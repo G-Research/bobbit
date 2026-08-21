@@ -153,7 +153,25 @@ async function loadMockPiExtensions(args = [], env = {}, extensionCache = shared
 		},
 		tool(...registrationArgs) {
 			const parsed = parseToolRegistration(registrationArgs);
-			if (parsed) tools.set(parsed.name, parsed);
+			if (parsed) {
+				const handler = parsed.handler;
+				parsed.handler = (...handlerArgs) => {
+					// A real Pi extension runs in the agent child process and reads its
+					// session environment directly. This in-process bridge must scope the
+					// local-data binding while a synchronous fixture handler executes.
+					const key = "BOBBIT_PACK_LOCAL_DATA_JSON";
+					const previous = process.env[key];
+					try {
+						if (env[key] === undefined) delete process.env[key];
+						else process.env[key] = env[key];
+						return handler(...handlerArgs);
+					} finally {
+						if (previous === undefined) delete process.env[key];
+						else process.env[key] = previous;
+					}
+				};
+				tools.set(parsed.name, parsed);
+			}
 			return parsed;
 		},
 		registerTool(...registrationArgs) {

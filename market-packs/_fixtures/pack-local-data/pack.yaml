@@ -1,0 +1,24 @@
+name: pack-local-data
+schema: 2
+description: End-to-end fixture for project-scoped pack local data across browser, server, agent, and sandbox realms.
+version: 1.0.0
+defaultDisabled: true
+localData:
+  scope: project
+  directory: .pack-local-data-fixture
+  access: read-write
+  preserveOnUninstall: true
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: [viewer-route]
+  providers: []
+  hooks: []
+  mcp: []
+  pi-extensions: [marker]
+  runtimes: []
+  workflows: []
+routes:
+  module: lib/routes.mjs
+  names: [snapshot, write]

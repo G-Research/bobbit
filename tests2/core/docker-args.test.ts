@@ -11,7 +11,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, packLocalDataContainerDirectory, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
 import { ProjectSandbox, _resetDockerLimitsCache } from "../../src/server/agent/project-sandbox.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
@@ -126,6 +126,36 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(
 			args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`),
 			"should mount worktrees named volume",
+		);
+	});
+
+	it("mounts pack local-data directories read-write in stable pack order", () => {
+		const alphaHost = path.join(fixtureDir("local-data"), "alpha");
+		const zetaHost = path.join(fixtureDir("local-data"), "zeta");
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: "/tmp/test",
+			packLocalDataMounts: [
+				{ packId: "zeta-pack", hostDirectory: zetaHost, containerDirectory: packLocalDataContainerDirectory("zeta-pack") },
+				{ packId: "alpha-pack", hostDirectory: alphaHost, containerDirectory: packLocalDataContainerDirectory("alpha-pack") },
+			],
+		}, NOOP_COMMAND_RUNNER);
+		const mounts = args.filter((_arg, index) => args[index - 1] === "-v");
+		const alpha = `${toDockerPath(alphaHost)}:/bobbit/local-data/alpha-pack`;
+		const zeta = `${toDockerPath(zetaHost)}:/bobbit/local-data/zeta-pack`;
+
+		assert.ok(mounts.includes(alpha));
+		assert.ok(mounts.includes(zeta));
+		assert.ok(mounts.indexOf(alpha) < mounts.indexOf(zeta), "local-data binds must be sorted by pack ID");
+		assert.ok(!mounts.find((entry) => entry === alpha)?.endsWith(":ro"));
+		assert.ok(!mounts.find((entry) => entry === zeta)?.endsWith(":ro"));
+	});
+
+	it("preserves Docker args exactly when the local-data mount set is empty", () => {
+		const config = { image: "test", workspaceDir: "/tmp/test" };
+		assert.deepEqual(
+			buildDockerRunArgs({ ...config, packLocalDataMounts: [] }, NOOP_COMMAND_RUNNER),
+			buildDockerRunArgs(config, NOOP_COMMAND_RUNNER),
 		);
 	});
 

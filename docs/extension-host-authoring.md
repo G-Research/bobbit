@@ -3,7 +3,7 @@
 This guide walks through making a **marketplace pack** that contributes Extension Host
 surfaces — a chat-block **renderer**, an interactive **server action handler**, side
 **panels**, long-lived **channels**, pack-owned **routes**, non-chat **entrypoints**, implicit
-pack-scoped **stores**, and **session** access. By the end you will understand every
+pack-scoped **stores**, optional project-scoped **local data**, and **session** access. By the end you will understand every
 contribution point, *where each one is declared on disk*, and the one mediated **Host API**
 they all flow through — with no privileged escape hatch.
 
@@ -29,7 +29,7 @@ This guide is the practical how-to.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
-**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`; `host.capabilities` reports all flags `true` on a current host.
+**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`. Base capabilities report `true` on a current host; the additive `localData` capability is present only for a winning pack that declares it.
 
 The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), `market-packs/terminal/` (the first-party xterm terminal over `host.channels`), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
@@ -44,6 +44,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
+| **Project local data** *(schema 2)* | top-level `pack.yaml` `localData:` | Browser, Gateway, and agent runtime | `host.localData.directory()` or the pack-keyed agent binding |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 | **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
@@ -181,6 +182,150 @@ reject an in-pack symlink that escapes, and do not trust an outside mutable syml
 it currently targets an in-pack file. A missing candidate may pass the spelling check so callers
 can retain their normal not-found handling; other resolution failures fail closed. This keeps shared
 `lib/` modules reachable without weakening the containment invariant.
+
+### Project local data (`localData`) — schema 2
+
+Pack Local Data gives trusted extension code and its agents one stable, project-scoped filesystem
+location. Use it for arbitrary files that server modules and agents read/write while browser
+surfaces coordinate those operations, and that must remain shared across worktrees, restored
+sessions, and sandboxes. It is a **location binding**, not a replacement for `host.store`: Bobbit
+supplies and validates the directory but does not define file formats, inspect
+contents, or mediate filesystem operations.
+
+Declare the capability at the top level of a schema-2 `pack.yaml`:
+
+```yaml
+name: performance-optimisation
+schema: 2
+description: Performance analysis and optimisation tools.
+version: 1.0.0
+localData:
+  scope: project
+  directory: .performance-optimisation
+  access: read-write
+  preserveOnUninstall: true
+contents:
+  roles: []
+  tools: []
+  skills: []
+```
+
+All four `localData` fields are required and their supported values are fixed:
+
+- `scope` is exactly `project`.
+- `directory` is a non-empty, already-trimmed, forward-slash-separated relative path. Nested
+  paths such as `.performance-optimisation/cache` are valid.
+- `access` is exactly `read-write`.
+- `preserveOnUninstall` is exactly `true`.
+
+The portable path rules deliberately produce the same result on Windows and POSIX. Bobbit rejects
+empty or whitespace-padded values; absolute, drive-relative, UNC, or device paths; backslashes,
+colons/alternate data streams, control characters, and Windows-invalid punctuation; empty, `.`,
+or `..` components; Windows reserved device names; and components ending in a dot or space. An
+invalid declaration rejects the pack instead of silently removing the capability. Schema-1 packs
+do not activate `localData`; packs with no declaration retain their previous manifest/runtime shape.
+
+#### Resolution and project identity
+
+On first use or mount planning, Bobbit resolves:
+
+```text
+<registered-project-root>/<localData.directory>
+```
+
+The root is the project's registered canonical `rootPath`, never `process.cwd()`, a Git top-level
+inferred from the caller, a component repository, or a session/goal/staff worktree. This matters
+because those working directories are disposable while project data must remain shared. In a
+polyrepo, the root is still the registered polyrepo container root; component roots do not change
+the binding.
+
+The directory is created lazily. Bobbit walks and validates every component, requires existing
+components to be directories, canonicalizes them, and rejects lexical escapes, non-directory
+components, POSIX symbolic links, Windows junctions, and reparse-point redirects. Resolution fails
+closed if the project, active winning pack, declaration, or filesystem path cannot be verified. A
+successful host-side resolution returns the absolute real path.
+
+#### Browser and server Host APIs
+
+Browser renderers, panels, and entrypoints belonging to the declared winning pack receive an
+optional, asynchronous API:
+
+```js
+if (host.capabilities.has("localData")) {
+  const directory = await host.localData.directory();
+  // This is the unrestricted host absolute path; perform file I/O in pack server code.
+}
+```
+
+`host.localData` and `host.capabilities.localData` are omitted when the pack has no declaration.
+The browser supplies no project id, pack id, or path: the host derives the authenticated session's
+project and the surface's winning pack identity.
+
+Bound server actions, routes, and provider hooks receive the synchronous equivalent:
+
+```js
+const directory = ctx.host.localData.directory();
+```
+
+Feature-detect with `ctx.host.capabilities.has("localData")` before use. The binding is a plain
+pre-resolved string in the worker, so no resolver or caller-controlled path crosses the worker
+boundary. Server modules can then use normal `node:fs` APIs directly.
+
+#### Pi extensions and ordinary agents
+
+Agent processes receive one structural environment carrier when at least one active winning pack
+declares local data:
+
+```text
+BOBBIT_PACK_LOCAL_DATA_JSON={"performance-optimisation":"/absolute/or/realm/path"}
+```
+
+The JSON object is keyed by the exact pack id, so multiple packs coexist without lossy environment
+variable names. A Pi extension selects its own pack entry; bespoke model-facing tools should not
+accept a project or directory argument:
+
+```js
+const bindings = JSON.parse(process.env.BOBBIT_PACK_LOCAL_DATA_JSON || "{}");
+const directory = bindings["performance-optimisation"];
+if (!directory) throw new Error("Pack Local Data is unavailable");
+```
+
+The same environment binding is available to ordinary agents through their normal shell and
+filesystem tools. Bobbit derives it from project and winning pack identity, not the current working
+directory. It is applied through the common session setup/activation paths for ordinary and
+persistent staff sessions, goal/team/delegate worktrees, and restored or respawned sessions.
+Consequently, every host worktree for one project sees the same host directory; restoration does
+not persist or reconstruct a worktree-relative path. The environment variable is omitted entirely
+when no active pack declares local data.
+
+#### Sandbox mapping and lifecycle
+
+Host processes receive the absolute host directory. Sandboxed agent processes instead receive a
+stable realm path:
+
+```text
+/bobbit/local-data/<encoded-pack-id>
+```
+
+Bobbit mounts the canonical host directory read-write at that path. The mount is the same directory,
+not a copy: a sandbox/Pi/tool write is immediately visible to host routes and browser-backed server
+code, and a host write is immediately visible inside the container. When the effective declaration
+set changes, Bobbit reconciles the immutable Docker mount set and recreates affected project
+containers when necessary; restored containers with missing, stale, extra, or read-only bindings
+are not treated as current.
+
+Disabling, shadowing, uninstalling, or updating a pack removes or changes **exposure**, never data.
+Bobbit does not delete the declared directory or any file in it. Reinstalling the same declaration
+reuses the preserved directory; changing `directory` leaves the old location untouched. Explicit
+data deletion belongs to the extension or user.
+
+Pack Local Data assumes installed extension code, browser panel code, the agent runtime, and bespoke
+tools are trusted. It does not isolate intentionally malicious extension code, restrict browser
+access to the returned path, inspect/classify/redact files, impose quotas, manage secrets or
+backups, define database schemas/migrations/locking, or publish change notifications. Those are
+separate responsibilities; this capability only establishes a stable shared location. A pack
+without the declaration causes no local-data directory creation, Host API namespace, agent
+environment bytes, or sandbox mount.
 
 ## Step 1 — the tool YAML (renderer + actions only)
 
@@ -369,6 +514,8 @@ The server-side `ctx.host` carries:
 - `ctx.host.session.{readTranscript,readToolCall}` — own-session reads through the adapter.
 - `ctx.host.agents.{spawn,prompt,dismiss,list,read,status}` — launch + orchestrate child
   agents owned by the bound session (poll-based, ambient). See [`host.agents`](#hostagents--launch-and-orchestrate-child-agents).
+- `ctx.host.localData.directory()` — synchronous, bound project-local filesystem directory,
+  present only when the winning pack declares [Pack Local Data](#project-local-data-localdata--schema-2).
 
 There is deliberately **no** `ctx.host.callRoute` or `ctx.host.ui` server-side: a server
 handler reaches its own pack's route by calling the function directly, and a server module has
@@ -457,9 +604,11 @@ if (host.capabilities.has("callRoute")) { /* true on a current host */ }
 if (host.capabilities.channels) { /* safe to use host.channels */ }
 ```
 
-A current host reports all client flags `true` — `{ invokeAction, requestRender, callRoute,
-session, ui, store, channels }`. The **server-side** capabilities are `{ session, store, agents }` (a
-current host reports all three `true`). `host.version` (`HOST_API_VERSION`, `1`) and `host.contractVersion`
+A current host reports the base client flags `true` — `{ invokeAction, requestRender, callRoute,
+session, ui, store, channels }`. A declared winning pack additionally receives `localData: true`;
+otherwise that flag and namespace are absent. The **server-side** base capabilities are `{ session,
+store, agents }`, with `localData: true` added only for a bound declared directory. `host.version`
+(`HOST_API_VERSION`, `1`) and `host.contractVersion`
 (`HOST_CONTRACT_VERSION`) identify the contract revision. All capabilities are purely additive
 (no signature churn), so code written against `capabilities` stays forward/backward-compatible.
 
@@ -1561,10 +1710,10 @@ built-in band, but it is **dormant until a Hindsight URL is configured**, so an 
 install still produces no Dynamic Context section. See
 [docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13) and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
-Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
-surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
-dispatches it, the provider runs as a module on the worker tier and returns context
-blocks (see the [provider module contract](#provider-module-contract) below).
+A provider runs as a module on the worker tier and returns context blocks rather than being
+reached through the panel/entrypoint/route Host API. Its optional least-privilege `ctx.host`
+contains the pack store and, when declared, Pack Local Data; session and agent capabilities remain
+unavailable. See the [provider module contract](#provider-module-contract) below.
 
 Key author-facing rules (full reference, field table, defaults, and clamps live in
 [docs/marketplace.md → Provider contributions](marketplace.md#provider-contributions-providersidyaml)):
@@ -1602,7 +1751,8 @@ export default {
   async sessionSetup(ctx) {
     // ctx carries: sessionId, projectId, scope, cwd, goalId?, roleName?, prompt?, turn?,
     //   optional advisory scopeContext (see Lifecycle Hub), budget.maxTokens (this provider's
-    //   clamped allowance), config (the YAML `config`), and gateway { baseUrl, token }.
+    //   clamped allowance), config (the YAML `config`), gateway { baseUrl, token }, and
+    //   least-privilege ctx.host (store plus declared localData; no session/agents).
     return {
       blocks: [{
         id: "recent-decisions",
@@ -2077,6 +2227,7 @@ sandbox/read-only enforcement. As an author, your obligations are:
 - [ ] **Handle channel backpressure and close events** — every `open`/`attach`/`send`/`close` promise can reject, and `onClose` is the lifecycle source of truth.
 - [ ] **Request `sessionPty` only for terminal-like trusted-pack channels** — generic handlers do not receive `ctx.host.pty`, and read-only/sandbox/cwd/env/quota/cleanup policy is enforced by the helper.
 - [ ] **Keep paths inside the pack root** — `renderer`, `actions.module`, panel `entry`, channel `module`, and `routes.module` resolve relative to their declaring file; `../lib/...` is fine, escaping the pack root is rejected.
+- [ ] **Use the bound Pack Local Data directory** — declare the fixed schema-2 `localData` block and call `host.localData.directory()` or select your exact pack id from `BOBBIT_PACK_LOCAL_DATA_JSON`; never reconstruct a project root from `cwd` or accept a caller-supplied directory.
 - [ ] **Server modules are trusted code with full ambient parity** — `child_process`/`fs`/network/`process.env` are available directly (no declaration). The worker is resource/crash isolation only; design handlers to be fast.
 - [ ] **Standalone pi extensions are host/runtime code** — source-level trust is required before executable discovery, and enabled extensions load into matching agent sessions by default via `--extension`.
 - [ ] **Feature-detect via `host.capabilities`**, never member presence.
@@ -2102,7 +2253,7 @@ the contract adapter, and the worker isolation model — is documented in
 - Pack-scoped contribution loaders + registry: `src/server/agent/pack-contributions.ts`, `src/server/extension-host/pack-contribution-registry.ts`
 - Tool-scoped contribution parser: `src/server/agent/tool-contributions.ts`
 - Internal→contract adapter: `src/server/extension-host/contract-adapter.ts`
-- Pack store + worker isolation: `pack-store.ts`, `module-host-worker.ts`, `module-host-bootstrap.ts`, `confinement-loader.ts`
+- Pack store, Pack Local Data, and worker isolation: `pack-store.ts`, `pack-local-data.ts`, `module-host-worker.ts`, `module-host-bootstrap.ts`, `confinement-loader.ts`
 - Activation persistence: `src/server/agent/project-config-store.ts` (`pack_activation`)
 - Client registries: `src/app/pack-renderers.ts`, `pack-panels.ts`, `pack-entrypoints.ts`, `host-api.ts`, `channel-bridge.ts`
 - Renderer render-context type: `src/ui/tools/types.ts`

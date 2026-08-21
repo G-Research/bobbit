@@ -1,0 +1,6 @@
+id: pack-local-data.viewer-route
+kind: route
+routeId: pack-local-data
+target:
+  panelId: pack-local-data.viewer
+paramKeys: []

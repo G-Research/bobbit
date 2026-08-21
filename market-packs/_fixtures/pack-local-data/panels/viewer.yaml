@@ -1,0 +1,3 @@
+id: pack-local-data.viewer
+title: Pack Local Data Fixture
+entry: ../lib/panel.js

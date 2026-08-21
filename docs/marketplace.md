@@ -15,7 +15,7 @@ This version makes **the pack directory itself the unit of truth**:
 - **Update** = re-pull and replace it.
 - **Resolve** = walk one ordered list of packs and let later packs shadow earlier ones.
 
-There is no separate ledger. The pack directory plus its generated `.pack-meta.yaml` *is* the install record. Uninstall removes exactly what install added, because they are the same directory.
+There is no separate ledger. The pack directory plus its generated `.pack-meta.yaml` *is* the install record. Uninstall removes exactly what install added, because they are the same directory. A schema-2 pack's declared [Pack Local Data](extension-host-authoring.md#project-local-data-localdata--schema-2) is deliberately outside that install directory and is preserved as extension/user-owned project data.
 
 ## Core concept: one resolver over one ordered list
 
@@ -135,7 +135,19 @@ Why two fields instead of one boolean? A single "update available" flag can't di
 ### Updating and uninstalling
 
 - **Update** re-syncs the originating source, re-resolves the commit/fingerprint, and atomically replaces the installed directory (preserving the original `installedAt`, bumping `updatedAt`). Re-syncing a source then updating reflects upstream changes. MCP Gateway packs are rebuilt from the latest MCP provider discovery result.
-- **Uninstall** deletes the pack directory and removes it from the scope's `pack_order`. Because the directory is the unit of truth, uninstall removes exactly what install added — no orphans. If the pack contributed MCP servers, Bobbit reloads the affected MCP managers and unregisters removed external MCP tools.
+- **Uninstall** deletes the pack directory and removes it from the scope's `pack_order`. Because the directory is the unit of truth, uninstall removes exactly what install added. If the pack contributed MCP servers, Bobbit reloads the affected MCP managers and unregisters removed external MCP tools.
+
+A `localData` directory is the intentional exception to installation cleanup: it is created under
+the registered project root, not copied into the installed pack. Disable, uninstall, update, pack
+precedence changes, and sandbox cleanup remove the capability or mount but never delete that
+directory or its files. Reinstalling the same declaration reuses it; changing the declaration leaves
+the prior directory untouched. Operators or the extension must delete data explicitly. For the
+declaration, Host APIs, worktree behavior, and sandbox mapping, see [Pack Local Data](extension-host-authoring.md#project-local-data-localdata--schema-2).
+
+For sandboxed projects, changes to the active winning declarations trigger mount reconciliation.
+Affected long-lived containers are recreated only when their writable mount set is stale, and
+attached sessions follow the normal recovery/respawn path. The local-data directories remain on the
+host even if a remount fails, so an exposure failure cannot become data loss.
 
 **When the Update button appears (change detection).** The Update button is shown only when the source's latest **manifest version** differs from the installed `.pack-meta.yaml` version — a plain version-string comparison, not a commit-SHA or file diff. This is cheap, deterministic, and matches the semver the publisher advertises.
 
@@ -652,6 +664,7 @@ name: research-pack              # REQUIRED. /^[a-z0-9][a-z0-9-]*$/ — used as 
 description: >                   # REQUIRED. One-paragraph summary shown in the browse UI.
   Deep-research role, web tools, and a literature-review skill.
 version: 1.2.0                   # REQUIRED. Semver-ish string; shown in provenance.
+schema: 2                       # OPTIONAL. Required to activate schema-2 fields such as localData.
 author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
 contents:                        # REQUIRED. roles/tools/skills required; each MAY be empty.
@@ -665,10 +678,16 @@ contents:                        # REQUIRED. roles/tools/skills required; each M
   pi-extensions: [demo]          #   OPTIONAL — pi-extensions/<name>/ or <name>.ts/.js/.mjs/.cjs (toggleable).
 routes:                          # OPTIONAL top-level block — Extension-Host pack routes.
   module: lib/routes.mjs         #   relative to pack.yaml, contained in the pack root.
-  names:  [bundle, publish]       #   exported route-name allowlist.
+  names:  [bundle, publish]      #   exported route-name allowlist.
+# schema: 2 only:
+# localData:                    # OPTIONAL — stable project-scoped extension directory.
+#   scope: project
+#   directory: .research-pack
+#   access: read-write
+#   preserveOnUninstall: true
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. `contents.mcp` and `contents.pi-extensions` are **rejected at schema 1** (the absent-or-`1` default) and **accepted at `schema: 2`**; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)), and schema-2 pi-extension basenames resolve standalone pi entries from `pi-extensions/<name>/` or `pi-extensions/<name>.ts/.js/.mjs/.cjs` (see [Marketplace pi extensions](#marketplace-pi-extensions)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. `contents.mcp`, `contents.pi-extensions`, and operational `localData` are schema-2 features; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)), and schema-2 pi-extension basenames resolve standalone pi entries from `pi-extensions/<name>/` or `pi-extensions/<name>.ts/.js/.mjs/.cjs` (see [Marketplace pi extensions](#marketplace-pi-extensions)). `localData` uses a strict fixed declaration documented in [Pack Local Data](extension-host-authoring.md#project-local-data-localdata--schema-2). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
@@ -696,9 +715,9 @@ dispatch PRs landed and have them load, validate, and toggle in the meantime.
 
 - **`schema?: number`** — a positive integer. Absent ⇒ **1** (every existing pack). Schema 1
   keeps verbatim v1 validation, including the `contents.mcp` rejection below. Other stray
-  schema-2 `contents` keys and top-level `provides`/`requires` are ignored, so v1 packs cannot
+  schema-2 `contents` keys and top-level `provides`/`requires`/`localData` are ignored, so v1 packs cannot
   load providers and their `pack-activation` catalogue remains the old shape.
-- **`schema: 2`** unlocks the six new `contents` keys and the `provides`/`requires` arrays.
+- **`schema: 2`** unlocks the six new `contents` keys, the `provides`/`requires` arrays, and `localData`.
 - **`schema: 3` or higher** is *not* fatal: the pack loads its **schema-2 subset** and one
   forward-compat warning is recorded (`pack.yaml: schema N is newer than supported (2)`).
   This keeps a newer pack installable on an older Bobbit rather than vanishing — the publisher
@@ -714,6 +733,15 @@ Two optional top-level arrays of **capability names** (each entry matches `/^[a-
 They are **metadata only** today (recorded on the parsed manifest, surfaced nowhere
 behaviourally yet) — the dependency/capability graph that consumes them belongs to a later
 goal. They are validated now so packs can declare them ahead of that work.
+
+#### Project local data
+
+Schema 2 also accepts the optional top-level `localData` declaration. It is not a `contents`
+entity or an independently toggleable catalogue row; it binds the active winning pack to one
+stable directory below the registered canonical project root. The fields are fixed to
+`scope: project`, `access: read-write`, and `preserveOnUninstall: true`, with a portable relative
+`directory`. This is why worktrees and polyrepo component roots cannot accidentally split a pack's
+data. See [Extension Host authoring — Pack Local Data](extension-host-authoring.md#project-local-data-localdata--schema-2) for validation, browser/server APIs, the multi-pack agent environment carrier, and sandbox behavior.
 
 #### Six new `contents` keys
 
@@ -742,6 +770,11 @@ version: 1.0.0
 schema: 2                     # opt into schema 2; absent ⇒ schema 1
 provides: [session-memory]    # capability names this pack offers (metadata only)
 requires: []                  # capability names it depends on (metadata only)
+localData:                    # optional stable project-scoped directory
+  scope: project
+  directory: .memory-pack
+  access: read-write
+  preserveOnUninstall: true
 contents:
   roles:    []
   tools:    []

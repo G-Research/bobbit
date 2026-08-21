@@ -4,22 +4,40 @@
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
   "censusTotal": 1142,
   "buckets": {
-    "daily": 68,
+    "daily": 67,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 202
+    "v2-integration": 203
   },
   "methods": {
-    "adapter": 275,
+    "adapter": 276,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 53,
+    "relocate": 52,
     "rewrite": 145,
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/pack-local-data.test.ts",
+      "reason": "Core coverage for schema-2 localData validation, canonical project-root materialization, worktree/polyrepo independence, link and non-directory rejection, stable sandbox projection, and no-declaration compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/pack-local-data-fixture.test.ts",
+      "reason": "Integration coverage proving the reusable fixture shares one canonical directory across a confined server route, Pi-extension tool, ordinary filesystem access, nested component cwd, and disabled-pack preservation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
     {
       "path": "tests2/core/github-trusted-host-resolver.test.ts",
       "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
@@ -18418,6 +18436,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
+    },
+    {
+      "file": "tests/e2e/pack-local-data.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
     }
   ]
 }

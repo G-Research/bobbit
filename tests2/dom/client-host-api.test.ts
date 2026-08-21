@@ -39,8 +39,12 @@ function caps() {
 		session: h.capabilities.session,
 		ui: h.capabilities.ui,
 		store: h.capabilities.store,
+		localData: h.capabilities.localData,
+		hasLocalDataMember: Object.prototype.hasOwnProperty.call(h, "localData"),
+		localDataDirectory: h.localData ? typeof h.localData.directory : "missing",
 		hasInvokeAction: h.capabilities.has("invokeAction"),
 		hasCallRoute: h.capabilities.has("callRoute"),
+		hasLocalData: h.capabilities.has("localData"),
 		hasUnknown: h.capabilities.has("nope"),
 		hasGatewayMember: (h as unknown as Record<string, unknown>).gateway !== undefined,
 	};
@@ -104,6 +108,45 @@ async function clientStoreRead() {
 	} finally {
 		window.fetch = originalFetch;
 		unregisterSurfaceTokenMinter("sess-read");
+	}
+}
+
+async function clientLocalDataDirectory() {
+	const originalFetch = window.fetch;
+	const expectedDirectory = "C:\\canonical project\\.performance-optimisation";
+	let request: { path?: string; method?: string; body?: Record<string, unknown> } = {};
+	registerSurfaceTokenMinter("sess-local-data", async () => "local-data-surface-token");
+	window.fetch = (async (input: any, init?: any) => {
+		const path = String(input);
+		if (path.includes("/api/ext/local-data/directory")) {
+			request = {
+				path: new URL(path, window.location.href).pathname,
+				method: init?.method,
+				body: JSON.parse(String(init?.body ?? "{}")),
+			};
+			return new Response(JSON.stringify({ directory: expectedDirectory }), {
+				status: 200, headers: { "content-type": "application/json" },
+			});
+		}
+		return new Response("not found", { status: 404 });
+	}) as any;
+	try {
+		const h = getHostApi("sess-local-data", "tu-local-data", {
+			kind: "pack",
+			packId: "performance",
+			contributionKind: "panel",
+			contributionId: "dashboard",
+			hasLocalData: true,
+		});
+		return {
+			directory: await h.localData!.directory(),
+			hasLocalData: h.capabilities.has("localData"),
+			hasLocalDataMember: Object.prototype.hasOwnProperty.call(h, "localData"),
+			request,
+		};
+	} finally {
+		window.fetch = originalFetch;
+		unregisterSurfaceTokenMinter("sess-local-data");
 	}
 }
 
@@ -321,7 +364,11 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 		expect(c.session).toBe(true);
 		expect(c.ui).toBe(true);
 		expect(c.store).toBe(true);
+		expect(c.localData).toBeUndefined();
+		expect(c.hasLocalDataMember).toBe(false);
+		expect(c.localDataDirectory).toBe("missing");
 		expect(c.hasCallRoute).toBe(true);
+		expect(c.hasLocalData).toBe(false);
 		expect(c.hasUnknown).toBe(false);
 		expect(c.hasGatewayMember).toBe(false);
 	});
@@ -336,6 +383,23 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 			request: {
 				path: "/api/ext/store/read",
 				body: { sessionId: "sess-read", surfaceToken: "surface-read-token", key: "retain-queue" },
+			},
+		});
+	});
+
+	it("returns the unrestricted local-data path through only the bound surface identity", async () => {
+		await expect(clientLocalDataDirectory()).resolves.toEqual({
+			directory: "C:\\canonical project\\.performance-optimisation",
+			hasLocalData: true,
+			hasLocalDataMember: true,
+			request: {
+				path: "/api/ext/local-data/directory",
+				method: "POST",
+				body: {
+					sessionId: "sess-local-data",
+					toolUseId: "tu-local-data",
+					surfaceToken: "local-data-surface-token",
+				},
 			},
 		});
 	});

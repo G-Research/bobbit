@@ -138,13 +138,16 @@ async function restoreHarnessDefaultProject(info: GatewayInfo): Promise<void> {
  *   import { test, expect } from "./in-process-harness.js";
  *   // e2e-setup helpers automatically target this worker's gateway
  */
-export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktreePool: boolean; gateway: GatewayInfo }>({
+export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktreePool: boolean; serveUi: boolean; gateway: GatewayInfo }>({
 	// Worker-scoped option. Default false (pool pre-fill skipped for CPU).
 	// Opt in with `test.use({ enableWorktreePool: true })` in specs that
 	// actually exercise the pool endpoints.
 	enableWorktreePool: [false, { scope: "worker", option: true }],
+	// Most in-process specs are API-only. A combined realm test may opt into the
+	// already-built UI without paying for a second spawned gateway.
+	serveUi: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableWorktreePool }, use, workerInfo) => {
+	gateway: [async ({ enableWorktreePool, serveUi }, use, workerInfo) => {
 		mkdirSync(E2E_TEMP_ROOT, { recursive: true });
 		// Every worker gets an owned child of the coordinator's canonical run root.
 		let bobbitDir = createRunChild(`e2e-inproc-${process.pid}-${workerInfo.workerIndex}`);
@@ -293,6 +296,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			defaultCwd: bobbitDir,
 			forceAuth: true,
 			agentCliPath: MOCK_AGENT,
+			...(serveUi ? { staticDir: resolve(PROJECT_ROOT, "dist", "ui") } : {}),
 		});
 
 		const port = await gw.start();

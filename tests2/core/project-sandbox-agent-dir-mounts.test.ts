@@ -5,7 +5,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
+import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getPackLocalDataMountStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
+import { packLocalDataContainerDirectory, type PackLocalDataMountPlan } from "../../src/server/agent/docker-args.js";
 import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
@@ -14,12 +15,13 @@ function mount(source: string, destination: string, rw = true, mode = ""): { Sou
 	return { Source: source, Destination: destination, RW: rw, Mode: mode };
 }
 
-function makeSandbox(): ProjectSandbox {
+function makeSandbox(resolvePackLocalDataMounts?: () => readonly PackLocalDataMountPlan[]): ProjectSandbox {
 	return new ProjectSandbox({
 		projectId: "stale-agent-dir-mounts",
 		projectDir: path.join(process.cwd(), "tmp-project"),
 		repoUrl: "https://example.test/repo.git",
 		image: "bobbit-test-image:latest",
+		resolvePackLocalDataMounts,
 	});
 }
 
@@ -220,6 +222,103 @@ describe("SandboxManager atomic model refresh", () => {
 
 		await assert.rejects(manager.refreshAgentModelMounts(), /broken/);
 		assert.deepEqual(calls.sort(), ["broken", "healthy"]);
+	});
+});
+
+describe("ProjectSandbox pack local-data mounts", () => {
+	const hostDirectory = path.resolve("/project/.performance-optimisation");
+	const plan: PackLocalDataMountPlan = {
+		packId: "performance-optimisation",
+		hostDirectory,
+		containerDirectory: packLocalDataContainerDirectory("performance-optimisation"),
+	};
+
+	it("requires the exact host source, stable destination, writable mode, and no stale extras", () => {
+		assert.equal(getPackLocalDataMountStaleness([
+			mount(hostDirectory, plan.containerDirectory),
+		], [plan]).stale, false);
+
+		const staleSource = getPackLocalDataMountStaleness([
+			mount(path.resolve("/project/.old-performance"), plan.containerDirectory),
+		], [plan]);
+		assert.equal(staleSource.stale, true);
+		assert.match(staleSource.reason ?? "", /stale host source/);
+
+		const readOnly = getPackLocalDataMountStaleness([
+			mount(hostDirectory, plan.containerDirectory, false, "ro"),
+		], [plan]);
+		assert.equal(readOnly.stale, true);
+		assert.match(readOnly.reason ?? "", /not writable/);
+
+		const staleExtra = getPackLocalDataMountStaleness([
+			mount(hostDirectory, plan.containerDirectory),
+			mount(path.resolve("/project/.removed-pack"), "/bobbit/local-data/removed-pack"),
+		], [plan]);
+		assert.equal(staleExtra.stale, true);
+		assert.match(staleExtra.reason ?? "", /stale extra/);
+
+		assert.equal(getPackLocalDataMountStaleness([
+			mount(hostDirectory, plan.containerDirectory),
+		], []).stale, true, "disabling a pack must remove its stale bind on recreation");
+	});
+
+	it("recreates a restored container before reconnecting when local-data binds differ", async () => {
+		const sandbox = makeSandbox(() => [plan]);
+		const calls: Call[] = [];
+		(sandbox as any)._findContainerByLabel = async () => "old-container-id";
+		(sandbox as any)._hasStaleAgentDirMounts = async () => false;
+		(sandbox as any)._hasStaleStateDirMounts = async () => false;
+		(sandbox as any)._hasStalePackLocalDataMounts = async () => true;
+		(sandbox as any)._isContainerImageStale = async () => { throw new Error("must not inspect image after stale local-data mounts"); };
+		(sandbox as any)._isContainerRunning = async () => { throw new Error("must not reconnect stale local-data mounts"); };
+		(sandbox as any)._removeContainer = async (containerId: string) => { calls.push(["remove", containerId]); };
+		(sandbox as any)._createContainer = async () => { calls.push("create"); (sandbox as any).containerId = "new-container-id"; };
+		(sandbox as any)._runInitSequence = async () => { calls.push("init"); };
+
+		await (sandbox as any)._initContainer();
+
+		assert.deepEqual(calls, [["remove", "old-container-id"], "create", "init"]);
+	});
+
+	it("re-resolves live plans and emits recovery events only when mounts changed", async () => {
+		let current = [plan];
+		const sandbox = makeSandbox(() => current);
+		const calls: Call[] = [];
+		const events: string[] = [];
+		(sandbox as any).containerId = "container-0";
+		(sandbox as any)._status = "ready";
+		(sandbox as any)._hasStalePackLocalDataMounts = async (_containerId: string, expected: readonly PackLocalDataMountPlan[]) => expected[0]?.hostDirectory !== hostDirectory;
+		(sandbox as any)._removeContainer = async (containerId: string) => { calls.push(["remove", containerId]); };
+		(sandbox as any)._initContainer = async () => { calls.push("create"); (sandbox as any).containerId = "container-1"; };
+		sandbox.onHealthEvent((event) => events.push(`${event.type}:${event.containerId}`));
+
+		assert.equal(await sandbox.refreshPackLocalDataMounts(), false);
+		assert.deepEqual(calls, []);
+		assert.deepEqual(events, []);
+
+		current = [{ ...plan, hostDirectory: path.resolve("/project/.performance-v2") }];
+		assert.equal(await sandbox.refreshPackLocalDataMounts(), true);
+		assert.deepEqual(calls, [["remove", "container-0"], "create"]);
+		assert.deepEqual(events, ["container-died:container-0", "container-recovered:container-1"]);
+	});
+});
+
+describe("SandboxManager pack local-data refresh", () => {
+	it("targets one project or all tracked projects and aggregates failures", async () => {
+		const manager = new SandboxManager();
+		const calls: string[] = [];
+		(manager as any).sandboxes = new Map([
+			["alpha", { getStatus: () => ({ projectId: "alpha" }), refreshPackLocalDataMounts: async () => { calls.push("alpha"); } }],
+			["beta", { getStatus: () => ({ projectId: "beta" }), refreshPackLocalDataMounts: async () => { calls.push("beta"); } }],
+		]);
+
+		await manager.refreshPackLocalDataMounts("alpha");
+		assert.deepEqual(calls, ["alpha"]);
+		await manager.refreshPackLocalDataMounts();
+		assert.deepEqual(calls.sort(), ["alpha", "alpha", "beta"]);
+
+		(manager as any).sandboxes.get("beta").refreshPackLocalDataMounts = async () => { throw new Error("remount failed"); };
+		await assert.rejects(manager.refreshPackLocalDataMounts(), /beta/);
 	});
 });
 

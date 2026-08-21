@@ -121,7 +121,7 @@ export class LifecycleHub {
 	private readonly trace: ContextTraceStore;
 	private readonly gatewayInfo: () => { baseUrl: string; token: string };
 	private readonly globalMaxTokens: number;
-	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+	private readonly providerHostApi?: (opts: { sessionId: string; packId: string; projectId?: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly scopeContextResolver?: HookScopeContextResolver;
 
@@ -137,12 +137,10 @@ export class LifecycleHub {
 		goalMetadataResolver?: GoalMetadataResolver;
 		/** Best-effort project-safe scope resolver for ordinary lifecycle events. */
 		scopeContextResolver?: HookScopeContextResolver;
-		/** Factory for a LEAST-PRIVILEGE, provider-scoped server Host API (store-only:
-		 *  `capabilities.store === true`, `session`/`agents` false/unavailable). Built
-		 *  per provider invocation so a hook reaches its own pack's durable store
-		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
-		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
-		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		/** Factory for a least-privilege provider Host API. Store and any declared
+		 *  local-data binding are pack-scoped; session/agents stay unavailable.
+		 *  Omitted ⇒ provider hooks run without `ctx.host`. */
+		providerHostApi?: (opts: { sessionId: string; packId: string; projectId?: string }) => ServerHostApi;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
@@ -204,7 +202,7 @@ export class LifecycleHub {
 			(p) => !disabled.has(p.id) && p.hooks.includes("goalProvisioned"),
 		);
 		for (const provider of providers) {
-			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId: packIdFromRoot(provider.packRoot) });
+			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId: packIdFromRoot(provider.packRoot), projectId: ctx.projectId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			try {
 				await this.moduleHost.invoke({
@@ -262,11 +260,10 @@ export class LifecycleHub {
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),
 			};
-			// Provider-scoped, store-only host (least privilege). The LIVE object stays
-			// in the parent (module-host-worker strips it before serialization) and
-			// services the worker's proxied store calls — the durable retain queue /
-			// diagnostics path. packId is derived from the contribution's pack root.
-			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId: packIdFromRoot(provider.packRoot) });
+			// Provider-scoped least-privilege host. The LIVE object stays in the parent
+			// (module-host-worker strips it before serialization). packId is derived
+			// from the contribution's pack root; projectId comes from the bound session.
+			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId: packIdFromRoot(provider.packRoot), projectId: base.projectId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const t0 = performance.now();
 			let ms = 0;
