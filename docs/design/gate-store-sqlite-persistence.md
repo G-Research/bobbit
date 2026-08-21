@@ -210,7 +210,7 @@ The memfs unit adapter continues to cover the public `GateStore` logic and JSON 
 - transient and persistent final-flush failures, shared concurrent-close outcomes, and handle release after persistent close and startup failures; and
 - the close mutation fence across every public mutator and reset variant, including durable pre-fence work, post-fence map/observer isolation, and strict-reset compensation.
 
-The packed-consumer test also rebuilds the installed native dependency with lifecycle scripts enabled only for `better-sqlite3`, then loads the binding and executes an in-memory create/insert/select/close smoke.
+The packed-consumer test retains the existing npm rebuild invocation, but with `better-sqlite3` 13.0.3 packaging (`gypfile: false`, no install lifecycle, and bundled prebuilds) that step is effectively a harmless no-op. The meaningful check loads the bundled native binding and performs an in-memory create/write/read/close smoke.
 
 ## MVP landing qualification
 

@@ -244,7 +244,7 @@ The test split keeps native setup focused:
 - lifecycle tests cover constructor cleanup and `ProjectContext`/`ProjectContextManager` close behavior; and
 - the daily E2E upgrade journey boots a real gateway from legacy per-project JSON, verifies collision-safe retirement, mutates and deletes through supported APIs, gracefully restarts, and directly inspects authoritative rows after shutdown.
 
-Packed-consumer qualification must rebuild/load the installed `better-sqlite3` binding and execute a native write/read/close smoke. That check belongs in bundle qualification rather than the general unit lane.
+Packed-consumer qualification retains the existing npm rebuild invocation, but with `better-sqlite3` 13.0.3 packaging (`gypfile: false`, no install lifecycle, and bundled prebuilds) that step is effectively a harmless no-op. The meaningful check loads the bundled native binding and performs an in-memory create/write/read/close smoke. That check belongs in bundle qualification rather than the general unit lane.
 
 ## Benchmark and qualification evidence
 
