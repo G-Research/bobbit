@@ -76,6 +76,17 @@ test.describe("Journey: Scheduler recovery controls", () => {
 			expect(childResponse.status, `spawn scheduler recovery child: ${await childResponse.clone().text()}`).toBe(201);
 			childId = (await childResponse.json()).id as string;
 
+			// spawn-child returns while its scheduler-owned auto-start is still
+			// finishing. Wait for TeamManager.startTeam's durable transition before
+			// injecting recovery that the scheduler success continuation may clear.
+			await expect.poll(
+				() => goalStoreFor(gateway, childId).get(childId)?.state,
+				{
+					message: "child auto-start reaches its durable in-progress state",
+					timeout: 20_000,
+				},
+			).toBe("in-progress");
+
 			const rootRecovery: SchedulerRecovery = {
 				kind: "root",
 				code: "SCHEDULER_CIRCUIT_OPEN",
