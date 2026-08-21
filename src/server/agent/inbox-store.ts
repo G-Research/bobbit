@@ -1,15 +1,24 @@
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
+import type { HostNotification } from "../../shared/extension-host/host-hooks.js";
 
 export type InboxEntryState = "pending" | "completed" | "failed" | "cancelled";
 
 export interface InboxEntrySource {
-	type: "trigger" | "manual_api" | "manual_ui";
+	type: "trigger" | "notification" | "manual_api" | "manual_ui";
 	/** Set when source.type === "trigger". The trigger id from PersistedStaff.triggers[].id. */
 	triggerId?: string;
 	/** Optional caller identifier for manual_api / manual_ui sources (e.g. user id, integration name). */
 	actorId?: string;
+}
+
+export interface NotificationInboxMetadata {
+	/** The exact validated canonical event; never a mutable aggregate projection. */
+	notification: HostNotification;
+	/** Host-owned loop controls, deliberately separate from envelope correlation. */
+	rootCorrelationId: string;
+	causationDepth: number;
 }
 
 export interface InboxEntry {
@@ -19,6 +28,8 @@ export interface InboxEntry {
 	title: string;
 	prompt: string;
 	context?: string;
+	/** Present only for source.type === "notification". */
+	notificationInput?: NotificationInboxMetadata;
 	state: InboxEntryState;
 	createdAt: number;
 	completedAt?: number;
@@ -77,15 +88,26 @@ export class InboxStore {
 		return this.byStaff.get(staffId)!;
 	}
 
-	private save(staffId: string): void {
+	private saveStrict(staffId: string): void {
 		const entries = this.byStaff.get(staffId) ?? [];
+		if (!this.fs.existsSync(this.inboxDir)) {
+			this.fs.mkdirSync(this.inboxDir, { recursive: true });
+		}
+		const file = this.fileFor(staffId);
+		const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
 		try {
-			if (!this.fs.existsSync(this.inboxDir)) {
-				this.fs.mkdirSync(this.inboxDir, { recursive: true });
-			}
-			const file = this.fileFor(staffId);
 			const payload = JSON.stringify({ staffId, entries }, null, 2);
-			this.fs.writeFileSync(file, payload, "utf-8");
+			this.fs.writeFileSync(temporary, payload, "utf-8");
+			this.fs.renameSync(temporary, file);
+		} catch (err) {
+			try { if (this.fs.existsSync(temporary)) this.fs.unlinkSync(temporary); } catch { /* preserve original error */ }
+			throw err;
+		}
+	}
+
+	private save(staffId: string): void {
+		try {
+			this.saveStrict(staffId);
 		} catch (err) {
 			console.error(`[inbox-store] Failed to save inbox for staff ${staffId}:`, err);
 		}
@@ -95,12 +117,37 @@ export class InboxStore {
 	put(entry: InboxEntry): void {
 		const entries = this.ensureLoaded(entry.staffId);
 		const idx = entries.findIndex((e) => e.id === entry.id);
-		if (idx >= 0) {
-			entries[idx] = entry;
-		} else {
-			entries.push(entry);
-		}
+		if (idx >= 0) entries[idx] = entry;
+		else entries.push(entry);
 		this.save(entry.staffId);
+	}
+
+	/**
+	 * Fail-loud idempotent insertion. An existing deterministic id is accepted
+	 * only when it carries the same canonical notification input.
+	 */
+	putStrict(entry: InboxEntry): { entry: InboxEntry; inserted: boolean } {
+		const entries = this.ensureLoaded(entry.staffId);
+		const idx = entries.findIndex((e) => e.id === entry.id);
+		if (idx >= 0) {
+			const existing = entries[idx];
+			const sameNotification = existing.source.type === "notification"
+				&& entry.source.type === "notification"
+				&& existing.source.triggerId === entry.source.triggerId
+				&& JSON.stringify(existing.notificationInput) === JSON.stringify(entry.notificationInput);
+			if (!sameNotification) {
+				throw Object.assign(new Error(`Inbox entry identity collision: ${entry.id}`), { code: "INBOX_IDENTITY_COLLISION" });
+			}
+			return { entry: existing, inserted: false };
+		}
+		entries.push(entry);
+		try {
+			this.saveStrict(entry.staffId);
+			return { entry, inserted: true };
+		} catch (err) {
+			entries.pop();
+			throw err;
+		}
 	}
 
 	get(staffId: string, entryId: string): InboxEntry | undefined {

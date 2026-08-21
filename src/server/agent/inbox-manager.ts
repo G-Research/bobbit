@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { StaffManager } from "./staff-manager.js";
 import type { InboxNudger } from "./inbox-nudger.js";
-import type { InboxStore, InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-store.js";
+import type { HostNotification } from "../../shared/extension-host/host-hooks.js";
+import type { InboxStore, InboxEntry, InboxEntryState, InboxEntrySource, NotificationInboxMetadata } from "./inbox-store.js";
 
 // Re-export for convenience so callers can import everything from
 // `inbox-manager` without reaching into the store module directly.
-export type { InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-store.js";
+export type { InboxEntry, InboxEntryState, InboxEntrySource, NotificationInboxMetadata } from "./inbox-store.js";
 
 /**
  * Facade over per-project `InboxStore`s. Provides a single point for
@@ -92,6 +93,50 @@ export class InboxManager {
 			console.error(`[inbox-manager] nudger.poke failed for staff ${staffId}:`, err);
 		}
 		return entry;
+	}
+
+	/**
+	 * Idempotently accept one notification delivery under its deterministic ID.
+	 * The full canonical event is host metadata, never interpolated into prompt.
+	 */
+	enqueueWithId(
+		entryId: string,
+		staffId: string,
+		input: {
+			title: string;
+			triggerId: string;
+			notification: HostNotification;
+			rootCorrelationId: string;
+			causationDepth: number;
+		},
+	): InboxEntry {
+		const store = this.resolveStore(staffId);
+		if (!store) throw new Error(`Staff agent not found: ${staffId}`);
+		const notificationInput: NotificationInboxMetadata = {
+			notification: input.notification,
+			rootCorrelationId: input.rootCorrelationId,
+			causationDepth: input.causationDepth,
+		};
+		const entry: InboxEntry = {
+			id: entryId,
+			staffId,
+			source: { type: "notification", triggerId: input.triggerId },
+			title: input.title,
+			prompt: "A host notification is available in this inbox entry's notification metadata.",
+			notificationInput,
+			state: "pending",
+			createdAt: Date.now(),
+		};
+		const accepted = store.putStrict(entry);
+		if (accepted.inserted) {
+			this.broadcastToAll({ type: "inbox.entry.added", staffId, entry: accepted.entry });
+			try {
+				this.nudger?.poke(staffId);
+			} catch (err) {
+				console.error(`[inbox-manager] nudger.poke failed for staff ${staffId}:`, err);
+			}
+		}
+		return accepted.entry;
 	}
 
 	listForStaff(staffId: string, state?: InboxEntryState, limit?: number): InboxEntry[] {

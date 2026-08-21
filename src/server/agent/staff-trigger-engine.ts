@@ -6,7 +6,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import type { StaffManager } from "./staff-manager.js";
 import type { SessionManager } from "./session-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
-import type { PersistedStaff, StaffTrigger } from "./staff-store.js";
+import type { LegacyStaffTrigger, PersistedStaff } from "./staff-store.js";
 
 /**
  * Minimal coordinator dependency used by Git-trigger polling. The coordinator
@@ -258,7 +258,7 @@ export class TriggerEngine {
 	}
 
 	/** Returns true if the trigger was fired. */
-	private checkScheduleTrigger(staff: PersistedStaff, trigger: StaffTrigger): boolean {
+	private checkScheduleTrigger(staff: PersistedStaff, trigger: LegacyStaffTrigger): boolean {
 		if (!trigger.config.cron) return false;
 		const now = new Date(this.clock.now());
 		if (!cronMatches(trigger.config.cron, now)) return false;
@@ -275,7 +275,7 @@ export class TriggerEngine {
 	}
 
 	/** Returns true if the trigger was fired. */
-	private async checkGitTrigger(staff: PersistedStaff, trigger: StaffTrigger): Promise<boolean> {
+	private async checkGitTrigger(staff: PersistedStaff, trigger: LegacyStaffTrigger): Promise<boolean> {
 		const repo = trigger.config.repo || staff.cwd;
 		const branch = trigger.config.branch || "HEAD";
 		let hasRemote = false;
@@ -344,7 +344,7 @@ export class TriggerEngine {
 	 * microtask; otherwise the 15 s nudger tick picks it up the next time
 	 * the staff goes idle.
 	 */
-	private fireTrigger(staff: PersistedStaff, trigger: StaffTrigger, extraContext?: string): void {
+	private fireTrigger(staff: PersistedStaff, trigger: LegacyStaffTrigger, extraContext?: string): void {
 		console.log(`[trigger-engine] Firing ${trigger.type} trigger "${trigger.id}" for staff "${staff.name}"`);
 
 		this.staffManager.updateTriggerState(staff.id, trigger.id, { lastFired: this.clock.now() });
