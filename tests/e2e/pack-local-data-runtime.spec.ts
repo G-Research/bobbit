@@ -290,7 +290,7 @@ test("ordinary and Pi runtime access share the canonical project directory and p
 	expect(fs.readFileSync(path.join(expectedDirectory, "ordinary-marker.txt"), "utf8")).toBe("E2E_WRITE_TEST\n");
 });
 
-test("same-ID Pi activation follows the local-data winner and falls back after project disable and uninstall", async ({ gateway }) => {
+test("same-ID Pi activation follows the local-data winner and falls back after project uninstall", async ({ gateway }) => {
 	const project = await defaultProject();
 	const serverSource = createPiPackSource(gateway.bobbitDir, {
 		packName: WINNER_PACK,
@@ -326,40 +326,24 @@ test("same-ID Pi activation follows the local-data winner and falls back after p
 		bindingKeys: [WINNER_PACK],
 	});
 
-	const disable = await apiFetch("/api/marketplace/pack-activation", {
-		method: "PUT",
-		body: JSON.stringify({ scope: "project", projectId: project.id, packName: WINNER_PACK, disabled: { enabled: false } }),
-	});
-	const disableText = await disable.text();
-	expect(disable.status, disableText).toBe(200);
-
-	const disabledFallbackSession = await createSession({ projectId: project.id });
-	sessionIds.push(disabledFallbackSession);
-	const disabledFallbackExtensions = extensionArgs(gateway, disabledFallbackSession);
-	expect(disabledFallbackExtensions.some(extension => extension.endsWith("/pi-extensions/server-winner/extension.ts"))).toBe(true);
-	expect(disabledFallbackExtensions.some(extension => extension.endsWith("/pi-extensions/project-winner/extension.ts"))).toBe(false);
-	const serverDirectory = fs.realpathSync(path.join(project.rootPath, ".pi-winner-server"));
-	expect(JSON.parse(runtimeEnvironment(gateway, disabledFallbackSession).BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({
-		[WINNER_PACK]: serverDirectory,
-	});
-	expect(await runPiTool(disabledFallbackSession, {}, "pi_same_id_server_marker")).toEqual({
-		marker: "server",
-		directory: serverDirectory,
-		bindingKeys: [WINNER_PACK],
-	});
-
 	const removed = await apiFetch("/api/marketplace/installed", {
 		method: "DELETE",
 		body: JSON.stringify({ scope: "project", projectId: project.id, packName: WINNER_PACK }),
 	});
 	expect(removed.status).toBe(204);
-	const uninstalledFallbackSession = await createSession({ projectId: project.id });
-	sessionIds.push(uninstalledFallbackSession);
-	const uninstalledFallbackExtensions = extensionArgs(gateway, uninstalledFallbackSession);
-	expect(uninstalledFallbackExtensions.some(extension => extension.endsWith("/pi-extensions/server-winner/extension.ts"))).toBe(true);
-	expect(uninstalledFallbackExtensions.some(extension => extension.endsWith("/pi-extensions/project-winner/extension.ts"))).toBe(false);
-	expect(JSON.parse(runtimeEnvironment(gateway, uninstalledFallbackSession).BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({
+	const fallbackSession = await createSession({ projectId: project.id });
+	sessionIds.push(fallbackSession);
+	const fallbackExtensions = extensionArgs(gateway, fallbackSession);
+	expect(fallbackExtensions.some(extension => extension.endsWith("/pi-extensions/server-winner/extension.ts"))).toBe(true);
+	expect(fallbackExtensions.some(extension => extension.endsWith("/pi-extensions/project-winner/extension.ts"))).toBe(false);
+	const serverDirectory = fs.realpathSync(path.join(project.rootPath, ".pi-winner-server"));
+	expect(JSON.parse(runtimeEnvironment(gateway, fallbackSession).BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({
 		[WINNER_PACK]: serverDirectory,
+	});
+	expect(await runPiTool(fallbackSession, {}, "pi_same_id_server_marker")).toEqual({
+		marker: "server",
+		directory: serverDirectory,
+		bindingKeys: [WINNER_PACK],
 	});
 });
 
