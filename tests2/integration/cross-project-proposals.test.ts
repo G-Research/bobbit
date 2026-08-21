@@ -69,6 +69,7 @@ let sourceProjectId: string;
 let sourceSessionId: string;
 let targetProjectId: string;
 let targetProjectRoot: string;
+let zeroWorkflowProjectId: string;
 let injectTargetProjectId: string;
 
 async function createSourceSession(): Promise<string> {
@@ -101,6 +102,7 @@ beforeAll(async () => {
 	});
 	targetProjectId = target.id;
 	targetProjectRoot = target.rootPath;
+	zeroWorkflowProjectId = registerProposalProject(gateway, { key: "zero-workflows" }).id;
 	injectTargetProjectId = target.id;
 });
 
@@ -324,6 +326,68 @@ test.describe("cross-project proposal seed @smoke", () => {
 	});
 
 	// ── (e) goal workflow validated against the TARGET project ─────────
+	test("zero-workflow seed validates defaults without draft or workflow mutation", async () => {
+		await clearSourceProposals("goal");
+		const context = gateway.sessionManager.getProjectContextManager().getOrCreate(zeroWorkflowProjectId);
+		expect(context.projectConfigStore.getWorkflows() ?? {}).toEqual({});
+
+		for (const [args, code] of [
+			[{ title: "Unknown default", spec: "Must fail before persistence.", workflow: "not-a-default" }, "UNKNOWN_WORKFLOW"],
+			[{ title: "Unknown option", spec: "Must validate default options.", workflow: "feature", options: "Not optional" }, "UNKNOWN_OPTIONAL_STEP"],
+		] as const) {
+			const rejected = await seed(sourceSessionId, "goal", { ...args, projectId: zeroWorkflowProjectId });
+			expect(rejected.status, await rejected.clone().text()).toBe(400);
+			expect((await rejected.json()).code).toBe(code);
+			expect(await seededFields(sourceSessionId, "goal")).toBeUndefined();
+			expect(context.projectConfigStore.getWorkflows() ?? {}).toEqual({});
+		}
+	});
+
+	test("ordinary acceptance rejects a draft made stale by an empty workflow store without mutation", async () => {
+		await clearSourceProposals("goal");
+		const context = gateway.sessionManager.getProjectContextManager().getOrCreate(zeroWorkflowProjectId);
+		const customWorkflows = {
+			custom: {
+				name: "Custom",
+				description: "Exists only while the draft is seeded.",
+				gates: [{ id: "custom-gate", name: "Custom Gate", depends_on: [] }],
+			},
+		};
+		context.projectConfigStore.setWorkflows(customWorkflows);
+		const seeded = await seed(sourceSessionId, "goal", {
+			title: "Empty stale ordinary",
+			spec: "The custom workflow disappears before acceptance.",
+			workflow: "custom",
+			projectId: zeroWorkflowProjectId,
+		});
+		expect(seeded.status, await seeded.clone().text()).toBe(200);
+		const draftBefore = await (await apiFetch(`/api/sessions/${sourceSessionId}/proposal/goal`)).text();
+		const goalsBefore = structuredClone(context.goalStore.getAll());
+		const tasksBefore = structuredClone(context.taskStore.getAll());
+		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
+		context.projectConfigStore.setWorkflows({});
+
+		const rejected = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "Empty stale ordinary",
+				spec: "The custom workflow disappears before acceptance.",
+				workflowId: "custom",
+				projectId: zeroWorkflowProjectId,
+				worktree: false,
+				autoStartTeam: false,
+			}),
+		});
+
+		expect(rejected.status, await rejected.clone().text()).toBe(400);
+		expect(await rejected.json()).toMatchObject({ ok: false, code: "UNKNOWN_WORKFLOW" });
+		expect(context.projectConfigStore.getWorkflows() ?? {}).toEqual({});
+		expect(context.goalStore.getAll()).toEqual(goalsBefore);
+		expect(context.taskStore.getAll()).toEqual(tasksBefore);
+		expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
+		expect(await (await apiFetch(`/api/sessions/${sourceSessionId}/proposal/goal`)).text()).toBe(draftBefore);
+	});
+
 	test("ordinary goal acceptance revalidates a stale proposal without partial state", async () => {
 		await clearSourceProposals("goal");
 		const seeded = await seed(sourceSessionId, "goal", {

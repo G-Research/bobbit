@@ -5507,6 +5507,28 @@ async function handleApiRoute(
 		return cascade.find(entry => entry.item.id === workflowId)?.item
 			?? existingProjectContext(projectId)?.workflowStore.get(workflowId);
 	};
+	const buildCurrentDefaultGoalWorkflows = (projectId: string): Workflow[] => {
+		const project = projectRegistry.get(projectId);
+		const projectName = project?.name || "project";
+		const components = existingProjectContext(projectId)?.projectConfigStore.getComponents() ?? [];
+		// Keep this selection identical for validation and both persistence paths.
+		const targetComponent = components.find(component =>
+			component.name === projectName && Object.keys(component.commands ?? {}).length > 0
+		) ?? components.find(component => Object.keys(component.commands ?? {}).length > 0)
+			?? components.find(component => component.name === projectName)
+			?? components.find(component => component.name.length > 0);
+		const seeds = buildDefaultWorkflows(
+			targetComponent?.name || projectName,
+			targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
+		);
+		seeds.parent = buildParentWorkflow();
+		return Object.values(seeds) as unknown as Workflow[];
+	};
+	const persistCurrentDefaultGoalWorkflows = (projectId: string, targetCtx: ProjectContext): Workflow[] => {
+		const defaults = buildCurrentDefaultGoalWorkflows(projectId);
+		for (const workflow of defaults) targetCtx.workflowStore.put(workflow);
+		return defaults;
+	};
 	const goalCandidateDeps = {
 		registry: projectRegistry,
 		projectContextManager,
@@ -5515,6 +5537,7 @@ async function handleApiRoute(
 			return cascade.length > 0 ? cascade : existingProjectContext(projectId)?.workflowStore.getAll() ?? [];
 		},
 		workflow: resolveCurrentProjectWorkflow,
+		defaultWorkflows: buildCurrentDefaultGoalWorkflows,
 		components: (projectId: string) => existingProjectContext(projectId)?.projectConfigStore.getComponents() ?? [],
 		getGoal: (id: string) => getGoalAcrossProjects(id),
 		nestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
@@ -8815,35 +8838,16 @@ async function handleApiRoute(
 						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
 					}
 				}
-				// Layer 2: store is empty → auto-seed defaults.
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-					const projName = resolved.project.name || "project";
-					// Structural command steps resolve through components[name].commands at
-					// verification time. Prefer an executable project-named component,
-					// then any executable component. Only if none exist, retain the prior
-					// project-name/first-valid fallbacks, which seed no command references.
-					const components = targetCtx.projectConfigStore.getComponents();
-					const targetComponent = components.find((component) =>
-						component.name === projName && Object.keys(component.commands ?? {}).length > 0,
-					) ?? components.find((component) => Object.keys(component.commands ?? {}).length > 0)
-						?? components.find((component) => component.name === projName)
-						?? components.find((component) => component.name.length > 0);
-					const componentName = targetComponent?.name || projName;
-					const seeds = buildDefaultWorkflows(
-						componentName,
-						targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
-					);
-					seeds.parent = buildParentWorkflow();
-					for (const wf of Object.values(seeds)) {
-						targetCtx.workflowStore.put(wf as unknown as Workflow);
-					}
-					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					if (workflowId) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					} else {
-						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-						resolvedWorkflowId = resolvedWorkflow?.id || "general";
-					}
+				// Layer 2: the canonical validator resolved this selection against an
+				// in-memory default set. Persist that exact set only after validation,
+				// and only if the live store is still empty.
+				if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
+					const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
+					console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
+					resolvedWorkflow = workflowId
+						? targetCtx.workflowStore.get(workflowId)
+						: targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+					resolvedWorkflowId = resolvedWorkflow?.id || resolvedWorkflowId || "general";
 				}
 				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
 				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
@@ -15955,6 +15959,12 @@ async function handleApiRoute(
 						projectId: coordinates.projectId,
 						cwd: coordinates.cwd,
 					};
+					// A fresh acceptance-time library selection overrides the draft's
+					// inline snapshot. Without clearing it, canonical inline precedence
+					// would silently ignore an explicit workflow/workflowId override.
+					if (Object.prototype.hasOwnProperty.call(body, "workflow") || Object.prototype.hasOwnProperty.call(body, "workflowId")) {
+						delete rawCandidate.inlineWorkflow;
+					}
 					if (rawCandidate.parentGoalId) {
 						throw Object.assign(new Error("Current-session promotion creates a top-level goal."), { statusCode: 422, code: "PROMOTION_PARENT_UNSUPPORTED" });
 					}
@@ -15995,12 +16005,8 @@ async function handleApiRoute(
 					const { candidate, coordinates, targetCtx } = fresh!;
 					let resolvedWorkflow = candidate.workflow;
 					let resolvedWorkflowId = candidate.workflowId;
-					if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-						const components = targetCtx.projectConfigStore.getComponents();
-						const component = components.find(item => Object.keys(item.commands ?? {}).length > 0) ?? components[0];
-						const seeds = buildDefaultWorkflows(component?.name || "project", component ? Object.keys(component.commands ?? {}) : []);
-						seeds.parent = buildParentWorkflow();
-						for (const workflow of Object.values(seeds)) targetCtx.workflowStore.put(workflow as unknown as Workflow);
+					if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
+						persistCurrentDefaultGoalWorkflows(coordinates.projectId, targetCtx);
 						resolvedWorkflow = resolvedWorkflowId ? targetCtx.workflowStore.get(resolvedWorkflowId) : targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
 						resolvedWorkflowId = resolvedWorkflow?.id ?? resolvedWorkflowId;
 					}

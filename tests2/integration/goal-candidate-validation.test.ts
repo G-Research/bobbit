@@ -110,6 +110,7 @@ function makeFixture(): Fixture {
 			projectContextManager: projectContextManager as any,
 			workflows: id => workflows.get(id) ?? [],
 			workflow: (projectId, workflowId) => workflows.get(projectId)?.find(workflow => workflow.id === workflowId),
+			defaultWorkflows: () => [structuredClone(FEATURE_WORKFLOW)],
 			components: () => [{ name: "app", repo: ".", commands: { test: "echo test" } }],
 			getGoal: id => goals.get(id),
 			nestingPrefs: () => ({ ...prefs }),
@@ -273,8 +274,23 @@ describe("canonical goal candidate — project, workflow, and structured fields"
 		if (accepted.ok) {
 			expect(accepted.candidate.workflowId).toBe("feature");
 			expect(accepted.candidate.enabledOptionalSteps).toEqual(["QA testing"]);
+			expect(accepted.candidate.seedDefaultWorkflows).toBeUndefined();
 		}
 		expectCode(validate({ workflow: "feature", options: "Not optional" }), "UNKNOWN_OPTIONAL_STEP");
+	});
+
+	it("validates an empty live store against the defaults creation would persist", () => {
+		fixture.workflows.set(fixture.projectId, []);
+		expectCode(validate({ workflow: "missing" }), "UNKNOWN_WORKFLOW");
+		expectCode(validate({ workflow: "feature", options: "Not optional" }), "UNKNOWN_OPTIONAL_STEP");
+
+		const accepted = validate({ workflow: "feature", options: "QA testing" });
+		expect(accepted.ok).toBe(true);
+		if (accepted.ok) {
+			expect(accepted.candidate.workflowId).toBe("feature");
+			expect(accepted.candidate.enabledOptionalSteps).toEqual(["QA testing"]);
+			expect(accepted.candidate.seedDefaultWorkflows).toBe(true);
+		}
 	});
 
 	it("accepts ordinary goal workflow snapshots above the child-inline cap", () => {

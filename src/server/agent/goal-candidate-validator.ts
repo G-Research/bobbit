@@ -36,6 +36,8 @@ export interface GoalCandidateDeps {
 	workflows(projectId: string): Workflow[];
 	/** Exact creation-time lookup, including store-only/hidden runtime entries. */
 	workflow(projectId: string, workflowId: string): Workflow | undefined;
+	/** Read-only defaults that creation would persist when the current store is empty. */
+	defaultWorkflows(projectId: string): Workflow[];
 	components(projectId: string): Component[];
 	getGoal(id: string): PersistedGoal | undefined;
 	nestingPrefs(): SubgoalNestingPrefs;
@@ -52,6 +54,8 @@ export interface RawGoalCandidate extends Record<string, unknown> {
 export interface ValidatedGoalCandidate {
 	title: string; spec: string; projectId: string; project: RegisteredProject; cwd: string;
 	workflowId?: string; workflow?: Workflow; enabledOptionalSteps?: string[];
+	/** Creation must persist the validated in-memory defaults if the store is still empty. */
+	seedDefaultWorkflows?: boolean;
 	parentGoalId?: string; parent?: PersistedGoal; inlineRoles?: Record<string, Role>;
 	subgoalsAllowed?: boolean; maxNestingDepth?: number;
 	divergencePolicy?: "strict" | "balanced" | "autonomous";
@@ -129,17 +133,25 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 
 	const cascadeWorkflows = deps.workflows(resolved.projectId);
 	const inlineWorkflow = raw.inlineWorkflow ?? (plainObject(raw.workflow) ? raw.workflow : undefined);
-	const workflowId = typeof raw.workflowId === "string" ? raw.workflowId.trim() : typeof raw.workflow === "string" ? raw.workflow.trim() : "";
+	const explicitWorkflowId = typeof raw.workflowId === "string" ? raw.workflowId.trim() : typeof raw.workflow === "string" ? raw.workflow.trim() : "";
 	const options = typeof raw.options === "string" ? raw.options : Array.isArray(raw.enabledOptionalSteps) ? raw.enabledOptionalSteps.join(",") : "";
 	if (raw.enabledOptionalSteps !== undefined && (!Array.isArray(raw.enabledOptionalSteps) || !raw.enabledOptionalSteps.every(v => typeof v === "string"))) return fail(400, "UNKNOWN_OPTIONAL_STEP", "enabledOptionalSteps must be an array of step names");
-	const registeredWorkflow = workflowId ? deps.workflow(resolved.projectId, workflowId) : undefined;
+	const registeredWorkflow = explicitWorkflowId ? deps.workflow(resolved.projectId, explicitWorkflowId) : undefined;
 	// Creation historically resolves an explicit id through the visible cascade,
 	// then falls back to the live project store. Add that exact match to the
 	// validation set so hidden/runtime workflows retain full option validation
 	// without exposing every hidden workflow in UNKNOWN_WORKFLOW guidance.
-	const workflows = registeredWorkflow && !cascadeWorkflows.some(workflow => workflow.id === registeredWorkflow.id)
+	let workflows = registeredWorkflow && !cascadeWorkflows.some(workflow => workflow.id === registeredWorkflow.id)
 		? [...cascadeWorkflows, registeredWorkflow]
 		: cascadeWorkflows;
+	// An empty live store is not unconstrained: goal creation installs a known set
+	// of defaults. Validate against an in-memory copy of exactly that set so an
+	// invalid proposal cannot reach the later persistence boundary. With no
+	// explicit selection, preserve legacy empty-store behavior by normalizing to
+	// the same `general` default used by ordinary creation and promotion.
+	const seedDefaultWorkflows = !inlineWorkflow && workflows.length === 0 && !registeredWorkflow;
+	if (seedDefaultWorkflows) workflows = deps.defaultWorkflows(resolved.projectId);
+	const workflowId = explicitWorkflowId || (seedDefaultWorkflows ? "general" : "");
 	const workflowArgs = { inlineWorkflow, workflow: workflowId, options };
 	const workflowError = validateGoalProposalWorkflow(workflowArgs, workflows);
 	if (workflowError) return fail(400, workflowError.code, workflowError.message, { ...(workflowError.availableWorkflows ? { availableWorkflows: workflowError.availableWorkflows } : {}), ...(workflowError.validOptionalSteps ? { validOptionalSteps: workflowError.validOptionalSteps } : {}) });
@@ -174,5 +186,5 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	if (concurrency !== undefined && (typeof concurrency !== "number" || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8)) return fail(400, "MAX_CONCURRENT_CHILDREN_INVALID", "maxConcurrentChildren must be an integer from 1 to 8");
 	if (parent && concurrency !== undefined) return fail(422, "ROOT_POLICY_ON_CHILD", "maxConcurrentChildren is only valid for root goals");
 
-	return { ok: true, candidate: { title, spec, projectId: resolved.projectId, project: resolved.project, cwd: cwdResult.cwd ?? requestedCwd, ...(frozenWorkflow ? { workflow: frozenWorkflow, workflowId: frozenWorkflow.id } : workflowId ? { workflowId } : {}), ...(enabledOptionalSteps.length ? { enabledOptionalSteps } : {}), ...(parentGoalId ? { parentGoalId, parent } : {}), ...(roleResult.roles && Object.keys(roleResult.roles).length ? { inlineRoles: roleResult.roles } : {}), ...(subgoalsAllowed !== undefined ? { subgoalsAllowed } : {}), ...(maxNestingDepth !== undefined ? { maxNestingDepth } : {}), ...(divergence !== undefined ? { divergencePolicy: divergence } : {}), ...(concurrency !== undefined ? { maxConcurrentChildren: concurrency } : {}), ...(metadata ? { metadata } : {}) } };
+	return { ok: true, candidate: { title, spec, projectId: resolved.projectId, project: resolved.project, cwd: cwdResult.cwd ?? requestedCwd, ...(frozenWorkflow ? { workflow: frozenWorkflow, workflowId: frozenWorkflow.id } : workflowId ? { workflowId } : {}), ...(seedDefaultWorkflows ? { seedDefaultWorkflows: true } : {}), ...(enabledOptionalSteps.length ? { enabledOptionalSteps } : {}), ...(parentGoalId ? { parentGoalId, parent } : {}), ...(roleResult.roles && Object.keys(roleResult.roles).length ? { inlineRoles: roleResult.roles } : {}), ...(subgoalsAllowed !== undefined ? { subgoalsAllowed } : {}), ...(maxNestingDepth !== undefined ? { maxNestingDepth } : {}), ...(divergence !== undefined ? { divergencePolicy: divergence } : {}), ...(concurrency !== undefined ? { maxConcurrentChildren: concurrency } : {}), ...(metadata ? { metadata } : {}) } };
 }

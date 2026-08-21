@@ -70,7 +70,7 @@ async function createPromotionCandidate(gateway: any, label: string): Promise<{
 }
 
 test.describe("current-session goal promotion API", () => {
-	test("revalidates a stale workflow before promotion without partial state", async ({ gateway }) => {
+	test("revalidates a stale workflow against defaults when the live store becomes empty", async ({ gateway }) => {
 		const { ownerId, context } = await createPromotionCandidate(gateway, "stale-workflow");
 		const workflowBefore = context.projectConfigStore.getWorkflows();
 		const goalsBefore = structuredClone(context.goalStore.getAll());
@@ -81,13 +81,7 @@ test.describe("current-session goal promotion API", () => {
 		const worktree = sessionBefore.worktreePath as string;
 		expect(fs.existsSync(worktree)).toBe(true);
 
-		const replacementWorkflows = {
-			replacement: {
-				name: "Replacement",
-				description: "Makes the selected promotion workflow stale.",
-				gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
-			},
-		};
+		const replacementWorkflows = {};
 		let rejected: Response;
 		let workflowsAfterReject: Record<string, unknown> | undefined;
 		try {
@@ -106,10 +100,59 @@ test.describe("current-session goal promotion API", () => {
 		expect(context.goalStore.getAll()).toEqual(goalsBefore);
 		expect(context.taskStore.getAll()).toEqual(tasksBefore);
 		expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
-		expect(workflowsAfterReject).toEqual(replacementWorkflows);
+		expect(workflowsAfterReject ?? {}).toEqual(replacementWorkflows);
 		expect(gateway.sessionManager.getPersistedSession(ownerId)).toEqual(sessionBefore);
 		expect(fs.existsSync(worktree)).toBe(true);
 		expect(await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text()).toBe(draftBefore);
+	});
+
+	test("an explicit acceptance workflow overrides the draft inline workflow", async ({ gateway }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `promotion-workflow-override-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const project = await registerProject({
+			name: `promotion-workflow-override-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [{ name: "app", repo: "." }],
+			workflows: {
+				"library-b": {
+					name: "Library B",
+					description: "Acceptance-time library selection.",
+					gates: [{ id: "library-b-gate", name: "Library B Gate", depends_on: [] }],
+				},
+			},
+		});
+		const ownerId = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(ownerId, "idle", 30_000);
+		const seeded = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/seed`, {
+			method: "POST",
+			body: JSON.stringify({
+				args: {
+					title: "Override inline workflow",
+					spec: "Accept with a library workflow instead.",
+					projectId: project.id,
+					inlineWorkflow: {
+						id: "inline-a",
+						name: "Inline A",
+						gates: [{ id: "inline-a-gate", name: "Inline A Gate", depends_on: [] }],
+					},
+				},
+			}),
+		});
+		expect(seeded.status, await seeded.clone().text()).toBe(200);
+		const selected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "current-session" }),
+		});
+		expect(selected.status, await selected.clone().text()).toBe(200);
+
+		const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ workflowId: "library-b" }),
+		});
+		expect(accepted.status, await accepted.clone().text()).toBe(201);
+		const goal = await jsonResponse(accepted);
+		expect(goal.workflowId).toBe("library-b");
+		expect(goal.workflow?.gates?.map((gate: any) => gate.id)).toEqual(["library-b-gate"]);
 	});
 
 	test("removes gates and goal after an exact reservation release, then permits a clean retry", async ({ gateway, scope }) => {
