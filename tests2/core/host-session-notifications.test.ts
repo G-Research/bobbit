@@ -11,6 +11,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "host-session-notifications-"
 process.env.BOBBIT_DIR = root;
 
 const { SessionManager, emitSessionEvent } = await import("../../src/server/agent/session-manager.ts");
+const { SessionStore } = await import("../../src/server/agent/session-store.ts");
 const { broadcastStatus } = await import("../../src/server/agent/session-status.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
@@ -95,18 +96,35 @@ describe("authoritative session host notifications", () => {
 		assert.deepEqual(calls, [session.id]);
 	});
 
-	it("keeps session creation listeners silent when initial persistence fails", async () => {
+	it("treats a synchronous injected recording store as an already-committed seam", async () => {
 		const manager: any = new SessionManager();
 		managers.push(manager);
 		const calls: string[] = [];
 		manager.addCreationListener((session: any) => calls.push(session.id));
-		await assert.rejects(
-			manager.notifySessionCreated({ id: "failed-creation" } as any, {
-				flushAsync: async () => { throw new Error("injected initial persistence failure"); },
-			} as any),
-			/injected initial persistence failure/,
-		);
-		assert.deepEqual(calls, []);
+		await manager.notifySessionCreated({ id: "sync-fixture-creation" } as any, {
+			put: () => {},
+			update: () => {},
+		} as any);
+		assert.deepEqual(calls, ["sync-fixture-creation"]);
+	});
+
+	it("keeps session creation listeners silent when a real store's atomic flush fails", async () => {
+		const manager: any = new SessionManager();
+		managers.push(manager);
+		const calls: string[] = [];
+		manager.addCreationListener((session: any) => calls.push(session.id));
+		const store = manager._testStore;
+		assert.ok(store instanceof SessionStore, "fixture must exercise the production SessionStore fence");
+		const flush = vi.spyOn(store, "flushAsync").mockRejectedValueOnce(new Error("injected initial persistence failure"));
+		try {
+			await assert.rejects(
+				manager.notifySessionCreated({ id: "failed-creation" } as any, store),
+				/injected initial persistence failure/,
+			);
+			assert.deepEqual(calls, []);
+		} finally {
+			flush.mockRestore();
+		}
 	});
 
 	it("publishes status only after the legacy frame and suppresses unchanged status", () => {
