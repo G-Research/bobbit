@@ -1095,9 +1095,6 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	const goalId = effectiveGoalId(plan);
-	const toolHooksNeeded = ctx.hostInterceptors?.hasAny?.(
-		["beforeToolCall", "afterToolResult"], plan.projectId, goalId,
-	) ?? !!ctx.hostInterceptors;
 	const beforeToolCallFailClosed = ctx.hostInterceptors?.requiresFailClosed?.(
 		"beforeToolCall", plan.projectId, goalId,
 	) === true;
@@ -1107,7 +1104,9 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	plan.bridgeOptions.env = {
 		...(plan.bridgeOptions.env || {}),
 		...activation.env,
-		...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
+		// Tool lifecycle notifications use this exact-auth callback path even when
+		// no interceptor contributes a decision. Only failure policy is opt-in.
+		BOBBIT_HOST_HOOKS_ENABLED: "1",
 		BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: beforeToolCallFailClosed ? "1" : "0",
 		BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: afterToolResultFailClosed ? "1" : "0",
 	};

@@ -928,10 +928,10 @@ export class SessionStore {
 		return true;
 	}
 
-	/** Mark a session as archived. */
+	/** Mark a session as archived. A durable/archive-in-flight row is a no-op. */
 	archive(id: string): boolean {
 		const existing = this.sessions.get(id);
-		if (!existing) return false;
+		if (!existing || existing.archived) return false;
 		this.generation++;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
@@ -948,20 +948,35 @@ export class SessionStore {
 	 */
 	async archiveAsync(id: string): Promise<boolean> {
 		const existing = this.sessions.get(id);
-		if (!existing) {
+		if (!existing || existing.archived) {
 			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
 			return false;
 		}
+		const previousArchived = existing.archived;
+		const previousArchivedAt = existing.archivedAt;
 		const failureSequence = this.persistenceFailureSequence;
 		this.generation++;
 		const targetGeneration = this.generation;
+		const archivedAt = this.clock.now();
 		existing.archived = true;
-		existing.archivedAt = this.clock.now();
+		existing.archivedAt = archivedAt;
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		await this.persistThroughGeneration(targetGeneration, failureSequence);
+		try {
+			await this.persistThroughGeneration(targetGeneration, failureSequence);
+		} catch (err) {
+			// A failed publication is not an archive transition. Restore the exact
+			// in-memory shape so a later explicit retry can cross a fresh fence.
+			if (existing.archived === true && existing.archivedAt === archivedAt) {
+				if (previousArchived === undefined) delete existing.archived;
+				else existing.archived = previousArchived;
+				if (previousArchivedAt === undefined) delete existing.archivedAt;
+				else existing.archivedAt = previousArchivedAt;
+			}
+			throw err;
+		}
 		this.onIndexUpdate?.(existing);
 		return true;
 	}

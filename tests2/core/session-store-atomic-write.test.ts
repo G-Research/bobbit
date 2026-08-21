@@ -217,6 +217,26 @@ describe("SessionStore atomic write", () => {
 		assert.equal(memfs.existsSync(TMP), false, "serialized writers must leave no shared tmp artifact");
 	});
 
+	it("rolls back a failed archive publication and suppresses repeat transitions", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("archive-once"));
+		await store.flushAsync();
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		(memfs.promises as any).rename = async () => { throw new Error("injected archive rename failure"); };
+		try {
+			await assert.rejects(store.archiveAsync("archive-once"), /injected archive rename failure/);
+			assert.equal(store.get("archive-once")?.archived, undefined, "failed publication is not an in-memory transition");
+			assert.equal(store.get("archive-once")?.archivedAt, undefined);
+		} finally {
+			(memfs.promises as any).rename = originalRename;
+		}
+
+		assert.equal(await store.archiveAsync("archive-once"), true, "a failed archive remains retryable");
+		const revision = store.get("archive-once")?.archivedAt;
+		assert.equal(await store.archiveAsync("archive-once"), false, "a repeated archive is not a transition");
+		assert.equal(store.get("archive-once")?.archivedAt, revision);
+	});
+
 	it("does not leave a .tmp file behind after a successful save", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
