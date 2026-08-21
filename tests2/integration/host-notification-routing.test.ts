@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WebSocket } from "ws";
 import { HostNotificationDispatcher } from "../../src/server/extension-host/host-notification-dispatcher.js";
 import {
@@ -14,7 +14,15 @@ interface FakeSocket {
 	authenticated?: boolean;
 	isViewer?: boolean;
 	frames: ServerMessage[];
-	send(data: string): void;
+	sendErrors: Array<Error | undefined>;
+	closes: Array<{ code?: number; reason?: string }>;
+	terminated: boolean;
+	closeListeners: Array<() => void>;
+	send(data: string, callback?: (error?: Error) => void): void;
+	close(code?: number, reason?: string): void;
+	terminate(): void;
+	once(event: string, listener: () => void): void;
+	emitClose(): void;
 }
 
 const socketsToUnbind: WebSocket[] = [];
@@ -25,7 +33,26 @@ function socket(overrides: Partial<FakeSocket> = {}): FakeSocket {
 		bufferedAmount: 0,
 		authenticated: true,
 		frames: [],
-		send(data) { this.frames.push(JSON.parse(data) as ServerMessage); },
+		sendErrors: [],
+		closes: [],
+		terminated: false,
+		closeListeners: [],
+		send(data, callback) {
+			this.frames.push(JSON.parse(data) as ServerMessage);
+			callback?.(this.sendErrors.shift());
+		},
+		close(code, reason) {
+			this.closes.push({ code, reason });
+			this.readyState = 3;
+		},
+		terminate() { this.terminated = true; },
+		once(event, listener) {
+			if (event === "close") this.closeListeners.push(listener);
+		},
+		emitClose() {
+			this.readyState = 3;
+			for (const listener of this.closeListeners.splice(0)) listener();
+		},
 		...overrides,
 	};
 	return ws;
@@ -44,6 +71,8 @@ async function settleRouting(): Promise<void> {
 
 afterEach(() => {
 	for (const ws of socketsToUnbind.splice(0)) unbindHostNotificationSocket(ws);
+	vi.useRealTimers();
+	vi.restoreAllMocks();
 });
 
 function sessionPublication() {
@@ -144,5 +173,137 @@ describe("canonical host notification socket routing", () => {
 			expect.objectContaining({ type: "host_notification", stream: { epoch: "epoch-2", sequence: 1 } }),
 			expect.objectContaining({ type: "host_notification", stream: { epoch: "epoch-2", sequence: 2 } }),
 		]);
+	});
+
+	it("retries a final pressure gap without another event while preserving healthy peer order", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const pressured = socket({ bufferedAmount: 100 });
+		const healthy = socket();
+		bind(pressured, "session-a", "project-a");
+		bind(healthy, "session-a", "project-a");
+		const router = new HostNotificationSocketRouter([pressured, healthy] as unknown as WebSocket[], {
+			epochGenerator: (() => { let epoch = 0; return () => `epoch-${++epoch}`; })(),
+			maxBufferedBytes: 10,
+			refreshRetryDelayMs: 5,
+			maxRefreshRetries: 4,
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => "project-a",
+			idGenerator: (() => { let id = 0; return () => `notification-${++id}`; })(),
+			now: () => 30,
+		});
+
+		dispatcher.publish("statusChanged", sessionPublication());
+		dispatcher.publish("statusChanged", {
+			...sessionPublication(),
+			aggregateRevision: 2,
+			payload: { ...sessionPublication().payload, statusVersion: 2 },
+		});
+		await settleRouting();
+
+		expect(pressured.frames).toEqual([]);
+		expect(healthy.frames).toEqual([
+			expect.objectContaining({ type: "host_notification", stream: expect.objectContaining({ sequence: 1 }) }),
+			expect.objectContaining({ type: "host_notification", stream: expect.objectContaining({ sequence: 2 }) }),
+		]);
+		expect(healthy.frames.flatMap(frame => frame.type === "host_notification"
+			? [frame.notification.aggregate.revision]
+			: [])).toEqual([1, 2]);
+
+		pressured.bufferedAmount = 0;
+		await vi.advanceTimersByTimeAsync(5);
+
+		expect(pressured.frames).toEqual([
+			expect.objectContaining({ type: "host_notifications_refresh_required", scope: "session", sequence: 1 }),
+		]);
+		expect(names(healthy)).toEqual(["statusChanged", "statusChanged"]);
+	});
+
+	it("retries failed delta and refresh sends without another event", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const exact = socket({ sendErrors: [new Error("delta failed"), new Error("refresh failed"), undefined] });
+		bind(exact, "session-a", "project-a");
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			epochGenerator: () => "epoch",
+			refreshRetryDelayMs: 7,
+			maxRefreshRetries: 4,
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => "project-a",
+			idGenerator: () => "notification-1",
+			now: () => 40,
+		});
+
+		dispatcher.publish("statusChanged", sessionPublication());
+		await settleRouting();
+		expect(exact.frames.map(frame => frame.type)).toEqual([
+			"host_notification",
+			"host_notifications_refresh_required",
+		]);
+
+		await vi.advanceTimersByTimeAsync(7);
+
+		expect(exact.frames).toEqual([
+			expect.objectContaining({ type: "host_notification", stream: { epoch: "epoch", sequence: 1 } }),
+			expect.objectContaining({ type: "host_notifications_refresh_required", epoch: "epoch", sequence: 2 }),
+			expect.objectContaining({ type: "host_notifications_refresh_required", epoch: "epoch", sequence: 3 }),
+		]);
+		expect(exact.closes).toEqual([]);
+	});
+
+	it("closes with 1013 after persistent refresh pressure", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const exact = socket({ bufferedAmount: 100 });
+		bind(exact, "session-a", "project-a");
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			maxBufferedBytes: 10,
+			refreshRetryDelayMs: 5,
+			maxRefreshRetries: 3,
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => "project-a",
+			now: () => 50,
+		});
+
+		dispatcher.publish("statusChanged", sessionPublication());
+		await settleRouting();
+		await vi.advanceTimersByTimeAsync(5);
+		expect(exact.closes).toEqual([]);
+		await vi.advanceTimersByTimeAsync(10);
+
+		expect(exact.closes).toEqual([{ code: 1013, reason: "host notification refresh required" }]);
+		expect(exact.terminated).toBe(false);
+		expect(exact.frames).toEqual([]);
+	});
+
+	it("cancels pending refresh retries when the socket closes", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const exact = socket({ bufferedAmount: 100 });
+		bind(exact, "session-a", "project-a");
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			maxBufferedBytes: 10,
+			refreshRetryDelayMs: 5,
+			maxRefreshRetries: 3,
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => "project-a",
+			now: () => 60,
+		});
+
+		dispatcher.publish("statusChanged", sessionPublication());
+		await settleRouting();
+		expect(vi.getTimerCount()).toBe(1);
+
+		exact.emitClose();
+		expect(vi.getTimerCount()).toBe(0);
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(exact.frames).toEqual([]);
+		expect(exact.closes).toEqual([]);
+		expect(exact.terminated).toBe(false);
 	});
 });
