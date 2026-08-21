@@ -118,9 +118,10 @@ async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
 	expect(response.status).toBe(200);
 }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string }> {
+async function callBeforePrompt(sessionId: string, prompt: string, sessionSecret: string): Promise<{ status: number; content: string }> {
 	const response = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt }),
 	});
 	const body = response.status === 200 ? await response.json() : {};
@@ -168,7 +169,7 @@ describe("hindsight installed-provider worker boundary", () => {
 		if (originalPackOrder) await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
 	});
 
-	test("configured pack recalls and retains through ModuleHost and the host-store proxy", async () => {
+	test("configured pack recalls and retains through ModuleHost and the host-store proxy", async ({ gateway }) => {
 		seedConfig(bobbitDir, {
 			mode: "external",
 			externalUrl: stub.url,
@@ -188,7 +189,8 @@ describe("hindsight installed-provider worker boundary", () => {
 		const sessionId = await createSession({ cwd });
 		sessionIds.push(sessionId);
 
-		const recalled = await callBeforePrompt(sessionId, "how should this roll out?");
+		const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const recalled = await callBeforePrompt(sessionId, "how should this roll out?", sessionSecret);
 		expect(recalled.status).toBe(200);
 		expect(recalled.content).toContain("source=\"Relevant memory\"");
 		expect(recalled.content).toContain("feature flag");
