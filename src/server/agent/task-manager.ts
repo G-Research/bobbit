@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { TaskStore, type TaskCommittedFact, type TaskState, type PersistedTask } from "./task-store.js";
+import type { HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
 
 /** Valid state transitions. Terminal states (complete, skipped) have no outgoing transitions. */
 const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
@@ -14,6 +15,35 @@ const TASK_UPDATED_FIELDS = [
 	"title", "spec", "assignedSessionId", "dependsOn", "workflowGateId", "inputGateIds",
 	"headSha", "baseSha", "branch", "resultSummary",
 ] as const;
+
+type TaskUpdatedField = (typeof TASK_UPDATED_FIELDS)[number];
+type CatalogueTaskUpdatedPublicField = HostNotificationPayload<"taskUpdated">["changedFields"][number];
+
+/** Internal checkout coordinates are persisted on the task but are not public
+ * notification metadata. Every exposed identifier comes from the catalogue. */
+const TASK_UPDATED_PUBLIC_FIELD_MAP = {
+	title: "title",
+	spec: "spec",
+	assignedSessionId: "assignedSessionId",
+	dependsOn: "dependsOn",
+	workflowGateId: "workflowGateId",
+	inputGateIds: "inputGateIds",
+	headSha: "headSha",
+	resultSummary: "resultSummary",
+} as const satisfies Partial<Record<TaskUpdatedField, CatalogueTaskUpdatedPublicField>>;
+
+type TaskUpdatedPublicField = (typeof TASK_UPDATED_PUBLIC_FIELD_MAP)[keyof typeof TASK_UPDATED_PUBLIC_FIELD_MAP];
+
+function isTaskUpdatedPublicField(field: TaskUpdatedField): field is keyof typeof TASK_UPDATED_PUBLIC_FIELD_MAP {
+	return Object.prototype.hasOwnProperty.call(TASK_UPDATED_PUBLIC_FIELD_MAP, field);
+}
+
+function projectTaskUpdatedFields(changedFields: readonly TaskUpdatedField[]): TaskUpdatedPublicField[] {
+	const projected = changedFields.flatMap((field): TaskUpdatedPublicField[] => {
+		return isTaskUpdatedPublicField(field) ? [TASK_UPDATED_PUBLIC_FIELD_MAP[field]] : [];
+	});
+	return [...new Set(projected)].sort();
+}
 
 function valuesEqual(left: unknown, right: unknown): boolean {
 	if (Array.isArray(left) && Array.isArray(right)) {
@@ -174,6 +204,7 @@ export class TaskManager {
 		const stateChanged = updates.state !== undefined && updates.state !== previousState;
 		if (!stateChanged && changedFields.length === 0) return true;
 
+		const publicChangedFields = projectTaskUpdatedFields(changedFields);
 		const now = monotonicNow(task.updatedAt);
 		// Handle completedAt for terminal states
 		if (stateChanged && (updates.state === "complete" || updates.state === "skipped")) {
@@ -188,7 +219,7 @@ export class TaskManager {
 				taskId: task.id,
 				goalId: task.goalId,
 				state: task.state,
-				changedFields,
+				changedFields: publicChangedFields,
 				revision: task.updatedAt,
 			});
 		}

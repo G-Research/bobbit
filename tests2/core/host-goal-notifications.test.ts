@@ -6,6 +6,8 @@ import {
 	type GoalStoreNotification,
 	type PersistedGoal,
 } from "../../src/server/agent/goal-store.js";
+import { HostNotificationDispatcher } from "../../src/server/extension-host/host-notification-dispatcher.js";
+import type { HostNotification } from "../../src/shared/extension-host/host-hooks.js";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 const stores: GoalStore[] = [];
@@ -42,6 +44,42 @@ function goal(id: string, overrides: Partial<PersistedGoal> = {}): PersistedGoal
 function durableGoal(memfs: MemFs, stateDir: string, id: string): PersistedGoal | undefined {
 	const rows = JSON.parse(memfs.readFileSync(path.join(stateDir, "goals.json"), "utf-8")) as PersistedGoal[];
 	return rows.find(row => row.id === id);
+}
+
+function captureDispatchedGoals(store: GoalStore): {
+	notifications: HostNotification[];
+	dispatcher: HostNotificationDispatcher;
+} {
+	const notifications: HostNotification[] = [];
+	let nextId = 0;
+	const dispatcher = new HostNotificationDispatcher({
+		idGenerator: () => `goal-notification-${++nextId}`,
+		now: () => 1_000,
+	});
+	store.onHostNotification = fact => {
+		const common = { projectId: "project-a", aggregateRevision: fact.revision };
+		let notification: HostNotification | undefined;
+		switch (fact.name) {
+			case "goalCreated":
+				notification = dispatcher.publish("goalCreated", { ...common, aggregateId: fact.payload.goalId, payload: fact.payload });
+				break;
+			case "goalUpdated":
+				notification = dispatcher.publish("goalUpdated", {
+					...common,
+					aggregateId: fact.payload.goalId,
+					payload: { ...fact.payload, changedFields: [...fact.payload.changedFields] },
+				});
+				break;
+			case "goalCompleted":
+				notification = dispatcher.publish("goalCompleted", { ...common, aggregateId: fact.payload.goalId, payload: fact.payload });
+				break;
+			case "goalArchived":
+				notification = dispatcher.publish("goalArchived", { ...common, aggregateId: fact.payload.goalId, payload: fact.payload });
+				break;
+		}
+		if (notification) notifications.push(notification);
+	};
+	return { notifications, dispatcher };
 }
 
 describe("authoritative goal host notifications", () => {
@@ -99,6 +137,27 @@ describe("authoritative goal host notifications", () => {
 			revision: 502,
 			payload: { goalId: "child", parentGoalId: "parent" },
 		});
+	});
+
+	it("omits internal setup metadata while the real dispatcher accepts the committed update", async () => {
+		const { store } = fixture("public-projection");
+		await store.putStrict(goal("goal-1"));
+		const { notifications, dispatcher } = captureDispatchedGoals(store);
+
+		await store.transitionSetupStrict("goal-1", "retrying", { branch: "private-checkout-branch" });
+		await store.updateStrict("goal-1", {
+			title: "Public title",
+			metadata: { "example.enabled": true },
+			setupStatus: "ready",
+		});
+
+		expect(notifications.map(notification => notification.payload)).toEqual([
+			{ goalId: "goal-1", state: "todo", changedFields: [] },
+			{ goalId: "goal-1", state: "todo", changedFields: ["metadata", "title"] },
+		]);
+		expect(JSON.stringify(notifications)).not.toContain("setupStatus");
+		expect(JSON.stringify(notifications)).not.toContain("private-checkout-branch");
+		expect(dispatcher.getDiagnostics().filter(row => row.code === "invalid_payload")).toEqual([]);
 	});
 
 	it("keeps completion distinct from archive and suppresses duplicate archive publication", async () => {

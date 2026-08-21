@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { readDeletionTombstones, recordDeletionTombstone } from "./deletion-tombstones.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
+import type { HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
@@ -187,26 +188,53 @@ export interface PersistedGoal {
  * dispatcher by ProjectContext. The store owns the authoritative transition
  * and revision; consumers never receive the mutable PersistedGoal record.
  */
+type CatalogueGoalUpdatedChangedField = HostNotificationPayload<"goalUpdated">["changedFields"][number];
+
+/** Map only catalogue-approved public mutation identifiers. Internal lifecycle,
+ * checkout, scheduler, and diagnostic fields intentionally produce an empty
+ * changedFields projection rather than leaking their names. */
+const GOAL_NOTIFICATION_CHANGED_FIELD_MAP = {
+	title: "title",
+	spec: "spec",
+	state: "state",
+	workflow: "workflow",
+	metadata: "metadata",
+	team: "team",
+	paused: "paused",
+	divergencePolicy: "divergencePolicy",
+	maxConcurrentChildren: "maxConcurrentChildren",
+} as const satisfies Partial<Record<keyof PersistedGoal, CatalogueGoalUpdatedChangedField>>;
+
+type GoalUpdatedChangedField = (typeof GOAL_NOTIFICATION_CHANGED_FIELD_MAP)[keyof typeof GOAL_NOTIFICATION_CHANGED_FIELD_MAP];
+
+function isGoalNotificationChangedField(key: string): key is keyof typeof GOAL_NOTIFICATION_CHANGED_FIELD_MAP {
+	return Object.prototype.hasOwnProperty.call(GOAL_NOTIFICATION_CHANGED_FIELD_MAP, key);
+}
+
+type FrozenGoalUpdatedPayload = Readonly<Omit<HostNotificationPayload<"goalUpdated">, "changedFields">> & Readonly<{
+	changedFields: readonly GoalUpdatedChangedField[];
+}>;
+
 export type GoalStoreNotification =
 	| Readonly<{
 		name: "goalCreated";
 		revision: number;
-		payload: Readonly<{ goalId: string; parentGoalId?: string; state: GoalState }>;
+		payload: Readonly<HostNotificationPayload<"goalCreated">>;
 	}>
 	| Readonly<{
 		name: "goalUpdated";
 		revision: number;
-		payload: Readonly<{ goalId: string; state: GoalState; changedFields: readonly string[] }>;
+		payload: FrozenGoalUpdatedPayload;
 	}>
 	| Readonly<{
 		name: "goalCompleted";
 		revision: number;
-		payload: Readonly<{ goalId: string; parentGoalId?: string }>;
+		payload: Readonly<HostNotificationPayload<"goalCompleted">>;
 	}>
 	| Readonly<{
 		name: "goalArchived";
 		revision: number;
-		payload: Readonly<{ goalId: string }>;
+		payload: Readonly<HostNotificationPayload<"goalArchived">>;
 	}>;
 
 interface GoalWriteMetrics {
@@ -280,16 +308,6 @@ const NUMBER_FIELDS = ["archivedAt", "maxConcurrentChildren", "replanCount", "ma
 const STRING_ARRAY_FIELDS = [
 	"skipGateRequirements", "enabledOptionalSteps", "acceptanceCriteria", "dependsOnPlanIds",
 ] as const;
-
-/** Field names safe to expose as bounded goalUpdated metadata. */
-const GOAL_NOTIFICATION_CHANGED_FIELDS = new Set<keyof PersistedGoal>([
-	"title", "cwd", "state", "spec", "worktreePath", "worktreeOwnerSessionId", "branch", "repoPath",
-	"team", "teamLeadSessionId", "skipGateRequirements", "workflowId", "workflow", "setupStatus", "setupError",
-	"schedulerRecovery", "metadata", "reattemptOf", "sandboxed", "autoStartTeam", "enabledOptionalSteps",
-	"repoWorktrees", "parentGoalId", "rootGoalId", "mergeTarget", "divergencePolicy", "maxConcurrentChildren",
-	"acceptanceCriteria", "spawnedFromPlanId", "dependsOnPlanIds", "paused", "pauseSource", "replanCount",
-	"mergeConflict", "suggestedRole", "spawnedBySessionId", "inlineRoles", "subgoalsAllowed", "maxNestingDepth",
-]);
 
 function nextGoalRevision(previous: number): number {
 	return Math.max(Date.now(), previous + 1);
@@ -1116,14 +1134,13 @@ export class GoalStore {
 	private changedNotificationFields(
 		existing: PersistedGoal,
 		cleaned: Record<string, unknown>,
-		clearSetupError: boolean,
-	): string[] {
+	): GoalUpdatedChangedField[] {
 		const record = existing as unknown as Record<string, unknown>;
-		const changed = Object.keys(cleaned)
-			.filter((key): key is keyof PersistedGoal => GOAL_NOTIFICATION_CHANGED_FIELDS.has(key as keyof PersistedGoal))
-			.filter(key => record[key] !== cleaned[key]);
-		if (clearSetupError && existing.setupError !== undefined && !changed.includes("setupError")) changed.push("setupError");
-		return changed.sort();
+		const changed = Object.keys(cleaned).flatMap((key): GoalUpdatedChangedField[] => {
+			if (record[key] === cleaned[key] || !isGoalNotificationChangedField(key)) return [];
+			return [GOAL_NOTIFICATION_CHANGED_FIELD_MAP[key]];
+		});
+		return [...new Set(changed)].sort();
 	}
 
 	private dispatchHostNotification(notification: GoalStoreNotification): void {
@@ -1229,7 +1246,7 @@ export class GoalStore {
 			return true;
 		}
 
-		const changedFields = this.changedNotificationFields(existing, cleaned, clearSetupError);
+		const changedFields = this.changedNotificationFields(existing, cleaned);
 		const previous = { ...existing };
 		const ownedKeys = new Set(Object.keys(cleaned));
 		if (clearSetupError) ownedKeys.add("setupError");
