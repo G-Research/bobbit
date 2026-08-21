@@ -125,15 +125,17 @@ async function waitForIdle(gw: GatewayFixture, sessionId: string): Promise<void>
 	await poll(() => gw.sessionManager.getSession(sessionId)?.status === "idle" ? true : undefined, `idle session ${sessionId}`);
 }
 
-async function inboxEntries(gw: GatewayFixture, staffId: string): Promise<any[]> {
-	const response = await gw.api(`/api/staff/${encodeURIComponent(staffId)}/inbox`);
+async function inboxEntries(gw: GatewayFixture, staffId: string, sessionSecret?: string): Promise<any[]> {
+	const response = await gw.api(`/api/staff/${encodeURIComponent(staffId)}/inbox`, {
+		headers: sessionSecret ? { "X-Bobbit-Session-Secret": sessionSecret } : undefined,
+	});
 	expect(response.status, await response.clone().text()).toBe(200);
 	return (await response.json()).entries;
 }
 
-async function waitForInboxCount(gw: GatewayFixture, staffId: string, count: number): Promise<any[]> {
+async function waitForInboxCount(gw: GatewayFixture, staffId: string, count: number, sessionSecret?: string): Promise<any[]> {
 	return poll(async () => {
-		const entries = await inboxEntries(gw, staffId);
+		const entries = await inboxEntries(gw, staffId, sessionSecret);
 		return entries.length === count ? entries : undefined;
 	}, `${count} inbox entries for ${staffId}`, 5_000);
 }
@@ -297,6 +299,7 @@ describe("real gateway notification authority", () => {
 			connectCaptured(gw.wsBase, "__viewer__", gw.token, "app"),
 		]);
 		const [exact, sandbox, stale, foreign, viewer] = sockets;
+		const staffSessionSecret = gw.sessionManager.sessionSecretStore.getOrCreateSecret(staff.currentSessionId);
 		const cursors = sockets.map(socket => socket.cursor());
 		const unboundFrames: any[] = [];
 		const unbound = {
@@ -324,7 +327,7 @@ describe("real gateway notification authority", () => {
 			expect(JSON.stringify(live)).not.toContain("rootCorrelationId");
 			expect(JSON.stringify(live)).not.toContain("causationDepth");
 
-			const persisted = await waitForInboxCount(gw, staff.id, 1);
+			const persisted = await waitForInboxCount(gw, staff.id, 1, staffSessionSecret);
 			expect(persisted[0].id).toBe(live.entry.id);
 			expect(persisted[0].notificationInput).toMatchObject({
 				rootCorrelationId: expect.any(String),
@@ -363,7 +366,7 @@ describe("real gateway notification authority", () => {
 		const foreignSecret = gw.sessionManager.sessionSecretStore.getOrCreateSecret(foreignSession.id);
 		try {
 			expect((await updateTask(task.id, "seed notification root")).status).toBe(200);
-			const initialEntries = await waitForInboxCount(gw, staff.id, 1);
+			const initialEntries = await waitForInboxCount(gw, staff.id, 1, secret);
 			const initialInput = initialEntries[0].notificationInput;
 			const turn = await poll(
 				() => gw.sessionManager.getStaffNotificationTurnContext(sessionId),
@@ -405,7 +408,7 @@ describe("real gateway notification authority", () => {
 				const response = await updateTask(task.id, `${label} secret gets a fresh root`, headers);
 				expect(response.status, await response.clone().text()).toBe(200);
 			}
-			const independentEntries = await waitForInboxCount(gw, staff.id, 4);
+			const independentEntries = await waitForInboxCount(gw, staff.id, 4, secret);
 			const roots = independentEntries.map(entry => entry.notificationInput.rootCorrelationId);
 			expect(new Set(roots).size).toBe(4);
 			expect(roots.slice(1)).not.toContain(initialInput.rootCorrelationId);
