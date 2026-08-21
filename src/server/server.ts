@@ -8688,11 +8688,23 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
 		try {
-			const requestedWorkflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
+			const explicitWorkflowId = typeof body?.workflowId === "string" && body.workflowId.trim()
+				? body.workflowId.trim()
+				: typeof body?.workflow === "string" && body.workflow.trim()
+					? body.workflow.trim()
+					: undefined;
+			const bodyHasInlineWorkflow = !!body?.workflow && typeof body.workflow === "object";
+			const targetWorkflows = !explicitWorkflowId && !bodyHasInlineWorkflow && typeof body?.projectId === "string"
+				? goalCandidateDeps.workflows(body.projectId)
+				: [];
+			const requestedWorkflowId = explicitWorkflowId ?? targetWorkflows[0]?.id;
 			// This is the mutation boundary shared by every caller of POST /api/goals.
 			// Resolve and validate the whole candidate before sandbox provisioning,
 			// workflow seeding, or any goal/gate/task/worktree mutation.
-			const validation = validateCurrentGoalCandidate({ ...(body ?? {}), workflowId: requestedWorkflowId });
+			const validation = validateCurrentGoalCandidate({
+				...(body ?? {}),
+				...(requestedWorkflowId ? { workflowId: requestedWorkflowId } : {}),
+			});
 			if (!validation.ok) { writeGoalCandidateError(validation); return; }
 			const candidate = validation.candidate;
 			const title = candidate.title;
@@ -8849,10 +8861,9 @@ async function handleApiRoute(
 				if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
 					const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
 					console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
-					resolvedWorkflow = workflowId
-						? targetCtx.workflowStore.get(workflowId)
-						: targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-					resolvedWorkflowId = resolvedWorkflow?.id || resolvedWorkflowId || "general";
+					const persistedWorkflowId = workflowId ?? defaults[0]?.id;
+					resolvedWorkflow = persistedWorkflowId ? targetCtx.workflowStore.get(persistedWorkflowId) : undefined;
+					resolvedWorkflowId = resolvedWorkflow?.id || resolvedWorkflowId;
 				}
 				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
 				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
@@ -16011,8 +16022,9 @@ async function handleApiRoute(
 					let resolvedWorkflow = candidate.workflow;
 					let resolvedWorkflowId = candidate.workflowId;
 					if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
-						persistCurrentDefaultGoalWorkflows(coordinates.projectId, targetCtx);
-						resolvedWorkflow = resolvedWorkflowId ? targetCtx.workflowStore.get(resolvedWorkflowId) : targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+						const defaults = persistCurrentDefaultGoalWorkflows(coordinates.projectId, targetCtx);
+						const persistedWorkflowId = resolvedWorkflowId ?? defaults[0]?.id;
+						resolvedWorkflow = persistedWorkflowId ? targetCtx.workflowStore.get(persistedWorkflowId) : undefined;
 						resolvedWorkflowId = resolvedWorkflow?.id ?? resolvedWorkflowId;
 					}
 					if (resolvedWorkflowId && !resolvedWorkflow) {

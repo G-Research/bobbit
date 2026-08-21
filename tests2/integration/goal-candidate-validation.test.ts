@@ -293,6 +293,33 @@ describe("canonical goal candidate — project, workflow, and structured fields"
 		}
 	});
 
+	it("selects and freezes the first generated default when an empty store has no explicit selection", () => {
+		fixture.workflows.set(fixture.projectId, []);
+		const firstDefault = structuredClone(FEATURE_WORKFLOW);
+		firstDefault.id = "project-default";
+		firstDefault.name = "Project Default";
+		fixture.deps.defaultWorkflows = () => [firstDefault, structuredClone(FEATURE_WORKFLOW)];
+
+		const accepted = validate({ workflow: undefined });
+		expect(accepted.ok).toBe(true);
+		if (accepted.ok) {
+			expect(accepted.candidate.workflowId).toBe("project-default");
+			expect(accepted.candidate.workflow?.id).toBe("project-default");
+			expect(accepted.candidate.workflow).not.toBe(firstDefault);
+			expect(accepted.candidate.seedDefaultWorkflows).toBe(true);
+		}
+	});
+
+	it("rejects an empty generated default set instead of returning an unbound candidate", () => {
+		fixture.workflows.set(fixture.projectId, []);
+		fixture.deps.defaultWorkflows = () => [];
+
+		const rejected = validate({ workflow: undefined });
+		expectCode(rejected, "MISSING_WORKFLOW");
+		if (!rejected.ok) expect(rejected.details?.availableWorkflows).toEqual([]);
+		expectCode(validate({ workflow: "missing" }), "MISSING_WORKFLOW");
+	});
+
 	it("accepts ordinary goal workflow snapshots above the child-inline cap", () => {
 		const largeWorkflow = structuredClone(FEATURE_WORKFLOW);
 		largeWorkflow.id = "large-workflow";

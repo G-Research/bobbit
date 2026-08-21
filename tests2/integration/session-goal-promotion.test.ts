@@ -70,6 +70,49 @@ async function createPromotionCandidate(gateway: any, label: string): Promise<{
 }
 
 test.describe("current-session goal promotion API", () => {
+	test("promotes an omitted workflow selection with the first generated default", async ({ gateway }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `promotion-default-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const project = await registerProject({
+			name: `promotion-default-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [{ name: "app", repo: "." }],
+			seedWorkflows: false,
+		});
+		const context = gateway.projectContextManager.getOrCreate(project.id);
+		expect(context.workflowStore.getAll()).toEqual([]);
+
+		const ownerId = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(ownerId, "idle", 30_000);
+		const seeded = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/seed`, {
+			method: "POST",
+			body: JSON.stringify({
+				args: {
+					title: "Promote generated default",
+					spec: "Select and persist the first generated project workflow.",
+					projectId: project.id,
+				},
+			}),
+		});
+		expect(seeded.status, await seeded.clone().text()).toBe(200);
+		const selected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "current-session" }),
+		});
+		expect(selected.status, await selected.clone().text()).toBe(200);
+
+		const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({}),
+		});
+		expect(accepted.status, await accepted.clone().text()).toBe(201);
+		const goal = await jsonResponse(accepted);
+		const persistedWorkflows = context.workflowStore.getAll();
+		expect(persistedWorkflows.length).toBeGreaterThan(0);
+		expect(goal.workflowId).toBe(persistedWorkflows[0].id);
+		expect(goal.workflow?.id).toBe(persistedWorkflows[0].id);
+	});
+
 	test("revalidates a stale workflow against defaults when the live store becomes empty", async ({ gateway }) => {
 		const { ownerId, context } = await createPromotionCandidate(gateway, "stale-workflow");
 		const workflowBefore = context.projectConfigStore.getWorkflows();

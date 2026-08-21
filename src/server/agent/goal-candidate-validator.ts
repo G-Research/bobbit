@@ -150,12 +150,16 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 		: cascadeWorkflows;
 	// An empty live store is not unconstrained: goal creation installs a known set
 	// of defaults. Validate against an in-memory copy of exactly that set so an
-	// invalid proposal cannot reach the later persistence boundary. With no
-	// explicit selection, preserve legacy empty-store behavior by normalizing to
-	// the same `general` default used by ordinary creation and promotion.
+	// invalid proposal cannot reach the later persistence boundary. When the
+	// caller omitted a selection, normalize to the first default supplied by the
+	// same dependency that creation will persist; default workflow ids are data,
+	// never a magic constant.
 	const seedDefaultWorkflows = !inlineWorkflow && workflows.length === 0 && !registeredWorkflow;
 	if (seedDefaultWorkflows) workflows = deps.defaultWorkflows(resolved.projectId);
-	const workflowId = explicitWorkflowId || (seedDefaultWorkflows ? "general" : "");
+	if (seedDefaultWorkflows && workflows.length === 0) {
+		return fail(400, "MISSING_WORKFLOW", "Workflow is required for this project. Configure at least one workflow and retry.", { availableWorkflows: [] });
+	}
+	const workflowId = explicitWorkflowId || (seedDefaultWorkflows ? workflows[0]?.id ?? "" : "");
 	const workflowArgs = { inlineWorkflow, workflow: workflowId, options };
 	const workflowError = validateGoalProposalWorkflow(workflowArgs, workflows);
 	if (workflowError) return fail(400, workflowError.code, workflowError.message, { ...(workflowError.availableWorkflows ? { availableWorkflows: workflowError.availableWorkflows } : {}), ...(workflowError.validOptionalSteps ? { validOptionalSteps: workflowError.validOptionalSteps } : {}) });
