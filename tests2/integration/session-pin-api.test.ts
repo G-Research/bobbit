@@ -28,6 +28,17 @@ type PinEvent = {
 	user_tags?: string[];
 };
 
+type GoalStateEvent = {
+	type: "goal_state_changed";
+	goalId: string;
+};
+
+type SessionTitleEvent = {
+	type: "session_title";
+	sessionId: string;
+	title: string;
+};
+
 let gw: GatewayFixture;
 let scope: TestScope;
 let baseline: EntityCounts;
@@ -137,6 +148,48 @@ function waitForPinEvent(ws: WebSocket, sessionId: string, timeoutMs = 2_000): P
 	});
 }
 
+function waitForGoalStateEvent(ws: WebSocket, goalId: string, timeoutMs = 2_000): Promise<GoalStateEvent> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			cleanup();
+			reject(new Error(`missing goal_state_changed for ${goalId}`));
+		}, timeoutMs);
+		const onMessage = (raw: unknown) => {
+			let message: GoalStateEvent;
+			try { message = JSON.parse(String(raw)) as GoalStateEvent; } catch { return; }
+			if (message.type !== "goal_state_changed" || message.goalId !== goalId) return;
+			cleanup();
+			resolve(message);
+		};
+		const cleanup = () => {
+			clearTimeout(timer);
+			ws.off("message", onMessage);
+		};
+		ws.on("message", onMessage);
+	});
+}
+
+function waitForSessionTitleEvent(ws: WebSocket, sessionId: string, title: string, timeoutMs = 2_000): Promise<SessionTitleEvent> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			cleanup();
+			reject(new Error(`missing session_title for ${sessionId}`));
+		}, timeoutMs);
+		const onMessage = (raw: unknown) => {
+			let message: SessionTitleEvent;
+			try { message = JSON.parse(String(raw)) as SessionTitleEvent; } catch { return; }
+			if (message.type !== "session_title" || message.sessionId !== sessionId || message.title !== title) return;
+			cleanup();
+			resolve(message);
+		};
+		const cleanup = () => {
+			clearTimeout(timer);
+			ws.off("message", onMessage);
+		};
+		ws.on("message", onMessage);
+	});
+}
+
 function connectWsWithToken(wsBase: string, sessionId: string, token: string): Promise<WebSocket> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${wsBase}/ws/${sessionId}`);
@@ -159,6 +212,18 @@ function connectWsWithToken(wsBase: string, sessionId: string, token: string): P
 		ws.on("message", onMessage);
 		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token })));
 	});
+}
+
+async function humanOperatorHeaders(): Promise<Record<string, string>> {
+	const response = await gw.api("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	expect(response.status).toBe(200);
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	const cookie = setCookies.map(value => value.split(";")[0]).find(value => value.startsWith("bobbit_session="));
+	expect(cookie, "browser-signaled operator auth should mint a signed cookie").toBeTruthy();
+	return { Cookie: cookie! };
 }
 
 describe("session pin API", () => {
@@ -527,6 +592,59 @@ describe("session pin API", () => {
 			sandboxClient.close();
 			sandboxStore.removeSession(gw.defaultProjectId, sandboxSession.id);
 			await store.flushAsync();
+		}
+	});
+
+	it("sends goal state to UI principals while keeping sandbox session delivery scoped", async () => {
+		const goal = await scope.createGoal({
+			title: `Goal audience ${randomUUID()}`,
+			spec: "A focused goal-state WebSocket audience regression fixture.",
+			team: false,
+			worktree: false,
+		});
+		const uiSession = await scope.createSession({});
+		const sandboxSession = await scope.createSession({});
+		const sandboxStore = gw.sessionManager.sandboxTokenStore;
+		const sandboxToken = sandboxStore.register(gw.defaultProjectId);
+		sandboxStore.addSession(gw.defaultProjectId, sandboxSession.id);
+		const [uiClient, sandboxClient] = await Promise.all([
+			gw.connectWs(uiSession.id),
+			connectWsWithToken(gw.wsBase, sandboxSession.id, sandboxToken),
+		]);
+		const sandboxFrames: unknown[] = [];
+		const onSandboxMessage = (raw: unknown) => {
+			try { sandboxFrames.push(JSON.parse(String(raw))); } catch { /* ignore non-JSON frames */ }
+		};
+		sandboxClient.on("message", onSandboxMessage);
+
+		try {
+			const scopedTitle = `sandbox scoped ${randomUUID()}`;
+			const targetedDelivery = waitForSessionTitleEvent(sandboxClient, sandboxSession.id, scopedTitle);
+			expect(gw.sessionManager.setTitle(sandboxSession.id, scopedTitle)).toBe(true);
+			await expect(targetedDelivery).resolves.toMatchObject({
+				type: "session_title",
+				sessionId: sandboxSession.id,
+				title: scopedTitle,
+			});
+
+			const uiDelivery = waitForGoalStateEvent(uiClient, goal.id);
+			const pause = await gw.api(`/api/goals/${goal.id}/pause`, {
+				method: "POST",
+				headers: await humanOperatorHeaders(),
+				body: JSON.stringify({ cascade: false }),
+			});
+			expect(pause.status).toBe(200);
+			await expect(uiDelivery).resolves.toEqual({ type: "goal_state_changed", goalId: goal.id });
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(sandboxFrames.filter(frame => (
+				(frame as GoalStateEvent)?.type === "goal_state_changed"
+				&& (frame as GoalStateEvent)?.goalId === goal.id
+			))).toHaveLength(0);
+		} finally {
+			uiClient.close();
+			sandboxClient.off("message", onSandboxMessage);
+			sandboxClient.close();
+			sandboxStore.removeSession(gw.defaultProjectId, sandboxSession.id);
 		}
 	});
 });

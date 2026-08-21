@@ -79,6 +79,9 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 			await pill.click();
 			const widgetDropdown = page.locator("#goal-status-dropdown");
 			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]')).toBeVisible({ timeout: 15_000 });
+			const sidebarGoalRow = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+			await expect(sidebarGoalRow, "completed goal should be visible in the session sidebar before reset").toBeVisible({ timeout: 15_000 });
+			await expect(sidebarGoalRow.locator('[title="3 of 3 gates passed"]'), "visible sidebar should show the completed goal's gate progress before reset").toBeVisible({ timeout: 15_000 });
 			expect(await browserGoalState(page)).toBe("complete");
 
 			await openApp(dashboardPage);
@@ -102,6 +105,10 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 
 			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]'), "Completed must clear without reload").toHaveCount(0, { timeout: 15_000 });
 			await expect(designRow, "reset gate should render pending in the still-open widget").toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
+			// Gate progress reads asynchronous state.gateStatusCache, not goal_state_changed.
+			// The open widget proves the visible lifecycle change; this keeps its sidebar
+			// entry visible through the push refresh before reload.
+			await expect(sidebarGoalRow, "reopened goal should remain visible in the live sidebar before reload").toBeVisible({ timeout: 2_000 });
 			await expect.poll(() => browserGoalState(page), {
 				timeout: 15_000,
 				message: "session/sidebar client state should reopen without reload",
@@ -120,6 +127,7 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 			await reloadedPill.click();
 			await expect(page.locator('#goal-status-dropdown [data-testid="goal-widget-completed"]')).toHaveCount(0);
 			await expect(page.locator('#goal-status-dropdown [data-testid="goal-widget-gate"][data-gate-id="design-doc"]')).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
+			await expect(page.locator(`[data-nav-id="goal:${goalId}"]`).first(), "reloaded sidebar should retain the reopened goal").toBeVisible({ timeout: 15_000 });
 
 			await dashboardPage.reload({ waitUntil: "domcontentloaded" });
 			await expect(dashboardPage.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
