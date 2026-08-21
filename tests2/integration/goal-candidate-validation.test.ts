@@ -86,6 +86,10 @@ function makeFixture(): Fixture {
 			project: projects.get(id),
 			sessionStore: { get: (sessionId: string) => sessions.get(id)?.get(sessionId) },
 		}),
+		all: () => [...projects.values()].map(record => ({
+			project: record,
+			sessionStore: { get: (sessionId: string) => sessions.get(record.id)?.get(sessionId) },
+		})),
 		getContextForGoal: (goalId: string) => {
 			const goal = goals.get(goalId);
 			return goal ? { project: projects.get(goal.projectId!), goalStore: { get: (id: string) => goals.get(id) } } : undefined;
