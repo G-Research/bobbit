@@ -39,6 +39,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/pack-local-data.spec.ts",
+      "reason": "Chromium journey proving an installed and enabled pack panel receives host.localData, shares its canonical project directory with a server route, survives reload, and preserves route-written data through uninstall and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/github-trusted-host-resolver.test.ts",
       "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
       "execution": {
@@ -18438,11 +18447,11 @@
       "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
     },
     {
-      "file": "tests/e2e/pack-local-data.spec.ts",
+      "file": "tests/e2e/pack-local-data-runtime.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
+      "rationale": "Real gateway/runtime adapter for canonical host and ordinary/Pi agent bindings, lifecycle preservation, and the conditional real-Docker bidirectional mount round trip; browser ownership lives in tests2/browser/e2e/pack-local-data.spec.ts."
     }
   ]
 }

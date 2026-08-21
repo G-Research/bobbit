@@ -10,7 +10,6 @@ import {
 	defaultProject,
 	deleteSession,
 } from "./e2e-setup.js";
-import { openApp } from "./ui/ui-helpers.js";
 
 const PACK = "pack-local-data";
 const PI_TOOL = "pi_local_data_marker";
@@ -119,17 +118,6 @@ async function packIsContributed(projectId?: string): Promise<boolean> {
 	return ((await response.json()).packs ?? []).some((pack: any) => pack.packId === PACK);
 }
 
-async function selectSessionAndOpenPanel(page: any, sessionId: string): Promise<void> {
-	await page.evaluate((id: string) => { window.location.hash = `#/session/${id}`; }, sessionId);
-	await expect.poll(
-		() => page.evaluate(() => (window as any).__bobbitState?.selectedSessionId ?? (window as any).bobbitState?.selectedSessionId),
-		{ timeout: 15_000 },
-	).toBe(sessionId);
-	await page.evaluate(() => { window.location.hash = "#/ext/pack-local-data"; });
-	await page.getByRole("button", { name: "Open Pack Local Data Fixture" }).click();
-}
-
-test.use({ serveUi: true });
 test.describe.configure({ mode: "serial" });
 
 test.afterEach(async () => {
@@ -148,7 +136,7 @@ test.afterEach(async () => {
 	if (project) fs.rmSync(path.join(project.rootPath, ".pack-local-data-fixture"), { recursive: true, force: true });
 });
 
-test("browser, server route, Pi tool, and ordinary filesystem access share the canonical project directory and preserve it", async ({ page, gateway }) => {
+test("ordinary and Pi runtime access share the canonical project directory and preserve it", async ({ gateway }) => {
 	const project = await defaultProject();
 	const componentCwd = path.join(project.rootPath, "components", "web");
 	fs.mkdirSync(componentCwd, { recursive: true });
@@ -172,25 +160,11 @@ test("browser, server route, Pi tool, and ordinary filesystem access share the c
 	expect(piResult).toMatchObject({ directory: expectedDirectory, name: "pi-marker.txt", content: "written-by-pi-host" });
 	expect(fs.readFileSync(path.join(expectedDirectory, "pi-marker.txt"), "utf8")).toBe("written-by-pi-host");
 
-	await openApp(page);
-	await selectSessionAndOpenPanel(page, sessionId);
-	await expect(page.locator('[data-testid="pack-local-data-browser-directory"]')).toHaveText(expectedDirectory, { timeout: 20_000 });
-	await expect(page.locator('[data-testid="pack-local-data-route-directory"]')).toHaveText(expectedDirectory);
-	await expect(page.locator('[data-testid="pack-local-data-markers"]')).toContainText('"ordinary-marker.txt":"E2E_WRITE_TEST\\n"');
-	await expect(page.locator('[data-testid="pack-local-data-markers"]')).toContainText('"pi-marker.txt":"written-by-pi-host"');
-	await expect(page.locator('[data-testid="pack-local-data-markers"]')).toContainText('"host-marker.txt":"written-by-browser-route"');
-
-	await page.reload();
-	await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
-	await selectSessionAndOpenPanel(page, sessionId);
-	await expect(page.locator('[data-testid="pack-local-data-browser-directory"]')).toHaveText(expectedDirectory, { timeout: 20_000 });
-
 	const removed = await uninstall();
 	expect(removed.status).toBe(204);
 	await expect.poll(() => packIsContributed(), { timeout: 15_000 }).toBe(false);
 	expect(fs.readFileSync(path.join(expectedDirectory, "pi-marker.txt"), "utf8")).toBe("written-by-pi-host");
 	expect(fs.readFileSync(path.join(expectedDirectory, "ordinary-marker.txt"), "utf8")).toBe("E2E_WRITE_TEST\n");
-	expect(fs.readFileSync(path.join(expectedDirectory, "host-marker.txt"), "utf8")).toBe("written-by-browser-route");
 });
 
 test("sandbox mount is writable in both directions at the stable pack path", async ({ gateway }) => {
