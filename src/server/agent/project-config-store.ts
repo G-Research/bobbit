@@ -1,7 +1,7 @@
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import yaml from "yaml";
 
 // ── Component yaml normalization ────────────────────────────
@@ -102,6 +102,17 @@ export interface ProjectConfigDraft {
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
 	setComponents(components: Component[]): void;
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void;
+}
+
+export interface ProjectSettingsChangedPayload {
+	readonly target: "project";
+	readonly changedKeys: readonly string[];
+}
+
+/** Safe post-commit projection consumed by project-scoped notification wiring. */
+export interface ProjectSettingsChangedFact {
+	readonly revision: string;
+	readonly payload: Readonly<ProjectSettingsChangedPayload>;
 }
 
 /** Thrown when a config file needs repair before it can be safely overwritten. */
@@ -469,6 +480,9 @@ export class ProjectConfigStore {
 	private readonly configFile: string;
 	private readonly fs: FsLike;
 
+	/** Invoked after changed canonical project settings are atomically committed. */
+	onSettingsChanged?: (fact: ProjectSettingsChangedFact) => void;
+
 	constructor(configDir: string, fsImpl: FsLike = realFs) {
 		this.fs = fsImpl;
 		this.configFile = path.join(configDir, "project.yaml");
@@ -600,7 +614,7 @@ export class ProjectConfigStore {
 		if (this.loadFailed) throw new ProjectConfigLoadError(this.configFile);
 	}
 
-	private serialize(state: ConfigStoreState): string {
+	private serializedObject(state: ConfigStoreState): Record<string, unknown> {
 		const out: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(state.data)) {
 			if (!MIGRATED_KEYS.has(k)) out[k] = v;
@@ -611,12 +625,27 @@ export class ProjectConfigStore {
 			out.config_directories = state.configDirectories.map(e => ({ path: e.path, types: [...e.types] }));
 		}
 		if (state.present.sandbox_tokens || state.sandboxTokens.length > 0) {
-			// Values are accepted at API ingress only; project.yaml must never contain them.
+			// Values are accepted at API ingress only; project.yaml and notification
+			// metadata must never contain them.
 			out.sandbox_tokens = state.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
 		}
 		if (state.present.pack_order || this.packOrderNonEmpty(state.packOrder)) out.pack_order = this.serializePackOrder(state.packOrder);
 		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
-		return yaml.stringify(out);
+		return out;
+	}
+
+	private serialize(state: ConfigStoreState): string {
+		return yaml.stringify(this.serializedObject(state));
+	}
+
+	private changedSettingKeys(before: ConfigStoreState, after: ConfigStoreState): string[] {
+		const previous = this.serializedObject(before);
+		const next = this.serializedObject(after);
+		return [...new Set([...Object.keys(previous), ...Object.keys(next)])]
+			.filter(key => key.length > 0 && key.length <= 128)
+			.filter(key => JSON.stringify(previous[key]) !== JSON.stringify(next[key]))
+			.sort()
+			.slice(0, 32);
 	}
 
 	private existingTargetMode(): number | undefined {
@@ -631,19 +660,23 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private publish(state: ConfigStoreState): void {
+	private publish(state: ConfigStoreState): string {
 		const dir = path.dirname(this.configFile);
 		const temp = `${this.configFile}.${process.pid}.${randomUUID()}.tmp`;
 		try {
+			// Serialize once so the returned revision hashes the exact canonical bytes
+			// atomically published by rename.
+			const bytes = this.serialize(state);
 			// Rename publishes the temp inode's mode. Seed it from the existing
 			// target before the POSIX atomic replacement, rather than chmodding the
 			// destination after publication (which could widen a private config).
 			const targetMode = this.existingTargetMode();
 			if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
-			this.fs.writeFileSync(temp, this.serialize(state), targetMode === undefined
+			this.fs.writeFileSync(temp, bytes, targetMode === undefined
 				? "utf-8"
 				: { encoding: "utf-8", mode: targetMode });
 			this.fs.renameSync(temp, this.configFile);
+			return bytes;
 		} catch {
 			try { this.fs.unlinkSync(temp); } catch { /* only clean this invocation's temp file */ }
 			// Filesystem/YAML errors can contain config contents or token values.
@@ -651,16 +684,27 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private commit(candidate: ConfigStoreState): void {
+	private commit(candidate: ConfigStoreState): string {
 		this.assertCanSave();
-		this.publish(candidate);
+		const committedBytes = this.publish(candidate);
 		candidate.dirty = false;
 		this.apply(candidate);
+		return createHash("sha256").update(committedBytes).digest("hex");
+	}
+
+	private notifySettingsChanged(fact: ProjectSettingsChangedFact): void {
+		try {
+			this.onSettingsChanged?.(fact);
+		} catch {
+			// Publication is already authoritative; observational fanout is non-fatal.
+			console.error("[project-config-store] Post-commit settings observer failed");
+		}
 	}
 
 	/** Apply several changes as one durable, all-or-nothing publication. */
 	mutate(mutator: (draft: ProjectConfigDraft) => void): void {
 		this.assertCanSave();
+		const before = this.snapshot();
 		const candidate = this.snapshot();
 		const draft: ProjectConfigDraft = {
 			set: (key, value) => this.setStateValue(candidate, key, value),
@@ -682,7 +726,15 @@ export class ProjectConfigStore {
 			setWorkflows: workflows => { candidate.workflows = workflows ? structuredClone(workflows) : undefined; },
 		};
 		mutator(draft);
-		this.commit(candidate);
+		const changedKeys = this.changedSettingKeys(before, candidate);
+		const revision = this.commit(candidate);
+		if (changedKeys.length > 0) {
+			const payload = Object.freeze({
+				target: "project" as const,
+				changedKeys: Object.freeze([...changedKeys]),
+			});
+			this.notifySettingsChanged(Object.freeze({ revision, payload }));
+		}
 	}
 
 	private setStateValue(state: ConfigStoreState, key: string, value: string): void {
