@@ -29,6 +29,7 @@ import { ProjectConfigStore } from "../../src/server/agent/project-config-store.
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { resolveRole } from "../../src/server/agent/resolve-role.ts";
 import type { Role, RoleStore } from "../../src/server/agent/role-store.ts";
+import { buildActive, buildFixture, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.ts";
 
 let tmpRoot: string;
 let stateDir: string;
@@ -132,6 +133,52 @@ describe("runSubgoalStep: child inherits parent.inlineRoles (integration via cre
 
 		const childAfter = goalStore.get(child.id)!;
 		assert.equal(childAfter.inlineRoles!["reviewer"].promptTemplate, "v1");
+	});
+
+	it("runSubgoalStep inherits legacy role and workflow snapshots without normalizing them", async () => {
+		const legacyRole = {
+			name: "legacy-reviewer",
+			label: "Legacy reviewer",
+			promptTemplate: "Keep exact legacy values.",
+			accessory: "vintage",
+			model: "retired-bare-model",
+			thinkingLevel: "legacy-depth",
+			toolPolicies: { bash: "retired-policy" },
+			createdAt: 7,
+			updatedAt: 8,
+		} as unknown as Role;
+		const legacyWorkflow = {
+			id: "legacy-inline",
+			name: "Legacy inline",
+			description: "Retired verification step fixture.",
+			createdAt: 3,
+			updatedAt: 4,
+			gates: [{
+				id: "ready-to-merge",
+				name: "Ready",
+				dependsOn: [],
+				verify: [{ name: "Retired remote state", type: "remote-state" }],
+			}],
+		} as any;
+		const fx = await buildFixture({ parentOver: {
+			workflowId: legacyWorkflow.id,
+			workflow: legacyWorkflow,
+			inlineRoles: { "legacy-reviewer": legacyRole },
+		} });
+		try {
+			const step = buildSubgoalStep({ planId: "legacy-snapshot-child" });
+			const { signal, active, stepIndex } = buildActive(fx.parent.id, "legacy-snapshot-child");
+			const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+			assert.equal(result.passed, true, result.output);
+			const create = fx.calls.find(call => call.kind === "createGoal");
+			assert.ok(create?.kind === "createGoal");
+			assert.deepEqual(create.opts.inlineRoles, { "legacy-reviewer": legacyRole });
+			assert.deepEqual(create.opts.resolvedWorkflow, legacyWorkflow);
+			assert.notEqual(create.opts.inlineRoles, fx.parent.inlineRoles);
+			assert.notEqual(create.opts.resolvedWorkflow, fx.parent.workflow);
+		} finally {
+			fx.cleanup();
+		}
 	});
 
 	it("parent without inlineRoles → child receives undefined, not empty {}", async () => {

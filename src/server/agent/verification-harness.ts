@@ -8683,6 +8683,7 @@ export class VerificationHarness {
 						output: "runSubgoalStep: candidate validation unavailable — not spawning child",
 					};
 				}
+				const inheritsWorkflowSnapshot = sg.workflowId === undefined && resolvedChildWorkflow !== undefined;
 				const validation = validateGoalCandidate({
 					title: sg.title,
 					spec: sg.spec,
@@ -8692,13 +8693,17 @@ export class VerificationHarness {
 					...(sg.workflowId !== undefined
 						? { workflowId: sg.workflowId }
 						: resolvedChildWorkflow
-							? { inlineWorkflow: resolvedChildWorkflow }
+							? {}
 							: { workflowId: childWorkflowId }),
-					inlineRoles: inheritedInlineRoles,
 					subgoalsAllowed: _childOverrides.subgoalsAllowed,
 					maxNestingDepth: _childOverrides.maxNestingDepth,
 				}, {
 					source: { kind: "server-child", parentGoalId, cwdAuthority: "verification" },
+					trustedSnapshots: {
+						kind: "inherited-goal",
+						...(inheritsWorkflowSnapshot ? { inlineWorkflow: resolvedChildWorkflow } : {}),
+						...(inheritedInlineRoles ? { inlineRoles: inheritedInlineRoles } : {}),
+					},
 				}, this.goalCandidateDeps);
 				if (!validation.ok) {
 					return {
@@ -8717,6 +8722,7 @@ export class VerificationHarness {
 					spec: candidate.spec,
 					workflowId: candidate.workflowId,
 					resolvedWorkflow: childWorkflow,
+					preserveResolvedWorkflowSnapshot: candidate.preserveWorkflowSnapshot,
 					projectId: candidate.projectId,
 					sandboxed: parent.sandboxed,
 					parentGoalId: candidate.parentGoalId,

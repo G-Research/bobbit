@@ -1,6 +1,6 @@
 import type { Component } from "./project-config-store.js";
 import type { PersistedGoal } from "./goal-store.js";
-import { validateInlineRoles } from "./inline-role-validator.js";
+import { snapshotPersistedInlineRoles, validateInlineRoles } from "./inline-role-validator.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { ProjectRegistry, RegisteredProject } from "./project-registry.js";
 import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./resolve-project.js";
@@ -9,6 +9,7 @@ import { freezeWorkflowDefinition } from "./workflow-validator.js";
 import type { Workflow } from "./workflow-store.js";
 import type { Role } from "./role-store.js";
 import { validateGoalProposalWorkflow } from "../proposals/goal-proposal-seed.js";
+import { validateGoalInlineWorkflow } from "../proposals/proposal-types.js";
 
 // Goal creation historically accepted descriptive titles without the shorter
 // agent-facing naming guidance. Keep that guidance advisory while bounding the
@@ -25,10 +26,22 @@ export type GoalCandidateSource =
 	/** Server-owned child coordinates after the parent has been authenticated/resolved. */
 	| { kind: "server-child"; parentGoalId: string; cwdAuthority: "goal" | "verification" };
 
+export interface GoalCandidateTrustedSnapshots {
+	/**
+	 * Provenance is supplied only by server code after reading an existing draft
+	 * or goal. Request bodies never populate this contract.
+	 */
+	kind: "persisted-proposal" | "inherited-goal";
+	inlineWorkflow?: unknown;
+	inlineRoles?: unknown;
+}
+
 export interface GoalCandidateContext {
 	source: GoalCandidateSource;
 	/** Authenticated parent authorization. Omit only for human/operator validation. */
 	authorizeParent?: (parent: PersistedGoal) => true | GoalCandidateError;
+	/** Host-derived unchanged snapshots; never derive this from request fields. */
+	trustedSnapshots?: GoalCandidateTrustedSnapshots;
 }
 
 export interface GoalCandidateDeps {
@@ -55,7 +68,7 @@ export interface RawGoalCandidate extends Record<string, unknown> {
 
 export interface ValidatedGoalCandidate {
 	title: string; spec: string; projectId: string; project: RegisteredProject; cwd: string;
-	workflowId?: string; workflow?: Workflow; enabledOptionalSteps?: string[];
+	workflowId?: string; workflow?: Workflow; preserveWorkflowSnapshot?: boolean; enabledOptionalSteps?: string[];
 	/** Creation must persist the validated in-memory defaults if the store is still empty. */
 	seedDefaultWorkflows?: boolean;
 	parentGoalId?: string; parent?: PersistedGoal; inlineRoles?: Record<string, Role>;
@@ -82,6 +95,15 @@ function jsonSnapshot(value: unknown, label: string, code: string): { ok: true; 
 	const bytes = Buffer.byteLength(json, "utf8");
 	if (bytes > MAX_GOAL_STRUCTURED_BYTES) return fail(400, code, `${label} exceeds the maximum size of ${MAX_GOAL_STRUCTURED_BYTES} bytes`, { limit: MAX_GOAL_STRUCTURED_BYTES, actual: bytes });
 	return { ok: true, value: JSON.parse(json) };
+}
+
+function trustedJsonSnapshot(value: unknown, label: string, code: string): { ok: true; value: any } | GoalCandidateError {
+	let json: string | undefined;
+	try { json = JSON.stringify(value); } catch { return fail(400, code, `${label} must be JSON-serializable`); }
+	if (json === undefined) return fail(400, code, `${label} must be JSON-serializable`);
+	const bytes = Buffer.byteLength(json, "utf8");
+	if (bytes > MAX_GOAL_STRUCTURED_BYTES) return fail(400, code, `${label} exceeds the maximum size of ${MAX_GOAL_STRUCTURED_BYTES} bytes`, { limit: MAX_GOAL_STRUCTURED_BYTES, actual: bytes });
+	return { ok: true, value: structuredClone(value) };
 }
 
 /** Canonical, read-only validation for every goal-creation-equivalent candidate. */
@@ -136,7 +158,10 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	}
 
 	const cascadeWorkflows = deps.workflows(resolved.projectId);
-	const inlineWorkflow = raw.inlineWorkflow ?? (plainObject(raw.workflow) ? raw.workflow : undefined);
+	const trustedInlineWorkflow = context.trustedSnapshots?.inlineWorkflow;
+	const inlineWorkflow = trustedInlineWorkflow !== undefined
+		? trustedInlineWorkflow
+		: raw.inlineWorkflow ?? (plainObject(raw.workflow) ? raw.workflow : undefined);
 	const explicitWorkflowId = typeof raw.workflowId === "string" ? raw.workflowId.trim() : typeof raw.workflow === "string" ? raw.workflow.trim() : "";
 	const options = typeof raw.options === "string" ? raw.options : Array.isArray(raw.enabledOptionalSteps) ? raw.enabledOptionalSteps.join(",") : "";
 	if (raw.enabledOptionalSteps !== undefined && (!Array.isArray(raw.enabledOptionalSteps) || !raw.enabledOptionalSteps.every(v => typeof v === "string"))) return fail(400, "UNKNOWN_OPTIONAL_STEP", "enabledOptionalSteps must be an array of step names");
@@ -166,15 +191,35 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	const selected = inlineWorkflow ?? registeredWorkflow ?? workflows.find(w => w.id === workflowId);
 	let frozenWorkflow: Workflow | undefined;
 	if (selected) {
-		const size = jsonSnapshot(selected, "inline workflow", "WORKFLOW_TOO_LARGE"); if (!size.ok) return size;
-		try { frozenWorkflow = freezeWorkflowDefinition(size.value, deps.components(resolved.projectId), workflowId, { validateComponentReferences: false }); }
-		catch (error) { return fail(400, "WORKFLOW_INVALID", error instanceof Error ? error.message : "Invalid workflow definition"); }
+		if (trustedInlineWorkflow !== undefined) {
+			const size = trustedJsonSnapshot(selected, "inline workflow", "WORKFLOW_TOO_LARGE"); if (!size.ok) return size;
+			const compatibilityError = validateGoalInlineWorkflow(size.value);
+			if (compatibilityError) return fail(400, "WORKFLOW_INVALID", compatibilityError.message);
+			frozenWorkflow = size.value as Workflow;
+		} else {
+			const size = jsonSnapshot(selected, "inline workflow", "WORKFLOW_TOO_LARGE"); if (!size.ok) return size;
+			try { frozenWorkflow = freezeWorkflowDefinition(size.value, deps.components(resolved.projectId), workflowId, { validateComponentReferences: false }); }
+			catch (error) { return fail(400, "WORKFLOW_INVALID", error instanceof Error ? error.message : "Invalid workflow definition"); }
+		}
 	}
 	const enabledOptionalSteps = options.split(",").map(v => v.trim()).filter(Boolean);
 
-	const roleSize = raw.inlineRoles === undefined ? { ok: true as const, value: undefined } : jsonSnapshot(raw.inlineRoles, "inline roles", "ROLES_TOO_LARGE"); if (!roleSize.ok) return roleSize;
+	let trustedRoles: Record<string, Role> | undefined;
+	if (context.trustedSnapshots?.inlineRoles !== undefined) {
+		const size = trustedJsonSnapshot(context.trustedSnapshots.inlineRoles, "inline roles", "ROLES_TOO_LARGE"); if (!size.ok) return size;
+		const snapshot = snapshotPersistedInlineRoles(size.value);
+		if (!snapshot.ok) return fail(400, "INLINE_ROLES_INVALID", snapshot.message);
+		trustedRoles = snapshot.roles;
+	}
+	const rawRoles = context.trustedSnapshots?.kind === "persisted-proposal" && trustedRoles !== undefined
+		? undefined
+		: raw.inlineRoles;
+	const roleSize = rawRoles === undefined ? { ok: true as const, value: undefined } : jsonSnapshot(rawRoles, "inline roles", "ROLES_TOO_LARGE"); if (!roleSize.ok) return roleSize;
 	const roleResult = validateInlineRoles(roleSize.value);
 	if (!roleResult.ok) return fail(400, "INLINE_ROLES_INVALID", roleResult.message);
+	const inlineRoles = trustedRoles || roleResult.roles
+		? { ...(trustedRoles ?? {}), ...(roleResult.roles ?? {}) }
+		: undefined;
 
 	let metadata: Record<string, unknown> | undefined;
 	if (raw.metadata !== undefined) {
@@ -194,5 +239,5 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	if (concurrency !== undefined && (typeof concurrency !== "number" || !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8)) return fail(400, "MAX_CONCURRENT_CHILDREN_INVALID", "maxConcurrentChildren must be an integer from 1 to 8");
 	if (parent && concurrency !== undefined) return fail(422, "ROOT_POLICY_ON_CHILD", "maxConcurrentChildren is only valid for root goals");
 
-	return { ok: true, candidate: { title, spec, projectId: resolved.projectId, project: resolved.project, cwd: cwdResult.cwd ?? requestedCwd, ...(frozenWorkflow ? { workflow: frozenWorkflow, workflowId: frozenWorkflow.id } : workflowId ? { workflowId } : {}), ...(seedDefaultWorkflows ? { seedDefaultWorkflows: true } : {}), ...(enabledOptionalSteps.length ? { enabledOptionalSteps } : {}), ...(parentGoalId ? { parentGoalId, parent } : {}), ...(roleResult.roles && Object.keys(roleResult.roles).length ? { inlineRoles: roleResult.roles } : {}), ...(subgoalsAllowed !== undefined ? { subgoalsAllowed } : {}), ...(maxNestingDepth !== undefined ? { maxNestingDepth } : {}), ...(divergence !== undefined ? { divergencePolicy: divergence } : {}), ...(concurrency !== undefined ? { maxConcurrentChildren: concurrency } : {}), ...(metadata ? { metadata } : {}) } };
+	return { ok: true, candidate: { title, spec, projectId: resolved.projectId, project: resolved.project, cwd: cwdResult.cwd ?? requestedCwd, ...(frozenWorkflow ? { workflow: frozenWorkflow, workflowId: frozenWorkflow.id } : workflowId ? { workflowId } : {}), ...(trustedInlineWorkflow !== undefined ? { preserveWorkflowSnapshot: true } : {}), ...(seedDefaultWorkflows ? { seedDefaultWorkflows: true } : {}), ...(enabledOptionalSteps.length ? { enabledOptionalSteps } : {}), ...(parentGoalId ? { parentGoalId, parent } : {}), ...(inlineRoles && Object.keys(inlineRoles).length ? { inlineRoles } : {}), ...(subgoalsAllowed !== undefined ? { subgoalsAllowed } : {}), ...(maxNestingDepth !== undefined ? { maxNestingDepth } : {}), ...(divergence !== undefined ? { divergencePolicy: divergence } : {}), ...(concurrency !== undefined ? { maxConcurrentChildren: concurrency } : {}), ...(metadata ? { metadata } : {}) } };
 }

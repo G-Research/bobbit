@@ -17,6 +17,10 @@ export type PersistedInlineRoleValidationResult =
 	| { ok: true }
 	| { ok: false; message: string };
 
+export type PersistedInlineRoleSnapshotResult =
+	| { ok: true; roles: Record<string, Role> | undefined }
+	| { ok: false; message: string };
+
 function plainRecord(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const proto = Object.getPrototypeOf(value);
@@ -57,6 +61,14 @@ export function validatePersistedInlineRoles(value: unknown): PersistedInlineRol
 		}
 	}
 	return { ok: true };
+}
+
+/** Compatibility-check and clone a trusted persisted snapshot without normalizing legacy values. */
+export function snapshotPersistedInlineRoles(value: unknown): PersistedInlineRoleSnapshotResult {
+	if (value === undefined || value === null) return { ok: true, roles: undefined };
+	const validation = validatePersistedInlineRoles(value);
+	if (!validation.ok) return validation;
+	return { ok: true, roles: structuredClone(value) as Record<string, Role> };
 }
 
 /** Validate and snapshot new ephemeral roles without consulting or mutating a role store. */

@@ -5584,8 +5584,10 @@ async function handleApiRoute(
 		source: GoalCandidateSource = { kind: "user-input" },
 		authorizeParent = true,
 		authenticatedProposalOwner?: AuthenticatedProposalOwner,
+		trustedSnapshots?: GoalCandidateContext["trustedSnapshots"],
 	) => validateGoalCandidate(raw, {
 		source,
+		...(trustedSnapshots ? { trustedSnapshots } : {}),
 		...(authorizeParent ? {
 			authorizeParent: (parent: PersistedGoal) => {
 				// Session-owned parent authority is available only after the exact
@@ -5610,8 +5612,22 @@ async function handleApiRoute(
 	const writeGoalCandidateError = (validation: GoalCandidateError): void => {
 		json(goalCandidateErrorBody(validation), validation.status);
 	};
-	const goalProposalPreCommitValidator = (owner: AuthenticatedProposalOwner): ProposalPreCommitValidator => fields => {
-		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, true, owner);
+	const goalProposalPreCommitValidator = (
+		owner: AuthenticatedProposalOwner,
+		persistedFields?: Record<string, unknown>,
+	): ProposalPreCommitValidator => fields => {
+		const trustedSnapshots: GoalCandidateContext["trustedSnapshots"] | undefined = persistedFields ? {
+			kind: "persisted-proposal",
+			...(persistedFields.inlineWorkflow !== undefined
+				&& isDeepStrictEqual(fields.inlineWorkflow, persistedFields.inlineWorkflow)
+				? { inlineWorkflow: persistedFields.inlineWorkflow }
+				: {}),
+			...(persistedFields.inlineRoles !== undefined
+				&& isDeepStrictEqual(fields.inlineRoles, persistedFields.inlineRoles)
+				? { inlineRoles: persistedFields.inlineRoles }
+				: {}),
+		} : undefined;
+		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, true, owner, trustedSnapshots);
 		return validation.ok ? undefined : validation;
 	};
 	const writeSpecialProjectMutationError = (err: unknown): boolean => {
@@ -16232,13 +16248,18 @@ async function handleApiRoute(
 				return;
 			}
 			try {
+				const persistedDraft = proposalType === "goal"
+					? await parseProposalFile(proposalStateDir, sessionId, proposalType)
+					: undefined;
 				const result = await editProposalFile(
 					proposalStateDir,
 					sessionId,
 					proposalType,
 					old_text,
 					new_text,
-					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!) : undefined,
+					proposalType === "goal"
+						? goalProposalPreCommitValidator(proposalOwner!, persistedDraft?.ok ? persistedDraft.value.fields : undefined)
+						: undefined,
 				);
 				if (!result.ok) {
 					const status = "status" in result ? result.status : result.code === "FILE_NOT_FOUND" ? 404 : 400;
@@ -16400,12 +16421,20 @@ async function handleApiRoute(
 				return;
 			}
 			try {
+				let persistedSnapshotFields: Record<string, unknown> | undefined;
+				if (proposalType === "goal") {
+					const snapshot = await readSnapshot(proposalStateDir, sessionId, proposalType, rev);
+					if (snapshot !== undefined) {
+						const parsedSnapshot = getProposalTypePlugin(proposalType).parse(snapshot);
+						if (parsedSnapshot.ok) persistedSnapshotFields = parsedSnapshot.value.fields;
+					}
+				}
 				const result = await restoreSnapshot(
 					proposalStateDir,
 					sessionId,
 					proposalType,
 					rev,
-					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!) : undefined,
+					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!, persistedSnapshotFields) : undefined,
 				);
 				if (!result.ok) {
 					const status = "status" in result ? result.status : result.code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;

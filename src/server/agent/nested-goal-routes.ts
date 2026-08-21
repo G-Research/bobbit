@@ -691,30 +691,14 @@ export async function tryHandleNestedGoalRoute(
 				workflowId = resolvedWorkflowForChild?.id ?? bodyWorkflowId ?? "feature";
 			}
 
-			// Inline roles — merge parent's snapshot with the body's; child
-			// overrides parent for same name. Mirrors goal.workflow snapshot.
-			const bodyInlineRoles = (body as { inlineRoles?: unknown }).inlineRoles;
-			let mergedInlineRoles: Record<string, import("./role-store.js").Role> | undefined;
-			const parentInlineRoles = parent.inlineRoles;
-			if (parentInlineRoles || (bodyInlineRoles && typeof bodyInlineRoles === "object" && !Array.isArray(bodyInlineRoles))) {
-				mergedInlineRoles = {
-					...(parentInlineRoles ?? {}),
-					...((bodyInlineRoles && typeof bodyInlineRoles === "object" && !Array.isArray(bodyInlineRoles))
-						? (bodyInlineRoles as Record<string, import("./role-store.js").Role>)
-						: {}),
-				};
-			}
-
 			// Propagate the parent's EFFECTIVE nesting limits onto the child so
 			// descendants cannot loosen what an ancestor has tightened.
 			const childOverrides = inheritedChildOverrides(parent, nestingPrefs, getGoalAcrossProjects);
 			const rawBodyWorkflow = (body as { workflow?: unknown }).workflow;
 			const rawBodyInlineRoles = (body as { inlineRoles?: unknown }).inlineRoles;
-			const candidateInlineRoles = rawBodyInlineRoles !== undefined
-				&& rawBodyInlineRoles !== null
-				&& (typeof rawBodyInlineRoles !== "object" || Array.isArray(rawBodyInlineRoles))
-				? rawBodyInlineRoles
-				: mergedInlineRoles;
+			const inheritsWorkflowSnapshot = rawBodyWorkflow === undefined
+				&& bodyWorkflowId === undefined
+				&& resolvedWorkflowForChild !== undefined;
 			const validation = validateGoalCandidate({
 				title,
 				spec,
@@ -726,13 +710,18 @@ export async function tryHandleNestedGoalRoute(
 					: bodyWorkflowId !== undefined
 						? { workflowId: bodyWorkflowId }
 						: resolvedWorkflowForChild
-							? { inlineWorkflow: resolvedWorkflowForChild }
+							? {}
 							: { workflowId }),
-				inlineRoles: candidateInlineRoles,
+				...(rawBodyInlineRoles !== undefined ? { inlineRoles: rawBodyInlineRoles } : {}),
 				subgoalsAllowed: childOverrides.subgoalsAllowed,
 				maxNestingDepth: childOverrides.maxNestingDepth,
 			}, {
 				source: { kind: "server-child", parentGoalId: parentId, cwdAuthority: "goal" },
+				trustedSnapshots: {
+					kind: "inherited-goal",
+					...(inheritsWorkflowSnapshot ? { inlineWorkflow: resolvedWorkflowForChild } : {}),
+					...(parent.inlineRoles ? { inlineRoles: parent.inlineRoles } : {}),
+				},
 			}, goalCandidateDeps);
 			if (!validation.ok) {
 				json({
@@ -749,6 +738,7 @@ export async function tryHandleNestedGoalRoute(
 				spec: candidate.spec,
 				workflowId: candidate.workflowId,
 				resolvedWorkflow: candidate.workflow,
+				preserveResolvedWorkflowSnapshot: candidate.preserveWorkflowSnapshot,
 				projectId: candidate.projectId,
 				sandboxed: parent.sandboxed,
 				parentGoalId: candidate.parentGoalId,

@@ -10,6 +10,7 @@ import {
 	validateGoalCandidate,
 	type GoalCandidateDeps,
 	type GoalCandidateSource,
+	type GoalCandidateTrustedSnapshots,
 	type RawGoalCandidate,
 } from "../../src/server/agent/goal-candidate-validator.js";
 import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
@@ -128,8 +129,12 @@ function candidate(overrides: RawGoalCandidate = {}): RawGoalCandidate {
 	};
 }
 
-function validate(overrides: RawGoalCandidate = {}, source: GoalCandidateSource = { kind: "user-input" }) {
-	return validateGoalCandidate(candidate(overrides), { source }, fixture.deps);
+function validate(
+	overrides: RawGoalCandidate = {},
+	source: GoalCandidateSource = { kind: "user-input" },
+	trustedSnapshots?: GoalCandidateTrustedSnapshots,
+) {
+	return validateGoalCandidate(candidate(overrides), { source, ...(trustedSnapshots ? { trustedSnapshots } : {}) }, fixture.deps);
 }
 
 function expectCode(result: ReturnType<typeof validate>, code: string): void {
@@ -242,6 +247,73 @@ describe("canonical goal candidate — cwd and ownership", () => {
 		const escape = path.join(fixture.root, "escape");
 		fs.symlinkSync(fixture.outside, escape, process.platform === "win32" ? "junction" : "dir");
 		expectCode(validate({ cwd: path.join(escape, "future") }), "CWD_OUTSIDE_PROJECT");
+	});
+});
+
+describe("canonical goal candidate — trusted legacy snapshots", () => {
+	const legacyRole = {
+		name: "legacy-reviewer",
+		label: "Legacy reviewer",
+		promptTemplate: "Review without normalizing me.",
+		accessory: "vintage",
+		model: "retired-bare-model",
+		thinkingLevel: "legacy-depth",
+		toolPolicies: { bash: "retired-policy" },
+		createdAt: 7,
+		updatedAt: 8,
+	};
+	const legacyWorkflow: Workflow = {
+		id: "legacy-inline",
+		name: "Legacy inline",
+		description: "Contains a retired verification discriminator.",
+		createdAt: 3,
+		updatedAt: 4,
+		gates: [{
+			id: "legacy-gate",
+			name: "Legacy gate",
+			dependsOn: [],
+			verify: [{ name: "Retired remote state", type: "remote-state" } as any],
+		}],
+	};
+
+	it("preserves exact trusted persisted values while strict new input still rejects them", () => {
+		const roles = { "legacy-reviewer": legacyRole };
+		const strict = validate({ workflow: undefined, inlineWorkflow: legacyWorkflow, inlineRoles: roles });
+		expect(strict.ok).toBe(false);
+		if (!strict.ok) expect(["WORKFLOW_INVALID", "INLINE_ROLES_INVALID"]).toContain(strict.code);
+
+		const trusted = validate(
+			{ workflow: undefined, inlineWorkflow: legacyWorkflow, inlineRoles: roles },
+			{ kind: "user-input" },
+			{ kind: "persisted-proposal", inlineWorkflow: legacyWorkflow, inlineRoles: roles },
+		);
+		expect(trusted.ok).toBe(true);
+		if (!trusted.ok) return;
+		expect(trusted.candidate.workflow).toEqual(legacyWorkflow);
+		expect(trusted.candidate.inlineRoles).toEqual(roles);
+		expect(trusted.candidate.workflow).not.toBe(legacyWorkflow);
+		expect(trusted.candidate.inlineRoles).not.toBe(roles);
+	});
+
+	it("strictly validates new child role overrides before merging with inherited legacy roles", () => {
+		const parentGoal = parent();
+		const inherited = { "legacy-reviewer": legacyRole };
+		const source: GoalCandidateSource = { kind: "server-child", parentGoalId: parentGoal.id, cwdAuthority: "goal" };
+		const accepted = validate({
+			parentGoalId: parentGoal.id,
+			inlineRoles: { modern: { name: "modern", label: "Modern", promptTemplate: "New role" } },
+		}, source, { kind: "inherited-goal", inlineRoles: inherited });
+		expect(accepted.ok).toBe(true);
+		if (accepted.ok) {
+			expect(accepted.candidate.inlineRoles?.["legacy-reviewer"]).toEqual(legacyRole);
+			expect(accepted.candidate.inlineRoles?.modern).toMatchObject({ name: "modern", accessory: "none" });
+		}
+
+		const rejected = validate({
+			parentGoalId: parentGoal.id,
+			inlineRoles: { modern: { name: "modern", label: "Modern", promptTemplate: "New role", model: "malformed" } },
+		}, source, { kind: "inherited-goal", inlineRoles: inherited });
+		expectCode(rejected, "INLINE_ROLES_INVALID");
 	});
 });
 

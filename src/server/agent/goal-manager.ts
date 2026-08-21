@@ -374,8 +374,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; adoptedWorkspace?: AdoptedGoalWorkspace; team?: boolean }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, team = true } = opts ?? {};
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; preserveResolvedWorkflowSnapshot?: boolean; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; adoptedWorkspace?: AdoptedGoalWorkspace; team?: boolean }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, preserveResolvedWorkflowSnapshot, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, team = true } = opts ?? {};
 		const headquartersGoal = isHeadquartersProject(projectId);
 		if (adoptedWorkspace) {
 			assertAdoptedGoalWorkspace(adoptedWorkspace);
@@ -510,7 +510,12 @@ export class GoalManager {
 		const NO_WORKFLOWS_MSG =
 			"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";
 		if (workflowId && resolvedWorkflow) {
-			const normalized = normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
+			// A server-derived persisted snapshot has already passed the goal-store
+			// compatibility contract. Preserve it exactly; normalization applies only
+			// to new/config input and intentionally rejects retired step types.
+			const normalized = preserveResolvedWorkflowSnapshot
+				? resolvedWorkflow
+				: normalizeWorkflow(resolvedWorkflow, workflowId) ?? resolvedWorkflow;
 			goal.workflowId = workflowId;
 			goal.workflow = structuredClone(normalized);
 		} else if (workflowId && workflowStore) {

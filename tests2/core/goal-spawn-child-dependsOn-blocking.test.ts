@@ -296,6 +296,63 @@ describe("spawn-child dependsOn enforcement — direct cases", () => {
 	});
 });
 
+describe("spawn-child trusted legacy snapshot inheritance", () => {
+	it("inherits exact persisted role/workflow values while rejecting a new invalid override", async () => {
+		const legacyRole = {
+			name: "legacy-reviewer",
+			label: "Legacy reviewer",
+			promptTemplate: "Keep exact legacy values.",
+			accessory: "vintage",
+			model: "retired-bare-model",
+			thinkingLevel: "legacy-depth",
+			toolPolicies: { bash: "retired-policy" },
+			createdAt: 7,
+			updatedAt: 8,
+		};
+		const legacyWorkflow = {
+			id: "legacy-inline",
+			name: "Legacy inline",
+			description: "Retired verification step fixture.",
+			createdAt: 3,
+			updatedAt: 4,
+			gates: [{
+				id: "ready-to-merge",
+				name: "Ready",
+				dependsOn: [],
+				verify: [{ name: "Retired remote state", type: "remote-state" }],
+			}],
+		};
+		h.goalStore.update(h.parent.id, {
+			workflowId: legacyWorkflow.id,
+			workflow: legacyWorkflow,
+			inlineRoles: { "legacy-reviewer": legacyRole },
+		} as any);
+
+		const accepted = await h.spawnChild({
+			planId: "legacy-child",
+			title: "Legacy child",
+			spec: "Inherit trusted snapshots without applying today's new-input allow-lists.",
+		});
+		assert.equal(accepted.status, 201, JSON.stringify(accepted.payload));
+		const child = h.goalStore.get(accepted.payload.id)!;
+		assert.deepEqual(child.inlineRoles, { "legacy-reviewer": legacyRole });
+		assert.deepEqual(child.workflow, legacyWorkflow);
+		assert.notEqual(child.inlineRoles, h.goalStore.get(h.parent.id)!.inlineRoles);
+		assert.notEqual(child.workflow, h.goalStore.get(h.parent.id)!.workflow);
+
+		const beforeCount = h.goalStore.getAll().length;
+		const rejected = await h.spawnChild({
+			planId: "invalid-new-role",
+			title: "Invalid override",
+			spec: "A newly supplied malformed role must be rejected before child creation.",
+			inlineRoles: { modern: { name: "modern", label: "Modern", promptTemplate: "New", model: "malformed" } },
+		});
+		assert.equal(rejected.status, 400);
+		assert.equal(rejected.payload.code, "INLINE_ROLES_INVALID");
+		assert.equal(h.goalStore.getAll().length, beforeCount);
+	});
+});
+
 describe("integrate-child dependsOn auto-unblock", () => {
 	it("t3: blocked child auto-unblocks when its single dep merges", async () => {
 		const r1 = await h.spawnChild({ planId: "planA", title: "A", spec: "Implement feature A: set up the core data model and persistence layer for this subgoal." });
