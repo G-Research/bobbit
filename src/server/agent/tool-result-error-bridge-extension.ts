@@ -157,12 +157,16 @@ function beforeDecision(response, originalArgs) {
   return { block: false, args: isObject(replacement) ? replacement : originalArgs };
 }
 
-function afterDecision(response, originalResult) {
+function syntheticErrorDecision(response) {
   const decision = response && (response.action || response.decision || response.result?.decision);
-  if (decision === "syntheticError" || response?.syntheticError === true) {
-    const code = typeof response?.code === "string" ? response.code : "handler_error";
-    return hostSyntheticError(code);
-  }
+  if (decision !== "syntheticError" && response?.syntheticError !== true) return undefined;
+  const code = typeof response?.code === "string" ? response.code : "handler_error";
+  return hostSyntheticError(code);
+}
+
+function afterDecision(response, originalResult) {
+  const synthetic = syntheticErrorDecision(response);
+  if (synthetic !== undefined) return synthetic;
   const replacement = response?.result ?? response?.replacement ?? response?.value?.result;
   return replacement === undefined ? originalResult : replacement;
 }
@@ -191,6 +195,9 @@ function wrapHandler(handler, toolName) {
     }
     if (args.length > 1) args[1] = before.args;
 
+    const afterFallback = process.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED === "1"
+      ? HOST_PROTECTED_RESULT_FAILURE
+      : undefined;
     let result;
     let afterAlreadyApplied = false;
     try {
@@ -200,12 +207,15 @@ function wrapHandler(handler, toolName) {
         toolCallId,
         toolName,
         result: { isError: true },
-      }, HOST_PROTECTED_RESULT_FAILURE);
-      const replacement = afterDecision(afterThrown, undefined);
-      if (replacement !== undefined) {
-        result = replacement;
-        afterAlreadyApplied = true;
-      } else throw error;
+      }, afterFallback);
+      // The host sees only the bounded failure flag. An allow/replace response
+      // cannot safely replace a result body that the host deliberately never
+      // received, so preserve the exact original exception unless policy made
+      // this operation terminal.
+      const synthetic = syntheticErrorDecision(afterThrown);
+      if (synthetic === undefined) throw error;
+      result = synthetic;
+      afterAlreadyApplied = true;
     }
 
     if (!afterAlreadyApplied) {
@@ -213,7 +223,7 @@ function wrapHandler(handler, toolName) {
         toolCallId,
         toolName,
         result,
-      }, HOST_PROTECTED_RESULT_FAILURE), result);
+      }, afterFallback), result);
     }
     if (isErroredToolResult(result)) {
       const err = new Error(messageFromToolResult(result));

@@ -5951,12 +5951,16 @@ export class SessionManager {
 		const beforeToolCallFailClosed = this.hostInterceptors?.requiresFailClosed?.(
 			"beforeToolCall", projectId, effectiveGoalId,
 		) === true;
+		const afterToolResultFailClosed = this.hostInterceptors?.requiresFailClosed?.(
+			"afterToolResult", projectId, effectiveGoalId,
+		) === true;
 		return {
 			args,
 			env: {
 				...activation.env,
 				...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
 				BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: beforeToolCallFailClosed ? "1" : "0",
+				BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: afterToolResultFailClosed ? "1" : "0",
 			},
 			runtimeExtensions: piExtensionActivation.runtimeExtensions,
 		};

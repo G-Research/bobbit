@@ -102,6 +102,98 @@ describe("tool result error bridge extension", () => {
 		assert.deepEqual(await handlers.get("x")!({}), { content: [{ type: "text", text: "ok" }] });
 	});
 
+	it("preserves the original thrown error when the host does not return a synthetic terminal", async () => {
+		const previousFetch = globalThis.fetch;
+		const previousEnv = {
+			gateway: process.env.BOBBIT_GATEWAY_URL,
+			session: process.env.BOBBIT_SESSION_ID,
+			hooks: process.env.BOBBIT_HOST_HOOKS_ENABLED,
+			afterFailClosed: process.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED,
+		};
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://host-hooks.test";
+			process.env.BOBBIT_SESSION_ID = "session-error-bridge";
+			process.env.BOBBIT_HOST_HOOKS_ENABLED = "1";
+			process.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED = "0";
+			let afterBody: unknown;
+			globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+				if (new URL(String(url)).pathname.endsWith("/before-tool-call")) {
+					return Response.json({ action: "replaceArgs", args: {} });
+				}
+				afterBody = JSON.parse(String(init?.body));
+				return Response.json({ action: "replaceResult", result: { isError: true } });
+			}) as typeof fetch;
+
+			const original = new TypeError("PRIVATE_VALIDATION_DETAIL");
+			const activate = await loadGeneratedExtension();
+			const { pi, handlers } = makePi();
+			activate(pi);
+			pi.tool({ name: "x" }, async () => { throw original; });
+
+			await assert.rejects(() => handlers.get("x")!("call-thrown", {}), (error: unknown) => error === original);
+			assert.deepEqual(afterBody, {
+				toolCallId: "call-thrown",
+				toolName: "x",
+				result: { isError: true },
+			});
+			assert.doesNotMatch(JSON.stringify(afterBody), /PRIVATE_VALIDATION_DETAIL/);
+		} finally {
+			globalThis.fetch = previousFetch;
+			for (const [key, value] of Object.entries({
+				BOBBIT_GATEWAY_URL: previousEnv.gateway,
+				BOBBIT_SESSION_ID: previousEnv.session,
+				BOBBIT_HOST_HOOKS_ENABLED: previousEnv.hooks,
+				BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: previousEnv.afterFailClosed,
+			})) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	it("replaces a thrown error when protected after-result transport fails closed", async () => {
+		const previousFetch = globalThis.fetch;
+		const previousEnv = {
+			gateway: process.env.BOBBIT_GATEWAY_URL,
+			session: process.env.BOBBIT_SESSION_ID,
+			hooks: process.env.BOBBIT_HOST_HOOKS_ENABLED,
+			afterFailClosed: process.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED,
+		};
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://host-hooks.test";
+			process.env.BOBBIT_SESSION_ID = "session-error-bridge";
+			process.env.BOBBIT_HOST_HOOKS_ENABLED = "1";
+			process.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED = "1";
+			globalThis.fetch = (async () => { throw new Error("PRIVATE_TRANSPORT_DETAIL"); }) as typeof fetch;
+
+			const activate = await loadGeneratedExtension();
+			const { pi, handlers } = makePi();
+			activate(pi);
+			pi.tool({ name: "x" }, async () => { throw new TypeError("PRIVATE_VALIDATION_DETAIL"); });
+
+			await assert.rejects(
+				() => handlers.get("x")!("call-protected", {}),
+				(error: any) => {
+					assert.equal(error.name, "BobbitToolResultError");
+					assert.match(error.message, /handler_error/);
+					assert.doesNotMatch(error.message, /PRIVATE_VALIDATION_DETAIL|PRIVATE_TRANSPORT_DETAIL/);
+					return true;
+				},
+			);
+		} finally {
+			globalThis.fetch = previousFetch;
+			for (const [key, value] of Object.entries({
+				BOBBIT_GATEWAY_URL: previousEnv.gateway,
+				BOBBIT_SESSION_ID: previousEnv.session,
+				BOBBIT_HOST_HOOKS_ENABLED: previousEnv.hooks,
+				BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: previousEnv.afterFailClosed,
+			})) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
 	it("names every unknown field without changing provider schema payloads", async () => {
 		const parameters = Type.Object({ operation: Type.Literal("health") }, { additionalProperties: false });
 		const providerSchema = JSON.stringify(parameters);
