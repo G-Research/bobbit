@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { recordDeletionTombstone } from "./deletion-tombstones.js";
+import type { HostHookScope, HostNotificationName } from "../../shared/extension-host/host-hooks.js";
 
 export type StaffState = "active" | "paused" | "retired";
-export type TriggerType = "schedule" | "git" | "manual" | "goal_created" | "goal_archived";
+export type LegacyTriggerType = "schedule" | "git" | "manual" | "goal_created" | "goal_archived";
+export type TriggerType = LegacyTriggerType | "notification";
 
 export interface TriggerConfig {
 	cron?: string;
@@ -13,15 +15,33 @@ export interface TriggerConfig {
 	repo?: string;
 }
 
-export interface StaffTrigger {
+export interface LegacyStaffTrigger {
 	id: string;
-	type: TriggerType;
+	type: LegacyTriggerType;
 	config: TriggerConfig;
 	enabled: boolean;
 	lastFired?: number;
 	prompt?: string;
 	lastSeenSha?: string;
 }
+
+export interface NotificationTriggerSelector<N extends HostNotificationName = HostNotificationName> {
+	scope: HostHookScope;
+	name: N;
+}
+
+/** Additive notification trigger. It never exposes notification data as prompt text. */
+export interface NotificationStaffTrigger<N extends HostNotificationName = HostNotificationName> {
+	id: string;
+	type: "notification";
+	notification: NotificationTriggerSelector<N>;
+	filter: Readonly<Record<string, string | number | boolean>>;
+	enabled: boolean;
+	prompt?: string;
+	lastFired?: number;
+}
+
+export type StaffTrigger = LegacyStaffTrigger | NotificationStaffTrigger;
 
 const STAFF_ACCESSORY_IDS = new Set([
 	"none",
@@ -136,13 +156,24 @@ export class StaffStore {
 		}
 	}
 
+	private saveStrict(): void {
+		if (!fs.existsSync(this.storeDir)) {
+			fs.mkdirSync(this.storeDir, { recursive: true });
+		}
+		const data = Array.from(this.staff.values());
+		const temporary = `${this.storeFile}.${process.pid}.${Date.now()}.tmp`;
+		try {
+			fs.writeFileSync(temporary, JSON.stringify(data, null, 2), "utf-8");
+			fs.renameSync(temporary, this.storeFile);
+		} catch (err) {
+			try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch { /* preserve original error */ }
+			throw err;
+		}
+	}
+
 	private save(): void {
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-			const data = Array.from(this.staff.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
+			this.saveStrict();
 		} catch (err) {
 			console.error("[staff-store] Failed to save staff:", err);
 		}
@@ -153,6 +184,19 @@ export class StaffStore {
 		// real values. Mirrors the load-side normalisation.
 		this.staff.set(staff.id, normalizeStaffRecord(staff));
 		this.save();
+	}
+
+	/** Fail-loud atomic publication used by authoritative staff lifecycle facts. */
+	putStrict(staff: PersistedStaff): void {
+		const previous = this.staff.get(staff.id);
+		this.staff.set(staff.id, normalizeStaffRecord(staff));
+		try {
+			this.saveStrict();
+		} catch (err) {
+			if (previous) this.staff.set(staff.id, previous);
+			else this.staff.delete(staff.id);
+			throw err;
+		}
 	}
 
 	get(id: string): PersistedStaff | undefined {
@@ -172,23 +216,39 @@ export class StaffStore {
 		return Array.from(this.staff.values());
 	}
 
-	update(id: string, updates: Partial<Omit<PersistedStaff, "id" | "createdAt">>): boolean {
-		const existing = this.staff.get(id);
-		if (!existing) return false;
+	private applyUpdate(existing: PersistedStaff, updates: Partial<Omit<PersistedStaff, "id" | "createdAt">>): void {
 		// Strip undefined values to avoid overwriting existing fields.
 		// null is treated as "clear this field" (delete the key).
 		const rec = existing as unknown as Record<string, unknown>;
 		for (const [k, v] of Object.entries(updates)) {
 			if (v === undefined) continue;
-			if (v === null) {
-				delete rec[k];
-			} else {
-				rec[k] = v;
-			}
+			if (v === null) delete rec[k];
+			else rec[k] = v;
 		}
 		existing.updatedAt = Date.now();
 		normalizeStaffRecord(existing);
+	}
+
+	update(id: string, updates: Partial<Omit<PersistedStaff, "id" | "createdAt">>): boolean {
+		const existing = this.staff.get(id);
+		if (!existing) return false;
+		this.applyUpdate(existing, updates);
 		this.save();
 		return true;
+	}
+
+	/** Apply an update only if its atomic publication succeeds; otherwise restore memory. */
+	updateStrict(id: string, updates: Partial<Omit<PersistedStaff, "id" | "createdAt">>): boolean {
+		const existing = this.staff.get(id);
+		if (!existing) return false;
+		const previous = structuredClone(existing);
+		this.applyUpdate(existing, updates);
+		try {
+			this.saveStrict();
+			return true;
+		} catch (err) {
+			this.staff.set(id, previous);
+			throw err;
+		}
 	}
 }
