@@ -31,6 +31,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { MAX_GOAL_TITLE_LENGTH } from "../../src/server/agent/goal-candidate-validator.js";
+import { getProposalTypePlugin } from "../../src/server/proposals/proposal-types.js";
 
 let sessionId: string;
 
@@ -464,6 +465,104 @@ test.describe("editable proposals — REST API", () => {
 			expect(fs.readFileSync(fp, "utf8")).toBe(liveBefore);
 			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(revisionBefore);
 			expect(fs.existsSync(fp + ".tmp")).toBe(false);
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("legacy inline snapshots survive title/spec edits and restore while modified invalid input rejects", async ({ gateway }) => {
+		const sid = await createSession();
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		try {
+			const session = gateway.sessionManager.getSession(sid);
+			const registry = gateway.sessionManager.getProjectContextManager().getRegistry();
+			const projectRoot = registry.get(session.projectId)?.rootPath as string;
+			const seeded = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({ args: {
+					title: "Compatibility baseline",
+					spec: "Original legacy proposal spec.",
+					workflow: "feature",
+					cwd: projectRoot,
+				} }),
+			});
+			expect(seeded.status, await seeded.clone().text()).toBe(200);
+
+			const legacyWorkflow = {
+				id: "legacy-inline",
+				name: "Legacy inline",
+				description: "Retired verification step fixture.",
+				createdAt: 3,
+				updatedAt: 4,
+				gates: [{
+					id: "legacy-gate",
+					name: "Legacy gate",
+					dependsOn: [],
+					verify: [{ name: "Retired remote state", type: "remote-state" }],
+				}],
+			};
+			const legacyRoles = {
+				"legacy-reviewer": {
+					name: "legacy-reviewer",
+					label: "Legacy reviewer",
+					promptTemplate: "Keep exact legacy values.",
+					accessory: "vintage",
+					model: "retired-bare-model",
+					thinkingLevel: "legacy-depth",
+					toolPolicies: { bash: "retired-policy" },
+					createdAt: 7,
+					updatedAt: 8,
+				},
+			};
+			const legacyContent = getProposalTypePlugin("goal").serialize({
+				title: "Legacy title",
+				spec: "Legacy spec body.",
+				projectId: session.projectId,
+				cwd: projectRoot,
+				inlineWorkflow: legacyWorkflow,
+				inlineRoles: legacyRoles,
+			});
+			const historyOne = path.join(path.dirname(fp), "goal.history", "1.md");
+			fs.writeFileSync(fp, legacyContent);
+			fs.writeFileSync(historyOne, legacyContent);
+
+			const editTitle = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
+				method: "POST",
+				body: JSON.stringify({ old_text: "Legacy title", new_text: "Edited legacy title" }),
+			});
+			expect(editTitle.status, await editTitle.clone().text()).toBe(200);
+			const editedTitleContent = (await editTitle.json()).newContent as string;
+			const parsedTitleEdit = getProposalTypePlugin("goal").parse(editedTitleContent);
+			expect(parsedTitleEdit.ok).toBe(true);
+			if (parsedTitleEdit.ok) expect(parsedTitleEdit.value.fields).toMatchObject({ inlineWorkflow: legacyWorkflow, inlineRoles: legacyRoles });
+
+			const editSpec = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
+				method: "POST",
+				body: JSON.stringify({ old_text: "Legacy spec body.", new_text: "Edited legacy spec body." }),
+			});
+			expect(editSpec.status, await editSpec.clone().text()).toBe(200);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(3);
+
+			const restored = await apiFetch(`/api/sessions/${sid}/proposal/goal/restore`, {
+				method: "POST",
+				body: JSON.stringify({ rev: 1 }),
+			});
+			expect(restored.status, await restored.clone().text()).toBe(200);
+			const restoredBody = await restored.json();
+			expect(restoredBody.newRev).toBe(4);
+			expect(restoredBody.fields).toMatchObject({ title: "Legacy title", inlineWorkflow: legacyWorkflow, inlineRoles: legacyRoles });
+			expect(fs.readFileSync(fp, "utf8")).toBe(legacyContent);
+
+			const beforeInvalid = fs.readFileSync(fp, "utf8");
+			const beforeInvalidRevision = latestProposalRevision(gateway.bobbitDir, sid, "goal");
+			const invalidEdit = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
+				method: "POST",
+				body: JSON.stringify({ old_text: "thinkingLevel: legacy-depth", new_text: "thinkingLevel: newly-invalid" }),
+			});
+			expect(invalidEdit.status, await invalidEdit.clone().text()).toBe(400);
+			expect(await invalidEdit.json()).toMatchObject({ ok: false, code: "INLINE_ROLES_INVALID" });
+			expect(fs.readFileSync(fp, "utf8")).toBe(beforeInvalid);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(beforeInvalidRevision);
 		} finally {
 			await deleteSession(sid);
 		}
