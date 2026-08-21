@@ -132,17 +132,24 @@ function projectOwnsGoal(project: RegisteredProject, pcm: ProjectContextManager,
 	return goal;
 }
 
+function existingProjectContext(project: RegisteredProject, pcm: ProjectContextManager) {
+	for (const ctx of pcm.all()) {
+		if (ctx.project.id === project.id) return ctx;
+	}
+	return undefined;
+}
+
 function projectOwnsSession(project: RegisteredProject, pcm: ProjectContextManager, sessionId: string): PersistedSession | undefined {
-	const ctx = pcm.getOrCreate(project.id);
-	const session = ctx?.sessionStore.get(sessionId);
+	// Ownership validation is read-only: a lookup must never lazily provision a
+	// project context or open its stores.
+	const session = existingProjectContext(project, pcm)?.sessionStore.get(sessionId);
 	if (!session) return undefined;
 	if (session.projectId && session.projectId !== project.id) return undefined;
 	return session;
 }
 
 function projectOwnsStaff(project: RegisteredProject, pcm: ProjectContextManager, staffId: string): PersistedStaff | undefined {
-	const ctx = pcm.getOrCreate(project.id);
-	const staff = ctx?.staffStore.get(staffId);
+	const staff = existingProjectContext(project, pcm)?.staffStore.get(staffId);
 	if (!staff) return undefined;
 	if (staff.projectId && staff.projectId !== project.id) return undefined;
 	return staff;

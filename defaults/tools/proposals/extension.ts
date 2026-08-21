@@ -104,6 +104,7 @@ async function argsWithProjectId(type: ProposalType, args: unknown): Promise<unk
 export interface SeedProposalResult {
 	rev?: number;
 	errorMessage?: string;
+	errorDetails?: Record<string, unknown>;
 }
 
 /**
@@ -130,7 +131,12 @@ export async function seedProposal(type: ProposalType, args: unknown): Promise<S
 				? String((bodyJson as { message?: unknown }).message)
 				: `seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`;
 			console.error(`[proposal-tools] seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`);
-			return { errorMessage: msg };
+			return {
+				errorMessage: msg,
+				...(bodyJson && typeof bodyJson === "object" && !Array.isArray(bodyJson)
+					? { errorDetails: bodyJson as Record<string, unknown> }
+					: {}),
+			};
 		}
 		if (bodyJson && typeof bodyJson === "object" && typeof (bodyJson as any).rev === "number") {
 			return { rev: (bodyJson as any).rev as number };
@@ -210,7 +216,11 @@ export default function (pi: ExtensionAPI) {
 			// one into the other corrupts the type contract.
 			const r = await seedProposal("goal", args);
 			if (r.errorMessage) {
-				return { content: [{ type: "text" as const, text: r.errorMessage }], isError: true } as any;
+				return {
+					content: [{ type: "text" as const, text: r.errorMessage }],
+					isError: true,
+					...(r.errorDetails ?? {}),
+				} as any;
 			}
 			return ack(r.rev);
 		},
