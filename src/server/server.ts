@@ -10100,6 +10100,10 @@ async function handleApiRoute(
 			json({ error: surf.error }, surf.status);
 			return;
 		}
+		// `surf.tool` comes only from an HMAC-validated, session-bound token whose
+		// winning contribution was re-resolved above. Its absence intentionally selects
+		// the installed+active+own-session contract for pack-bound surfaces.
+		// codeql[js/user-controlled-bypass] Signed surface kind selects one of two complete authorization contracts.
 		const guard = surf.tool !== undefined
 			? authorizeScopedRequest({
 				tool: surf.tool,
