@@ -99,7 +99,7 @@ const TaskChangedFieldSchema = literals([
 	"title", "type", "assignedSessionId", "spec", "parentTaskId", "dependsOn", "workflowGateId", "inputGateIds", "resultSummary", "headSha",
 ] as const);
 const SettingsChangedKeySchema = literals([
-	"components", "workflows", "configDirectories", "sandbox", "sandboxTokens", "packOrder", "packActivation", "commands", "providers", "models",
+	"baseRef", "commands", "components", "configDirectories", "models", "packActivation", "packOrder", "providers", "sandbox", "sandboxTokens", "workflows", "worktrees",
 ] as const);
 
 const StatusChangedPayloadSchema = strictObject({

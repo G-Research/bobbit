@@ -91,6 +91,7 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surfa
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { HostInterceptorRouter } from "./extension-host/host-interceptor-router.js";
+import { hostInterceptorAuditSink } from "./extension-host/host-interceptor-audit.js";
 import {
 	HostNotificationDispatcher,
 	HostNotificationModuleAdapter,
@@ -2159,26 +2160,42 @@ export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "
 	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
 }
 
-type SettingsChangedIdentifier = "components" | "workflows" | "configDirectories" | "sandbox" | "sandboxTokens" | "packOrder" | "packActivation" | "commands" | "providers" | "models";
+type SettingsChangedIdentifier = "baseRef" | "commands" | "components" | "configDirectories" | "models" | "packActivation" | "packOrder" | "providers" | "sandbox" | "sandboxTokens" | "workflows" | "worktrees";
+
+/**
+ * Allowlist of public ProjectConfigStore families. Unknown flat keys are
+ * deliberately omitted: that namespace is extensible and may contain secrets.
+ */
+const SETTINGS_CHANGED_IDENTIFIERS = new Map<string, SettingsChangedIdentifier>([
+	["base_ref", "baseRef"],
+	["build_command", "commands"],
+	["components", "components"],
+	["config_directories", "configDirectories"],
+	["pack_activation", "packActivation"],
+	["pack_order", "packOrder"],
+	["sandbox", "sandbox"],
+	["sandbox_credentials", "sandbox"],
+	["sandbox_github_token", "sandbox"],
+	["sandbox_host_token_overrides", "sandbox"],
+	["sandbox_image", "sandbox"],
+	["sandbox_mounts", "sandbox"],
+	["sandbox_tokens", "sandboxTokens"],
+	["test_command", "commands"],
+	["test_e2e_command", "commands"],
+	["test_unit_command", "commands"],
+	["typecheck_command", "commands"],
+	["workflows", "workflows"],
+	["worktree_pool_size", "worktrees"],
+	["worktree_root", "worktrees"],
+	["worktree_setup_command", "commands"],
+	["worktree_setup_timeout_ms", "worktrees"],
+]);
 
 function settingsChangedIdentifiers(keys: readonly string[]): SettingsChangedIdentifier[] {
-	const mapped = keys.flatMap((key): SettingsChangedIdentifier[] => {
-		switch (key) {
-			case "components": return ["components"];
-			case "workflows": return ["workflows"];
-			case "config_directories": return ["configDirectories"];
-			case "sandbox_tokens": return ["sandboxTokens"];
-			case "pack_order": return ["packOrder"];
-			case "pack_activation": return ["packActivation"];
-			default:
-				if (key.includes("command")) return ["commands"];
-				if (key.includes("provider")) return ["providers"];
-				if (key.includes("model") || key.includes("thinking")) return ["models"];
-				if (key.startsWith("sandbox")) return ["sandbox"];
-				return [];
-		}
-	});
-	return [...new Set(mapped)].sort();
+	return [...new Set(keys.flatMap(key => {
+		const identifier = SETTINGS_CHANGED_IDENTIFIERS.get(key);
+		return identifier === undefined ? [] : [identifier];
+	}))].sort();
 }
 
 /**
@@ -4148,6 +4165,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	const hostInterceptorRouter = new HostInterceptorRouter({
 		registry: packContributionRegistry,
+		audit: hostInterceptorAuditSink,
 		moduleHost,
 		lifecycleHub: sessionManager.lifecycleHub,
 		createHostApi: ({ context, packId, contributionId, capabilities }) =>
@@ -4852,6 +4870,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		/** @internal Exposed for integration coverage of production hook wiring. */
+		hostInterceptorRouter,
 		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
 			// Phase timer for the pre-listen critical path: everything awaited here

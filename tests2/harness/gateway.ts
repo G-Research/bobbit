@@ -113,6 +113,7 @@ export interface GatewayFixture {
 	readonly orchestrationCore: any;
 	readonly bgProcessManager: any;
 	readonly projectContextManager: any;
+	readonly hostInterceptorRouter: any;
 	/** Authed fetch against the gateway; `path` starts with `/`. */
 	api(path: string, init?: RequestInit): Promise<Response>;
 	/** Authed fetch returning parsed JSON, throwing on non-2xx. */
@@ -390,6 +391,7 @@ async function boot(): Promise<BootedGateway> {
 		orchestrationCore: (gw as any).orchestrationCore,
 		bgProcessManager: gw.bgProcessManager,
 		projectContextManager: gw.projectContextManager,
+		hostInterceptorRouter: (gw as any).hostInterceptorRouter,
 		restoreAgentDirRuntime,
 		async api(path, init) {
 			restoreAgentDirRuntime();
