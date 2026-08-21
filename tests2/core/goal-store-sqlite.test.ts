@@ -161,6 +161,66 @@ describe("GoalStore SQLite persistence", () => {
 		expect(reopened.get("legacy-null")).toEqual(legacyGoal);
 	});
 
+	it("reopens persisted inline roles under the historical compatibility contract without rewriting them", async () => {
+		const stateDir = tempRoot();
+		const initialized = openStore(stateDir);
+		await closeTracked(initialized);
+
+		const inlineRoles = {
+			reviewer: {
+				name: "reviewer",
+				label: "Legacy reviewer",
+				promptTemplate: "Review the persisted goal",
+				accessory: "legacy-accessory",
+				model: "bare-legacy-model",
+				thinkingLevel: "legacy-deep",
+				toolPolicies: { bash: "prompt-every-time" },
+				createdAt: 11,
+				updatedAt: 12,
+			},
+		};
+		const legacyGoal = goal("legacy-inline-role", { inlineRoles } as any);
+		const payload = JSON.stringify(legacyGoal);
+		const dbFile = path.join(stateDir, "goals.sqlite");
+		let db = new Database(dbFile);
+		db.prepare("INSERT INTO goal_records (id, payload) VALUES (?, ?)").run(legacyGoal.id, payload);
+		db.close();
+
+		const reopened = openStore(stateDir);
+		expect(reopened.get(legacyGoal.id)?.inlineRoles).toEqual(inlineRoles);
+		await closeTracked(reopened);
+
+		db = new Database(dbFile);
+		expect((db.prepare("SELECT payload FROM goal_records WHERE id = ?").get(legacyGoal.id) as { payload: string }).payload).toBe(payload);
+		db.close();
+	});
+
+	it("migrates legacy JSON inline roles without normalizing their values", async () => {
+		const stateDir = tempRoot();
+		const legacyFile = path.join(stateDir, "goals.json");
+		const inlineRoles = {
+			builder: {
+				name: "builder",
+				label: "Legacy builder",
+				promptTemplate: "Build from the old snapshot",
+				model: "old-model-id",
+				thinkingLevel: "maximum-plus",
+				toolPolicies: { edit: "legacy-custom-policy" },
+			},
+		};
+		const legacyGoal = goal("legacy-json-inline-role", { inlineRoles } as any);
+		const sourceBytes = Buffer.from(JSON.stringify([legacyGoal]));
+		fs.writeFileSync(legacyFile, sourceBytes);
+
+		const migrated = openStore(stateDir);
+		expect(migrated.get(legacyGoal.id)?.inlineRoles).toEqual(inlineRoles);
+		expect(fs.readFileSync(`${legacyFile}.sqlite-retired`)).toEqual(sourceBytes);
+		await closeTracked(migrated);
+
+		const reopened = openStore(stateDir);
+		expect(reopened.get(legacyGoal.id)?.inlineRoles).toEqual(inlineRoles);
+	});
+
 	it("migrates a legacy verify step whose type was retired instead of failing the load", async () => {
 		const stateDir = tempRoot();
 		const legacyFile = path.join(stateDir, "goals.json");

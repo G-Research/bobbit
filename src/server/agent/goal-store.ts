@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { readDeletionTombstones, recordDeletionTombstone } from "./deletion-tombstones.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
-import { validateInlineRoles as validateInlineRoleDefinitions } from "./inline-role-validator.js";
+import { validatePersistedInlineRoles } from "./inline-role-validator.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
@@ -325,8 +325,8 @@ function validateWorkflow(value: unknown, label: string): void {
 	}
 }
 
-function validateInlineRoles(value: unknown, label: string): void {
-	const result = validateInlineRoleDefinitions(value);
+function validatePersistedGoalInlineRoles(value: unknown, label: string): void {
+	const result = validatePersistedInlineRoles(value);
 	if (!result.ok) invalidGoal(label, result.message);
 }
 
@@ -361,7 +361,7 @@ function validateGoal(
 	if (value.divergencePolicy !== undefined && (typeof value.divergencePolicy !== "string" || !DIVERGENCE_POLICIES.has(value.divergencePolicy))) invalidGoal(label, "divergencePolicy is unsupported");
 	if (value.metadata !== undefined && !isRecord(value.metadata)) invalidGoal(label, "metadata must be an object");
 	if (value.repoWorktrees !== undefined) validateStringRecord(value.repoWorktrees, `${label} repoWorktrees`);
-	if (value.inlineRoles !== undefined) validateInlineRoles(value.inlineRoles, `${label} inlineRoles`);
+	if (value.inlineRoles !== undefined) validatePersistedGoalInlineRoles(value.inlineRoles, `${label} inlineRoles`);
 	if (value.workflow !== undefined && value.workflow !== null) validateWorkflow(value.workflow, `${label} workflow`);
 	if (validateSerialization) {
 		try {

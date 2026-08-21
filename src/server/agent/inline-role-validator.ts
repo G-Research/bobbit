@@ -13,13 +13,53 @@ export type InlineRoleValidationResult =
 	| { ok: true; roles: Record<string, Role> | undefined }
 	| { ok: false; message: string };
 
+export type PersistedInlineRoleValidationResult =
+	| { ok: true }
+	| { ok: false; message: string };
+
 function plainRecord(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const proto = Object.getPrototypeOf(value);
 	return proto === Object.prototype || proto === null;
 }
 
-/** Validate and snapshot ephemeral roles without consulting or mutating a role store. */
+/**
+ * Validate the historical persisted-goal role contract without changing its values.
+ *
+ * Persisted goals may contain model IDs, thinking levels, and tool policies that
+ * predate today's candidate allow-lists. Goal loading must retain those snapshots;
+ * only newly submitted candidate roles use the stricter validator below.
+ */
+export function validatePersistedInlineRoles(value: unknown): PersistedInlineRoleValidationResult {
+	if (!plainRecord(value)) return { ok: false, message: "inlineRoles must be an object" };
+	for (const [key, raw] of Object.entries(value)) {
+		if (!plainRecord(raw)
+			|| typeof raw.name !== "string"
+			|| raw.name !== key
+			|| typeof raw.label !== "string"
+			|| typeof raw.promptTemplate !== "string") {
+			return { ok: false, message: `Inline role "${key}" must have matching name, label, and promptTemplate` };
+		}
+		for (const field of ["accessory", "model", "thinkingLevel"] as const) {
+			if (raw[field] !== undefined && typeof raw[field] !== "string") {
+				return { ok: false, message: `Inline role "${key}" ${field} must be a string` };
+			}
+		}
+		for (const field of ["createdAt", "updatedAt"] as const) {
+			if (raw[field] !== undefined && (typeof raw[field] !== "number" || !Number.isFinite(raw[field]))) {
+				return { ok: false, message: `Inline role "${key}" ${field} must be finite` };
+			}
+		}
+		if (raw.toolPolicies !== undefined) {
+			if (!plainRecord(raw.toolPolicies) || Object.values(raw.toolPolicies).some(policy => typeof policy !== "string")) {
+				return { ok: false, message: `Inline role "${key}" toolPolicies must be an object with string values` };
+			}
+		}
+	}
+	return { ok: true };
+}
+
+/** Validate and snapshot new ephemeral roles without consulting or mutating a role store. */
 export function validateInlineRoles(value: unknown): InlineRoleValidationResult {
 	if (value === undefined || value === null) return { ok: true, roles: undefined };
 	if (!plainRecord(value)) return { ok: false, message: "inlineRoles must be a plain object" };
