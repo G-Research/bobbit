@@ -45,6 +45,7 @@ import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/c
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS } from "../strict-body.js";
+import { validateGoalCandidate, type GoalCandidateDeps } from "./goal-candidate-validator.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -73,6 +74,8 @@ export interface NestedGoalRouteDeps {
 	broadcastToAll(event: any): void;
 	/** Read the system-scope subgoal nesting prefs (subgoalsEnabled, maxNestingDepth). */
 	getSubgoalNestingPrefs(): SubgoalNestingPrefs;
+	/** Canonical read-only dependencies shared with every goal creation owner. */
+	goalCandidateDeps: GoalCandidateDeps;
 }
 
 const HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
@@ -255,6 +258,7 @@ export async function tryHandleNestedGoalRoute(
 		broadcastToAll,
 		getSubgoalNestingPrefs,
 		cookieStore,
+		goalCandidateDeps,
 	} = deps;
 
 	function readReqHeader(name: string): string | undefined {
@@ -704,16 +708,53 @@ export async function tryHandleNestedGoalRoute(
 			// Propagate the parent's EFFECTIVE nesting limits onto the child so
 			// descendants cannot loosen what an ancestor has tightened.
 			const childOverrides = inheritedChildOverrides(parent, nestingPrefs, getGoalAcrossProjects);
-			const child = await goalManager.createGoal(title, childCwd, {
+			const rawBodyWorkflow = (body as { workflow?: unknown }).workflow;
+			const rawBodyInlineRoles = (body as { inlineRoles?: unknown }).inlineRoles;
+			const candidateInlineRoles = rawBodyInlineRoles !== undefined
+				&& rawBodyInlineRoles !== null
+				&& (typeof rawBodyInlineRoles !== "object" || Array.isArray(rawBodyInlineRoles))
+				? rawBodyInlineRoles
+				: mergedInlineRoles;
+			const validation = validateGoalCandidate({
+				title,
 				spec,
-				workflowId,
-				resolvedWorkflow: resolvedWorkflowForChild,
-				projectId: parent.projectId,
-				sandboxed: parent.sandboxed,
+				projectId: ctx.project.id,
+				cwd: childCwd,
 				parentGoalId: parentId,
-				inlineRoles: mergedInlineRoles,
+				...(rawBodyWorkflow !== undefined
+					? { inlineWorkflow: rawBodyWorkflow }
+					: bodyWorkflowId !== undefined
+						? { workflowId: bodyWorkflowId }
+						: resolvedWorkflowForChild
+							? { inlineWorkflow: resolvedWorkflowForChild }
+							: { workflowId }),
+				inlineRoles: candidateInlineRoles,
 				subgoalsAllowed: childOverrides.subgoalsAllowed,
 				maxNestingDepth: childOverrides.maxNestingDepth,
+			}, {
+				source: { kind: "server-child", parentGoalId: parentId, cwdAuthority: "goal" },
+			}, goalCandidateDeps);
+			if (!validation.ok) {
+				json({
+					error: validation.message,
+					message: validation.message,
+					code: validation.code,
+					...(validation.details ?? {}),
+					...(validation.details ? { details: validation.details } : {}),
+				}, validation.status);
+				return true;
+			}
+			const candidate = validation.candidate;
+			const child = await goalManager.createGoal(candidate.title, candidate.cwd, {
+				spec: candidate.spec,
+				workflowId: candidate.workflowId,
+				resolvedWorkflow: candidate.workflow,
+				projectId: candidate.projectId,
+				sandboxed: parent.sandboxed,
+				parentGoalId: candidate.parentGoalId,
+				inlineRoles: candidate.inlineRoles,
+				subgoalsAllowed: candidate.subgoalsAllowed,
+				maxNestingDepth: candidate.maxNestingDepth,
 			});
 			// stamp-immediately invariant: stamp spawnedFromPlanId IMMEDIATELY
 			// — no awaits between. Persist suggestedRole + spawnedBySessionId

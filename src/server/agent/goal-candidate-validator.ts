@@ -21,7 +21,9 @@ export const MAX_GOAL_STRUCTURED_BYTES = 1024 * 1024;
 
 export type GoalCandidateSource =
 	| { kind: "user-input" }
-	| { kind: "current-session-promotion"; sessionId: string; serverDerivedProjectId: string; serverDerivedCwd: string };
+	| { kind: "current-session-promotion"; sessionId: string; serverDerivedProjectId: string; serverDerivedCwd: string }
+	/** Server-owned child coordinates after the parent has been authenticated/resolved. */
+	| { kind: "server-child"; parentGoalId: string; cwdAuthority: "goal" | "verification" };
 
 export interface GoalCandidateContext {
 	source: GoalCandidateSource;
@@ -98,6 +100,7 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	if (raw.cwd !== undefined && typeof raw.cwd !== "string") return fail(422, "CWD_OUTSIDE_PROJECT", "cwd must be a path string inside the selected project");
 	let cwdSource: CwdOwnershipSource = { kind: "user-input" };
 	if (context.source.kind === "current-session-promotion") cwdSource = { kind: "session", sessionId: context.source.sessionId };
+	if (context.source.kind === "server-child") cwdSource = { kind: context.source.cwdAuthority, goalId: context.source.parentGoalId };
 	const cwdResult = validateExecutionCwd(deps.registry, deps.projectContextManager, resolved.projectId, requestedCwd, cwdSource);
 	if (!cwdResult.ok) return fail(cwdResult.status, cwdResult.code, cwdResult.error);
 	if (context.source.kind === "current-session-promotion") {
@@ -108,6 +111,7 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 
 	const parentGoalId = typeof raw.parentGoalId === "string" && raw.parentGoalId.trim() ? raw.parentGoalId.trim() : undefined;
 	if (raw.parentGoalId !== undefined && !parentGoalId) return fail(422, "PARENT_NOT_FOUND", "parentGoalId must be a non-empty string");
+	if (context.source.kind === "server-child" && parentGoalId !== context.source.parentGoalId) return fail(422, "PARENT_SCOPE_MISMATCH", "parentGoalId does not match the server-owned child parent");
 	let parent: PersistedGoal | undefined;
 	const prefs = deps.nestingPrefs();
 	if (parentGoalId) {

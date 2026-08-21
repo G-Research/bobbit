@@ -676,6 +676,7 @@ import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource
 import {
 	validateGoalCandidate,
 	type GoalCandidateContext,
+	type GoalCandidateDeps,
 	type GoalCandidateError,
 	type GoalCandidateSource,
 	type RawGoalCandidate,
@@ -3935,7 +3936,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4417,8 +4418,48 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
+	const existingGoalCandidateProjectContext = (projectId: string): ProjectContext | undefined => {
+		for (const ctx of projectContextManager.all()) {
+			if (ctx.project.id === projectId) return ctx;
+		}
+		return undefined;
+	};
+	const buildGoalCandidateDefaultWorkflows = (projectId: string): Workflow[] => {
+		const project = projectRegistry.get(projectId);
+		const projectName = project?.name || "project";
+		const components = existingGoalCandidateProjectContext(projectId)?.projectConfigStore.getComponents() ?? [];
+		const targetComponent = components.find(component =>
+			component.name === projectName && Object.keys(component.commands ?? {}).length > 0
+		) ?? components.find(component => Object.keys(component.commands ?? {}).length > 0)
+			?? components.find(component => component.name === projectName)
+			?? components.find(component => component.name.length > 0);
+		const seeds = buildDefaultWorkflows(
+			targetComponent?.name || projectName,
+			targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
+		);
+		seeds.parent = buildParentWorkflow();
+		return Object.values(seeds) as unknown as Workflow[];
+	};
+	const canonicalGoalCandidateDeps: GoalCandidateDeps = {
+		registry: projectRegistry,
+		projectContextManager,
+		workflows: (projectId) => {
+			const cascade = configCascade.resolveWorkflows(projectId).map(entry => entry.item);
+			return cascade.length > 0 ? cascade : existingGoalCandidateProjectContext(projectId)?.workflowStore.getAll() ?? [];
+		},
+		workflow: (projectId, workflowId) => {
+			const cascade = configCascade.resolveWorkflows(projectId);
+			return cascade.find(entry => entry.item.id === workflowId)?.item
+				?? existingGoalCandidateProjectContext(projectId)?.workflowStore.get(workflowId);
+		},
+		defaultWorkflows: buildGoalCandidateDefaultWorkflows,
+		components: (projectId) => existingGoalCandidateProjectContext(projectId)?.projectConfigStore.getComponents() ?? [],
+		getGoal: (goalId) => projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId),
+		nestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+	};
+
 	ck("pre-VerificationHarness");
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview, goalCandidateDeps: canonicalGoalCandidateDeps });
 	ck("new VerificationHarness");
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
@@ -5265,6 +5306,7 @@ async function handleApiRoute(
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	configCascade: ConfigCascade,
+	goalCandidateDeps: GoalCandidateDeps,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
 	reviewAnnotationStore?: ReviewAnnotationStore,
@@ -5499,48 +5541,10 @@ async function handleApiRoute(
 		}
 		return undefined;
 	};
-	const resolveCurrentProjectWorkflow = (projectId: string, workflowId: string): Workflow | undefined => {
-		// Match ordinary creation: prefer the current visible cascade, then use
-		// exact live-store lookup so hidden/runtime-registered workflows remain
-		// creatable. Both branches are reads; validation never seeds or writes.
-		const cascade = configCascade.resolveWorkflows(projectId);
-		return cascade.find(entry => entry.item.id === workflowId)?.item
-			?? existingProjectContext(projectId)?.workflowStore.get(workflowId);
-	};
-	const buildCurrentDefaultGoalWorkflows = (projectId: string): Workflow[] => {
-		const project = projectRegistry.get(projectId);
-		const projectName = project?.name || "project";
-		const components = existingProjectContext(projectId)?.projectConfigStore.getComponents() ?? [];
-		// Keep this selection identical for validation and both persistence paths.
-		const targetComponent = components.find(component =>
-			component.name === projectName && Object.keys(component.commands ?? {}).length > 0
-		) ?? components.find(component => Object.keys(component.commands ?? {}).length > 0)
-			?? components.find(component => component.name === projectName)
-			?? components.find(component => component.name.length > 0);
-		const seeds = buildDefaultWorkflows(
-			targetComponent?.name || projectName,
-			targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
-		);
-		seeds.parent = buildParentWorkflow();
-		return Object.values(seeds) as unknown as Workflow[];
-	};
 	const persistCurrentDefaultGoalWorkflows = (projectId: string, targetCtx: ProjectContext): Workflow[] => {
-		const defaults = buildCurrentDefaultGoalWorkflows(projectId);
+		const defaults = goalCandidateDeps.defaultWorkflows(projectId);
 		for (const workflow of defaults) targetCtx.workflowStore.put(workflow);
 		return defaults;
-	};
-	const goalCandidateDeps = {
-		registry: projectRegistry,
-		projectContextManager,
-		workflows: (projectId: string): Workflow[] => {
-			const cascade = configCascade.resolveWorkflows(projectId).map(entry => entry.item);
-			return cascade.length > 0 ? cascade : existingProjectContext(projectId)?.workflowStore.getAll() ?? [];
-		},
-		workflow: resolveCurrentProjectWorkflow,
-		defaultWorkflows: buildCurrentDefaultGoalWorkflows,
-		components: (projectId: string) => existingProjectContext(projectId)?.projectConfigStore.getComponents() ?? [],
-		getGoal: (id: string) => getGoalAcrossProjects(id),
-		nestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
 	};
 	const authorizeGoalCandidateParent = (parent: PersistedGoal): true | GoalCandidateError => {
 		const headers = req.headers as Record<string, string | string[] | undefined>;
@@ -8492,6 +8496,7 @@ async function handleApiRoute(
 		jsonError,
 		broadcastToAll,
 		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+		goalCandidateDeps,
 	})) return;
 
 	// GET /api/goals/:goalId/descendants — live + archived descendants for the Plan tab.

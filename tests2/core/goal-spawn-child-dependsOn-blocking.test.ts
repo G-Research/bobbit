@@ -35,6 +35,7 @@ import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
 import { CookieStore } from "../../src/server/auth/cookie.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -92,6 +93,7 @@ async function makeHarness(): Promise<Harness> {
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
 	goalStore.update(parent.id, {
+		projectId: "p",
 		branch: `goal/${parent.id}`,
 		worktreePath: tmpRoot,
 	} as any);
@@ -184,6 +186,18 @@ async function makeHarness(): Promise<Harness> {
 		notifyChildTerminal: (cid: string) => scheduler.notifyTerminal(cid),
 	};
 
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: { get: (projectId: string) => projectId === "p" ? {
+			id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0, colorLight: "", colorDark: "",
+		} : undefined } as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 	const deps: NestedGoalRouteDeps = {
 		projectContextManager,
 		verificationHarness,
@@ -198,6 +212,7 @@ async function makeHarness(): Promise<Harness> {
 		jsonError: () => {},
 		broadcastToAll: (ev) => { broadcasts.push(ev); },
 		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+		goalCandidateDeps,
 	};
 
 	async function callRoute(method: string, pathname: string, body?: any): Promise<{ status: number; payload: any }> {

@@ -29,6 +29,7 @@ import { GateStore } from "../../src/server/agent/gate-store.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
 
 export type CallRecord =
 	| { kind: "createGoal"; title: string; opts: any }
@@ -139,6 +140,21 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		getContextForGoal: (_id: string) => ctx,
 		all: () => [ctx],
 	};
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: {
+			get: (projectId: string) => projectId === "p" ? {
+				id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0,
+				colorLight: "", colorDark: "",
+			} : undefined,
+		} as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 
 	const mockTeamManager = {
 		teardownTeam: async (goalId: string) => { calls.push({ kind: "teardownTeam", goalId }); },
@@ -160,6 +176,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		undefined,
 		projectContextManager,
 		undefined,
+		{ goalCandidateDeps },
 	);
 	// Default: ready-to-merge passes immediately.
 	let readyHook: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout"> =

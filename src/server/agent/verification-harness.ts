@@ -1024,6 +1024,7 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { applyRuntimeSessionThinkingSelection } from "../ws/runtime-model-selection.js";
 import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
+import { validateGoalCandidate, type GoalCandidateDeps } from "./goal-candidate-validator.js";
 import {
 	appendRetainedLogChunk,
 	finalizeGateStepDiagnostics,
@@ -3463,6 +3464,8 @@ export class VerificationHarness {
 	/** Test seam for the bounded Engine snapshot used as post-signal completion evidence. */
 	private readonly containerProcessTopSnapshot: (containerId: string) => Promise<readonly DockerTopStateRow[]>;
 	private readonly skipLlmReview: boolean;
+	/** Required by server-generated child creation; optional only for harnesses that never spawn children. */
+	private readonly goalCandidateDeps?: GoalCandidateDeps;
 
 	constructor(
 		stateDir: string,
@@ -3476,7 +3479,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]> } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]>; goalCandidateDeps?: GoalCandidateDeps } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -3489,6 +3492,7 @@ export class VerificationHarness {
 		this.containerProcessIdentityInspector = deps.containerProcessIdentityInspector;
 		this.containerProcessTopSnapshot = deps.containerProcessTopSnapshot ?? readDockerTopStateSnapshot;
 		this.skipLlmReview = !!deps.skipLlmReview;
+		this.goalCandidateDeps = deps.goalCandidateDeps;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
 		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
@@ -8536,6 +8540,7 @@ export class VerificationHarness {
 		// re-acquires before the in-flight ready-to-merge wait. The `finally`
 		// only releases when we actually hold the permit.
 		let permitHeld = true;
+		let managedChild = !!resolved.child;
 		try {
 			let childGoalId: string;
 			if (resolved.child) {
@@ -8638,28 +8643,6 @@ export class VerificationHarness {
 				const workflowStore = ctx.workflowStore;
 				let { workflow: resolvedChildWorkflow, workflowId: childWorkflowId } =
 					resolveChildWorkflow(parent, sg, undefined, workflowStore);
-				// Spawn-time rewrite — every newly-spawned child gets a child-aware
-				// `ready-to-merge` snapshot so it merges into parent's branch locally
-				// and skips the PR step. See child-ready-to-merge.ts.
-				if (parent.branch) {
-					if (resolvedChildWorkflow) {
-						resolvedChildWorkflow = adaptReadyToMergeForChild(
-							resolvedChildWorkflow,
-							{ parentBranch: parent.branch },
-						);
-					} else if (workflowStore) {
-						// Cascade landed on an id-only tier (2/4/5). Materialise the
-						// workflow from the store so we can stamp a child-aware
-						// snapshot onto the child goal at create-time.
-						const fromStore = workflowStore.get(childWorkflowId);
-						if (fromStore) {
-							resolvedChildWorkflow = adaptReadyToMergeForChild(
-								structuredClone(fromStore),
-								{ parentBranch: parent.branch },
-							);
-						}
-					}
-				}
 				// R-032/033 — prefer structuredClone over JSON.parse/stringify
 				// (this is the harness:3086 site called out by the review).
 				const inheritedInlineRoles = parent.inlineRoles
@@ -8694,16 +8677,52 @@ export class VerificationHarness {
 				);
 				const _unresolvedDeps = this._computeUnresolvedDeps(sg.dependsOn, _siblings);
 				const _blocked = _unresolvedDeps.length > 0;
-				const child = await goalManager.createGoal(sg.title, parent.cwd, {
+				if (!this.goalCandidateDeps) {
+					return {
+						passed: false,
+						output: "runSubgoalStep: candidate validation unavailable — not spawning child",
+					};
+				}
+				const validation = validateGoalCandidate({
+					title: sg.title,
 					spec: sg.spec,
-					workflowId: childWorkflowId,
-					resolvedWorkflow: resolvedChildWorkflow,
-					projectId: parent.projectId,
-					sandboxed: parent.sandboxed,
+					projectId: ctx.project.id,
+					cwd: parent.cwd,
 					parentGoalId,
+					...(sg.workflowId !== undefined
+						? { workflowId: sg.workflowId }
+						: resolvedChildWorkflow
+							? { inlineWorkflow: resolvedChildWorkflow }
+							: { workflowId: childWorkflowId }),
 					inlineRoles: inheritedInlineRoles,
 					subgoalsAllowed: _childOverrides.subgoalsAllowed,
 					maxNestingDepth: _childOverrides.maxNestingDepth,
+				}, {
+					source: { kind: "server-child", parentGoalId, cwdAuthority: "verification" },
+				}, this.goalCandidateDeps);
+				if (!validation.ok) {
+					return {
+						passed: false,
+						output: `runSubgoalStep: candidate validation failed (${validation.code}): ${validation.message}`,
+					};
+				}
+				const candidate = validation.candidate;
+				// Apply the child-local merge rewrite only to the canonical frozen
+				// workflow. This preserves explicit-id validation while ensuring the
+				// child merges into its parent branch instead of opening a PR.
+				const childWorkflow = parent.branch && candidate.workflow
+					? adaptReadyToMergeForChild(candidate.workflow, { parentBranch: parent.branch })
+					: candidate.workflow;
+				const child = await goalManager.createGoal(candidate.title, candidate.cwd, {
+					spec: candidate.spec,
+					workflowId: candidate.workflowId,
+					resolvedWorkflow: childWorkflow,
+					projectId: candidate.projectId,
+					sandboxed: parent.sandboxed,
+					parentGoalId: candidate.parentGoalId,
+					inlineRoles: candidate.inlineRoles,
+					subgoalsAllowed: candidate.subgoalsAllowed,
+					maxNestingDepth: candidate.maxNestingDepth,
 				});
 				await goalManager.updateGoal(child.id, {
 					spawnedFromPlanId: planId,
@@ -8717,6 +8736,7 @@ export class VerificationHarness {
 					...(_blocked ? { state: "blocked" as const } : {}),
 				});
 				// END stamp-immediately invariant critical sequence.
+				managedChild = true;
 
 				// R-001 — initialise the child's gate state. Mirrors the
 				// `initGatesForGoal` call in POST /api/goals/:id/spawn-child.
@@ -8829,10 +8849,12 @@ export class VerificationHarness {
 		} finally {
 			if (permitHeld) {
 				sem.release();
-				// Terminal release for this harness-managed child — drive the next
-				// capacity-blocked REST/POST child into the freed slot so the
-				// per-root cap is unified across all start paths.
-				this.childScheduler.startNextEligible(rootGoalId);
+				if (managedChild) {
+					// Terminal release for this harness-managed child — drive the next
+					// capacity-blocked REST/POST child into the freed slot so the
+					// per-root cap is unified across all start paths.
+					this.childScheduler.startNextEligible(rootGoalId);
+				}
 			}
 		}
 	}

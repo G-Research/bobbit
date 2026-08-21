@@ -33,6 +33,7 @@ import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/se
 import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -109,6 +110,7 @@ async function makeHarness(): Promise<Harness> {
 	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false }, memfs);
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
+	goalStore.update(parent.id, { projectId: "p" });
 
 	// No-op heavy side effects, with calls recorded so validation tests can
 	// prove rejection happens before any worktree/setup mutation.
@@ -169,6 +171,21 @@ async function makeHarness(): Promise<Harness> {
 		notifyChildTerminal: () => {},
 	};
 
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: {
+			get: (projectId: string) => projectId === "p" ? {
+				id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0,
+				colorLight: "", colorDark: "",
+			} : undefined,
+		} as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 	const deps: NestedGoalRouteDeps = {
 		projectContextManager,
 		verificationHarness,
@@ -183,6 +200,7 @@ async function makeHarness(): Promise<Harness> {
 		jsonError: () => {},
 		broadcastToAll: () => {},
 		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+		goalCandidateDeps,
 	};
 
 	async function call(

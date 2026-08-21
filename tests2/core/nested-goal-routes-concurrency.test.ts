@@ -34,6 +34,7 @@ import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.
 import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
 
 const TL = "tl-session";
 
@@ -83,6 +84,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "feature" });
 	goalStore.update(parent.id, {
+		projectId: "p",
 		maxConcurrentChildren: cap,
 		branch: `goal/${parent.id}`,
 		worktreePath: tmpRoot,
@@ -182,6 +184,18 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		},
 	};
 
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: { get: (projectId: string) => projectId === "p" ? {
+			id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0, colorLight: "", colorDark: "",
+		} : undefined } as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 	const deps: NestedGoalRouteDeps = {
 		projectContextManager, verificationHarness, teamManager, sessionManager, cookieStore,
 		requireSubgoalsEnabled: () => true,
@@ -190,6 +204,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		readBody: async (req: http.IncomingMessage) => (req as any)._body,
 		json: () => {}, jsonError: () => {}, broadcastToAll: () => {},
 		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+		goalCandidateDeps,
 	};
 
 	async function call(method: string, pathname: string, body?: unknown, headers: Record<string, string | string[] | undefined> = {}) {
