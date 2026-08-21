@@ -184,6 +184,24 @@ describe("current-session goal proposal panel", () => {
 		await waitFor(() => expect(currentOption?.textContent).toContain("/repo-wt/session-owner"));
 	});
 
+	it("supports arrow-key traversal and Escape dismissal from the disclosure summary", async () => {
+		await mount();
+		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(false));
+		const details = host.querySelector("[data-testid='goal-form-worktree-mode']") as HTMLDetailsElement;
+		const summary = host.querySelector("[data-testid='goal-form-worktree-summary']") as HTMLElement;
+		const newOption = host.querySelector("[data-testid='goal-form-worktree-option-new']") as HTMLButtonElement;
+		const currentOption = host.querySelector("[data-testid='goal-form-worktree-option-current-session']") as HTMLButtonElement;
+		details.open = true;
+		summary.focus();
+		summary.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+		expect(document.activeElement).toBe(newOption);
+		newOption.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+		expect(document.activeElement).toBe(currentOption);
+		currentOption.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+		expect(details.open).toBe(false);
+		expect(document.activeElement).toBe(summary);
+	});
+
 	it("persists Current session, renders authoritative coordinates, disables inherited controls, and accepts without coordinate authority", async () => {
 		await mount();
 		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(false));

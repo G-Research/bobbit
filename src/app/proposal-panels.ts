@@ -1316,19 +1316,20 @@ function renderGoalForm(config: GoalFormConfig) {
 		if (mode !== worktreeMode) config.onWorktreeModeChange?.(mode);
 	};
 	const handleWorktreeModeMenuKeydown = (event: KeyboardEvent) => {
-		if (event.key === "Escape") {
+		const details = event.currentTarget as HTMLDetailsElement;
+		if (event.key === "Escape" && details.open) {
 			event.preventDefault();
-			closeWorktreeModeMenu(event.currentTarget, true);
+			closeWorktreeModeMenu(details, true);
 			return;
 		}
 		if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-		const menu = event.currentTarget as HTMLElement;
-		const options = [...menu.querySelectorAll<HTMLButtonElement>("button[role='option']:not(:disabled)")];
+		const options = [...details.querySelectorAll<HTMLButtonElement>("button[role='option']:not(:disabled)")];
 		if (options.length === 0) return;
 		const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
 		const offset = event.key === "ArrowDown" ? 1 : -1;
 		const nextIndex = currentIndex < 0 ? (offset > 0 ? 0 : options.length - 1) : (currentIndex + offset + options.length) % options.length;
 		event.preventDefault();
+		details.open = true;
 		options[nextIndex].focus();
 	};
 
@@ -1410,7 +1411,7 @@ function renderGoalForm(config: GoalFormConfig) {
 			${linkedProject ? html`
 				<div class="flex items-center gap-2 min-w-0">
 					<span class="${lblCls} w-20 md:w-16" id="goal-worktree-label">Worktree</span>
-					<details class="group relative flex-1 min-w-0" data-testid="goal-form-worktree-mode">
+					<details class="group relative flex-1 min-w-0" data-testid="goal-form-worktree-mode" @keydown=${handleWorktreeModeMenuKeydown}>
 						<input class="sr-only" type="radio" name="goal-worktree-mode" value="new-worktree"
 							.checked=${!currentMode}
 							?disabled=${createBusy}
@@ -1442,7 +1443,6 @@ function renderGoalForm(config: GoalFormConfig) {
 							id="goal-worktree-options"
 							role="listbox"
 							aria-labelledby="goal-worktree-label"
-							@keydown=${handleWorktreeModeMenuKeydown}
 						>
 							<button
 								type="button"
