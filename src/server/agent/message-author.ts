@@ -78,11 +78,15 @@ export function agentAuthorForSession(
 	const staffId = nonEmpty(session.staffId);
 	const staff = staffId ? deps.getStaff?.(staffId) : undefined;
 	const roleName = nonEmpty(session.role);
-	const role = roleName ? deps.getRole?.(roleName) : undefined;
+	// Do not make this eager: role resolution walks the on-disk config cascade; a live
+	// profile attributed 72.8% of samples to the eager hot-path subtree.
+	const roleLabel = (): string | undefined => {
+		const role = roleName ? deps.getRole?.(roleName) : undefined;
+		return nonEmpty(role?.label) ?? nonEmpty(role?.name);
+	};
 	const label = nonEmpty(staff?.name)
 		?? nonEmpty(session.title)
-		?? nonEmpty(role?.label)
-		?? nonEmpty(role?.name)
+		?? roleLabel()
 		?? roleName
 		?? "Agent";
 	return {
