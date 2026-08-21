@@ -128,9 +128,7 @@ export class NotificationDeliveryStore {
 		return Array.from(this.rows.values()).some((row) =>
 			row.rootCorrelationId === rootCorrelationId
 			&& row.staffId === staffId
-			&& row.triggerId === triggerId
-			&& row.state !== "failed"
-			&& row.state !== "cancelled");
+			&& row.triggerId === triggerId);
 	}
 
 	/** Claim pending or expired-leased rows and durably publish every lease. */

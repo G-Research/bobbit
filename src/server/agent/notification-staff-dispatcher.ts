@@ -82,7 +82,8 @@ export function validateStaffNotification(value: unknown, projectId: string): Ho
 
 function transientDeliveryError(error: unknown): boolean {
 	const code = (error as { code?: unknown } | null)?.code;
-	return code === "EAGAIN" || code === "EBUSY" || code === "ETIMEDOUT" || code === "UNAVAILABLE";
+	return code === "EAGAIN" || code === "EBUSY" || code === "ETIMEDOUT" || code === "UNAVAILABLE"
+		|| code === "EIO" || code === "ENOSPC" || code === "EMFILE" || code === "ENFILE";
 }
 
 function currentNotificationTrigger(staff: PersistedStaff | undefined, triggerId: string): NotificationStaffTrigger | undefined {
@@ -178,6 +179,11 @@ export class NotificationStaffDispatcher {
 		}
 		const rootCorrelationId = controls.rootCorrelationId ?? event.correlationId ?? event.id;
 		const causationDepth = controls.causationDepth ?? 0;
+		if (typeof rootCorrelationId !== "string" || rootCorrelationId.length === 0 || rootCorrelationId.length > 256
+			|| !Number.isSafeInteger(causationDepth) || causationDepth < 0) {
+			this.diagnostic({ code: "INVALID_DELIVERY_CONTROLS", projectId: event.projectId, notificationName: event.name });
+			return 0;
+		}
 		let inserted = 0;
 		for (const staff of this.staffManager.listStaff(event.projectId)) {
 			if (staff.projectId !== event.projectId || staff.state !== "active") continue;
@@ -204,7 +210,11 @@ export class NotificationStaffDispatcher {
 					createdAt: now,
 					updatedAt: now,
 				};
-				if (store.insertPending(row).inserted) inserted++;
+				try {
+					if (store.insertPending(row).inserted) inserted++;
+				} catch {
+					this.diagnostic({ code: "OUTBOX_INSERT_FAILED", projectId: event.projectId, notificationName: event.name, staffId: staff.id, triggerId: trigger.id, deliveryId });
+				}
 			}
 		}
 		this.queueDrain();
