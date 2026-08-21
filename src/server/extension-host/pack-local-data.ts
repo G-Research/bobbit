@@ -22,6 +22,9 @@ export interface PackLocalDataContributionRegistry {
 	list(projectId: string | undefined): PackContributions[];
 }
 
+/** Live view of every Marketplace directory whose children uninstall may remove. */
+export type ManagedMarketplaceRootsProvider = () => readonly string[];
+
 export type PackLocalDataErrorCode =
 	| "project_not_found"
 	| "pack_not_active"
@@ -67,6 +70,7 @@ export class PackLocalDataResolver {
 	constructor(
 		private readonly projects: PackLocalDataProjectRegistry,
 		private readonly contributions: PackLocalDataContributionRegistry,
+		private readonly managedMarketplaceRoots: ManagedMarketplaceRootsProvider = () => [],
 	) {}
 
 	resolveHostDirectory(projectId: string, packId: string): string {
@@ -129,6 +133,14 @@ export class PackLocalDataResolver {
 			throw new PackLocalDataError("invalid_project_root", "Registered project root is unavailable", { cause });
 		}
 
+		// Marketplace uninstall recursively removes an installed pack directory. A
+		// registered project may be an ancestor of Headquarters, the user's home,
+		// or another registered project, so the manifest-only relative-prefix guard
+		// cannot see every managed pack tree. Reject the fully resolved candidate
+		// against the live roots before creating even its first component.
+		const candidate = path.resolve(rootReal, ...normalized.split("/"));
+		this.assertOutsideManagedMarketplaceRoots(candidate);
+
 		let current = rootReal;
 		for (const component of normalized.split("/")) {
 			const candidate = path.join(current, component);
@@ -171,6 +183,32 @@ export class PackLocalDataResolver {
 		return current;
 	}
 
+	private assertOutsideManagedMarketplaceRoots(candidate: string): void {
+		let managedRoots: readonly string[];
+		try {
+			managedRoots = this.managedMarketplaceRoots();
+		} catch (cause) {
+			throw new PackLocalDataError("filesystem_error", "Could not enumerate managed Marketplace roots", { cause });
+		}
+
+		const candidateVariants = absolutePathVariants(candidate);
+		for (const managedRoot of managedRoots) {
+			let rootVariants: string[];
+			try {
+				rootVariants = absolutePathVariants(managedRoot);
+			} catch (cause) {
+				if (cause instanceof PackLocalDataError) throw cause;
+				throw new PackLocalDataError("filesystem_error", "Could not inspect a managed Marketplace root", { cause });
+			}
+			if (rootVariants.some(root => candidateVariants.some(variant => isEqualOrDescendant(root, variant)))) {
+				throw new PackLocalDataError(
+					"unsafe_path",
+					"Pack local-data directory overlaps a Bobbit-managed Marketplace root",
+				);
+			}
+		}
+	}
+
 	private lstat(candidate: string): fs.Stats | undefined {
 		try {
 			return fs.lstatSync(candidate);
@@ -179,6 +217,38 @@ export class PackLocalDataResolver {
 			throw new PackLocalDataError("filesystem_error", "Could not inspect pack local-data directory", { cause });
 		}
 	}
+}
+
+/** Native lexical spelling plus its canonical spelling when the path exists. */
+function absolutePathVariants(value: string): string[] {
+	const absolute = path.resolve(value);
+	const variants = [absolute];
+	try {
+		const real = fs.realpathSync(absolute);
+		if (!sameNativePath(absolute, real)) variants.push(real);
+	} catch (cause: any) {
+		if (cause?.code !== "ENOENT" && cause?.code !== "ENOTDIR") {
+			throw new PackLocalDataError("filesystem_error", "Could not canonicalize a managed Marketplace path", { cause });
+		}
+	}
+	return variants;
+}
+
+function isEqualOrDescendant(root: string, candidate: string): boolean {
+	const rootKey = nativePathKey(root);
+	const candidateKey = nativePathKey(candidate);
+	if (candidateKey === rootKey) return true;
+	const prefix = rootKey.endsWith(path.sep) ? rootKey : `${rootKey}${path.sep}`;
+	return candidateKey.startsWith(prefix);
+}
+
+function nativePathKey(value: string): string {
+	const normalized = path.normalize(path.resolve(value));
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function sameNativePath(left: string, right: string): boolean {
+	return nativePathKey(left) === nativePathKey(right);
 }
 
 function sameWindowsPath(left: string, right: string): boolean {

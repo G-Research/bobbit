@@ -702,7 +702,7 @@ import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, typ
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
-import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
@@ -2990,7 +2990,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
-	const packLocalDataResolver = new PackLocalDataResolver(projectRegistry, packContributionRegistry);
+	const packLocalDataResolver = new PackLocalDataResolver(
+		projectRegistry,
+		packContributionRegistry,
+		() => [
+			scopePaths("server", headquartersDir()).marketPacksRoot,
+			scopePaths("global-user", os.homedir()).marketPacksRoot,
+			...projectRegistry.list().map(project => scopePaths("project", project.rootPath).marketPacksRoot),
+		],
+	);
 	const resolveDeclaredPackLocalData = (projectId: string | undefined, packId: string): string | undefined => {
 		if (!projectId || !packId || !packContributionRegistry.getPack(projectId, packId)?.localData) return undefined;
 		return packLocalDataResolver.resolveHostDirectory(projectId, packId);
