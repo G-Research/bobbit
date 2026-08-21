@@ -127,7 +127,7 @@ function runtimeEnvironment(gateway: any, sessionId: string): Record<string, str
 	return gateway.sessionManager.getSession(sessionId)?.rpcClient?.options?.env ?? {};
 }
 
-async function installAndEnable(projectId?: string): Promise<void> {
+async function installFixture(projectId?: string): Promise<void> {
 	const source = await apiFetch("/api/marketplace/sources", {
 		method: "POST",
 		body: JSON.stringify({ url: SOURCE }),
@@ -149,18 +149,26 @@ async function installAndEnable(projectId?: string): Promise<void> {
 	});
 	const installText = await install.text();
 	expect(install.status, installText).toBe(201);
+}
 
-	const enable = await apiFetch("/api/marketplace/pack-activation", {
+async function setFixtureActivation(disabled: Record<string, unknown>, projectId?: string): Promise<any> {
+	const response = await apiFetch("/api/marketplace/pack-activation", {
 		method: "PUT",
 		body: JSON.stringify({
 			scope: projectId ? "project" : "server",
 			packName: PACK,
 			...(projectId ? { projectId } : {}),
-			disabled: { enabled: true },
+			disabled,
 		}),
 	});
-	const enableText = await enable.text();
-	expect(enable.status, enableText).toBe(200);
+	const text = await response.text();
+	expect(response.status, text).toBe(200);
+	return JSON.parse(text);
+}
+
+async function installAndEnable(projectId?: string): Promise<void> {
+	await installFixture(projectId);
+	await setFixtureActivation({ enabled: true }, projectId);
 }
 
 async function uninstall(projectId?: string): Promise<Response> {
@@ -170,12 +178,21 @@ async function uninstall(projectId?: string): Promise<Response> {
 	});
 }
 
+async function piToolIsListed(): Promise<boolean> {
+	const response = await apiFetch("/api/tools");
+	expect(response.status).toBe(200);
+	return ((await response.json()).tools ?? []).some((tool: any) => tool.name === PI_TOOL);
+}
+
 async function waitForPiTool(): Promise<void> {
-	await expect.poll(async () => {
-		const response = await apiFetch("/api/tools");
-		expect(response.status).toBe(200);
-		return ((await response.json()).tools ?? []).some((tool: any) => tool.name === PI_TOOL);
-	}, { timeout: 15_000, message: `${PI_TOOL} should be discovered before session creation` }).toBe(true);
+	await expect.poll(piToolIsListed, {
+		timeout: 15_000,
+		message: `${PI_TOOL} should be discovered before session creation`,
+	}).toBe(true);
+}
+
+function hasFixturePiExtension(gateway: any, sessionId: string): boolean {
+	return extensionArgs(gateway, sessionId).some(extension => extension.endsWith("/pack-local-data/pi-extensions/marker/extension.ts"));
 }
 
 async function runPiTool(sessionId: string, input: Record<string, unknown>, toolName = PI_TOOL): Promise<any> {
@@ -241,6 +258,7 @@ test.afterEach(async () => {
 			body: JSON.stringify({ scope: fixture.scope, packName: fixture.packName, ...(fixture.projectId ? { projectId: fixture.projectId } : {}) }),
 		}).catch(() => {});
 	}
+	if (sourceId) await setFixtureActivation({}).catch(() => {});
 	await uninstall().catch(() => {});
 	if (sourceId) {
 		await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
@@ -257,6 +275,62 @@ test.afterEach(async () => {
 			fs.rmSync(path.join(project.rootPath, directory), { recursive: true, force: true });
 		}
 	}
+});
+
+test("default-disabled installed local data stays inert until enabled and preserves data after the override is cleared", async ({ gateway }) => {
+	const project = await defaultProject();
+	const declaredDirectory = path.join(project.rootPath, ".pack-local-data-fixture");
+	fs.rmSync(declaredDirectory, { recursive: true, force: true });
+
+	await installFixture();
+
+	const installedResponse = await apiFetch(`/api/marketplace/installed?projectId=${encodeURIComponent(project.id)}`);
+	expect(installedResponse.status).toBe(200);
+	const installedRows = (await installedResponse.json()).installed ?? [];
+	const rawInstalledRow = installedRows.find((row: any) => row.packName === PACK && row.scope === "server" && row.builtin !== true);
+	expect(rawInstalledRow, "default-disabled installed packs must remain visible in the raw Marketplace listing").toBeTruthy();
+	expect(rawInstalledRow.manifest.defaultDisabled).toBe(true);
+
+	expect(await packIsContributed()).toBe(false);
+	expect(await piToolIsListed()).toBe(false);
+	const disabledSession = await createSession({ projectId: project.id });
+	sessionIds.push(disabledSession);
+	expect(runtimeEnvironment(gateway, disabledSession).BOBBIT_PACK_LOCAL_DATA_JSON).toBeUndefined();
+	expect(hasFixturePiExtension(gateway, disabledSession)).toBe(false);
+	expect(fs.existsSync(declaredDirectory), "default-OFF session activation must not materialize local data").toBe(false);
+
+	const enabled = await setFixtureActivation({ enabled: true });
+	expect(enabled.disabled.enabled).toBe(true);
+	await expect.poll(() => packIsContributed(), { timeout: 15_000 }).toBe(true);
+	await waitForPiTool();
+
+	const enabledSession = await createSession({ projectId: project.id });
+	sessionIds.push(enabledSession);
+	const expectedDirectory = fs.realpathSync(declaredDirectory);
+	expect(JSON.parse(runtimeEnvironment(gateway, enabledSession).BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({
+		[PACK]: expectedDirectory,
+	});
+	expect(hasFixturePiExtension(gateway, enabledSession)).toBe(true);
+	const markerPath = path.join(expectedDirectory, "default-disabled-marker.txt");
+	const markerContent = "default-disabled lifecycle marker: π\n";
+	const writeResult = await runPiTool(enabledSession, {
+		operation: "write",
+		name: path.basename(markerPath),
+		content: markerContent,
+	});
+	expect(writeResult).toMatchObject({ directory: expectedDirectory, content: markerContent });
+	const markerBytes = fs.readFileSync(markerPath);
+
+	const cleared = await setFixtureActivation({});
+	expect(cleared.disabled.enabled).toBeUndefined();
+	await expect.poll(() => packIsContributed(), { timeout: 15_000 }).toBe(false);
+	await expect.poll(piToolIsListed, { timeout: 15_000 }).toBe(false);
+
+	const freshDisabledSession = await createSession({ projectId: project.id });
+	sessionIds.push(freshDisabledSession);
+	expect(runtimeEnvironment(gateway, freshDisabledSession).BOBBIT_PACK_LOCAL_DATA_JSON).toBeUndefined();
+	expect(hasFixturePiExtension(gateway, freshDisabledSession)).toBe(false);
+	expect(fs.readFileSync(markerPath)).toEqual(markerBytes);
 });
 
 test("ordinary and Pi runtime access share the canonical project directory and preserve it", async ({ gateway }) => {
