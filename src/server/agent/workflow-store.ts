@@ -457,10 +457,15 @@ export class InlineWorkflowStore {
 	}
 
 	getAll(): Workflow[] {
+		return this.getAllIncludingHidden().filter(workflow => !workflow.hidden);
+	}
+
+	/** Read-only exact-lookup snapshot used by canonical creation validation. */
+	getAllIncludingHidden(): Workflow[] {
 		const local = this.readLocal();
 		const merged = new Map(this.builtins);
 		for (const [k, v] of local) merged.set(k, v);
-		return [...merged.values()].filter(w => !w.hidden);
+		return [...merged.values()];
 	}
 
 	getAllLocal(): Workflow[] {

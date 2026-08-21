@@ -22,8 +22,6 @@ export interface GoalProposalSeedSession {
 export interface PrepareGoalProposalSeedDeps {
 	/** The live session only. Persisted sessions must not gain parent injection. */
 	session?: GoalProposalSeedSession;
-	/** Workflows resolved from the proposal's target project. */
-	workflows: Workflow[];
 	getGoal(id: string): PersistedGoal | undefined;
 	getPreference(key: string): unknown;
 }
@@ -35,8 +33,9 @@ export type PrepareGoalProposalSeedResult =
 /**
  * Prepare the goal-specific portion of the proposal seed route without owning
  * transport, session-manager, or project-context state. The HTTP route resolves
- * and stamps the target project first, then delegates parent injection and
- * workflow validation here.
+ * and stamps the target project first, then delegates parent injection here.
+ * Complete workflow/options validation belongs exclusively to
+ * `validateGoalCandidate`, including exact hidden/store-only workflow lookup.
  */
 export function prepareGoalProposalSeed(
 	args: Record<string, unknown>,
@@ -64,10 +63,7 @@ export function prepareGoalProposalSeed(
 		}
 	}
 
-	const validationError = validateGoalProposalWorkflow(enrichedArgs, deps.workflows);
-	return validationError
-		? { ok: false, status: 400, body: validationError }
-		: { ok: true, status: 200, args: enrichedArgs };
+	return { ok: true, status: 200, args: enrichedArgs };
 }
 
 /**

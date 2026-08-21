@@ -280,6 +280,21 @@ export class ConfigCascade {
 			.map(item => ({ item, origin: "project" as const }));
 	}
 
+	/**
+	 * Passive workflow resolution for validation and other read-only probes.
+	 * Unlike the UI/API resolver above, this never lazily creates a project
+	 * context. `includeHidden` supports exact creation-time lookup without
+	 * exposing hidden workflows in listings or error guidance.
+	 */
+	resolveWorkflowsReadOnly(projectId?: string, options: { includeHidden?: boolean } = {}): ResolvedItem<Workflow>[] {
+		if (!projectId) return [];
+		const snapshot = this.projectContextManager.readConfigSnapshot(projectId);
+		if (!snapshot) return [];
+		return snapshot.workflows
+			.filter(workflow => options.includeHidden || !workflow.hidden)
+			.map(item => ({ item, origin: "project" as const }));
+	}
+
 	// ── Tools ────────────────────────────────────────────────────
 
 	resolveTools(projectId?: string): ResolvedItem<ToolInfo>[] {

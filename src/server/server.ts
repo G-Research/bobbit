@@ -4418,16 +4418,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
-	const existingGoalCandidateProjectContext = (projectId: string): ProjectContext | undefined => {
-		for (const ctx of projectContextManager.all()) {
-			if (ctx.project.id === projectId) return ctx;
-		}
-		return undefined;
-	};
 	const buildGoalCandidateDefaultWorkflows = (projectId: string): Workflow[] => {
 		const project = projectRegistry.get(projectId);
 		const projectName = project?.name || "project";
-		const components = existingGoalCandidateProjectContext(projectId)?.projectConfigStore.getComponents() ?? [];
+		const components = projectContextManager.readConfigSnapshot(projectId)?.components ?? [];
 		const targetComponent = components.find(component =>
 			component.name === projectName && Object.keys(component.commands ?? {}).length > 0
 		) ?? components.find(component => Object.keys(component.commands ?? {}).length > 0)
@@ -4443,17 +4437,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const canonicalGoalCandidateDeps: GoalCandidateDeps = {
 		registry: projectRegistry,
 		projectContextManager,
-		workflows: (projectId) => {
-			const cascade = configCascade.resolveWorkflows(projectId).map(entry => entry.item);
-			return cascade.length > 0 ? cascade : existingGoalCandidateProjectContext(projectId)?.workflowStore.getAll() ?? [];
-		},
-		workflow: (projectId, workflowId) => {
-			const cascade = configCascade.resolveWorkflows(projectId);
-			return cascade.find(entry => entry.item.id === workflowId)?.item
-				?? existingGoalCandidateProjectContext(projectId)?.workflowStore.get(workflowId);
-		},
+		workflows: (projectId) => configCascade.resolveWorkflowsReadOnly(projectId).map(entry => entry.item),
+		workflow: (projectId, workflowId) => configCascade
+			.resolveWorkflowsReadOnly(projectId, { includeHidden: true })
+			.find(entry => entry.item.id === workflowId)?.item,
 		defaultWorkflows: buildGoalCandidateDefaultWorkflows,
-		components: (projectId) => existingGoalCandidateProjectContext(projectId)?.projectConfigStore.getComponents() ?? [],
+		components: (projectId) => projectContextManager.readConfigSnapshot(projectId)?.components ?? [],
 		getGoal: (goalId) => projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId),
 		nestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
 	};
@@ -8688,33 +8677,31 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
 		try {
-			const explicitWorkflowId = typeof body?.workflowId === "string" && body.workflowId.trim()
-				? body.workflowId.trim()
-				: typeof body?.workflow === "string" && body.workflow.trim()
-					? body.workflow.trim()
-					: undefined;
-			const bodyHasInlineWorkflow = !!body?.workflow && typeof body.workflow === "object";
-			const targetWorkflows = !explicitWorkflowId && !bodyHasInlineWorkflow && typeof body?.projectId === "string"
-				? goalCandidateDeps.workflows(body.projectId)
-				: [];
-			const requestedWorkflowId = explicitWorkflowId ?? targetWorkflows[0]?.id;
-			// This is the mutation boundary shared by every caller of POST /api/goals.
-			// Resolve and validate the whole candidate before sandbox provisioning,
-			// workflow seeding, or any goal/gate/task/worktree mutation.
-			const validation = validateCurrentGoalCandidate({
-				...(body ?? {}),
-				...(requestedWorkflowId ? { workflowId: requestedWorkflowId } : {}),
-			});
-			if (!validation.ok) { writeGoalCandidateError(validation); return; }
-			const candidate = validation.candidate;
-			const title = candidate.title;
-			const cwd = candidate.cwd;
-			const spec = candidate.spec;
-			const workflowId = candidate.workflowId ?? requestedWorkflowId;
-			const metadata = candidate.metadata && Object.keys(candidate.metadata).length > 0 ? candidate.metadata : undefined;
-			const enabledOptionalSteps = candidate.enabledOptionalSteps;
-			const targetProjectId = candidate.projectId;
-			const resolved = { project: candidate.project };
+			const validateRequestCandidate = () => {
+				const explicitWorkflowId = typeof body?.workflowId === "string" && body.workflowId.trim()
+					? body.workflowId.trim()
+					: typeof body?.workflow === "string" && body.workflow.trim()
+						? body.workflow.trim()
+						: undefined;
+				const bodyHasInlineWorkflow = !!body?.workflow && typeof body.workflow === "object";
+				const targetWorkflows = !explicitWorkflowId && !bodyHasInlineWorkflow && typeof body?.projectId === "string"
+					? goalCandidateDeps.workflows(body.projectId)
+					: [];
+				const requestedWorkflowId = explicitWorkflowId ?? targetWorkflows[0]?.id;
+				return {
+					requestedWorkflowId,
+					validation: validateCurrentGoalCandidate({
+						...(body ?? {}),
+						...(requestedWorkflowId ? { workflowId: requestedWorkflowId } : {}),
+					}),
+				};
+			};
+			// Validate before sandbox provisioning so an invalid request cannot
+			// bootstrap project infrastructure or resolve sandbox credentials.
+			let requestValidation = validateRequestCandidate();
+			if (!requestValidation.validation.ok) { writeGoalCandidateError(requestValidation.validation); return; }
+			const initialCandidate = requestValidation.validation.candidate;
+			const targetProjectId = initialCandidate.projectId;
 			const sandboxed = body?.sandboxed === true;
 			const autoStartTeam = body?.autoStartTeam !== false; // default true
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
@@ -8731,6 +8718,20 @@ async function handleApiRoute(
 					return;
 				}
 			}
+			// Sandbox provisioning is awaited and project config can change while it
+			// is in flight. Rebuild and re-run the same canonical candidate now, at
+			// the actual mutation boundary, and consume only this refreshed snapshot.
+			requestValidation = validateRequestCandidate();
+			if (!requestValidation.validation.ok) { writeGoalCandidateError(requestValidation.validation); return; }
+			const candidate = requestValidation.validation.candidate;
+			const requestedWorkflowId = requestValidation.requestedWorkflowId;
+			const title = candidate.title;
+			const cwd = candidate.cwd;
+			const spec = candidate.spec;
+			const workflowId = candidate.workflowId ?? requestedWorkflowId;
+			const metadata = candidate.metadata && Object.keys(candidate.metadata).length > 0 ? candidate.metadata : undefined;
+			const enabledOptionalSteps = candidate.enabledOptionalSteps;
+			const resolved = { project: candidate.project };
 			const targetGoalManager = targetCtx.goalManager;
 			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child).
 			const parentGoalId = candidate.parentGoalId;
@@ -8838,44 +8839,16 @@ async function handleApiRoute(
 					}
 				}
 			}
-			// Cascade: body.workflow (inline snapshot) → workflowId lookup → auto-seed → first match.
+			// The refreshed canonical snapshot is authoritative. No second resolver
+			// may reinterpret its workflow/options between validation and mutation.
 			let resolvedWorkflow: Workflow | undefined = candidate.workflow;
 			let resolvedWorkflowId = candidate.workflowId ?? workflowId;
-			const inlineWorkflow = body?.workflow;
-			if (inlineWorkflow && typeof inlineWorkflow === "object") {
-				resolvedWorkflow = candidate.workflow;
-				resolvedWorkflowId = candidate.workflowId ?? workflowId;
-			} else {
-				// Layer 1: cascade lookup (only when workflowId given).
-				if (workflowId) {
-					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-					// Layer 1b: cascade miss — fall through to project store directly.
-					if (!resolvedWorkflow) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					}
-				}
-				// Layer 2: the canonical validator resolved this selection against an
-				// in-memory default set. Persist that exact set only after validation,
-				// and only if the live store is still empty.
-				if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
-					const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
-					console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
-					const persistedWorkflowId = workflowId ?? defaults[0]?.id;
-					resolvedWorkflow = persistedWorkflowId ? targetCtx.workflowStore.get(persistedWorkflowId) : undefined;
-					resolvedWorkflowId = resolvedWorkflow?.id || resolvedWorkflowId;
-				}
-				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
-				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
-					const available = targetCtx.workflowStore.getAll().map(w => w.id);
-					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
-						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
-						code: "WORKFLOW_NOT_FOUND",
-						workflowId,
-						available,
-					});
-					return;
-				}
+			if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
+				const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
+				console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
+				const persistedWorkflowId = workflowId ?? defaults[0]?.id;
+				resolvedWorkflow = persistedWorkflowId ? targetCtx.workflowStore.get(persistedWorkflowId) : undefined;
+				resolvedWorkflowId = resolvedWorkflow?.id || resolvedWorkflowId;
 			}
 			// Resolve per-goal subgoal-nesting overrides.
 			//
@@ -16308,22 +16281,13 @@ async function handleApiRoute(
 				}
 				enrichedArgs = { ...enrichedArgs, ...(targetProjectId ? { projectId: targetProjectId } : {}) };
 			}
-			// Resolve workflow membership from the stamped TARGET project, then run
-			// parent injection and validation through the state-independent core.
+			// Enrich the serialization candidate first, then let the canonical
+			// validator exclusively own workflow/options and every other creation
+			// contract decision before draft persistence.
 			if (proposalType === "goal") {
 				const liveSession = sessionManager.getSession(sessionId);
-				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined)
-					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
-				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
-				if (projectId) {
-					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
-					if (workflows.length === 0) workflows = existingProjectContext(projectId)?.workflowStore.getAll() ?? [];
-				}
 				const prepared = prepareGoalProposalSeed(enrichedArgs, {
 					session: liveSession,
-					workflows,
 					getGoal: (id) => getGoalAcrossProjects(id),
 					getPreference: (key) => preferencesStore.get(key),
 				});
