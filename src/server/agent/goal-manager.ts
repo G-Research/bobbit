@@ -440,7 +440,10 @@ export class GoalManager {
 			} : {}),
 			branch,
 			repoPath,
-			team,
+			// Explicit false is the legacy standalone shape: omit the durable team
+			// capability before the authoritative create rather than publishing a
+			// transient true value and silently rewriting the stored record later.
+			...(team ? { team: true } : {}),
 			setupStatus,
 			sandboxed: adoptedWorkspace ? adoptedWorkspace.sandboxed : sandboxed,
 		};

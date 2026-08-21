@@ -9221,17 +9221,11 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
-				...(body?.team !== false ? { team: true } : {}),
+				// `team: false` historically means "standalone until manually
+				// started". Give createGoal the final shape so goalCreated is the only
+				// fact for this create and no existing record is silently rewritten.
+				team: body?.team !== false,
 			});
-			// `team: false` historically meant "do not auto-enable yet", not a
-			// durable prohibition on a later manual start. GoalManager defaults new
-			// goals to team mode, so remove that default from this explicit legacy
-			// shape while retaining `team: true` as archive-retry evidence for goals
-			// that were actually enabled at creation.
-			if (body?.team === false) {
-				delete goal.team;
-				targetCtx.goalStore.put(goal);
-			}
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
@@ -13892,10 +13886,9 @@ async function handleApiRoute(
 			// preserve team worktree/branch evidence after TeamStore is reconciled.
 			if (startGoal.team === undefined) {
 				const startContext = projectContextManager.getContextForGoal(goalId);
-				if (!startContext?.goalStore.update(goalId, { team: true })) {
+				if (!startContext || !(await startContext.goalStore.updateStrict(goalId, { team: true }))) {
 					throw new Error(`Unable to enable team mode for goal ${goalId}`);
 				}
-				await startContext.goalStore.flush();
 			}
 			// REST retries are idempotent even after the first paused request has
 			// resumed the goal. Resume authority remains limited to the paused
