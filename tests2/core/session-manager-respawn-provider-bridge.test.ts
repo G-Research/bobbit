@@ -58,7 +58,7 @@ function extensionPaths(args: string[]): string[] {
 }
 
 describe("initial tool hook transport snapshot", () => {
-	it("injects the host-owned protected beforeToolCall decision during setup", () => {
+	it("injects the host-owned protected tool-hook decisions during setup", () => {
 		const seen: Array<{ name: string; projectId?: string; goalId?: string }> = [];
 		const plan: any = {
 			id: "sess-initial-protected",
@@ -86,7 +86,11 @@ describe("initial tool hook transport snapshot", () => {
 
 		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_HOOKS_ENABLED, "1");
 		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "1");
-		assert.deepEqual(seen, [{ name: "beforeToolCall", projectId: "proj-initial", goalId: "goal-initial" }]);
+		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED, "1");
+		assert.deepEqual(seen, [
+			{ name: "beforeToolCall", projectId: "proj-initial", goalId: "goal-initial" },
+			{ name: "afterToolResult", projectId: "proj-initial", goalId: "goal-initial" },
+		]);
 	});
 });
 
@@ -140,7 +144,7 @@ describe("buildToolActivationArgs provider-bridge re-attachment (respawn/restore
 		);
 	});
 
-	it("refreshes the authoritative protected beforeToolCall transport snapshot on respawn", () => {
+	it("refreshes the authoritative protected tool-hook transport snapshots on respawn", () => {
 		const manager = makeManager();
 		let failClosed = true;
 		const seen: Array<{ name: string; projectId?: string; goalId?: string }> = [];
@@ -155,12 +159,16 @@ describe("buildToolActivationArgs provider-bridge re-attachment (respawn/restore
 
 		const protectedActivation = manager.buildToolActivationArgs("sess-protected", undefined, undefined, tmpRoot, "proj-protected", "goal-protected");
 		assert.equal(protectedActivation.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "1");
+		assert.equal(protectedActivation.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED, "1");
 		failClosed = false;
 		const refreshedActivation = manager.buildToolActivationArgs("sess-protected", undefined, undefined, tmpRoot, "proj-protected", "goal-protected");
 		assert.equal(refreshedActivation.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "0");
+		assert.equal(refreshedActivation.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED, "0");
 		assert.deepEqual(seen, [
 			{ name: "beforeToolCall", projectId: "proj-protected", goalId: "goal-protected" },
+			{ name: "afterToolResult", projectId: "proj-protected", goalId: "goal-protected" },
 			{ name: "beforeToolCall", projectId: "proj-protected", goalId: "goal-protected" },
+			{ name: "afterToolResult", projectId: "proj-protected", goalId: "goal-protected" },
 		]);
 	});
 
