@@ -15,7 +15,7 @@
  *   - build:packs  — market-packs/** sources + scripts/build-market-packs.mjs
  *   - build:server — src/** (tsconfig.server.json includes src/server + src/shared),
  *                    defaults/** (copy-defaults.mjs), market-packs/** again
- *                    (copy-builtin-packs.mjs), tsconfig.server.json
+ *                    (copy-builtin-packs.mjs), build-server.mjs, tsconfig.server.json
  *   - build:ui     — vite build: index.html, src/**, public/**, vite.config.ts,
  *                    tsconfig.json
  *   - shared       — package.json (the build scripts themselves),
@@ -68,6 +68,7 @@ const INPUT_FILES = [
 	"vite.config.ts",
 	"tsconfig.json",
 	"tsconfig.server.json",
+	"scripts/build-server.mjs",
 	"scripts/copy-defaults.mjs",
 	"scripts/copy-builtin-packs.mjs",
 	"scripts/build-market-packs.mjs",

@@ -50,6 +50,10 @@ import {
 } from "./bounded-async-work.js";
 import { isHeadquartersProject } from "./project-registry.js";
 import { isSessionSelectableModelString } from "./google-code-assist.js";
+import {
+	FileTeamRecoveryCheckpointStore,
+	type TeamRecoveryCheckpointStore,
+} from "./team-recovery-checkpoint.js";
 
 const execFile = promisify(execFileCb);
 
@@ -119,13 +123,14 @@ function createRealTeamRecoverySidecars(recoveryFs: RecoveryFs): TeamRecoverySid
 		read: (jsonlPath) => readSessionSidecarAsync(jsonlPath, recoveryFs),
 		async write(jsonlPath, sidecar) {
 			const target = sidecarPathFor(jsonlPath);
+			await fs.promises.mkdir(path.dirname(target), { recursive: true });
+			const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
 			try {
-				await fs.promises.mkdir(path.dirname(target), { recursive: true });
-				const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-				await fs.promises.writeFile(tmp, JSON.stringify(sidecar, null, 2), { encoding: "utf-8" });
+				await fs.promises.writeFile(tmp, JSON.stringify(sidecar, null, 2), { encoding: "utf-8", flag: "wx" });
 				await fs.promises.rename(tmp, target);
-			} catch (err) {
-				console.warn(`[session-sidecar] Failed to write sidecar for ${jsonlPath}: ${err}`);
+			} catch (error) {
+				try { await fs.promises.unlink(tmp); } catch { /* best-effort temporary cleanup */ }
+				throw error;
 			}
 		},
 	};
@@ -474,6 +479,8 @@ export interface TeamManagerConfig {
 	recoveryFs?: RecoveryFs;
 	/** Injectable asynchronous sidecar operations for boot recovery/backfill. */
 	recoverySidecars?: TeamRecoverySidecars;
+	/** Injectable durable boundary for the one-time historical forensic sweep. */
+	recoveryCheckpoints?: TeamRecoveryCheckpointStore;
 	/**
 	 * OrchestrationCore — the goal-agnostic child-agent lifecycle core
 	 * (docs/design/orchestration-core.md). The team-manager is the GOAL ADAPTER:
@@ -571,6 +578,7 @@ export class TeamManager {
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
+	private readonly recoveryCheckpoints: TeamRecoveryCheckpointStore;
 	private readonly restorePromise: Promise<void>;
 	private restoreCompleted = false;
 	private startStuckSweepAfterRestore = true;
@@ -582,6 +590,7 @@ export class TeamManager {
 		this.commandRunner = config.commandRunner ?? realCommandRunner;
 		this.recoveryFs = config.recoveryFs ?? realRecoveryFs;
 		this.recoverySidecars = config.recoverySidecars ?? createRealTeamRecoverySidecars(this.recoveryFs);
+		this.recoveryCheckpoints = config.recoveryCheckpoints ?? new FileTeamRecoveryCheckpointStore();
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
@@ -849,12 +858,39 @@ export class TeamManager {
 	 * are restored). Event subscriptions deferred to resubscribeTeamEvents().
 	 */
 	private async restoreTeams(): Promise<void> {
-		// Promotion provenance only exists in project-context stores. Keep the
-		// non-PCM restore path synchronous through persisted entry hydration: local
-		// callers have always been able to inspect restored teams immediately after
-		// construction, and awaiting a no-op promise would defer that hydration.
+		const projectContexts = this.config.projectContextManager
+			? [...this.config.projectContextManager.all()]
+			: [];
+
+		// Promotion provenance only exists in project-context stores. Reconcile it
+		// before ordinary orphan recovery so an adopted source is durably attached
+		// before the live session restore set is dispatched. Keep the non-PCM path
+		// synchronous through persisted entry hydration as it was before promotion.
 		if (this.config.projectContextManager) {
 			await this.reconcileAdoptedGoalReservations();
+		}
+
+		const forensicContexts = new Set<(typeof projectContexts)[number]>();
+		const failedForensicContexts = new Set<(typeof projectContexts)[number]>();
+		for (const ctx of projectContexts) {
+			// Some structural test doubles predate ProjectContext.stateDir. Treat
+			// those as uncheckpointed so their established recovery coverage remains
+			// exhaustive without letting production silently skip a project.
+			if (typeof ctx.stateDir !== "string" || !await this.recoveryCheckpoints.isComplete(ctx.stateDir)) {
+				forensicContexts.add(ctx);
+			}
+		}
+		// Durably revoke any prior completion before a recovery pass is allowed to
+		// inspect or repair historical transcript state. If publication fails, defer
+		// that project's forensic repair while routine every-boot checks still run.
+		for (const ctx of forensicContexts) {
+			if (typeof ctx.stateDir !== "string") continue;
+			try {
+				await this.recoveryCheckpoints.begin(ctx.stateDir);
+			} catch (err) {
+				failedForensicContexts.add(ctx);
+				console.warn(`[team-manager] Failed to begin forensic recovery checkpoint for ${ctx.stateDir}:`, err);
+			}
 		}
 
 		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
@@ -874,7 +910,7 @@ export class TeamManager {
 		// happen and the cleanup is a no-op.
 		let droppedOrphans = 0;
 		if (this.config.projectContextManager) {
-			for (const ctx of this.config.projectContextManager.all()) {
+			for (const ctx of projectContexts) {
 				for (const entry of ctx.teamStore.getAll()) {
 					const goal = ctx.goalStore.get(entry.goalId);
 					if (!goal) {
@@ -927,11 +963,30 @@ export class TeamManager {
 			// unknown leak sources.
 			let recovered = 0;
 			let droppedDanglingLead = 0;
-			for (const ctx of this.config.projectContextManager.all()) {
+			for (const ctx of projectContexts) {
 				const orphans = findOrphanTeamEntries(
 					ctx.teamStore.getAll(),
 					(id) => ctx.sessionStore.get(id) !== undefined,
 				);
+				// A concrete dangling team pointer is new damage, not historical
+				// archaeology. Recover it every boot and re-open the broader project
+				// sweep so sibling worker records can be repaired in the same pass.
+				if (orphans.length > 0 && !forensicContexts.has(ctx)) {
+					if (typeof ctx.stateDir === "string") {
+						try {
+							// Invalidate a prior completion before the targeted repair. If
+							// the process exits mid-pass, the next boot retries the sweep.
+							await this.recoveryCheckpoints.begin(ctx.stateDir);
+							forensicContexts.add(ctx);
+						} catch (err) {
+							failedForensicContexts.add(ctx);
+							console.warn(`[team-manager] Failed to begin forensic recovery checkpoint for ${ctx.stateDir}:`, err);
+						}
+					} else {
+						forensicContexts.add(ctx);
+					}
+				}
+				if (failedForensicContexts.has(ctx)) continue;
 				for (const goalId of orphans) {
 					const entry = ctx.teamStore.get(goalId);
 					const tlid = entry?.teamLeadSessionId ?? "<none>";
@@ -992,6 +1047,7 @@ export class TeamManager {
 							);
 						}
 					} catch (err) {
+						failedForensicContexts.add(ctx);
 						console.error(
 							`[team-manager] Boot recovery/cleanup failed for goalId=${goalId}:`,
 							err,
@@ -1025,7 +1081,8 @@ export class TeamManager {
 			// the goal again, with the full .jsonl history available via
 			// continue-archived if the user wants to read it.
 			let fullyOrphanRecovered = 0;
-			for (const ctx of this.config.projectContextManager.all()) {
+			for (const ctx of forensicContexts) {
+				if (failedForensicContexts.has(ctx)) continue;
 				for (const goal of ctx.goalStore.getAll()) {
 					if (!goal.team) continue;
 					if (!goal.worktreePath) continue;
@@ -1077,6 +1134,7 @@ export class TeamManager {
 							);
 						}
 					} catch (err) {
+						failedForensicContexts.add(ctx);
 						console.error(
 							`[team-manager] Fully-orphan recovery failed for goalId=${goal.id}:`,
 							err,
@@ -1097,7 +1155,7 @@ export class TeamManager {
 			// Idempotent: the predicate detects the OLD shape only, so after
 			// rename the predicate stays false on subsequent boots.
 			let titlesUpgraded = 0;
-			for (const ctx of this.config.projectContextManager.all()) {
+			for (const ctx of projectContexts) {
 				for (const session of ctx.sessionStore.getAll()) {
 					if (session.role !== "team-lead" || !session.teamGoalId) continue;
 					const goal = ctx.goalStore.get(session.teamGoalId);
@@ -1140,7 +1198,8 @@ export class TeamManager {
 			// Idempotent: each agent worktree path is uniquely keyed; we
 			// skip any agent whose worktreePath already has a session record.
 			let agentsRecovered = 0;
-			for (const ctx of this.config.projectContextManager.all()) {
+			for (const ctx of forensicContexts) {
+				if (failedForensicContexts.has(ctx)) continue;
 				for (const goal of ctx.goalStore.getAll()) {
 					if (!goal.team || !goal.worktreePath) continue;
 					// Find the team-lead session for this goal (recovered or
@@ -1185,6 +1244,7 @@ export class TeamManager {
 							existingAgentWorktrees.add(agent.agentWorktreePath);
 							agentsRecovered++;
 						} catch (err) {
+							failedForensicContexts.add(ctx);
 							console.error(`[team-manager] Agent recovery failed for ${agent.agentWorktreePath}:`, err);
 						}
 					}
@@ -1210,7 +1270,8 @@ export class TeamManager {
 			// rolled identity from THIS boot's recovery passes gets a sidecar
 			// before any other race could disturb the record again.
 			let sidecarsBackfilled = 0;
-			for (const ctx of this.config.projectContextManager.all()) {
+			for (const ctx of forensicContexts) {
+				if (failedForensicContexts.has(ctx)) continue;
 				const allSessions = ctx.sessionStore.getAll();
 				const ordered = [
 					...allSessions.filter(s => typeof s.title === "string" && s.title.includes("(recovered)")),
@@ -1229,12 +1290,37 @@ export class TeamManager {
 						await this.recoverySidecars.write(s.agentSessionFile, sidecar);
 						sidecarsBackfilled++;
 					} catch (err) {
+						failedForensicContexts.add(ctx);
 						console.warn(`[team-manager] Sidecar backfill failed for session ${s.id}:`, err);
 					}
 				}
 			}
 			if (sidecarsBackfilled > 0) {
 				console.log(`[team-manager] Boot backfill: wrote ${sidecarsBackfilled} session sidecar(s) for legacy sessions.`);
+			}
+
+			// SessionStore.put() publishes asynchronously. The forensic checkpoint may
+			// become authoritative only after every reconstructed row for the project
+			// has crossed the store's acknowledged atomic persistence barrier.
+			for (const ctx of forensicContexts) {
+				if (typeof ctx.stateDir !== "string" || failedForensicContexts.has(ctx)) continue;
+				try {
+					await ctx.sessionStore.flushAsync();
+				} catch (err) {
+					failedForensicContexts.add(ctx);
+					console.warn(`[team-manager] Failed to publish recovered sessions for ${ctx.stateDir}:`, err);
+				}
+			}
+			for (const ctx of forensicContexts) {
+				if (typeof ctx.stateDir !== "string" || failedForensicContexts.has(ctx)) continue;
+				try {
+					await this.recoveryCheckpoints.complete(ctx.stateDir);
+				} catch (err) {
+					console.warn(`[team-manager] Failed to complete forensic recovery checkpoint for ${ctx.stateDir}:`, err);
+				}
+			}
+			if (process.env.BOBBIT_DEBUG && projectContexts.length > forensicContexts.size) {
+				console.log(`[team-manager] Skipped completed forensic recovery for ${projectContexts.length - forensicContexts.size} project(s).`);
 			}
 		}
 

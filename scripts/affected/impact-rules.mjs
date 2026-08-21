@@ -503,6 +503,15 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		]),
 	},
 	{
+		id: "sentinel-restart-source-contract",
+		consumer: "tests2/core/node-modules-ring-fence.test.ts",
+		inputs: frozen([
+			"src/server/harness.ts",
+			"scripts/dev-nord.mjs",
+			"scripts/harness-bootstrap.mjs",
+		]),
+	},
+	{
 		id: "published-shrinkwrap-fixtures",
 		consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts",
 		inputs: frozen([
@@ -656,6 +665,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		operations: frozen([
 			declaredExecutableOperation("embedded-dynamic-import", "process.env.BOBBIT_TEST_LEDGER_MODULE_URL", ["indirect:ledger-child-module"]),
 			allowedExecutableOperation("embedded-dynamic-import", "\"node:os\"", "inline child imports a Node builtin"),
+		]),
+	},
+	{
+		consumer: "tests2/core/node-modules-ring-fence.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(liveCli).href}?restored=${Date.now()}`", "test-owned restored CLI interruption fixture"),
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(liveCandidateCli).href}?candidate=${Date.now()}`", "test-owned promoted CLI interruption fixture"),
 		]),
 	},
 	{
@@ -1342,6 +1358,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/team-recovery-checkpoint.test.ts",
+		allowReason: "checkpoint marker inside the test-owned temporary state directory",
+		reads: frozen([
+			{ expression: "marker", count: 4 },
+		]),
+	},
+	{
 		consumer: "tests2/core/team-manager-ghost-workers.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
@@ -1703,10 +1726,18 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/node-modules-ring-fence.test.ts",
-		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		declarations: frozen([
+			"impact:package-metadata",
+			"indirect:sentinel-restart-source-contract",
+		]),
+		policyExemption: "remaining operands are test-owned temporary staged-build and sentinel fixture outputs",
 		reads: frozen([
 			{ expression: "sentinel", count: 2 },
 			{ expression: "file", count: 1 },
+			{ expression: "path.join(repositoryRoot, relativePath)", count: 1 },
+			{ expression: "path.join(repositoryRoot, \"package.json\")", count: 2 },
+			{ expression: "liveCli", count: 4 },
+			{ expression: "liveUi", count: 2 },
 		]),
 	},
 	{
@@ -1837,15 +1868,26 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "filePath", count: 1 },
 			{ expression: "path.join(dirs.headquartersConfigDir, \"project.yaml\")", count: 1 },
 			{ expression: "file", count: 2 },
+			{ expression: "marker", count: 2 },
+			{ expression: "diagnostics", count: 2 },
+			{ expression: "copiedPreview", count: 2 },
+			{ expression: "path.join(dirs.headquartersStateDir, \"gateway-url\")", count: 2 },
 			{ expression: "sessionsFile", count: 2 },
 			{ expression: "secretsToken", count: 2 },
 			{ expression: "path.join(secretsDir, \"sandbox-agent-auth\")", count: 1 },
 			{ expression: "path.join(secretsDir, \"tls\", \"cert.pem\")", count: 1 },
-			{ expression: "path.join(secretsDir, \"token\")", count: 2 },
+			{ expression: "path.join(secretsDir, \"token\")", count: 3 },
 			{ expression: "path.join(dirs.headquartersStateDir, \"migration-quarantine\", \"config\", \"legacy-server-bobbit-config\", \"project.yaml\")", count: 1 },
 			{ expression: "path.join(overrideConfig, \"project.yaml\")", count: 1 },
 			{ expression: "normalStaffFile", count: 2 },
 			{ expression: "hqStaffFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/team-manager-async-recovery.test.ts",
+		allowReason: "test-owned temporary sidecar output used to prove retry after publication failure",
+		reads: frozen([
+			{ expression: "targetSidecar", count: 1 },
 		]),
 	},
 	{

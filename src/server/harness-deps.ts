@@ -103,6 +103,19 @@ export interface HarnessLifecycleDeps {
 	exit: (code: number) => void;
 }
 
+export interface HarnessSentinelRestartDeps<TPrepared = void> {
+	validate: () => DependencyValidationResult | Promise<DependencyValidationResult>;
+	build: () => TPrepared | Promise<TPrepared>;
+	/** Enter the narrow intentional-stop window. False means the live child changed during preparation. */
+	enterIntentionalStop?: () => boolean | Promise<boolean>;
+	stop: () => void | Promise<void>;
+	waitUntilStopped: () => void | Promise<void>;
+	promote?: (prepared: TPrepared) => void | Promise<void>;
+	discard?: (prepared: TPrepared) => void | Promise<void>;
+	launch: () => void | Promise<void>;
+	report: (message: string) => void;
+}
+
 function describeValidationFailure(result: Exclude<DependencyValidationResult, { ok: true }>): string {
 	const details = [result.message, ...(result.diagnostics ?? [])];
 	if (result.missing?.length && !details.some(detail => result.missing!.every(name => detail.includes(name)))) {
@@ -170,6 +183,54 @@ export async function runHarnessLifecycle(
 	}
 
 	await deps.launch();
+}
+
+/**
+ * Prepare a sentinel-triggered replacement before taking the current gateway
+ * offline. TypeScript compilation dominates restart time on Windows, but it
+ * does not require the listening process to be stopped. Validation or build
+ * failure therefore leaves the current gateway serving, while a successful
+ * build enters the short stop/port-release/launch critical section.
+ */
+export async function runHarnessSentinelRestart<TPrepared = void>(
+	deps: HarnessSentinelRestartDeps<TPrepared>,
+): Promise<void> {
+	let validation: DependencyValidationResult;
+	try {
+		validation = await deps.validate();
+	} catch (error) {
+		validation = invalidResult(`Dependency validation failed: ${errorMessage(error)}.`);
+	}
+
+	if (!validation.ok) {
+		deps.report(describeValidationFailure(validation));
+		return;
+	}
+
+	let prepared: TPrepared;
+	try {
+		prepared = await deps.build();
+	} catch (error) {
+		deps.report(`Harness build failure: ${errorMessage(error)}.`);
+		return;
+	}
+
+	if (deps.enterIntentionalStop && !await deps.enterIntentionalStop()) {
+		await deps.discard?.(prepared);
+		deps.report("Gateway changed during restart preparation; discarded the staged build and kept normal crash recovery in control.");
+		return;
+	}
+
+	let promoted = false;
+	try {
+		await deps.stop();
+		await deps.waitUntilStopped();
+		await deps.promote?.(prepared);
+		promoted = true;
+		await deps.launch();
+	} finally {
+		if (!promoted) await deps.discard?.(prepared);
+	}
 }
 
 const invokedPath = process.argv[1];

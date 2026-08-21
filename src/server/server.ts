@@ -2442,6 +2442,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		headquartersConfigDir: configDir,
 		legacyServerBobbitDir: path.join(getProjectRoot(), ".bobbit"),
 	});
+	ck("migrateLegacyHeadquartersDirectory");
 	// Non-destructively seed model-default preference keys from the legacy
 	// .bobbit/state/preferences.json into the headquarters state dir. This
 	// covers the case where BOBBIT_DIR points to a fresh directory (the
@@ -2451,6 +2452,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		headquartersStateDir: stateDir,
 		serverRunDir: getProjectRoot(),
 	});
+	ck("seedModelDefaultsFromLegacy");
 	fs.mkdirSync(stateDir, { recursive: true });
 	// The author ledger reuses the stable cookie key through a domain-separated
 	// derivation and lives under this same private, owner-only server root.
@@ -2496,8 +2498,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
 	}
 
+	// Keep the residual setup bucket visible separately from the Headquarters
+	// migration above: on large legacy state trees the two have very different
+	// remediation paths, and a combined checkpoint previously hid that fact.
+	ck("state-stores+project-registry");
+
 	// Run one-time migration from centralized to per-project state
-	ck("pre-migration-setup");
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot(), { centralConfigDir: configDir });
 	ck("migrateToPerProjectState");
 
