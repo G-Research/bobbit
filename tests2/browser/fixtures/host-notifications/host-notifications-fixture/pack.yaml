@@ -1,0 +1,12 @@
+name: host-notifications-fixture
+schema: 2
+description: Browser journey fixture for scoped canonical Host API notifications.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: [host-notifications-route]
+routes:
+  module: lib/routes.mjs
+  names: [snapshot]

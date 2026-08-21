@@ -1,0 +1,4 @@
+id: host-notifications.panel
+title: Host Notifications Fixture
+entry: ../lib/panel.js
+instanceMode: singleton
