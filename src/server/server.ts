@@ -681,6 +681,14 @@ import {
 	type RawGoalCandidate,
 	type ValidatedGoalCandidate,
 } from "./agent/goal-candidate-validator.js";
+
+class GoalCandidateValidationResponseError extends Error {
+	constructor(readonly validation: GoalCandidateError) {
+		super(validation.message);
+		this.name = "GoalCandidateValidationResponseError";
+	}
+}
+
 import { GoalManager } from "./agent/goal-manager.js";
 import {
 	evaluateSessionGoalPromotion,
@@ -15947,13 +15955,7 @@ async function handleApiRoute(
 						serverDerivedProjectId: coordinates.projectId,
 						serverDerivedCwd: coordinates.cwd,
 					}, false);
-					if (!validation.ok) {
-						throw Object.assign(new Error(validation.message), {
-							statusCode: validation.status,
-							code: validation.code,
-							details: validation.details,
-						});
-					}
+					if (!validation.ok) throw new GoalCandidateValidationResponseError(validation);
 					const targetCtx = existingProjectContext(coordinates.projectId);
 					if (!targetCtx) throw Object.assign(new Error("Proposal project is unavailable."), { statusCode: 404, code: "PROJECT_NOT_FOUND" });
 					fresh = { candidate: validation.candidate, coordinates, targetCtx };
@@ -16080,13 +16082,17 @@ async function handleApiRoute(
 				const goal = await flight;
 				json(goal, 201);
 			} catch (error) {
-				const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : 400;
-				const details = (error as any)?.details;
-				jsonError(status, error, (error as any)?.code ? {
-					code: (error as any).code,
-					...(details ?? {}),
-					...(details ? { details } : {}),
-				} : undefined);
+				if (error instanceof GoalCandidateValidationResponseError) {
+					writeGoalCandidateError(error.validation);
+				} else {
+					const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : 400;
+					const details = (error as any)?.details;
+					jsonError(status, error, (error as any)?.code ? {
+						code: (error as any).code,
+						...(details ?? {}),
+						...(details ? { details } : {}),
+					} : undefined);
+				}
 			}
 			return;
 		}
