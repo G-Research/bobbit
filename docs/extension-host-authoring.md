@@ -123,12 +123,13 @@ auto-discovered from `panels/*.yaml`).
 name: artifacts
 description: "Search tool + artifact viewer."
 version: 1.0.0
+schema: 2                                # required for channels and lifecycle hooks
 contents:
   roles:       []
   tools:       [artifact_demo]          # tools/<group> dir names
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
-  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2, metadata only
+  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; explicit kind makes it runtime-eligible
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -145,8 +146,8 @@ Rules:
   channel names within a pack are rejected.
 - **`contents.hooks: string[]`** — schema-2 lifecycle-hook basenames under
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
-  read. See [Lifecycle hooks](#lifecycle-hooks-hooksnameyaml--schema-2) for the declaration
-  contract and explicit runtime opt-in.
+  read. See [Unified Extension Host hooks](host-hooks.md#authoring-runtime-hook-contributions)
+  for the declaration contract and explicit runtime opt-in.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1451,10 +1452,14 @@ Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi
 
 ### Lifecycle hooks (`hooks/<name>.yaml`) — schema 2
 
-A hook declaration becomes executable only with an explicit `kind`:
+A hook declaration becomes runtime-eligible only with an explicit `kind`:
 
 - `kind: interceptor` participates before Bobbit commits an operation and returns a typed proposal;
 - `kind: notification` observes a canonical fact after Bobbit commits it.
+
+A kind does not invoke the hook by itself. The declaration executes only when it is listed in
+`contents.hooks`, currently active, selected for the canonical boundary, and authorized by live
+grant checks. Installation and indexing alone never call a handler.
 
 Copyable YAML and module examples, the canonical catalogues, failure policies, delivery guarantees,
 and privacy rules live in [Unified Extension Host hooks](host-hooks.md). Keep that page open while
