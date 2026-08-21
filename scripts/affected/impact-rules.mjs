@@ -649,6 +649,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/host-tool-interceptor-order.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned generated host tool interceptor bridge"),
+		]),
+	},
+	{
 		consumer: "tests2/core/hung-test-reporter.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "reporterUrl", ["indirect:hung-test-reporter-module"]),

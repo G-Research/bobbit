@@ -649,7 +649,7 @@ export interface HostInterceptorDefinition<N extends string, RQ extends TSchema,
 	readonly dispatchDeadlineMs: number;
 	readonly defaultFailurePolicy: HostInterceptorFailurePolicy;
 	readonly allowedFailurePolicies: ReadonlySet<HostInterceptorFailurePolicy>;
-	readonly requiredGrants: readonly string[];
+	readonly requiredCapabilities: readonly string[];
 	readonly cancellation: Readonly<{
 		abortWorker: true;
 		discardLateResult: true;
@@ -661,7 +661,7 @@ export interface HostInterceptorDefinition<N extends string, RQ extends TSchema,
 const FAIL_OPEN = new Set<HostInterceptorFailurePolicy>(["failOpen"]);
 const FAIL_CLOSED_OR_OPEN = new Set<HostInterceptorFailurePolicy>(["failOpen", "failClosed"]);
 const NON_FATAL = new Set<HostInterceptorFailurePolicy>(["nonFatal"]);
-const NO_GRANTS = Object.freeze([]) as readonly string[];
+const NO_REQUIRED_CAPABILITIES = Object.freeze([]) as readonly string[];
 const AUDIT_NONE = Object.freeze({ proposal: "none" } as const);
 const AUDIT_RECEIVED = Object.freeze({ proposal: "received" } as const);
 
@@ -678,7 +678,7 @@ function interceptor<const N extends string, const RQ extends TSchema, const RS 
 }): HostInterceptorDefinition<N, RQ, RS> {
 	return Object.freeze({
 		...options,
-		requiredGrants: NO_GRANTS,
+		requiredCapabilities: NO_REQUIRED_CAPABILITIES,
 		cancellation: Object.freeze({ abortWorker: true, discardLateResult: true, operationAtDeadline: options.operationAtDeadline }),
 		auditProjector: (_request: unknown, result: unknown) => result === undefined ? AUDIT_NONE : AUDIT_RECEIVED,
 	});

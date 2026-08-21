@@ -71,8 +71,9 @@ export type HostNotificationModuleDiagnosticCode =
 export interface HostNotificationModuleAdapterOptions {
 	/** Must return the normalized winning contributions in deterministic order. */
 	readonly resolve: (notification: HostNotification) => readonly HostNotificationModuleHandler[];
-	/** Live pack activation, winning-ref, and grant check. Called before invoke and
-	 * again after settlement so invalidated late work has no host-observed effect. */
+	/** Live pack activation, winning-ref, and capability authorization check. Called
+	 * before invoke and again after settlement so invalidated late work has no
+	 * host-observed effect. */
 	readonly isAuthorized: (handler: HostNotificationModuleHandler, notification: HostNotification) => boolean;
 	/** ModuleHost-backed invocation. It must observe signal cancellation and receives
 	 * the exact frozen canonical event. Return values are deliberately discarded. */

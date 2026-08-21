@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.ts";
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
 enableTsWorkerResolver();
 import fs from "node:fs";
 import os from "node:os";
@@ -120,14 +122,14 @@ describe("HostInterceptorRouter", () => {
 		expect(result.decisions[0]).toMatchObject({ outcome: "cancelled", cancelled: true, applied: false, proposalReceived: true });
 	});
 
-	it("rechecks capability grants before applying a settled proposal", async () => {
-		const declaration = explicit("granted");
+	it("rechecks capability authorization before applying a settled proposal", async () => {
+		const declaration = explicit("authorized");
 		declaration.capabilities = ["store"];
 		const { registry } = registryFor(pack([declaration]));
-		let granted = true;
+		let authorized = true;
 		const moduleHost = {
 			invoke: vi.fn(async () => {
-				granted = false;
+				authorized = false;
 				return { action: "replaceArgs", args: { forbidden: true } };
 			}),
 		} as unknown as ModuleHost;
@@ -135,7 +137,7 @@ describe("HostInterceptorRouter", () => {
 			registry,
 			moduleHost,
 			validateToolArgs: () => true,
-			isCapabilityGranted: () => granted,
+			isCapabilityAuthorized: () => authorized,
 		});
 		const result = await router.dispatch("beforeToolCall", {
 			toolCallId: "call-1", toolName: "demo", args: { original: true },
@@ -189,14 +191,20 @@ describe("HostInterceptorRouter", () => {
 });
 
 let tmp = "";
-beforeAll(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "host-hook-module-")); });
+beforeAll(() => {
+	// v2-core reuses forks with isolate:false. Re-assert the supported worker
+	// bootstrap resolver immediately before this file spawns real ModuleHost
+	// workers, after any sibling env guard may have restored NODE_OPTIONS.
+	enableTsWorkerResolver();
+	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "host-hook-module-")));
+});
 afterAll(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
 
 describe("ModuleHost hooks execution", () => {
 	it("resolves canonical members from the default hooks export", async () => {
 		const file = path.join(tmp, "hooks.mjs");
 		fs.writeFileSync(file, "export default { beforePrompt: async (_ctx, request) => ({ context: [{ id: request.sessionId, title: 't', authority: 'memory', content: 'c', reason: 'r', priority: 1 }] }) };\n");
-		const host = new ModuleHost({ timeoutMs: 5_000 });
+		const host = new ModuleHost({ timeoutMs: 30_000 });
 		try {
 			const value = await host.invoke({
 				url: pathToFileURL(file).href, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",

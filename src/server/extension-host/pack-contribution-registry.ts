@@ -157,7 +157,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		const hook = this.getPack(projectId, packId)?.hooks.find(
 			(candidate) => candidate.id === contributionId && candidate.listName === listName && candidate.kind !== undefined,
 		);
-		return !!hook && requiredCapabilities.every((capability) => hook.capabilities.some((granted) => granted === capability));
+		return !!hook && requiredCapabilities.every((capability) => hook.capabilities.some((declared) => declared === capability));
 	}
 
 	list(projectId: string | undefined): PackContributions[] {
@@ -271,7 +271,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			// Legacy rows retain their metadata-only compatibility behavior. Explicit
 			// runtime rows additionally honor declaration config activation; none of
-			// these checks imports pack code or grants undeclared capabilities.
+			// these checks imports pack code or authorizes undeclared capabilities.
 			const disabledHooks = this.disabledHooks
 				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
 				: undefined;

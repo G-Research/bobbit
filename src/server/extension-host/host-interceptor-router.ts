@@ -77,9 +77,9 @@ export interface HostInterceptorRouterOptions {
 		contributionId: string;
 		capabilities: readonly string[];
 	}>) => ServerHostApi | undefined;
-	/** Live parent-owned grant lookup. Omitted means declarations are already
-	 * grant-filtered by the registry. */
-	readonly isCapabilityGranted?: (input: Readonly<{
+	/** Live parent-owned capability authorization. Omitted means the registry
+	 * has already authorized every declared capability. */
+	readonly isCapabilityAuthorized?: (input: Readonly<{
 		projectId?: string;
 		packId: string;
 		contributionId: string;
@@ -112,7 +112,7 @@ export class HostInterceptorRouter {
 			if (contribution.kind !== "interceptor" || contribution.name !== name) return false;
 			const policy = contribution.failurePolicy ?? definition.defaultFailurePolicy;
 			return policy === "failClosed"
-				&& this.isAuthorized(contribution, projectId, definition.requiredGrants);
+				&& this.isAuthorized(contribution, projectId, definition.requiredCapabilities);
 		});
 	}
 
@@ -157,8 +157,8 @@ export class HostInterceptorRouter {
 					if (failed !== undefined) terminal = failed as HostInterceptorResult<N>;
 					break;
 				}
-				const requiredGrants = contribution.kind === "interceptor" ? definition.requiredGrants : [];
-				if (!this.isAuthorized(contribution, context.projectId, requiredGrants)) {
+				const requiredCapabilities = contribution.kind === "interceptor" ? definition.requiredCapabilities : [];
+				if (!this.isAuthorized(contribution, context.projectId, requiredCapabilities)) {
 					this.record(decisions, contribution, name, context, started, "inactive", false, false, false);
 					continue;
 				}
@@ -183,7 +183,7 @@ export class HostInterceptorRouter {
 					}
 					// Authority is deliberately checked again after worker settlement and
 					// immediately before application.
-					if (!this.isAuthorized(contribution, context.projectId, requiredGrants) || dispatchController.signal.aborted) {
+					if (!this.isAuthorized(contribution, context.projectId, requiredCapabilities) || dispatchController.signal.aborted) {
 						this.record(decisions, contribution, name, context, started, "cancelled", true, true, false, false, true);
 						continue;
 					}
@@ -218,13 +218,13 @@ export class HostInterceptorRouter {
 	private isAuthorized(
 		contribution: NormalizedInterceptorContribution | NormalizedLegacyProviderContribution,
 		projectId: string | undefined,
-		requiredGrants: readonly string[],
+		requiredCapabilities: readonly string[],
 	): boolean {
 		const registryAuthorized = contribution.kind === "legacy-provider"
 			? this.options.registry.isProviderAuthorized(projectId, contribution.packId, contribution.providerId, contribution.listName, contribution.activationEpoch)
-			: this.options.registry.isHookAuthorized(projectId, contribution.packId, contribution.contributionId, contribution.listName, contribution.activationEpoch, requiredGrants);
+			: this.options.registry.isHookAuthorized(projectId, contribution.packId, contribution.contributionId, contribution.listName, contribution.activationEpoch, requiredCapabilities);
 		if (!registryAuthorized) return false;
-		return contribution.capabilities.every((capability) => this.options.isCapabilityGranted?.({
+		return contribution.capabilities.every((capability) => this.options.isCapabilityAuthorized?.({
 			projectId,
 			packId: contribution.packId,
 			contributionId: contribution.contributionId,

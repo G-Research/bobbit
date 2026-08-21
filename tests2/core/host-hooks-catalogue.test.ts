@@ -193,7 +193,7 @@ describe("host interceptor catalogue", () => {
 		for (const definition of Object.values(HOST_INTERCEPTOR_CATALOGUE)) {
 			expect(definition.maxTimeoutMs).toBeLessThanOrEqual(definition.dispatchDeadlineMs);
 			expect(definition.cancellation).toEqual(expect.objectContaining({ abortWorker: true, discardLateResult: true }));
-			expect(definition.requiredGrants).toEqual([]);
+			expect(definition.requiredCapabilities).toEqual([]);
 		}
 	});
 
