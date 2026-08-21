@@ -12,8 +12,12 @@ import type { InboxManager } from "./inbox-manager.js";
 import type { StaffManager } from "./staff-manager.js";
 import type { NotificationStaffTrigger, PersistedStaff } from "./staff-store.js";
 import { NotificationDeliveryStore, type NotificationDeliveryRow } from "./notification-delivery-store.js";
+import {
+	currentStaffNotificationTurnContext,
+	MAX_NOTIFICATION_CAUSATION_DEPTH,
+} from "./staff-notification-causation.js";
 
-const MAX_CAUSATION_DEPTH = 8;
+const MAX_CAUSATION_DEPTH = MAX_NOTIFICATION_CAUSATION_DEPTH;
 const MAX_ATTEMPTS = 5;
 const FINAL_DEADLINE_MS = 24 * 60 * 60 * 1_000;
 const LEASE_MS = 30_000;
@@ -109,6 +113,7 @@ export class NotificationStaffDispatcher {
 			clock?: Clock;
 			storeFactory?: (stateDir: string, projectId: string) => NotificationDeliveryStore;
 			onDiagnostic?: (diagnostic: NotificationStaffDiagnostic) => void;
+			isTurnContextCurrent?: (context: ReturnType<typeof currentStaffNotificationTurnContext>) => boolean;
 		} = {},
 	) {
 		this.clock = options.clock ?? realClock;
@@ -156,11 +161,20 @@ export class NotificationStaffDispatcher {
 		});
 	}
 
-	/** Canonical dispatcher adapter surface. The host invokes this in its own
-	 * microtask, so this method crosses the durable subscriber admission seam
-	 * directly without occupying (or being dropped by) a bounded live queue. */
+	/** Canonical dispatcher adapter surface. AsyncLocalStorage propagation from
+	 * an exact session-authenticated mutation supplies loop controls separately;
+	 * the canonical envelope remains byte-identical for every consumer. */
 	deliver(notification: HostNotification): void {
-		try { this.enqueueNow(notification); }
+		const candidate = currentStaffNotificationTurnContext();
+		const turn = candidate
+			&& candidate.projectId === notification.projectId
+			&& (this.options.isTurnContextCurrent?.(candidate) ?? true)
+			? candidate
+			: undefined;
+		const controls = turn
+			? { rootCorrelationId: turn.rootCorrelationId, causationDepth: turn.causationDepth }
+			: undefined;
+		try { this.enqueueNow(notification, controls); }
 		catch {
 			this.diagnostic({ code: "OUTBOX_INSERT_FAILED", projectId: notification.projectId, notificationName: notification.name });
 		}

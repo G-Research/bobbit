@@ -1,4 +1,4 @@
-import type { InboxEntry } from "../agent/inbox-store.js";
+import type { InboxLiveEntry } from "../agent/inbox-manager.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
@@ -378,8 +378,8 @@ export type ServerMessage =
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
-	| { type: "inbox.entry.added"; staffId: string; entry: InboxEntry }
-	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
+	| { type: "inbox.entry.added"; staffId: string; entry: InboxLiveEntry }
+	| { type: "inbox.entry.updated"; staffId: string; entry: InboxLiveEntry }
 	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
 	| RemoteStateSnapshotMessage
 	| { type: "pr_status_changed"; goalId: string }

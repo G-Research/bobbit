@@ -9,6 +9,51 @@ import type { InboxStore, InboxEntry, InboxEntryState, InboxEntrySource, Notific
 // `inbox-manager` without reaching into the store module directly.
 export type { InboxEntry, InboxEntryState, InboxEntrySource, NotificationInboxMetadata } from "./inbox-store.js";
 
+/** Browser-safe live projection. Canonical notification input and loop controls
+ * remain available only through the authenticated staff inbox read surface. */
+export type InboxLiveEntry = Omit<InboxEntry, "notificationInput">;
+
+export type InboxLiveEvent =
+	| { type: "inbox.entry.added"; staffId: string; entry: InboxLiveEntry }
+	| { type: "inbox.entry.updated"; staffId: string; entry: InboxLiveEntry }
+	| { type: "inbox.entry.removed"; staffId: string; entryId: string };
+
+export interface InboxLiveAddress {
+	readonly staffId: string;
+	readonly staffSessionId: string;
+	readonly projectId: string;
+}
+
+function bounded(value: string | undefined, max: number): string | undefined {
+	return value === undefined ? undefined : value.slice(0, max);
+}
+
+/** Never return a source store object through WebSocket publication. */
+function liveEntry(entry: InboxEntry): InboxLiveEntry {
+	const triggerId = bounded(entry.source.triggerId, 256);
+	const actorId = bounded(entry.source.actorId, 256);
+	const context = bounded(entry.context, 2_048);
+	const result = bounded(entry.result, 2_048);
+	const error = bounded(entry.error, 2_048);
+	return Object.freeze({
+		id: entry.id.slice(0, 256),
+		staffId: entry.staffId.slice(0, 256),
+		source: Object.freeze({
+			type: entry.source.type,
+			...(triggerId !== undefined ? { triggerId } : {}),
+			...(actorId !== undefined ? { actorId } : {}),
+		}),
+		title: entry.title.slice(0, 512),
+		prompt: entry.prompt.slice(0, 2_048),
+		...(context !== undefined ? { context } : {}),
+		state: entry.state,
+		createdAt: entry.createdAt,
+		...(entry.completedAt !== undefined ? { completedAt: entry.completedAt } : {}),
+		...(result !== undefined ? { result } : {}),
+		...(error !== undefined ? { error } : {}),
+	});
+}
+
 /**
  * Facade over per-project `InboxStore`s. Provides a single point for
  * server.ts / REST handlers / inbox-tool extension code to enqueue work,
@@ -17,7 +62,7 @@ export type { InboxEntry, InboxEntryState, InboxEntrySource, NotificationInboxMe
  *
  * Side effects per mutation:
  *  - Persists to the underlying `InboxStore` (synchronous JSON write).
- *  - Broadcasts a WS event via the injected `broadcastToAll`:
+ *  - Publishes a bounded WS invalidation only to the owning staff session:
  *      "inbox.entry.added" | "inbox.entry.updated" | "inbox.entry.removed".
  *  - `enqueue` additionally calls `nudger.poke(staffId)` so an idle staff
  *    session is woken on the next tick (or earlier — `poke` schedules a
@@ -30,17 +75,17 @@ export type { InboxEntry, InboxEntryState, InboxEntrySource, NotificationInboxMe
 export class InboxManager {
 	private nudger: InboxNudger | null = null;
 	private readonly pcm: ProjectContextManager;
-	/** Held for API parity with the design doc; reserved for higher-layer lookups. */
 	private readonly staffManager: StaffManager;
-	private readonly broadcastToAll: (event: unknown) => void;
+	private readonly publishLive: (event: InboxLiveEvent, address?: InboxLiveAddress) => void;
 
-	constructor(pcm: ProjectContextManager, staffManager: StaffManager, broadcastToAll: (event: unknown) => void) {
+	constructor(
+		pcm: ProjectContextManager,
+		staffManager: StaffManager,
+		publishLive: (event: InboxLiveEvent, address?: InboxLiveAddress) => void,
+	) {
 		this.pcm = pcm;
 		this.staffManager = staffManager;
-		this.broadcastToAll = broadcastToAll;
-		// Touch staffManager so the unused-private-property check stays happy
-		// while preserving the constructor signature the design doc pins.
-		void this.staffManager;
+		this.publishLive = publishLive;
 	}
 
 	/**
@@ -61,6 +106,20 @@ export class InboxManager {
 			if (ctx.staffStore.get(staffId)) return ctx.inboxStore;
 		}
 		return null;
+	}
+
+	private publishForStaff(staffId: string, event: InboxLiveEvent): void {
+		const getStaff = (this.staffManager as StaffManager & { getStaff?: StaffManager["getStaff"] }).getStaff;
+		const staff = typeof getStaff === "function" ? getStaff.call(this.staffManager, staffId) : undefined;
+		const address = staff?.currentSessionId && staff.projectId ? {
+			staffId,
+			staffSessionId: staff.currentSessionId,
+			projectId: staff.projectId,
+		} : undefined;
+		// The production publisher fails closed when address is absent. Keeping the
+		// optional address also preserves narrow manager test doubles that observe
+		// persistence events without constructing a SessionManager.
+		this.publishLive(event, address);
 	}
 
 	/**
@@ -86,7 +145,7 @@ export class InboxManager {
 			createdAt: Date.now(),
 		};
 		store.put(entry);
-		this.broadcastToAll({ type: "inbox.entry.added", staffId, entry });
+		this.publishForStaff(staffId, { type: "inbox.entry.added", staffId, entry: liveEntry(entry) });
 		try {
 			this.nudger?.poke(staffId);
 		} catch (err) {
@@ -129,7 +188,7 @@ export class InboxManager {
 		};
 		const accepted = store.putStrict(entry);
 		if (accepted.inserted) {
-			this.broadcastToAll({ type: "inbox.entry.added", staffId, entry: accepted.entry });
+			this.publishForStaff(staffId, { type: "inbox.entry.added", staffId, entry: liveEntry(accepted.entry) });
 			try {
 				this.nudger?.poke(staffId);
 			} catch (err) {
@@ -167,7 +226,7 @@ export class InboxManager {
 			result: summary,
 		});
 		const entry = store.get(staffId, entryId)!;
-		this.broadcastToAll({ type: "inbox.entry.updated", staffId, entry });
+		this.publishForStaff(staffId, { type: "inbox.entry.updated", staffId, entry: liveEntry(entry) });
 		return entry;
 	}
 
@@ -196,7 +255,7 @@ export class InboxManager {
 			error: reason,
 		});
 		const entry = store.get(staffId, entryId)!;
-		this.broadcastToAll({ type: "inbox.entry.updated", staffId, entry });
+		this.publishForStaff(staffId, { type: "inbox.entry.updated", staffId, entry: liveEntry(entry) });
 		return entry;
 	}
 
@@ -206,7 +265,7 @@ export class InboxManager {
 		if (!store) return false;
 		const ok = store.remove(staffId, entryId);
 		if (ok) {
-			this.broadcastToAll({ type: "inbox.entry.removed", staffId, entryId });
+			this.publishForStaff(staffId, { type: "inbox.entry.removed", staffId, entryId: entryId.slice(0, 256) });
 		}
 		return ok;
 	}
