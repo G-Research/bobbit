@@ -208,6 +208,50 @@ test.describe("Sandbox Security Boundaries", () => {
 
 	// ── ALLOWED endpoints ──────────────────────────────────────────────
 
+	test("host hook callbacks require both own-session sandbox scope and the current session secret", async ({ gateway }) => {
+		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const cases = [
+			{
+				route: "before-tool-call",
+				body: { toolCallId: "sandbox-call", toolName: "fixture", args: { safe: true } },
+			},
+			{
+				route: "after-tool-result",
+				body: { toolCallId: "sandbox-call", toolName: "fixture", result: { isError: false } },
+			},
+		];
+
+		for (const fixture of cases) {
+			const route = `/api/sessions/${sessionId}/host-hooks/${fixture.route}`;
+			const missingSecret = await sandboxFetch(gateway.baseURL, route, scopedToken, {
+				method: "POST",
+				body: JSON.stringify(fixture.body),
+			});
+			expect(missingSecret.status).toBe(403);
+
+			const wrongSecret = await sandboxFetch(gateway.baseURL, route, scopedToken, {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": "not-the-current-secret" },
+				body: JSON.stringify(fixture.body),
+			});
+			expect(wrongSecret.status).toBe(403);
+
+			const accepted = await sandboxFetch(gateway.baseURL, route, scopedToken, {
+				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": secret },
+				body: JSON.stringify(fixture.body),
+			});
+			expect(accepted.status).toBe(200);
+		}
+
+		const crossSession = await sandboxFetch(gateway.baseURL, "/api/sessions/not-owned/host-hooks/before-tool-call", scopedToken, {
+			method: "POST",
+			headers: { "X-Bobbit-Session-Secret": secret },
+			body: JSON.stringify(cases[0].body),
+		});
+		expect(crossSession.status).toBe(403);
+	});
+
 	test("can access own session", async ({ gateway }) => {
 		const res = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}`, scopedToken);
 		expect(res.status).toBe(200);

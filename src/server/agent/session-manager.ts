@@ -912,6 +912,7 @@ export interface HostSessionNotificationPublisher {
 export interface SessionHostInterceptorPort {
 	dispatch(name: string, input: Record<string, unknown>, context: Record<string, unknown>): Promise<any>;
 	hasAny?(names: readonly string[], projectId?: string, goalId?: string): boolean;
+	requiresFailClosed?(name: string, projectId?: string, goalId?: string): boolean;
 }
 
 interface ToolCallLifecycleEntry {
@@ -5947,11 +5948,15 @@ export class SessionManager {
 		const toolHooksNeeded = this.hostInterceptors?.hasAny?.(
 			["beforeToolCall", "afterToolResult"], projectId, effectiveGoalId,
 		) ?? !!this.hostInterceptors;
+		const beforeToolCallFailClosed = this.hostInterceptors?.requiresFailClosed?.(
+			"beforeToolCall", projectId, effectiveGoalId,
+		) === true;
 		return {
 			args,
 			env: {
 				...activation.env,
 				...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
+				BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: beforeToolCallFailClosed ? "1" : "0",
 			},
 			runtimeExtensions: piExtensionActivation.runtimeExtensions,
 		};

@@ -437,6 +437,7 @@ export interface PipelineContext {
 	hostInterceptors?: {
 		dispatch: (name: string, input: Record<string, unknown>, context: Record<string, unknown>) => Promise<any>;
 		hasAny?: (names: readonly string[], projectId?: string, goalId?: string) => boolean;
+		requiresFailClosed?: (name: string, projectId?: string, goalId?: string) => boolean;
 	};
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
@@ -1092,13 +1093,18 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
+	const goalId = effectiveGoalId(plan);
 	const toolHooksNeeded = ctx.hostInterceptors?.hasAny?.(
-		["beforeToolCall", "afterToolResult"], plan.projectId, effectiveGoalId(plan),
+		["beforeToolCall", "afterToolResult"], plan.projectId, goalId,
 	) ?? !!ctx.hostInterceptors;
+	const beforeToolCallFailClosed = ctx.hostInterceptors?.requiresFailClosed?.(
+		"beforeToolCall", plan.projectId, goalId,
+	) === true;
 	plan.bridgeOptions.env = {
 		...(plan.bridgeOptions.env || {}),
 		...activation.env,
 		...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
+		BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: beforeToolCallFailClosed ? "1" : "0",
 	};
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.

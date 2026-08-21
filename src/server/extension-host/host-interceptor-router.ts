@@ -102,6 +102,20 @@ export class HostInterceptorRouter {
 		this.monotonicNow = options.monotonicNow ?? performance.now.bind(performance);
 	}
 
+	/** Snapshot whether an active, currently authorized contribution makes a
+	 * transport failure terminal for this operation. Spawn/respawn callers inject
+	 * this host-owned decision into the generated Pi bridge; pack code cannot
+	 * assert protected status itself. */
+	requiresFailClosed(name: HostInterceptorName, projectId?: string): boolean {
+		const definition = HOST_INTERCEPTOR_CATALOGUE[name] as RuntimeInterceptorDefinition;
+		return normalizeHookContributions(this.options.registry, projectId).some((contribution) => {
+			if (contribution.kind !== "interceptor" || contribution.name !== name) return false;
+			const policy = contribution.failurePolicy ?? definition.defaultFailurePolicy;
+			return policy === "failClosed"
+				&& this.isAuthorized(contribution, projectId, definition.requiredGrants);
+		});
+	}
+
 	async dispatch<N extends HostInterceptorName>(
 		name: N,
 		input: HostInterceptorRequest<N>,

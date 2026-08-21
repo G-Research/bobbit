@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 
 import { guardProcessEnv } from "./helpers/env-guard.js";
 import { generateToolResultErrorBridgeExtension } from "../../src/server/agent/tool-result-error-bridge-extension.ts";
@@ -17,6 +17,7 @@ const originalEnv = {
 	session: process.env.BOBBIT_SESSION_ID,
 	token: process.env.BOBBIT_TOKEN,
 	hooks: process.env.BOBBIT_HOST_HOOKS_ENABLED,
+	beforeFailClosed: process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED,
 };
 
 afterEach(() => {
@@ -26,6 +27,7 @@ afterEach(() => {
 		BOBBIT_SESSION_ID: originalEnv.session,
 		BOBBIT_TOKEN: originalEnv.token,
 		BOBBIT_HOST_HOOKS_ENABLED: originalEnv.hooks,
+		BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: originalEnv.beforeFailClosed,
 	})) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
@@ -62,6 +64,7 @@ function installHostEnv(): void {
 	process.env.BOBBIT_SESSION_ID = "session-tool-order";
 	process.env.BOBBIT_TOKEN = "token";
 	process.env.BOBBIT_HOST_HOOKS_ENABLED = "1";
+	process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED = "0";
 }
 
 describe("Pi host tool interceptor ordering", () => {
@@ -121,12 +124,89 @@ describe("Pi host tool interceptor ordering", () => {
 			() => handlers.get("sample")!("call-block", { secret: "PRIVATE_ARGS" }),
 			(error: any) => {
 				assert.equal(error.name, "BobbitToolPolicyError");
-				assert.match(error.message, /policy_denied/);
+				assert.match(error.message, /not_permitted/);
 				assert.doesNotMatch(error.message, /PRIVATE_POLICY_REASON|PRIVATE_ARGS/);
 				return true;
 			},
 		);
 		assert.equal(handlerCalled, false);
+	});
+
+	it("blocks with a constant decision when protected beforeToolCall transport fails", async () => {
+		const failures: Array<{ name: string; configure: () => void }> = [
+			{ name: "disabled", configure: () => { delete process.env.BOBBIT_HOST_HOOKS_ENABLED; } },
+			{ name: "missing gateway", configure: () => { delete process.env.BOBBIT_GATEWAY_URL; } },
+			{ name: "forbidden", configure: () => { globalThis.fetch = (async () => new Response(null, { status: 403 })) as typeof fetch; } },
+			{ name: "non-2xx", configure: () => { globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch; } },
+			{ name: "malformed", configure: () => { globalThis.fetch = (async () => Response.json({ unexpected: true })) as typeof fetch; } },
+			{ name: "unavailable", configure: () => { globalThis.fetch = (async () => { throw new Error("PRIVATE_TRANSPORT_FAILURE"); }) as typeof fetch; } },
+		];
+
+		for (const failure of failures) {
+			installHostEnv();
+			process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED = "1";
+			failure.configure();
+			let handlerCalled = false;
+			const activate = await loadBridge();
+			const { pi, handlers } = makePi();
+			activate(pi);
+			pi.tool({ name: "sample" }, async () => { handlerCalled = true; return { content: [] }; });
+
+			await assert.rejects(
+				() => handlers.get("sample")!(`call-${failure.name}`, { secret: "PRIVATE_ARGS" }),
+				(error: any) => {
+					assert.equal(error.name, "BobbitToolPolicyError");
+					assert.match(error.message, /not_permitted/);
+					assert.doesNotMatch(error.message, /PRIVATE_TRANSPORT_FAILURE|PRIVATE_ARGS/);
+					return true;
+				},
+				failure.name,
+			);
+			assert.equal(handlerCalled, false, failure.name);
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("blocks a protected beforeToolCall when the host callback times out", async () => {
+		vi.useFakeTimers();
+		try {
+			installHostEnv();
+			process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED = "1";
+			globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => new Promise((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+			})) as typeof fetch;
+			const activate = await loadBridge();
+			const { pi, handlers } = makePi();
+			activate(pi);
+			pi.tool({ name: "sample" }, async () => ({ content: [] }));
+
+			const invocation = handlers.get("sample")!("call-timeout", {});
+			const rejection = assert.rejects(invocation, /not_permitted/);
+			await vi.advanceTimersByTimeAsync(2_501);
+			await rejection;
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps an ordinary fail-open beforeToolCall transport failure non-blocking", async () => {
+		installHostEnv();
+		let handlerCalled = false;
+		globalThis.fetch = (async (url: string | URL | Request) => {
+			return new URL(String(url)).pathname.endsWith("/before-tool-call")
+				? new Response(null, { status: 503 })
+				: Response.json({ decision: "allow" });
+		}) as typeof fetch;
+		const activate = await loadBridge();
+		const { pi, handlers } = makePi();
+		activate(pi);
+		pi.tool({ name: "sample" }, async () => {
+			handlerCalled = true;
+			return { content: [{ type: "text", text: "ok" }] };
+		});
+
+		assert.deepEqual(await handlers.get("sample")!("call-open", {}), { content: [{ type: "text", text: "ok" }] });
+		assert.equal(handlerCalled, true);
 	});
 
 	it("applies protected synthetic results before Pi persistence", async () => {

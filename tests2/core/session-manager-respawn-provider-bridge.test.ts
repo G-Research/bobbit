@@ -32,6 +32,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "respawn-bridge-test-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { resolveToolActivation } = await import("../../src/server/agent/session-setup.ts");
 
 const managers: any[] = [];
 
@@ -55,6 +56,39 @@ function extensionPaths(args: string[]): string[] {
 	}
 	return out;
 }
+
+describe("initial tool hook transport snapshot", () => {
+	it("injects the host-owned protected beforeToolCall decision during setup", () => {
+		const seen: Array<{ name: string; projectId?: string; goalId?: string }> = [];
+		const plan: any = {
+			id: "sess-initial-protected",
+			projectId: "proj-initial",
+			goalId: "goal-initial",
+			cwd: tmpRoot,
+			effectiveAllowedTools: [],
+			bridgeOptions: { args: [], env: {} },
+		};
+		resolveToolActivation(plan, {
+			toolManager: null,
+			mcpManager: null,
+			groupPolicyStore: null,
+			lifecycleHub: undefined,
+			resolveGoalMetadata: () => ({}),
+			hostInterceptors: {
+				dispatch: async () => undefined,
+				hasAny: () => true,
+				requiresFailClosed(name: string, projectId?: string, goalId?: string) {
+					seen.push({ name, projectId, goalId });
+					return true;
+				},
+			},
+		} as any);
+
+		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_HOOKS_ENABLED, "1");
+		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "1");
+		assert.deepEqual(seen, [{ name: "beforeToolCall", projectId: "proj-initial", goalId: "goal-initial" }]);
+	});
+});
 
 describe("buildToolActivationArgs provider-bridge re-attachment (respawn/restore)", () => {
 	it("appends the provider-bridge extension when the project declares a per-turn hook", () => {
@@ -104,6 +138,30 @@ describe("buildToolActivationArgs provider-bridge re-attachment (respawn/restore
 			!exts.some((p) => p.includes("provider-bridge")),
 			`expected NO provider-bridge --extension without a hub, got: ${JSON.stringify(exts)}`,
 		);
+	});
+
+	it("refreshes the authoritative protected beforeToolCall transport snapshot on respawn", () => {
+		const manager = makeManager();
+		let failClosed = true;
+		const seen: Array<{ name: string; projectId?: string; goalId?: string }> = [];
+		manager.setHostInterceptorPort({
+			dispatch: async () => undefined,
+			hasAny: () => true,
+			requiresFailClosed(name: string, projectId?: string, goalId?: string) {
+				seen.push({ name, projectId, goalId });
+				return failClosed;
+			},
+		});
+
+		const protectedActivation = manager.buildToolActivationArgs("sess-protected", undefined, undefined, tmpRoot, "proj-protected", "goal-protected");
+		assert.equal(protectedActivation.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "1");
+		failClosed = false;
+		const refreshedActivation = manager.buildToolActivationArgs("sess-protected", undefined, undefined, tmpRoot, "proj-protected", "goal-protected");
+		assert.equal(refreshedActivation.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "0");
+		assert.deepEqual(seen, [
+			{ name: "beforeToolCall", projectId: "proj-protected", goalId: "goal-protected" },
+			{ name: "beforeToolCall", projectId: "proj-protected", goalId: "goal-protected" },
+		]);
 	});
 
 	it("forwards the session's effective goal id to the hub so disabled providers filter after respawn", () => {

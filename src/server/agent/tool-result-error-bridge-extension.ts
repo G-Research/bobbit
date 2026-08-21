@@ -20,10 +20,10 @@ export function generateToolResultErrorBridgeExtension(): string {
 	return `// The client deadline must leave enough margin for the host router's 2s
 // protected-operation deadline to settle and serialize its decision.
 const HOST_HOOK_TIMEOUT_MS = 2500;
-const HOST_PROTECTED_FAILURE = Object.freeze({ action: "syntheticError", code: "handler_error" });
+const HOST_PROTECTED_TOOL_CALL_FAILURE = Object.freeze({ action: "block", reasonCode: "not_permitted" });
+const HOST_PROTECTED_RESULT_FAILURE = Object.freeze({ action: "syntheticError", code: "handler_error" });
 
-async function postHostHook(route, body, protectedResult = false) {
-  const fallback = protectedResult ? HOST_PROTECTED_FAILURE : undefined;
+async function postHostHook(route, body, fallback) {
   if (process.env.BOBBIT_HOST_HOOKS_ENABLED !== "1") return fallback;
   const gatewayUrl = process.env.BOBBIT_GATEWAY_URL;
   const sessionId = process.env.BOBBIT_SESSION_ID;
@@ -172,13 +172,16 @@ function wrapHandler(handler, toolName) {
   async function bobbitToolResultErrorBridgeHandler(...args) {
     const toolCallId = typeof args[0] === "string" ? args[0] : "unknown";
     const originalArgs = isObject(args[1]) ? args[1] : {};
+    const beforeFallback = process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED === "1"
+      ? HOST_PROTECTED_TOOL_CALL_FAILURE
+      : undefined;
     const before = beforeDecision(await postHostHook("/host-hooks/before-tool-call", {
       toolCallId,
       toolName,
       args: originalArgs,
-    }), originalArgs);
+    }, beforeFallback), originalArgs);
     if (before.block) {
-      const denied = hostSyntheticError("policy_denied");
+      const denied = hostSyntheticError("not_permitted");
       const err = new Error(messageFromToolResult(denied));
       err.name = "BobbitToolPolicyError";
       err.isError = true;
@@ -197,7 +200,7 @@ function wrapHandler(handler, toolName) {
         toolCallId,
         toolName,
         result: { isError: true },
-      }, true);
+      }, HOST_PROTECTED_RESULT_FAILURE);
       const replacement = afterDecision(afterThrown, undefined);
       if (replacement !== undefined) {
         result = replacement;
@@ -210,7 +213,7 @@ function wrapHandler(handler, toolName) {
         toolCallId,
         toolName,
         result,
-      }, true), result);
+      }, HOST_PROTECTED_RESULT_FAILURE), result);
     }
     if (isErroredToolResult(result)) {
       const err = new Error(messageFromToolResult(result));
