@@ -1,7 +1,7 @@
 # Unified Host Hooks
 
 **Status:** implementation design  
-**Decision:** use a shared TypeBox catalogue, an operation-specific interceptor router, and one post-commit notification dispatcher. Persist only staff delivery intents; do not add a durable global notification journal.
+**Decision:** use a shared TypeBox catalogue, an operation-specific interceptor router, and one post-commit notification dispatcher. Persist only matching staff delivery intents, including each intent's original bounded canonical notification; do not add a durable global notification journal.
 
 ## 1. Scope and decisions
 
@@ -209,7 +209,7 @@ Legacy provider budgets continue to be read from `ProviderContribution.budget`; 
 
 `projectImported` is wired at the project-create/import owner in `src/server/server.ts`: after `projectRegistry.register`, `ProjectContextManager.getOrCreate`, component/workflow/base-ref publication, optional worktree-pool initialization, and `wireGoalManagerResolvers` have completed, but before the 201 response. Its request contains only the new project ID and configured component coordinates. Failure is recorded after the durable registration/config boundary; it neither removes the project nor changes the response to failure.
 
-Raw tool args/results exist only in the interceptor's trusted worker request. They are excluded from audit rows, diagnostics, notifications, staff rows, and browser frames. The host records whether a proposal was `received`, `valid`, and `applied`; extension code cannot assert application.
+Raw tool args/results exist only in the interceptor's trusted worker request. They are excluded from audit rows, diagnostics, canonical notifications (including the bounded notification persisted in matching staff rows), and browser frames. The host records whether a proposal was `received`, `valid`, and `applied`; extension code cannot assert application.
 
 ## 3. Contribution normalization and execution
 
@@ -506,62 +506,61 @@ Legacy `GoalTriggerDispatcher` remains active during migration. Do not route leg
 
 ### 7.2 Small durable delivery outbox
 
-Add `src/server/agent/notification-delivery-store.ts` and `notification-staff-dispatcher.ts`. The outbox is per project and stores subscriber delivery state, not canonical notification history.
+Add `src/server/agent/notification-delivery-store.ts` and `notification-staff-dispatcher.ts`. The outbox is per project and stores only matching subscriber delivery state plus the original already-bounded canonical notification needed by that subscriber. It is not a global notification history, replay source, or raw aggregate store.
 
-A row is keyed by deterministic `deliveryId = sha256(staffId + "|" + triggerId + "|" + notification.id)` and contains only:
+A row is keyed by deterministic `deliveryId = sha256(staffId + "|" + triggerId + "|" + notification.id)`:
 
 ```ts
 interface NotificationDeliveryRow {
   deliveryId: string;
-  notificationId: string;
-  projectId: string;
+  projectId: string; // partition key; must equal notification.projectId
   staffId: string;
   triggerId: string;
   subscriberVersion: string; // hash of enabled selector/filter/prompt config
-  name: HostNotificationName;
-  aggregateKind: string;
-  aggregateId: string;
-  aggregateRevision?: string | number;
-  safeContext: Record<string, string | number | boolean>; // allowlisted render fields
+  notification: HostNotification; // complete validated, bounded catalogue projection
+  safeContext?: Record<string, string | number | boolean>; // display-only derivative
   state: "pending" | "leased" | "accepted" | "cancelled" | "failed";
   attempt: number;
   nextAttemptAt: number;
   leaseUntil?: number;
-  rootCorrelationId: string;
-  causationDepth: number;
+  rootCorrelationId: string; // internal loop-control state
+  causationDepth: number; // internal loop-control state
   createdAt: number;
   updatedAt: number;
   diagnosticCode?: string;
 }
 ```
 
-The bounded staff-intent queue asynchronously matches active, enabled project staff triggers and upserts pending rows without holding up the source operation. The unique delivery ID coalesces concurrent duplicate fanout. It is intentionally possible for the source mutation to commit and the subsequent queueing/outbox insert to be lost or fail catastrophically; the source still succeeds and the dispatcher records a bounded diagnostic when possible. This is the unavoidable consequence of notifications being non-blocking/non-transactional/non-rollback. The design does not misrepresent that window as exactly-once notification capture.
+`notification` preserves, losslessly, `id`, `scope`, `name`, `payloadVersion`, `occurredAt`, `projectId`, optional `sessionId`, aggregate kind/ID/revision, optional correlation/causation IDs, and the definition-validated payload. Persisting those fields as individual columns plus a typed payload blob is viable but rejected because it adds omission and schema-migration risk without reducing authority or delivery state. A `safeContext`-only row is invalid because it would give staff a different semantic contract. `safeContext`, when present, is derived from allowlisted fields solely for a host-owned display title; filtering, retry, inbox input, and staff behavior never depend on it.
+
+The bounded staff-intent queue asynchronously matches active, enabled project staff triggers and upserts pending rows without holding up the source operation. Before insertion it verifies the definition, supported `payloadVersion`, complete envelope and payload schema, size limits, and exact `notification.projectId === row.projectId === staff.projectId`; it stores no mutable source object. The unique delivery ID coalesces concurrent duplicate fanout. It is intentionally possible for the source mutation to commit and the subsequent queueing/outbox insert to be lost or fail catastrophically; the source still succeeds and the dispatcher records a bounded diagnostic when possible. This non-transactional window is not described as exactly-once capture.
 
 A project worker/reconciler:
 
 1. scans pending and expired leased rows at boot and after staff/trigger activation changes;
 2. claims a bounded lease and creates an abort controller;
-3. rechecks exact project match, staff existence/active state, trigger enabled state, selector/filter equality, `subscriberVersion`, causation limit, and retirement/disable cancellation;
-4. renders a fixed host-owned title/context from `safeContext`; it never serializes a full envelope or source aggregate;
-5. calls additive `InboxManager.enqueueWithId(deliveryId, ...)`, backed by fail-loud `InboxStore.putStrict`, so inbox acceptance is idempotent;
-6. marks `accepted` only after the inbox write durably succeeds or proves that the identical deterministic entry already exists;
+3. revalidates the persisted notification against its catalogue definition, supported schema version, size bounds, and project partition, then deep-freezes that exact stored event;
+4. rechecks staff existence/active state, trigger enabled state, selector and catalogue-owned filter match against that event, `subscriberVersion`, causation limit, and retirement/disable cancellation;
+5. creates only optional display text from `safeContext`, then calls additive `InboxManager.enqueueWithId(deliveryId, ...)` with the exact immutable notification in host-owned inbox/wake metadata and exposed as the staff notification input—never as prompt text;
+6. relies on fail-loud `InboxStore.putStrict` so acceptance is idempotent, and marks `accepted` only after the inbox write durably succeeds or proves that the identical deterministic entry with byte-equivalent semantic notification fields already exists;
 7. lets existing `InboxNudger` own session wake-up. Inbox acceptance, not agent execution/completion, is notification delivery success.
 
-If the gateway crashes after inbox commit and before outbox acceptance, boot retry uses the same inbox ID, observes/overwrites only an identical entry, then marks the row accepted without a duplicate. Late retries use compare-and-set state/lease generation and cannot move `accepted`, `cancelled`, or permanent `failed` back to pending.
+Restart retry reads and delivers the persisted original notification verbatim; it never reprojects a current mutable aggregate. If the gateway crashes after inbox commit and before outbox acceptance, boot retry uses the same inbox ID and identical notification metadata, then marks the row accepted without a duplicate. Late retries use compare-and-set state/lease generation and cannot move `accepted`, `cancelled`, or permanent `failed` back to pending. Unsupported versions, invalid schemas/sizes, partition mismatch, or changed trigger identity fail closed for that row with bounded diagnostics; they do not reach staff.
 
-Retry only classified transient storage/unavailable errors with capped exponential backoff, bounded attempts, and a final deadline. Invalid trigger/filter/project data is permanent failure. Paused, retired, deleted, or disabled staff/trigger rows are cancelled; cancellation aborts a leased attempt and a final live recheck precedes inbox acceptance. Accepted inbox work is not rolled back by later retirement.
+Retry only classified transient storage/unavailable errors with capped exponential backoff, bounded attempts, and a final deadline. Invalid trigger/filter/project data is permanent failure. Paused, retired, deleted, or disabled staff/trigger rows are cancelled; cancellation aborts a leased attempt and a final live recheck precedes inbox acceptance. Accepted inbox work is not rolled back by later retirement. The notification input and metadata path is available only to `type:"notification"` triggers; legacy schedule/git/manual/goal triggers cannot access or accidentally consume it.
 
-Correlation/loop protection uses a root correlation ID and bounded causation depth propagated in internal inbox metadata, not prompt text. Permit at most one delivery for `(rootCorrelationId, staffId, triggerId)` and cap depth. A notification caused by that staff wake cannot recursively redeliver to the same subscriber/root chain. Unknown/missing causation starts a new root; extensions cannot forge it because the host constructs envelopes.
+Correlation/loop protection uses separate internal `rootCorrelationId`/`causationDepth` delivery controls while preserving the canonical envelope's correlation and causation fields unchanged. Internal controls travel in host-owned inbox metadata, never prompt text. Permit at most one delivery for `(rootCorrelationId, staffId, triggerId)` and cap depth. A notification caused by that staff wake cannot recursively redeliver to the same subscriber/root chain. Unknown/missing causation starts a new host-owned root; extensions cannot forge it because the host constructs envelopes.
 
 Guarantees are therefore:
 
-- source commit precedes notification publication;
+- source commit precedes non-blocking notification publication;
+- browser, observational modules, and notification-triggered staff receive the same immutable canonical name/envelope/payload contract within their permitted scope;
 - browser/module observation is ordered live per connection/project queue and best-effort;
-- a successfully inserted staff intent is restart-recoverable; staff intent queueing/insertion never delays the source operation;
+- a successfully inserted staff intent retains the original canonical event and is restart-recoverable; queueing/insertion never delays or rolls back the source;
 - durable inbox acceptance is idempotent and effectively once per delivery identity;
-- attempt semantics are at least once, never exactly once;
-- source commit cannot be rolled back by any consumer or outbox failure;
-- intermediate notification facts lost in the commit-to-outbox crash window are not reconstructed; authoritative state remains queryable.
+- delivery attempts are at least once; staff execution is never exactly once;
+- intermediate facts lost in the source-commit-to-outbox window are not reconstructed from mutable state; authoritative state remains queryable;
+- no global journal, historical replay, or legacy-trigger access is introduced.
 
 ## 8. Security and privacy bounds
 
@@ -576,7 +575,7 @@ The shared catalogue and payload projectors enforce these invariants:
 - public error fields are closed enums such as `timeout`, `denied`, `handler_error`, not messages;
 - filter fields are catalogue allowlists over bounded scalars only.
 
-Builders accept explicit safe scalars or pre-projected snapshots, not domain objects. Tests recursively inject forbidden sentinel keys/values and prove they cannot serialize. Browser routing uses exact server-derived bindings. Module Host APIs remain pack- and grant-scoped. Staff matching requires the envelope's project and staff's project to match even for session-scoped facts.
+Builders accept explicit safe scalars or pre-projected snapshots, not domain objects. The staff outbox persists the complete canonical event only after that projection has passed catalogue schema/version/size validation; the worker revalidates and deep-freezes it before delivery. The same bounded event may appear only in matching project-partitioned notification rows and host-owned inbox/wake metadata, never prompt text, a global journal, or legacy-trigger input. Tests recursively inject forbidden sentinel keys/values and prove they cannot serialize in the envelope, persisted row, or inbox metadata. Browser routing uses exact server-derived bindings. Module Host APIs remain pack- and grant-scoped. Staff matching requires the envelope's project and staff's project to match even for session-scoped facts.
 
 Diagnostics record only timestamp, hook/notification, project/session aggregate identity, pack/contribution/subscriber attribution, duration, outcome code, timeout/cancel/retry counts, and revision. They never include payload bodies or arbitrary exception strings.
 
@@ -593,9 +592,11 @@ Diagnostics record only timestamp, hook/notification, project/session aggregate 
 
 ## 10. Implementation partitions and files
 
-Each partition is independently reviewable and keeps state ownership narrow.
+Each partition is independently reviewable and keeps state ownership narrow. Section 12.1 ties every new runtime state owner/API below to a selected component flow, rejected alternative, failure behavior, exact files, and focused tests; §12.2 separately decides durable global-journal versus subscriber-outbox storage.
 
 ### A. Catalogue and contribution runtime
+
+Decision coverage: the pure shared catalogue and contribution-normalization APIs serve all four §12.1 decisions; hook resolution/worker/grant changes are owned by the interceptor-execution and observational-fanout rows, not a new registry or worker runtime.
 
 - Add `src/shared/extension-host/host-hooks.ts`.
 - Add `src/server/extension-host/host-hook-contributions.ts`.
@@ -605,6 +606,8 @@ Each partition is independently reviewable and keeps state ownership narrow.
 
 ### B. Interceptors
 
+Decision coverage: §12.1 **Interceptor execution** owns the new coordinator and its ephemeral per-dispatch deadline/fold state.
+
 - Add `src/server/extension-host/host-interceptor-router.ts` and bounded audit types.
 - Keep `src/server/agent/lifecycle-hub.ts` as the legacy provider adapter/facade; do not make it publish facts.
 - Compose existing `provider-bridge-extension.ts`, `tool-guard-extension.ts`, and `tool-result-error-bridge-extension.ts` seams.
@@ -612,18 +615,24 @@ Each partition is independently reviewable and keeps state ownership narrow.
 
 ### C. Dispatcher, transport, and browser API
 
-- Add `src/server/extension-host/host-notification-dispatcher.ts` and a dedicated socket router.
+Decision coverage: §12.1 **Post-commit fanout/routing** owns the dispatcher, exact socket route, and bounded server queues; **Browser notification delivery** owns the additive scoped Host APIs and the single generation-fenced client bus.
+
+- Add `src/server/extension-host/host-notification-dispatcher.ts` and `host-notification-socket-router.ts`.
 - Add `src/app/host-notification-bus.ts`.
 - Modify `ws/protocol.ts`, `ws/handler.ts`, `remote-agent.ts`, and `host-api.ts`.
 - Wire through `project-context.ts`/`project-context-manager.ts` using existing late wiring.
 
 ### D. Authoritative publishers
 
+Decision coverage: §12.1 **Post-commit fanout/routing** limits domain owners to narrow post-authority callbacks and allowlisted payload builders; owners gain no fanout queues or transport API.
+
 - Session: `session-status.ts`, `session-manager.ts`, and the history-fork success route in `server.ts`.
 - Project domains: `goal-store.ts`/`goal-manager.ts`, `task-store.ts`/`task-manager.ts`, `gate-store.ts`/gate status adapter, `staff-store.ts`/`staff-manager.ts`, `pr-status-store.ts`, and `project-config-store.ts`.
 - Add only the strict callbacks/revisions required by the boundary table. Preserve search, legacy broadcast, and goal-trigger callbacks independently.
 
 ### E. Staff durability
+
+Decision coverage: §12.1 **Notification staff delivery** owns the sole new durable subscriber store/lease worker and the additive idempotent inbox metadata/API; §12.2 rejects broader durable event state.
 
 - Add `notification-delivery-store.ts` and `notification-staff-dispatcher.ts`.
 - Extend `staff-store.ts`, `staff-manager.ts`, and staff request/UI validation additively.
@@ -635,6 +644,8 @@ Each partition is independently reviewable and keeps state ownership narrow.
 Update `docs/extension-host-authoring.md`, `docs/lifecycle-hub.md`, staff trigger/inbox documentation, Host API contract/version reference, WebSocket reference, REST/project snapshot refresh guidance, and marketplace fixture documentation. Register every new Test Suite v2 file in `tests2/tests-map.json`; add no legacy-suite tests.
 
 ## 11. Protecting tests and acceptance checks
+
+Section 12.1 maps each component decision to exact protecting tests and focused new test files. The aggregate matrix below covers catalogue and authoritative-domain behavior shared across those component seams; §12.2 lists only the additional tests a rejected global journal would require.
 
 Reuse and extend existing seams rather than replace their tests:
 
@@ -673,7 +684,9 @@ Required new v2 coverage:
 - fixture installed explicit interceptor and notification handlers through real registry/worker infrastructure;
 - precedence, activation/config/grants, timeout, cancellation, malformed result, protected failure isolation, and exact project context;
 - staff filter validation/matching, concurrent duplicate coalescing, transient retry, retirement/disable cancellation, late retry fence, causation loop limit, deterministic inbox acceptance, and restart reconciliation;
-- unchanged schedule/git/manual/goal trigger suites.
+- a session `toolCallCompleted` and a project notification each deliver to matching staff with byte-equivalent semantic envelope fields to the dispatcher's canonical event; restart between intent persistence and acceptance preserves `id`, `scope`, `name`, `payloadVersion`, payload, aggregate revision, and correlation/causation fields;
+- forbidden privacy sentinels cannot serialize in the persisted delivery row or host-owned inbox/wake metadata, and `safeContext` cannot become semantic notification input;
+- unchanged schedule/git/manual/goal trigger suites remain unable to access notification metadata.
 
 ### Browser and E2E
 
@@ -693,28 +706,41 @@ npm run test:e2e
 
 Acceptance is complete only when every catalogue entry has exactly one tested authoritative publisher, public payload privacy tests pass, cross-project attempts are silent, existing provider/panel/staff compatibility tests remain green, and all new files are registered in `tests2/tests-map.json`.
 
-## 12. Defect-surface comparison: selected outbox vs rejected full journal
+## 12. Comparative design and defect surface
 
-The alternative durable-global-journal design adds a notification database, stream heads, retention, aggregate reconciliation, catch-up scheduling, and journal-to-consumer cursors before it can deliver the same user-visible behavior. It improves recovery of a subset of post-commit facts but cannot make the source-store commit and journal insert atomic without either coupling every domain transaction to the journal or allowing notification infrastructure to fail/roll back the source. It therefore still has a commit-to-journal crash window while adding substantial state.
+### 12.1 Component-level comparative decisions
+
+These decisions justify the non-trivial cross-layer additions independently. Each selected path composes current authority owners and gives its new state an explicit failure contract; the durable-storage choice remains separate in §12.2.
+
+| Decision | Selected data/control flow, new state, and failure behavior | Materially different rejected approach and defect-surface rationale | Exact implementation files and protecting/focused tests |
+|---|---|---|---|
+| Interceptor execution | `HostInterceptorRouter` validates a typed request, obtains deterministic contributions from `PackContributionRegistry`, invokes them sequentially through `ModuleHost`, folds typed mutations/decisions, and rechecks activation/epoch/grants before invocation and application. `LifecycleHub.dispatch()` remains one legacy-provider adapter and retains context validation/budget/application semantics. The router owns only ephemeral per-dispatch deadline, current folded value, and bounded decision rows—no durable state. Timeout/invalid/revoked work follows the definition's fail-open or protected fail-closed result without late application. | Generalize `LifecycleHub` into the executor for all seven operations. That would add tool mutation, result replacement, import/flush, and differing failure-policy branches to the legacy context-block owner, blur byte-compatible provider behavior, and still require worker/grant resolution. The selected coordinator exists specifically for typed sequential mutation and pre-apply authority checks rather than speculative reuse. | Production: `src/server/extension-host/host-interceptor-router.ts`, `host-hook-contributions.ts`, `module-host-worker.ts`, `module-host-bootstrap.ts`; `src/server/agent/lifecycle-hub.ts`, `pack-contributions.ts`; existing `tests2/core/lifecycle-hub.test.ts`, `provider-bridge-extension.test.ts`, `pack-contributions.test.ts`, `extension-host-module-isolation.test.ts`, `extension-host-module-memory-isolation.test.ts`, `extension-host-no-capability-sandbox-residual.test.ts`, `extension-host-server-host-api.test.ts`; focused `tests2/core/host-interceptor-router.test.ts`. |
+| Browser notification delivery | `HostNotificationSocketRouter` sends canonical frames only to exact server-bound sockets; `RemoteAgent` feeds one bounded `host-notification-bus.ts`; scoped `host-api.ts` subscriptions consume it. `session-event-bus.ts` remains the rich byte-compatible legacy adapter. New client state is one generation-fenced bounded recent-ID set plus epoch/sequence state per mounted host; on mount/reconnect/gap/overflow it coalesces refresh and discards delta reconstruction. | Extend `session-event-bus.ts` or synthesize canonical/project facts from existing raw session frames. Those frames lack an exact project-scoped routing model and include rich message/tool bodies; reuse would couple the public privacy contract to raw transport, invite client filtering, and endanger legacy compatibility. | Production: `src/server/ws/protocol.ts`, `handler.ts`, `src/server/extension-host/host-notification-socket-router.ts`, `src/app/remote-agent.ts`, `host-api.ts`, `host-notification-bus.ts`, `session-event-bus.ts`, `src/shared/extension-host/host-api.ts`; existing `tests2/core/extension-host-session-event-bus.test.ts`, `extension-host-surface-binding.test.ts`, `tests2/integration/extension-host-surface-token.test.ts`; focused `tests2/dom/extension-host-notification-bus.test.ts` and browser reconnect/gap/isolation journey. |
+| Notification staff delivery | After canonical publication, `notification-staff-dispatcher.ts` matches catalogue selectors/filters and persists a per-project `NotificationDeliveryStore` row containing subscriber lease/identity state and the complete original bounded event. Its worker revalidates/freezes that event and calls `InboxManager.enqueueWithId`; `InboxStore.putStrict` is durable acceptance and `InboxNudger` remains wake owner. This is the sole new durable consumer state. Queue/insert failure never affects the source; transient leased rows retry, invalid/foreign/version-mismatched rows fail closed, and deterministic IDs close the inbox-ACK window. Legacy `GoalTriggerDispatcher`/`TriggerEngine` remain unchanged. | Add selector/filter/causation/lease logic to the legacy goal dispatcher/trigger engine. It mixes non-migrated legacy semantics with canonical notifications, still requires durable identity and the original event for restart, and risks double wakes. A `safeContext`-only row violates the shared contract; individually columnizing the envelope is viable but has greater omission/migration risk; a global journal is disproportionate (§12.2). | Production: `src/server/agent/notification-delivery-store.ts`, `notification-staff-dispatcher.ts`, `staff-store.ts`, `staff-manager.ts`, `inbox-manager.ts`, `inbox-store.ts`, with unchanged `goal-trigger-dispatcher.ts`, `staff-trigger-engine.ts`; existing `tests2/core/staff-trigger-engine.test.ts`, `goal-trigger-dispatcher.test.ts`, `inbox-manager.test.ts`, `inbox-store.test.ts`, `tests2/integration/staff-goal-triggers.test.ts`; focused `tests2/integration/notification-staff-dispatcher.test.ts`, `tests/e2e/notification-staff-restart.spec.ts`. |
+| Post-commit fanout/routing | Narrow callbacks from §5 authority owners submit allowlisted scalars after their strict commit/publication fence. One `HostNotificationDispatcher` validates, constructs, and freezes the envelope, then enqueues exact socket, ordered module, matching staff, and bounded diagnostic fanout. It owns bounded live queues only—no durable global event state—and never awaits consumer I/O in the source operation. Queue/send/handler failures are isolated and coded; browser gaps refresh, module delivery may drop, and only matched staff intents become durable. | Let every domain owner send browser/module/staff facts through existing broadcast helpers. That duplicates envelope construction, schema, privacy, ordering, and failure branches at every mutation; tempts unsafe `broadcastToProject`; and prevents one canonical post-commit contract from being tested. | Production: `src/server/extension-host/host-notification-dispatcher.ts`, `host-notification-socket-router.ts`, `src/server/agent/project-context.ts`, `project-context-manager.ts`, and every §5 domain owner file; focused `tests2/core/host-notification-dispatcher.test.ts`, `tests2/integration/host-notification-routing.test.ts`, privacy/post-commit boundary cases in §11, and `tests/e2e/host-notification-routing.spec.ts`. |
+
+### 12.2 Durable storage decision: selected subscriber outbox vs rejected full journal
+
+The component choices above do not imply durable global publication state. The alternative durable-global-journal design adds a notification database, stream heads, retention, aggregate reconciliation, catch-up scheduling, and journal-to-consumer cursors before it can deliver the same user-visible behavior. It improves recovery of a subset of post-commit facts but cannot make the source-store commit and journal insert atomic without either coupling every domain transaction to the journal or allowing notification infrastructure to fail/roll back the source. It therefore still has a commit-to-journal crash window while adding substantial state.
 
 | Surface | Selected: live dispatcher + staff outbox | Rejected: durable global journal | Consequence |
 |---|---|---|---|
-| Durable state owners | One per-project staff delivery store; existing inbox remains wake authority | Notification journal, stream-head table, staff-delivery table, retention/quarantine state, reconciler cursors, plus inbox | Selected adds only state required for the one durable consumer. |
-| Canonical notification storage | None; envelope exists for live fanout and safe fields are copied only into matching staff rows | Every envelope and aggregate revision persisted | Journal enlarges privacy/retention/migration surface for events browsers/modules do not replay. |
+| Durable state owners | One per-project staff delivery store; each matching row holds subscriber state and its original bounded canonical event; existing inbox remains wake authority | Notification journal, stream-head table, staff-delivery table, retention/quarantine state, reconciler cursors, plus inbox | Selected adds only state required for the one durable consumer. |
+| Canonical notification storage | Only a matching staff intent persists its complete validated event until bounded terminal-row compaction; unmatched/browser/module events are not history | Every emitted envelope and aggregate revision is persisted independently of a subscriber | The selected row is necessary to give asynchronous/restarted staff the shared contract. A journal enlarges privacy/retention/migration surface for events no consumer replays. |
 | Ordering state | Ephemeral per-connection sequence and per-project module queue | Durable publication sequence, stream heads, per-consumer cursors/leases | Selected provides required live ordering/gap refresh without pretending to be event sourcing. |
 | Crash before event persistence | Source remains committed; rare missed live fact/outbox diagnostic; consumers refresh state | Same unless every domain transaction shares journal transaction; reconciler can only infer current/terminal state | Journal cannot reconstruct unknowable intermediate facts, so its stronger guarantee is partial. |
 | Crash after staff intent | Pending/expired lease reconciles; deterministic inbox ID closes ACK window | Journal delivery row reconciles similarly | Both meet staff restart needs; global notification rows add no benefit to this path. |
 | Browser reconnect | Snapshot refresh, no replay | Design still requires snapshot refresh because deltas may be sensitive/incomplete and client state may be stale | Durable journal is unused for the required browser correctness model. |
 | Module restart | Best-effort observation; module reads snapshots | Could replay, but activation/grant/config may differ and replay semantics require durable per-handler cursors | Goal asks observational asynchronous handlers, not historical processors. Replay adds semantic ambiguity. |
 | Project isolation | Server-bound live router + project-owned outbox | Same plus journal query authorization and partition correctness | Journal adds another cross-project read boundary. |
-| Schema migration | Shared catalogue and compact staff-row schema | Catalogue plus persisted envelope versions, migrations, compatibility readers, quarantine | Full journal makes every payload version a storage migration concern. |
+| Schema/version handling | Shared catalogue plus version-aware validation of bounded events in matching staff rows; invalid/unsupported rows fail closed or quarantine per-row | Catalogue plus migrations, compatibility readers, and quarantine for every emitted journal event and every consumer cursor | Staff needs bounded version handling either way; a full journal makes all payload versions and historical events a storage migration concern. |
 | Retention/deletion | Terminal outbox rows can be compacted after bounded audit TTL | Must coordinate journal TTL with all consumer cursors, unresolved deliveries, project deletion, privacy policy | More cleanup branches and stuck-row modes. |
 | Corruption handling | Quarantine/fail one staff row/store; browser/modules unaffected | Journal corruption can block fanout order, replay, staff scanning, and stream heads | Larger blast radius. |
 | Backpressure | Bounded live queues may drop and force refresh; outbox is durable only for staff | Durable journal queue can grow without bound unless retention/cursors are correct | Selected failure behavior matches consumer guarantees explicitly. |
 | Source coupling | Narrow post-commit callback | Post-commit append at every source plus reconciliation readers for every aggregate | Journal creates a second representation of domain history. |
 | Aggregate revisions | Only catalogue-required revision sources; one small gate revision addition | Durable revisions/cursors must be added consistently to all aggregates for reconciliation | Full journal forces more new state and forgotten-writer risk. |
 | APIs | Two notification namespaces, explicit hook kind, internal staff rows | Same plus journal read/replay/admin/maintenance APIs even if initially hidden | Hidden operational APIs still require security/testing. |
-| Testing | Boundaries, live gaps/refresh, module isolation, staff crash window | All selected tests plus migrations, journal atomicity, replay order, cursor leases, TTL, compaction, quarantine, reconciliation | Materially larger verification matrix with no acceptance gain. |
+| Testing | Boundaries, live gaps/refresh, module isolation, byte-equivalent staff event/inbox metadata, privacy sentinels, and staff crash window | All selected tests plus global migrations, journal atomicity, replay order, cursor leases, TTL, compaction, quarantine, reconciliation | Materially larger verification matrix with no acceptance gain. |
 | Operational claims | Honest live best-effort + durable staff intent/idempotent acceptance | Tempts exactly-once/event-log claims that cross-store transactions cannot satisfy | Selected contract is smaller and accurate. |
 
 Unavoidable selected additions are limited to:
