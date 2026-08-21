@@ -14,6 +14,7 @@ const { SessionManager, emitSessionEvent } = await import("../../src/server/agen
 const { broadcastStatus } = await import("../../src/server/agent/session-status.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+const { HostNotificationDispatcher } = await import("../../src/server/extension-host/host-notification-dispatcher.ts");
 
 const managers: any[] = [];
 
@@ -27,9 +28,14 @@ afterEach(() => {
 function makeHarness() {
 	const facts: Array<{ name: string; publication: any; frameCount: number }> = [];
 	const sent: any[] = [];
+	const dispatcher = new HostNotificationDispatcher({
+		resolveSessionProject: (sessionId) => sessionId === "session-a" ? "project-a" : undefined,
+	});
 	const publisher = {
 		publish(name: string, publication: any) {
-			facts.push({ name, publication, frameCount: sent.length });
+			const validated = dispatcher.publish(name as any, publication);
+			if (validated) facts.push({ name, publication: validated, frameCount: sent.length });
+			return validated;
 		},
 	};
 	const manager: any = new SessionManager({ hostNotificationPublisher: publisher });
@@ -60,7 +66,7 @@ function makeHarness() {
 	};
 	manager.sessions.set(session.id, session);
 	manager.setHostNotificationPublisher(publisher);
-	return { manager, session, facts, sent };
+	return { manager, session, facts, sent, dispatcher };
 }
 
 describe("authoritative session host notifications", () => {
@@ -113,7 +119,7 @@ describe("authoritative session host notifications", () => {
 	});
 
 	it("fences tool completion on accepted tool-result message metadata", () => {
-		const { manager, session, facts } = makeHarness();
+		const { manager, session, facts, dispatcher } = makeHarness();
 		manager.handleAgentLifecycle(session, { type: "agent_start" });
 		manager.markToolCallAdmitted(session.id, "call-1", "read");
 		manager.handleAgentLifecycle(session, {
@@ -141,11 +147,12 @@ describe("authoritative session host notifications", () => {
 		assert.deepEqual(facts.at(-1)?.publication.payload, {
 			toolCallId: "call-1",
 			toolName: "read",
-			status: "failed",
+			status: "errored",
 			durationMs: facts.at(-1)?.publication.payload.durationMs,
-			errorStatus: "tool_error",
+			errorStatus: "handler_error",
 		});
 		assert.equal(JSON.stringify(facts).includes("PRIVATE_TOOL_BODY"), false);
+		assert.deepEqual(dispatcher.getDiagnostics(), [], "session facts must satisfy the canonical dispatcher schema");
 		assert.equal(session.hostToolCallLifecycle.size, 0);
 	});
 });
