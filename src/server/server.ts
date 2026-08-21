@@ -4244,6 +4244,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	sessionManager.setHostNotificationPublisher(hostNotificationDispatcher as any);
 	sessionManager.setHostInterceptorPort({
 		dispatch: (name, input, context) => hostInterceptorRouter.dispatch(name as any, input as any, context as any),
+		requiresFailClosed: (name, projectId) => hostInterceptorRouter.requiresFailClosed(name as any, projectId),
 		hasAny: (names, projectId, goalId) => {
 			const explicit = normalizeHookContributions(packContributionRegistry, projectId)
 				.some(row => row.kind === "interceptor" && names.includes(row.name));

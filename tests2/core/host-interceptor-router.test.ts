@@ -61,6 +61,20 @@ const context = () => ({
 });
 
 describe("HostInterceptorRouter", () => {
+	it("derives the protected transport snapshot only from live authorized fail-closed contributions", () => {
+		const authority = registryFor(pack([
+			explicit("ordinary", "failOpen"),
+			explicit("protected", "failClosed"),
+		]));
+		const router = new HostInterceptorRouter({
+			registry: authority.registry,
+			moduleHost: {} as ModuleHost,
+		});
+		expect(router.requiresFailClosed("beforeToolCall", "project-1")).toBe(true);
+		authority.setInactive();
+		expect(router.requiresFailClosed("beforeToolCall", "project-1")).toBe(false);
+	});
+
 	it("validates and folds explicit mutations sequentially in normalized order", async () => {
 		const declarations = [explicit("first"), explicit("second")];
 		const { registry } = registryFor(pack(declarations));

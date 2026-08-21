@@ -17,6 +17,9 @@ function isOwnSessionToolEndpoint(subpath: string, method: string): boolean {
 	if (method === "GET" && subpath === "/google-code-assist/token") return true;
 	if (method === "POST" && subpath === "/tool-grant-request") return true;
 	if (method === "POST" && subpath === "/activate-skill") return true;
+	// Pi's generated bridge may reach only these exact operation callbacks. The
+	// route still requires the owning session secret before accepting any body.
+	if (method === "POST" && (subpath === "/host-hooks/before-tool-call" || subpath === "/host-hooks/after-tool-result")) return true;
 	// Sandboxed agents may upload their own tool output with the owning session
 	// secret, but payload reads and workspace opens are browser/admin surfaces.
 	if (method === "POST" && subpath === "/review-payloads") return true;

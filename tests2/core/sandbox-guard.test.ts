@@ -23,6 +23,8 @@ describe("sandbox route guard", () => {
 			["GET", "/api/sessions/session-1"],
 			["PATCH", "/api/sessions/session-1"],
 			["POST", "/api/sessions/session-1/activate-skill"],
+			["POST", "/api/sessions/session-1/host-hooks/before-tool-call"],
+			["POST", "/api/sessions/session-1/host-hooks/after-tool-result"],
 			["GET", "/api/sessions/session-1/transcript"],
 			["POST", "/api/sessions/session-1/prompt"],
 			["GET", "/api/sessions/session-1/proposals"],
@@ -42,6 +44,8 @@ describe("sandbox route guard", () => {
 				`${method} ${pathname} must not cross sessions`,
 			);
 		}
+		assert.equal(isSandboxAllowed("/api/sessions/session-1/host-hooks/before-tool-call", "GET", scope()), false);
+		assert.equal(isSandboxAllowed("/api/sessions/session-1/host-hooks/other", "POST", scope()), false);
 	});
 
 	it("allows only secret-authenticated review upload from sandboxes", () => {
