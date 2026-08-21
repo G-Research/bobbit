@@ -91,6 +91,29 @@ describe("ProposalRenderer — failed goal proposal", () => {
 		expect(workflowIds, "plaintext workflow failures should keep valid workflow IDs available for the proposal panel").toEqual(["general", "feature"]);
 	});
 
+	it("renders non-workflow CWD_OUTSIDE_PROJECT failures with actionable guidance and no revision", async () => {
+		const result = await renderGoalProposal({
+			content: [{ type: "text", text: JSON.stringify({
+				ok: false,
+				code: "CWD_OUTSIDE_PROJECT",
+				message: "cwd must be inside the selected project or an owned Bobbit worktree",
+			}) }],
+		});
+
+		expect(result.failedCard).toBe(true);
+		expect(result.errorText).toContain("cwd must be inside the selected project");
+		expect(result.hasRev, "failed cwd validation must not render a successful revision").toBe(false);
+		expect(result.hasOpenButton, "the rejected candidate must remain inspectable for correction").toBe(true);
+		expect(result.openDetail).toMatchObject({
+			type: "goal",
+			fields: {
+				title: "Missing Workflow Goal",
+				spec: "Draft body without a workflow.",
+			},
+		});
+		expect(result.openDetail?.workflowValidationError).toBeUndefined();
+	});
+
 	it("infers missing-workflow failures when older transcripts have isError false", async () => {
 		const result = await renderGoalProposal({ isError: false });
 

@@ -67,6 +67,8 @@
  *  EDITABLE_PROPOSAL_INITIAL / EDITABLE_PROPOSAL_EDIT
  *                                      → editable-proposals seed/edit
  *  GOAL_PROPOSAL_REV2                  → 2nd propose_goal (different title/spec)
+ *  GOAL_PROPOSAL_OUTSIDE_CWD           → propose_goal with a cwd outside its project
+ *  GOAL_PROPOSAL_FIXED_CWD             → corrected propose_goal with project-default cwd
  *  GOAL_EDITABLE_EDIT                  → edit_proposal type:"goal" (Mode A repro)
  *  (See _decideToolAction / respondToPrompt for the full matcher table.)
  *
@@ -621,6 +623,33 @@ export class MockAgentCore {
 					spec: "A corrected draft with an explicit valid workflow.",
 				},
 				output: "Corrected goal proposal submitted.",
+			};
+		}
+
+		// Non-workflow validation failure + correction. A path directly below the
+		// filesystem root is deterministically outside the harness default project
+		// on Windows and POSIX; it need not exist for containment validation.
+		if (text.includes("GOAL_PROPOSAL_OUTSIDE_CWD")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Outside Cwd Goal",
+					workflow: "general",
+					spec: "A draft intentionally using a cwd outside the selected project.",
+					cwd: path.join(path.parse(this.cwd).root, "__bobbit-outside-proposal__"),
+				},
+				output: "Goal proposal failed cwd validation.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_FIXED_CWD")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Corrected Cwd Goal",
+					workflow: "general",
+					spec: "A corrected draft using the selected project's default cwd.",
+				},
+				output: "Corrected cwd goal proposal submitted.",
 			};
 		}
 

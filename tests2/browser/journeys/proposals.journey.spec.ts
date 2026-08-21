@@ -296,6 +296,32 @@ test.describe("Journey: Failed Goal Proposal", () => {
 		await expect(workflowError).toBeVisible({ timeout: 20_000 });
 		await expect(workflowError).toContainText(/Workflow is required/i, { timeout: 10_000 });
 	});
+
+	test("CWD_OUTSIDE_PROJECT renders an actionable failed card and corrected resubmission revision", async ({ page }) => {
+		test.setTimeout(90_000);
+		await openApp(page);
+		await createSessionViaUI(page);
+		await sendMessage(page, "Please run GOAL_PROPOSAL_OUTSIDE_CWD now");
+
+		const failedCard = page.locator('[data-testid="proposal-failed-card"]').filter({ hasText: "Outside Cwd Goal" }).first();
+		await expect(failedCard).toBeVisible({ timeout: 20_000 });
+		const errorMessage = failedCard.locator('[data-testid="proposal-error-message"]');
+		await expect(errorMessage).toContainText(/cwd must be inside the selected project/i);
+		await expect(failedCard.locator('[data-testid="proposal-rev"]')).toHaveCount(0);
+		await expect.poll(() => page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			const messages = state?.remoteAgent?.state?.messages ?? [];
+			const failed = [...messages].reverse().find((message: any) =>
+				message?.role === "toolResult" && message?.toolName === "propose_goal" && message?.isError === true,
+			);
+			return (failed?.content ?? []).map((part: any) => part?.text ?? "").join("\n");
+		}), { timeout: 20_000 }).toContain('"code": "CWD_OUTSIDE_PROJECT"');
+
+		await sendMessage(page, "Please run GOAL_PROPOSAL_FIXED_CWD now");
+		await expect(page.getByText("Corrected Cwd Goal").first()).toBeVisible({ timeout: 20_000 });
+		await expect(page.locator('[data-testid="proposal-failed-card"]')).toHaveCount(1);
+		await expect(page.locator('[data-testid="proposal-rev"]').last()).toHaveText(/^rev \d+$/, { timeout: 20_000 });
+	});
 });
 
 // Ported from goal-reattempt-project-binding.spec.ts (audit: project-settings
