@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
+import { collectTeamOwnedSessionClosure, type PromptSource, type SessionManager, type SessionInfo } from "./session-manager.js";
 import type { PersistedSession } from "./session-store.js";
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
@@ -328,6 +328,16 @@ export interface TeamState {
 	maxConcurrent: number;
 }
 
+export interface ArchivedGoalReconciliationResult {
+	goalId: string;
+	status: "complete" | "blocked";
+	archivedSessionIds: string[];
+	suppressedSessionIds: string[];
+	teamRemoved: boolean;
+	teamEntryRetained: boolean;
+	errors: string[];
+}
+
 /** Start behaviour selected by the caller. Scheduler starts retain pause guards. */
 export interface StartTeamOptions {
 	/**
@@ -573,8 +583,12 @@ export class TeamManager {
 
 	/** In-flight startTeam operations, including their immutable caller semantics. */
 	private startTeamLocks = new Map<string, StartTeamLock>();
+	/** Serializes team admission and terminal reconciliation per goal. */
+	private goalAdmissionTails = new Map<string, Promise<void>>();
 	/** Serializes adopted-lead finalization with the admitted archive operation. */
 	private adoptedGoalLifecycleLocks = new Map<string, Promise<void>>();
+	/** Exact same-process retry evidence for rejected session archive publications. */
+	private archivedGoalSessionRetries = new Map<string, Set<string>>();
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
@@ -591,6 +605,11 @@ export class TeamManager {
 		this.recoveryFs = config.recoveryFs ?? realRecoveryFs;
 		this.recoverySidecars = config.recoverySidecars ?? createRealTeamRecoverySidecars(this.recoveryFs);
 		this.recoveryCheckpoints = config.recoveryCheckpoints ?? new FileTeamRecoveryCheckpointStore();
+		// OrchestrationCore is constructed before TeamManager, so bridge its
+		// team-owned child admission through SessionManager without adding another
+		// goal-lifecycle owner. The whole child publication runs on this same queue.
+		this.sessionManager.setTeamGoalAdmissionFence?.((goalId, operation) =>
+			this.withGoalAdmission(goalId, false, operation));
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
@@ -712,6 +731,25 @@ export class TeamManager {
 		return undefined;
 	}
 
+	private async withGoalAdmission<T>(goalId: string, allowArchived: boolean, operation: () => Promise<T>): Promise<T> {
+		const previous = this.goalAdmissionTails.get(goalId) ?? Promise.resolve();
+		let release!: () => void;
+		const turn = new Promise<void>((resolve) => { release = resolve; });
+		const tail = previous.catch(() => {}).then(() => turn);
+		this.goalAdmissionTails.set(goalId, tail);
+		await previous.catch(() => {});
+		try {
+			const goal = this.resolveGoal(goalId);
+			if (!allowArchived && goal?.archived) {
+				throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot create team sessions");
+			}
+			return await operation();
+		} finally {
+			release();
+			if (this.goalAdmissionTails.get(goalId) === tail) this.goalAdmissionTails.delete(goalId);
+		}
+	}
+
 	/** Set the broadcastToGoal function (called after WebSocket server is created). */
 	setBroadcastToGoal(fn: (goalId: string, event: any) => void): void {
 		this.config.broadcastToGoal = fn;
@@ -766,6 +804,8 @@ export class TeamManager {
 	 * Persist the current state of a team entry to disk.
 	 */
 	private persistEntry(goalId: string): void {
+		// Durable terminal intent wins over stale runtime callbacks.
+		if (this.resolveGoal(goalId)?.archived) return;
 		const entry = this.teams.get(goalId);
 		if (entry) {
 			this.resolveTeamStore(goalId).put(this.toPersistedEntry(entry));
@@ -1380,6 +1420,11 @@ export class TeamManager {
 	 * restoreSessions() — needs live session objects.
 	 */
 	resubscribeTeamEvents(): void {
+		// Defense-in-depth: a retained TeamStore row is passive retry evidence,
+		// never authority to reactivate an archived goal's runtime.
+		for (const [goalId, entry] of [...this.teams]) {
+			if (this.resolveGoal(goalId)?.archived) this.deactivateArchivedTeamRuntime(goalId, entry);
+		}
 		// zombie-reviewer sweep — Zombie-reviewer sweep. After a server restart, reviewer
 		// sessions belonging to a verification that was running mid-flight are
 		// torn down by the harness's resume logic. The persisted `team-state.json`
@@ -2368,7 +2413,7 @@ export class TeamManager {
 				}
 			}
 
-			const promise = this._startTeamImpl(goalId, normalizedOptions);
+			const promise = this.withGoalAdmission(goalId, false, () => this._startTeamImpl(goalId, normalizedOptions));
 			const lock: StartTeamLock = { options: normalizedOptions, promise };
 			this.startTeamLocks.set(goalId, lock);
 			try {
@@ -2397,6 +2442,9 @@ export class TeamManager {
 	}
 
 	private assertGoalCanStart(goal: PersistedGoal): void {
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot start a team");
+		}
 		if (!goal.team) {
 			throw new TeamStartError("TEAM_DISABLED", `Goal "${goal.title}" does not have team mode enabled`);
 		}
@@ -2561,14 +2609,19 @@ export class TeamManager {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
 			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");
 		}
+		const teamLeadAccessory = storedRole.accessory ?? "crown";
 		const session = await this.sessionManager.createSession(
 			cwd,
 			["--extension", teamLeadExtPath],
 			goalId,
 			undefined,
 			{
+				// Durable ownership and known role structure must be present in the
+				// initial row: createSession persists before later naming/team-state work.
+				teamGoalId: goalId,
 				rolePrompt: teamLeadPrompt,
 				roleName: "team-lead",
+				accessory: teamLeadAccessory,
 				env: { BOBBIT_GOAL_ID: goalId },
 				sandboxed,
 				// For sandboxed goals, create a worktree at the goal branch inside the container.
@@ -2589,7 +2642,6 @@ export class TeamManager {
 		const teamLeadName = await generateTeamName("team-lead");
 		this.sessionManager.setTitle(session.id, `Team Lead: ${teamLeadName}`);
 		session.titleGenerated = true;
-		const teamLeadAccessory = storedRole?.accessory ?? "crown";
 		this.sessionManager.updateSessionMeta(session.id, {
 			role: "team-lead",
 			teamGoalId: goalId,
@@ -2733,6 +2785,15 @@ export class TeamManager {
 		task: string,
 		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
+		return this.withGoalAdmission(goalId, false, () => this._spawnRoleImpl(goalId, role, task, opts));
+	}
+
+	private async _spawnRoleImpl(
+		goalId: string,
+		role: string,
+		task: string,
+		opts?: { workflowGateId?: string; inputGateIds?: string[] },
+	): Promise<{ sessionId: string; worktreePath?: string }> {
 		// Resolve via the goal's inline-roles snapshot first, then the
 		// config cascade (project→server→builtin→market-packs). See resolveRole()
 		// and the PersistedGoal.inlineRoles field doc for the precedence rule.
@@ -2755,6 +2816,9 @@ export class TeamManager {
 		const goal = this.resolveGoal(goalId);
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
+		}
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot create team sessions");
 		}
 		this.assertAdoptedLeadWorkerAdmission(goal, entry);
 
@@ -2982,7 +3046,11 @@ export class TeamManager {
 				goalId,
 				undefined,
 				{
-					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
+					// Persist team ownership before any later title/base-SHA/team-state await.
+					teamGoalId: goalId,
+					teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
+					rolePrompt, roleName: role, accessory: storedRoleDef.accessory,
+					workflowContext, sandboxed: memberSandboxed,
 					// A host worker worktree is already fully provisioned. Thread every
 					// ownership coordinate into createSession so the initial persisted
 					// row proves its exact repo/path/branch identity before return.
@@ -3458,7 +3526,20 @@ export class TeamManager {
 	 * The verification harness manages the session lifecycle — no agent_end subscription is needed.
 	 * Silently returns if no team exists for the goal (handles manual gate signals).
 	 */
-	registerReviewerSession(goalId: string, sessionId: string, stepName: string): void {
+	async registerReviewerSession(goalId: string, sessionId: string, stepName: string): Promise<void> {
+		if (this.resolveGoal(goalId)?.archived) {
+			// Defensive evidence path for resume/legacy callers outside the admission
+			// boundary. Await the soft archive so returning never implies publication
+			// succeeded while leaving a late verifier live.
+			this.sessionManager.updateSessionMeta(sessionId, { role: "reviewer", teamGoalId: goalId });
+			try {
+				const terminated = await this.sessionManager.terminateSession(sessionId, { preserveEvidence: true });
+				if (!terminated) await this.sessionManager.storeArchive(sessionId, { preserveEvidence: true });
+			} catch {
+				await this.sessionManager.storeArchive(sessionId, { preserveEvidence: true });
+			}
+			return;
+		}
 		const entry = this.teams.get(goalId);
 		if (!entry) return; // No active team — skip registration silently
 
@@ -3586,6 +3667,231 @@ export class TeamManager {
 		this.rearmedCompletedTeams.add(goalId);
 		console.log(`[team-manager] Rearmed completed team for reopened goal ${goalId}; team lead remains ${entry.teamLeadSessionId}`);
 		return true;
+	}
+
+	private deactivateArchivedTeamRuntime(goalId: string, entry: TeamEntry | undefined): void {
+		this.clearIdleNudgeTimer(goalId);
+		try { entry?.unsubscribeTeamLeadEvents?.(); } catch (err) {
+			console.warn(`[team-manager] Failed to unsubscribe archived team lead for ${goalId}:`, err);
+		}
+		if (entry) {
+			for (const agent of entry.agents) {
+				try { agent.unsubscribeEvent?.(); } catch { /* terminal cleanup is best-effort */ }
+				this.sessionToGoal.delete(agent.sessionId);
+				const idleTimer = this.pendingIdleNotify.get(agent.sessionId);
+				if (idleTimer) this.clock.clearTimeout(idleTimer);
+				this.pendingIdleNotify.delete(agent.sessionId);
+			}
+			if (entry.teamLeadSessionId) this.sessionToGoal.delete(entry.teamLeadSessionId);
+		}
+		this.teams.delete(goalId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
+		this.lastSpecNudgeTs.delete(goalId);
+		this.rearmedCompletedTeams.delete(goalId);
+	}
+
+	/**
+	 * Reconcile every durable team-owned session after goal archive intent is
+	 * committed. Runtime deactivation is independent of TeamStore publication.
+	 */
+	async reconcileArchivedGoal(
+		goalId: string,
+		options: { audit?: boolean } = {},
+	): Promise<ArchivedGoalReconciliationResult> {
+		return this.withGoalAdmission(goalId, true, async () => {
+			const startedAt = this.clock.now();
+			const goal = this.resolveGoal(goalId);
+			if (!goal?.archived) {
+				return { goalId, status: "complete", archivedSessionIds: [], suppressedSessionIds: [], teamRemoved: false, teamEntryRetained: false, errors: [] };
+			}
+
+			const context = this.config.projectContextManager?.getContextForGoal(goalId);
+			const teamStore = context?.teamStore ?? this.localStore!;
+			const sessionStore = context?.sessionStore ?? (this.sessionManager as any)._testStore;
+			const persistedEntry = teamStore?.get(goalId);
+			const runtimeEntry = this.teams.get(goalId);
+			const referencedIds = new Set<string>();
+			for (const entry of [persistedEntry, runtimeEntry]) {
+				if (entry?.teamLeadSessionId) referencedIds.add(entry.teamLeadSessionId);
+				for (const agent of entry?.agents ?? []) referencedIds.add(agent.sessionId);
+			}
+			const retryIds = this.archivedGoalSessionRetries.get(goalId) ?? new Set<string>();
+			const authoritativeIds = new Set([...referencedIds, ...retryIds]);
+
+			const errors: string[] = [];
+			const liveRows = (): PersistedSession[] => sessionStore?.getLive?.() ?? [];
+			// A failed SessionStore publication can leave its mutable in-memory row
+			// archived even though disk still says live. TeamStore references and exact
+			// failed IDs keep only those authoritative rows retryable without scanning
+			// archive history or broadening ownership to goalId-only sessions.
+			const candidateRows = (): PersistedSession[] => {
+				const byId = new Map(liveRows().map((session) => [session.id, session]));
+				for (const id of authoritativeIds) {
+					const referenced = sessionStore?.get?.(id);
+					if (referenced) byId.set(id, referenced);
+				}
+				return [...byId.values()];
+			};
+			const initialRows = candidateRows();
+			const initialClosure = collectTeamOwnedSessionClosure(goalId, initialRows, authoritativeIds, errors);
+			const hasAuthoritativeOwnership = initialRows.some((session) =>
+				session.teamGoalId === goalId
+				|| (authoritativeIds.has(session.id) && (!session.teamGoalId || session.teamGoalId === goalId)));
+
+			this.deactivateArchivedTeamRuntime(goalId, runtimeEntry);
+
+			// Recovery-shaped team ownership may predate the durable goal.team marker.
+			// Publish that sticky marker before archiving its only reconstructable row;
+			// archive replays then keep worktrees and remote branches as evidence.
+			if (goal.team !== true && hasAuthoritativeOwnership) {
+				let markerAcknowledged = false;
+				try {
+					const goalStore = context?.goalStore ?? this._localGoalManager?.getGoalStore();
+					if (goalStore) markerAcknowledged = await goalStore.updateStrict(goalId, { team: true });
+				} catch (err) {
+					errors.push(`team marker: ${err instanceof Error ? err.message : String(err)}`);
+				}
+				if (!markerAcknowledged) {
+					if (!errors.some((error) => error.startsWith("team marker:"))) {
+						errors.push("team marker: persistence was not acknowledged");
+					}
+					for (const id of initialClosure) {
+						try { await this.sessionManager.quiesceSessionRuntime(id); }
+						catch (err) { errors.push(`quiesce ${id}: ${err instanceof Error ? err.message : String(err)}`); }
+					}
+					try { await this.verificationHarness?.cancelAllVerifications(goalId); }
+					catch (err) { errors.push(`verification cancellation: ${err instanceof Error ? err.message : String(err)}`); }
+					const result: ArchivedGoalReconciliationResult = {
+						goalId,
+						status: "blocked",
+						archivedSessionIds: [],
+						suppressedSessionIds: [...initialClosure],
+						teamRemoved: false,
+						teamEntryRetained: !!teamStore?.get(goalId),
+						errors: errors.slice(0, 10),
+					};
+					if (options.audit !== false) {
+						console.log(`[team-manager] Archived-team reconciliation blocked: goal=${goalId} archived=0 suppressed=${result.suppressedSessionIds.length} teamRemoved=false retained=${result.teamEntryRetained} errors=${errors.length} elapsedMs=${this.clock.now() - startedAt}`);
+					}
+					return result;
+				}
+			}
+
+			try { await this.verificationHarness?.cancelAllVerifications(goalId); }
+			catch (err) { errors.push(`verification cancellation: ${err instanceof Error ? err.message : String(err)}`); }
+
+			// These are durable acknowledgements from this call, not a projection of
+			// the mutable SessionStore row. archiveAsync marks a row archived before
+			// publishing its snapshot, so every retained explicit reference is retried.
+			const archivedSessionIds = new Set<string>();
+			const selectedIds = new Set<string>();
+			const attempted = new Set<string>();
+			// Admission is closed, so this bounded final scan reaches a fixed point;
+			// the extra pass catches descendants published by work admitted earlier.
+			const maxPasses = Math.max(1, candidateRows().length + 1);
+			for (let pass = 0; pass < maxPasses; pass++) {
+				const closure = collectTeamOwnedSessionClosure(goalId, candidateRows(), authoritativeIds, errors);
+				for (const id of closure) selectedIds.add(id);
+				const pending = [...closure].filter((id) => !attempted.has(id));
+				if (pending.length === 0) break;
+				for (const id of pending) {
+					attempted.add(id);
+					const archiveOptions = { preserveEvidence: true, cascadeSessionIds: selectedIds };
+					let acknowledged = false;
+					try {
+						acknowledged = await this.sessionManager.terminateSession(id, archiveOptions);
+					} catch (err) {
+						errors.push(`stop ${id}: ${err instanceof Error ? err.message : String(err)}`);
+					}
+					if (!acknowledged) {
+						try {
+							acknowledged = await this.sessionManager.storeArchive(id, archiveOptions);
+							if (!acknowledged) errors.push(`archive ${id}: persistence was not acknowledged`);
+						} catch (archiveErr) {
+							errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`);
+						}
+					}
+					if (acknowledged) {
+						archivedSessionIds.add(id);
+						const retries = this.archivedGoalSessionRetries.get(goalId);
+						retries?.delete(id);
+						if (retries?.size === 0) this.archivedGoalSessionRetries.delete(goalId);
+					} else {
+						let retries = this.archivedGoalSessionRetries.get(goalId);
+						if (!retries) this.archivedGoalSessionRetries.set(goalId, retries = new Set());
+						retries.add(id);
+						authoritativeIds.add(id);
+					}
+				}
+			}
+
+			const finalClosure = collectTeamOwnedSessionClosure(goalId, candidateRows(), authoritativeIds, errors);
+			for (const id of finalClosure) selectedIds.add(id);
+			const suppressedSessionIds = [...selectedIds].filter((id) => !archivedSessionIds.has(id));
+			let teamRemoved = false;
+			let teamEntryRetained = !!teamStore?.get(goalId);
+			// Ownership conflicts protect the foreign session, not stale archived-goal
+			// bookkeeping. Once every session actually owned by this goal is archived,
+			// remove its TeamStore row so the bounded repair is idempotent.
+			if (suppressedSessionIds.length === 0 && teamEntryRetained) {
+				try {
+					await teamStore.removeAsync(goalId);
+					teamRemoved = teamStore.get(goalId) === undefined;
+					teamEntryRetained = !teamRemoved;
+				} catch (err) {
+					errors.push(`team state: ${err instanceof Error ? err.message : String(err)}`);
+					teamEntryRetained = true;
+				}
+			}
+
+			const result: ArchivedGoalReconciliationResult = {
+				goalId,
+				status: suppressedSessionIds.length > 0 || teamEntryRetained ? "blocked" : "complete",
+				archivedSessionIds: [...archivedSessionIds],
+				suppressedSessionIds,
+				teamRemoved,
+				teamEntryRetained,
+				errors: errors.slice(0, 10),
+			};
+			if (options.audit !== false && (selectedIds.size > 0 || persistedEntry || runtimeEntry)) {
+				console.log(`[team-manager] Archived-team reconciliation ${result.status}: goal=${goalId} archived=${result.archivedSessionIds.length} suppressed=${result.suppressedSessionIds.length} teamRemoved=${teamRemoved} retained=${teamEntryRetained} errors=${errors.length} elapsedMs=${this.clock.now() - startedAt}`);
+			}
+			return result;
+		});
+	}
+
+	/** Bounded boot repair over current live sessions and current team entries. */
+	async reconcileArchivedTeamOwnership(): Promise<Set<string>> {
+		const suppressed = new Set<string>();
+		const candidates = new Set<string>();
+		for (const context of this.config.projectContextManager?.all() ?? []) {
+			for (const session of context.sessionStore.getLive()) {
+				if (session.teamGoalId && context.goalStore.get(session.teamGoalId)?.archived) candidates.add(session.teamGoalId);
+			}
+			for (const entry of context.teamStore.getAll()) {
+				if (context.goalStore.get(entry.goalId)?.archived) candidates.add(entry.goalId);
+			}
+		}
+		for (const [goalId, retries] of this.archivedGoalSessionRetries) {
+			if (retries.size > 0 && this.resolveGoal(goalId)?.archived) candidates.add(goalId);
+		}
+		let archived = 0;
+		let removed = 0;
+		let blocked = 0;
+		const errors: string[] = [];
+		for (const goalId of candidates) {
+			const result = await this.reconcileArchivedGoal(goalId, { audit: false });
+			archived += result.archivedSessionIds.length;
+			if (result.teamRemoved) removed++;
+			if (result.status === "blocked") blocked++;
+			for (const id of result.suppressedSessionIds) suppressed.add(id);
+			errors.push(...result.errors);
+		}
+		if (candidates.size > 0) {
+			console.log(`[team-manager] Boot archived-team repair: goals=${candidates.size} sessionsArchived=${archived} teamsRemoved=${removed} blocked=${blocked} suppressed=${suppressed.size} errors=${errors.length}${errors.length ? ` samples=${JSON.stringify(errors.slice(0, 10))}` : ""}`);
+		}
+		return suppressed;
 	}
 
 	/**

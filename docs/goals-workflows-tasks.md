@@ -16,6 +16,25 @@ Team worker capacity counts only live active worker sessions, not every historic
 
 `autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
+### Archived team ownership
+
+Archiving a goal is explicit terminal intent. Operator archive, cascade archive, child integration/merge, workflow-less recovery, and verification auto-merge all converge on `GoalManager.archiveGoal()` (merge callers enter through `archiveGoalAfterMerge()`). The boundary first durably publishes `goal.archived = true`, then reconciles team-owned runtime and persisted state. This ordering matters: after the goal write succeeds, a crash can delay cleanup but cannot make the team eligible to run again.
+
+Current persisted session ownership is classified conservatively:
+
+- A live session whose non-empty `teamGoalId` exactly equals the archived goal id is owned by that team, regardless of its `goalId`, delegate ancestry, parent, or role. `teamGoalId` remains authoritative even when the row has child-shaped metadata pointing at a standalone session.
+- Current `TeamStore` lead and agent references supplement that durable ownership. A referenced live row with no `teamGoalId`, or the same `teamGoalId`, is included with the canonical recursive delegate/child closure. Newly created full- and bare-lifecycle children persist ownership derived from these trusted references as `teamGoalId`, so optional team bookkeeping is not their sole cleanup authority.
+- `goalId` alone means affiliation, not team ownership. A standalone session that only points at the archived goal remains live and restores normally.
+- A referenced row with a different non-empty `teamGoalId` is an ownership conflict. Reconciliation logs and leaves that foreign row live rather than guessing or transferring ownership.
+
+Legacy goals may carry authoritative session or TeamStore ownership while `goal.team` is false or absent. Before that current evidence can be archived or removed, reconciliation durably promotes the sticky `goal.team = true` marker. The marker tells later archive replays to preserve local and remote branches and worktrees. If its strict publication fails, cleanup is blocked: admission and runtime membership are closed, verifier work is cancelled, and selected processes are quiesced, but persisted sessions and TeamStore evidence are left unchanged and their exact ids remain suppressed. A replay or restart publishes the marker before attempting archival again.
+
+Under a per-goal admission fence, reconciliation prevents new team-owned sessions from being admitted, then soft-archives current live or store-only owned rows after stopping processes where possible. A stop failure falls back to the same evidence-preserving session archive path. Completion requires an explicit successful durable acknowledgement for each selected archive operation; an in-memory `archived` bit is not proof. Failed ids remain in a bounded per-goal retry set for the lifetime of the process, including exact-`teamGoalId` rows with no TeamStore entry, while their disk-live ownership reconstructs the retry after restart. The persisted team entry is removed only after every selected session archive is acknowledged. If that removal cannot be persisted, the disk entry remains passive retry evidence; it cannot restore subscriptions or reactivate the archived team.
+
+A reconciliation is **complete** when all selected archive writes and any required team-entry removal are acknowledged. It is **blocked** when marker publication fails, a selected row lacks an archive acknowledgement, or the team entry cannot be removed. Blocked cleanup does not roll back terminal goal intent or a successful merge: selected rows are fenced from process dispatch and the next archive replay or gateway boot retries from retained ownership.
+
+This is archival, not purge. Transcripts, proposal drafts, costs, session metadata, branch/worktree recovery evidence, and sidebar affiliation/hierarchy remain available through the normal archived-session surfaces. Reconciliation does not use transcript recovery as an ownership registry and does not delete those artifacts. See [Internals — Archived-team crash reconciliation](internals.md#archived-team-crash-reconciliation) for boot ordering and [Debugging — Archived team reconciliation](debugging.md#archived-team-reconciliation) for the operator runbook.
+
 ### Manual team start and paused goals
 
 Manual **Start Team** is an explicit recovery action, not another auto-start

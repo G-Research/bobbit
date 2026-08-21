@@ -17,6 +17,7 @@ import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
 import { GoalTriggerDispatcher } from "../../src/server/agent/goal-trigger-dispatcher.ts";
+import { GoalManager } from "../../src/server/agent/goal-manager.ts";
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "goal-trigger-disp-"));
@@ -290,6 +291,89 @@ describe("GoalStore — onGoalCreated / onGoalArchived", () => {
 		const updated = makeGoal("g-1", "Renamed");
 		store.put(updated);
 		assert.equal(fired.length, 0);
+	});
+
+	it("strict manager archive failure rolls back and cannot leak through a later write", async () => {
+		const dir = fs.mkdtempSync(path.join(tmpRoot, "strict-manager-"));
+		const store = new GoalStore(dir, undefined, { persistence: "json" });
+		const manager = new GoalManager(store, undefined, dir);
+		store.put(makeGoal("strict-goal"));
+		await store.flush();
+		let archiveHooks = 0;
+		let reconciliations = 0;
+		store.onGoalArchived = () => { archiveHooks++; };
+		manager.setGoalArchiveReconciler(async () => { reconciliations++; });
+		const originalSaveStrict = (store as any).saveStrict.bind(store);
+		let failStrict = true;
+		(store as any).saveStrict = async (ids: Iterable<string>) => {
+			if (failStrict) throw new Error("injected strict archive failure");
+			return originalSaveStrict(ids);
+		};
+		const beforeFailure = { ...store.get("strict-goal")! };
+
+		await assert.rejects(() => manager.archiveGoal("strict-goal"), /injected strict archive failure/);
+		assert.deepEqual(store.get("strict-goal"), beforeFailure, "an uncontended failure restores the full prior record");
+		assert.equal(store.get("strict-goal")?.archived, undefined, "failed strict publication rolls back memory");
+		assert.equal(archiveHooks, 0);
+		assert.equal(reconciliations, 0, "cleanup cannot run before durable terminal intent");
+
+		store.put(makeGoal("unrelated-goal"));
+		await store.flush();
+		const diskView = new GoalStore(dir, undefined, { persistence: "json" });
+		assert.equal(diskView.get("strict-goal")?.archived, undefined, "a later write cannot publish the failed archive");
+		diskView.dispose();
+
+		failStrict = false;
+		assert.equal(await manager.archiveGoal("strict-goal"), true);
+		assert.equal(archiveHooks, 1);
+		assert.equal(reconciliations, 1);
+		await manager.archiveGoal("strict-goal");
+		assert.equal(archiveHooks, 1, "already-archived replay does not refire hooks");
+		assert.equal(reconciliations, 2, "already-archived replay still reconciles");
+		await store.close();
+	});
+
+	it("does not let a concurrent manager archive report success after shared publication failure", async () => {
+		const dir = fs.mkdtempSync(path.join(tmpRoot, "strict-manager-coalesced-"));
+		const store = new GoalStore(dir, undefined, { persistence: "json" });
+		const manager = new GoalManager(store, undefined, dir);
+		store.put(makeGoal("coalesced-manager-goal"));
+		await store.flush();
+		let archiveHooks = 0;
+		let reconciliations = 0;
+		store.onGoalArchived = () => { archiveHooks++; };
+		manager.setGoalArchiveReconciler(async () => { reconciliations++; });
+
+		const originalSaveStrict = (store as any).saveStrict.bind(store);
+		let rejectPublication!: (error: Error) => void;
+		let entered!: () => void;
+		const publicationEntered = new Promise<void>((resolve) => { entered = resolve; });
+		let firstPublication = true;
+		(store as any).saveStrict = (ids: Iterable<string>) => {
+			if (!firstPublication) return originalSaveStrict(ids);
+			firstPublication = false;
+			return new Promise<void>((_resolve, reject) => {
+				rejectPublication = reject;
+				entered();
+			});
+		};
+
+		const first = manager.archiveGoal("coalesced-manager-goal");
+		await publicationEntered;
+		const second = manager.archiveGoal("coalesced-manager-goal");
+		const firstRejected = assert.rejects(first, /shared publication failure/);
+		const secondRejected = assert.rejects(second, /shared publication failure/);
+		rejectPublication(new Error("injected shared publication failure"));
+		await Promise.all([firstRejected, secondRejected]);
+
+		assert.equal(store.get("coalesced-manager-goal")?.archived, undefined);
+		assert.equal(archiveHooks, 0);
+		assert.equal(reconciliations, 0, "no concurrent caller may continue into cleanup");
+
+		assert.equal(await manager.archiveGoal("coalesced-manager-goal"), true);
+		assert.equal(archiveHooks, 1);
+		assert.equal(reconciliations, 1, "a fresh retry performs the cleanup exactly once");
+		await store.close();
 	});
 
 	it("archive fires onGoalArchived exactly once on the false → true transition", () => {

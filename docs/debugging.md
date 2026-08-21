@@ -313,6 +313,59 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 - `handleSetupFailure()` owns cleanup on pipeline errors; `subscribeToEvents()` is the shared event subscription path.
 - `connectToSession()` creates `ChatPanel` before `remote.connect()`; model and WebSocket connect in parallel. `switchGeneration` / `isStale()` fences rapid switches, connect failure clears `state.chatPanel`, and `get_state` synchronizes model/thinking values on connect and reconnect.
 
+## Archived team reconciliation
+
+**Symptom:** an archived goal still has live team-owned rows or a retained `team-state.json` entry, or boot reports archived-team repair work. Do not delete those rows or their transcripts. The archive boundary and pre-spawn boot barrier soft-archive current owned rows while preserving evidence.
+
+### Read the audit summary
+
+A normal archive reconciliation logs one bounded per-goal line when it found selected sessions or team state:
+
+```text
+[team-manager] Archived-team reconciliation <complete|blocked>: goal=<id> archived=<count> suppressed=<count> teamRemoved=<bool> retained=<bool> errors=<count> elapsedMs=<ms>
+```
+
+Boot combines candidate goals into one line:
+
+```text
+[team-manager] Boot archived-team repair: goals=<count> sessionsArchived=<count> teamsRemoved=<count> blocked=<count> suppressed=<count> errors=<count> samples=[...]
+```
+
+The optional `samples` array contains at most ten error strings. Interpret the fields as follows:
+
+- `archived` / `sessionsArchived` counts explicit successful durable session-archive acknowledgements from that pass. It is archival, not deletion; an in-memory `archived` bit after a rejected write does not increment the count.
+- `suppressed` counts exact selected ids whose marker or session-archive acknowledgement failed. They are denied process dispatch for that boot.
+- `teamRemoved=true` / `teamsRemoved` means persisted team bookkeeping was removed after marker and session acknowledgements.
+- `retained=true` means the TeamStore row remains as passive retry evidence. It must not appear as an active runtime team or receive event subscriptions.
+- `blocked` means at least one goal could not publish its sticky team marker, retained an unacknowledged selected session, or retained a TeamStore row. A non-zero `errors` count alone can also describe a conservative foreign-ownership conflict while cleanup of the archived goal otherwise completed.
+
+Common samples are prefixed `team marker:`, `quiesce <sessionId>:`, `verification cancellation:`, `stop <sessionId>:`, `archive <sessionId>:`, or `team state:`. A `team marker:` error means reconciliation found authoritative ownership on a legacy goal whose `team` flag was false or absent but could not durably promote it. Runtime admission and team state are already deactivated, verifier work is cancelled, and selected processes are quiesced; persisted sessions and TeamStore references are intentionally retained so a later replay can publish the marker before archival. `ownership conflict: <sessionId> belongs to <goalId>` means a current team reference points at a row with a different non-empty `teamGoalId`; leaving that foreign row live is intentional.
+
+Audit summaries describe only the current bounded candidate set. They do not prove that any historical production snapshot was directly migrated or repaired.
+
+### Investigate retained retry evidence
+
+1. Resolve the archived goal to its project's state directory. Inspect the current live rows in `sessions.json` and the current entries in `team-state.json`; do not traverse archived history to decide ownership.
+2. Treat every current row with `teamGoalId` exactly equal to the archived goal id as owned, regardless of `goalId`, `delegateOf`, `parentSessionId`, or role. Also check current lead/agent references and their canonical delegate/typed-child closure.
+3. Separate negative controls explicitly. A row with only `goalId === archivedGoalId` is affiliated but standalone and must remain live. Do not "repair" it manually. A team reference whose row has a foreign non-empty `teamGoalId` is a conflict, not permission to archive it.
+4. For a `team marker:` error, fix GoalStore publication first. Confirm the archived goal remains durable, its runtime team is absent, selected ids have no process, and session/TeamStore rows remain unchanged. Do not archive or remove that evidence manually; recovery must first persist sticky `team = true` so later archive replays preserve branches and worktrees.
+5. For `archive <sessionId>:` errors, trust the explicit acknowledgement and disk state rather than a mutable in-memory `archived` bit. The gateway retains failed ids in a bounded per-goal set, so another archive call in the same process retries even when TeamStore is missing. After restart, the still-live disk row's exact `teamGoalId` reconstructs authority.
+6. If `retained=true` without a marker or session failure, inspect the TeamStore write error. The row should be absent from active in-memory teams and archived-goal event subscriptions.
+7. Retry through the ordinary goal archive path or restart after fixing storage. Do not remove retry evidence by hand.
+
+Archived session detail and sidebar APIs should still expose the transcript, metadata, and lead/worker hierarchy after repair. Missing drafts, costs, branch/worktree coordinates, or transcript content indicate destructive cleanup and are separate regressions; archive reconciliation must not purge them.
+
+### Validate restart recovery
+
+Use two consecutive hard gateway restarts when validating the crash window:
+
+1. Before the first restart, durably archive the goal while leaving matching current sessions and team state, simulating a kill between goal publication and reconciliation.
+2. Confirm the `Boot archived-team repair` line appears before `[session-manager] Restoring ... live...`, and the restore line appears before team-event resubscription. Matching owned ids must never reach process spawn; a `goalId`-only control and unrelated live sessions must still restore eagerly.
+3. Check `GET /api/health` after boot. It must report `status: "ok"` and `orphanedTranscripts: 0`. Also verify archived messages and sidebar hierarchy remain readable.
+4. Capture the repaired TeamStore file bytes and modification time, then hard-restart again. A clean second boot must emit no `Boot archived-team repair` line, perform no reconciliation writes, preserve those bytes and modification time, and eagerly restore the same genuine live controls.
+
+If an archived team receives event callbacks, a leaked process starts, or the second clean boot rewrites state, inspect the boot phases `restore-teams`, `reconcile-archived-team-ownership`, `restore-sessions`, and `resubscribeTeamEvents` in that order. See [Internals — Archived-team crash reconciliation](internals.md#archived-team-crash-reconciliation) and [Startup performance audit](startup-performance-audit.md).
+
 ## Session/goal refresh not updating
 
 - Both stores track a `generation` counter; clients pass `?since=N` to skip unchanged data

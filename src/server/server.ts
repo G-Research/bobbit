@@ -682,7 +682,6 @@ import {
 	type SessionGoalPromotionEligibility,
 	type SessionGoalPromotionWorkspaceClaim,
 } from "./agent/session-goal-promotion.js";
-import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { worktreeRoot as resolveWorktreeRoot } from "./skills/worktree-paths.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
@@ -3691,6 +3690,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		commandRunner: gatewayDeps.commandRunner,
 	}, undefined, gatewayDeps.clock);
+	// One archive boundary for every existing and future project context. Goal
+	// intent is durable before this callback is entered.
+	projectContextManager.setGoalArchiveReconciler((goalId) => teamManager.reconcileArchivedGoal(goalId));
 	const bgProcessManager = new BgProcessManager(
 		(sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
@@ -4714,7 +4716,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
-			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			const archivedTeamSuppression = await bootPhase(
+				"reconcile-archived-team-ownership",
+				() => teamManager.reconcileArchivedTeamOwnership(),
+			);
+			await bootPhase("restore-sessions", () => sessionManager.restoreSessions(archivedTeamSuppression));
 			await bootPhase("review-payload-recovery", async () => {
 				try {
 					const knownSessionIds = [...projectContextManager.all()]
@@ -7871,6 +7877,7 @@ async function handleApiRoute(
 				return;
 			}
 			const parentProjectId = parentSession?.projectId ?? parentPersisted?.projectId;
+			const parentTrustedTeamGoalId = sessionManager.getTrustedTeamGoalIdForSession(parentId);
 			if (!parentProjectId) {
 				json({ error: "Delegate parent session is missing projectId", code: "PROJECT_ID_REQUIRED" }, 422);
 				return;
@@ -7895,12 +7902,18 @@ async function handleApiRoute(
 			const parentInitialModel = resolveServerInitialModelTuple(parentPersisted, parentSession).initialModel;
 			if (parentInitialModel && !(await requireCurrentSessionModel(parentInitialModel, "Delegate parent model"))) return;
 			try {
-				const session = await sessionManager.createDelegateSession(parentId, {
+				const createDelegate = () => sessionManager.createDelegateSession(parentId, {
 					instructions: body.instructions,
 					cwd,
 					title: body.title,
 					context: body.context,
 				});
+				// Direct REST delegates do not pass through OrchestrationCore. Join the
+				// shared terminal-admission turn for every durably team-owned parent,
+				// including exact teamGoalId ownership regardless of ancestry.
+				const session = parentTrustedTeamGoalId
+					? await sessionManager.runWithTeamGoalAdmission(parentTrustedTeamGoalId, createDelegate)
+					: await createDelegate();
 				// Register delegate as child in parent's sandbox scope
 				if (sandboxScope && sandboxTokenStore) {
 					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
@@ -7918,7 +7931,11 @@ async function handleApiRoute(
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
-				jsonError(500, err);
+				if (err instanceof TeamStartError) {
+					json({ error: err.message, code: err.code, goalId: parentTrustedTeamGoalId }, err.status);
+				} else {
+					jsonError(500, err);
+				}
 			}
 			return;
 		}
@@ -8844,7 +8861,17 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
+				...(body?.team !== false ? { team: true } : {}),
 			});
+			// `team: false` historically meant "do not auto-enable yet", not a
+			// durable prohibition on a later manual start. GoalManager defaults new
+			// goals to team mode, so remove that default from this explicit legacy
+			// shape while retaining `team: true` as archive-retry evidence for goals
+			// that were actually enabled at creation.
+			if (body?.team === false) {
+				delete goal.team;
+				targetCtx.goalStore.put(goal);
+			}
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
@@ -9151,6 +9178,7 @@ async function handleApiRoute(
 		const mergedManually = url.searchParams.get("mergedManually") === "true";
 
 		const performArchiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+			const wasArchived = g.archived === true;
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 			}
@@ -9163,6 +9191,12 @@ async function handleApiRoute(
 			}
 			const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
 			const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+			// Snapshot before reconciliation archives the authoritative rows and may
+			// remove TeamStore. Remote branches are recovery evidence for every team
+			// cleanup shape, including store-only and blocked reconciliation.
+			const preserveRemoteBranchEvidence = g.team === true
+				|| !!teamEntry
+				|| !!goalProjectCtx?.sessionStore.getLive().some((session) => session.teamGoalId === g.id);
 			const agentBranches: string[] = [];
 			if (teamEntry?.agents) {
 				for (const a of teamEntry.agents) {
@@ -9173,13 +9207,10 @@ async function handleApiRoute(
 				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
 				if (tl?.branch) agentBranches.push(tl.branch);
 			}
+			// GoalManager is the authoritative archive boundary: it durably publishes
+			// terminal intent before reconciling every team-owned session and team row.
 			const gm = getGoalManagerForGoal(g.id);
-			// A promoted source remains the checkout/sandbox lifecycle owner. Its
-			// durable archived bit must publish before TeamManager tears it down.
-			if (g.worktreeOwnerSessionId) await gm.archiveGoal(g.id);
-			if (teamManager.getTeamState(g.id)) {
-				await teamManager.teardownTeam(g.id);
-			}
+			await gm.archiveGoal(g.id);
 			// Finding 2 — terminal event: release any per-root scheduler permit
 			// this child held (or drop it from the capacity queue) so the next
 			// capacity-blocked sibling can start. Best-effort + idempotent.
@@ -9188,28 +9219,19 @@ async function handleApiRoute(
 					console.warn(`[api] archive: notifyChildTerminal failed for ${g.id} (non-fatal):`, err);
 				}
 			}
-			if (!g.worktreeOwnerSessionId) await gm.archiveGoal(g.id);
 			prStatusStore.remove(g.id);
 			const archivedGoal = gm.getGoal(g.id);
-			// An adopted branch is session-owned provenance, not a goal-provisioned
-			// branch. Its remote lifecycle stays with the source session.
-			if (archivedGoal?.repoPath && !archivedGoal.worktreeOwnerSessionId) {
+			// Adopted branches and team branches are recovery evidence. Their remote
+			// lifecycle remains with the source session or the retained team records.
+			if (archivedGoal?.repoPath && !archivedGoal.worktreeOwnerSessionId && !preserveRemoteBranchEvidence) {
 				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
 			}
-			return true;
+			return !wasArchived;
 		};
 
 		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-			if (g.archived) {
-				try {
-					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
-				} catch (err) {
-					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
-				}
-				return false;
-			}
 			// Admission precedes every archive-side mutation, including merged-state
 			// updates and verification cancellation, and holds through durable archive.
 			return g.worktreeOwnerSessionId
@@ -13504,6 +13526,17 @@ async function handleApiRoute(
 			}
 		}
 		try {
+			// Legacy and explicit `team: false` creates omit the durable capability
+			// bit so they remain standalone until the user manually starts a team.
+			// Publish that explicit enablement before dispatch so archive retries can
+			// preserve team worktree/branch evidence after TeamStore is reconciled.
+			if (startGoal.team === undefined) {
+				const startContext = projectContextManager.getContextForGoal(goalId);
+				if (!startContext?.goalStore.update(goalId, { team: true })) {
+					throw new Error(`Unable to enable team mode for goal ${goalId}`);
+				}
+				await startContext.goalStore.flush();
+			}
 			// REST retries are idempotent even after the first paused request has
 			// resumed the goal. Resume authority remains limited to the paused
 			// snapshot that passed operator authorization above.

@@ -129,9 +129,10 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 
 	test("/api/goals/:id/team/dismiss duplicate team-agent dismiss is structured already-dismissed", async ({ gateway }) => {
 		const goal = await createGoal({ title: "Structured duplicate team dismiss", team: true });
+		const leadId = await createSession();
 		let agentId: string | undefined;
 		try {
-			seedTeam(gateway, goal.id as string, sharedOwnerId);
+			seedTeam(gateway, goal.id as string, leadId);
 			agentId = await createTeamWorker(gateway, goal.id as string, "structured-dismiss-regression");
 
 			const first = await goalTeamDismiss(goal.id as string, agentId);
@@ -145,14 +146,16 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			if (agentId) await goalTeamDismiss(goal.id as string, agentId).catch(() => {});
 			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
+			await deleteSession(leadId).catch(() => {});
 		}
 	});
 
 	test("/api/goals/:id/team/dismiss real core-registered team worker uses TeamManager cleanup", async ({ gateway }) => {
 		const goal = await createGoal({ title: "Structured real team worker dismiss", team: true });
+		const leadId = await createSession();
 		let agentId: string | undefined;
 		try {
-			seedTeam(gateway, goal.id as string, sharedOwnerId);
+			seedTeam(gateway, goal.id as string, leadId);
 			agentId = await createTeamWorker(gateway, goal.id as string, "structured-real-worker");
 			expect(agentId).toBeTruthy();
 			expect((await goalTeamAgents(goal.id as string)).some((agent) => agent.sessionId === agentId)).toBe(true);
@@ -171,15 +174,17 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			if (agentId) await goalTeamDismiss(goal.id as string, agentId).catch(() => {});
 			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
+			await deleteSession(leadId).catch(() => {});
 		}
 	});
 
 	test("/api/goals/:id/team/dismiss denies same-goal non-lead sandbox callers before TeamManager cleanup", async ({ gateway }) => {
 		const goal = await createGoal({ title: "Structured dismiss team-lead authz", team: true });
+		const leadId = await createSession();
 		let attackerId: string | undefined;
 		let victimId: string | undefined;
 		try {
-			seedTeam(gateway, goal.id as string, sharedOwnerId);
+			seedTeam(gateway, goal.id as string, leadId);
 			attackerId = await createTeamWorker(gateway, goal.id as string, "structured-attacker");
 			expect(attackerId).toBeTruthy();
 
@@ -212,12 +217,13 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			if (attackerId) await goalTeamDismiss(goal.id as string, attackerId).catch(() => {});
 			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
+			await deleteSession(leadId).catch(() => {});
 		}
 	});
 
 	test("/api/goals/:id/team/dismiss own-child fallback duplicate dismiss is structured already-dismissed", async ({ gateway }) => {
 		const goal = await createGoal({ title: "Structured duplicate fallback dismiss", team: true });
-		const leadId = sharedOwnerId;
+		const leadId = await createSession();
 		let childId: string | undefined;
 		try {
 			seedTeam(gateway, goal.id as string, leadId);
@@ -237,6 +243,7 @@ test.describe("team_dismiss duplicate dismiss regression", () => {
 			if (childId) await orchestrate(leadId, "dismiss", { childSessionId: childId }).catch(() => {});
 			dropTeam(gateway, goal.id as string);
 			await deleteGoal(goal.id as string).catch(() => {});
+			await deleteSession(leadId).catch(() => {});
 		}
 	});
 });

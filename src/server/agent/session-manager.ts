@@ -427,6 +427,56 @@ function isNonSandboxedPolyrepoTeamLead(ps: Pick<PersistedSession, "role" | "goa
 		&& Object.keys(ps.repoWorktrees).length > 0;
 }
 
+/**
+ * Classify the current live closure owned by one team goal.
+ *
+ * Every exact non-empty `teamGoalId` match is a durable ownership root,
+ * regardless of ancestry. Current TeamStore references supplement those roots;
+ * `goalId` alone never does. Descendants use the canonical OR relation.
+ */
+export function collectTeamOwnedSessionClosure(
+	goalId: string,
+	live: readonly PersistedSession[],
+	referencedIds: ReadonlySet<string> = new Set(),
+	errors?: string[],
+): Set<string> {
+	const byId = new Map(live.map((session) => [session.id, session]));
+	const selected = new Set<string>();
+	const reportConflict = (session: PersistedSession) => {
+		const message = `ownership conflict: ${session.id} belongs to ${session.teamGoalId}`;
+		if (errors && !errors.includes(message)) errors.push(message);
+	};
+	for (const session of live) {
+		if (session.teamGoalId === goalId) selected.add(session.id);
+	}
+	for (const id of referencedIds) {
+		const session = byId.get(id);
+		if (!session) continue;
+		if (session.teamGoalId && session.teamGoalId !== goalId) {
+			reportConflict(session);
+			continue;
+		}
+		selected.add(id);
+	}
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const session of live) {
+			if (selected.has(session.id)) continue;
+			const childOfSelected = (!!session.delegateOf && selected.has(session.delegateOf))
+				|| (!!session.childKind && !!session.parentSessionId && selected.has(session.parentSessionId));
+			if (!childOfSelected) continue;
+			if (session.teamGoalId && session.teamGoalId !== goalId) {
+				reportConflict(session);
+				continue;
+			}
+			selected.add(session.id);
+			changed = true;
+		}
+	}
+	return selected;
+}
+
 type StrictSandboxWiringOptions = SandboxWiringOptions & { expectedExistingContainerId?: string };
 
 interface ArchivedWorktreeScanContext {
@@ -3741,8 +3791,64 @@ export class SessionManager {
 	 * rebuild the in-memory child index + remind owners of live children on boot.
 	 */
 	private orchestrationCore: OrchestrationCore | null = null;
+	private teamGoalAdmissionFence?: <T>(goalId: string, operation: () => Promise<T>) => Promise<T>;
 	setOrchestrationCore(core: OrchestrationCore | null): void {
 		this.orchestrationCore = core;
+	}
+
+	/** Late-bound bridge onto TeamManager's authoritative per-goal admission queue. */
+	setTeamGoalAdmissionFence(fence: (<T>(goalId: string, operation: () => Promise<T>) => Promise<T>) | undefined): void {
+		this.teamGoalAdmissionFence = fence;
+	}
+
+	/**
+	 * Resolve durable team ownership from the same bounded live closure used by
+	 * archive reconciliation. An exact `teamGoalId` stamp is authoritative;
+	 * current TeamStore references and their descendants supplement it.
+	 */
+	getTrustedTeamGoalIdForSession(sessionId: string): string | undefined {
+		const persisted = this.getPersistedSession(sessionId);
+		if (!persisted) return undefined;
+		if (persisted.teamGoalId) return persisted.teamGoalId;
+
+		let live: PersistedSession[];
+		let teamEntries: Array<{ goalId: string; teamLeadSessionId: string | null; agents: Array<{ sessionId: string }> }> = [];
+		if (this.projectContextManager) {
+			const context = (persisted.projectId
+				? this.projectContextManager.getOrCreate(persisted.projectId)
+				: this.projectContextManager.getContextForSession(sessionId));
+			if (!context) return undefined;
+			live = context.sessionStore.getLive();
+			teamEntries = context.teamStore.getAll();
+		} else {
+			live = this._testStore?.getLive() ?? [];
+		}
+		// Admission can race just after reconciliation archived the requested
+		// referenced owner. Include only that exact row so TeamStore-derived
+		// ownership remains fenced without traversing archived history.
+		if (!live.some((session) => session.id === sessionId)) live = [...live, persisted];
+
+		const candidateGoalIds = new Set<string>();
+		// Exact stamps returned above are the primary authority. The remaining scan
+		// resolves their current live descendants plus TeamStore references and the
+		// references' descendants, without consulting goalId or archived history.
+		for (const session of live) {
+			if (session.teamGoalId) candidateGoalIds.add(session.teamGoalId);
+		}
+		for (const entry of teamEntries) candidateGoalIds.add(entry.goalId);
+		for (const goalId of candidateGoalIds) {
+			const entry = teamEntries.find((candidate) => candidate.goalId === goalId);
+			const references = new Set<string>();
+			if (entry?.teamLeadSessionId) references.add(entry.teamLeadSessionId);
+			for (const agent of entry?.agents ?? []) references.add(agent.sessionId);
+			if (collectTeamOwnedSessionClosure(goalId, live, references).has(sessionId)) return goalId;
+		}
+		return undefined;
+	}
+
+	/** Run publication of a team-owned orchestration child under terminal admission. */
+	runWithTeamGoalAdmission<T>(goalId: string, operation: () => Promise<T>): Promise<T> {
+		return this.teamGoalAdmissionFence ? this.teamGoalAdmissionFence(goalId, operation) : operation();
 	}
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
@@ -10325,7 +10431,9 @@ export class SessionManager {
 	 * Restore sessions from disk on startup.
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
-	async restoreSessions(): Promise<void> {
+	async restoreSessions(): Promise<void>;
+	async restoreSessions(suppressedSessionIds: ReadonlySet<string>): Promise<void>;
+	async restoreSessions(suppressedSessionIds: ReadonlySet<string> = new Set()): Promise<void> {
 		// Initialize search service (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the service and wires callbacks)
 		if (!this.projectContextManager && this._testSearchIndex && this._testStore && this._testGoalManager) {
@@ -10356,9 +10464,48 @@ export class SessionManager {
 			}
 		}
 
-		const persisted = this.projectContextManager
+		const livePersisted = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
 			: (this._testStore?.getLive() ?? []);
+		// Defensive terminal-owner fence. Use the same durable-ownership classifier
+		// as reconciliation: every exact archived-goal `teamGoalId` match and its
+		// canonical descendants are suppressed, while `goalId` alone stays eager.
+		const terminalSuppressed = new Set(suppressedSessionIds);
+		if (this.projectContextManager) {
+			for (const context of this.projectContextManager.all()) {
+				// Minimal SessionManager fixtures intentionally provide session state only.
+				// Without a goal resolver there is no authoritative archived-owner fact,
+				// so preserve the legacy full eager restore instead of guessing from metadata.
+				if (!context.goalStore?.get) continue;
+				const contextLive = context.sessionStore.getLive();
+				const teamEntries = context.teamStore?.getAll?.() ?? [];
+				const archivedGoalIds = new Set<string>();
+				for (const session of contextLive) {
+					if (session.teamGoalId && context.goalStore.get(session.teamGoalId)?.archived) archivedGoalIds.add(session.teamGoalId);
+				}
+				for (const entry of teamEntries) {
+					if (context.goalStore.get(entry.goalId)?.archived) archivedGoalIds.add(entry.goalId);
+				}
+				for (const goalId of archivedGoalIds) {
+					const entry = teamEntries.find((candidate) => candidate.goalId === goalId);
+					const references = new Set<string>();
+					if (entry?.teamLeadSessionId) references.add(entry.teamLeadSessionId);
+					for (const agent of entry?.agents ?? []) references.add(agent.sessionId);
+					for (const id of collectTeamOwnedSessionClosure(goalId, contextLive, references)) terminalSuppressed.add(id);
+				}
+			}
+		} else if (this._testGoalManager) {
+			const archivedGoalIds = new Set(livePersisted
+				.map((session) => session.teamGoalId)
+				.filter((goalId): goalId is string => !!goalId && this.resolveGoal(goalId)?.archived === true));
+			for (const goalId of archivedGoalIds) {
+				for (const id of collectTeamOwnedSessionClosure(goalId, livePersisted)) terminalSuppressed.add(id);
+			}
+		}
+		const persisted = livePersisted.filter((session) => !terminalSuppressed.has(session.id));
+		if (terminalSuppressed.size > 0) {
+			console.warn(`[session-manager] Suppressed ${terminalSuppressed.size} archived-team session(s) from boot dispatch`);
+		}
 		if (persisted.length === 0) return;
 
 		// Separate regular sessions from delegate sessions
@@ -12161,11 +12308,15 @@ export class SessionManager {
 		const id = randomUUID();
 		// Resolve projectId from parent session
 		const parentStore = this.resolveStoreForId(parentSessionId);
-		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
-			?? parentStore?.get(parentSessionId)?.projectId;
+		const parentSession = this.sessions.get(parentSessionId);
+		const parentMeta = parentStore?.get(parentSessionId);
+		const parentProjectId = parentSession?.projectId ?? parentMeta?.projectId;
+		const initialTrustedTeamGoalId = this.getTrustedTeamGoalIdForSession(parentSessionId);
+		if (initialTrustedTeamGoalId && this.resolveGoal(initialTrustedTeamGoalId)?.archived) {
+			throw new Error("Cannot create a delegate for an archived team goal");
+		}
 
 		// ── Sandbox propagation from parent ──
-		const parentMeta = parentStore?.get(parentSessionId);
 		let delegateSandboxed = false;
 		if (parentMeta?.sandboxed && !(parentProjectId && isSandboxExemptProject(parentProjectId))) {
 			// Always use the parent's validated host-side cwd — never trust the
@@ -12185,7 +12336,6 @@ export class SessionManager {
 
 		// Inherit tool access from parent session, unless the caller passes an
 		// explicit allowedTools override (OrchestrationCore strips spawn verbs).
-		const parentSession = this.sessions.get(parentSessionId);
 
 		// ── Goal-metadata inheritance (anti-asymmetry invariant) ──
 		// A `team_delegate` sub-agent natively carries only `delegateOf`; it has no
@@ -12194,10 +12344,11 @@ export class SessionManager {
 		// could re-acquire a tool/provider the goal disabled — a treatment leak.
 		// Stamp the PARENT's effective goal as the delegate's `teamGoalId` (NOT
 		// `goalId`, so it is treated as a member, not a lead) so the resolver walks
-		// the same ancestry and the delegate inherits the same metadata. Prefer the
-		// live parent session, then its persisted record (restart/respawn).
-		const parentEffectiveGoalId =
-			parentSession?.goalId ?? parentSession?.teamGoalId
+		// the same ancestry and the delegate inherits the same metadata. Durable or
+		// current TeamStore-derived ownership wins; otherwise preserve the legacy
+		// live-then-persisted raw goal fallback used by standalone delegates.
+		const parentEffectiveGoalId = initialTrustedTeamGoalId
+			?? parentSession?.goalId ?? parentSession?.teamGoalId
 			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
@@ -12306,11 +12457,27 @@ export class SessionManager {
 		);
 		let session: SessionInfo;
 		try {
+			const setupTrustedTeamGoalId = this.getTrustedTeamGoalIdForSession(parentSessionId);
+			if (setupTrustedTeamGoalId && this.resolveGoal(setupTrustedTeamGoalId)?.archived) {
+				throw new Error("Cannot create a delegate for an archived team goal");
+			}
 			session = await executePlan(plan, ctx);
 		} finally {
 			releaseSetupThinkingAuthority();
 		}
 		if (parentProjectId) session.projectId = parentProjectId;
+		// Re-evaluate the published child, not only its parent: reconciliation may
+		// have archived/removed the parent while setup was in flight.
+		const postSetupTrustedTeamGoalId = this.getTrustedTeamGoalIdForSession(session.id);
+		if (postSetupTrustedTeamGoalId && this.resolveGoal(postSetupTrustedTeamGoalId)?.archived) {
+			// The setup crossed terminal intent. Its initial row already carries
+			// teamGoalId, so boot can reconstruct cleanup even if this stop fails.
+			try {
+				const terminated = await this.terminateSession(session.id);
+				if (!terminated) await this.storeArchive(session.id);
+			} catch { try { await this.storeArchive(session.id); } catch { /* boot repair retries */ } }
+			throw new Error("Delegate creation was cancelled because its team goal was archived");
+		}
 		// Persist the effective-goal stamp on BOTH the live session and the store
 		// record so it survives restart/respawn (the initial structural put happens
 		// inside executePlan; this guarantees the field regardless of plan
@@ -14890,15 +15057,17 @@ export class SessionManager {
 	 * dormant/not-live or was archived while the server was down. The boot-reap
 	 * (`shouldReapChildOnBoot`) remains as defense-in-depth.
 	 */
-	private async cascadeReapOwner(id: string): Promise<void> {
+	private async cascadeReapOwner(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string> } = {}): Promise<void> {
 		// Cascade: terminate all live child sessions first. Children are linked via
 		// `delegateOf` (delegate kind) OR `parentSessionId`+`childKind` (team /
 		// pr-walkthrough / host-agents / any future kind) — otherwise a child
 		// process leaks when its parent is terminated or archived.
-		const children = [...this.sessions.values()].filter(s => s.delegateOf === id || (!!s.childKind && s.parentSessionId === id));
+		const children = [...this.sessions.values()].filter(s =>
+			(s.delegateOf === id || (!!s.childKind && s.parentSessionId === id))
+			&& (!options.cascadeSessionIds || options.cascadeSessionIds.has(s.id)));
 		for (const child of children) {
 			console.log(`[session ${id}] Cascading terminate to child ${child.id}`);
-			await this.terminateSession(child.id);
+			await this.terminateSession(child.id, options);
 		}
 		// Also archive persisted-but-not-in-memory children of any kind.
 		const allLiveForTerminate = this.projectContextManager
@@ -14906,12 +15075,14 @@ export class SessionManager {
 			: (this._testStore?.getLive() ?? []);
 		for (const ps of allLiveForTerminate) {
 			const isChild = ps.delegateOf === id || (!!ps.childKind && ps.parentSessionId === id);
-			if (isChild && !this.sessions.has(ps.id)) {
+			if (isChild && (!options.cascadeSessionIds || options.cascadeSessionIds.has(ps.id)) && !this.sessions.has(ps.id)) {
 				try { await this.getSessionStore(ps.projectId).archiveAsync(ps.id); } catch { /* project gone */ }
 			}
 		}
 		// Keep the OrchestrationCore in-memory index consistent.
-		try { this.orchestrationCore?.forgetOwner(id); } catch { /* best-effort */ }
+		if (!options.cascadeSessionIds) {
+			try { this.orchestrationCore?.forgetOwner(id); } catch { /* best-effort */ }
+		}
 	}
 
 	/**
@@ -14928,11 +15099,11 @@ export class SessionManager {
 	 * (`shouldReapChildOnBoot`) stays as defense-in-depth for the server-was-down
 	 * case.
 	 */
-	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
+	private async archiveWithCascade(id: string, store?: SessionStore, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string> } = {}): Promise<boolean> {
 		// Defense in depth for internal recovery and maintenance callers. Ordered
 		// goal archival has already made the canonical guard return undefined here.
 		this.assertPromotedSessionRecoveryAllowed(id, "archive its session record");
-		await this.cascadeReapOwner(id);
+		await this.cascadeReapOwner(id, options);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down. Best-effort and bounded by the hub's per-provider
 		// timeouts; wrapped in try/catch so archival always completes even if a
@@ -14964,7 +15135,107 @@ export class SessionManager {
 		try { return await target.archiveAsync(id); } catch { return false; }
 	}
 
-	async terminateSession(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+	/**
+	 * Stop and detach a live runtime while deliberately leaving its persisted row
+	 * live. Archived-goal reconciliation uses this only when it cannot durably
+	 * publish the sticky team ownership marker: the row must remain available for
+	 * boot repair, but its process, dispatch authority, timers, and credentials
+	 * must not survive in the current process.
+	 */
+	async quiesceSessionRuntime(id: string): Promise<boolean> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
+		if (!this.sessions.has(id) && !coordinator) return true;
+		if (coordinator) coordinator.terminalRequest = "terminate";
+		const quiesced = this._coordinateSessionReplacement(id, "quiesce", (token) =>
+			this._quiesceSessionRuntimeOwned(id, token), { coalesceKey: "quiesce", drainOnRelease: false });
+		// _coordinateSessionReplacement installs a coordinator synchronously. Make
+		// terminal intent sticky for replacements admitted after this call as well.
+		const installed = this._sessionReplacementCoordinators.get(id);
+		if (installed) installed.terminalRequest = "terminate";
+		return quiesced;
+	}
+
+	private async _quiesceSessionRuntimeOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
+		const session = this.sessions.get(id);
+		if (!session) return true;
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} quiesce was superseded before start`);
+		}
+
+		// Fence dispatch before the first await, then stop the bridge even when an
+		// auxiliary cleanup hook is unhealthy. The durable SessionStore row is never
+		// mutated by this seam.
+		session.lifecycleFenced = true;
+		session.dormant = true;
+		this.cancelPendingAutoRetry(session, "terminated");
+		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
+		if (session.pendingMetadataPersist) {
+			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
+		}
+		try { await session.rpcClient.getState(); } catch { /* process may already be stopped */ }
+		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
+		let bridgeStopError: unknown;
+		try { await session.rpcClient.stop(); }
+		catch (err) { bridgeStopError = err; }
+		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
+		}
+		broadcastStatus(session, "terminated");
+
+		try { await this.closeExtensionChannelsForSession(id, "session-quiesced"); } catch { /* runtime is already stopped */ }
+		if (session.pendingGrantRequest) {
+			const pending = session.pendingGrantRequest;
+			const requests = pending.requests?.length
+				? pending.requests
+				: [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+			for (const req of requests) {
+				this.clock.clearTimeout(req.timer);
+				req.resolve({ granted: false });
+			}
+			session.pendingGrantRequest = undefined;
+		}
+		if ((this as any).bgProcessManager) {
+			try { (this as any).bgProcessManager.abortAllWaits(id); } catch { /* best-effort */ }
+			try { (this as any).bgProcessManager.cleanup(id); } catch { /* best-effort */ }
+		}
+		try {
+			if (this.sandboxTokenStore && session.projectId) this.sandboxTokenStore.removeSession(session.projectId, id);
+		} catch { /* process is already stopped */ }
+		try { this.sessionSecretStore.remove(id); } catch { /* process is already stopped */ }
+		const quiesceReason = `Session ${id} was quiesced by archived goal ownership`;
+		this.rejectAllVerifierPromptReceipts(id, quiesceReason);
+		this.rejectIdleWaiters(id, new Error(quiesceReason));
+		for (const client of session.clients) {
+			try { client.close(1000, "Session quiesced"); } catch { /* best-effort */ }
+		}
+		session.clients.clear();
+		this._untrackConnectedSession(session);
+
+		const scope = { projectId: session.projectId, cwd: session.cwd };
+		this.sessions.delete(id);
+		this._taskIdCache.delete(id);
+		try { await this.cleanupScopedMcpManagersForSessionScope(scope); } catch { /* runtime authority is already removed */ }
+		if (this.lifecycleHub) {
+			try {
+				await this.lifecycleHub.dispatch("sessionShutdown", {
+					sessionId: id,
+					projectId: session.projectId,
+					scope: session.projectId ? "project" : "global",
+					cwd: session.cwd,
+					goalId: session.goalId ?? session.teamGoalId,
+					roleName: session.role,
+				}, lifecycleScopeInput(session));
+			} catch (err) {
+				console.warn(`[session-manager] sessionShutdown dispatch failed for quiesced ${id}:`, err);
+			}
+		}
+		if (bridgeStopError) {
+			throw new Error(`Session ${id} runtime was detached after its bridge stop failed: ${bridgeStopError instanceof Error ? bridgeStopError.message : String(bridgeStopError)}`, { cause: bridgeStopError });
+		}
+		return true;
+	}
+
+	async terminateSession(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Legacy callers may still pass the old option, but canonical goal state —
 		// never a caller boolean — is the only authority for promoted teardown.
@@ -14991,22 +15262,25 @@ export class SessionManager {
 			const current = this.sessions.get(id);
 			const currentPersisted = this.getPersistedSession(id);
 			if (
-				(current?.sandboxed || currentPersisted?.sandboxed)
+				!options.preserveEvidence
+				&& (current?.sandboxed || currentPersisted?.sandboxed)
 				&& !(current?.borrowsWorktree || currentPersisted?.borrowsWorktree)
 			) {
 				this.assertSandboxOwnerHasNoLiveBorrowers(id);
 			}
 			if (coordinator) coordinator.terminalRequest = "terminate";
 			return this._coordinateSessionReplacement(id, "terminate", (token) =>
-				this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+				this._terminateSessionOwned(id, token, options), { coalesceKey: "terminate", drainOnRelease: false });
 		};
 
-		return lifecycleOwnerId
+		// Evidence-preserving archival never mutates the sandbox worktree, so it
+		// must not enter the owner lock recursively while cascading borrowed children.
+		return lifecycleOwnerId && !options.preserveEvidence
 			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, terminate)
 			: terminate();
 	}
 
-	private async _terminateSessionOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
+	private async _terminateSessionOwned(id: string, token: SessionReplacementToken, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string> }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (!this._replacementTokenIsCurrent(id, token)) {
@@ -15014,7 +15288,7 @@ export class SessionManager {
 		}
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
-		await this.cascadeReapOwner(id);
+		await this.cascadeReapOwner(id, options);
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 
@@ -15089,7 +15363,7 @@ export class SessionManager {
 		// Skip sessions that share another owner's worktree: delegates, read-only
 		// children, and explicit writable history forks (`borrowsWorktree`). Only the
 		// session that provisioned the sandbox worktree may remove it.
-		if (session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+		if (!options.preserveEvidence && session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
 			const removalAuthority = this.getPersistedSession(id) ?? session;
 			const coordinates = sandboxWorktreeOwnerCoordinates(removalAuthority);
 			if (!coordinates) {
@@ -15167,26 +15441,28 @@ export class SessionManager {
 		// purgeOneSession at the 7-day mark. Fire-and-forget — never blocks.
 		// branch/repoPath live on PersistedSession (not SessionInfo), so we read
 		// the persisted record we just archived.
-		const persistedForBranchDelete = terminateStore.get(id);
-		const sessionBranch = persistedForBranchDelete?.branch;
-		const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
-		const skipRemoteBranchDelete = shouldSkipRemotePush(this.remoteGitPolicy) || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner, this.remoteGitPolicy);
-		eagerDeleteRemoteSessionBranch({
-			branch: sessionBranch,
-			repoPath: repoPathForBranchDelete,
-			delegateOf: session.delegateOf,
-			skipPush: skipRemoteBranchDelete,
-			detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner, this.remoteGitPolicy),
-			runGit: async (args, cwd) => {
-				await this.commandRunner.execFile("git", args, { cwd, timeout: 15_000 });
-			},
-		}).then(result => {
-			if (result.deleted) {
-				console.log(`[session-manager] Deleted merged remote session branch: ${sessionBranch}`);
-			}
-		}).catch(err => {
-			console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
-		});
+		if (!options.preserveEvidence) {
+			const persistedForBranchDelete = terminateStore.get(id);
+			const sessionBranch = persistedForBranchDelete?.branch;
+			const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
+			const skipRemoteBranchDelete = shouldSkipRemotePush(this.remoteGitPolicy) || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner, this.remoteGitPolicy);
+			eagerDeleteRemoteSessionBranch({
+				branch: sessionBranch,
+				repoPath: repoPathForBranchDelete,
+				delegateOf: session.delegateOf,
+				skipPush: skipRemoteBranchDelete,
+				detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner, this.remoteGitPolicy),
+				runGit: async (args, cwd) => {
+					await this.commandRunner.execFile("git", args, { cwd, timeout: 15_000 });
+				},
+			}).then(result => {
+				if (result.deleted) {
+					console.log(`[session-manager] Deleted merged remote session branch: ${sessionBranch}`);
+				}
+			}).catch(err => {
+				console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
+			});
+		}
 
 		// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
 		// Pass cwd/worktreePath/repoWorktrees in the info so listeners
@@ -15224,7 +15500,7 @@ export class SessionManager {
 	 * Routes through the runtime archive seam (§6) so a dormant parent's live
 	 * children are cascade-reaped before it is archived.
 	 */
-	async storeArchive(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+	async storeArchive(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Preserve the legacy call shape without preserving its authority bypass.
 		this.assertPromotedSessionLifecycleAllowed(id, "archive");
@@ -15238,12 +15514,12 @@ export class SessionManager {
 			: undefined;
 		const archive = async () => {
 			const current = this.getPersistedSession(id);
-			if (current?.sandboxed && !current.borrowsWorktree) {
+			if (!options.preserveEvidence && current?.sandboxed && !current.borrowsWorktree) {
 				this.assertSandboxOwnerHasNoLiveBorrowers(id);
 			}
-			return this.archiveWithCascade(id);
+			return this.archiveWithCascade(id, undefined, options);
 		};
-		return lifecycleOwnerId
+		return lifecycleOwnerId && !options.preserveEvidence
 			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, archive)
 			: archive();
 	}

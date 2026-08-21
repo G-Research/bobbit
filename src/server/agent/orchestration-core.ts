@@ -339,6 +339,10 @@ export interface OrchestrationSessionView {
 		assistantType: string | undefined,
 		opts?: Record<string, unknown>,
 	): Promise<{ id: string }>;
+	/** Resolve durable team ownership from teamGoalId or current team references. */
+	getTrustedTeamGoalIdForSession?(sessionId: string): string | undefined;
+	/** Team-owned child publication joins TeamManager's terminal admission queue. */
+	runWithTeamGoalAdmission?<T>(goalId: string, operation: () => Promise<T>): Promise<T>;
 	enqueuePrompt(sessionId: string, text: string, opts?: Record<string, unknown>): Promise<{ status: string }>;
 	deliverLiveSteer(sessionId: string, message: string, opts?: Record<string, unknown>): Promise<unknown>;
 	getErroredPromptRecoveryDecision?(sessionId: string): ErroredPromptRecoveryDecision;
@@ -537,7 +541,25 @@ export class OrchestrationCore {
 
 	async spawn(opts: SpawnOpts): Promise<ChildHandle> {
 		this.assertCanSpawn(opts.ownerSessionId);
+		const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
+		// Exact teamGoalId metadata is durable ownership regardless of ancestry;
+		// current TeamStore references and their closure are supplemental authority.
+		const trustedTeamGoalId = this.deps.sessionManager.getTrustedTeamGoalIdForSession
+			? this.deps.sessionManager.getTrustedTeamGoalIdForSession(opts.ownerSessionId)
+			// Structural unit-test views predating the classifier retain their legacy
+			// raw-owner behaviour; production SessionManager always implements the query.
+			: ownerPs?.teamGoalId;
+		const operation = () => this.spawnAdmitted(opts, ownerPs, trustedTeamGoalId);
+		return trustedTeamGoalId && this.deps.sessionManager.runWithTeamGoalAdmission
+			? this.deps.sessionManager.runWithTeamGoalAdmission(trustedTeamGoalId, operation)
+			: operation();
+	}
 
+	private async spawnAdmitted(
+		opts: SpawnOpts,
+		ownerPs: PersistedSessionLike | undefined,
+		trustedTeamGoalId: string | undefined,
+	): Promise<ChildHandle> {
 		const childKind: ChildKind = opts.childKind ?? "delegate";
 		const model = opts.model ?? this.deps.resolveSessionModel(opts.ownerSessionId);
 		const thinkingLevel = opts.thinkingLevel ?? this.deps.resolveSessionThinking?.(opts.ownerSessionId);
@@ -588,7 +610,6 @@ export class OrchestrationCore {
 			// sandboxed / project-scoped owner could be created OUTSIDE that scope — a
 			// privilege escalation. This inherits the owner's scope verbatim and never
 			// widens it (there is no per-call option that could).
-			const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
 			const ownerSandboxed = ownerPs?.sandboxed === true;
 			const worktreeOpts = opts.worktree?.mode === "sub-branch"
 				? { repoPath: opts.worktree.repoPath }
@@ -605,6 +626,11 @@ export class OrchestrationCore {
 			const createOpts: Record<string, unknown> = {
 				parentSessionId: opts.ownerSessionId,
 				childKind,
+				// Structural ownership is part of the initial persisted row, before
+				// createSession can await worktree setup or start an agent process.
+				// A current TeamStore reference is trusted even when a legacy owner row
+				// has no stamp; an explicit foreign stamp still wins in the classifier.
+				teamGoalId: trustedTeamGoalId ?? ownerPs?.teamGoalId,
 				// Visible session title (Decision A.5 / launch-ux §5.3). createSession
 				// otherwise defaults to "New session"; thread it so a launcher-supplied
 				// title (e.g. "PR Walkthrough") names the sidebar entry.
@@ -626,6 +652,14 @@ export class OrchestrationCore {
 			};
 			if (opts.worktree?.mode === "sub-branch") {
 				createOpts.sandboxBranch = opts.worktree.branch;
+				// A team-owned sub-branch must finish process setup before releasing
+				// terminal admission. Otherwise createSession returns its preparing
+				// placeholder and detached setup can start a process after archival.
+				// Team-owned setup must remain inside the admission turn until process
+				// creation finishes, including exact inherited teamGoalId ownership.
+				if (lifecycle === "full" && trustedTeamGoalId) {
+					createOpts.awaitWorktreeSetup = true;
+				}
 			}
 			const child = await this.deps.sessionManager.createSession(cwd, undefined, goalId, undefined, createOpts);
 			childId = child.id;

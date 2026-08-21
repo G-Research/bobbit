@@ -50,9 +50,11 @@ type StoredRecord = Record<string, any> & { id: string };
 class RecordingStore {
 	readonly records = new Map<string, StoredRecord>();
 	readonly puts: string[] = [];
+	readonly putSnapshots: StoredRecord[] = [];
 
 	put(record: StoredRecord): void {
 		this.puts.push(record.id);
+		this.putSnapshots.push({ ...record });
 		this.records.set(record.id, { ...record });
 	}
 
@@ -186,6 +188,24 @@ afterAll(() => {
 });
 
 describe("actual SessionManager bare-delegate model boundary", () => {
+	it("persists TeamStore-derived ownership in the bare delegate's initial row", async () => {
+		const { manager, store } = makeFixture("teamstore-ownership");
+		const trustedGoalId = "teamstore-referenced-goal";
+		manager.getTrustedTeamGoalIdForSession = (id: string) =>
+			id === PARENT_ID ? trustedGoalId : store.get(id)?.teamGoalId;
+
+		const child = await manager.createDelegateSession(PARENT_ID, {
+			instructions: "Preserve supplemental team ownership",
+			cwd: tmpRoot,
+		});
+		if (child.pendingMetadataPersist) await child.pendingMetadataPersist;
+
+		const initial = store.putSnapshots.find((row) => row.id === child.id);
+		assert.ok(initial, "delegate setup must publish an initial structural row");
+		assert.equal(initial.teamGoalId, trustedGoalId, "initial row carries TeamStore-derived ownership");
+		assert.equal(store.get(child.id)?.teamGoalId, trustedGoalId, "final metadata keeps the same trusted stamp");
+	});
+
 	it("rejects exact deferred provider before RpcBridge construction or child persistence", async () => {
 		const { manager, store, bridgeOptions, counters } = makeFixture("deferred-provider");
 		let rejection: unknown;
