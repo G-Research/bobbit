@@ -2,33 +2,42 @@ import { expect, test } from "./_e2e/in-process-harness.js";
 
 test.describe("POST /api/sessions/:id/provider-hooks/before-compact", () => {
 	test("forwards a string span to the lifecycle hook and rejects non-string spans", async ({ gateway, scope }) => {
-		const sessionId = `before-compact-api-${process.pid}-${Date.now()}`;
-		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
-		expect(context).toBeTruthy();
-		context.sessionStore.put({
-			id: sessionId,
+		const session = await scope.createSession({
 			title: "Before compact API fixture",
-			cwd: gateway.bobbitDir,
-			agentSessionFile: `${gateway.bobbitDir}/${sessionId}.jsonl`,
-			createdAt: Date.now(),
-			lastActivity: Date.now(),
-			archived: false,
+			cwd: gateway.projectContextManager.getRegistry().get(gateway.defaultProjectId).rootPath,
 			projectId: gateway.defaultProjectId,
 		});
-		scope.trackSession(sessionId);
+		const sessionId = session.id;
 
-		const originalHub = gateway.sessionManager.lifecycleHub;
+		const originalHostInterceptors = gateway.sessionManager.hostInterceptors;
 		const dispatches: Array<{ hook: string; hookContext: Record<string, unknown> }> = [];
-		gateway.sessionManager.lifecycleHub = {
-			async dispatch(hook: string, hookContext: Record<string, unknown>) {
-				dispatches.push({ hook, hookContext });
-				return { blocks: [], diagnostics: [] };
+		gateway.sessionManager.setHostInterceptorPort({
+			async dispatch(hook: string, input: Record<string, unknown>, requestContext: Record<string, unknown>) {
+				dispatches.push({ hook, hookContext: { ...input, projectId: requestContext.projectId } });
+				return input;
 			},
-		};
+		});
 
 		try {
+			const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+			const foreignSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(`${sessionId}-foreign`);
+
+			for (const headers of [
+				undefined,
+				{ "X-Bobbit-Session-Secret": foreignSecret },
+			]) {
+				const unauthorized = await gateway.api(`/api/sessions/${sessionId}/provider-hooks/before-compact`, {
+					method: "POST",
+					headers,
+					body: JSON.stringify({ span: "conversation span to retain" }),
+				});
+				expect(unauthorized.status).toBe(403);
+			}
+			expect(dispatches).toHaveLength(0);
+
 			const valid = await gateway.api(`/api/sessions/${sessionId}/provider-hooks/before-compact`, {
 				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": sessionSecret },
 				body: JSON.stringify({ span: "conversation span to retain" }),
 			});
 			expect(valid.status).toBe(200);
@@ -45,13 +54,14 @@ test.describe("POST /api/sessions/:id/provider-hooks/before-compact", () => {
 
 			const invalid = await gateway.api(`/api/sessions/${sessionId}/provider-hooks/before-compact`, {
 				method: "POST",
+				headers: { "X-Bobbit-Session-Secret": sessionSecret },
 				body: JSON.stringify({ span: 42 }),
 			});
 			expect(invalid.status).toBe(400);
-			expect(await invalid.json()).toEqual({ error: "span must be a string" });
+			expect(await invalid.json()).toEqual({ error: "Invalid bounded beforeCompact body" });
 			expect(dispatches).toHaveLength(1);
 		} finally {
-			gateway.sessionManager.lifecycleHub = originalHub;
+			gateway.sessionManager.setHostInterceptorPort(originalHostInterceptors);
 		}
 	});
 });

@@ -65,9 +65,11 @@ async function promptSectionsText(sessionId: string): Promise<string> {
 		.join("\n\n---\n\n");
 }
 
-async function refreshPromptSections(sessionId: string): Promise<void> {
+async function refreshPromptSections(gateway: { sessionManager: any }, sessionId: string): Promise<void> {
+	const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt: "refresh restored delegate prompt sections" }),
 	});
 	expect(resp.status).toBe(200);
@@ -238,7 +240,7 @@ test.describe("orchestration restart survival", () => {
 				"Restored delegate prompt sections should expose the durable task instructions",
 			).toContain(marker);
 
-			await refreshPromptSections(child);
+			await refreshPromptSections(gateway, child);
 			const refreshedSections = await promptSectionsText(child);
 			expect(
 				refreshedSections,
