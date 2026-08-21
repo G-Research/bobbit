@@ -91,10 +91,11 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 beforeAll(() => {
-	// v2-core reuses forks with isolate:false; another file's env restoration can
-	// run after collection, so restore the worker resolver at this file boundary.
-	enableTsWorkerResolver();
 	tmp = makeTmpDir("ext-host-iso-");
+	// v2-core reuses forks with isolate:false. Re-assert the supported worker
+	// resolver immediately before this file spawns real ModuleHost workers, after
+	// any sibling env guard may have restored NODE_OPTIONS following collection.
+	enableTsWorkerResolver();
 });
 afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
