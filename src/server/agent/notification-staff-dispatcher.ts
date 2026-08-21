@@ -95,6 +95,7 @@ function currentNotificationTrigger(staff: PersistedStaff | undefined, triggerId
 /** Durable, project-partitioned delivery adapter for notification staff triggers. */
 export class NotificationStaffDispatcher {
 	readonly consumer = "staff" as const;
+	readonly admission = "durable-subscriber" as const;
 	private readonly stores = new Map<string, NotificationDeliveryStore>();
 	private readonly aborters = new Map<string, AbortController>();
 	private interval: ReturnType<Clock["setInterval"]> | null = null;
@@ -155,9 +156,14 @@ export class NotificationStaffDispatcher {
 		});
 	}
 
-	/** Canonical dispatcher adapter surface. */
+	/** Canonical dispatcher adapter surface. The host invokes this in its own
+	 * microtask, so this method crosses the durable subscriber admission seam
+	 * directly without occupying (or being dropped by) a bounded live queue. */
 	deliver(notification: HostNotification): void {
-		this.enqueue(notification);
+		try { this.enqueueNow(notification); }
+		catch {
+			this.diagnostic({ code: "OUTBOX_INSERT_FAILED", projectId: notification.projectId, notificationName: notification.name });
+		}
 	}
 
 	/** Alias for narrow domain integrations that also propagate loop controls. */

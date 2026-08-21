@@ -25,6 +25,9 @@ interface StreamState {
 	sequence: number;
 	refreshRequired: boolean;
 	refreshScheduled: boolean;
+	refreshAttempts: number;
+	active: boolean;
+	refreshTimer?: ReturnType<typeof setTimeout>;
 }
 
 export interface HostNotificationSocketRouterOptions {
@@ -32,6 +35,10 @@ export interface HostNotificationSocketRouterOptions {
 	/** If a socket already has this many unsent bytes, drop the delta and require
 	 * an authoritative refresh rather than growing transport memory unbounded. */
 	readonly maxBufferedBytes?: number;
+	/** Initial retry delay for a refresh frame rejected by transport pressure. */
+	readonly refreshRetryDelayMs?: number;
+	/** Failed refresh attempts before closing with WebSocket retry-later code 1013. */
+	readonly maxRefreshRetries?: number;
 }
 
 /**
@@ -57,8 +64,11 @@ export function unbindHostNotificationSocket(ws: WebSocket): void {
 export class HostNotificationSocketRouter implements HostNotificationDeliveryAdapter {
 	readonly consumer = "browser" as const;
 	private readonly states = new WeakMap<WebSocket, Map<HostHookScope, StreamState>>();
+	private readonly closeListeners = new WeakSet<WebSocket>();
 	private readonly epochGenerator: () => string;
 	private readonly maxBufferedBytes: number;
+	private readonly refreshRetryDelayMs: number;
+	private readonly maxRefreshRetries: number;
 
 	constructor(
 		private readonly sockets: Iterable<WebSocket> | (() => Iterable<WebSocket>),
@@ -66,6 +76,8 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 	) {
 		this.epochGenerator = options.epochGenerator ?? randomUUID;
 		this.maxBufferedBytes = Math.max(1, options.maxBufferedBytes ?? 512 * 1024);
+		this.refreshRetryDelayMs = Math.max(1, Math.min(options.refreshRetryDelayMs ?? 25, 1_000));
+		this.maxRefreshRetries = Math.max(1, Math.min(options.maxRefreshRetries ?? 8, 32));
 	}
 
 	deliver(notification: HostNotification): void {
@@ -77,6 +89,7 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 			}
 			if (!this.canSend(ws)) {
 				state.refreshRequired = true;
+				this.scheduleRefresh(ws, notification.scope, state);
 				continue;
 			}
 			const frame: ServerMessage = {
@@ -85,9 +98,14 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 				stream: { epoch: state.epoch, sequence: ++state.sequence },
 			};
 			try {
-				ws.send(JSON.stringify(frame));
+				ws.send(JSON.stringify(frame), (error?: Error) => {
+					if (!error) return;
+					state.refreshRequired = true;
+					this.scheduleRefresh(ws, notification.scope, state);
+				});
 			} catch {
 				state.refreshRequired = true;
+				this.scheduleRefresh(ws, notification.scope, state);
 			}
 		}
 	}
@@ -118,6 +136,7 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 		if (!streams) {
 			streams = new Map();
 			this.states.set(ws, streams);
+			this.installCloseCleanup(ws);
 		}
 		let state = streams.get(scope);
 		if (!state) {
@@ -126,6 +145,8 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 				sequence: 0,
 				refreshRequired: false,
 				refreshScheduled: false,
+				refreshAttempts: 0,
+				active: true,
 			};
 			streams.set(scope, state);
 		}
@@ -138,23 +159,92 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 	}
 
 	private scheduleRefresh(ws: WebSocket, scope: HostHookScope, state: StreamState): void {
-		if (state.refreshScheduled) return;
+		if (!state.active || state.refreshScheduled || state.refreshTimer) return;
 		state.refreshScheduled = true;
 		queueMicrotask(() => {
 			state.refreshScheduled = false;
-			if (!state.refreshRequired || !this.canSend(ws)) return;
-			const frame: ServerMessage = {
-				type: "host_notifications_refresh_required",
-				scope,
-				epoch: state.epoch,
-				sequence: ++state.sequence,
-			};
-			try {
-				ws.send(JSON.stringify(frame));
-				state.refreshRequired = false;
-			} catch {
-				// A later notification/overflow will retry. Never spin on a dead socket.
-			}
+			this.tryRefresh(ws, scope, state);
 		});
+	}
+
+	private tryRefresh(ws: WebSocket, scope: HostHookScope, state: StreamState): void {
+		if (!state.active) return;
+		if (!state.refreshRequired) {
+			state.refreshAttempts = 0;
+			return;
+		}
+		if (!isSocketSendable(ws)) {
+			if (ws.readyState === 1) this.closeRetryably(ws);
+			else this.cleanupSocket(ws);
+			return;
+		}
+		if (!this.canSend(ws)) {
+			this.retryRefresh(ws, scope, state);
+			return;
+		}
+		const frame: ServerMessage = {
+			type: "host_notifications_refresh_required",
+			scope,
+			epoch: state.epoch,
+			sequence: ++state.sequence,
+		};
+		state.refreshRequired = false;
+		try {
+			ws.send(JSON.stringify(frame), (error?: Error) => {
+				if (!state.active) return;
+				if (!error) {
+					state.refreshAttempts = 0;
+					return;
+				}
+				state.refreshRequired = true;
+				this.retryRefresh(ws, scope, state);
+			});
+		} catch {
+			state.refreshRequired = true;
+			this.retryRefresh(ws, scope, state);
+		}
+	}
+
+	private retryRefresh(ws: WebSocket, scope: HostHookScope, state: StreamState): void {
+		if (!state.active || !state.refreshRequired || state.refreshTimer) return;
+		state.refreshAttempts++;
+		if (state.refreshAttempts >= this.maxRefreshRetries) {
+			this.closeRetryably(ws);
+			return;
+		}
+		const delay = Math.min(1_000, this.refreshRetryDelayMs * (2 ** Math.max(0, state.refreshAttempts - 1)));
+		state.refreshTimer = setTimeout(() => {
+			state.refreshTimer = undefined;
+			this.tryRefresh(ws, scope, state);
+		}, delay);
+	}
+
+	private installCloseCleanup(ws: WebSocket): void {
+		if (this.closeListeners.has(ws)) return;
+		this.closeListeners.add(ws);
+		const once = (ws as WebSocket & { once?: (event: string, listener: () => void) => unknown }).once;
+		if (typeof once === "function") once.call(ws, "close", () => this.cleanupSocket(ws));
+	}
+
+	private cleanupSocket(ws: WebSocket): void {
+		const streams = this.states.get(ws);
+		if (streams) {
+			for (const state of streams.values()) {
+				state.active = false;
+				if (state.refreshTimer) clearTimeout(state.refreshTimer);
+				state.refreshTimer = undefined;
+				state.refreshScheduled = false;
+				state.refreshRequired = false;
+			}
+		}
+		this.states.delete(ws);
+	}
+
+	private closeRetryably(ws: WebSocket): void {
+		this.cleanupSocket(ws);
+		try { ws.close(1013, "host notification refresh required"); }
+		catch {
+			try { ws.terminate(); } catch { /* transport is already unusable */ }
+		}
 	}
 }
