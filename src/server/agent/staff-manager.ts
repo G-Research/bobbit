@@ -26,8 +26,9 @@ type StaffFactPublisher = {
 	}): unknown;
 };
 
-const STAFF_PUBLIC_CONFIG_FIELDS = new Set([
-	"name", "description", "systemPrompt", "cwd", "state", "triggers", "memory", "roleId", "accessory", "contextPolicy",
+type StaffConfigChangedField = Extract<HostNotificationPayload<"staffConfigChanged">["changedFields"][number], string>;
+const STAFF_PUBLIC_CONFIG_FIELDS: ReadonlySet<StaffConfigChangedField> = new Set([
+	"name", "description", "systemPrompt", "state", "triggers", "roleId", "accessory", "contextPolicy",
 ]);
 
 function sanitiseBranchName(name: string): string {
@@ -573,7 +574,7 @@ export class StaffManager {
 		searchIndex?.indexStaff(staff, found.projectId);
 
 		const changedFields = Object.keys(updates)
-			.filter((field) => STAFF_PUBLIC_CONFIG_FIELDS.has(field)
+			.filter((field): field is StaffConfigChangedField => STAFF_PUBLIC_CONFIG_FIELDS.has(field as StaffConfigChangedField)
 				&& JSON.stringify(before[field as keyof PersistedStaff]) !== JSON.stringify(staff[field as keyof PersistedStaff]))
 			.sort();
 		if (changedFields.length > 0) {

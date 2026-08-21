@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import {
-	HOST_NOTIFICATION_CATALOGUE,
-	validateNotificationFilter,
-	validateNotificationPayload,
-	type HostHookScope,
+	deepFreezeHostValue,
+	getHostNotificationDefinition,
+	notificationMatchesFilter,
+	validateHostNotification,
 	type HostNotification,
-	type HostNotificationName,
 } from "../../shared/extension-host/host-hooks.js";
 import { realClock, type Clock } from "../gateway-deps.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
@@ -14,7 +13,6 @@ import type { StaffManager } from "./staff-manager.js";
 import type { NotificationStaffTrigger, PersistedStaff } from "./staff-store.js";
 import { NotificationDeliveryStore, type NotificationDeliveryRow } from "./notification-delivery-store.js";
 
-const MAX_EVENT_BYTES = 32 * 1024;
 const MAX_CAUSATION_DEPTH = 8;
 const MAX_ATTEMPTS = 5;
 const FINAL_DEADLINE_MS = 24 * 60 * 60 * 1_000;
@@ -22,14 +20,6 @@ const LEASE_MS = 30_000;
 const BATCH_SIZE = 32;
 
 type Scalar = string | number | boolean;
-type DefinitionView = {
-	name: string;
-	scope: HostHookScope;
-	payloadVersion: number;
-	aggregateKind: string;
-	consumers: ReadonlySet<string> | readonly string[];
-	filterFields: Readonly<Record<string, unknown>>;
-};
 
 export interface NotificationDeliveryControls {
 	/** Host-owned root propagated from a prior notification staff wake. */
@@ -45,35 +35,6 @@ export interface NotificationStaffDiagnostic {
 	triggerId?: string;
 	deliveryId?: string;
 	attempt?: number;
-}
-
-function definitionFor(name: string): DefinitionView | undefined {
-	return (HOST_NOTIFICATION_CATALOGUE as unknown as Record<string, DefinitionView>)[name];
-}
-
-function consumerAllowed(definition: DefinitionView, consumer: string): boolean {
-	return definition.consumers instanceof Set
-		? definition.consumers.has(consumer)
-		: Array.isArray(definition.consumers) && definition.consumers.includes(consumer);
-}
-
-function isBoundedString(value: unknown, max = 512): value is string {
-	return typeof value === "string" && value.length > 0 && value.length <= max;
-}
-
-function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
-	return Object.keys(value).every((key) => allowed.has(key));
-}
-
-const ENVELOPE_KEYS = new Set(["id", "scope", "name", "payloadVersion", "occurredAt", "projectId", "sessionId", "aggregate", "correlationId", "causationId", "payload"]);
-const AGGREGATE_KEYS = new Set(["kind", "id", "revision"]);
-
-function deepFreeze<T>(value: T): T {
-	if (value && typeof value === "object" && !Object.isFrozen(value)) {
-		Object.freeze(value);
-		for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
-	}
-	return value;
 }
 
 function cloneJson<T>(value: T): T {
@@ -99,10 +60,7 @@ export function notificationSubscriberVersion(trigger: NotificationStaffTrigger)
 
 function selectorAndFilterMatch(trigger: NotificationStaffTrigger, event: HostNotification): boolean {
 	if (trigger.notification.scope !== event.scope || trigger.notification.name !== event.name) return false;
-	const checked = validateNotificationFilter(event.scope, event.name, trigger.filter ?? {});
-	if (!checked.ok) return false;
-	const payload = event.payload as unknown as Record<string, unknown>;
-	return Object.entries(checked.filter).every(([key, value]) => payload[key] === value);
+	return notificationMatchesFilter(event, trigger.filter ?? {});
 }
 
 /**
@@ -111,32 +69,12 @@ function selectorAndFilterMatch(trigger: NotificationStaffTrigger, event: HostNo
  * scope, version, aggregate, consumer eligibility, partition, and size.
  */
 export function validateStaffNotification(value: unknown, projectId: string): HostNotification | null {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-	let encoded: string;
-	try { encoded = JSON.stringify(value); } catch { return null; }
-	if (Buffer.byteLength(encoded, "utf-8") > MAX_EVENT_BYTES) return null;
-	const event = value as Record<string, unknown>;
-	if (!hasOnlyKeys(event, ENVELOPE_KEYS)) return null;
-	if (!isBoundedString(event.id) || !isBoundedString(event.name, 128)) return null;
-	const definition = definitionFor(event.name);
-	if (!definition || !consumerAllowed(definition, "staff")) return null;
-	if (event.scope !== definition.scope || event.projectId !== projectId || !isBoundedString(event.projectId)) return null;
-	if (event.payloadVersion !== definition.payloadVersion) return null;
-	if (typeof event.occurredAt !== "number" || !Number.isFinite(event.occurredAt) || event.occurredAt < 0) return null;
-	if (definition.scope === "session" && !isBoundedString(event.sessionId)) return null;
-	if (event.sessionId !== undefined && !isBoundedString(event.sessionId)) return null;
-	if (event.correlationId !== undefined && !isBoundedString(event.correlationId)) return null;
-	if (event.causationId !== undefined && !isBoundedString(event.causationId)) return null;
-	if (!event.aggregate || typeof event.aggregate !== "object" || Array.isArray(event.aggregate)) return null;
-	const aggregate = event.aggregate as Record<string, unknown>;
-	if (!hasOnlyKeys(aggregate, AGGREGATE_KEYS)) return null;
-	if (aggregate.kind !== definition.aggregateKind || !isBoundedString(aggregate.id)) return null;
-	if (aggregate.revision !== undefined
-		&& typeof aggregate.revision !== "string"
-		&& (typeof aggregate.revision !== "number" || !Number.isFinite(aggregate.revision))) return null;
-	if (!validateNotificationPayload(event.name as HostNotificationName, event.payload)) return null;
+	if (!validateHostNotification(value) || value.projectId !== projectId) return null;
+	const definition = getHostNotificationDefinition(value.name);
+	if (!definition || !definition.consumers.has("staff") || definition.delivery.staff !== "durable-intent") return null;
 	try {
-		return deepFreeze(cloneJson(value as HostNotification));
+		const copy = cloneJson(value);
+		return deepFreezeHostValue(copy) as HostNotification;
 	} catch {
 		return null;
 	}
@@ -155,6 +93,7 @@ function currentNotificationTrigger(staff: PersistedStaff | undefined, triggerId
 
 /** Durable, project-partitioned delivery adapter for notification staff triggers. */
 export class NotificationStaffDispatcher {
+	readonly consumer = "staff" as const;
 	private readonly stores = new Map<string, NotificationDeliveryStore>();
 	private readonly aborters = new Map<string, AbortController>();
 	private interval: ReturnType<Clock["setInterval"]> | null = null;
@@ -215,7 +154,12 @@ export class NotificationStaffDispatcher {
 		});
 	}
 
-	/** Alias suitable for a notification-dispatcher consumer callback. */
+	/** Canonical dispatcher adapter surface. */
+	deliver(notification: HostNotification): void {
+		this.enqueue(notification);
+	}
+
+	/** Alias for narrow domain integrations that also propagate loop controls. */
 	onNotification(notification: HostNotification, controls?: NotificationDeliveryControls): void {
 		this.enqueue(notification, controls);
 	}
