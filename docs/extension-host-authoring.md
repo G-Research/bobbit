@@ -235,6 +235,14 @@ project registered after startup is protected too. An invalid declaration reject
 of silently removing the capability. Schema-1 packs do not activate `localData`; packs with no
 declaration retain their previous manifest/runtime shape.
 
+Effective pack activation gates the entire extension runtime surface. Only an effectively enabled,
+winning pack exposes its browser or server Host APIs, Pi contributions, agent runtime binding, or
+sandbox mount. Installing a pack with `defaultDisabled: true` leaves all of those inert until an
+explicit enable, while its raw Marketplace listing and activation configuration remain visible.
+Clearing that enable returns the pack to its default-off state: new or refreshed sessions omit its Pi
+extension and `BOBBIT_PACK_LOCAL_DATA_JSON` entry, and sandbox reconciliation removes its mount.
+This changes exposure only; the existing directory and every file remain byte-for-byte untouched.
+
 #### Resolution and project identity
 
 On first use or mount planning, Bobbit resolves:
@@ -331,10 +339,11 @@ set changes, Bobbit reconciles the immutable Docker mount set and recreates affe
 containers when necessary; restored containers with missing, stale, extra, or read-only bindings
 are not treated as current.
 
-Disabling, shadowing, uninstalling, or updating a pack removes or changes **exposure**, never data.
-Bobbit does not delete the declared directory or any file in it. Reinstalling the same declaration
-reuses the preserved directory; changing `directory` leaves the old location untouched. Explicit
-data deletion belongs to the extension or user.
+Disabling (including clearing a default-disabled pack's explicit enable), shadowing, uninstalling,
+or updating a pack removes or changes **exposure**, never data. Bobbit does not delete the declared
+directory or alter any file in it. Reinstalling the same declaration reuses the preserved directory;
+changing `directory` leaves the old location untouched. Explicit data deletion belongs to the
+extension or user.
 
 Pack Local Data assumes installed extension code, browser panel code, the agent runtime, and bespoke
 tools are trusted. It does not isolate intentionally malicious extension code, restrict browser

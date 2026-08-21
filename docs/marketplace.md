@@ -170,6 +170,19 @@ contributions: providers, hook metadata, MCP, and pi extensions. Support surface
 routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
 shown read-only as "support surfaces").
 
+Whole-pack effective activation is the prerequisite for all of those contributions and support
+surfaces. A normal pack is active by default and then follows its per-entity toggles. An installed
+or shipped pack with `defaultDisabled: true` instead contributes nothing until its explicit enable
+override is set; only effectively enabled packs participate in precedence and expose Host APIs, Pi
+contributions, runtime environment bindings, or sandbox mounts. The raw Marketplace listing and
+activation configuration remain visible while the pack is off, so it can still be inspected and
+re-enabled.
+
+Clearing the explicit enable returns a default-disabled pack to its inert state. Host exposure is
+removed, new or refreshed sessions omit its Pi/runtime bindings, and affected sandboxes reconcile
+away its mounts. This never deletes or rewrites Pack Local Data: existing directories and files are
+preserved byte-for-byte. A later enable reuses the same declared directory.
+
 > **Extension Platform (`schema: 2`).** The activation system covers `providers`, `hooks`,
 > `mcp`, `piExtensions`, and the reserved `runtimes` / `workflows` siblings. They are first-class
 > in `DisabledRefs` and `ACTIVATION_KINDS`, and the `pack-activation` catalogue includes their
@@ -628,7 +641,7 @@ The Market **Sources** tab shows a distinct, labelled **Built-in** section. It i
 
 ### Disabling a shipped feature
 
-Built-in packs appear in the **Installed** tab in their own *Built-in (shipped)* group, flagged `builtin: true`, with **enable/disable toggles only — no Uninstall and no Update**. Disabling reuses the [#734 activation-override system](#activation-controls) verbatim: it writes `pack_activation` under the **`server` scope** (a shipped feature is a server-wide admin decision, so disabling applies across projects) and removes exactly the toggled user-facing entries (roles/tools/skills/entrypoints) from resolution. Panels and routes stay as support surfaces and are not independently toggleable or force-closed. For a launcher-only feature such as the file explorer, removing its entrypoints removes the supported way to open a new panel; a feature with a declared deep-link instead degrades that route to the standard unavailable state. Toggling invalidates resolver caches synchronously, so the change takes effect with no restart/reload, and the disabled state **persists across reload and restart** (it lives in server config).
+Built-in packs appear in the **Installed** tab in their own *Built-in (shipped)* group, flagged `builtin: true`, with **activation toggles only — no Uninstall and no Update**. Per-entity disabling reuses the [activation system](#activation-controls) under the **`server` scope** (a shipped feature is a server-wide admin decision, so it applies across projects) and removes exactly the toggled user-facing entries (roles/tools/skills/entrypoints) from resolution. Panels and routes stay as non-toggleable support surfaces for those per-entity changes. A `defaultDisabled: true` pack's explicit enable is instead a whole-pack prerequisite; clearing it returns every contribution and support surface to the inert state described above while the raw Installed row remains visible. For a launcher-only feature such as the file explorer, removing its entrypoints removes the supported way to open a new panel; a feature with a declared deep-link instead degrades that route to the standard unavailable state. Activation changes take effect without a restart/reload and persist across both.
 
 ### Tool activation diagnostics for inactive packs
 
