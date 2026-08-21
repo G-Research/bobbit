@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
+import { hostInterceptorAuditSink } from "../../src/server/extension-host/host-interceptor-audit.ts";
 import { HostInterceptorRouter } from "../../src/server/extension-host/host-interceptor-router.ts";
 import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
 import type { PackContributions } from "../../src/server/agent/pack-contributions.ts";
@@ -144,6 +145,34 @@ describe("HostInterceptorRouter", () => {
 		}, context());
 		expect(result.value.args).toEqual({ original: true });
 		expect(result.decisions[0].outcome).toBe("cancelled");
+	});
+
+	it("records the production diagnostic projection once and keeps sink failures non-fatal", async () => {
+		const { registry } = registryFor(pack([explicit("audited")]));
+		const moduleHost = {
+			invoke: vi.fn(async () => ({ action: "allow" })),
+		} as unknown as ModuleHost;
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const router = new HostInterceptorRouter({ registry, moduleHost, audit: hostInterceptorAuditSink });
+		const result = await router.dispatch("beforeToolCall", {
+			toolCallId: "call-sensitive", toolName: "demo", args: { secret: "forbidden args" },
+		}, context());
+		expect(result.decisions).toHaveLength(1);
+		expect(log).toHaveBeenCalledOnce();
+		expect(log.mock.calls[0]?.[0]).toBe("[host-interceptor-audit] %s");
+		const diagnostic = JSON.parse(String(log.mock.calls[0]?.[1]));
+		expect(diagnostic).toMatchObject({
+			hook: "beforeToolCall", projectId: "project-1", sessionId: "session-1",
+			packId: "p", contributionId: "audited", outcome: "applied",
+			proposalReceived: true, valid: true, applied: true, timedOut: false, cancelled: false,
+		});
+		expect(JSON.stringify(diagnostic)).not.toMatch(/call-sensitive|forbidden|args|prompt|result|error|path/i);
+
+		log.mockImplementation(() => { throw new Error("diagnostic sink unavailable"); });
+		await expect(router.dispatch("beforeToolCall", {
+			toolCallId: "call-2", toolName: "demo", args: {},
+		}, context())).resolves.toMatchObject({ decisions: [{ outcome: "applied" }] });
+		log.mockRestore();
 	});
 
 	it("applies a constant fail-closed decision without exposing worker errors", async () => {

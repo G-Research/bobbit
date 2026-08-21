@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,8 +34,7 @@ function project(id: string): RegisteredProject {
 	};
 }
 
-function context(id: string): ProjectContext {
-	const fs = createMemFs();
+function context(id: string, fs = createMemFs()): ProjectContext {
 	const registered = project(id);
 	fs.mkdirSync(registered.rootPath, { recursive: true });
 	const ctx = new ProjectContext(registered, {
@@ -140,6 +139,34 @@ async function waitForInboxCount(gw: GatewayFixture, staffId: string, count: num
 	}, `${count} inbox entries for ${staffId}`, 5_000);
 }
 
+async function refreshServerPackIndex(gw: GatewayFixture): Promise<void> {
+	const current = await gw.apiJson<{ order: string[] }>("/api/marketplace/pack-order?scope=server");
+	const response = await gw.api("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order: current.order }),
+	});
+	expect(response.status, await response.clone().text()).toBe(200);
+}
+
+function writeInterceptorAuditPack(gw: GatewayFixture, packName: string): string {
+	const packDir = path.join(gw.bobbitDir, "config", "market-packs", packName);
+	mkdirSync(path.join(packDir, "hooks"), { recursive: true });
+	mkdirSync(path.join(packDir, "lib"), { recursive: true });
+	writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2", `name: ${packName}`, "description: Host interceptor audit fixture", "version: 1.0.0",
+		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  hooks: [audit-project]",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
+		"sourceUrl: integration", "sourceRef: local", "commit: test", `packName: ${packName}`, "version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "hooks", "audit-project.yaml"), [
+		"id: audit.project", "module: ../lib/hooks.mjs", "kind: interceptor", "interceptors: [projectImported]", "capabilities: []",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "lib", "hooks.mjs"), "export default { projectImported: async () => { throw new Error('private worker failure sentinel'); } };\n");
+	return packDir;
+}
+
 describe("gateway-owned host hook boundaries", () => {
 	it("routes project store commits through one canonical dispatcher without replacing legacy callbacks", async () => {
 		const delivered: HostNotification[] = [];
@@ -206,6 +233,59 @@ describe("gateway-owned host hook boundaries", () => {
 			changedKeys: ["commands"],
 		});
 	});
+
+	it("publishes every public worktree setting family only after rename and omits values, unknown keys, and failed writes", async () => {
+		const delivered: HostNotification[] = [];
+		const fs = createMemFs();
+		let renameCount = 0;
+		const rename = fs.renameSync.bind(fs);
+		fs.renameSync = ((from: Parameters<typeof fs.renameSync>[0], to: Parameters<typeof fs.renameSync>[1]) => {
+			rename(from, to);
+			renameCount++;
+		}) as typeof fs.renameSync;
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [{
+				consumer: "browser",
+				deliver: notification => {
+					expect(renameCount).toBeGreaterThan(0);
+					delivered.push(notification);
+				},
+			}],
+			idGenerator: (() => { let id = 0; return () => `settings-${++id}`; })(),
+		});
+		const ctx = context("project-settings", fs);
+		ctx.setHostNotificationDispatcher(dispatcher);
+		wireProjectHostNotificationBoundaries(ctx);
+
+		ctx.projectConfigStore.set("base_ref", "origin/sensitive-value");
+		ctx.projectConfigStore.set("worktree_pool_size", "19");
+		ctx.projectConfigStore.set("worktree_setup_timeout_ms", "987654");
+		ctx.projectConfigStore.set("arbitrary_secret_key", "forbidden-secret-value");
+		await settleFanout();
+
+		expect(delivered).toHaveLength(3);
+		expect(delivered.map(notification => notification.payload)).toEqual([
+			{ target: "project", changedKeys: ["baseRef"] },
+			{ target: "project", changedKeys: ["worktrees"] },
+			{ target: "project", changedKeys: ["worktrees"] },
+		]);
+		expect(new Set(delivered.map(notification => notification.aggregate.revision)).size).toBe(3);
+		for (const notification of delivered) {
+			expect(notification.aggregate.revision).toMatch(/^[a-f0-9]{64}$/);
+		}
+		const publicFacts = JSON.stringify(delivered);
+		expect(publicFacts).not.toContain("sensitive-value");
+		expect(publicFacts).not.toContain("987654");
+		expect(publicFacts).not.toContain("forbidden-secret-value");
+
+		const committedRename = fs.renameSync;
+		fs.renameSync = (() => { throw new Error("rename sentinel path and value"); }) as typeof fs.renameSync;
+		expect(() => ctx.projectConfigStore.set("sandbox", "docker")).toThrow();
+		fs.renameSync = committedRename;
+		await settleFanout();
+		expect(delivered).toHaveLength(3);
+		expect(ctx.projectConfigStore.get("sandbox")).toBeUndefined();
+	});
 });
 
 describe("real gateway notification authority", () => {
@@ -227,6 +307,39 @@ describe("real gateway notification authority", () => {
 		for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
 	});
 	afterAll(() => { assertNoLeaks(baseline, snapshotEntities(gw)); });
+
+	it("uses the production router audit sink for project-only interceptor decisions", async () => {
+		const packName = `host-audit-${process.pid}-${Date.now()}`;
+		const packDir = writeInterceptorAuditPack(gw, packName);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await refreshServerPackIndex(gw);
+			const result = await gw.hostInterceptorRouter.dispatch("projectImported", {
+				projectId: gw.defaultProjectId,
+				components: [],
+			}, {
+				projectId: gw.defaultProjectId,
+				cwd: gw.projectContextManager.getOrCreate(gw.defaultProjectId).project.rootPath,
+				signal: new AbortController().signal,
+			});
+			expect(result.decisions).toHaveLength(1);
+			expect(result.decisions[0]).toMatchObject({
+				hook: "projectImported", projectId: gw.defaultProjectId, contributionId: "audit.project",
+				outcome: "failed-open", proposalReceived: false, valid: false, applied: false,
+			});
+			expect(result.decisions[0]).not.toHaveProperty("sessionId");
+			const auditCalls = log.mock.calls.filter(call => call[0] === "[host-interceptor-audit] %s");
+			expect(auditCalls).toHaveLength(1);
+			const diagnostic = JSON.parse(String(auditCalls[0]?.[1]));
+			expect(diagnostic).toEqual(result.decisions[0]);
+			expect(diagnostic).not.toHaveProperty("sessionId");
+			expect(JSON.stringify(diagnostic)).not.toContain("private worker failure sentinel");
+		} finally {
+			log.mockRestore();
+			rmSync(packDir, { recursive: true, force: true });
+			await refreshServerPackIndex(gw);
+		}
+	});
 
 	async function createTaskAndObserver(suffix: string) {
 		const project = gw.projectContextManager.getRegistry().get(gw.defaultProjectId);
