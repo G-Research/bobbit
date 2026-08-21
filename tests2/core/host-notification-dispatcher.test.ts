@@ -124,6 +124,52 @@ describe("HostNotificationDispatcher", () => {
 			expect.objectContaining({ code: "consumer_failure", consumer: "browser" }),
 		]));
 	});
+
+	it("admits every durable staff event in order beyond bounded live capacity", async () => {
+		const browserDelivered: string[] = [];
+		const refreshes: string[] = [];
+		const staffAdmitted: string[] = [];
+		let nextId = 0;
+		const dispatcher = new HostNotificationDispatcher({
+			queueCapacity: 1,
+			idGenerator: () => `notification-${++nextId}`,
+			now: () => 103,
+			adapters: [
+				{
+					consumer: "browser",
+					deliver(notification) { browserDelivered.push(notification.id); },
+					refreshRequired(notification) { refreshes.push(notification.id); },
+				},
+				{
+					consumer: "staff",
+					admission: "durable-subscriber",
+					deliver(notification) { staffAdmitted.push(notification.id); },
+				},
+			],
+		});
+
+		for (let revision = 1; revision <= 4; revision++) {
+			dispatcher.publish("goalUpdated", {
+				...goalPublication(),
+				aggregateRevision: revision,
+			});
+		}
+		await settleFanout();
+
+		expect(browserDelivered).toEqual(["notification-1"]);
+		expect(refreshes).toEqual(["notification-2", "notification-3", "notification-4"]);
+		expect(staffAdmitted).toEqual([
+			"notification-1",
+			"notification-2",
+			"notification-3",
+			"notification-4",
+		]);
+		expect(dispatcher.getDiagnostics().filter(row => row.code === "queue_overflow")).toEqual([
+			expect.objectContaining({ consumer: "browser" }),
+			expect.objectContaining({ consumer: "browser" }),
+			expect.objectContaining({ consumer: "browser" }),
+		]);
+	});
 });
 
 describe("HostNotificationModuleAdapter", () => {
