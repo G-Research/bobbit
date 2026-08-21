@@ -179,6 +179,9 @@ test.describe("Continue-Archived stale worktree source", () => {
 
 			const seedProposal = await apiFetch(`/api/sessions/${srcId}/proposal/role/seed`, {
 				method: "POST",
+				headers: {
+					"X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(srcId),
+				},
 				body: JSON.stringify({
 					args: {
 						name: `stale-source-role-${Date.now()}`,
