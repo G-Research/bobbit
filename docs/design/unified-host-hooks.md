@@ -1,6 +1,6 @@
 # Unified Host Hooks
 
-**Status:** implementation design  
+**Status:** implementation design
 **Decision:** use a shared TypeBox catalogue, an operation-specific interceptor router, and one post-commit notification dispatcher. Persist only matching staff delivery intents, including each intent's original bounded canonical notification; do not add a durable global notification journal.
 
 ## 1. Scope and decisions
