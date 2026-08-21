@@ -55,6 +55,22 @@ type ProjectMutationCapture = {
 	waitForMutation: (method: "POST" | "PUT" | "DELETE", pathname: string | RegExp) => Promise<void>;
 };
 
+let operatorCookie: string | undefined;
+
+async function authenticatedOperatorCookie(): Promise<string> {
+	if (operatorCookie) return operatorCookie;
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	operatorCookie = setCookies
+		.map((cookie) => cookie.split(";")[0])
+		.find((cookie) => cookie.startsWith("bobbit_session="));
+	if (!operatorCookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	return operatorCookie;
+}
+
 async function openSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
@@ -151,6 +167,7 @@ async function seedAndHydrateProjectProposal(
 ): Promise<ReturnType<Page["locator"]>> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
 		method: "POST",
+		headers: { Cookie: await authenticatedOperatorCookie() },
 		body: JSON.stringify({ args: fields }),
 	});
 	const text = await resp.text();
