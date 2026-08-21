@@ -632,9 +632,10 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { GoalTriggerDispatcher } from "./agent/goal-trigger-dispatcher.js";
-import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
+import { InboxManager, type InboxEntry, type InboxLiveAddress, type InboxLiveEvent } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import { NotificationStaffDispatcher } from "./agent/notification-staff-dispatcher.js";
+import { runWithStaffNotificationTurnContext } from "./agent/staff-notification-causation.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
@@ -3159,7 +3160,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	//   - Wiring order: construct InboxManager → construct InboxNudger →
 	//     inboxManager.setNudger(inboxNudger) → staffManager.setInboxManager(
 	//     inboxManager) → sessionManager.setInboxNudger(inboxNudger) → start.
-	const inboxManager = new InboxManager(projectContextManager, staffManager, (event) => broadcastToAll(event));
+	const inboxManager = new InboxManager(projectContextManager, staffManager, broadcastInboxLive);
 	const crossProjectInboxStore: InboxStore = {
 		listPending: (staffId: string): InboxEntry[] => {
 			for (const ctx of projectContextManager.all()) {
@@ -3188,7 +3189,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		staffManager,
 		inboxManager,
-		{ clock: gatewayDeps.clock },
+		{
+			clock: gatewayDeps.clock,
+			isTurnContextCurrent: (context) => !!context
+				&& sessionManager.getStaffNotificationTurnContext(context.sessionId) === context,
+		},
 	);
 
 	// One-shot migration: heal sessions that lost their `staffId` association
@@ -4010,7 +4015,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			const rawSessionSecret = req.headers["x-bobbit-session-secret"];
+			const sessionSecret = Array.isArray(rawSessionSecret) ? rawSessionSecret[0] : rawSessionSecret;
+			const authenticSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(sessionSecret);
+			const causalTurn = authenticSessionId
+				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
+				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
+				: undefined;
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
+			else await routeOperation();
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4388,6 +4402,34 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			stringifyMs,
 			sendMs: performance.now() - sendStart,
 		});
+	}
+
+	/** Publish a bounded inbox invalidation only to the exact owning staff UI
+	 * session. Project, staff, live/persisted session, viewer, unbound, and sandbox
+	 * authority are all checked server-side; clients never filter for isolation. */
+	function broadcastInboxLive(event: InboxLiveEvent, address?: InboxLiveAddress): void {
+		if (!address) return;
+		const staff = staffManager.getStaff(address.staffId);
+		if (!staff
+			|| staff.projectId !== address.projectId
+			|| staff.currentSessionId !== address.staffSessionId) return;
+		const session = sessionManager.getSession(address.staffSessionId);
+		const persisted = sessionManager.getPersistedSession(address.staffSessionId);
+		if (!session
+			|| !persisted
+			|| session.staffId !== address.staffId
+			|| persisted.staffId !== address.staffId
+			|| session.projectId !== address.projectId
+			|| persisted.projectId !== address.projectId) return;
+		const data = JSON.stringify(event);
+		for (const ws of session.clients) {
+			if ((ws as any).authenticated !== true
+				|| (ws as any).isViewer === true
+				|| (ws as any).sessionId !== address.staffSessionId
+				|| !hasUiWebSocketPrincipal(ws)
+				|| !isSocketSendable(ws)) continue;
+			ws.send(data);
+		}
 	}
 
 	/** Broadcast to ALL authenticated WebSocket clients (regardless of session/goal). */

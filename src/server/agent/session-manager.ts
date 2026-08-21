@@ -172,6 +172,12 @@ import { WorktreePool } from "./worktree-pool.js";
 import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
+	freezeStaffNotificationTurnContext,
+	MAX_STAFF_NOTIFICATION_TURN_DEPTH,
+	runWithStaffNotificationTurnContext,
+	type StaffNotificationTurnContext,
+} from "./staff-notification-causation.js";
+import {
 	type SessionSetupPlan,
 	type PipelineContext,
 	type SandboxWiringOptions,
@@ -1038,6 +1044,8 @@ export interface SessionInfo {
 	lastAssistantTerminalIdentity?: string;
 	/** Deduplicates repeated/late final agent_end frames within one turn. */
 	turnTerminalHandled?: boolean;
+	/** Host-only causal binding for one exact notification-triggered staff turn. */
+	staffNotificationTurnContext?: StaffNotificationTurnContext;
 	/** Last turn index whose canonical agent_start notification was published. */
 	hostTurnStartedIndex?: number;
 	/** Bounded, metadata-only tool calls admitted by the host interceptor seam. */
@@ -3621,6 +3629,7 @@ export class SessionManager {
 		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
+		session.staffNotificationTurnContext = undefined;
 		session.hostToolCallLifecycle?.clear();
 		session.dormant = true;
 		session.status = "terminated";
@@ -3865,13 +3874,16 @@ export class SessionManager {
 	): void {
 		if (!this.hostNotificationPublisher || !session.projectId) return;
 		try {
-			this.hostNotificationPublisher.publish(name, {
-				projectId: session.projectId,
+			const publish = () => this.hostNotificationPublisher!.publish(name, {
+				projectId: session.projectId!,
 				sessionId: session.id,
 				aggregateId,
 				aggregateRevision,
 				payload,
 			});
+			const causalTurn = this.getStaffNotificationTurnContext(session.id);
+			if (causalTurn) runWithStaffNotificationTurnContext(causalTurn, publish);
+			else publish();
 		} catch {
 			console.warn(`[session-manager] host notification publication failed code=publisher_error name=${name} session=${session.id}`);
 		}
@@ -3880,6 +3892,7 @@ export class SessionManager {
 	private attachHostLifecycleObservers(session: SessionInfo): void {
 		session.onStatusChanged = (change) => {
 			if (change.status === "terminated") {
+				session.staffNotificationTurnContext = undefined;
 				session.hostToolCallLifecycle?.clear();
 			}
 			this.publishSessionNotification(session, "statusChanged", session.id, change.statusVersion, {
@@ -4051,6 +4064,82 @@ export class SessionManager {
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
 		this._inboxNudger = nudger;
+	}
+
+	/** Return causal controls only while every exact staff/session/lifecycle fence
+	 * remains authoritative. Invalid bindings are erased on observation. */
+	getStaffNotificationTurnContext(sessionId: string): StaffNotificationTurnContext | undefined {
+		const session = this.sessions.get(sessionId);
+		const context = session?.staffNotificationTurnContext;
+		if (!session || !context) return undefined;
+		const staff = this.staffRecordSource?.getStaff(context.staffId);
+		if (session.lifecycleFenced === true
+			|| !this._sessionWriterIsCurrent(session)
+			|| session.id !== context.sessionId
+			|| session.projectId !== context.projectId
+			|| session.staffId !== context.staffId
+			|| (session.lifecycleGeneration ?? 0) !== context.lifecycleGeneration
+			|| !staff
+			|| staff.state !== "active"
+			|| staff.currentSessionId !== session.id
+			|| staff.projectId !== context.projectId) {
+			session.staffNotificationTurnContext = undefined;
+			return undefined;
+		}
+		return context;
+	}
+
+	clearStaffNotificationTurnContext(sessionId: string, notificationId?: string): void {
+		const session = this.sessions.get(sessionId);
+		if (!session?.staffNotificationTurnContext) return;
+		if (notificationId && session.staffNotificationTurnContext.notificationId !== notificationId) return;
+		session.staffNotificationTurnContext = undefined;
+	}
+
+	/** Atomically reserve an otherwise-empty idle staff turn for one notification
+	 * root, then dispatch the host-owned wake prompt. Batching roots is forbidden. */
+	async enqueueStaffNotificationPrompt(
+		sessionId: string,
+		text: string,
+		input: Omit<StaffNotificationTurnContext, "sessionId" | "lifecycleGeneration">,
+	): Promise<{ status: "dispatched" | "queued" }> {
+		const session = this.sessions.get(sessionId);
+		const staff = this.staffRecordSource?.getStaff(input.staffId);
+		const validString = (value: string) => value.length > 0 && value.length <= 256;
+		if (!session
+			|| session.status !== "idle"
+			|| !session.promptQueue.isEmpty
+			|| session.lifecycleFenced === true
+			|| !this._sessionWriterIsCurrent(session)
+			|| session.projectId !== input.projectId
+			|| session.staffId !== input.staffId
+			|| !staff
+			|| staff.state !== "active"
+			|| staff.currentSessionId !== sessionId
+			|| staff.projectId !== input.projectId
+			|| !validString(input.staffId)
+			|| !validString(input.triggerId)
+			|| !validString(input.notificationId)
+			|| !validString(input.rootCorrelationId)
+			|| !Number.isSafeInteger(input.causationDepth)
+			|| input.causationDepth < 0
+			|| input.causationDepth > MAX_STAFF_NOTIFICATION_TURN_DEPTH) {
+			return { status: "queued" };
+		}
+		const context = freezeStaffNotificationTurnContext({
+			...input,
+			sessionId,
+			lifecycleGeneration: session.lifecycleGeneration ?? 0,
+		});
+		session.staffNotificationTurnContext = context;
+		try {
+			const result = await this.enqueuePrompt(sessionId, text, { isSteered: true, source: "system" });
+			if (result.status !== "dispatched") this.clearStaffNotificationTurnContext(sessionId, context.notificationId);
+			return result;
+		} catch (error) {
+			this.clearStaffNotificationTurnContext(sessionId, context.notificationId);
+			throw error;
+		}
 	}
 
 	setStaffManager(sm: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined }): void {
@@ -9042,6 +9131,13 @@ export class SessionManager {
 				durationMs: terminalStartedAt === undefined ? 0 : Math.max(0, this.clock.now() - terminalStartedAt),
 				hadToolCalls: terminalHadToolCalls,
 			});
+			// turnCompleted is the last fact allowed to inherit this root. The
+			// dispatcher admits durable subscribers in its already-queued microtask;
+			// clear immediately after that admission seam, fenced by notification id.
+			const completedNotificationId = session.staffNotificationTurnContext?.notificationId;
+			if (completedNotificationId) {
+				queueMicrotask(() => this.clearStaffNotificationTurnContext(session.id, completedNotificationId));
+			}
 			session.hostToolCallLifecycle?.clear();
 			this.resolveIdleWaiters(session.id);
 			this.schedulePromptCursorRefresh(session, { settleBindings: true });
@@ -15419,6 +15515,7 @@ export class SessionManager {
 		// mutated by this seam.
 		session.lifecycleFenced = true;
 		session.dormant = true;
+		session.staffNotificationTurnContext = undefined;
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
 		if (session.pendingMetadataPersist) {
@@ -17264,6 +17361,7 @@ export class SessionManager {
 	async abortSessionTurn(id: string): Promise<void> {
 		const session = this.sessions.get(id);
 		if (!session || session.status !== "streaming") return;
+		session.staffNotificationTurnContext = undefined;
 		broadcastStatus(session, "aborting");
 		try { await session.rpcClient.abort(); } catch { /* best-effort */ }
 	}
@@ -17341,6 +17439,8 @@ export class SessionManager {
 		if (!this._replacementTokenIsCurrent(id, token)) {
 			throw new Error(`Session ${id} force-abort was superseded before start`);
 		}
+		// Abort permanently severs any notification-turn causal authority.
+		session.staffNotificationTurnContext = undefined;
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
 
