@@ -41,7 +41,15 @@ export const HOST_API_VERSION = 1 as const;
 // side-panel tab identity. Packs feature-detect via `host.contractVersion >= 3` and
 // fall back to host-derived singleton/allowlisted param identity. See PanelTarget.
 // v4 (additive): added generic host.channels data contracts.
-export const HOST_CONTRACT_VERSION = 4 as const;
+// v5 (additive): added canonical scoped session/project notification contracts.
+export const HOST_CONTRACT_VERSION = 5 as const;
+
+import type {
+	HostNotification,
+	HostNotificationName,
+	ProjectNotificationName,
+	SessionNotificationName,
+} from "./host-hooks.js";
 
 /**
  * The single, versioned, capability-scoped object through which ALL extension code
@@ -111,8 +119,11 @@ export interface HostApi {
 	 */
 	callRoute<TResult = unknown>(name: string, init?: HostRouteInit): Promise<TResult>;
 
-	/** Transcript + message capabilities. PHASE 2 (frozen, not implemented). */
+	/** Transcript, legacy events, and canonical session notifications. */
 	readonly session: HostSessionApi;
+
+	/** Current-project canonical notifications, bound by the host. */
+	readonly project: HostProjectApi;
 
 	/** UI surface capabilities. PHASE 2 (frozen, not implemented). */
 	readonly ui: HostUiApi;
@@ -146,6 +157,10 @@ export interface HostCapabilities {
 	readonly store: boolean;
 	/** Long-lived pack-scoped framed channels. False/absent until the host wires the bridge. */
 	readonly channels?: boolean;
+	/** Canonical facts bound to the current session. */
+	readonly sessionNotifications?: boolean;
+	/** Canonical facts bound to the current session's server-resolved project. */
+	readonly projectNotifications?: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -165,6 +180,16 @@ export interface HostRouteInit {
 /** PHASE 2 — frozen, not implemented. Read/post the current session's transcript.
  *  All shapes returned/accepted here are Host-API-OWNED contract types (below), produced
  *  by the internal→contract adapter — never Bobbit's internal wire format. */
+export interface HostNotificationSubscriptionApi<N extends HostNotificationName> {
+	/** Observe a committed canonical fact. The host owns scope and identity binding. */
+	subscribe<E extends N>(
+		name: E,
+		handler: (event: HostNotification<E>) => void,
+	): () => void;
+	/** Refresh the authoritative projection after mount, reconnect, or a stream gap. */
+	onRefreshRequired(handler: () => void): () => void;
+}
+
 export interface HostSessionApi {
 	/** Read the current session's transcript (paginated envelope of HostMessages). */
 	readTranscript(opts?: ReadTranscriptOpts): Promise<TranscriptEnvelope>;
@@ -178,6 +203,13 @@ export interface HostSessionApi {
 		event: E,
 		cb: (payload: HostSessionEventMap[E]) => void,
 	): () => void;
+	/** Privacy-bounded committed facts for this host's current session. */
+	readonly notifications: HostNotificationSubscriptionApi<SessionNotificationName>;
+}
+
+export interface HostProjectApi {
+	/** Privacy-bounded committed facts for the host's server-resolved project. */
+	readonly notifications: HostNotificationSubscriptionApi<ProjectNotificationName>;
 }
 
 /** PHASE 2 — frozen, not implemented. Drive non-chat UI surfaces. Targets are STRUCTURED
