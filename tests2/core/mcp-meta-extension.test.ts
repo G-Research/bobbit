@@ -18,7 +18,7 @@ guardProcessEnv();
 import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 
-const { generateMcpMetaExtension, writeMcpProxyExtensions } = await import("../../src/server/agent/tool-activation.ts");
+const { generateMcpMetaExtension, jsonSchemaToTypeBox, normalizeMcpMetaArgs, writeMcpProxyExtensions } = await import("../../src/server/agent/tool-activation.ts");
 const os = await import("node:os");
 const pathMod = await import("node:path");
 const fsMod = await import("node:fs");
@@ -62,8 +62,31 @@ describe("generateMcpMetaExtension — happy path", () => {
 		assert.match(code, /Type\.Literal\("get-direct-reports"\)/);
 	});
 
-	it("includes args as an opaque object in the schema", () => {
-		assert.match(code, /"args":/);
+	it("declares args as a Bedrock-valid object-or-string union", () => {
+		assert.match(code, /"args":\s*Type\.Union\(\[/);
+		assert.match(code, /Type\.Object\(\{\}, \{ additionalProperties: true \}\)/);
+		assert.match(code, /Type\.String\(\)/);
+		assert.doesNotMatch(code, /"args":\s*Type\.Any\(\)/);
+	});
+
+	it("normalizes GLM string args while preserving GPT object args", () => {
+		const objectArgs = { query: "intraday", size: 3 };
+		const native = normalizeMcpMetaArgs(objectArgs);
+		assert.equal(native.ok, true);
+		if (native.ok) assert.equal(native.args, objectArgs, "native object is preserved by identity");
+		assert.deepEqual(normalizeMcpMetaArgs('{"query":"intraday","size":3}'), { ok: true, args: objectArgs });
+		assert.deepEqual(normalizeMcpMetaArgs("[1,2]"), { ok: false, reason: "args_must_be_object" });
+		assert.deepEqual(normalizeMcpMetaArgs("not-json"), { ok: false, reason: "args_not_json" });
+	});
+
+	it("converts JSON-Schema anyOf and open objects without Type.Any", () => {
+		const converted = jsonSchemaToTypeBox({ anyOf: [{ type: "object", additionalProperties: true }, { type: "string" }] });
+		assert.equal(converted, "Type.Union([Type.Object({}, { additionalProperties: true }), Type.String()])");
+	});
+
+	it("injects the runtime normalizer before MCP dispatch", () => {
+		assert.match(code, /__bobbitNormalizeArgs/);
+		assert.match(code, /invalid_args/);
 	});
 
 	it("execute body POSTs to /api/internal/mcp-call with the canonical per-op tool name", () => {

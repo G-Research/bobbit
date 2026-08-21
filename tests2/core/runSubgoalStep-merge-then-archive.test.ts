@@ -6,8 +6,8 @@
  * Phase 3 — happy-path merge + archive flow when child reaches ready-to-merge.
  *
  * SUBGOALS-SPEC §2 step 8: on `outcome.merged || outcome.alreadyMerged`:
- *   - teamManager.teardownTeam(childGoalId)  (try/catch — non-fatal)
- *   - goalManager.archiveGoalAfterMerge(childGoalId)
+ *   - goalManager.archiveGoalAfterMerge(childGoalId), whose durable archive
+ *     reconciliation owns evidence-preserving team cleanup
  *   - Return passed=true
  *
  * On conflict:
@@ -27,9 +27,14 @@ beforeAll(async () => {
 });
 
 describe("runSubgoalStep — merge + archive flow", () => {
-	it("ready-to-merge passes → mergeChild + teardownTeam + archiveAfterMerge in order", async () => {
+	it("ready-to-merge passes → mergeChild + reconciliation-owned archive in order", async () => {
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
+		const reconciled: string[] = [];
+		fx.goalManager.setGoalArchiveReconciler(async (goalId) => {
+			reconciled.push(goalId);
+			return { archivedSessionIds: ["worker"], teamRemoved: true };
+		});
 
 		const step = buildSubgoalStep({ planId: "p-merge" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
@@ -40,33 +45,32 @@ describe("runSubgoalStep — merge + archive flow", () => {
 
 		const order = fx.calls.map(c => c.kind);
 		const mergeIdx = order.indexOf("mergeChild");
-		const tearIdx = order.indexOf("teardownTeam");
 		const archIdx = order.indexOf("archiveGoalAfterMerge");
 		assert.notEqual(mergeIdx, -1);
-		assert.notEqual(tearIdx, -1);
 		assert.notEqual(archIdx, -1);
-		assert.ok(mergeIdx < tearIdx, "mergeChild must precede teardownTeam");
-		assert.ok(tearIdx < archIdx, "teardownTeam must precede archiveAfterMerge");
+		assert.ok(mergeIdx < archIdx, "mergeChild must precede archiveAfterMerge");
+		assert.equal(order.includes("teardownTeam"), false, "ordinary teardown must not erase evidence before reconciliation");
+		assert.deepEqual(reconciled, [fx.goalStore.getAll().find(g => g.parentGoalId === fx.parent.id)?.id]);
 	});
 
 	it("R-028: archiveGoalAfterMerge sets state=complete BEFORE archiving (stale-pointer invalidation rescue path)", async () => {
 		// Order is load-bearing: the archived snapshot must have
 		// state=complete on disk so the rescue-path tier-2 short-circuit fires.
-		// Wrap goalStore.update to log the state stamp; wrap goalStore.archive
-		// to log the archive call. Assert state-complete < archive.
+		// Wrap goalStore.update to log the state stamp; wrap the strict durable
+		// archive boundary to log publication. Assert state-complete < archive.
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
 
 		const storeCalls: string[] = [];
 		const origUpdate = fx.goalStore.update.bind(fx.goalStore);
-		const origArchive = fx.goalStore.archive.bind(fx.goalStore);
+		const origArchiveStrict = fx.goalStore.archiveStrict.bind(fx.goalStore);
 		(fx.goalStore as any).update = (id: string, updates: any) => {
 			if (updates && updates.state === "complete") storeCalls.push(`state-complete:${id}`);
 			return origUpdate(id, updates);
 		};
-		(fx.goalStore as any).archive = (id: string) => {
-			storeCalls.push(`archive:${id}`);
-			return origArchive(id);
+		(fx.goalStore as any).archiveStrict = async (id: string) => {
+			storeCalls.push(`archive-strict:${id}`);
+			return origArchiveStrict(id);
 		};
 
 		const step = buildSubgoalStep({ planId: "p-order" });
@@ -75,14 +79,14 @@ describe("runSubgoalStep — merge + archive flow", () => {
 		assert.equal(result.passed, true);
 
 		const stateIdx = storeCalls.findIndex(c => c.startsWith("state-complete:"));
-		const archiveIdx = storeCalls.findIndex(c => c.startsWith("archive:"));
+		const archiveIdx = storeCalls.findIndex(c => c.startsWith("archive-strict:"));
 		assert.notEqual(stateIdx, -1, `expected state-complete log entry, got: ${storeCalls.join(", ")}`);
 		assert.notEqual(archiveIdx, -1, `expected archive log entry, got: ${storeCalls.join(", ")}`);
 		assert.ok(stateIdx < archiveIdx,
-			`state=complete must be set BEFORE archive(). order: ${storeCalls.join(" → ")}`);
+			`state=complete must be set BEFORE archiveStrict(). order: ${storeCalls.join(" → ")}`);
 	});
 
-	it("alreadyMerged child → still tears down + archives, returns passed=true", async () => {
+	it("alreadyMerged child → archives through reconciliation without ordinary teardown", async () => {
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
 
@@ -93,7 +97,7 @@ describe("runSubgoalStep — merge + archive flow", () => {
 		const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
 		assert.equal(result.passed, true);
 		assert.match(result.output, /already merged/i);
-		assert.ok(fx.calls.find(c => c.kind === "teardownTeam"));
+		assert.equal(fx.calls.find(c => c.kind === "teardownTeam"), undefined);
 		assert.ok(fx.calls.find(c => c.kind === "archiveGoalAfterMerge"));
 	});
 
@@ -119,25 +123,17 @@ describe("runSubgoalStep — merge + archive flow", () => {
 			"must NOT auto-archive on conflict — preserves work for retry");
 	});
 
-	it("teardownTeam failure is non-fatal (try/catch) — archive + passed=true still happen", async () => {
+	it("ordinary teardown is never consulted, so its failure cannot invalidate merge success", async () => {
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
+		fx.mockTeamManager.teardownTeam = async () => { throw new Error("must not run"); };
 
-		// Override teardownTeam to throw.
-		const origTeardown = fx.mockTeamManager.teardownTeam;
-		fx.mockTeamManager.teardownTeam = async (goalId: string) => {
-			fx.calls.push({ kind: "teardownTeam", goalId });
-			throw new Error("teardown blew up");
-		};
-
-		const step = buildSubgoalStep({ planId: "p-teardown-fail" });
+		const step = buildSubgoalStep({ planId: "p-no-teardown" });
 		const { signal, active, stepIndex } = buildActive(fx.parent.id);
 		const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
 
 		assert.equal(result.passed, true);
-		assert.ok(fx.calls.find(c => c.kind === "archiveGoalAfterMerge"),
-			"archiveAfterMerge must still run even when teardown threw");
-
-		fx.mockTeamManager.teardownTeam = origTeardown;
+		assert.equal(fx.calls.find(c => c.kind === "teardownTeam"), undefined);
+		assert.ok(fx.calls.find(c => c.kind === "archiveGoalAfterMerge"));
 	});
 });

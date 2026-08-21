@@ -1864,6 +1864,21 @@ describe("TeamManager", () => {
 			assert.ok(session, "session should exist");
 			assert.equal(session.cwd, result.worktreePath, "session cwd should be the production-created worktree");
 			assert.equal(session.worktreePath, result.worktreePath, "session metadata should retain the member worktree");
+			assert.equal(session.repoPath, fixture.repoPath, "single-repo worker metadata must retain its source repository");
+			assert.equal(session.branch, agents[0].branch, "single-repo worker metadata must retain its exact branch");
+			assert.deepEqual(
+				{
+					worktreePath: session.createOpts.worktreePath,
+					repoPath: session.createOpts.repoPath,
+					branch: session.createOpts.branch,
+				},
+				{
+					worktreePath: result.worktreePath,
+					repoPath: fixture.repoPath,
+					branch: agents[0].branch,
+				},
+				"the initial persisted row must own the exact single-repo worktree identity before createSession returns",
+			);
 			assert.equal(session.rpcClient.prompt.mock.calls.length, 1);
 			assert.deepEqual(
 				sm.enqueuePrompt.mock.calls[0],

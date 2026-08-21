@@ -38,4 +38,4 @@ contents:
 #    state. `bundle`/`publish` are byte-stable compatibility routes.
 routes:
   module: lib/routes.mjs
-  names: [bundle, publish, run, status, recover]
+  names: [bundle, publish, run, status, recover, submitReview]

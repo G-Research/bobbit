@@ -86,6 +86,7 @@ export class TeamStore {
 			);
 		} catch (err) {
 			console.error("[team-store] Failed to save:", err);
+			throw err;
 		}
 	}
 
@@ -128,10 +129,19 @@ export class TeamStore {
 		this.save();
 	}
 
-	/** Promise-based, serialized removal used by team-lead archive purge. */
+	/** Promise-based, acknowledged removal used by archived-goal reconciliation. */
 	async removeAsync(goalId: string): Promise<void> {
+		const previous = this.teams.get(goalId);
+		if (!previous) return;
 		this.teams.delete(goalId);
-		await this.requestAsyncSave();
+		try {
+			await this.requestAsyncSave();
+		} catch (err) {
+			// Retain passive retry evidence in memory; the failed publication left
+			// the on-disk row intact as well.
+			this.teams.set(goalId, previous);
+			throw err;
+		}
 	}
 
 	getAll(): PersistedTeamEntry[] {

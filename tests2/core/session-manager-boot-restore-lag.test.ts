@@ -69,6 +69,15 @@ describe("SessionManager lag-aware eager boot restore", () => {
 		assert.deepEqual(yieldDelays, [0, 0]);
 	});
 
+	it("preserves full eager restore when the fixture has no goal resolver", async () => {
+		const rows = [persisted("unresolved-team-owner", { teamGoalId: "unresolved-goal" })];
+		const { manager, attempted } = makeManager(rows, [0]);
+
+		await manager.restoreSessions();
+
+		assert.deepEqual(attempted, rows.map((row) => row.id));
+	});
+
 	it("shrinks to one and applies bounded backoff under high lag", async () => {
 		const rows = Array.from({ length: 4 }, (_, i) => persisted(`high${i}`));
 		const { manager, attempted, yieldAt, yieldDelays } = makeManager(rows, [250, 250, 250, 250]);

@@ -13,7 +13,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SRC = "defaults";
-const DEST = "dist/server/defaults";
+const SERVER_OUT_DIR = process.env.BOBBIT_SERVER_OUT_DIR || "dist";
+const DEST = path.join(SERVER_OUT_DIR, "server", "defaults");
 
 function copyDir(src, dest) {
   if (!fs.existsSync(src)) return;

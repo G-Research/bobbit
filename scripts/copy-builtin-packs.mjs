@@ -25,7 +25,8 @@ import path from "node:path";
 // stays under market-packs/hindsight/ so it can be re-added here later.
 const FIRST_PARTY_PACKS = ["file-explorer", "pr-walkthrough", "terminal"]; // explicit allowlist
 const SRC = "market-packs";
-const DEST = "dist/server/builtin-packs/market-packs";
+const SERVER_OUT_DIR = process.env.BOBBIT_SERVER_OUT_DIR || "dist";
+const DEST = path.join(SERVER_OUT_DIR, "server", "builtin-packs", "market-packs");
 
 const SKIP_DIRS = new Set(["src", "node_modules"]);
 

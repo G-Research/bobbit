@@ -2,8 +2,11 @@ import {
 	state,
 	renderApp,
 	setProjectsIfChanged,
+	invalidateGoalWorktreeModeProjection,
 	type GatewaySession,
 	type Goal,
+	type GoalWorktreeMode,
+	type GoalWorktreeModeProjection,
 	type Project,
 	type RemotePrStatus,
 	type RemoteStateError,
@@ -321,17 +324,67 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 	}
 }
 
+function watchesGoalPromotionProjection(sessionId: string): boolean {
+	return Object.prototype.hasOwnProperty.call(state.goalWorktreeModeBySession, sessionId)
+		|| Object.prototype.hasOwnProperty.call(state.goalWorktreeModeRevisionBySession, sessionId)
+		|| state.activeProposals.goal?.sessionId === sessionId;
+}
+
 export function updateLocalSessionStatus(sessionId: string, status: string): void {
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
+		const previous = state.gatewaySessions[idx];
+		// A real owner status transition changes promotion eligibility. Drop only
+		// the display projection; the durable proposal mode stays untouched and the
+		// next render starts a fresh owner-scoped GET. Heartbeats with the same
+		// status deliberately do not create a refetch loop.
+		if (previous.status !== status && watchesGoalPromotionProjection(sessionId)) {
+			invalidateGoalWorktreeModeProjection(sessionId);
+		}
 		// NOTE: do NOT touch lastActivity here. The server is the sole writer of
 		// lastActivity (bumped on real activity in src/server/agent/session-setup.ts
 		// and friends, surfaced via /api/sessions polling every ~5s). Clobbering
 		// lastActivity to Date.now() on every session_status frame caused spurious
 		// "now ●" unread indicators in the sidebar on benign heartbeats and
 		// busy→idle transitions. See tests/spurious-idle-unread.spec.ts.
-		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status };
+		state.gatewaySessions[idx] = { ...previous, status };
 		renderApp();
+	}
+}
+
+/** Public session fields that can change the server's promotion policy or its
+ * displayed canonical coordinates. Volatile activity/title/tag fields are
+ * intentionally excluded so polling does not refetch eligibility needlessly. */
+const GOAL_PROMOTION_SESSION_SNAPSHOT_KEYS = [
+	"status", "isCompacting", "isAborting", "restoreStartupWasStreaming", "dormant", "lifecycleFenced",
+	"goalId", "teamGoalId", "teamLeadSessionId", "role", "assistantType", "goalAssistant", "roleAssistant", "toolAssistant",
+	"delegateOf", "parentSessionId", "childKind", "childTerminal", "readOnly", "nonInteractive", "borrowsWorktree",
+	"borrowedWorktreeOwnerSessionId", "staffId", "taskId", "archived", "projectId", "cwd", "worktreePath", "repoPath",
+	"branch", "repoWorktrees", "sandboxed", "containerId",
+] as const;
+
+function goalPromotionSessionSnapshotFingerprint(session: GatewaySession | undefined): string {
+	if (!session) return "missing";
+	const record = session as GatewaySession & Record<string, unknown>;
+	return JSON.stringify(GOAL_PROMOTION_SESSION_SNAPSHOT_KEYS.map((key) => record[key]));
+}
+
+function invalidateChangedGoalPromotionSessionSnapshots(
+	previousSessions: readonly GatewaySession[],
+	nextSessions: readonly GatewaySession[],
+): void {
+	const previousById = new Map(previousSessions.map((session) => [session.id, session]));
+	const nextById = new Map(nextSessions.map((session) => [session.id, session]));
+	const watchedIds = new Set([
+		...Object.keys(state.goalWorktreeModeBySession),
+		...Object.keys(state.goalWorktreeModeRevisionBySession),
+		...(state.activeProposals.goal?.sessionId ? [state.activeProposals.goal.sessionId] : []),
+	]);
+	for (const sessionId of watchedIds) {
+		if (goalPromotionSessionSnapshotFingerprint(previousById.get(sessionId))
+			!== goalPromotionSessionSnapshotFingerprint(nextById.get(sessionId))) {
+			invalidateGoalWorktreeModeProjection(sessionId);
+		}
 	}
 }
 
@@ -789,6 +842,10 @@ export async function refreshSessions(): Promise<void> {
 				_prevSessionStatus.set(s.id, s.status);
 			}
 
+			// Session list snapshots can change eligibility without a live status
+			// frame (role/lifecycle/workspace updates, removal, restart recovery).
+			// Invalidate before replacement so the comparison uses the prior record.
+			invalidateChangedGoalPromotionSessionSnapshots(state.gatewaySessions, newSessions);
 			state.gatewaySessions = newSessions;
 
 			// Merge archived delegates of live sessions into state.archivedSessions
@@ -2007,6 +2064,117 @@ export async function fetchGoalGitStatus(
 // ============================================================================
 // GOAL API
 // ============================================================================
+
+export interface CurrentSessionGoalAcceptOptions {
+	spec?: string;
+	workflowId?: string;
+	enabledOptionalSteps?: string[];
+	workflow?: unknown;
+	inlineRoles?: Record<string, unknown>;
+	subgoalsAllowed?: boolean;
+	maxNestingDepth?: number;
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren?: number;
+	parentGoalId?: string;
+	metadata?: Record<string, unknown>;
+}
+
+async function finishGoalCreate(goal: Goal): Promise<Goal> {
+	await refreshSessions();
+	const goalsById = new Map(state.goals.map(g => [g.id, g]));
+	let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
+	const seenGoalIds = new Set<string>();
+	while (cursor && !seenGoalIds.has(cursor.id)) {
+		seenGoalIds.add(cursor.id);
+		expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
+		cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
+	}
+	return goal;
+}
+
+/** Read the durable mode plus freshly recomputed promotion eligibility for the
+ * proposal-owning session. Coordinate fields are display-only. */
+export async function fetchGoalWorktreeMode(sessionId: string): Promise<GoalWorktreeModeProjection> {
+	const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/worktree-mode`);
+	if (!res.ok) throw await errorFromResponse(res, `Failed to load worktree mode: ${res.status}`);
+	const body = await res.json() as any;
+	const eligibility = body?.eligibility && typeof body.eligibility === "object" ? body.eligibility : body;
+	const coordinates = eligibility?.coordinates && typeof eligibility.coordinates === "object"
+		? eligibility.coordinates
+		: body?.coordinates && typeof body.coordinates === "object" ? body.coordinates
+			: eligibility?.workspace && typeof eligibility.workspace === "object" ? eligibility.workspace
+				: body?.workspace && typeof body.workspace === "object" ? body.workspace : eligibility;
+	const rawMode = body?.mode ?? eligibility?.mode;
+	const componentCount = Number.isFinite(coordinates?.componentCount)
+		? Number(coordinates.componentCount)
+		: Array.isArray(coordinates?.components) ? coordinates.components.length
+			: coordinates?.repoWorktrees && typeof coordinates.repoWorktrees === "object" ? Object.keys(coordinates.repoWorktrees).length : undefined;
+	return {
+		mode: rawMode === "current-session" ? "current-session" : "new-worktree",
+		eligible: eligibility?.eligible === true,
+		...(typeof eligibility?.reason === "string" && eligibility.reason ? { reason: eligibility.reason } : {}),
+		...(typeof coordinates?.branch === "string" && coordinates.branch ? { branch: coordinates.branch } : {}),
+		...(typeof coordinates?.worktreePath === "string" && coordinates.worktreePath ? { worktreePath: coordinates.worktreePath } : {}),
+		...(componentCount !== undefined ? { componentCount } : {}),
+		...(typeof coordinates?.sandboxed === "boolean" ? { sandboxed: coordinates.sandboxed } : {}),
+	};
+}
+
+/** Persist only the human-owned mode. The server derives all promotion
+ * authority from the proposal owner and broadcasts the rewritten draft. */
+export async function updateGoalWorktreeMode(sessionId: string, mode: GoalWorktreeMode): Promise<GoalWorktreeModeProjection> {
+	const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/worktree-mode`, {
+		method: "PUT",
+		body: JSON.stringify({ mode }),
+	});
+	if (!res.ok) throw await errorFromResponse(res, `Failed to update worktree mode: ${res.status}`);
+	const body = await res.json().catch(() => ({})) as any;
+	const eligibility = body?.eligibility && typeof body.eligibility === "object" ? body.eligibility : body;
+	const coordinates = eligibility?.coordinates && typeof eligibility.coordinates === "object" ? eligibility.coordinates : eligibility;
+	return {
+		mode: body?.mode === "current-session" ? "current-session" : mode,
+		eligible: eligibility?.eligible === true,
+		...(typeof eligibility?.reason === "string" && eligibility.reason ? { reason: eligibility.reason } : {}),
+		...(typeof coordinates?.branch === "string" && coordinates.branch ? { branch: coordinates.branch } : {}),
+		...(typeof coordinates?.worktreePath === "string" && coordinates.worktreePath ? { worktreePath: coordinates.worktreePath } : {}),
+		...(Number.isFinite(coordinates?.componentCount) ? { componentCount: Number(coordinates.componentCount) } : {}),
+		...(typeof coordinates?.sandboxed === "boolean" ? { sandboxed: coordinates.sandboxed } : {}),
+	};
+}
+
+/** Accept a current-session proposal without sending any session, project,
+ * branch, worktree, repository, sandbox, or cwd authority. */
+export async function acceptGoalProposalInCurrentSession(
+	sessionId: string,
+	title: string,
+	opts: CurrentSessionGoalAcceptOptions = {},
+): Promise<Goal | null> {
+	try {
+		const body: Record<string, unknown> = { title, spec: opts.spec ?? "" };
+		if (opts.workflowId) body.workflowId = opts.workflowId;
+		if (opts.enabledOptionalSteps?.length) body.enabledOptionalSteps = opts.enabledOptionalSteps;
+		if (opts.workflow !== undefined) body.workflow = opts.workflow;
+		if (opts.inlineRoles && Object.keys(opts.inlineRoles).length > 0) body.inlineRoles = opts.inlineRoles;
+		if (opts.subgoalsAllowed !== undefined) body.subgoalsAllowed = opts.subgoalsAllowed;
+		if (opts.maxNestingDepth !== undefined) body.maxNestingDepth = opts.maxNestingDepth;
+		if (opts.divergencePolicy !== undefined) body.divergencePolicy = opts.divergencePolicy;
+		if (opts.maxConcurrentChildren !== undefined) body.maxConcurrentChildren = opts.maxConcurrentChildren;
+		if (opts.parentGoalId) body.parentGoalId = opts.parentGoalId;
+		if (opts.metadata && Object.keys(opts.metadata).length > 0) body.metadata = opts.metadata;
+		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed to promote session: ${res.status}`);
+		const responseBody = await res.json() as Goal | { goal: Goal };
+		const goal = "goal" in responseBody ? responseBody.goal : responseBody;
+		return await finishGoalCreate(goal);
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to promote session", message, { code, stack });
+		return null;
+	}
+}
 
 export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
 	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};

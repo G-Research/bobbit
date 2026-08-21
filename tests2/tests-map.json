@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1142,
   "buckets": {
-    "daily": 67,
+    "daily": 68,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,11 +15,74 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 52,
+    "relocate": 53,
     "rewrite": 145,
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/github-trusted-host-resolver.test.ts",
+      "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-proposal.test.ts",
+      "reason": "Core coverage for legacy-default proposal compatibility, durable current-session selection, snapshots, archive continuation, validation, and server-owned coordinate authority.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-eligibility.test.ts",
+      "reason": "Core policy coverage for current-session promotion eligibility, canonical coordinates, forbidden relationships, workspace conflicts, multi-repo fidelity, and sandbox reachability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-session-runtime.test.ts",
+      "reason": "Core runtime coverage for staged same-session role replacement, identity and sandbox continuity, exact rollback, and serialized idempotent promotion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/session-goal-promotion-panel.test.ts",
+      "reason": "DOM coverage for the accessible New worktree and Current session selector, authoritative coordinate projection, unavailable reasons, and owner-scoped acceptance dispatch.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/session-goal-promotion.test.ts",
+      "reason": "Integration coverage for owner-scoped worktree-mode routes, authority rejection, in-place acceptance, idempotency, coordinate continuity, and proposal cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
+      "reason": "Browser journey for selecting Current session, accepting in place with the original session, reload continuity, unavailable reasons, safe archive, and unchanged new-worktree creation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
     {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
@@ -2381,7 +2444,16 @@
     },
     {
       "path": "tests2/core/team-manager-async-recovery.test.ts",
-      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries using deterministic in-memory asynchronous I/O.",
+      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries, durable forensic-scan suppression, and targeted damage invalidation using deterministic in-memory asynchronous I/O.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/team-recovery-checkpoint.test.ts",
+      "reason": "Tier-1 durability coverage for the versioned team forensic-recovery checkpoint, including crash-in-progress, corrupt, stale-version, and completed states.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2608,6 +2680,15 @@
     {
       "path": "tests2/core/rpc-bridge-line-buffer-correctness.test.ts",
       "reason": "Native v2 core coverage for incremental RPC line framing, partial chunks, CRLF handling, ordering, and multibyte UTF-8 boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/archived-team-restore-guard.test.ts",
+      "reason": "Failing-first native v2 core coverage proving cold restore suppresses live team-owned sessions whose teamGoalId resolves to an archived goal without relying on TeamStore, while preserving goalId-only standalone restoration.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3225,6 +3306,33 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/archived-goal-reconciliation.test.ts",
+      "reason": "Core lifecycle coverage for authoritative archived-goal team ownership reconciliation: teamGoalId and current team references, recursive child closure, standalone-session exclusion, durable fallback and suppression, passive retry evidence, admission fencing, bounded audit output, and clean-repeat idempotence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/archived-team-reconciliation.test.ts",
+      "reason": "In-process gateway integration coverage for operator archive and boot repair, proving team lead and worker soft archival, missing-team-state repair, termination fallback, pre-restore and pre-resubscription ordering, eager restoration of unrelated sessions, and preserved transcripts and sidebar hierarchy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/archived-team-reconciliation-restart.spec.ts",
+      "reason": "Hard-restart Playwright E2E coverage proving archived team-owned sessions are repaired before dispatch, goalId-only controls still restore eagerly, team state and health remain clean, and a second boot performs no reconciliation writes while reporting comparative boot metrics.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -3326,6 +3434,10 @@
     },
     {
       "path": "tests2/browser/journeys/session-activity-restart.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

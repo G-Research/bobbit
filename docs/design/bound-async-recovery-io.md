@@ -131,7 +131,9 @@ await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
 
 Recovered persisted records therefore exist before live-session revival. `resubscribeTeamEvents()` remains after session restoration, and the stuck-team sweep starts only after team restoration succeeds. No boot consumer needs to infer completion from constructor timing or observe a partially restored team map.
 
-The existing recovery passes and policies are unchanged. This includes sidecar identity precedence, dangling-team cleanup, fully orphaned team-lead recovery, non-team-lead recovery, title upgrades, and sidecar backfill. In particular, this work did not add untracked-team adoption or change session restoration or lazy-revival policy.
+At the time of this I/O change, the existing recovery passes and policies were unchanged. A later boot-latency fix retained their recovery decisions but placed fully orphaned team-lead recovery, non-team-lead recovery, and legacy sidecar backfill behind a durable per-project completion boundary; see [Checkpoint Team Forensic Recovery](checkpoint-team-forensic-recovery.md). Recovered rows now flush before completion, and a completion-pending fence keeps a visible but unacknowledged `complete` marker retryable, including compensation after fence-clear `EIO`. Dangling-team cleanup and targeted recovery still run on every boot. Neither change added untracked-team adoption or changed eager session revival.
+
+PR #1216 (`Fix Archived Team Leaks`) adds a pre-dispatch archived-ownership boundary. If both changes are present, boot ordering must be `restoreTeams → reconcileArchivedTeamOwnership → restoreSessions(suppression)`, followed by event resubscription. This prevents recovery checkpoint authority from bypassing archived-session suppression.
 
 ## Model configuration commands
 

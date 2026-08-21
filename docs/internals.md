@@ -209,13 +209,51 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 Team state is restored from each project's `team-state.json` so live teams survive gateway restarts without losing their lead/worker wiring. The restart path is restorative only:
 
-- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state.
-- After `SessionManager.restoreSessions()`, `TeamManager.resubscribeTeamEvents()` re-attaches lead/worker event listeners for those restored entries and may nudge an already-restored idle lead that has concrete outstanding work.
+- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state. Historical fully-orphan/worker transcript discovery and legacy sidecar backfill run once per project recovery-policy version behind `.team-forensic-recovery.json`; concrete dangling team pointers invalidate completion and reopen recovery. Recovered session rows are flushed before completion, and a sibling completion-pending fence makes failed completion acknowledgement retryable. See [Checkpoint Team Forensic Recovery](design/checkpoint-team-forensic-recovery.md).
+- After archived ownership reconciliation and eager `SessionManager.restoreSessions()`, `TeamManager.resubscribeTeamEvents()` re-attaches lead/worker event listeners for genuinely live restored entries and may nudge an already-restored idle lead that has concrete outstanding work.
 - Restart does **not** scan team-mode goals and call `startTeam()` for goals that lack a restored team entry. A teamless existing goal stays teamless even if its persisted `autoStartTeam` flag is `true`.
 
 This distinction matters because `autoStartTeam` is a creation/setup affordance, not a supervisor. Goals created with `autoStartTeam: false` and goals explicitly stopped through `teardownTeam()` have no active team-store entry after setup/teardown, so they remain manual-start goals across restart. The UI should show "Start Team" rather than a silently recreated lead.
 
 Regression coverage pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and that start → teardown → restart leaves the goal teamless until manual start.
+
+#### Archived-team crash reconciliation
+
+A durable archived goal must not retain runnable team ownership. The normal archive boundary enforces this immediately, while startup supplies the crash-recovery barrier for a process killed after the goal write but before cross-store cleanup. Both paths call the same per-goal reconciliation logic instead of inferring lifecycle from optional team bookkeeping.
+
+The ownership roots are every current live persisted row with `teamGoalId === goal.id`, plus valid current lead/agent references from the in-memory or persisted team entry. Exact `teamGoalId` ownership wins regardless of ancestry. Team references may supplement an unstamped row, but a different non-empty `teamGoalId` is a conservative conflict and the foreign row is not archived. `goalId` by itself never selects a standalone session. From valid roots, reconciliation follows only the established recursive child relationships: `delegateOf`, or a non-empty `childKind` with matching `parentSessionId`. Full- and bare-lifecycle children created from a trusted TeamStore-derived owner persist that ownership as `teamGoalId` in their initial row, preventing optional team state from remaining their only durable authority.
+
+The runtime boundary is ordered as follows:
+
+1. The goal archive is durably acknowledged. Concurrent strict archive callers for the same goal share that publication outcome, so a rejected write cannot appear successful to another caller and bypass reconciliation. A per-goal admission queue then excludes starts, role spawns, and team-owned child publication that arrive after terminal intent; previously admitted work completes before reconciliation's final closure scan.
+2. Current ownership references are captured, then runtime team subscriptions, timers, reverse indices, and active in-memory membership are detached.
+3. If authoritative ownership exists on a legacy goal whose `team` marker is false or absent, reconciliation strictly publishes sticky `team = true` before changing session or TeamStore evidence. This preserves local and remote branches and worktrees on all later archive replays. If publication fails, verification is cancelled and selected runtimes are quiesced, but no persisted session is archived and no TeamStore row is removed; the exact selected ids are suppressed while current `teamGoalId` rows and team references remain retry authority.
+4. After marker acknowledgement, verification work is cancelled best-effort. Each current live or store-only selected row is stopped if possible and soft-archived through the canonical session cascade. Only an explicit successful durable return from that archive operation counts as acknowledgement; a mutable in-memory `archived` projection never does.
+5. Failed ids enter a bounded per-goal in-process retry set, including exact-`teamGoalId` rows that have no TeamStore entry, and become the exact dispatch-suppression set. The persisted team entry is removed only after every selected id has an acknowledged archive.
+6. A failed team-entry removal leaves its on-disk row as passive retry evidence. Runtime deactivation is not rolled back, and event resubscription defensively drops archived-goal entries.
+
+The archive call is replay-safe even when the goal is already archived. Same-process replays retain failed exact ids even if a rejected persistence operation changed the mutable store projection; after restart, disk-live `teamGoalId` rows and retained team references reconstruct the retry. This preserves the existing merge contract: a completed child merge remains successful after an ordinary process-stop or persistence failure, while durable goal intent makes incomplete cleanup reconstructable and retryable.
+
+##### Pre-spawn boot barrier
+
+With respect to archived ownership, restored team entries remain passive until the barrier completes. The relevant pre-listen order is:
+
+```text
+restore team state
+→ reconcile archived team ownership
+→ restore live sessions (excluding exact suppressed ids)
+→ resubscribe team events
+```
+
+For each project, the barrier scans only `SessionStore.getLive()` and `TeamStore.getAll()`, then resolves their candidate goal ids through indexed goal lookup. It does not enumerate archived session history, transcripts, drafts, or forensic recovery checkpoints. Startup work is therefore `O(current live sessions + current team entries)`, plus the bounded current descendant closure for candidate archived goals, rather than proportional to archived history.
+
+Repairs are persisted before `restoreOneSession()` can dispatch an agent process. Legacy ownership-marker promotion is also acknowledged before session archival begins. If marker or session publication still fails, the exact selected rows remain suppressed for the boot; an archived goal wins over stale `wasStreaming`, queued prompts, or team metadata. Marker failure leaves persisted session and TeamStore evidence intact so the next replay publishes `team = true` first. Unrelated sessions, including a `goalId`-only standalone control, stay on the unchanged eager restore path. A retained archived-goal team entry cannot receive event subscriptions.
+
+The repair is idempotent. A partial first pass is retried from the bounded in-process failed-id set or reconstructed after restart from still-live `teamGoalId` rows and retained team entries. After successful marker/session publications and team removal, a clean second boot discovers no candidate, emits no repair summary, and performs no reconciliation write. See [Startup performance audit](startup-performance-audit.md) for the restart fixture evidence.
+
+##### Evidence preservation
+
+Reconciliation uses the session archive path with evidence preservation enabled. It archives rows rather than deleting or purging them, and it does not remove local/sandbox worktrees or eagerly delete remote branches. Sticky promotion of a legacy goal's `team` marker preserves those artifacts even after session and TeamStore ownership rows disappear. Transcripts, proposal drafts, cost records, queued-prompt and model metadata, branch/worktree recovery coordinates, and archived sidebar hierarchy remain readable under their existing retention rules. The ownership guard is independent of transcript-forensics recovery: one repairs current runtime lifecycle; the other diagnoses missing metadata.
 
 #### Worker liveness, spawn capacity, and stale reap
 

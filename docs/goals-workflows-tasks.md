@@ -16,6 +16,25 @@ Team worker capacity counts only live active worker sessions, not every historic
 
 `autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
+### Archived team ownership
+
+Archiving a goal is explicit terminal intent. Operator archive, cascade archive, child integration/merge, workflow-less recovery, and verification auto-merge all converge on `GoalManager.archiveGoal()` (merge callers enter through `archiveGoalAfterMerge()`). The boundary first durably publishes `goal.archived = true`, then reconciles team-owned runtime and persisted state. This ordering matters: after the goal write succeeds, a crash can delay cleanup but cannot make the team eligible to run again.
+
+Current persisted session ownership is classified conservatively:
+
+- A live session whose non-empty `teamGoalId` exactly equals the archived goal id is owned by that team, regardless of its `goalId`, delegate ancestry, parent, or role. `teamGoalId` remains authoritative even when the row has child-shaped metadata pointing at a standalone session.
+- Current `TeamStore` lead and agent references supplement that durable ownership. A referenced live row with no `teamGoalId`, or the same `teamGoalId`, is included with the canonical recursive delegate/child closure. Newly created full- and bare-lifecycle children persist ownership derived from these trusted references as `teamGoalId`, so optional team bookkeeping is not their sole cleanup authority.
+- `goalId` alone means affiliation, not team ownership. A standalone session that only points at the archived goal remains live and restores normally.
+- A referenced row with a different non-empty `teamGoalId` is an ownership conflict. Reconciliation logs and leaves that foreign row live rather than guessing or transferring ownership.
+
+Legacy goals may carry authoritative session or TeamStore ownership while `goal.team` is false or absent. Before that current evidence can be archived or removed, reconciliation durably promotes the sticky `goal.team = true` marker. The marker tells later archive replays to preserve local and remote branches and worktrees. If its strict publication fails, cleanup is blocked: admission and runtime membership are closed, verifier work is cancelled, and selected processes are quiesced, but persisted sessions and TeamStore evidence are left unchanged and their exact ids remain suppressed. A replay or restart publishes the marker before attempting archival again.
+
+Under a per-goal admission fence, reconciliation prevents new team-owned sessions from being admitted, then soft-archives current live or store-only owned rows after stopping processes where possible. A stop failure falls back to the same evidence-preserving session archive path. Completion requires an explicit successful durable acknowledgement for each selected archive operation; an in-memory `archived` bit is not proof. Failed ids remain in a bounded per-goal retry set for the lifetime of the process, including exact-`teamGoalId` rows with no TeamStore entry, while their disk-live ownership reconstructs the retry after restart. The persisted team entry is removed only after every selected session archive is acknowledged. If that removal cannot be persisted, the disk entry remains passive retry evidence; it cannot restore subscriptions or reactivate the archived team.
+
+A reconciliation is **complete** when all selected archive writes and any required team-entry removal are acknowledged. It is **blocked** when marker publication fails, a selected row lacks an archive acknowledgement, or the team entry cannot be removed. Blocked cleanup does not roll back terminal goal intent or a successful merge: selected rows are fenced from process dispatch and the next archive replay or gateway boot retries from retained ownership.
+
+This is archival, not purge. Transcripts, proposal drafts, costs, session metadata, branch/worktree recovery evidence, and sidebar affiliation/hierarchy remain available through the normal archived-session surfaces. Reconciliation does not use transcript recovery as an ownership registry and does not delete those artifacts. See [Internals — Archived-team crash reconciliation](internals.md#archived-team-crash-reconciliation) for boot ordering and [Debugging — Archived team reconciliation](debugging.md#archived-team-reconciliation) for the operator runbook.
+
 ### Manual team start and paused goals
 
 Manual **Start Team** is an explicit recovery action, not another auto-start
@@ -92,6 +111,57 @@ Durable regression coverage is kept near the affected contracts:
 - **Goal-scoped variation** — when you need one goal to differ from another (enable a feature, seed an index, disable a tool/provider, reorder prompt sections), use **hierarchical goal metadata** and the `goalProvisioned` extension hook. Metadata is set at goal creation, inherited down the goal tree, and applied uniformly to every session (team lead, members, delegates, reviewers, nested sub-goals). See **[docs/design/goal-metadata.md](design/goal-metadata.md)** for the full design.
 
 > **Legacy note — per-goal setup command removed.** An earlier design (PR #816) added bespoke per-goal `worktreeSetupCommand` / `worktreeSetupTimeoutMs` fields on `PersistedGoal`, plus matching REST, `propose_goal`, and goal-dialog affordances. That surface is **superseded by goal metadata and the `goalProvisioned` hook** and has been removed: the goal-store load path **drops** those legacy fields, the REST / `propose_goal` / UI inputs no longer exist, and posting them has no effect. Only the **component / project** `worktree_setup_command` (and its `worktree_setup_timeout_ms`) remains supported. To run goal-specific setup, declare metadata that an extension's `goalProvisioned` provider acts on — that hook fires at **every** worktree provisioning in the subtree (including pool claims), so filesystem treatments land on every agent and sub-goal worktree symmetrically, which the single per-goal command could not guarantee.
+
+### Promote the current session in place
+
+A goal proposal can either provision a new goal workspace or adopt the proposal-owning session's existing workspace. The second mode is useful when planning turns into implementation after work has already started: the user keeps the same conversation, checkout, dirty files, and sandbox instead of moving that state into a newly spawned Team Lead.
+
+The proposal's **Worktree** row exposes two modes:
+
+- **New worktree** is the default and retains the ordinary `POST /api/goals` path. An absent mode and an explicitly selected New worktree serialize identically, so existing proposal files and callers remain compatible.
+- **Current session** promotes the proposal owner in place. The panel shows the server-derived branch, worktree path, sandbox state, and multi-repository worktree count. Sandbox and auto-start controls become read-only because the existing realm is retained and that session becomes the lead immediately.
+
+The choice is stored as the optional `worktreeMode: current-session` field in the goal proposal's frontmatter. Proposal edits, revision snapshots, reload rehydration, and archived-draft continuation therefore use the existing proposal-file lifecycle rather than a second preference store. Selecting New worktree removes the field. If an archived draft still selects Current session, the selection remains visible but its archived owner is ineligible; a copied continue-archived draft is evaluated against the new proposal owner.
+
+#### Eligibility and authority
+
+Eligibility is recomputed from live and durable server state both when the panel reads the proposal and immediately before acceptance. The panel's result is advisory; a session that becomes busy or otherwise unsafe before submit is rejected by the final check.
+
+The proposal owner must be:
+
+- a live, non-archived, idle regular interactive session in the proposal's registered project;
+- free of goal, team, staff, assistant, delegate, child, task, read-only, non-interactive, or borrowed-worktree relationships (the ordinary baseline role is allowed);
+- backed by an available durable transcript;
+- the owner of a dedicated branch and worktree whose live and persisted `cwd`, `worktreePath`, `repoPath`, and `branch` agree;
+- complete for every configured Git component in a multi-repository project; and
+- still attached to the same reachable sandbox container when sandboxed.
+
+Promotion also fails when another session, goal, team, or staff record claims an overlapping workspace, or when multiple live goals claim the same promotion provenance. The eligibility response uses stable reason codes such as `SESSION_NOT_IDLE`, `SESSION_HAS_RELATION`, `WORKTREE_UNAVAILABLE`, `MULTI_REPO_MISMATCH`, `SANDBOX_UNAVAILABLE`, and `WORKSPACE_CLAIMED`; see the [owner-scoped REST contract](rest-api.md#current-session-goal-promotion) for the complete response shape.
+
+The source is always the owner named by the proposal route and must remain in the same project. The accept body cannot choose a session, project, checkout, branch, repository, container, or sandbox mode. This prevents a valid proposal from being turned into authority over another checkout by editing a request or draft. Current-session promotion creates a top-level goal; a `parentGoalId` is rejected because adopting a regular session as a nested child would introduce a second lifecycle owner.
+
+#### Acceptance and continuity
+
+Acceptance composes the normal goal framework with an adopted workspace:
+
+1. Create the goal with its normal workflow snapshot, metadata, inline roles, policy, and gate records.
+2. Copy the canonical session coordinates onto the goal, stamp `worktreeOwnerSessionId` as provenance, and mark setup `ready` without provisioning, pool claims, setup commands, or a `goalProvisioned` hook.
+3. Reserve the existing session as the team's only lead. An adopted goal cannot fall through to ordinary `startTeam()` and spawn a second lead.
+4. Replace the agent bridge in place with canonical `team-lead` prompt, goal/team tools, and `BOBBIT_GOAL_ID`, then resume the same transcript. No duplicate kickoff prompt is sent.
+
+The Bobbit session ID, transcript file, title, connected clients, queued work, model/thinking tuple, `cwd`, branch, single- or multi-repository worktrees, sandbox container, and checkout contents stay attached to the same session. Promotion performs no Git checkout, reset, commit, copy, move, rename, or worktree creation, so staged, unstaged, and untracked work is unchanged. `worktreeOwnerSessionId` is an idempotency and recovery link only: the source session remains the checkout and sandbox lifecycle owner.
+
+#### Failure, restart, and cleanup
+
+Acceptance is single-flight per proposal owner. While the reservation is held, competing role or destructive session mutations return `409 SESSION_GOAL_PROMOTION_IN_PROGRESS`. A retry locates an existing live goal only through `worktreeOwnerSessionId`; matching paths or branch names are never enough.
+
+Before the replacement runtime becomes canonical, compensation may remove only the attempt-created empty lead reservation, gates, and adopted goal. It does not touch the source runtime, transcript, sandbox, or checkout. Once runtime replacement commits, later finalization failures retain the exact goal/session/team graph; retry finalizes and returns that same goal instead of creating another.
+
+On gateway restart, adopted-goal reconciliation runs before ordinary orphan-team recovery. It verifies same-project identity and exact coordinates, repairs an unambiguous missing lead reservation, attachment fields, or workflow gates, and then restores the original session runtime and team subscriptions. It never calls ordinary team start, creates a session, provisions a worktree, or transfers a sandbox. Ambiguous records fail closed. If the promoted transcript, worktree, or recorded sandbox realm cannot be restored safely, Bobbit preserves the source as dormant rather than archiving it, repairing the adopted checkout, replacing its container, or silently downgrading it to the host.
+
+A live promoted session cannot be archived or purged directly (`409 PROMOTED_SESSION_LIFECYCLE_CONFLICT`), and its team cannot be torn down independently. Archive the goal instead. The ordered goal path first publishes the goal's archived state, then removes workers and team subscriptions and archives the source session. Archive retention preserves the session-owned worktree; final session purge may remove it only after no live session, goal, team, staff, pool, or container reference remains. Multi-repository component worktrees follow the same ownership rule, and adopted branches are not treated as goal-created remote branches.
+
+For the implementation rationale and recovery boundaries, see [Promote Session to Goal — implementation design](design/session-goal-promotion.md).
 
 ### Headquarters no-worktree goals
 

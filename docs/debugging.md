@@ -15,6 +15,21 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Diagnostic**: enable Settings → Debug and inspect the latest `boot-timing.jsonl`. A long delay before `modules-evaluated` is Vite/browser loading; a delay after `ws-open` belongs to auth or snapshot recovery. Bundled dev requests `/assets/*.js`, not hundreds of `/src/**/*.ts` modules. Confirm `[boot]` / `[harness]` lifecycle logs before treating a proxy disconnect as a gateway restart.
 - **Pinning test**: `tests2/core/vite-bundled-dev.test.ts`.
 
+## Gateway restart preparation or promotion fails
+
+- **Compiler failure while the old gateway still answers:** this is expected fail-safe behavior. Sentinel preparation builds a sibling candidate without touching live `dist`; fix the source error and run `npm run restart-server` again. The serving gateway does not need to stop for source-only repair.
+- **Dependency-validation failure:** the gateway may remain available, but dependency repair is different. Stop Bobbit and the full development stack before running `npm install`, then restart. Never mutate `node_modules` beneath the serving stack.
+- **Gateway exits during preparation:** normal quick-crash accounting and relaunch remain authoritative. The harness discards the candidate if the prepared child changed; it must not promote output prepared against a different live-child generation.
+- **Promotion recovery message on startup:** every development launcher first runs `node scripts/harness-bootstrap.mjs recover`. The repository-root `.bobbit-dist-promotion.json` journal names only managed sibling staging and previous-live directories. The bootstrap validates required server entry points, restores the previous tree after interruption between renames, or retains a valid promoted candidate after the second rename.
+- **Corrupt journal or "no recovery authority":** stop the development stack and preserve `dist`, `.bobbit-dist-promotion.json`, `.bobbit-dist-stage-*`, and `.bobbit-dist-previous-*` for inspection. Do not delete or rename them manually; the bootstrap fails because selecting an authority without valid evidence could launch partial output. See [Development workflow](dev-workflow.md#dev-with-harness-recommended).
+
+## Team or Headquarters historical recovery repeats on every boot
+
+- **Team recovery:** inspect each project state directory's `.team-forensic-recovery.json` and sibling `.completion-pending` fence. Only a current-version, well-formed `complete` record with no fence qualifies. Missing, corrupt, `running`, stale-version, fenced, dangling-pointer-invalidated, or failed-flush state deliberately retries. A visible `complete` plus a fence means completion was not acknowledged.
+- **Headquarters migration:** inspect `.headquarters-dir-migrated` and its sibling fence. The current policy uses version 3 `running`/`complete` records. Changed path topology, project/tombstone/backup content, or backup keys no longer qualified by their live store invalidate the fast path. Missing, empty, or corrupt same-root live stores deliberately reopen backup recovery.
+- **Fence-clear I/O failure:** an `EIO` after fence removal should recreate the fence before the error is returned. If the fence is present on the next boot, retry is correct; a later successful pass removes it and restores the fast path. An aggregate error saying retry authority could not be republished means compensation also failed: stop the gateway, repair storage, remove the affected checkpoint and any fence, then restart to force recovery.
+- **Always-run work is not a regression:** secret relocation, `projects.json` repair, Headquarters execution-store sanitization, routine team consistency cleanup, and concrete dangling-pointer recovery run even when historical traversal is skipped. Use `<headquarters>/state/boot-timings.log` to distinguish these bounded checks from the slow migration/team phases. See [Gateway Startup Performance Audit](startup-performance-audit.md).
+
 ## Project Settings save returns `PROJECT_CONFIG_LOAD_FAILED` or `PROJECT_CONFIG_PERSIST_FAILED`
 
 - **Symptom**: `PUT /api/projects/:id/config` or `PUT /api/project-config` returns 409 `PROJECT_CONFIG_LOAD_FAILED`, or 500 `PROJECT_CONFIG_PERSIST_FAILED`, instead of `{ ok: true }`.
@@ -297,6 +312,59 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 - `executePlan()` runs the full pipeline synchronously for normal/delegate sessions; `executeWorktreeAsync()` is asynchronous for worktree sessions and immediately returns `status: "preparing"`.
 - `handleSetupFailure()` owns cleanup on pipeline errors; `subscribeToEvents()` is the shared event subscription path.
 - `connectToSession()` creates `ChatPanel` before `remote.connect()`; model and WebSocket connect in parallel. `switchGeneration` / `isStale()` fences rapid switches, connect failure clears `state.chatPanel`, and `get_state` synchronizes model/thinking values on connect and reconnect.
+
+## Archived team reconciliation
+
+**Symptom:** an archived goal still has live team-owned rows or a retained `team-state.json` entry, or boot reports archived-team repair work. Do not delete those rows or their transcripts. The archive boundary and pre-spawn boot barrier soft-archive current owned rows while preserving evidence.
+
+### Read the audit summary
+
+A normal archive reconciliation logs one bounded per-goal line when it found selected sessions or team state:
+
+```text
+[team-manager] Archived-team reconciliation <complete|blocked>: goal=<id> archived=<count> suppressed=<count> teamRemoved=<bool> retained=<bool> errors=<count> elapsedMs=<ms>
+```
+
+Boot combines candidate goals into one line:
+
+```text
+[team-manager] Boot archived-team repair: goals=<count> sessionsArchived=<count> teamsRemoved=<count> blocked=<count> suppressed=<count> errors=<count> samples=[...]
+```
+
+The optional `samples` array contains at most ten error strings. Interpret the fields as follows:
+
+- `archived` / `sessionsArchived` counts explicit successful durable session-archive acknowledgements from that pass. It is archival, not deletion; an in-memory `archived` bit after a rejected write does not increment the count.
+- `suppressed` counts exact selected ids whose marker or session-archive acknowledgement failed. They are denied process dispatch for that boot.
+- `teamRemoved=true` / `teamsRemoved` means persisted team bookkeeping was removed after marker and session acknowledgements.
+- `retained=true` means the TeamStore row remains as passive retry evidence. It must not appear as an active runtime team or receive event subscriptions.
+- `blocked` means at least one goal could not publish its sticky team marker, retained an unacknowledged selected session, or retained a TeamStore row. A non-zero `errors` count alone can also describe a conservative foreign-ownership conflict while cleanup of the archived goal otherwise completed.
+
+Common samples are prefixed `team marker:`, `quiesce <sessionId>:`, `verification cancellation:`, `stop <sessionId>:`, `archive <sessionId>:`, or `team state:`. A `team marker:` error means reconciliation found authoritative ownership on a legacy goal whose `team` flag was false or absent but could not durably promote it. Runtime admission and team state are already deactivated, verifier work is cancelled, and selected processes are quiesced; persisted sessions and TeamStore references are intentionally retained so a later replay can publish the marker before archival. `ownership conflict: <sessionId> belongs to <goalId>` means a current team reference points at a row with a different non-empty `teamGoalId`; leaving that foreign row live is intentional.
+
+Audit summaries describe only the current bounded candidate set. They do not prove that any historical production snapshot was directly migrated or repaired.
+
+### Investigate retained retry evidence
+
+1. Resolve the archived goal to its project's state directory. Inspect the current live rows in `sessions.json` and the current entries in `team-state.json`; do not traverse archived history to decide ownership.
+2. Treat every current row with `teamGoalId` exactly equal to the archived goal id as owned, regardless of `goalId`, `delegateOf`, `parentSessionId`, or role. Also check current lead/agent references and their canonical delegate/typed-child closure.
+3. Separate negative controls explicitly. A row with only `goalId === archivedGoalId` is affiliated but standalone and must remain live. Do not "repair" it manually. A team reference whose row has a foreign non-empty `teamGoalId` is a conflict, not permission to archive it.
+4. For a `team marker:` error, fix GoalStore publication first. Confirm the archived goal remains durable, its runtime team is absent, selected ids have no process, and session/TeamStore rows remain unchanged. Do not archive or remove that evidence manually; recovery must first persist sticky `team = true` so later archive replays preserve branches and worktrees.
+5. For `archive <sessionId>:` errors, trust the explicit acknowledgement and disk state rather than a mutable in-memory `archived` bit. The gateway retains failed ids in a bounded per-goal set, so another archive call in the same process retries even when TeamStore is missing. After restart, the still-live disk row's exact `teamGoalId` reconstructs authority.
+6. If `retained=true` without a marker or session failure, inspect the TeamStore write error. The row should be absent from active in-memory teams and archived-goal event subscriptions.
+7. Retry through the ordinary goal archive path or restart after fixing storage. Do not remove retry evidence by hand.
+
+Archived session detail and sidebar APIs should still expose the transcript, metadata, and lead/worker hierarchy after repair. Missing drafts, costs, branch/worktree coordinates, or transcript content indicate destructive cleanup and are separate regressions; archive reconciliation must not purge them.
+
+### Validate restart recovery
+
+Use two consecutive hard gateway restarts when validating the crash window:
+
+1. Before the first restart, durably archive the goal while leaving matching current sessions and team state, simulating a kill between goal publication and reconciliation.
+2. Confirm the `Boot archived-team repair` line appears before `[session-manager] Restoring ... live...`, and the restore line appears before team-event resubscription. Matching owned ids must never reach process spawn; a `goalId`-only control and unrelated live sessions must still restore eagerly.
+3. Check `GET /api/health` after boot. It must report `status: "ok"` and `orphanedTranscripts: 0`. Also verify archived messages and sidebar hierarchy remain readable.
+4. Capture the repaired TeamStore file bytes and modification time, then hard-restart again. A clean second boot must emit no `Boot archived-team repair` line, perform no reconciliation writes, preserve those bytes and modification time, and eagerly restore the same genuine live controls.
+
+If an archived team receives event callbacks, a leaked process starts, or the second clean boot rewrites state, inspect the boot phases `restore-teams`, `reconcile-archived-team-ownership`, `restore-sessions`, and `resubscribeTeamEvents` in that order. See [Internals — Archived-team crash reconciliation](internals.md#archived-team-crash-reconciliation) and [Startup performance audit](startup-performance-audit.md).
 
 ## Session/goal refresh not updating
 
@@ -944,7 +1012,7 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - Search not filtering by project? Verify `?projectId=` query param is passed; each project context, including Headquarters, has its own `search.flex/` index under its state dir.
 - Config not cascading? Check builtin, Headquarters/server, and normal project `.bobbit/config/` directories. `projectId=headquarters` should resolve as server scope for non-workflow roles/tools/policies/skills, while workflows remain project-scoped.
 - **State migration**: On first startup after upgrade, central JSON state is distributed to per-project dirs. GoalStore, TaskStore, and GateStore then validate and import their own legacy/recovery sources into separate SQLite databases before retiring the JSON collision-safely. Headquarters keeps central state in place during distribution and stamps the migration marker instead of renaming its own files away. Check `.migrated-to-per-project`, store authority/retirement metadata, and `.headquarters-project-id-migrated` when diagnosing old server-root project promotion.
-- **Deleted staff/session/goal reappears after restart**: the boot migration's backup-only recovery (`routeLegacyProjectStoreFile` in `state-migration.ts`) resurrects a record present in a `.pre-headquarters-id-migration` backup but absent from the live store — `staff.json` reverts byte-for-byte to its pre-delete size and any triggers reactivate. Fixed by durable **deletion tombstones** (`deletion-tombstones.ts`, file `<stateDir>/.deletion-tombstones.json`) recorded by store `remove()`; the recovery loop skips tombstoned keys (see `diagnostics.tombstonedSkipped`). If it recurs, confirm the tombstone file exists and contains the id, that the same-root repair is marker-guarded (`.headquarters-dir-migrated` → no-op on second boot), and that spent backups were retired to `.pre-headquarters-id-migration-recovered`. See [docs/headquarters.md — Deletion tombstones](headquarters.md#deletion-tombstones-why-deleted-staffsessionsgoals-stay-deleted).
+- **Deleted staff/session/goal reappears after restart**: the boot migration's backup-only recovery (`routeLegacyProjectStoreFile` in `state-migration.ts`) resurrects a record present in a `.pre-headquarters-id-migration` backup but absent from the live store — `staff.json` reverts byte-for-byte to its pre-delete size and any triggers reactivate. Fixed by durable **deletion tombstones** (`deletion-tombstones.ts`, file `<stateDir>/.deletion-tombstones.json`) recorded by store `remove()`; the recovery loop skips tombstoned keys (see `diagnostics.tombstonedSkipped`). If it recurs, confirm the tombstone file contains the id and inspect `.headquarters-dir-migrated`: default layouts use a versioned evidence checkpoint, while override/B1 layouts also require spent backups to retire to `.pre-headquarters-id-migration-recovered`. Delete the checkpoint to force a full recovery pass. See [docs/headquarters.md — Deletion tombstones](headquarters.md#deletion-tombstones-why-deleted-staffsessionsgoals-stay-deleted).
 - **Model defaults missing after BOBBIT_DIR change**: `migrateLegacyHeadquartersDirectory` skips the legacy copy when `BOBBIT_DIR`/`BOBBIT_PI_DIR` is set, so `default.*Model` / `default.*ThinkingLevel` preference keys would be lost when pointing to a fresh dir. `seedModelDefaultsFromLegacy` runs after the main migration and non-destructively seeds those 7 keys from `<serverRunDir>/.bobbit/state/preferences.json` into the new Headquarters state dir. If settings are still missing, confirm the legacy file exists at that path and check `[migration]` log output on startup. See [docs/headquarters.md — Model-default preference seeding](headquarters.md#model-default-preference-seeding).
 - **Store routing bugs**: All store access must go through `ProjectContextManager` — direct `this.store` calls bypass per-project routing. `SessionManager` uses `resolveStoreForSession()` / `resolveStoreForId()` to find the correct per-project `SessionStore`
 - **Known limitations**: `active-verifications.json` stays in the central state dir (transient operational state).

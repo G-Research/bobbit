@@ -39,6 +39,38 @@ export interface GoalProvisionedContext {
 }
 
 /**
+ * Canonical workspace coordinates supplied only by the owner-scoped session
+ * promotion path. GoalManager copies them verbatim and never provisions,
+ * renames, sets up, or assumes ownership of the checkout.
+ */
+export interface AdoptedGoalWorkspace {
+	ownerSessionId: string;
+	cwd: string;
+	worktreePath: string;
+	branch: string;
+	repoPath: string;
+	repoWorktrees?: Record<string, string>;
+	sandboxed?: boolean;
+}
+
+function assertAdoptedGoalWorkspace(value: AdoptedGoalWorkspace): void {
+	for (const field of ["ownerSessionId", "cwd", "worktreePath", "branch", "repoPath"] as const) {
+		if (typeof value[field] !== "string" || value[field].length === 0) {
+			throw new Error(`GoalManager.createGoal: adoptedWorkspace.${field} must be a non-empty string`);
+		}
+	}
+	if (value.repoWorktrees !== undefined) {
+		if (!value.repoWorktrees || Array.isArray(value.repoWorktrees)
+			|| Object.values(value.repoWorktrees).some(pathValue => typeof pathValue !== "string" || pathValue.length === 0)) {
+			throw new Error("GoalManager.createGoal: adoptedWorkspace.repoWorktrees must contain non-empty string paths");
+		}
+	}
+	if (value.sandboxed !== undefined && typeof value.sandboxed !== "boolean") {
+		throw new Error("GoalManager.createGoal: adoptedWorkspace.sandboxed must be boolean");
+	}
+}
+
+/**
  * Sanitize a goal title into a valid git branch name.
  * Lowercase, replace non-alphanumeric with hyphens, truncate, trim.
  *
@@ -159,8 +191,14 @@ export class GoalManager {
 	 * no-op for the hook (current behaviour).
 	 */
 	private goalProvisionedDispatcher?: (ctx: GoalProvisionedContext) => Promise<void>;
+	private goalArchiveReconciler?: (goalId: string) => Promise<unknown>;
 	setGoalProvisionedDispatcher(dispatcher: (ctx: GoalProvisionedContext) => Promise<void>): void {
 		this.goalProvisionedDispatcher = dispatcher;
+	}
+
+	/** Late-bound cross-store cleanup invoked only after archive intent is durable. */
+	setGoalArchiveReconciler(reconciler: ((goalId: string) => Promise<unknown>) | undefined): void {
+		this.goalArchiveReconciler = reconciler;
 	}
 
 	/**
@@ -336,10 +374,15 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata } = opts ?? {};
-		const team = true;
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; adoptedWorkspace?: AdoptedGoalWorkspace; team?: boolean }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, team = true } = opts ?? {};
 		const headquartersGoal = isHeadquartersProject(projectId);
+		if (adoptedWorkspace) {
+			assertAdoptedGoalWorkspace(adoptedWorkspace);
+			if (headquartersGoal) {
+				throw new Error("GoalManager.createGoal: headquarters sessions cannot adopt a worktree");
+			}
+		}
 		const worktree = !headquartersGoal && opts?.worktree !== false;
 		const now = Date.now();
 		const id = randomUUID();
@@ -348,10 +391,10 @@ export class GoalManager {
 		// maxConcurrentChildren are root-only (not inherited).
 		const nesting = deriveNestingFields(id, parentGoalId, (gid) => this.store.get(gid));
 
-		let worktreePath: string | undefined;
-		let branch: string | undefined;
-		let repoPath: string | undefined;
-		let goalCwd = cwd;
+		let worktreePath: string | undefined = adoptedWorkspace?.worktreePath;
+		let branch: string | undefined = adoptedWorkspace?.branch;
+		let repoPath: string | undefined = adoptedWorkspace?.repoPath;
+		let goalCwd = adoptedWorkspace?.cwd ?? cwd;
 		let setupStatus: "ready" | "preparing" = "ready";
 
 		// Detect git repo root — needed for team operations even without a worktree.
@@ -361,7 +404,7 @@ export class GoalManager {
 		// `<rootPath>-wt/<branch>/`) ONLY when at least one component is a git repo
 		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
 		// and to no-worktree when that also fails (never throws).
-		if (!headquartersGoal) {
+		if (!headquartersGoal && !adoptedWorkspace) {
 			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
 			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
 			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
@@ -370,7 +413,7 @@ export class GoalManager {
 		}
 
 		// Compute worktree path and branch (but don't create yet)
-		if (worktree && repoPath) {
+		if (!adoptedWorkspace && worktree && repoPath) {
 			branch = `goal/${toBranchName(title)}-${id.slice(0, 8)}`;
 			worktreePath = path.join(path.resolve(repoPath, "..", `${path.basename(repoPath)}-wt`), branch.replace(/\//g, "-"));
 			// Apply subdirectory offset: if project rootPath (cwd) is a subdirectory of the
@@ -389,11 +432,17 @@ export class GoalManager {
 			createdAt: now,
 			updatedAt: now,
 			worktreePath,
+			...(adoptedWorkspace ? {
+				worktreeOwnerSessionId: adoptedWorkspace.ownerSessionId,
+				repoWorktrees: adoptedWorkspace.repoWorktrees
+					? structuredClone(adoptedWorkspace.repoWorktrees)
+					: undefined,
+			} : {}),
 			branch,
 			repoPath,
 			team,
 			setupStatus,
-			sandboxed,
+			sandboxed: adoptedWorkspace ? adoptedWorkspace.sandboxed : sandboxed,
 		};
 
 		// Stamp projectId so subgoals don't need a parentGoalId-chain walk.
@@ -911,9 +960,9 @@ export class GoalManager {
 	 *      short-circuits on `archived && state === "complete"` and
 	 *      returns success terminal — without this stamp the rescue path
 	 *      reads `state="in-progress"` on a stale record and re-spawns.
-	 *   2. Archive (soft-delete) — sets archived=true / archivedAt.
-	 *   3. (Caller may invoke teamManager.teardownTeam afterwards; this
-	 *      method is a pure data-layer operation.)
+	 *   2. Archive (soft-delete) — sets archived=true / archivedAt and invokes
+	 *      the authoritative team reconciliation boundary. Callers must not
+	 *      destructively tear down the team before this boundary snapshots it.
 	 *
 	 * Idempotent: safe to call twice — a second invocation finds the row
 	 * already complete + archived and silently returns.
@@ -924,19 +973,13 @@ export class GoalManager {
 			console.warn(`[goal-manager] archiveGoalAfterMerge: child ${childId} not found`);
 			return;
 		}
-		// Idempotent — already complete and archived.
-		if (goal.archived && goal.state === "complete") {
-			return;
-		}
-
 		// 1. State first.
 		if (goal.state !== "complete") {
 			this.store.update(childId, { state: "complete" });
 		}
-		// 2. Archive.
-		if (!goal.archived) {
-			await this.archiveGoal(childId);
-		}
+		// 2. Archive. Always replay the boundary for an already-archived child:
+		// a prior crash may have committed goal intent but not session cleanup.
+		await this.archiveGoal(childId);
 		console.log(`[goal-manager] archiveGoalAfterMerge: child ${childId} complete + archived`);
 	}
 
@@ -1002,17 +1045,44 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		const archived = this.store.archive(id);
+		// Publish terminal intent exactly once and durably before any cross-store
+		// cleanup. archiveStrict rolls memory back on persistence failure, and also
+		// publishes adopted-goal archival before its promoted lead is terminated.
+		const archived = await this.store.archiveStrict(id);
+		let reconciledTeamOwnership = false;
 		if (archived) {
 			try {
 				await cleanupGateDiagnosticsForGoal(id, this.diagnosticsStateDir);
 			} catch (err) {
 				console.warn(`[goal-manager] Failed to clean gate diagnostics for archived goal ${id}:`, err);
 			}
+			try {
+				const result = await this.goalArchiveReconciler?.(id) as {
+					archivedSessionIds?: unknown[];
+					suppressedSessionIds?: unknown[];
+					teamRemoved?: boolean;
+					teamEntryRetained?: boolean;
+				} | undefined;
+				reconciledTeamOwnership = !!result && (
+					(result.archivedSessionIds?.length ?? 0) > 0
+					|| (result.suppressedSessionIds?.length ?? 0) > 0
+					|| result.teamRemoved === true
+					|| result.teamEntryRetained === true
+				);
+			} catch (err) {
+				// A failed reconciliation may already have selected team-owned evidence;
+				// conservatively leave goal worktrees for the retry/purge lifecycle.
+				reconciledTeamOwnership = true;
+				// Archive is already committed. Cleanup remains reconstructable from
+				// teamGoalId/team-state and must never roll back a successful merge.
+				console.error(`[goal-manager] Archived-goal reconciliation blocked for ${id}:`, err);
+			}
 		}
 		// Multi-repo cleanup: best-effort per-repo worktree + remote-branch
-		// removal. Single-repo cleanup remains owned by session purge.
-		if (archived && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
+		// removal for standalone goals. Durable team mode remains authoritative
+		// recovery evidence after reconciliation removes every live session/team
+		// row, so retries must never fall back to generic destructive cleanup.
+		if (archived && goal.team !== true && !reconciledTeamOwnership && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
 			const { cleanupWorktree } = await import("../skills/git.js");
 			const entries = Object.entries(goal.repoWorktrees);
 			const sessions = this.getSessionsForWorktreeGuard();
@@ -1134,6 +1204,25 @@ export class GoalManager {
 	/** Narrow explicit deletion because GoalStore.update deliberately ignores undefined fields. */
 	async clearSchedulerRecovery(id: string): Promise<boolean> {
 		return this.store.clearSchedulerRecovery(id);
+	}
+
+	/**
+	 * Compensate a promotion attempt only when the goal still carries the exact
+	 * source-session provenance. This deliberately removes metadata only: the
+	 * adopted checkout, branch, sandbox, transcript, and source session remain
+	 * owned by their original lifecycle and are never cleaned here.
+	 */
+	async deleteAdoptedGoalAttempt(id: string, ownerSessionId: string): Promise<boolean> {
+		const goal = this.store.get(id);
+		if (!goal || goal.archived || goal.state !== "todo" || goal.worktreeOwnerSessionId !== ownerSessionId) return false;
+		try {
+			await cleanupGateDiagnosticsForGoal(id, this.diagnosticsStateDir);
+		} catch (err) {
+			console.warn(`[goal-manager] Failed to clean gate diagnostics for compensated adopted goal ${id}:`, err);
+		}
+		this.store.remove(id);
+		await this.store.flush();
+		return true;
 	}
 
 	async deleteGoal(id: string): Promise<boolean> {

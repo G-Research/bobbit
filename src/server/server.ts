@@ -3,6 +3,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
+import { GithubTrustedHostResolver } from "./github-trusted-hosts.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
@@ -44,7 +45,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
+import { PromotedSessionLifecycleConflictError, SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -166,6 +167,7 @@ import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manag
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import {
 	sessionFileDeleteContainerOnly,
+	sessionFileExists,
 	sessionFileRead,
 	sessionFileWriteAtomic,
 	sessionFsContextForAgentFile,
@@ -429,6 +431,18 @@ function collectVisibleSessionWorktreeReferences(projectContextManager: ProjectC
 	return sessions;
 }
 
+function promotedSessionLifecycleConflictReason(
+	projectContextManager: ProjectContextManager,
+	sessionId: string,
+): string | undefined {
+	const liveAdoptedGoal = projectContextManager.getAllGoals().find(goal =>
+		!goal.archived && goal.worktreeOwnerSessionId === sessionId,
+	);
+	return liveAdoptedGoal
+		? `promoted goal ${liveAdoptedGoal.id} is still active; archive the goal first`
+		: undefined;
+}
+
 function wireGoalManagerResolvers(
 	ctx: ProjectContext,
 	deps: {
@@ -626,7 +640,7 @@ import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
-import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
+import { isTrustedExternalHost, normalizeTrustedHost, normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
@@ -660,7 +674,14 @@ import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
 import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
+import {
+	evaluateSessionGoalPromotion,
+	isSessionGoalWorktreeMode,
+	lookupSessionGoalPromotion,
+	resolveSessionGoalWorktreeMode,
+	type SessionGoalPromotionEligibility,
+	type SessionGoalPromotionWorkspaceClaim,
+} from "./agent/session-goal-promotion.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { worktreeRoot as resolveWorktreeRoot } from "./skills/worktree-paths.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
@@ -712,6 +733,9 @@ export const WS_MAX_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 const _goalPendingOverflowCheck = new WeakSet<WebSocket>();
 const _goalWarnedClients = new WeakSet<WebSocket>();
+
+/** Owner-scoped promotion is a single transaction per source session. */
+const _sessionGoalPromotionFlights = new Map<string, Promise<PersistedGoal>>();
 
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
@@ -2106,11 +2130,7 @@ export function createPreviewSessionOperationQueue(): PreviewSessionOperationQue
 	return { run, purge };
 }
 
-/**
- * Initialize post-listen project pools one at a time. Each pool owns the shared
- * candidate-level I/O ceiling during orphan reclaim, so project-level
- * parallelism here would multiply that bound across visible projects.
- */
+/** Initialize post-listen project pools in deterministic project order. */
 export async function initializeBootProjectPools<T>(
 	projects: readonly T[],
 	initialize: (project: T, index: number) => Promise<void>,
@@ -2203,16 +2223,15 @@ export async function drainWorktreePoolsForShutdown(
 }
 
 /**
- * Serialize the boot-time worktree ownership transition. The sweeper rechecks
- * live durable owners at every mutation boundary, while a pool entry must not
- * be exposed for claim (and renamed out of the pool namespace) until its scan
- * and deletion phase has settled. Both phases remain post-listen background work.
+ * Keep boot-time diagnostic discovery ahead of pool initialization so the
+ * sweeper observes one stable pre-fill inventory. Neither phase adopts or
+ * mutates worktrees discovered only from Git/path shape.
  */
 export async function coordinateBootWorktreeLifecycle(
-	runSweepDeletionPhase: () => Promise<void>,
+	runSweepDiscoveryPhase: () => Promise<void>,
 	initializePools: () => Promise<void>,
 ): Promise<void> {
-	await runSweepDeletionPhase();
+	await runSweepDiscoveryPhase();
 	await initializePools();
 }
 
@@ -2417,6 +2436,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		headquartersConfigDir: configDir,
 		legacyServerBobbitDir: path.join(getProjectRoot(), ".bobbit"),
 	});
+	ck("migrateLegacyHeadquartersDirectory");
 	// Non-destructively seed model-default preference keys from the legacy
 	// .bobbit/state/preferences.json into the headquarters state dir. This
 	// covers the case where BOBBIT_DIR points to a fresh directory (the
@@ -2426,6 +2446,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		headquartersStateDir: stateDir,
 		serverRunDir: getProjectRoot(),
 	});
+	ck("seedModelDefaultsFromLegacy");
 	fs.mkdirSync(stateDir, { recursive: true });
 	// The author ledger reuses the stable cookie key through a domain-separated
 	// derivation and lives under this same private, owner-only server root.
@@ -2471,8 +2492,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		console.warn(`[startup] Failed to register Headquarters project: ${err}`);
 	}
 
+	// Keep the residual setup bucket visible separately from the Headquarters
+	// migration above: on large legacy state trees the two have very different
+	// remediation paths, and a combined checkpoint previously hid that fact.
+	ck("state-stores+project-registry");
+
 	// Run one-time migration from centralized to per-project state
-	ck("pre-migration-setup");
 	migrateToPerProjectState(stateDir, projectRegistry, getProjectRoot(), { centralConfigDir: configDir });
 	ck("migrateToPerProjectState");
 
@@ -2548,6 +2573,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
 	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
+	const githubTrustedHostResolver = new GithubTrustedHostResolver({
+		commandRunner: gatewayDeps.commandRunner,
+		clock: gatewayDeps.clock,
+		getManagedHosts: () => normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts")),
+		env: process.env,
+	});
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir, gatewayDeps.fsImpl);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
@@ -2611,6 +2642,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		previewPurgeOperation: previewOperations.purge,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+	// A promoted source remains the workspace lifecycle owner until its goal has
+	// been durably archived. Resolve that authority only from canonical goal
+	// records so session archive/purge APIs cannot bypass the ordered goal flow.
+	sessionManager.setPromotedSessionLifecycleGuard((sessionId) =>
+		promotedSessionLifecycleConflictReason(projectContextManager, sessionId),
+	);
 
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,
@@ -3222,8 +3259,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
 		try {
 			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
-			const configuredEnterpriseHosts = normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts"));
-			return parseTrustedGithubRemote(origin, configuredEnterpriseHosts);
+			return parseTrustedGithubRemote(origin, await githubTrustedHostResolver.resolve());
 		} catch {
 			return undefined;
 		}
@@ -3553,6 +3589,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
 	};
 	const remoteStateRoutes = {
+		resolveGithubTrustedHosts: () => githubTrustedHostResolver.resolve(),
 		publicSnapshot: publicRemoteSnapshot,
 		publicGitSnapshot,
 		gitSnapshotFor,
@@ -3653,6 +3690,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		commandRunner: gatewayDeps.commandRunner,
 	}, undefined, gatewayDeps.clock);
+	// One archive boundary for every existing and future project context. Goal
+	// intent is durable before this callback is entered.
+	projectContextManager.setGoalArchiveReconciler((goalId) => teamManager.reconcileArchivedGoal(goalId));
 	const bgProcessManager = new BgProcessManager(
 		(sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
@@ -4676,7 +4716,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
-			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			const archivedTeamSuppression = await bootPhase(
+				"reconcile-archived-team-ownership",
+				() => teamManager.reconcileArchivedTeamOwnership(),
+			);
+			await bootPhase("restore-sessions", () => sessionManager.restoreSessions(archivedTeamSuppression));
 			await bootPhase("review-payload-recovery", async () => {
 				try {
 					const knownSessionIds = [...projectContextManager.all()]
@@ -4723,20 +4767,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// claim, which costs real CPU on tests that don't need git at all.
 			//
 			// Boot sweeper + pool fill run AFTER `server.listen()` as a background
-			// chain — the sweeper shells out to `git worktree list/repair` per repo
-			// with 10–15s timeouts, and the pool readiness check awaits `isGitRepo`
+			// chain — the sweeper shells out to `git worktree list` per repo with a
+			// 10s timeout, and the pool readiness check awaits `isGitRepo`
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
 			// Ownership ordering: the sweeper starts from a durable-owner snapshot
-			// for deterministic scan results, then refreshes visible project stores
-			// immediately before every repair or cleanup. Pool initialization still
-			// waits for the deletion phase so a claimed entry cannot be renamed out
-			// of the pool namespace while its old listing is being reconciled. Both
-			// phases run after listen(), so health and session requests remain
-			// available (sessions use the normal cold fallback until pools are ready).
-			// Project pools initialize sequentially afterwards so each reclaim scan
-			// exclusively owns the shared candidate-level I/O ceiling.
+			// for deterministic diagnostics. Pool initialization waits for discovery
+			// so the scan observes one stable pre-fill inventory; neither phase adopts
+			// worktrees based only on branch/path shape. Both phases run after listen(),
+			// so health and session requests remain available (sessions use the normal
+			// cold fallback until pools are ready).
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
 
@@ -4764,7 +4805,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-						type SweepOwnerSnapshot = { id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> };
+						type SweepOwnerSnapshot = { id: string; branch?: string; worktreePath?: string; cwd?: string; repoPath?: string; archived?: boolean; repoWorktrees?: Record<string, string> };
 						const snapshotSweepOwnership = (): {
 							goals: SweepOwnerSnapshot[];
 							sessions: SweepOwnerSnapshot[];
@@ -4775,19 +4816,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							const sessions: SweepOwnerSnapshot[] = [];
 							const teams: SweepOwnerSnapshot[] = [];
 							const staff: SweepOwnerSnapshot[] = [];
-							// Read the currently visible stores synchronously so no request can
-							// interleave between this snapshot and the sweeper's mutation call.
+							// Read the currently visible stores synchronously so diagnostic
+							// classification uses one internally consistent ownership snapshot.
 							for (const ctx of projectContextManager.visible()) {
 								if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 								for (const goal of ctx.goalStore.getAll()) {
 									goals.push({
-										id: goal.id, branch: goal.branch, worktreePath: goal.worktreePath, cwd: goal.cwd, archived: !!goal.archived,
+										id: goal.id, branch: goal.branch, worktreePath: goal.worktreePath, cwd: goal.cwd, repoPath: goal.repoPath, archived: !!goal.archived,
 										repoWorktrees: (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees,
 									});
 								}
 								for (const session of ctx.sessionStore.getAll()) {
 									sessions.push({
-										id: session.id, branch: session.branch, worktreePath: session.worktreePath, cwd: session.cwd, archived: !!session.archived,
+										id: session.id, branch: session.branch, worktreePath: session.worktreePath, cwd: session.cwd, repoPath: session.repoPath, archived: !!session.archived,
 										repoWorktrees: session.repoWorktrees,
 									});
 								}
@@ -4805,7 +4846,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								}
 								for (const member of ctx.staffStore.getAll()) {
 									staff.push({
-										id: member.id, branch: member.branch, worktreePath: member.worktreePath, cwd: member.cwd,
+										id: member.id, branch: member.branch, worktreePath: member.worktreePath, cwd: member.cwd, repoPath: member.repoPath,
 										repoWorktrees: member.repoWorktrees,
 									});
 								}
@@ -5359,6 +5400,21 @@ async function handleApiRoute(
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
 	};
+	const writeSessionLifecycleConflict = (err: unknown): boolean => {
+		if (err instanceof PromotedSessionLifecycleConflictError) {
+			json({ error: err.message, code: err.code }, err.statusCode);
+			return true;
+		}
+		if (
+			err instanceof Error
+			&& (err as any).statusCode === 409
+			&& (err as any).code === "SESSION_GOAL_PROMOTION_IN_PROGRESS"
+		) {
+			json({ error: err.message, code: (err as any).code, retryable: true }, 409);
+			return true;
+		}
+		return false;
+	};
 	const parseStrictUpdateBody = <K extends readonly string[]>(raw: unknown, keys: K, options?: StrictBodyOptions): StrictBody<K> | null => {
 		try {
 			return parseStrictBody(raw, keys, options);
@@ -5532,6 +5588,7 @@ async function handleApiRoute(
 			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
 		},
 		preferencesStore,
+		resolveGithubTrustedHosts: remoteState.resolveGithubTrustedHosts,
 		sandboxScope,
 		// host.agents reviewer migration (design Decisions C/D/E): the binding-routed
 		// submit-yaml/bundle paths resolve the jobId from the pack-store binding keyed
@@ -5542,6 +5599,8 @@ async function handleApiRoute(
 		sessionSecretStore: sessionManager.sessionSecretStore,
 		commandRunner: serverCommandRunner,
 		noExternal: serverRuntimeFlags.testNoExternal || serverRuntimeFlags.e2e,
+	} as Parameters<typeof handlePrWalkthroughApiRoute>[3] & {
+		resolveGithubTrustedHosts: () => Promise<string[]>;
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
@@ -7818,6 +7877,7 @@ async function handleApiRoute(
 				return;
 			}
 			const parentProjectId = parentSession?.projectId ?? parentPersisted?.projectId;
+			const parentTrustedTeamGoalId = sessionManager.getTrustedTeamGoalIdForSession(parentId);
 			if (!parentProjectId) {
 				json({ error: "Delegate parent session is missing projectId", code: "PROJECT_ID_REQUIRED" }, 422);
 				return;
@@ -7842,12 +7902,18 @@ async function handleApiRoute(
 			const parentInitialModel = resolveServerInitialModelTuple(parentPersisted, parentSession).initialModel;
 			if (parentInitialModel && !(await requireCurrentSessionModel(parentInitialModel, "Delegate parent model"))) return;
 			try {
-				const session = await sessionManager.createDelegateSession(parentId, {
+				const createDelegate = () => sessionManager.createDelegateSession(parentId, {
 					instructions: body.instructions,
 					cwd,
 					title: body.title,
 					context: body.context,
 				});
+				// Direct REST delegates do not pass through OrchestrationCore. Join the
+				// shared terminal-admission turn for every durably team-owned parent,
+				// including exact teamGoalId ownership regardless of ancestry.
+				const session = parentTrustedTeamGoalId
+					? await sessionManager.runWithTeamGoalAdmission(parentTrustedTeamGoalId, createDelegate)
+					: await createDelegate();
 				// Register delegate as child in parent's sandbox scope
 				if (sandboxScope && sandboxTokenStore) {
 					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
@@ -7865,7 +7931,11 @@ async function handleApiRoute(
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
-				jsonError(500, err);
+				if (err instanceof TeamStartError) {
+					json({ error: err.message, code: err.code, goalId: parentTrustedTeamGoalId }, err.status);
+				} else {
+					jsonError(500, err);
+				}
 			}
 			return;
 		}
@@ -8791,7 +8861,17 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
+				...(body?.team !== false ? { team: true } : {}),
 			});
+			// `team: false` historically meant "do not auto-enable yet", not a
+			// durable prohibition on a later manual start. GoalManager defaults new
+			// goals to team mode, so remove that default from this explicit legacy
+			// shape while retaining `team: true` as archive-retry evidence for goals
+			// that were actually enabled at creation.
+			if (body?.team === false) {
+				delete goal.team;
+				targetCtx.goalStore.put(goal);
+			}
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
@@ -9069,29 +9149,36 @@ async function handleApiRoute(
 		const rootGoal = getGoalAcrossProjects(id);
 		if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
 
-		if (!cascade) {
-			const liveDescendants = listDescendants(projectContextManager, id, { includeArchived: false });
-			if (liveDescendants.length > 0) {
-				json({
-					error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
-					code: "HAS_DESCENDANTS",
-					count: liveDescendants.length,
-				}, 409);
-				return;
-			}
+		const liveDescendants = listDescendants(projectContextManager, id, { includeArchived: false });
+		if (!cascade && liveDescendants.length > 0) {
+			json({
+				error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
+				code: "HAS_DESCENDANTS",
+				count: liveDescendants.length,
+			}, 409);
+			return;
+		}
+
+		// Promotion owns the source session flight. Reject the entire archive request
+		// before merged-state updates, verification cancellation, or cascade mutation
+		// can touch any adopted goal in the requested subtree.
+		const pendingPromotion = [rootGoal, ...(cascade ? liveDescendants : [])]
+			.find(goal => goal.worktreeOwnerSessionId && (
+				_sessionGoalPromotionFlights.has(goal.worktreeOwnerSessionId)
+				|| sessionManager.isSessionGoalPromotionReserved(goal.worktreeOwnerSessionId)
+			));
+		if (pendingPromotion) {
+			json({
+				error: "Current-session promotion is still in progress; retry goal archive after it finishes",
+				code: "PROMOTION_IN_PROGRESS",
+			}, 409);
+			return;
 		}
 
 		const mergedManually = url.searchParams.get("mergedManually") === "true";
 
-		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-			if (g.archived) {
-				try {
-					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
-				} catch (err) {
-					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
-				}
-				return false;
-			}
+		const performArchiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+			const wasArchived = g.archived === true;
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 			}
@@ -9104,6 +9191,12 @@ async function handleApiRoute(
 			}
 			const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
 			const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+			// Snapshot before reconciliation archives the authoritative rows and may
+			// remove TeamStore. Remote branches are recovery evidence for every team
+			// cleanup shape, including store-only and blocked reconciliation.
+			const preserveRemoteBranchEvidence = g.team === true
+				|| !!teamEntry
+				|| !!goalProjectCtx?.sessionStore.getLive().some((session) => session.teamGoalId === g.id);
 			const agentBranches: string[] = [];
 			if (teamEntry?.agents) {
 				for (const a of teamEntry.agents) {
@@ -9114,9 +9207,10 @@ async function handleApiRoute(
 				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
 				if (tl?.branch) agentBranches.push(tl.branch);
 			}
-			if (teamManager.getTeamState(g.id)) {
-				await teamManager.teardownTeam(g.id);
-			}
+			// GoalManager is the authoritative archive boundary: it durably publishes
+			// terminal intent before reconciling every team-owned session and team row.
+			const gm = getGoalManagerForGoal(g.id);
+			await gm.archiveGoal(g.id);
 			// Finding 2 — terminal event: release any per-root scheduler permit
 			// this child held (or drop it from the capacity queue) so the next
 			// capacity-blocked sibling can start. Best-effort + idempotent.
@@ -9125,21 +9219,37 @@ async function handleApiRoute(
 					console.warn(`[api] archive: notifyChildTerminal failed for ${g.id} (non-fatal):`, err);
 				}
 			}
-			const gm = getGoalManagerForGoal(g.id);
-			await gm.archiveGoal(g.id);
 			prStatusStore.remove(g.id);
 			const archivedGoal = gm.getGoal(g.id);
-			if (archivedGoal?.repoPath) {
+			// Adopted branches and team branches are recovery evidence. Their remote
+			// lifecycle remains with the source session or the retained team records.
+			if (archivedGoal?.repoPath && !archivedGoal.worktreeOwnerSessionId && !preserveRemoteBranchEvidence) {
 				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
 			}
-			return true;
+			return !wasArchived;
+		};
+
+		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+			// Admission precedes every archive-side mutation, including merged-state
+			// updates and verification cancellation, and holds through durable archive.
+			return g.worktreeOwnerSessionId
+				? teamManager.withAdoptedGoalArchiveAdmission(g.id, () => performArchiveOne(g))
+				: performArchiveOne(g);
 		};
 
 		if (!cascade) {
-			await archiveOne(rootGoal);
-			json({ ok: true, archived: 1 });
+			try {
+				await archiveOne(rootGoal);
+				json({ ok: true, archived: 1 });
+			} catch (error) {
+				if (error instanceof TeamStartError) {
+					json({ error: error.message, code: error.code }, error.status);
+					return;
+				}
+				throw error;
+			}
 			return;
 		}
 
@@ -9155,6 +9265,11 @@ async function handleApiRoute(
 		if (result.errors.length > 0) {
 			for (const e of result.errors) {
 				console.error(`[api] archive cascade: ${e.goalId} failed:`, e.error);
+			}
+			const admissionError = result.errors.find(entry => entry.error instanceof TeamStartError)?.error;
+			if (admissionError instanceof TeamStartError) {
+				json({ error: admissionError.message, code: admissionError.code }, admissionError.status);
+				return;
 			}
 		}
 		json({
@@ -10424,6 +10539,19 @@ async function handleApiRoute(
 		preferencesStore.set("agentDirHistory", state.history);
 		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
 		json({ ...report, guidance: buildAgentDirRestartGuidance() });
+		return;
+	}
+
+	// GET /api/github/trusted-hosts/check — return only the effective trust decision.
+	if (url.pathname === "/api/github/trusted-hosts/check" && req.method === "GET") {
+		const hostInput = url.searchParams.get("host");
+		const host = hostInput?.includes("://") ? undefined : normalizeTrustedHost(hostInput);
+		if (!host) {
+			json({ error: "host must be a bare hostname" }, 400);
+			return;
+		}
+		const trustedHosts = await remoteState.resolveGithubTrustedHosts();
+		json({ host, trusted: isTrustedExternalHost(host, trustedHosts) });
 		return;
 	}
 
@@ -13398,6 +13526,17 @@ async function handleApiRoute(
 			}
 		}
 		try {
+			// Legacy and explicit `team: false` creates omit the durable capability
+			// bit so they remain standalone until the user manually starts a team.
+			// Publish that explicit enablement before dispatch so archive retries can
+			// preserve team worktree/branch evidence after TeamStore is reconciled.
+			if (startGoal.team === undefined) {
+				const startContext = projectContextManager.getContextForGoal(goalId);
+				if (!startContext?.goalStore.update(goalId, { team: true })) {
+					throw new Error(`Unable to enable team mode for goal ${goalId}`);
+				}
+				await startContext.goalStore.flush();
+			}
 			// REST retries are idempotent even after the first paused request has
 			// resumed the goal. Resume authority remains limited to the paused
 			// snapshot that passed operator authorization above.
@@ -14238,7 +14377,10 @@ async function handleApiRoute(
 			// Check if it's an archived session — purge immediately
 			const archivedSession = sessionManager.getArchivedSession(id);
 			if (archivedSession) {
-				await sessionManager.purgeArchivedSession(id);
+				try { await sessionManager.purgeArchivedSession(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					throw err;
+				}
 				json({ ok: true });
 				return;
 			}
@@ -14246,6 +14388,7 @@ async function handleApiRoute(
 			try {
 				terminated = await sessionManager.terminateSession(id);
 			} catch (err) {
+				if (writeSessionLifecycleConflict(err)) return;
 				if (err instanceof SharedSandboxWorktreeInUseError) {
 					json({ error: err.message, code: err.code }, 409);
 					return;
@@ -14270,6 +14413,7 @@ async function handleApiRoute(
 				try {
 					await sessionManager.storeArchive(id);
 				} catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
 					if (err instanceof SharedSandboxWorktreeInUseError) {
 						json({ error: err.message, code: err.code }, 409);
 						return;
@@ -14277,14 +14421,20 @@ async function handleApiRoute(
 					throw err;
 				}
 				if (purge) {
-					await sessionManager.purgeArchivedSession(id);
+					try { await sessionManager.purgeArchivedSession(id); } catch (err) {
+						if (writeSessionLifecycleConflict(err)) return;
+						throw err;
+					}
 				}
 				json({ ok: true });
 				return;
 			}
 			// If purge requested, also purge the now-archived session immediately
 			if (purge) {
-				await sessionManager.purgeArchivedSession(id);
+				try { await sessionManager.purgeArchivedSession(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					throw err;
+				}
 			}
 			json({ ok: true });
 			return;
@@ -15336,6 +15486,28 @@ async function handleApiRoute(
 		}
 		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.sessions);
 		if (!body) return;
+		// Fail before applying any sibling PATCH fields. Relation/destructive fields
+		// cannot race the short SessionManager-owned promotion reservation.
+		const promotionSensitiveFields = [
+			"projectId", "roleId", "assistantType", "goalAssistant", "goalId", "accessory",
+			"delegateOf", "teamLeadSessionId", "archived",
+		];
+		if (promotionSensitiveFields.some(key => Object.prototype.hasOwnProperty.call(body, key))) {
+			try {
+				sessionManager.assertSessionGoalPromotionMutationAllowed(id);
+			} catch (err) {
+				const status = typeof (err as any)?.statusCode === "number" ? (err as any).statusCode : 409;
+				jsonError(status, err, { code: (err as any)?.code });
+				return;
+			}
+		}
+		if (body.archived === true) {
+			const reason = promotedSessionLifecycleConflictReason(projectContextManager, id);
+			if (reason) {
+				writeSessionLifecycleConflict(new PromotedSessionLifecycleConflictError(id, reason));
+				return;
+			}
+		}
 
 		if (typeof body.title === "string") {
 			const ok = sessionManager.setTitle(id, body.title);
@@ -15380,7 +15552,8 @@ async function handleApiRoute(
 				const ok = await sessionManager.assignRole(id, role);
 				if (!ok) { json({ error: "Session not found" }, 404); return; }
 			} catch (err) {
-				jsonError(400, err);
+				const status = typeof (err as any)?.statusCode === "number" ? (err as any).statusCode : 400;
+				jsonError(status, err, (err as any)?.code ? { code: (err as any).code } : undefined);
 				return;
 			}
 		} else if (typeof body.roleId === "string" && body.roleId === "") {
@@ -15441,10 +15614,16 @@ async function handleApiRoute(
 			// Try to terminate live session first (which archives it)
 			const session = sessionManager.getSession(id);
 			if (session) {
-				try { await sessionManager.terminateSession(id); } catch {}
+				try { await sessionManager.terminateSession(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					// Preserve the legacy best-effort behavior for unrelated failures.
+				}
 			} else {
 				// Dormant/store-only session — archive directly in the store
-				await sessionManager.storeArchive(id);
+				try { await sessionManager.storeArchive(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					throw err;
+				}
 			}
 		}
 
@@ -15468,6 +15647,377 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
+
+	const goalWorktreeModeMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/goal\/(worktree-mode|accept)$/);
+	if (goalWorktreeModeMatch) {
+		const ownerSessionId = goalWorktreeModeMatch[1];
+		const action = goalWorktreeModeMatch[2];
+		if (!/^[A-Za-z0-9_-]+$/.test(ownerSessionId)) {
+			json({ error: "Invalid sessionId" }, 400);
+			return;
+		}
+		const proposalStateDir = bobbitStateDir();
+
+		const readPromotionDraft = async () => {
+			const parsed = await parseProposalFile(proposalStateDir, ownerSessionId, "goal");
+			if (!parsed.ok) return parsed;
+			return { ok: true as const, fields: parsed.value.fields };
+		};
+		const configuredGitRepos = async (ctx: ProjectContext, sandboxed: boolean): Promise<string[]> => {
+			const components = ctx.projectConfigStore.getComponents();
+			const candidates = components.length > 0 ? components.map(component => component.repo) : ["."];
+			const distinct = [...new Set(candidates)];
+			const gitRepos: string[] = [];
+			for (const repo of distinct) {
+				try {
+					if (sandboxed) {
+						const sandbox = sandboxManager?.get(ctx.project.id);
+						if (!sandbox) continue;
+						await sandbox.exec(["git", "rev-parse", "--is-inside-work-tree"], {
+							cwd: repo === "." ? "/workspace" : path.posix.join("/workspace", repo),
+							timeout: 5_000,
+						});
+						gitRepos.push(repo);
+					} else if (await isGitRepo(path.join(ctx.project.rootPath, repo), commandRunner)) {
+						gitRepos.push(repo);
+					}
+				} catch { /* data-only component */ }
+			}
+			return gitRepos.length > 0 ? gitRepos : ["."];
+		};
+		const promotionWorkspaceClaims = (): SessionGoalPromotionWorkspaceClaim[] => {
+			const claims: SessionGoalPromotionWorkspaceClaim[] = [];
+			for (const ctx of projectContextManager.visible()) {
+				for (const session of ctx.sessionStore.getLive()) {
+					claims.push({ kind: "session", id: session.id, sessionId: session.id, projectId: session.projectId, worktreePath: session.worktreePath, repoWorktrees: session.repoWorktrees });
+				}
+				for (const goal of ctx.goalStore.getLive()) {
+					claims.push({ kind: "goal", id: goal.id, goalId: goal.id, projectId: goal.projectId, worktreePath: goal.worktreePath, repoWorktrees: goal.repoWorktrees });
+				}
+				for (const team of ctx.teamStore.getAll()) {
+					for (const agent of team.agents) {
+						claims.push({ kind: "team", id: agent.sessionId, goalId: team.goalId, projectId: ctx.project.id, worktreePath: agent.worktreePath, repoWorktrees: agent.repoWorktrees });
+					}
+				}
+				for (const staff of ctx.staffStore.getAll()) {
+					claims.push({ kind: "staff", id: staff.id, projectId: staff.projectId, worktreePath: staff.worktreePath, repoWorktrees: staff.repoWorktrees });
+				}
+			}
+			return claims;
+		};
+		const evaluateOwner = async (fields: Record<string, unknown>): Promise<SessionGoalPromotionEligibility> => {
+			const live = sessionManager.getSession(ownerSessionId);
+			const sessionCtx = projectContextManager.getContextForSession(ownerSessionId);
+			const persisted = sessionCtx?.sessionStore.get(ownerSessionId) ?? sessionManager.getPersistedSession(ownerSessionId);
+			const proposalProjectId = typeof fields.projectId === "string" ? fields.projectId.trim() : undefined;
+			const project = proposalProjectId ? projectRegistry.get(proposalProjectId) : undefined;
+			const targetCtx = proposalProjectId ? projectContextManager.getOrCreate(proposalProjectId) : undefined;
+			const fileSystem = fsImpl ?? fs;
+			let transcriptAvailable = false;
+			if (persisted?.agentSessionFile) {
+				const transcriptContext = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
+				transcriptAvailable = transcriptContext.sandboxed
+					? await sessionFileExists(transcriptContext, persisted.agentSessionFile, sandboxManager ?? null)
+					: fileSystem.existsSync(persisted.agentSessionFile);
+			}
+			let workspaceAvailable = false;
+			let sandboxReachable: boolean | undefined;
+			if (live?.cwd && live.branch) {
+				const componentWorktrees = live.repoWorktrees?.map(entry => entry.worktreePath) ?? [];
+				const branchProbePaths = componentWorktrees.length > 0 ? componentWorktrees : [live.cwd];
+				try {
+					if (live.sandboxed) {
+						const sandbox = proposalProjectId ? sandboxManager?.get(proposalProjectId) : undefined;
+						const status = sandbox?.getStatus();
+						sandboxReachable = !!sandbox && status?.status === "ready" && status.containerId === live.containerId;
+						if (sandboxReachable) {
+							const branches = await Promise.all(branchProbePaths.map(probePath =>
+								sandbox!.exec(["git", "branch", "--show-current"], { cwd: probePath, timeout: 5_000 }),
+							));
+							workspaceAvailable = branches.every(branch => branch.trim() === live.branch);
+						}
+					} else {
+						const branches = await Promise.all(branchProbePaths.map(probePath =>
+							commandRunner.execFile("git", ["branch", "--show-current"], { cwd: probePath, timeout: 5_000 }),
+						));
+						workspaceAvailable = branches.every(result => String(result.stdout).trim() === live.branch);
+					}
+				} catch { workspaceAvailable = false; }
+			}
+			const gitComponentRepos = targetCtx ? await configuredGitRepos(targetCtx, live?.sandboxed === true) : [];
+			// Every ordinary interactive session is materialized with the baseline
+			// `general` role. It is not a team/assistant relation and therefore must
+			// not make an otherwise regular proposal owner ineligible.
+			const eligibilityLive = live?.role === "general" ? { ...live, role: undefined } : live;
+			const eligibilityPersisted = persisted?.role === "general" ? { ...persisted, role: undefined } : persisted;
+			return evaluateSessionGoalPromotion({
+				ownerSessionId,
+				proposalProjectId,
+				project: project ? { id: project.id, rootPath: project.rootPath } : undefined,
+				liveSession: eligibilityLive,
+				persistedSession: eligibilityPersisted,
+				transcriptAvailable,
+				workspaceAvailable,
+				hasPendingWork: !!live && (live.promptQueue.length > 0 || (live.inFlightSteerTexts?.length ?? 0) > 0),
+				gitComponentRepos,
+				sandboxReachable,
+				workspaceClaims: promotionWorkspaceClaims(),
+				goals: projectContextManager.getAllGoals(),
+			});
+		};
+		const projection = async (fields: Record<string, unknown>) => {
+			const eligibility = await evaluateOwner(fields);
+			const projectedEligibility = eligibility.eligible
+				? {
+					...eligibility,
+					coordinates: {
+						...eligibility.coordinates,
+						componentCount: Object.keys(eligibility.coordinates.repoWorktrees ?? {}).length || 1,
+					},
+				}
+				: eligibility;
+			return { mode: resolveSessionGoalWorktreeMode(fields.worktreeMode), eligibility: projectedEligibility };
+		};
+
+		if (action === "worktree-mode" && req.method === "GET") {
+			const draft = await readPromotionDraft();
+			if (!draft.ok) {
+				json(draft, draft.code === "FILE_NOT_FOUND" ? 404 : 400);
+				return;
+			}
+			json(await projection(draft.fields));
+			return;
+		}
+		if (action === "worktree-mode" && req.method === "PUT") {
+			const body = await readBody(req);
+			if (!body || !isSessionGoalWorktreeMode(body.mode) || Object.keys(body).some(key => key !== "mode")) {
+				json({ error: "mode must be one of: new-worktree, current-session", code: "INVALID_WORKTREE_MODE" }, 400);
+				return;
+			}
+			const draft = await readPromotionDraft();
+			if (!draft.ok) {
+				json(draft, draft.code === "FILE_NOT_FOUND" ? 404 : 400);
+				return;
+			}
+			const nextFields = { ...draft.fields };
+			if (body.mode === "current-session") nextFields.worktreeMode = body.mode;
+			else delete nextFields.worktreeMode;
+			const writeResult = await writeProposalFile(proposalStateDir, ownerSessionId, "goal", nextFields);
+			const parsed = await parseProposalFile(proposalStateDir, ownerSessionId, "goal");
+			if (!parsed.ok) { json(parsed, 400); return; }
+			if (_broadcastToSession) {
+				_broadcastToSession(ownerSessionId, {
+					type: "proposal_update",
+					sessionId: ownerSessionId,
+					proposalType: "goal",
+					fields: parsed.value.fields,
+					rev: writeResult.rev,
+					streaming: false,
+					source: "edit",
+				});
+			}
+			json(await projection(parsed.value.fields));
+			return;
+		}
+		if (action === "accept" && req.method === "POST") {
+			const body = await readBody(req);
+			if (!body || typeof body !== "object" || Array.isArray(body)) {
+				json({ error: "body must be a JSON object", code: "INVALID_BODY" }, 400);
+				return;
+			}
+			const allowedFields = new Set([
+				"title", "spec", "workflowId", "workflow", "inlineRoles", "enabledOptionalSteps",
+				"subgoalsAllowed", "maxNestingDepth", "divergencePolicy", "maxConcurrentChildren", "parentGoalId", "metadata",
+			]);
+			const forbiddenAuthority = [
+				"sessionId", "ownerSessionId", "promoteSessionId", "projectId", "cwd", "worktree", "worktreePath",
+				"branch", "repoPath", "repoWorktrees", "sandboxed", "containerId", "autoStartTeam",
+			];
+			const suppliedAuthority = forbiddenAuthority.filter(key => Object.prototype.hasOwnProperty.call(body, key));
+			if (suppliedAuthority.length > 0) {
+				json({ error: `Promotion coordinates are server-owned: ${suppliedAuthority.join(", ")}`, code: "PROMOTION_AUTHORITY_REJECTED" }, 400);
+				return;
+			}
+			const unknownFields = Object.keys(body).filter(key => !allowedFields.has(key));
+			if (unknownFields.length > 0) {
+				json({ error: `Unknown acceptance field(s): ${unknownFields.join(", ")}`, code: "INVALID_BODY" }, 400);
+				return;
+			}
+			if (typeof body.title !== "string" || !body.title.trim()) {
+				json({ error: "Missing title" }, 400);
+				return;
+			}
+
+			const runPromotion = async (): Promise<PersistedGoal> => {
+				const existing = lookupSessionGoalPromotion(projectContextManager.getAllGoals(), ownerSessionId);
+				if (existing.status === "conflict") throw Object.assign(new Error("Current session has conflicting goal promotion records."), { statusCode: 409, code: "PROMOTION_CONFLICT" });
+				const promotionReservation = sessionManager.reserveSessionGoalPromotion(
+					ownerSessionId,
+					existing.status === "found" ? existing.goal.id : undefined,
+				);
+				// Retain process-local exclusion whenever an attempt-owned graph survives.
+				// Exact retry reclaims the same reservation by its bound goal id.
+				let retainPromotionReservation = existing.status === "found";
+				try {
+					if (existing.status === "found") {
+						await teamManager.adoptExistingLead(existing.goal.id, ownerSessionId);
+						await sessionManager.promoteToGoalLead(ownerSessionId, existing.goal.id, promotionReservation);
+						await teamManager.finalizeAdoptedLead(existing.goal.id);
+						retainPromotionReservation = false;
+						try {
+							await deleteProposalFile(proposalStateDir, ownerSessionId, "goal");
+							_broadcastToSession?.(ownerSessionId, { type: "proposal_cleared", sessionId: ownerSessionId, proposalType: "goal" });
+						} catch (error) {
+							console.warn(`[promotion] Goal ${existing.goal.id} finalized on retry but its proposal draft could not be cleared:`, error);
+						}
+						return existing.goal as PersistedGoal;
+					}
+
+				const draft = await readPromotionDraft();
+				if (!draft.ok) throw Object.assign(new Error(draft.message), { statusCode: draft.code === "FILE_NOT_FOUND" ? 404 : 400, code: draft.code });
+				if (resolveSessionGoalWorktreeMode(draft.fields.worktreeMode) !== "current-session") {
+					throw Object.assign(new Error("Select Current session before accepting this proposal."), { statusCode: 409, code: "WORKTREE_MODE_MISMATCH" });
+				}
+				const eligibility = await evaluateOwner(draft.fields);
+				if (!eligibility.eligible) throw Object.assign(new Error(eligibility.reason), { statusCode: 409, code: eligibility.code });
+				const coordinates = eligibility.coordinates;
+				const targetCtx = projectContextManager.getOrCreate(coordinates.projectId);
+				if (!targetCtx) throw Object.assign(new Error("Proposal project is unavailable."), { statusCode: 404, code: "PROJECT_NOT_FOUND" });
+				if (body.parentGoalId) throw Object.assign(new Error("Current-session promotion creates a top-level goal."), { statusCode: 422, code: "PROMOTION_PARENT_UNSUPPORTED" });
+
+				let resolvedWorkflow: Workflow | undefined;
+				let resolvedWorkflowId = typeof body.workflowId === "string" && body.workflowId.trim()
+					? body.workflowId.trim()
+					: typeof draft.fields.workflow === "string" ? draft.fields.workflow : undefined;
+				if (body.workflow && typeof body.workflow === "object" && !Array.isArray(body.workflow)) {
+					resolvedWorkflow = body.workflow as Workflow;
+					resolvedWorkflowId = (body.workflow as { id?: string }).id || resolvedWorkflowId;
+				} else if (resolvedWorkflowId) {
+					resolvedWorkflow = configCascade.resolveWorkflows(coordinates.projectId).find(entry => entry.item.id === resolvedWorkflowId)?.item
+						?? targetCtx.workflowStore.get(resolvedWorkflowId);
+				}
+				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
+					const components = targetCtx.projectConfigStore.getComponents();
+					const component = components.find(item => Object.keys(item.commands ?? {}).length > 0) ?? components[0];
+					const seeds = buildDefaultWorkflows(component?.name || "project", component ? Object.keys(component.commands ?? {}) : []);
+					seeds.parent = buildParentWorkflow();
+					for (const workflow of Object.values(seeds)) targetCtx.workflowStore.put(workflow as unknown as Workflow);
+					resolvedWorkflow = resolvedWorkflowId ? targetCtx.workflowStore.get(resolvedWorkflowId) : targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
+					resolvedWorkflowId = resolvedWorkflow?.id ?? resolvedWorkflowId;
+				}
+				if (resolvedWorkflowId && !resolvedWorkflow) {
+					throw Object.assign(new Error(`Workflow "${resolvedWorkflowId}" not found`), { statusCode: 400, code: "WORKFLOW_NOT_FOUND" });
+				}
+				if (resolvedWorkflow) {
+					resolvedWorkflow = freezeWorkflowDefinition(resolvedWorkflow, targetCtx.projectConfigStore.getComponents(), resolvedWorkflowId, { validateComponentReferences: false });
+				}
+				const nestingPrefs = readSubgoalNestingPrefs(key => preferencesStore.get(key));
+				const requestedSubgoals = typeof body.subgoalsAllowed === "boolean" ? body.subgoalsAllowed : undefined;
+				const requestedDepth = typeof body.maxNestingDepth === "number" && Number.isFinite(body.maxNestingDepth)
+					? Math.min(clampMaxDepth(body.maxNestingDepth), nestingPrefs.maxNestingDepth)
+					: undefined;
+				const metadata = body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+					? body.metadata as Record<string, unknown>
+					: undefined;
+				const inlineRoles = body.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles)
+					? body.inlineRoles as Record<string, Role>
+					: undefined;
+				const enabledOptionalSteps = Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((step: unknown) => typeof step === "string")
+					? body.enabledOptionalSteps as string[]
+					: undefined;
+				let goal: PersistedGoal | undefined;
+				let committed = false;
+				try {
+					goal = await targetCtx.goalManager.createGoal(body.title.trim(), coordinates.cwd, {
+						spec: typeof body.spec === "string" ? body.spec : "",
+						workflowId: resolvedWorkflowId,
+						workflowStore: targetCtx.workflowStore,
+						resolvedWorkflow,
+						enabledOptionalSteps,
+						projectId: coordinates.projectId,
+						inlineRoles,
+						subgoalsAllowed: requestedSubgoals === undefined ? undefined : requestedSubgoals && nestingPrefs.subgoalsEnabled,
+						maxNestingDepth: requestedDepth,
+						divergencePolicy: body.divergencePolicy === "strict" || body.divergencePolicy === "balanced" || body.divergencePolicy === "autonomous" ? body.divergencePolicy : undefined,
+						maxConcurrentChildren: typeof body.maxConcurrentChildren === "number" && Number.isInteger(body.maxConcurrentChildren) && body.maxConcurrentChildren >= 1 && body.maxConcurrentChildren <= 8 ? body.maxConcurrentChildren : undefined,
+						metadata,
+						adoptedWorkspace: {
+							ownerSessionId,
+							cwd: coordinates.cwd,
+							worktreePath: coordinates.worktreePath,
+							branch: coordinates.branch,
+							repoPath: coordinates.repoPath,
+							repoWorktrees: coordinates.repoWorktrees,
+							sandboxed: coordinates.sandboxed,
+						},
+					});
+					// From this point, retain the reservation unless finalization succeeds or
+					// exact pre-commit compensation removes the complete attempt graph.
+					sessionManager.bindSessionGoalPromotion(promotionReservation, goal.id);
+					retainPromotionReservation = true;
+					await targetCtx.goalManager.updateGoal(goal.id, { autoStartTeam: false });
+					goal.autoStartTeam = false;
+					if (goal.workflow) targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(gate => gate.id));
+					await Promise.all([targetCtx.goalStore.flush(), targetCtx.gateStore.flush()]);
+					await teamManager.adoptExistingLead(goal.id, ownerSessionId);
+					await sessionManager.promoteToGoalLead(ownerSessionId, goal.id, promotionReservation);
+					// Runtime replacement is the commit point. Finalization is idempotent
+					// post-commit repair: failures retain the exact graph/session for retry.
+					committed = true;
+					await teamManager.finalizeAdoptedLead(goal.id);
+					retainPromotionReservation = false;
+					try {
+						await deleteProposalFile(proposalStateDir, ownerSessionId, "goal");
+						_broadcastToSession?.(ownerSessionId, { type: "proposal_cleared", sessionId: ownerSessionId, proposalType: "goal" });
+					} catch (error) {
+						console.warn(`[promotion] Goal ${goal.id} committed but its proposal draft could not be cleared:`, error);
+					}
+					broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
+					return goal;
+				} catch (error) {
+					if (goal && !committed) {
+						// Goal/gate compensation is safe only after TeamManager confirms the
+						// exact empty owner reservation was released (or was provably absent).
+						// A false/failed release means the graph changed under this attempt;
+						// retain it intact so retry/boot reconciliation can finish promotion.
+						const reservationReleased = await teamManager.releaseAdoptedLead(goal.id, ownerSessionId).catch(() => false);
+						if (reservationReleased) {
+							targetCtx.gateStore.removeGoalGates(goal.id);
+							await targetCtx.gateStore.flush().catch(() => undefined);
+							const goalDeleted = await targetCtx.goalManager.deleteAdoptedGoalAttempt(goal.id, ownerSessionId).catch(() => false);
+							if (goalDeleted) retainPromotionReservation = false;
+						}
+					}
+					throw error;
+				}
+				} finally {
+					if (!retainPromotionReservation) {
+						sessionManager.releaseSessionGoalPromotion(promotionReservation);
+					}
+				}
+			};
+
+			let flight = _sessionGoalPromotionFlights.get(ownerSessionId);
+			if (!flight) {
+				flight = runPromotion();
+				_sessionGoalPromotionFlights.set(ownerSessionId, flight);
+				void flight.finally(() => {
+					if (_sessionGoalPromotionFlights.get(ownerSessionId) === flight) _sessionGoalPromotionFlights.delete(ownerSessionId);
+				}).catch(() => undefined);
+			}
+			try {
+				const goal = await flight;
+				json(goal, 201);
+			} catch (error) {
+				const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : 400;
+				jsonError(status, error, (error as any)?.code ? { code: (error as any).code } : undefined);
+			}
+			return;
+		}
+		json({ error: "Method not allowed" }, 405);
+		return;
+	}
+
 	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];

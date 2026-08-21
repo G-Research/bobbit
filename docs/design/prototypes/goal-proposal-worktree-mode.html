@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Goal proposal — worktree mode prototype</title>
+  <!--
+    PURPOSE
+    High-fidelity interaction spec for extending the existing Worktree row in
+    src/app/proposal-panels.ts::renderGoalForm. This is a prototype only.
+
+    CONSISTENCY RATIONALE
+    - Keeps the control in the existing Worktree row and preserves the row's
+      64px desktop label column; no new form section or card is introduced.
+    - Reuses the segmented-button grammar already used by
+      goal-form-divergence-policy: rounded border, border-separated options,
+      primary selected fill, background/secondary unselected states.
+    - Reuses current form type sizes: 12px labels, 11px supporting copy, 10px
+      monospace path text, 36px controls, 8px gaps, and Bobbit theme tokens.
+    - Uses visible inline disabled text instead of a tooltip because a disabled
+      control cannot receive keyboard focus.
+
+    IMPLEMENTATION CONTRACT
+    1. Add the selector inside the current linked-project Worktree row, replacing
+       its read-only value span. Keep Directory behaviour unchanged for proposals
+       without a linked project unless promotion eligibility supports that case.
+    2. Model the selector as a native radio group (name="goal-worktree-mode") so
+       Arrow keys switch modes and only one value can be submitted. Values:
+       "new" and "current-session". Persist the latter only when explicitly set;
+       absent remains "new" for draft compatibility.
+    3. Eligibility comes from the proposal-owning session. The browser must never
+       submit branch/path as authority; displayed coordinates are read-only.
+    4. When Current session is unavailable, disable only that radio and render
+       its concise server reason in #current-session-reason. Never rely only on
+       title/tooltip. If a restored draft selected it and eligibility changed,
+       retain the draft value, disable Create Goal, and let New worktree recover.
+    5. Set aria-describedby on the group to the selected description, coordinates,
+       and disabled/error message. Keep the submit error in role="alert" and busy
+       feedback in aria-live="polite".
+    6. When Current session is selected, keep the existing Sandbox and
+       Auto-start team controls visible but disabled. Their values are inherited:
+       promotion preserves the source sandbox, and the source is the lead already.
+       This avoids implying either resource will be reprovisioned.
+    7. Suggested test ids:
+       goal-form-worktree-mode, goal-form-worktree-new,
+       goal-form-worktree-current-session, goal-form-worktree-summary,
+       goal-form-worktree-branch, goal-form-worktree-path,
+       goal-form-worktree-current-unavailable.
+  -->
+  <style>
+    :root {
+      /* Semantic fallback only; the Bobbit theme bridge overrides it. */
+      --positive: oklch(0.55 0.15 145);
+      --negative: oklch(0.55 0.18 25);
+      --warning: oklch(0.62 0.15 75);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+    button, input, select, textarea { font: inherit; }
+    button, label, select { -webkit-tap-highlight-color: transparent; }
+
+    .prototype-shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px 18px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--card);
+      color: var(--card-foreground);
+    }
+    .demo-title {
+      margin-right: auto;
+      font-size: 12px;
+      font-weight: 650;
+    }
+    .demo-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted-foreground);
+      font-size: 11px;
+    }
+    .demo-control select {
+      height: 30px;
+      max-width: 220px;
+      padding: 0 28px 0 9px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--foreground);
+      background: var(--background);
+    }
+    .demo-control input { accent-color: var(--primary); }
+    .reset-button {
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--foreground);
+      background: var(--background);
+      cursor: pointer;
+    }
+    .reset-button:hover { background: var(--secondary); }
+    .reset-button:focus-visible,
+    .demo-control select:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 2px;
+    }
+
+    .stage {
+      display: grid;
+      place-items: start center;
+      padding: 28px 16px 56px;
+      background: color-mix(in oklch, var(--muted) 30%, var(--background));
+    }
+    .panel {
+      width: min(100%, 760px);
+      height: min(760px, calc(100vh - 116px));
+      min-height: 620px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--card);
+      color: var(--card-foreground);
+      box-shadow: 0 18px 45px color-mix(in oklch, var(--foreground) 9%, transparent);
+    }
+
+    .panel-head {
+      min-height: 46px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .goal-icon {
+      width: 18px;
+      height: 18px;
+      color: var(--primary);
+      flex: none;
+    }
+    .panel-title {
+      min-width: 0;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .panel-subtitle {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted-foreground);
+      font-size: 11px;
+    }
+    .tabs {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-height: 39px;
+      padding: 8px 20px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      position: relative;
+      height: 31px;
+      padding: 0 12px;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      color: var(--muted-foreground);
+      background: transparent;
+      font-size: 12px;
+      font-weight: 550;
+    }
+    .tab[aria-selected="true"] {
+      border-bottom-color: var(--primary);
+      color: var(--foreground);
+    }
+    .tab:not([aria-selected="true"]):hover { color: var(--foreground); }
+    .tab:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: -3px;
+      border-radius: 4px;
+    }
+    .revision {
+      margin-left: auto;
+      margin-bottom: 6px;
+      padding: 2px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted-foreground);
+      font-size: 11px;
+    }
+
+    .form-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 16px 20px 12px;
+    }
+    .top-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 235px;
+      gap: 10px;
+    }
+    .form-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .form-label {
+      width: 64px;
+      flex: 0 0 64px;
+      color: var(--muted-foreground);
+      font-size: 12px;
+      font-weight: 550;
+    }
+    .input,
+    .select {
+      width: 100%;
+      height: 36px;
+      min-width: 0;
+      padding: 0 9px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--background);
+      color: var(--foreground);
+      font-size: 14px;
+    }
+    .input:focus-visible,
+    .select:focus-visible,
+    .spec-box:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 1px;
+    }
+
+    .worktree-row { align-items: flex-start; }
+    .worktree-row > .form-label { padding-top: 9px; }
+    .worktree-control {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .mode-and-project {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+    .mode-group {
+      position: relative;
+      display: inline-flex;
+      flex: none;
+      height: 36px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--background);
+    }
+    .mode-option {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 126px;
+      height: 34px;
+      padding: 0 12px;
+      color: var(--muted-foreground);
+      background: var(--background);
+      font-size: 12px;
+      font-weight: 550;
+      cursor: pointer;
+      user-select: none;
+      transition: background-color 120ms ease, color 120ms ease;
+    }
+    .mode-option + .mode-option { border-left: 1px solid var(--border); }
+    .mode-option:hover { color: var(--foreground); background: var(--secondary); }
+    .mode-option:has(input:checked) {
+      color: var(--primary-foreground);
+      background: var(--primary);
+    }
+    .mode-option:has(input:focus-visible) {
+      z-index: 1;
+      outline: 2px solid var(--ring);
+      outline-offset: -3px;
+      border-radius: 4px;
+    }
+    .mode-option:has(input:disabled) {
+      color: var(--muted-foreground);
+      background: var(--muted);
+      cursor: not-allowed;
+    }
+    .mode-option input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: 0;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .project-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--muted-foreground);
+      font-size: 11px;
+    }
+    .project-name strong { color: var(--foreground); font-weight: 550; }
+
+    .mode-summary {
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: color-mix(in oklch, var(--secondary) 45%, transparent);
+    }
+    .mode-description {
+      margin: 0 0 6px;
+      color: var(--foreground);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .coordinates {
+      display: grid;
+      grid-template-columns: 45px minmax(0, 1fr);
+      gap: 3px 8px;
+      margin: 0;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .coordinates dt { color: var(--muted-foreground); }
+    .coordinates dd {
+      min-width: 0;
+      margin: 0;
+      color: var(--foreground);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+    .unavailable {
+      display: none;
+      align-items: flex-start;
+      gap: 5px;
+      margin: 0;
+      color: var(--muted-foreground);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .unavailable.is-visible { display: flex; }
+    .unavailable svg {
+      width: 13px;
+      height: 13px;
+      margin-top: 1px;
+      flex: none;
+      color: var(--warning);
+    }
+    .loading-dot {
+      width: 11px;
+      height: 11px;
+      margin: 2px 1px 0;
+      flex: none;
+      border: 1.5px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 650ms linear infinite;
+    }
+
+    .toggles {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 18px;
+      padding-top: 1px;
+    }
+    .switch-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted-foreground);
+      font-size: 12px;
+      font-weight: 550;
+      cursor: pointer;
+    }
+    .switch-label:has(.switch:disabled) { cursor: not-allowed; }
+    .switch {
+      appearance: none;
+      position: relative;
+      width: 32px;
+      height: 18px;
+      margin: 0;
+      border-radius: 999px;
+      background: var(--muted);
+      cursor: pointer;
+      transition: background-color 160ms ease;
+    }
+    .switch::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--muted-foreground);
+      transition: transform 160ms ease, background-color 160ms ease;
+    }
+    .switch:checked { background: var(--primary); }
+    .switch:checked::after {
+      transform: translateX(14px);
+      background: var(--primary-foreground);
+    }
+    .switch:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+    .switch:disabled { cursor: not-allowed; }
+    .info-mark { cursor: help; font-size: 9px; }
+
+    .spec-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 2px;
+    }
+    .spec-label { color: var(--muted-foreground); font-size: 12px; font-weight: 550; }
+    .mini-actions { display: flex; gap: 5px; }
+    .mini-button {
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: transparent;
+      color: var(--muted-foreground);
+      font-size: 10px;
+      cursor: pointer;
+    }
+    .mini-button:hover { color: var(--foreground); background: var(--secondary); }
+    .spec-box {
+      flex: 1;
+      min-height: 186px;
+      padding: 12px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: color-mix(in oklch, var(--secondary) 30%, transparent);
+      color: var(--foreground);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .spec-box h2 { margin: 0 0 8px; font-size: 15px; }
+    .spec-box p { margin: 0 0 8px; }
+    .spec-box ul { margin: 0; padding-left: 20px; }
+
+    .footer {
+      flex: none;
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 20px;
+      border-top: 1px solid var(--border);
+    }
+    .feedback {
+      flex: 1;
+      min-width: 0;
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .feedback.error { color: var(--negative); }
+    .feedback.success { color: var(--positive); }
+    .footer-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+    .button {
+      height: 34px;
+      padding: 0 13px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .button.ghost { color: var(--foreground); background: transparent; }
+    .button.ghost:hover { background: var(--secondary); }
+    .button.primary {
+      min-width: 111px;
+      color: var(--primary-foreground);
+      background: var(--primary);
+      border-color: var(--primary);
+    }
+    .button.primary:hover:not(:disabled) {
+      background: color-mix(in oklch, var(--primary) 88%, var(--foreground));
+    }
+    .button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+    .button:disabled { cursor: not-allowed; color: var(--muted-foreground); background: var(--muted); border-color: var(--border); }
+    .button-busy { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
+    .spinner {
+      width: 12px;
+      height: 12px;
+      border: 1.5px solid color-mix(in oklch, var(--primary-foreground) 45%, transparent);
+      border-top-color: var(--primary-foreground);
+      border-radius: 50%;
+      animation: spin 650ms linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+    }
+
+    @media (max-width: 620px) {
+      .demo-bar { align-items: flex-start; }
+      .demo-title { width: 100%; }
+      .stage { padding: 0; }
+      .panel {
+        width: 100%;
+        height: calc(100vh - 104px);
+        min-height: 620px;
+        border-inline: 0;
+        border-radius: 0;
+      }
+      .panel-head, .form-body, .footer { padding-inline: 14px; }
+      .tabs { padding-inline: 14px; overflow-x: auto; }
+      .top-row { grid-template-columns: 1fr; }
+      .top-row .form-label, .form-label { width: 68px; flex-basis: 68px; }
+      .mode-and-project { align-items: flex-start; flex-direction: column; }
+      .mode-group { width: 100%; }
+      .mode-option { flex: 1; min-width: 0; }
+      .footer { align-items: flex-start; flex-wrap: wrap; }
+      .feedback { flex-basis: 100%; }
+      .footer-actions { width: 100%; justify-content: flex-end; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-shell">
+    <header class="demo-bar" aria-label="Prototype state controls">
+      <div class="demo-title">Prototype states</div>
+      <label class="demo-control">
+        Session eligibility
+        <select id="scenario">
+          <option value="eligible">Eligible regular session</option>
+          <option value="goal">Already belongs to a goal</option>
+          <option value="missing">Missing dedicated worktree</option>
+          <option value="archived">Session is archived</option>
+          <option value="checking">Checking eligibility</option>
+        </select>
+      </label>
+      <label class="demo-control"><input id="fail-next" type="checkbox" /> Fail next creation</label>
+      <button class="reset-button" id="reset" type="button">Reset</button>
+    </header>
+
+    <main class="stage">
+      <section class="panel" aria-labelledby="proposal-title">
+        <header class="panel-head">
+          <svg class="goal-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M15 9l5-5m0 0v4m0-4h-4"/></svg>
+          <div>
+            <div class="panel-title" id="proposal-title">Goal Proposal</div>
+            <div class="panel-subtitle">Promote Session to Goal</div>
+          </div>
+        </header>
+
+        <nav class="tabs" role="tablist" aria-label="Goal proposal sections">
+          <button class="tab" type="button" role="tab" aria-selected="true">Goal</button>
+          <button class="tab" type="button" role="tab" aria-selected="false">Workflow</button>
+          <button class="tab" type="button" role="tab" aria-selected="false">Roles</button>
+          <button class="tab" type="button" role="tab" aria-selected="false">Metadata</button>
+          <span class="revision">rev 2</span>
+        </nav>
+
+        <div class="form-body" role="tabpanel" aria-label="Goal">
+          <div class="top-row">
+            <div class="form-row">
+              <label class="form-label" for="title">Title</label>
+              <input class="input" id="title" value="Promote Session to Goal" />
+            </div>
+            <div class="form-row">
+              <label class="form-label" for="workflow" style="width:auto;flex-basis:auto">Workflow</label>
+              <select class="select" id="workflow"><option>Software delivery</option></select>
+            </div>
+          </div>
+
+          <div class="form-row worktree-row">
+            <span class="form-label" id="worktree-label">Worktree</span>
+            <div class="worktree-control">
+              <div class="mode-and-project">
+                <div class="mode-group" role="radiogroup" aria-labelledby="worktree-label" aria-describedby="mode-description coordinate-list current-session-reason" data-testid="goal-form-worktree-mode">
+                  <label class="mode-option">
+                    <input id="mode-new" type="radio" name="goal-worktree-mode" value="new" checked data-testid="goal-form-worktree-new" />
+                    <span>New worktree</span>
+                  </label>
+                  <label class="mode-option" id="current-option">
+                    <input id="mode-current" type="radio" name="goal-worktree-mode" value="current-session" data-testid="goal-form-worktree-current-session" />
+                    <span>Current session</span>
+                  </label>
+                </div>
+                <span class="project-name">Project <strong>Bobbit</strong></span>
+              </div>
+
+              <div class="mode-summary" id="mode-summary" data-testid="goal-form-worktree-summary">
+                <p class="mode-description" id="mode-description">Bobbit will create a dedicated branch and worktree for the goal.</p>
+                <dl class="coordinates" id="coordinate-list">
+                  <dt>Branch</dt><dd id="branch-value" data-testid="goal-form-worktree-branch">goal/promote-session-to-goal-a1b2</dd>
+                  <dt>Path</dt><dd id="path-value" data-testid="goal-form-worktree-path">C:\Users\jsubr\w\bobbit-wt\goal-promote-session-to-goal-a1b2</dd>
+                </dl>
+              </div>
+
+              <p class="unavailable" id="current-session-reason" data-testid="goal-form-worktree-current-unavailable" aria-live="polite">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5m0 3h.01"/></svg>
+                <span id="reason-copy"></span>
+              </p>
+            </div>
+          </div>
+
+          <div class="toggles">
+            <label class="switch-label" id="sandbox-label"><input class="switch" id="sandbox-switch" type="checkbox" checked /> Sandbox <span class="info-mark" title="Runs each team agent in an isolated Docker container">ⓘ</span></label>
+            <label class="switch-label" id="auto-start-label"><input class="switch" id="auto-start-switch" type="checkbox" checked /> Auto-start team <span class="info-mark" title="Automatically start the team lead when the worktree is ready">ⓘ</span></label>
+            <label class="switch-label"><input class="switch" type="checkbox" /> Browser QA <span class="info-mark" title="Run the browser QA verification step">ⓘ</span></label>
+          </div>
+
+          <div class="spec-head">
+            <span class="spec-label">Spec</span>
+            <div class="mini-actions">
+              <button class="mini-button" type="button">Copy</button>
+              <button class="mini-button" type="button">Edit</button>
+            </div>
+          </div>
+          <div class="spec-box" tabindex="0">
+            <h2>Objective</h2>
+            <p>Promote the proposal-owning session into the accepted goal without copying or moving its checkout.</p>
+            <ul>
+              <li>Keep the same session, transcript, branch, and worktree.</li>
+              <li>Attach the normal goal workflow, gates, and team capabilities.</li>
+              <li>Preserve staged, unstaged, and untracked work exactly.</li>
+            </ul>
+          </div>
+        </div>
+
+        <footer class="footer">
+          <p class="feedback" id="feedback" role="status" aria-live="polite"></p>
+          <div class="footer-actions">
+            <button class="button ghost" type="button">Dismiss</button>
+            <button class="button primary" id="create" type="button"><span>Create Goal</span></button>
+          </div>
+        </footer>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const NEW_COORDS = {
+        branch: "goal/promote-session-to-goal-a1b2",
+        path: "C:\\Users\\jsubr\\w\\bobbit-wt\\goal-promote-session-to-goal-a1b2",
+      };
+      const CURRENT_COORDS = {
+        branch: "goal/cf3419f7/ux-designer-ff6b",
+        path: "C:\\Users\\jsubr\\w\\bobbit-wt\\goal-cf3419f7-ux-designer-ff6b",
+      };
+      const reasons = {
+        goal: "Current session unavailable — this session already belongs to a goal.",
+        missing: "Current session unavailable — this session does not have a dedicated branch and worktree.",
+        archived: "Current session unavailable — archived sessions cannot be promoted.",
+        checking: "Checking whether this session can be reused…",
+      };
+
+      const scenario = document.querySelector("#scenario");
+      const modeNew = document.querySelector("#mode-new");
+      const modeCurrent = document.querySelector("#mode-current");
+      const currentOption = document.querySelector("#current-option");
+      const reason = document.querySelector("#current-session-reason");
+      const reasonCopy = document.querySelector("#reason-copy");
+      const description = document.querySelector("#mode-description");
+      const branch = document.querySelector("#branch-value");
+      const path = document.querySelector("#path-value");
+      const feedback = document.querySelector("#feedback");
+      const create = document.querySelector("#create");
+      const sandboxSwitch = document.querySelector("#sandbox-switch");
+      const sandboxLabel = document.querySelector("#sandbox-label");
+      const autoStartSwitch = document.querySelector("#auto-start-switch");
+      const autoStartLabel = document.querySelector("#auto-start-label");
+      const failNext = document.querySelector("#fail-next");
+      const reset = document.querySelector("#reset");
+      let busy = false;
+
+      function selectedMode() {
+        return modeCurrent.checked ? "current" : "new";
+      }
+
+      function renderMode() {
+        const current = selectedMode() === "current";
+        const coords = current ? CURRENT_COORDS : NEW_COORDS;
+        description.textContent = current
+          ? "This session becomes the goal lead in place. Its checkout, transcript, and sandbox stay unchanged."
+          : "Bobbit will create a dedicated branch and worktree for the goal.";
+        branch.textContent = coords.branch;
+        path.textContent = coords.path;
+        sandboxSwitch.disabled = current || busy;
+        sandboxLabel.title = current ? "Inherited from the current session; promotion does not recreate its sandbox." : "";
+        autoStartSwitch.disabled = current || busy;
+        autoStartLabel.title = current ? "The current session becomes the goal lead immediately." : "";
+      }
+
+      function renderScenario() {
+        const value = scenario.value;
+        const eligible = value === "eligible";
+        modeCurrent.disabled = !eligible;
+        currentOption.setAttribute("aria-disabled", eligible ? "false" : "true");
+        reason.classList.toggle("is-visible", !eligible);
+        reasonCopy.textContent = reasons[value] || "";
+        const oldSpinner = reason.querySelector(".loading-dot");
+        if (oldSpinner) oldSpinner.remove();
+        const icon = reason.querySelector("svg");
+        if (value === "checking") {
+          icon.style.display = "none";
+          const spinner = document.createElement("span");
+          spinner.className = "loading-dot";
+          spinner.setAttribute("aria-hidden", "true");
+          reason.prepend(spinner);
+        } else {
+          icon.style.display = "block";
+        }
+        if (!eligible && modeCurrent.checked) modeNew.checked = true;
+        feedback.textContent = "";
+        feedback.className = "feedback";
+        renderMode();
+      }
+
+      function setBusy(next) {
+        busy = next;
+        create.disabled = next;
+        scenario.disabled = next;
+        modeNew.disabled = next;
+        modeCurrent.disabled = next || scenario.value !== "eligible";
+        sandboxSwitch.disabled = next || selectedMode() === "current";
+        autoStartSwitch.disabled = next || selectedMode() === "current";
+        create.setAttribute("aria-busy", String(next));
+        create.innerHTML = next
+          ? '<span class="button-busy"><span class="spinner" aria-hidden="true"></span>Creating…</span>'
+          : "<span>Create Goal</span>";
+      }
+
+      modeNew.addEventListener("change", renderMode);
+      modeCurrent.addEventListener("change", renderMode);
+      scenario.addEventListener("change", renderScenario);
+
+      create.addEventListener("click", () => {
+        if (busy) return;
+        feedback.textContent = selectedMode() === "current"
+          ? "Promoting this session without changing its checkout…"
+          : "Creating a new goal worktree…";
+        feedback.className = "feedback";
+        setBusy(true);
+        window.setTimeout(() => {
+          setBusy(false);
+          if (failNext.checked) {
+            failNext.checked = false;
+            feedback.textContent = "Couldn’t promote this session. Nothing was changed. Try again.";
+            feedback.className = "feedback error";
+            feedback.setAttribute("role", "alert");
+          } else {
+            feedback.textContent = selectedMode() === "current"
+              ? "Goal created. This session is now the goal lead."
+              : "Goal created. Worktree setup has started.";
+            feedback.className = "feedback success";
+            feedback.setAttribute("role", "status");
+          }
+        }, 1050);
+      });
+
+      reset.addEventListener("click", () => {
+        scenario.value = "eligible";
+        failNext.checked = false;
+        modeNew.checked = true;
+        feedback.textContent = "";
+        feedback.className = "feedback";
+        renderScenario();
+      });
+
+      renderScenario();
+    })();
+  </script>
+</body>
+</html>

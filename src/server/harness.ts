@@ -8,14 +8,14 @@
  * which touches a sentinel file that this harness watches.
  *
  * Lifecycle on restart signal:
- *   1. Kill the running server child process
- *   2. Wait for the port to become free
- *   3. Validate installed dependencies
- *   4. Rebuild server TypeScript
- *   5. Re-launch the server
+ *   1. Validate installed dependencies
+ *   2. Build a complete staged dist while the current gateway remains available
+ *   3. Kill the running server child process
+ *   4. Wait for the port to become free
+ *   5. Promote the staged dist and re-launch the server
  *
  * Usage:
- *   node dist/server/harness.js [-- ...args forwarded to cli.js]
+ *   node scripts/harness-bootstrap.mjs harness [-- ...args forwarded to cli.js]
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -24,7 +24,13 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { restartSentinelPath } from "./harness-signal.js";
-import { runHarnessLifecycle, validateDependencies } from "./harness-deps.js";
+import { runHarnessLifecycle, runHarnessSentinelRestart, validateDependencies } from "./harness-deps.js";
+import {
+	discardStagedDistBuild,
+	prepareStagedDistBuild,
+	promoteStagedDistBuild,
+	type StagedDistBuild,
+} from "./harness-build.js";
 import { windowsGatewayKillArgs } from "./harness-kill.js";
 
 // ---------------------------------------------------------------------------
@@ -39,6 +45,9 @@ const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
 /** The compiled CLI entry point we spawn as the child */
 const CLI_PATH = path.join(__dirname, "cli.js");
+
+/** Shared server build driver; accepts an isolated --out-dir. */
+const BUILD_SCRIPT = path.join(PROJECT_ROOT, "scripts", "build-server.mjs");
 
 /** Sentinel file — any write triggers a restart */
 const SENTINEL = restartSentinelPath();
@@ -98,7 +107,9 @@ const CRASH_LOOP_THRESHOLD = 5;
 // ---------------------------------------------------------------------------
 
 let child: ChildProcess | null = null;
-let restarting = false;
+let childVersion = 0;
+let restartInProgress = false;
+let intentionalStop = false;
 
 let consecutiveQuickCrashes = 0;
 let lastLaunchAt = 0;
@@ -112,23 +123,25 @@ function launchServer(): void {
 	}
 	console.log(`\n[harness] Launching server (port ${PORT})...`);
 	lastLaunchAt = Date.now();
-	child = spawn(process.execPath, [CLI_PATH, ...forwardedArgs], {
+	const launchedChild = spawn(process.execPath, [CLI_PATH, ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
 		env: { ...process.env, BOBBIT_DEV_HARNESS: "1" },
 	});
+	child = launchedChild;
+	childVersion++;
 
-	child.on("exit", (code, signal) => {
+	launchedChild.on("exit", (code, signal) => {
 		const reason = signal ? `signal ${signal}` : `code ${code}`;
 		const uptimeMs = Date.now() - lastLaunchAt;
 		console.log(`[harness] Server exited (${reason}, uptime ${uptimeMs}ms)`);
-		child = null;
+		if (child === launchedChild) child = null;
+		childVersion++;
 
-		// If we didn't initiate this exit, restart automatically — but bound
-		// the blast radius via the crash-loop guard. A child that lives
-		// HEALTHY_UPTIME_MS or longer counts as healthy; anything shorter is
-		// a "quick crash" and pushes us closer to the auto-restart cap.
-		if (!restarting) {
+		// Only the narrow stop/wait/promote section suppresses crash recovery.
+		// A genuine child exit during validation or staging retains the normal
+		// quick-crash accounting, delay, halt threshold, and intact live dist.
+		if (!intentionalStop) {
 			if (uptimeMs < HEALTHY_UPTIME_MS) {
 				consecutiveQuickCrashes++;
 			} else {
@@ -214,18 +227,42 @@ async function waitForPortFree(port: number): Promise<void> {
 // Build and lifecycle policy
 // ---------------------------------------------------------------------------
 
-function buildServer(): void {
-	console.log("[harness] Building server...");
-	try {
-		execSync("npm run build:server", {
+function runServerBuild(outputDir: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const builder = spawn(process.execPath, [BUILD_SCRIPT, "--out-dir", outputDir], {
 			cwd: PROJECT_ROOT,
 			stdio: "inherit",
-			timeout: BUILD_TIMEOUT_MS,
-			shell: true as unknown as string,
 		});
-		console.log("[harness] Build complete.");
+		let timedOut = false;
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			builder.kill("SIGTERM");
+		}, BUILD_TIMEOUT_MS);
+		builder.once("error", error => {
+			clearTimeout(timeout);
+			reject(error);
+		});
+		builder.once("exit", (code, signal) => {
+			clearTimeout(timeout);
+			if (timedOut) {
+				reject(new Error(`Server build exceeded ${BUILD_TIMEOUT_MS}ms`));
+			} else if (code === 0) {
+				resolve();
+			} else {
+				reject(new Error(`Server build failed (${signal ? `signal ${signal}` : `code ${code}`})`));
+			}
+		});
+	});
+}
+
+async function buildServer(): Promise<StagedDistBuild> {
+	console.log("[harness] Building staged server replacement...");
+	try {
+		const prepared = await prepareStagedDistBuild(PROJECT_ROOT, runServerBuild);
+		console.log("[harness] Staged build complete; live dist is unchanged.");
+		return prepared;
 	} catch (err) {
-		console.error("[harness] Build failed:", err);
+		console.error("[harness] Staged build failed:", err);
 		throw err;
 	}
 }
@@ -233,7 +270,7 @@ function buildServer(): void {
 async function applyLifecycle(trigger: "initial" | "sentinel-restart" | "crash-relaunch"): Promise<void> {
 	await runHarnessLifecycle(trigger, {
 		validate: () => validateDependencies(PROJECT_ROOT),
-		build: buildServer,
+		build: () => runServerBuild(path.join(PROJECT_ROOT, "dist")),
 		launch: launchServer,
 		report: (message) => console.error(`[harness] ${message}`),
 		exit: (code) => process.exit(code),
@@ -245,11 +282,13 @@ async function applyLifecycle(trigger: "initial" | "sentinel-restart" | "crash-r
 // ---------------------------------------------------------------------------
 
 async function restart(): Promise<void> {
-	if (restarting) {
+	if (restartInProgress) {
 		console.log("[harness] Restart already in progress, ignoring signal.");
 		return;
 	}
-	restarting = true;
+	restartInProgress = true;
+	const preparedChild = child;
+	const preparedChildVersion = childVersion;
 
 	// Manual restart via the sentinel file is the explicit
 	// "I have fixed the underlying problem, please try again" signal. Reset
@@ -264,22 +303,34 @@ async function restart(): Promise<void> {
 
 	try {
 		console.log("\n[harness] ======== RESTART TRIGGERED ========");
+		console.log("[harness] Preparing replacement before stopping the current server...");
 
-		// 1. Kill running server
-		await killServer();
-
-		// 2. Wait for port to clear
-		console.log(`[harness] Waiting for port ${PORT} to be free...`);
-		await waitForPortFree(PORT);
-
-		// 3. Validate dependencies, then rebuild and relaunch when healthy.
-		// Invalid dependencies or a failed build leave this watcher alive for a
-		// later operator-triggered retry; stale output is never launched.
-		await applyLifecycle("sentinel-restart");
+		// Validation and the full TypeScript build are intentionally outside the
+		// gateway downtime window. A failed preparation leaves the current server
+		// available; only a successful build enters stop/wait/launch.
+		await runHarnessSentinelRestart({
+			validate: () => validateDependencies(PROJECT_ROOT),
+			build: buildServer,
+			enterIntentionalStop: () => {
+				if (child !== preparedChild || childVersion !== preparedChildVersion) return false;
+				intentionalStop = true;
+				return true;
+			},
+			stop: killServer,
+			waitUntilStopped: async () => {
+				console.log(`[harness] Waiting for port ${PORT} to be free...`);
+				await waitForPortFree(PORT);
+			},
+			promote: promoteStagedDistBuild,
+			discard: discardStagedDistBuild,
+			launch: launchServer,
+			report: (message) => console.error(`[harness] ${message}`),
+		});
 	} catch (err) {
 		console.error("[harness] Restart failed:", err);
 	} finally {
-		restarting = false;
+		intentionalStop = false;
+		restartInProgress = false;
 	}
 }
 
@@ -337,7 +388,7 @@ function watchSentinel(): void {
 
 async function shutdown(): Promise<void> {
 	console.log("\n[harness] Shutting down...");
-	restarting = true; // prevent auto-restart on child exit
+	intentionalStop = true; // prevent auto-restart on child exit
 	await killServer();
 	process.exit(0);
 }

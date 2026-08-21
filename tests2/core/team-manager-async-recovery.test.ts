@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import { trustedAgentSessionsRoots } from "../../src/server/agent/agent-session-path.ts";
 import { sidecarPathFor, type SessionSidecar } from "../../src/server/agent/session-sidecar.ts";
 import { TeamManager, type TeamRecoverySidecars } from "../../src/server/agent/team-manager.ts";
+import type { TeamRecoveryCheckpointStore } from "../../src/server/agent/team-recovery-checkpoint.ts";
 import { slugDirNameForCwd } from "../../src/server/agent/team-store-consistency.ts";
 import { TeamRecoveryFsFake, microtaskTurns, sessionHeader } from "./team-recovery-test-fake.ts";
 
@@ -35,6 +38,19 @@ class MemoryStore<T extends { id: string }> {
 		this.records.set(id, { ...current, ...patch });
 		this.updates.push(id);
 	}
+	async flush(): Promise<void> {}
+}
+
+class MemorySessionStore extends MemoryStore<any> {
+	flushCalls = 0;
+	flushError: Error | undefined;
+
+	async flushAsync(): Promise<void> {
+		this.flushCalls++;
+		if (this.flushError) throw this.flushError;
+	}
+
+	flush(): Promise<void> { return this.flushAsync(); }
 }
 
 class MemoryTeamStore {
@@ -54,6 +70,36 @@ class MemoryTeamStore {
 	remove(goalId: string): void {
 		this.records.delete(goalId);
 		this.mutations.push(`remove:${goalId}`);
+	}
+}
+
+class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
+	readonly statuses = new Map<string, "running" | "complete">();
+	readonly completionPending = new Set<string>();
+	readonly calls: string[] = [];
+	failBegin = false;
+	failCompleteAfterPublication = false;
+	failFenceClearAcknowledgement = false;
+
+	async isComplete(stateDir: string): Promise<boolean> {
+		this.calls.push(`isComplete:${stateDir}`);
+		return this.statuses.get(stateDir) === "complete" && !this.completionPending.has(stateDir);
+	}
+	async begin(stateDir: string): Promise<void> {
+		this.calls.push(`begin:${stateDir}`);
+		if (this.failBegin) throw new Error("INJECTED_CHECKPOINT_BEGIN_FAILURE");
+		this.statuses.set(stateDir, "running");
+	}
+	async complete(stateDir: string): Promise<void> {
+		this.calls.push(`complete:${stateDir}`);
+		this.completionPending.add(stateDir);
+		this.statuses.set(stateDir, "complete");
+		if (this.failCompleteAfterPublication) throw new Error("INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO");
+		this.completionPending.delete(stateDir);
+		if (this.failFenceClearAcknowledgement) {
+			this.completionPending.add(stateDir);
+			throw new Error("INJECTED_FENCE_CLEAR_DIRECTORY_FSYNC_EIO");
+		}
 	}
 }
 
@@ -111,12 +157,15 @@ function seedTranscript(
 	return transcript;
 }
 
-function makeFixture(options: { deferFirstScan?: boolean } = {}) {
+function makeFixture(options: { deferFirstScan?: boolean; completedCheckpoint?: boolean } = {}) {
 	const roots = trustedAgentSessionsRoots();
 	assert.ok(roots.length > 0);
 	const firstRoot = roots[0]!;
 	const fs = new TeamRecoveryFsFake();
 	const sidecars = new MemoryRecoverySidecars();
+	const checkpoints = new MemoryRecoveryCheckpoints();
+	const stateDir = "/project-state";
+	if (options.completedCheckpoint) checkpoints.statuses.set(stateDir, "complete");
 
 	const goalPass2 = {
 		id: "goal-pass2",
@@ -159,7 +208,7 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 		{ goalId: goalPass2.id, teamLeadSessionId: "lead-pass2", agents: [], maxConcurrent: 4 },
 		{ goalId: goalPass2Failure.id, teamLeadSessionId: "lead-failure", agents: [], maxConcurrent: 2 },
 	]);
-	const sessions = new MemoryStore<any>([{
+	const sessions = new MemorySessionStore([{
 		id: "existing-untracked-lead",
 		title: "Team Lead: Existing",
 		cwd: goalUntracked.worktreePath,
@@ -194,6 +243,7 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 	for (const transcript of [pass2Canonical, pass3Canonical, agentTranscript]) sidecars.existing.add(sidecarPathFor(transcript));
 
 	const context = {
+		stateDir,
 		goalStore: goals,
 		teamStore: teams,
 		sessionStore: sessions,
@@ -206,18 +256,24 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 		getSession: () => undefined,
 		getSessionInfo: () => undefined,
 	};
-	const manager = new TeamManager(sessionManager as any, {
+	const managerConfig = {
 		projectContextManager,
 		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
 		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
 		recoveryFs: fs,
 		recoverySidecars: sidecars,
-	} as any, undefined, noTimerClock as any);
+		recoveryCheckpoints: checkpoints,
+	};
+	const manager = new TeamManager(sessionManager as any, managerConfig as any, undefined, noTimerClock as any);
 
 	return {
 		manager,
+		managerConfig,
+		sessionManager,
 		fs,
 		sidecars,
+		checkpoints,
+		stateDir,
 		sessions,
 		teams,
 		roots,
@@ -230,6 +286,497 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 		agentTranscript,
 	};
 }
+
+async function makeAdoptedAdmissionFixture() {
+	const ownerSessionId = "regular-owner";
+	const projectId = "project-admission";
+	const goal = {
+		id: "goal-admission",
+		title: "Adopted admission goal",
+		projectId,
+		state: "todo",
+		team: true,
+		cwd: "/worktrees/session-owner",
+		archived: false,
+		paused: false,
+		worktreeOwnerSessionId: ownerSessionId,
+	};
+	let subscriptionCount = 0;
+	let unsubscribeCount = 0;
+	let activeSubscriptions = 0;
+	let promptCount = 0;
+	let failNextTransition = false;
+	const source = {
+		id: ownerSessionId,
+		title: "Regular session",
+		projectId,
+		cwd: goal.cwd,
+		status: "idle",
+		role: "general",
+		rpcClient: {
+			onEvent: () => {
+				subscriptionCount += 1;
+				activeSubscriptions += 1;
+				let active = true;
+				return () => {
+					if (!active) return;
+					active = false;
+					unsubscribeCount += 1;
+					activeSubscriptions -= 1;
+				};
+			},
+		},
+		createdAt: 1,
+		lastActivity: 1,
+	};
+	const goals = new MemoryStore<any>();
+	const sessions = new MemoryStore<any>();
+	const teams = new MemoryTeamStore([]);
+	const liveSessions = new Map<string, any>();
+	let workerSequence = 0;
+	const goalManager = {
+		updateGoal: async (goalId: string, patch: any) => {
+			if (failNextTransition) {
+				failNextTransition = false;
+				throw new Error("injected transition failure");
+			}
+			goals.update(goalId, patch);
+			return goals.get(goalId);
+		},
+	};
+	const context = {
+		project: { id: projectId },
+		goalStore: goals,
+		goalManager,
+		teamStore: teams,
+		sessionStore: sessions,
+	};
+	const projectContextManager = {
+		all: () => [context],
+		getContextForGoal: (goalId: string) => goals.get(goalId) ? context : undefined,
+	};
+	const sessionManager = {
+		getSession: (id: string) => liveSessions.get(id),
+		getSessionInfo: (id: string) => liveSessions.get(id),
+		getPersistedSession: (id: string) => sessions.get(id),
+		createSession: async (cwd: string, _args?: string[], goalId?: string) => {
+			const id = `worker-${++workerSequence}`;
+			const worker = {
+				id,
+				title: "Worker",
+				cwd,
+				status: "idle",
+				goalId,
+				titleGenerated: false,
+				rpcClient: { onEvent: () => () => {}, prompt: async () => {} },
+				clients: new Set(),
+				createdAt: 2,
+				lastActivity: 2,
+			};
+			liveSessions.set(id, worker);
+			sessions.put(worker);
+			return worker;
+		},
+		setTitle: (id: string, title: string) => {
+			const live = liveSessions.get(id);
+			if (live) live.title = title;
+			return !!live;
+		},
+		updateSessionMeta: (id: string, patch: any) => {
+			const live = liveSessions.get(id);
+			if (live) Object.assign(live, patch);
+			if (sessions.get(id)) sessions.update(id, patch);
+			return !!live;
+		},
+		resolveSessionAgentAuthor: () => undefined,
+		enqueuePrompt: async () => {
+			promptCount += 1;
+			return { status: "dispatched" };
+		},
+		isSandboxEnabled: false,
+		getSandboxManager: () => undefined,
+		dispatchGoalProvisionedForWorktree: async () => {},
+	};
+	const recoveryFs = new TeamRecoveryFsFake();
+	for (const root of trustedAgentSessionsRoots()) recoveryFs.dir(root, []);
+	const roles = [{
+		name: "team-lead",
+		label: "Team Lead",
+		promptTemplate: "Lead the goal",
+		accessory: "lead-crown",
+		createdAt: 0,
+		updatedAt: 0,
+	}, {
+		name: "coder",
+		label: "Coder",
+		promptTemplate: "Implement the task",
+		accessory: "headphones",
+		createdAt: 0,
+		updatedAt: 0,
+	}];
+	const manager = new TeamManager(sessionManager as any, {
+		projectContextManager,
+		roleStore: { get: (name: string) => roles.find(role => role.name === name), getAll: () => roles },
+		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+		recoveryFs,
+		recoverySidecars: new MemoryRecoverySidecars(),
+	} as any, undefined, noTimerClock as any);
+	await manager.waitForRestore();
+
+	goals.put(goal);
+	sessions.put(source);
+	liveSessions.set(source.id, { ...source });
+	await manager.adoptExistingLead(goal.id, source.id);
+
+	return {
+		manager,
+		goal,
+		source,
+		goals,
+		sessions,
+		teams,
+		liveSessions,
+		failNextTransition: () => { failNextTransition = true; },
+		get workerCount() { return workerSequence; },
+		get subscriptionCount() { return subscriptionCount; },
+		get unsubscribeCount() { return unsubscribeCount; },
+		get activeSubscriptions() { return activeSubscriptions; },
+		get promptCount() { return promptCount; },
+	};
+}
+
+function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: string }) {
+	const ownerSessionId = "regular-owner";
+	const projectId = "project-adopted";
+	const goal = {
+		id: "goal-adopted",
+		title: "Adopted goal",
+		projectId,
+		state: "todo",
+		team: true,
+		cwd: "/worktrees/session-owner",
+		worktreePath: "/worktrees/session-owner",
+		repoPath: "/repo",
+		branch: "session/owner",
+		repoWorktrees: { app: "/worktrees/session-owner/app" },
+		sandboxed: true,
+		archived: false,
+		worktreeOwnerSessionId: ownerSessionId,
+		workflow: { gates: [{ id: "design-doc" }] },
+	};
+	const source = {
+		id: ownerSessionId,
+		title: "Regular session",
+		projectId,
+		cwd: goal.cwd,
+		worktreePath: goal.worktreePath,
+		repoPath: goal.repoPath,
+		branch: goal.branch,
+		repoWorktrees: goal.repoWorktrees,
+		sandboxed: goal.sandboxed,
+		role: options.role,
+		accessory: "regular-cap",
+		createdAt: 1,
+		lastActivity: 1,
+	};
+	const goals = new MemoryStore<any>([goal]);
+	const sessions = new MemoryStore<any>([source]);
+	const teams = new MemoryTeamStore(options.reservation ? [{
+		goalId: goal.id,
+		teamLeadSessionId: ownerSessionId,
+		agents: [],
+		maxConcurrent: 12,
+	}] : []);
+	const initializedGates: string[] = [];
+	const gateStore = {
+		initGatesForGoal: (goalId: string) => { initializedGates.push(goalId); },
+		removeGoalGates: () => {},
+		flush: async () => {},
+	};
+	const deletedAttempts: string[] = [];
+	const context = {
+		project: { id: projectId },
+		goalStore: goals,
+		teamStore: teams,
+		sessionStore: sessions,
+		gateStore,
+		goalManager: {
+			deleteAdoptedGoalAttempt: async (goalId: string) => {
+				deletedAttempts.push(goalId);
+				return false;
+			},
+			updateGoal: async (goalId: string, patch: any) => {
+				goals.update(goalId, patch);
+				return goals.get(goalId);
+			},
+		},
+	};
+	const projectContextManager = {
+		all: () => [context],
+		getContextForGoal: (goalId: string) => goals.get(goalId) ? context : undefined,
+	};
+	const recoveryFs = new TeamRecoveryFsFake();
+	for (const root of trustedAgentSessionsRoots()) recoveryFs.dir(root, []);
+	const sessionManager = {
+		getSession: () => undefined,
+		getSessionInfo: () => undefined,
+	};
+	const role = {
+		name: "team-lead",
+		label: "Team Lead",
+		promptTemplate: "Lead the goal",
+		accessory: "lead-crown",
+		createdAt: 0,
+		updatedAt: 0,
+	};
+	const manager = new TeamManager(sessionManager as any, {
+		projectContextManager,
+		roleStore: { get: (name: string) => name === role.name ? role : undefined, getAll: () => [role] },
+		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+		recoveryFs,
+		recoverySidecars: new MemoryRecoverySidecars(),
+	} as any, undefined, noTimerClock as any);
+
+	return { manager, goal, source, goals, sessions, teams, initializedGates, deletedAttempts };
+}
+
+describe("TeamManager adopted-lead worker admission", () => {
+	it("rejects a worker in the pending window after reservation and releases the untouched reservation", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			await assert.rejects(
+				() => fixture.manager.spawnRole(fixture.goal.id, "coder", "must not start yet"),
+				(error: any) => error?.code === "ADOPTED_LEAD_ATTACHMENT_PENDING",
+			);
+			assert.equal(fixture.workerCount, 0);
+			assert.deepEqual(fixture.manager.getTeamState(fixture.goal.id)?.agents, []);
+			assert.equal(await fixture.manager.releaseAdoptedLead(fixture.goal.id, fixture.source.id), true);
+			assert.equal(fixture.manager.getTeamState(fixture.goal.id), undefined);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("allows workers only after both the live and durable source carry the exact committed attachment", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const attachment = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
+			fixture.sessions.update(fixture.source.id, attachment);
+
+			const worker = await fixture.manager.spawnRole(fixture.goal.id, "coder", "start after commit");
+			assert.equal(worker.sessionId, "worker-1");
+			assert.equal(fixture.manager.getTeamState(fixture.goal.id)?.agents.length, 1);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("keeps ordinary team worker admission unchanged", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const ordinaryGoal = { ...fixture.goal, id: "goal-ordinary", title: "Ordinary goal", worktreeOwnerSessionId: undefined };
+			const ordinaryLead = {
+				...fixture.source,
+				id: "ordinary-lead",
+				goalId: ordinaryGoal.id,
+				teamGoalId: ordinaryGoal.id,
+				role: "team-lead",
+			};
+			fixture.goals.put(ordinaryGoal);
+			fixture.sessions.put(ordinaryLead);
+			fixture.liveSessions.set(ordinaryLead.id, ordinaryLead);
+			(fixture.manager as any).teams.set(ordinaryGoal.id, {
+				goalId: ordinaryGoal.id,
+				teamLeadSessionId: ordinaryLead.id,
+				agents: [],
+				maxConcurrent: 12,
+			});
+			(fixture.manager as any).sessionToGoal.set(ordinaryLead.id, ordinaryGoal.id);
+
+			const worker = await fixture.manager.spawnRole(ordinaryGoal.id, "coder", "ordinary spawn");
+			assert.equal(worker.sessionId, "worker-1");
+			assert.equal(fixture.manager.getTeamState(ordinaryGoal.id)?.agents.length, 1);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("fails closed on a partial identity change and refuses to release its reservation", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			Object.assign(fixture.liveSessions.get(fixture.source.id), {
+				goalId: fixture.goal.id,
+				teamGoalId: "different-goal",
+				role: "team-lead",
+			});
+			fixture.sessions.update(fixture.source.id, { goalId: fixture.goal.id });
+
+			await assert.rejects(
+				() => fixture.manager.spawnRole(fixture.goal.id, "coder", "identity changed"),
+				(error: any) => error?.code === "ADOPTED_LEAD_ATTACHMENT_PENDING",
+			);
+			assert.equal(await fixture.manager.releaseAdoptedLead(fixture.goal.id, fixture.source.id), false);
+			assert.ok(fixture.manager.getTeamState(fixture.goal.id), "failed defense must retain the reservation");
+			assert.equal(fixture.teams.get(fixture.goal.id)?.teamLeadSessionId, fixture.source.id);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+});
+
+describe("TeamManager adopted-lead finalization", () => {
+	it("activates the reserved lead without a kickoff and stays single-subscribed across retries", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const attachment = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
+			fixture.sessions.update(fixture.source.id, attachment);
+
+			const first = await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
+			assert.equal(first.teamLeadSessionId, fixture.source.id);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
+			assert.equal(fixture.subscriptionCount, 1);
+			assert.equal(fixture.activeSubscriptions, 1);
+			assert.equal(fixture.promptCount, 0);
+			assert.equal(fixture.workerCount, 0);
+
+			const retry = await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
+			assert.equal(retry.teamLeadSessionId, fixture.source.id);
+			assert.equal(fixture.subscriptionCount, 2);
+			assert.equal(fixture.unsubscribeCount, 1);
+			assert.equal(fixture.activeSubscriptions, 1, "retry replaces rather than duplicates the lead listener");
+			assert.equal(fixture.goals.updates.length, 1, "in-progress transition is idempotent");
+			assert.equal(fixture.promptCount, 0, "finalization never sends the normal startTeam kickoff");
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("retries cleanly after the todo transition fails", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const attachment = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
+			fixture.sessions.update(fixture.source.id, attachment);
+			fixture.failNextTransition();
+
+			await assert.rejects(
+				() => fixture.manager.finalizeAdoptedLead(fixture.goal.id),
+				/injected transition failure/,
+			);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "todo");
+			assert.equal(fixture.activeSubscriptions, 1);
+
+			await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
+			assert.equal(fixture.subscriptionCount, 2);
+			assert.equal(fixture.unsubscribeCount, 1);
+			assert.equal(fixture.activeSubscriptions, 1);
+			assert.equal(fixture.promptCount, 0);
+			assert.equal(fixture.workerCount, 0);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+});
+
+describe("TeamManager adopted-goal archive admission", () => {
+	for (const scenario of ["pending", "live-only", "durable-only", "partial", "identity-mismatch"] as const) {
+		it(`rejects ${scenario} promotion state before running archive`, async () => {
+			const fixture = await makeAdoptedAdmissionFixture();
+			try {
+				const exact = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+				if (scenario === "live-only") Object.assign(fixture.liveSessions.get(fixture.source.id), exact);
+				if (scenario === "durable-only") fixture.sessions.update(fixture.source.id, exact);
+				if (scenario === "partial") {
+					Object.assign(fixture.liveSessions.get(fixture.source.id), { goalId: fixture.goal.id });
+					fixture.sessions.update(fixture.source.id, { goalId: fixture.goal.id });
+				}
+				if (scenario === "identity-mismatch") {
+					Object.assign(fixture.liveSessions.get(fixture.source.id), exact, { teamGoalId: "other-goal" });
+					fixture.sessions.update(fixture.source.id, exact);
+				}
+				let archiveCalls = 0;
+				await assert.rejects(
+					() => fixture.manager.withAdoptedGoalArchiveAdmission(fixture.goal.id, async () => { archiveCalls += 1; }),
+					(error: any) => error?.code === "PROMOTION_IN_PROGRESS" && error?.status === 409,
+				);
+				assert.equal(archiveCalls, 0);
+				assert.equal(fixture.goals.get(fixture.goal.id)?.archived, false);
+			} finally {
+				fixture.manager.dispose();
+			}
+		});
+	}
+
+	it("admits an exact committed attachment and leaves ordinary goals unchanged", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const exact = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), exact);
+			fixture.sessions.update(fixture.source.id, exact);
+			const adoptedResult = await fixture.manager.withAdoptedGoalArchiveAdmission(
+				fixture.goal.id,
+				async () => "adopted-archive",
+			);
+			assert.equal(adoptedResult, "adopted-archive");
+
+			const ordinaryGoal = { ...fixture.goal, id: "ordinary-goal", worktreeOwnerSessionId: undefined };
+			fixture.goals.put(ordinaryGoal);
+			const ordinaryResult = await fixture.manager.withAdoptedGoalArchiveAdmission(
+				ordinaryGoal.id,
+				async () => "ordinary-archive",
+			);
+			assert.equal(ordinaryResult, "ordinary-archive");
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+});
+
+describe("TeamManager adopted-goal restart reconciliation", () => {
+	for (const reservation of [true, false]) {
+		it(`repairs a baseline general session with ${reservation ? "an empty" : "no"} lead reservation`, async () => {
+			const fixture = makeAdoptedGoalRestartFixture({ reservation, role: "general" });
+			await fixture.manager.waitForRestore();
+
+			assert.deepEqual(fixture.sessions.get(fixture.source.id), {
+				...fixture.source,
+				goalId: fixture.goal.id,
+				teamGoalId: fixture.goal.id,
+				role: "team-lead",
+				accessory: "lead-crown",
+			});
+			assert.deepEqual(fixture.manager.getTeamState(fixture.goal.id), {
+				goalId: fixture.goal.id,
+				teamLeadSessionId: fixture.source.id,
+				agents: [],
+				maxConcurrent: 12,
+			});
+			assert.deepEqual(fixture.initializedGates, [fixture.goal.id]);
+			assert.equal(fixture.sessions.records.size, 1);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
+			assert.deepEqual(fixture.deletedAttempts, []);
+			assert.deepEqual(fixture.teams.mutations, reservation ? [] : [`put:${fixture.goal.id}`]);
+			fixture.manager.dispose();
+		});
+	}
+
+	it("leaves a non-general relation unchanged instead of attaching or compensating it", async () => {
+		const fixture = makeAdoptedGoalRestartFixture({ reservation: true, role: "coder" });
+		await fixture.manager.waitForRestore();
+
+		assert.deepEqual(fixture.sessions.get(fixture.source.id), fixture.source);
+		assert.deepEqual(fixture.sessions.updates, []);
+		assert.deepEqual(fixture.initializedGates, []);
+		assert.deepEqual(fixture.deletedAttempts, []);
+		assert.equal(fixture.manager.getTeamState(fixture.goal.id)?.teamLeadSessionId, fixture.source.id);
+		fixture.manager.dispose();
+	});
+});
 
 describe("TeamManager awaited async recovery", () => {
 	it("keeps restore pending and team indexes incomplete until deferred recovery I/O settles", async () => {
@@ -296,6 +843,190 @@ describe("TeamManager awaited async recovery", () => {
 		);
 		assert.equal(fixture.fs.count("readFile"), 0, "manager recovery must use bounded transcript headers and injected sidecars");
 		fixture.manager.dispose();
+	});
+
+	it("checkpoints a completed forensic sweep and performs no transcript-tree I/O on the next clean boot", async () => {
+		const fixture = makeFixture();
+		await fixture.manager.waitForRestore();
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "first boot must preserve historical recovery");
+		fixture.manager.dispose();
+
+		fixture.fs.calls.length = 0;
+		const second = new TeamManager(
+			fixture.sessionManager as any,
+			fixture.managerConfig as any,
+			undefined,
+			noTimerClock as any,
+		);
+		await second.waitForRestore();
+
+		assert.deepEqual(
+			fixture.fs.calls.filter((call) => ["readdir", "stat", "open", "read"].includes(call.operation)),
+			[],
+			"a completed project must not revisit historical agent-session roots",
+		);
+		assert.deepEqual(fixture.checkpoints.calls.slice(-1), [`isComplete:${fixture.stateDir}`]);
+		second.dispose();
+	});
+
+	it("retries forensic recovery after visible completion fails its durability acknowledgement", async () => {
+		const fixture = makeFixture();
+		fixture.checkpoints.failCompleteAfterPublication = true;
+		await fixture.manager.waitForRestore();
+
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete", "precondition: completion became visible before acknowledgement failed");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), true, "RECOVERY_COMPLETION_FENCE: the failed publication must retain retry authority");
+		fixture.manager.dispose();
+
+		fixture.checkpoints.failCompleteAfterPublication = false;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_COMPLETION_FENCE: the second boot must rerun forensic traversal");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), false, "RECOVERY_COMPLETION_FENCE: successful retry must clear the fence");
+		retry.dispose();
+	});
+
+	it("reruns forensic recovery after fence-clear acknowledgement fails", async () => {
+		const fixture = makeFixture();
+		fixture.checkpoints.failFenceClearAcknowledgement = true;
+		await fixture.manager.waitForRestore();
+
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete", "precondition: completion was visible after the fence was cleared");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), true, "RECOVERY_COMPLETION_FENCE: compensation must republish retry authority");
+		fixture.manager.dispose();
+
+		fixture.checkpoints.failFenceClearAcknowledgement = false;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_COMPLETION_FENCE: the next boot must rerun historical recovery after the reported failure");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), false);
+		retry.dispose();
+	});
+
+	it("invalidates a completed checkpoint and recovers when a persisted team points at a missing lead", async () => {
+		const fixture = makeFixture({ completedCheckpoint: true });
+		await fixture.manager.waitForRestore();
+
+		assert.ok(fixture.sessions.get("lead-pass2"), "targeted dangling-lead recovery must remain available");
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "new concrete damage must reopen forensic recovery");
+		assert.ok(fixture.checkpoints.calls.includes(`begin:${fixture.stateDir}`));
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		fixture.manager.dispose();
+	});
+
+	it("does not complete recovery until reconstructed session rows are durably published", async () => {
+		const fixture = makeFixture();
+		fixture.sessions.flushError = new Error("INJECTED_SESSION_PUBLICATION_FAILURE");
+		await fixture.manager.waitForRestore();
+
+		assert.equal(
+			fixture.checkpoints.statuses.get(fixture.stateDir),
+			"running",
+			"RECOVERY_DURABILITY_BARRIER: a failed session-store publication must leave the forensic checkpoint retryable",
+		);
+		assert.ok(fixture.sessions.flushCalls > 0, "RECOVERY_DURABILITY_BARRIER: recovery must await a session-store persistence barrier");
+		fixture.manager.dispose();
+
+		fixture.sessions.flushError = undefined;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_DURABILITY_BARRIER: the next boot must retry forensic traversal");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		retry.dispose();
+	});
+
+	it("does not repair under stale complete authority when checkpoint invalidation fails", async () => {
+		const fixture = makeFixture({ completedCheckpoint: true });
+		fixture.checkpoints.failBegin = true;
+		await fixture.manager.waitForRestore();
+
+		assert.equal(
+			fixture.sessions.get("lead-pass2"),
+			undefined,
+			"RECOVERY_INVALIDATION_FENCE: recovery must not continue while an old complete checkpoint cannot be durably invalidated",
+		);
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		fixture.manager.dispose();
+
+		fixture.checkpoints.failBegin = false;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.sessions.get("lead-pass2"), "RECOVERY_INVALIDATION_FENCE: a later boot must recover after checkpoint invalidation succeeds");
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_INVALIDATION_FENCE: retry must reopen forensic traversal");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		retry.dispose();
+	});
+
+	it("retries a real sidecar backfill after publication fails", async () => {
+		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "bobbit-team-sidecar-retry-"));
+		const transcript = path.join(root, "legacy.jsonl");
+		const stateDir = path.join(root, "state");
+		await fs.promises.writeFile(transcript, "{}\n", "utf-8");
+		const checkpoints = new MemoryRecoveryCheckpoints();
+		const sessions = new MemorySessionStore([{
+			id: "legacy-session",
+			title: "Coder: Legacy",
+			cwd: root,
+			createdAt: 1,
+			lastActivity: 1,
+			role: "coder",
+			agentSessionFile: transcript,
+			archived: true,
+		}]);
+		const goals = new MemoryStore<any>();
+		const teams = new MemoryTeamStore([]);
+		const context = { stateDir, goalStore: goals, teamStore: teams, sessionStore: sessions };
+		const managerConfig = {
+			projectContextManager: { all: () => [context], getContextForGoal: () => undefined },
+			taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+			colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+			recoveryCheckpoints: checkpoints,
+		};
+		const sessionManager = { getSession: () => undefined, getSessionInfo: () => undefined };
+		const targetSidecar = sidecarPathFor(transcript);
+		const realRename = fs.promises.rename.bind(fs.promises);
+		let injectFailure = true;
+		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (injectFailure && path.resolve(String(to)) === path.resolve(targetSidecar)) {
+				injectFailure = false;
+				throw new Error("INJECTED_SIDECAR_PUBLICATION_FAILURE");
+			}
+			return realRename(from, to);
+		});
+		let manager: TeamManager | undefined;
+		let retry: TeamManager | undefined;
+		try {
+			manager = new TeamManager(sessionManager as any, managerConfig as any, undefined, noTimerClock as any);
+			await manager.waitForRestore();
+			assert.equal(
+				checkpoints.statuses.get(stateDir),
+				"running",
+				"RECOVERY_SIDECAR_RETRY: a failed sidecar publication must leave the forensic checkpoint retryable",
+			);
+			manager.dispose();
+			manager = undefined;
+
+			retry = new TeamManager(sessionManager as any, managerConfig as any, undefined, noTimerClock as any);
+			await retry.waitForRestore();
+			assert.equal(await fs.promises.readFile(targetSidecar, "utf-8").then(() => true, () => false), true, "RECOVERY_SIDECAR_RETRY: the next boot must retry the sidecar write");
+			assert.equal(checkpoints.statuses.get(stateDir), "complete");
+		} finally {
+			manager?.dispose();
+			retry?.dispose();
+			renameSpy.mockRestore();
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("supports an explicit boot boundary: team restore completes before session restore and event resubscription", async () => {
