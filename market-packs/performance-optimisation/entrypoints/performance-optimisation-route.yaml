@@ -1,0 +1,8 @@
+id: performance-optimisation.route
+kind: route
+routeId: performance-optimisation
+target:
+  panelId: performance-optimisation.panel
+# `demo` is an explicitly labelled development fixture for visual iteration; the
+# normal launcher omits it and production data always comes from host.store.
+paramKeys: [tab, demo]

@@ -1,0 +1,17 @@
+name: performance-optimisation
+schema: 2
+description: Store-backed performance analysis control pane and specialist optimisation roles.
+version: 1.0.0
+# Early production pack: visible in the shipped marketplace but opt-in while the
+# project snapshot and persistent-staff provisioning contracts are completed.
+defaultDisabled: true
+contents:
+  roles:
+    - performance-scanner
+    - optimisation-director
+  tools: []
+  skills: []
+  entrypoints:
+    - performance-optimisation-open
+    - performance-optimisation-session-menu
+    - performance-optimisation-route
