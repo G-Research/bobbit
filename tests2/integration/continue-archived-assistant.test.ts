@@ -12,12 +12,27 @@ import {
 	apiFetch,
 	nonGitCwd,
 	createSession as createSessionFromHarness,
+	rawApiFetch,
 } from "./_e2e/e2e-setup.js";
 import { createSessionTracker, seedSessionTranscript, trackGoal } from "./helpers/session-fixtures.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 const sessions = createSessionTracker();
+let operatorCookie: string | undefined;
+
+async function authenticatedOperatorCookie(): Promise<string> {
+	if (operatorCookie) return operatorCookie;
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	operatorCookie = setCookies.map(cookie => cookie.split(";")[0])
+		.find(cookie => cookie.startsWith("bobbit_session="));
+	if (!operatorCookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	return operatorCookie;
+}
 
 async function archive(id: string): Promise<void> {
 	const resp = await apiFetch(`/api/sessions/${id}`, { method: "DELETE" });
@@ -63,14 +78,17 @@ async function seedDraftWithHistory(
 	args: Record<string, unknown>,
 	editPairs: Array<{ old_text: string; new_text: string }>,
 ): Promise<void> {
+	const headers = { Cookie: await authenticatedOperatorCookie() };
 	const seed = await apiFetch(`/api/sessions/${sid}/proposal/${type}/seed`, {
 		method: "POST",
+		headers,
 		body: JSON.stringify({ args }),
 	});
 	expect(seed.status, `seed ${type}`).toBe(200);
 	for (const pair of editPairs) {
 		const edit = await apiFetch(`/api/sessions/${sid}/proposal/${type}/edit`, {
 			method: "POST",
+			headers,
 			body: JSON.stringify(pair),
 		});
 		expect(edit.status, `edit ${type} (${pair.old_text} → ${pair.new_text})`).toBe(200);

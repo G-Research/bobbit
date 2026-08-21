@@ -31,6 +31,7 @@ import {
 	createSession,
 	deleteSession as deleteE2ESession,
 	ensureGateway,
+	rawApiFetch,
 } from "./_e2e/e2e-setup.js";
 import {
 	MINIMAL_PROPOSAL_WORKFLOWS,
@@ -47,9 +48,25 @@ import {
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const SYSTEM_PROJECT_ID = "system";
 
+let operatorCookie: string | undefined;
+
+async function authenticatedOperatorCookie(): Promise<string> {
+	if (operatorCookie) return operatorCookie;
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	operatorCookie = setCookies.map(cookie => cookie.split(";")[0])
+		.find(cookie => cookie.startsWith("bobbit_session="));
+	if (!operatorCookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	return operatorCookie;
+}
+
 async function seed(sid: string, type: string, args: Record<string, unknown>): Promise<Response> {
 	return apiFetch(`/api/sessions/${sid}/proposal/${type}/seed`, {
 		method: "POST",
+		headers: { Cookie: await authenticatedOperatorCookie() },
 		body: JSON.stringify({ args }),
 	});
 }

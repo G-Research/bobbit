@@ -980,6 +980,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "staged", count: 2 },
 			{ expression: "untracked", count: 2 },
+			{ expression: "draftPath", count: 2 },
 		]),
 	},
 	{
@@ -1018,6 +1019,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "fp", count: 7 },
 			{ expression: "proposalPath(gateway.bobbitDir, sid, \"goal\")", count: 1 },
 			{ expression: "historyPath", count: 1 },
+			{ expression: "victimDraft", count: 2 },
 		]),
 	},
 	{
@@ -1965,7 +1967,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "`${liveFile}.sqlite-retired`", count: 1 },
 			{ expression: "`${liveFile}.pre-migration-recovered`", count: 1 },
-			{ expression: "`${legacyFile}.sqlite-retired`", count: 1 },
+			{ expression: "`${legacyFile}.sqlite-retired`", count: 2 },
 			{ expression: "tombstoneFile", count: 1 },
 			{ expression: "preferred", count: 1 },
 			{ expression: "`${preferred}.1`", count: 1 },
