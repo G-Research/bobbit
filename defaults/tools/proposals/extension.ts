@@ -47,10 +47,12 @@ async function callGateway(
 ): Promise<{ status: number; bodyText: string; bodyJson: unknown }> {
 	const baseUrl = getGatewayUrl();
 	const token = getGatewayToken();
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET?.trim();
 	const init: RequestInit = {
 		method,
 		headers: {
 			"Authorization": `Bearer ${token}`,
+			...(sessionSecret ? { "X-Bobbit-Session-Secret": sessionSecret } : {}),
 			...(body !== undefined ? { "Content-Type": "application/json" } : {}),
 		},
 		...(body !== undefined ? { body: JSON.stringify(body) } : {}),

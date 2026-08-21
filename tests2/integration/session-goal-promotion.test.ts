@@ -4,8 +4,32 @@ import { randomUUID } from "node:crypto";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { copyGitTemplate } from "../harness/git-template.js";
-import { apiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
+import { apiFetch as harnessApiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
 import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
+
+let operatorCookie: string | undefined;
+
+async function authenticatedOperatorCookie(): Promise<string> {
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	return setCookies.map(cookie => cookie.split(";")[0])
+		.find(cookie => cookie.startsWith("bobbit_session=")) ?? "";
+}
+
+async function apiFetch(requestPath: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method ?? "GET").toUpperCase();
+	const mutatesProposal = /^\/api\/sessions\/[^/]+\/proposal\//.test(requestPath)
+		&& (method === "POST" || method === "PUT" || method === "DELETE");
+	if (!mutatesProposal) return harnessApiFetch(requestPath, opts);
+	operatorCookie ??= await authenticatedOperatorCookie();
+	return harnessApiFetch(requestPath, {
+		...opts,
+		headers: { ...(opts.headers as Record<string, string> | undefined), Cookie: operatorCookie },
+	});
+}
 
 async function jsonResponse(response: Response): Promise<any> {
 	const text = await response.text();

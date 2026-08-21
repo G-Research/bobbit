@@ -19,7 +19,7 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
-	apiFetch,
+	apiFetch as harnessApiFetch,
 	connectWs,
 	createGoal,
 	createSession,
@@ -64,6 +64,20 @@ function sessionCapabilityHeaders(gateway: any, sid: string): Record<string, str
 	return {
 		"X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sid),
 	};
+}
+
+let operatorCookie: string | undefined;
+
+async function apiFetch(requestPath: string, opts: RequestInit = {}): Promise<Response> {
+	const method = (opts.method ?? "GET").toUpperCase();
+	const mutatesProposal = /^\/api\/sessions\/[^/]+\/proposal\//.test(requestPath)
+		&& (method === "POST" || method === "PUT" || method === "DELETE");
+	if (!mutatesProposal) return harnessApiFetch(requestPath, opts);
+	operatorCookie ??= await authenticatedOperatorCookie();
+	return harnessApiFetch(requestPath, {
+		...opts,
+		headers: { ...(opts.headers as Record<string, string> | undefined), Cookie: operatorCookie },
+	});
 }
 
 async function expectProposalOwnerMismatch(response: Response, operation: string): Promise<void> {

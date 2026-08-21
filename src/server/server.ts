@@ -5535,17 +5535,40 @@ async function handleApiRoute(
 		for (const workflow of defaults) targetCtx.workflowStore.put(workflow);
 		return defaults;
 	};
-	const authorizeGoalCandidateParent = (parent: PersistedGoal): true | GoalCandidateError => {
+	type AuthenticatedProposalOwner = {
+		ownerSessionId: string;
+		authenticatedBy: "session-capability" | "operator-cookie";
+	};
+	const authenticCallerSessionId = (): string | undefined => {
 		const headers = req.headers as Record<string, string | string[] | undefined>;
 		const rawSecret = headers["x-bobbit-session-secret"];
 		const sessionSecret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		return sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof sessionSecret === "string" && sessionSecret.trim() ? sessionSecret.trim() : undefined,
+		);
+	};
+	const authenticateProposalOwner = (ownerSessionId: string): AuthenticatedProposalOwner | undefined => {
+		const callerSessionId = authenticCallerSessionId();
+		if (callerSessionId === ownerSessionId) {
+			return { ownerSessionId, authenticatedBy: "session-capability" };
+		}
+		if (cookieTryAuth(req, cookieStore!)) {
+			return { ownerSessionId, authenticatedBy: "operator-cookie" };
+		}
+		json({
+			ok: false,
+			code: "PROPOSAL_OWNER_MISMATCH",
+			message: "Proposal mutation is not authorized for this session owner",
+			error: "Proposal mutation is not authorized for this session owner",
+		}, 403);
+		return undefined;
+	};
+	const authorizeGoalCandidateParent = (parent: PersistedGoal): true | GoalCandidateError => {
 		const rootGoalId = parent.rootGoalId ?? parent.id;
 		const authz = authorizeChildrenMutation({
 			mutationClass: "operator",
 			isHumanOperator: cookieTryAuth(req, cookieStore!),
-			authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-				typeof sessionSecret === "string" && sessionSecret.trim() ? sessionSecret.trim() : undefined,
-			),
+			authenticCallerSessionId: authenticCallerSessionId(),
 			teamLeadSessionId: teamManager.getTeamState(rootGoalId)?.teamLeadSessionId,
 		});
 		return authz.ok ? true : {
@@ -5560,15 +5583,17 @@ async function handleApiRoute(
 		raw: RawGoalCandidate,
 		source: GoalCandidateSource = { kind: "user-input" },
 		authorizeParent = true,
-		proposalOwnerSessionId?: string,
+		authenticatedProposalOwner?: AuthenticatedProposalOwner,
 	) => validateGoalCandidate(raw, {
 		source,
 		...(authorizeParent ? {
 			authorizeParent: (parent: PersistedGoal) => {
-				// A live team lead's matching relation is server-owned seed provenance.
-				// Never consult a persisted/ambient record, so it cannot become a
-				// durable authority after the session stops being live.
-				const owner = proposalOwnerSessionId ? sessionManager.getSession(proposalOwnerSessionId) : undefined;
+				// Session-owned parent authority is available only after the exact
+				// owner capability was authenticated. The URL session id alone is
+				// never caller identity; signed operators use the normal cookie path.
+				const owner = authenticatedProposalOwner?.authenticatedBy === "session-capability"
+					? sessionManager.getSession(authenticatedProposalOwner.ownerSessionId)
+					: undefined;
 				if (owner?.role === "team-lead" && owner.teamGoalId === parent.id) return true;
 				return authorizeGoalCandidateParent(parent);
 			},
@@ -5585,8 +5610,8 @@ async function handleApiRoute(
 	const writeGoalCandidateError = (validation: GoalCandidateError): void => {
 		json(goalCandidateErrorBody(validation), validation.status);
 	};
-	const goalProposalPreCommitValidator = (ownerSessionId: string): ProposalPreCommitValidator => fields => {
-		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, true, ownerSessionId);
+	const goalProposalPreCommitValidator = (owner: AuthenticatedProposalOwner): ProposalPreCommitValidator => fields => {
+		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, true, owner);
 		return validation.ok ? undefined : validation;
 	};
 	const writeSpecialProjectMutationError = (err: unknown): boolean => {
@@ -15720,6 +15745,10 @@ async function handleApiRoute(
 			json({ error: "Invalid sessionId" }, 400);
 			return;
 		}
+		const proposalOwner = (req.method === "PUT" || (action === "accept" && req.method === "POST"))
+			? authenticateProposalOwner(ownerSessionId)
+			: undefined;
+		if ((req.method === "PUT" || (action === "accept" && req.method === "POST")) && !proposalOwner) return;
 		const proposalStateDir = bobbitStateDir();
 
 		const readPromotionDraft = async () => {
@@ -15873,7 +15902,7 @@ async function handleApiRoute(
 					ownerSessionId,
 					"goal",
 					nextFields,
-					goalProposalPreCommitValidator(ownerSessionId),
+					goalProposalPreCommitValidator(proposalOwner!),
 				);
 			} catch (error) {
 				if (error instanceof ProposalPreCommitValidationError) writeGoalCandidateError(error.validation);
@@ -15962,7 +15991,7 @@ async function handleApiRoute(
 						sessionId: ownerSessionId,
 						serverDerivedProjectId: coordinates.projectId,
 						serverDerivedCwd: coordinates.cwd,
-					}, false);
+					}, false, proposalOwner);
 					if (!validation.ok) throw new GoalCandidateValidationResponseError(validation);
 					const targetCtx = existingProjectContext(coordinates.projectId);
 					if (!targetCtx) throw Object.assign(new Error("Proposal project is unavailable."), { statusCode: 404, code: "PROJECT_NOT_FOUND" });
@@ -16119,6 +16148,10 @@ async function handleApiRoute(
 			return;
 		}
 		const proposalType = typeStr as ProposalType;
+		const isProposalMutation = (suffix === "" && req.method === "DELETE")
+			|| ((suffix === "/edit" || suffix === "/seed" || suffix === "/restore") && req.method === "POST");
+		const proposalOwner = isProposalMutation ? authenticateProposalOwner(sessionId) : undefined;
+		if (isProposalMutation && !proposalOwner) return;
 		const proposalStateDir = bobbitStateDir();
 
 		// GET /api/sessions/:id/proposal/:type — read raw file
@@ -16198,7 +16231,7 @@ async function handleApiRoute(
 					proposalType,
 					old_text,
 					new_text,
-					proposalType === "goal" ? goalProposalPreCommitValidator(sessionId) : undefined,
+					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!) : undefined,
 				);
 				if (!result.ok) {
 					const status = "status" in result ? result.status : result.code === "FILE_NOT_FOUND" ? 404 : 400;
@@ -16296,7 +16329,7 @@ async function handleApiRoute(
 					return;
 				}
 				enrichedArgs = prepared.args;
-				const validation = validateCurrentGoalCandidate(enrichedArgs, { kind: "user-input" }, true, sessionId);
+				const validation = validateCurrentGoalCandidate(enrichedArgs, { kind: "user-input" }, true, proposalOwner);
 				if (!validation.ok) { writeGoalCandidateError(validation); return; }
 			}
 			try {
@@ -16305,7 +16338,7 @@ async function handleApiRoute(
 					sessionId,
 					proposalType,
 					enrichedArgs,
-					proposalType === "goal" ? goalProposalPreCommitValidator(sessionId) : undefined,
+					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!) : undefined,
 				);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
 				if (!parsed.ok) {
@@ -16365,7 +16398,7 @@ async function handleApiRoute(
 					sessionId,
 					proposalType,
 					rev,
-					proposalType === "goal" ? goalProposalPreCommitValidator(sessionId) : undefined,
+					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!) : undefined,
 				);
 				if (!result.ok) {
 					const status = "status" in result ? result.status : result.code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
