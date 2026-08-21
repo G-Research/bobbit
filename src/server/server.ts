@@ -103,10 +103,10 @@ import {
 } from "./extension-host/host-hook-contributions.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
-import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { LifecycleHub } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
-import { fenceBlock } from "./agent/context-blocks.js";
+import { estimateTokens, fenceBlock, type ContextBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
@@ -4113,6 +4113,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		} : {}),
 	});
 
+	const validateBoundedToolResult = (toolName: string, result: unknown): boolean => {
+		const knownTool = toolManager.resolveScopedPiExtensionTools().some(tool =>
+			(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
+		) || toolManager.getToolByName(toolName) !== undefined;
+		if (!knownTool) return false;
+		let nodes = 0;
+		const visit = (value: unknown, depth: number): boolean => {
+			if (++nodes > 1_024 || depth > 8) return false;
+			if (value === null || typeof value === "boolean" || typeof value === "string") return typeof value !== "string" || value.length <= 8_192;
+			if (typeof value === "number") return Number.isFinite(value);
+			if (Array.isArray(value)) return value.length <= 64 && value.every(item => visit(item, depth + 1));
+			if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+			const entries = Object.entries(value as Record<string, unknown>);
+			return entries.length <= 64 && entries.every(([key, item]) => /^[A-Za-z][A-Za-z0-9._-]*$/.test(key) && key.length <= 128 && visit(item, depth + 1));
+		};
+		if (!visit(result, 0)) return false;
+		try { return Buffer.byteLength(JSON.stringify(result), "utf8") <= 128 * 1_024; } catch { return false; }
+	};
+
 	const hostInterceptorRouter = new HostInterceptorRouter({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -4134,7 +4153,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					&& required.every(key => Object.prototype.hasOwnProperty.call(args, key));
 			} catch { return false; }
 		},
-		validateToolResult: () => true,
+		validateToolResult: validateBoundedToolResult,
 	});
 
 	type RuntimeNotificationHandler = HostNotificationModuleHandler & {
@@ -4209,7 +4228,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	projectContextManager.setHostNotificationDispatcher(hostNotificationDispatcher);
 	sessionManager.setHostNotificationPublisher(hostNotificationDispatcher as any);
-	sessionManager.setHostInterceptorPort(hostInterceptorRouter as any);
+	sessionManager.setHostInterceptorPort({
+		dispatch: (name, input, context) => hostInterceptorRouter.dispatch(name as any, input as any, context as any),
+		hasAny: (names, projectId, goalId) => {
+			const explicit = normalizeHookContributions(packContributionRegistry, projectId)
+				.some(row => row.kind === "interceptor" && names.includes(row.name));
+			if (explicit) return true;
+			const legacy = names.filter((name): name is "sessionSetup" | "beforePrompt" | "beforeCompact" | "sessionShutdown" =>
+				name === "sessionSetup" || name === "beforePrompt" || name === "beforeCompact" || name === "sessionShutdown",
+			);
+			return legacy.length > 0 && sessionManager.lifecycleHub?.hasProvidersForHooks(projectId, legacy, goalId) === true;
+		},
+	});
 	staffManager.setStaffNotificationPublisher(hostNotificationDispatcher);
 	prStatusStore.onPullRequestStatusChanged = (fact) => {
 		const ctx = projectContextManager.getContextForGoal(fact.goalId);
@@ -7839,95 +7869,59 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Provider per-turn lifecycle hooks (EP G1.4) ──
-	// These endpoints are called only by the Bobbit-generated provider-bridge pi
-	// extension (before-prompt / before-compact) and the context-trace inspector.
-	// They inherit the admin-bearer gate enforced before handleApiRoute, exactly
-	// like POST /api/sessions/:id/tool-grant-request above. afterTurn /
-	// sessionShutdown are gateway-internal dispatches and intentionally have NO
-	// public endpoint.
-	//
-	// Resolve a session's lifecycle dispatch context from live or persisted state.
-	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
-	const resolveHookCtx = (id: string): {
-		base: Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
-		scopeInput: {
-			projectId?: string;
-			goalId?: string;
-			roleName?: string;
-			cwd: string;
-			worktreePath?: string;
-			repoPath?: string;
-			repoWorktrees?: Readonly<Record<string, string>>;
-		};
-	} | undefined => {
-		const live = sessionManager.getSession(id);
-		const persisted = sessionManager.getPersistedSession(id);
-		const source = live ?? persisted;
-		if (!source) return undefined;
-		const projectId = source.projectId;
-		const goalId = source.goalId ?? source.teamGoalId;
-		const repoWorktrees = Array.isArray(source.repoWorktrees)
-			? Object.fromEntries(source.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
-			: source.repoWorktrees;
-		const base = {
-			sessionId: id,
-			projectId,
-			scope: projectId ? "project" as const : "global" as const,
-			cwd: source.cwd ?? process.cwd(),
-			// Effective goal: team members, delegates, and reviewers carry the goal
-			// only in teamGoalId, so fall back to it before persisted state. Without
-			// this, disabled-provider filtering would not apply at the provider hook
-			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
-			goalId,
-			roleName: source.role,
-		};
-		return {
-			base,
-			scopeInput: {
-				projectId,
-				goalId,
-				roleName: source.role,
-				cwd: source.cwd ?? process.cwd(),
-				worktreePath: source.worktreePath,
-				repoPath: source.repoPath,
-				repoWorktrees,
-			},
-		};
+	// ── Pi-owned interceptor lifecycle routes ──
+	// The global bearer gate authenticates the process; the per-session secret
+	// below binds authority to the exact URL session before any body is accepted.
+	const resolveAuthenticatedHookSession = (rawSessionId: string): string | undefined => {
+		let sessionId: string;
+		try { sessionId = decodeURIComponent(rawSessionId); } catch { return undefined; }
+		const rawSecret = req.headers["x-bobbit-session-secret"];
+		const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		const authenticatedSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+		return authenticatedSessionId === sessionId ? sessionId : undefined;
 	};
+	const isStrictHookBody = (body: unknown, keys: readonly string[]): body is Record<string, unknown> => {
+		if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+		return Object.keys(body).every(key => keys.includes(key));
+	};
+	const hookTurnIndex = (sessionId: string): number =>
+		Math.max(0, (sessionManager.getSession(sessionId)?.completedTurnCount ?? 0) + 1);
 
-	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
+	// The generated Pi bridges call these four exact-session routes. The router is
+	// the sole lifecycle dispatcher; its legacy adapter already normalizes providers.
 	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
 	if (beforePromptMatch && req.method === "POST") {
-		const sessionId = beforePromptMatch[1];
-		const body = await readBody(req).catch(() => ({} as any));
-		if (body && body.prompt !== undefined && typeof body.prompt !== "string") {
-			json({ error: "prompt must be a string" }, 400);
+		const sessionId = resolveAuthenticatedHookSession(beforePromptMatch[1]);
+		if (!sessionId) { json({ error: "Exact session authentication required" }, 403); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!isStrictHookBody(body, ["prompt"]) || typeof body.prompt !== "string" || body.prompt.length > 16_384) {
+			json({ error: "Invalid bounded beforePrompt body" }, 400);
 			return;
 		}
-		const hookContext = resolveHookCtx(sessionId);
-		if (!hookContext) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		const hub = sessionManager.lifecycleHub;
-		if (!hub) {
-			json({ content: "", tail: "", blocks: [] });
-			return;
-		}
+		const session = sessionManager.getSession(sessionId);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
 		try {
-			const turnIndex = body?.turn?.index;
-			const { blocks } = await hub.dispatch("beforePrompt", {
-				...hookContext.base,
-				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
-				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
-			}, hookContext.scopeInput);
+			const routed = await sessionManager.dispatchHostInterceptor(sessionId, "beforePrompt", {
+				sessionId,
+				turnIndex: hookTurnIndex(sessionId),
+				source: session.lastPromptSource ?? "user",
+				userText: body.prompt,
+			});
+			const contributions = Array.isArray((routed?.value as any)?.context) ? (routed.value as any).context : [];
+			const blocks: ContextBlock[] = contributions.map((block: any) => ({
+				id: block.id,
+				title: block.title,
+				providerId: "host-hooks",
+				authority: block.authority,
+				content: block.content,
+				reason: block.reason,
+				priority: block.priority,
+				tokenEstimate: estimateTokens(block.content),
+			}));
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
-			// Temporary back-compat for generated bridges from the system-prompt-tail era.
-			// New bridges consume `content` only and must never return systemPrompt.
 			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";
-			// Best-effort: refresh the persisted prompt-sections snapshot so the
-			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
@@ -7937,52 +7931,82 @@ async function handleApiRoute(
 			} catch (err) {
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
 			}
-			json({
-				content,
-				tail,
-				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
-			});
+			json({ content, tail, blocks: blocks.map(({ id, providerId, title, tokenEstimate }) => ({ id, providerId, title, tokenEstimate })) });
 		} catch (err: any) {
-			jsonError(500, err);
+			jsonError(err instanceof TypeError ? 400 : 500, err);
 		}
 		return;
 	}
 
-	// POST /api/sessions/:id/provider-hooks/before-compact — notify providers before compaction.
 	const beforeCompactMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-compact$/);
 	if (beforeCompactMatch && req.method === "POST") {
-		const sessionId = beforeCompactMatch[1];
-		// The bridge forwards the about-to-be-lost span (and optionally a precomputed
-		// summary) from the pi session_before_compact payload. Validate both as strings
-		// so a malformed body is rejected rather than silently dispatched empty.
-		const body = await readBody(req).catch(() => ({} as any));
-		if (body && body.span !== undefined && typeof body.span !== "string") {
-			json({ error: "span must be a string" }, 400);
+		const sessionId = resolveAuthenticatedHookSession(beforeCompactMatch[1]);
+		if (!sessionId) { json({ error: "Exact session authentication required" }, 403); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!isStrictHookBody(body, ["span", "summary"])
+			|| (body.span !== undefined && typeof body.span !== "string")
+			|| (body.summary !== undefined && typeof body.summary !== "string")
+			|| (typeof body.span === "string" && body.span.length > 16_384)
+			|| (typeof body.summary === "string" && body.summary.length > 16_384)) {
+			json({ error: "Invalid bounded beforeCompact body" }, 400);
 			return;
 		}
-		if (body && body.summary !== undefined && typeof body.summary !== "string") {
-			json({ error: "summary must be a string" }, 400);
-			return;
-		}
-		const hookContext = resolveHookCtx(sessionId);
-		if (!hookContext) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		const hub = sessionManager.lifecycleHub;
-		if (!hub) {
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		try {
+			await sessionManager.dispatchHostInterceptor(sessionId, "beforeCompact", {
+				sessionId,
+				turnIndex: hookTurnIndex(sessionId),
+				span: typeof body.span === "string" ? body.span : "",
+				...(typeof body.summary === "string" ? { summary: body.summary } : {}),
+			});
 			json({});
+		} catch (err: any) {
+			jsonError(err instanceof TypeError ? 400 : 500, err);
+		}
+		return;
+	}
+
+	const toolHookMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/host-hooks\/(before-tool-call|after-tool-result)$/);
+	if (toolHookMatch && req.method === "POST") {
+		const sessionId = resolveAuthenticatedHookSession(toolHookMatch[1]);
+		if (!sessionId) { json({ error: "Exact session authentication required" }, 403); return; }
+		const body = await readBody(req).catch(() => undefined);
+		const isBefore = toolHookMatch[2] === "before-tool-call";
+		const keys = isBefore ? ["toolCallId", "toolName", "args"] : ["toolCallId", "toolName", "result"];
+		if (!isStrictHookBody(body, keys)
+			|| typeof body.toolCallId !== "string"
+			|| typeof body.toolName !== "string") {
+			json({ error: "Invalid bounded tool hook body" }, 400);
 			return;
 		}
 		try {
-			await hub.dispatch("beforeCompact", {
-				...hookContext.base,
-				span: typeof body?.span === "string" ? body.span : undefined,
-				summary: typeof body?.summary === "string" ? body.summary : undefined,
-			}, hookContext.scopeInput);
-			json({});
+			if (isBefore) {
+				const routed = await sessionManager.dispatchHostInterceptor(sessionId, "beforeToolCall", {
+					toolCallId: body.toolCallId,
+					toolName: body.toolName,
+					args: body.args as Record<string, any>,
+				});
+				const terminal = routed?.terminal as any;
+				if (terminal?.action === "block") { json(terminal); return; }
+				const args = (routed?.value as any)?.args;
+				sessionManager.markToolCallAdmitted(sessionId, body.toolCallId, body.toolName);
+				json({ action: "replaceArgs", args });
+			} else {
+				const routed = await sessionManager.dispatchHostInterceptor(sessionId, "afterToolResult", {
+					toolCallId: body.toolCallId,
+					toolName: body.toolName,
+					result: body.result as any,
+				});
+				const terminal = routed?.terminal as any;
+				if (terminal?.action === "syntheticError") { json(terminal); return; }
+				json({ action: "replaceResult", result: (routed?.value as any)?.result });
+			}
 		} catch (err: any) {
-			jsonError(500, err);
+			if (!isBefore) {
+				json({ action: "syntheticError", code: "handler_error" });
+			} else {
+				jsonError(err instanceof TypeError ? 400 : 500, err);
+			}
 		}
 		return;
 	}

@@ -17,30 +17,38 @@ import { bobbitStateDir } from "../bobbit-dir.js";
  * rejected property instead of reporting only a root additional-property error.
  */
 export function generateToolResultErrorBridgeExtension(): string {
-	return `const HOST_HOOK_TIMEOUT_MS = 2000;
+	return `// The client deadline must leave enough margin for the host router's 2s
+// protected-operation deadline to settle and serialize its decision.
+const HOST_HOOK_TIMEOUT_MS = 2500;
+const HOST_PROTECTED_FAILURE = Object.freeze({ action: "syntheticError", code: "handler_error" });
 
-async function postHostHook(route, body) {
-  if (process.env.BOBBIT_HOST_HOOKS_ENABLED !== "1") return undefined;
+async function postHostHook(route, body, protectedResult = false) {
+  const fallback = protectedResult ? HOST_PROTECTED_FAILURE : undefined;
+  if (process.env.BOBBIT_HOST_HOOKS_ENABLED !== "1") return fallback;
   const gatewayUrl = process.env.BOBBIT_GATEWAY_URL;
   const sessionId = process.env.BOBBIT_SESSION_ID;
   const token = process.env.BOBBIT_TOKEN;
-  if (!gatewayUrl || !sessionId || typeof globalThis.fetch !== "function") return undefined;
+  const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
+  if (!gatewayUrl || !sessionId || typeof globalThis.fetch !== "function") return fallback;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HOST_HOOK_TIMEOUT_MS);
   try {
-    const response = await globalThis.fetch(gatewayUrl + "/api/sessions/" + sessionId + route, {
+    const response = await globalThis.fetch(gatewayUrl + "/api/sessions/" + encodeURIComponent(sessionId) + route, {
       method: "POST",
       headers: {
         ...(token ? { "Authorization": "Bearer " + token } : {}),
+        ...(sessionSecret ? { "X-Bobbit-Session-Secret": sessionSecret } : {}),
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!response.ok) return undefined;
-    return await response.json();
+    if (!response.ok) return fallback;
+    const decision = await response.json();
+    if (!isObject(decision) || (typeof decision.action !== "string" && typeof decision.decision !== "string")) return fallback;
+    return decision;
   } catch {
-    return undefined;
+    return fallback;
   } finally {
     clearTimeout(timer);
   }
@@ -143,19 +151,19 @@ function hostSyntheticError(code) {
 }
 
 function beforeDecision(response, originalArgs) {
-  const decision = response && (response.decision || response.result?.decision);
+  const decision = response && (response.action || response.decision || response.result?.decision);
   if (response?.block === true || decision === "block") return { block: true };
   const replacement = response?.args ?? response?.result?.args ?? response?.value?.args;
   return { block: false, args: isObject(replacement) ? replacement : originalArgs };
 }
 
 function afterDecision(response, originalResult) {
-  const decision = response && (response.decision || response.result?.decision);
+  const decision = response && (response.action || response.decision || response.result?.decision);
   if (decision === "syntheticError" || response?.syntheticError === true) {
-    const code = typeof response?.code === "string" ? response.code : "policy_denied";
+    const code = typeof response?.code === "string" ? response.code : "handler_error";
     return hostSyntheticError(code);
   }
-  const replacement = response?.replacement ?? response?.result?.result ?? response?.value?.result;
+  const replacement = response?.result ?? response?.replacement ?? response?.value?.result;
   return replacement === undefined ? originalResult : replacement;
 }
 
@@ -189,7 +197,7 @@ function wrapHandler(handler, toolName) {
         toolCallId,
         toolName,
         result: { isError: true },
-      });
+      }, true);
       const replacement = afterDecision(afterThrown, undefined);
       if (replacement !== undefined) {
         result = replacement;
@@ -202,7 +210,7 @@ function wrapHandler(handler, toolName) {
         toolCallId,
         toolName,
         result,
-      }), result);
+      }, true), result);
     }
     if (isErroredToolResult(result)) {
       const err = new Error(messageFromToolResult(result));
