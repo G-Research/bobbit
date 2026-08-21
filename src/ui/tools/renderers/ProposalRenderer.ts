@@ -9,7 +9,6 @@ import { renderHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 import "../../../ui/components/ExpandableSection.js";
 import {
-	isWorkflowValidationProposalError,
 	parseProposalErrorFromResult,
 	parseRevFromResult,
 	workflowValidationErrorFromProposalResult,
@@ -106,8 +105,12 @@ export class ProposalRenderer implements ToolRenderer {
 
 		const title = fields?.[meta.titleField] || "";
 		const preview = fields?.[meta.previewField] || "";
-		const isWorkflowValidationFailure = this._toolName === "propose_goal" && isWorkflowValidationProposalError(result);
-		const isFailedGoalProposal = this._toolName === "propose_goal" && (Boolean(result?.isError) || isWorkflowValidationFailure);
+		const parsedProposalError = this._toolName === "propose_goal" ? parseProposalErrorFromResult(result) : undefined;
+		// Older transcript adapters could preserve a structured gateway error while
+		// dropping the outer tool-result isError bit. Treat any stable error code as
+		// failed so non-workflow validation errors cannot render as valid proposals.
+		const isFailedGoalProposal = this._toolName === "propose_goal"
+			&& (Boolean(result?.isError) || Boolean(parsedProposalError?.code));
 		const rev = isFailedGoalProposal ? undefined : parseRevFromResult(result);
 		const errorMessage = isFailedGoalProposal ? formatProposalErrorMessage(result) : "";
 		const workflowValidationError = isFailedGoalProposal
@@ -137,7 +140,7 @@ export class ProposalRenderer implements ToolRenderer {
 				>
 					${renderHeader(state, FileText, isFailedGoalProposal ? `${meta.label} failed` : meta.label)}
 					${title ? html`<div class="text-sm font-medium">${title}</div>` : ""}
-					${isFailedGoalProposal ? html`<div class="text-sm text-destructive" data-testid="proposal-error-message">${errorMessage}</div>` : ""}
+					${isFailedGoalProposal ? html`<div class="text-sm text-destructive" data-testid="proposal-error-message">${workflowValidationError ? html`<span data-testid="goal-proposal-workflow-error">${errorMessage}</span>` : errorMessage}</div>` : ""}
 					${typeof rev === "number" && rev > 0 ? html`<div class="text-xs text-muted-foreground" data-testid="proposal-rev">rev ${rev}</div>` : ""}
 					${preview ? html`<expandable-section .summary=${truncate(preview, 80)}><markdown-block .content=${preview}></markdown-block></expandable-section>` : ""}
 					${result ? html`

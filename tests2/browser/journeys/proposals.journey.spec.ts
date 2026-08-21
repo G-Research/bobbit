@@ -9,6 +9,30 @@ import { createSessionViaUI, sendMessage } from "../_helpers/journey-fixture.js"
 import { nonGitCwd } from "../e2e-setup.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
+async function authenticateMockProposalTools(
+	page: import("@playwright/test").Page,
+	gateway: any,
+): Promise<void> {
+	const sessionId = await page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return state?.selectedSessionId as string | undefined;
+	});
+	const agent = sessionId ? gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent : undefined;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("proposal journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("proposal journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
+
 async function waitForProposalSlot(page: import("@playwright/test").Page, type: string): Promise<void> {
 	await page.waitForFunction(
 		(t: string) => {
@@ -287,20 +311,22 @@ test.describe("Journey: Proposals — API error handling", () => {
 // Ported from failed-goal-proposal-ux.spec.ts (audit: proposals GAP): a
 // MISSING_WORKFLOW failed proposal surfaces the workflow-error row.
 test.describe("Journey: Failed Goal Proposal", () => {
-	test("MISSING_WORKFLOW surfaces the goal-proposal-workflow-error row", async ({ page }) => {
+	test("MISSING_WORKFLOW surfaces the goal-proposal-workflow-error row", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
+		await authenticateMockProposalTools(page, gateway);
 		await sendMessage(page, "Please run GOAL_PROPOSAL_MISSING_WORKFLOW now");
 		const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]').first();
 		await expect(workflowError).toBeVisible({ timeout: 20_000 });
 		await expect(workflowError).toContainText(/Workflow is required/i, { timeout: 10_000 });
 	});
 
-	test("CWD_OUTSIDE_PROJECT renders an actionable failed card and corrected resubmission revision", async ({ page }) => {
+	test("CWD_OUTSIDE_PROJECT renders an actionable failed card and corrected resubmission revision", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
+		await authenticateMockProposalTools(page, gateway);
 		await sendMessage(page, "Please run GOAL_PROPOSAL_OUTSIDE_CWD now");
 
 		const failedCard = page.locator('[data-testid="proposal-failed-card"]').filter({ hasText: "Outside Cwd Goal" }).first();
@@ -312,10 +338,12 @@ test.describe("Journey: Failed Goal Proposal", () => {
 			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 			const messages = state?.remoteAgent?.state?.messages ?? [];
 			const failed = [...messages].reverse().find((message: any) =>
-				message?.role === "toolResult" && message?.toolName === "propose_goal" && message?.isError === true,
+				message?.role === "toolResult" && message?.toolName === "propose_goal"
+					&& (message?.content ?? []).some((part: any) => String(part?.text ?? "").includes("CWD_OUTSIDE_PROJECT")),
 			);
-			return (failed?.content ?? []).map((part: any) => part?.text ?? "").join("\n");
-		}), { timeout: 20_000 }).toContain('"code": "CWD_OUTSIDE_PROJECT"');
+			const text = (failed?.content ?? []).map((part: any) => part?.text ?? "").join("\n");
+			try { return JSON.parse(text)?.code; } catch { return undefined; }
+		}), { timeout: 20_000 }).toBe("CWD_OUTSIDE_PROJECT");
 
 		await sendMessage(page, "Please run GOAL_PROPOSAL_FIXED_CWD now");
 		await expect(page.getByText("Corrected Cwd Goal").first()).toBeVisible({ timeout: 20_000 });
@@ -451,10 +479,11 @@ test.describe("Journey: Goal Proposal — revision auto-update", () => {
 	const INITIAL_SPEC_TAIL = "It validates the goal creation UI.";
 	const EDITED_SPEC_BODY = "EDITED SPEC BODY for Mode A repro.";
 
-	test("edit_proposal auto-updates the assistant panel form-mirror in place", async ({ page }) => {
+	test("edit_proposal auto-updates the assistant panel form-mirror in place", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		await openApp(page);
 		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		await authenticateMockProposalTools(page, gateway);
 		const textarea = page.locator("textarea").first();
 		await expect(textarea).toBeVisible({ timeout: 30_000 });
 		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
@@ -653,12 +682,13 @@ test.describe("Journey: Goal Proposal — Sub-goals prefill", () => {
 // an editable project proposal panel exposes its Apply/Accept button via the
 // accept-label testid, and applying the (live-edited) proposal persists.
 test.describe("Journey: Editable Project Proposal", () => {
-	test("edit_proposal updates the slot live; Apply (accept-label) persists edited value", async ({ page }) => {
+	test("edit_proposal updates the slot live; Apply (accept-label) persists edited value", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		const projectId = await defaultProjectId();
 		expect(projectId).toBeTruthy();
 		await openApp(page);
 		await createSessionViaUI(page);
+		await authenticateMockProposalTools(page, gateway);
 
 		// Initial propose_project → slot populates with build_command="echo old".
 		await sendMessage(page, "EDITABLE_PROPOSAL_INITIAL");
@@ -681,15 +711,21 @@ test.describe("Journey: Editable Project Proposal", () => {
 			return s?.selectedSessionId as string | undefined;
 		});
 		expect(sessionId).toBeTruthy();
-		const targetEdit = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
-			method: "POST",
-			body: JSON.stringify({
-				old_text: "root_path: /tmp/editable",
-				new_text: `root_path: ${JSON.stringify(nonGitCwd())}\nprojectId: ${projectId}`,
-			}),
-		});
-		const targetEditText = await targetEdit.text();
-		expect(targetEdit.status, `explicit project target edit failed: ${targetEditText}`).toBe(200);
+		const targetEdit = await page.evaluate(async ({ sid, cwd, targetProjectId }) => {
+			// Proposal mutation is a human-operator action. Keep this request on the
+			// mounted app's origin so the browser's signed operator cookie, rather
+			// than the Node harness bearer token, authenticates the owner explicitly.
+			const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposal/project/edit`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					old_text: "root_path: /tmp/editable",
+					new_text: `root_path: ${JSON.stringify(cwd)}\nprojectId: ${targetProjectId}`,
+				}),
+			});
+			return { status: response.status, text: await response.text() };
+		}, { sid: sessionId!, cwd: nonGitCwd(), targetProjectId: projectId });
+		expect(targetEdit.status, `explicit project target edit failed: ${targetEdit.text}`).toBe(200);
 		await page.waitForFunction(
 			(id) => {
 				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
