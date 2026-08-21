@@ -42,6 +42,15 @@ function proposalPath(bobbitDir: string, sid: string, type: string): string {
 	return path.join(bobbitDir, "state", "proposal-drafts", sid, `${type}.${ext}`);
 }
 
+function latestProposalRevision(bobbitDir: string, sid: string, type: string): number {
+	const historyDir = path.join(bobbitDir, "state", "proposal-drafts", sid, `${type}.history`);
+	if (!fs.existsSync(historyDir)) return 0;
+	return fs.readdirSync(historyDir).reduce((latest, filename) => {
+		const match = /^(\d+)\.(?:md|yaml)$/.exec(filename);
+		return match ? Math.max(latest, Number.parseInt(match[1], 10)) : latest;
+	}, 0);
+}
+
 test.describe("editable proposals — REST API", () => {
 	test("edit-before-propose returns 404 FILE_NOT_FOUND naming propose_goal", async () => {
 		const sid = await createSession();
@@ -55,6 +64,71 @@ test.describe("editable proposals — REST API", () => {
 			expect(body.ok).toBe(false);
 			expect(body.code).toBe("FILE_NOT_FOUND");
 			expect(String(body.message)).toMatch(/propose_goal/);
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("outside-project goal cwd is rejected transactionally before draft persistence", async ({ gateway }) => {
+		const sid = await createSession();
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		const outsideCwd = path.join(gateway.bobbitDir, "outside-proposal-cwd", sid);
+		try {
+			const rejectedFirst = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({
+					args: {
+						title: "Invalid First Draft",
+						spec: "An outside-project cwd must not become a proposal draft.\n",
+						workflow: "feature",
+						cwd: outsideCwd,
+					},
+				}),
+			});
+			const rejectedFirstText = await rejectedFirst.text();
+			expect(
+				rejectedFirst.status,
+				`PROPOSE_GOAL_CWD_VALIDATION_MISSING: outside-project seed was accepted: ${rejectedFirstText}`,
+			).toBe(422);
+			const rejectedFirstBody = JSON.parse(rejectedFirstText) as Record<string, unknown>;
+			expect(rejectedFirstBody.code).toBe("CWD_OUTSIDE_PROJECT");
+			expect(String(rejectedFirstBody.message ?? rejectedFirstBody.error)).toMatch(/cwd must be inside the selected project/i);
+			expect(fs.existsSync(fp), "rejected first seed must not create a live proposal draft").toBe(false);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal"), "rejected first seed must not advance proposal revision").toBe(0);
+
+			const accepted = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({
+					args: {
+						title: "Valid Baseline Draft",
+						spec: "A valid draft that a later rejected proposal must preserve.\n",
+						workflow: "feature",
+					},
+				}),
+			});
+			expect(accepted.status, await accepted.clone().text()).toBe(200);
+			const acceptedBody = await accepted.json() as { rev: number };
+			const beforeContent = fs.readFileSync(fp, "utf8");
+			const beforeRevision = latestProposalRevision(gateway.bobbitDir, sid, "goal");
+			expect(beforeRevision).toBe(acceptedBody.rev);
+
+			const rejectedSecond = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({
+					args: {
+						title: "Invalid Replacement",
+						spec: "This invalid attempt must not overwrite the valid baseline.\n",
+						workflow: "feature",
+						cwd: outsideCwd,
+					},
+				}),
+			});
+			const rejectedSecondText = await rejectedSecond.text();
+			expect(rejectedSecond.status, `invalid replacement response: ${rejectedSecondText}`).toBe(422);
+			const rejectedSecondBody = JSON.parse(rejectedSecondText) as Record<string, unknown>;
+			expect(rejectedSecondBody.code).toBe("CWD_OUTSIDE_PROJECT");
+			expect(fs.readFileSync(fp, "utf8"), "rejected replacement must preserve the valid draft bytes").toBe(beforeContent);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal"), "rejected replacement must preserve the valid draft revision").toBe(beforeRevision);
 		} finally {
 			await deleteSession(sid);
 		}
