@@ -147,6 +147,15 @@
       }
     },
     {
+      "path": "tests2/integration/host-notification-sandbox-ws.test.ts",
+      "reason": "Integration regression proving sandbox tokens cannot claim app client metadata to receive canonical notification deltas or refresh signals.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/notification-staff-dispatcher.test.ts",
       "reason": "Integration coverage for notification staff filtering, canonical durable envelopes, deduplication, retry, cancellation, loop protection, and reconciliation.",
       "execution": {

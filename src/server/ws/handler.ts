@@ -57,7 +57,15 @@ import {
 	SessionCommandSerialiser,
 } from "./session-command-serialiser.js";
 import { isSocketSendable } from "./socket-sendability.js";
+import {
+	hasUiWebSocketPrincipal,
+	type PrincipalTaggedWebSocket,
+	type WebSocketAuthPrincipal,
+} from "./ui-principal.js";
 import { bindHostNotificationSocket, unbindHostNotificationSocket } from "../extension-host/host-notification-socket-router.js";
+
+export { hasUiWebSocketPrincipal } from "./ui-principal.js";
+export type { WebSocketAuthPrincipal } from "./ui-principal.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -735,24 +743,6 @@ function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
 		|| (f.kind === "json" && Object.prototype.hasOwnProperty.call(f, "data") && f.data !== undefined);
 }
 
-export type WebSocketAuthPrincipal = Readonly<{
-	kind: "admin" | "sandbox" | "localhost";
-}>;
-
-type PrincipalTaggedWebSocket = WebSocket & {
-	authPrincipal?: WebSocketAuthPrincipal;
-};
-
-/**
- * Sidebar/global UI payloads are restricted to server-authenticated user
- * principals. Product metadata such as clientKind is intentionally ignored:
- * sandbox bearer tokens must never acquire global UI broadcast authority.
- */
-export function hasUiWebSocketPrincipal(ws: WebSocket): boolean {
-	const kind = (ws as PrincipalTaggedWebSocket).authPrincipal?.kind;
-	return kind === "admin" || kind === "localhost";
-}
-
 export function handleWebSocketConnection(
 	ws: WebSocket,
 	sessionId: string,
@@ -994,8 +984,10 @@ export function handleWebSocketConnection(
 					const archivedProjectId = persistedArchivedProjectId && archived.projectId && persistedArchivedProjectId !== archived.projectId
 						? undefined
 						: persistedArchivedProjectId ?? archived.projectId;
-					if (authMsg.clientKind === "app" && archivedProjectId) {
+					if (authMsg.clientKind === "app" && archivedProjectId && hasUiWebSocketPrincipal(ws)) {
 						bindHostNotificationSocket(ws, { sessionId, projectId: archivedProjectId });
+					} else {
+						unbindHostNotificationSocket(ws);
 					}
 					send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
@@ -1027,8 +1019,10 @@ export function handleWebSocketConnection(
 			const exactProjectId = persistedProjectId && session.projectId && persistedProjectId !== session.projectId
 				? undefined
 				: persistedProjectId ?? session.projectId;
-			if (authMsg.clientKind === "app" && exactProjectId) {
+			if (authMsg.clientKind === "app" && exactProjectId && hasUiWebSocketPrincipal(ws)) {
 				bindHostNotificationSocket(ws, { sessionId, projectId: exactProjectId });
+			} else {
+				unbindHostNotificationSocket(ws);
 			}
 
 			// Pack-bound surface-token minting uses an app-connection protocol key so

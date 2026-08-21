@@ -6,6 +6,10 @@ import type {
 } from "../../shared/extension-host/host-hooks.js";
 import type { ServerMessage } from "../ws/protocol.js";
 import { isSocketSendable } from "../ws/socket-sendability.js";
+import {
+	hasUiWebSocketPrincipal,
+	type PrincipalTaggedWebSocket,
+} from "../ws/ui-principal.js";
 import type { HostNotificationDeliveryAdapter } from "./host-notification-dispatcher.js";
 
 interface HostNotificationSocketBinding {
@@ -15,10 +19,16 @@ interface HostNotificationSocketBinding {
 
 const SOCKET_BINDINGS = new WeakMap<WebSocket, HostNotificationSocketBinding>();
 
-type BoundWebSocket = WebSocket & {
+type BoundWebSocket = PrincipalTaggedWebSocket & {
 	authenticated?: boolean;
 	isViewer?: boolean;
 };
+
+function eligibleBinding(ws: WebSocket): HostNotificationSocketBinding | undefined {
+	const socket = ws as BoundWebSocket;
+	if (socket.authenticated !== true || socket.isViewer === true || !hasUiWebSocketPrincipal(ws)) return undefined;
+	return SOCKET_BINDINGS.get(ws);
+}
 
 interface StreamState {
 	readonly epoch: string;
@@ -49,7 +59,15 @@ export function bindHostNotificationSocket(
 	ws: WebSocket,
 	binding: { sessionId: string; projectId: string },
 ): void {
-	if (!binding.sessionId || !binding.projectId || binding.sessionId === "__viewer__") {
+	const socket = ws as BoundWebSocket;
+	if (
+		!binding.sessionId
+		|| !binding.projectId
+		|| binding.sessionId === "__viewer__"
+		|| socket.authenticated !== true
+		|| socket.isViewer === true
+		|| !hasUiWebSocketPrincipal(ws)
+	) {
 		unbindHostNotificationSocket(ws);
 		return;
 	}
@@ -60,7 +78,7 @@ export function unbindHostNotificationSocket(ws: WebSocket): void {
 	SOCKET_BINDINGS.delete(ws);
 }
 
-/** Exact, server-authorized live browser delivery. No viewer/client filtering. */
+/** Exact, server-authorized live browser delivery with live principal checks. */
 export class HostNotificationSocketRouter implements HostNotificationDeliveryAdapter {
 	readonly consumer = "browser" as const;
 	private readonly states = new WeakMap<WebSocket, Map<HostHookScope, StreamState>>();
@@ -122,10 +140,8 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 	private *recipients(notification: HostNotification): IterableIterator<WebSocket> {
 		const sockets = typeof this.sockets === "function" ? this.sockets() : this.sockets;
 		for (const ws of sockets) {
-			const socket = ws as BoundWebSocket;
-			const binding = SOCKET_BINDINGS.get(ws);
-			if (socket.authenticated !== true || socket.isViewer === true || !binding) continue;
-			if (binding.projectId !== notification.projectId) continue;
+			const binding = eligibleBinding(ws);
+			if (!binding || binding.projectId !== notification.projectId) continue;
 			if (notification.scope === "session" && binding.sessionId !== notification.sessionId) continue;
 			yield ws;
 		}
@@ -169,6 +185,11 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 
 	private tryRefresh(ws: WebSocket, scope: HostHookScope, state: StreamState): void {
 		if (!state.active) return;
+		if (!eligibleBinding(ws)) {
+			unbindHostNotificationSocket(ws);
+			this.cleanupSocket(ws);
+			return;
+		}
 		if (!state.refreshRequired) {
 			state.refreshAttempts = 0;
 			return;

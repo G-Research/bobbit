@@ -13,6 +13,7 @@ interface FakeSocket {
 	bufferedAmount: number;
 	authenticated?: boolean;
 	isViewer?: boolean;
+	authPrincipal?: { kind: "admin" | "sandbox" | "localhost" };
 	frames: ServerMessage[];
 	sendErrors: Array<Error | undefined>;
 	closes: Array<{ code?: number; reason?: string }>;
@@ -32,6 +33,7 @@ function socket(overrides: Partial<FakeSocket> = {}): FakeSocket {
 		readyState: 1,
 		bufferedAmount: 0,
 		authenticated: true,
+		authPrincipal: { kind: "admin" },
 		frames: [],
 		sendErrors: [],
 		closes: [],
@@ -132,6 +134,59 @@ describe("canonical host notification socket routing", () => {
 		expect(names(unauthenticated)).toEqual([]);
 		const exactNotifications = exact.frames.filter(frame => frame.type === "host_notification");
 		expect(exactNotifications.map(frame => frame.notification.projectId)).toEqual(["project-a", "project-a"]);
+	});
+
+	it("refuses sandbox-principal bindings and rechecks principal authority for deltas and refreshes", async () => {
+		const sandbox = socket({ authPrincipal: { kind: "sandbox" } });
+		const revoked = socket();
+		bind(sandbox, "session-a", "project-a");
+		bind(revoked, "session-a", "project-a");
+		revoked.authPrincipal = { kind: "sandbox" };
+		const router = new HostNotificationSocketRouter([sandbox, revoked] as unknown as WebSocket[], {
+			epochGenerator: () => "epoch",
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => "project-a",
+			idGenerator: () => "notification-1",
+			now: () => 15,
+		});
+
+		const notification = dispatcher.publish("statusChanged", sessionPublication());
+		expect(notification).toBeDefined();
+		router.refreshRequired(notification!);
+		await settleRouting();
+
+		expect(sandbox.frames).toEqual([]);
+		expect(revoked.frames).toEqual([]);
+	});
+
+	it("cancels an already-scheduled refresh when UI principal authority is revoked", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const exact = socket({ bufferedAmount: 100 });
+		bind(exact, "session-a", "project-a");
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			maxBufferedBytes: 10,
+			refreshRetryDelayMs: 5,
+			maxRefreshRetries: 3,
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => "project-a",
+			now: () => 16,
+		});
+
+		dispatcher.publish("statusChanged", sessionPublication());
+		await settleRouting();
+		expect(vi.getTimerCount()).toBe(1);
+
+		exact.authPrincipal = { kind: "sandbox" };
+		exact.bufferedAmount = 0;
+		await vi.advanceTimersByTimeAsync(5);
+
+		expect(exact.frames).toEqual([]);
+		expect(exact.closes).toEqual([]);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 
 	it("uses independent scope epochs, monotonic sequences, and one coalesced refresh frame after dispatcher gaps", async () => {
