@@ -58,6 +58,28 @@ function extensionPaths(args: string[]): string[] {
 }
 
 describe("initial tool hook transport snapshot", () => {
+	it("enables metadata-only tool lifecycle callbacks without interceptors", () => {
+		const plan: any = {
+			id: "sess-initial-observational",
+			projectId: "proj-initial",
+			cwd: tmpRoot,
+			effectiveAllowedTools: [],
+			bridgeOptions: { args: [], env: {} },
+		};
+		resolveToolActivation(plan, {
+			toolManager: null,
+			mcpManager: null,
+			groupPolicyStore: null,
+			lifecycleHub: undefined,
+			resolveGoalMetadata: () => ({}),
+			hostInterceptors: undefined,
+		} as any);
+
+		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_HOOKS_ENABLED, "1");
+		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "0");
+		assert.equal(plan.bridgeOptions.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED, "0");
+	});
+
 	it("injects the host-owned protected tool-hook decisions during setup", () => {
 		const seen: Array<{ name: string; projectId?: string; goalId?: string }> = [];
 		const plan: any = {
@@ -95,6 +117,18 @@ describe("initial tool hook transport snapshot", () => {
 });
 
 describe("buildToolActivationArgs provider-bridge re-attachment (respawn/restore)", () => {
+	it("keeps metadata-only tool lifecycle callbacks enabled after respawn without interceptors", () => {
+		const manager = makeManager();
+		manager.hostInterceptors = undefined;
+
+		const { env } = manager.buildToolActivationArgs(
+			"sess-respawn-observational", undefined, undefined, tmpRoot, "proj-observational",
+		);
+		assert.equal(env.BOBBIT_HOST_HOOKS_ENABLED, "1");
+		assert.equal(env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED, "0");
+		assert.equal(env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED, "0");
+	});
+
 	it("appends the provider-bridge extension when the project declares a per-turn hook", () => {
 		const manager = makeManager();
 		const seen: Array<{ projectId?: string; hooks: readonly string[] }> = [];

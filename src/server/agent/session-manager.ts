@@ -3984,7 +3984,13 @@ export class SessionManager {
 		});
 	}
 
-	private notifySessionCreated(session: SessionInfo): void {
+	/**
+	 * Publish the legacy/canonical creation seam only after the structural row is
+	 * atomically durable. The store barrier is intentionally owned here so every
+	 * creation listener shares the same authority boundary.
+	 */
+	private async notifySessionCreated(session: SessionInfo, store: SessionStore): Promise<void> {
+		await store.flushAsync();
 		for (const fn of this._creationListeners) {
 			try { fn(session); } catch (err) {
 				console.error(`[session-manager] session creation listener failed for ${session.id}:`, err);
@@ -5945,9 +5951,6 @@ export class SessionManager {
 			args.push("--extension", aigwDnsGuardPath);
 		}
 
-		const toolHooksNeeded = this.hostInterceptors?.hasAny?.(
-			["beforeToolCall", "afterToolResult"], projectId, effectiveGoalId,
-		) ?? !!this.hostInterceptors;
 		const beforeToolCallFailClosed = this.hostInterceptors?.requiresFailClosed?.(
 			"beforeToolCall", projectId, effectiveGoalId,
 		) === true;
@@ -5958,7 +5961,10 @@ export class SessionManager {
 			args,
 			env: {
 				...activation.env,
-				...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
+				// The same exact-auth bridge owns canonical tool lifecycle metadata even
+				// when no interceptor contributes a decision. Failure policy remains
+				// contribution-derived through the two flags below.
+				BOBBIT_HOST_HOOKS_ENABLED: "1",
 				BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: beforeToolCallFailClosed ? "1" : "0",
 				BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: afterToolResultFailClosed ? "1" : "0",
 			},
@@ -12456,14 +12462,22 @@ export class SessionManager {
 				bridgeOptions: { cwd },
 			};
 
-			// Persist immediately with all known structural fields
+			// Persist immediately with all known structural fields. Creation listeners
+			// remain silent until the final structural generation crosses the store's
+			// atomic publication fence.
 			persistOnce(session, plan, ctx.store);
 			if (session.repoWorktrees && session.repoWorktrees.length > 0) {
 				ctx.store.update(session.id, {
 					repoWorktrees: Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath])),
 				});
 			}
-			this.notifySessionCreated(session);
+			try {
+				await this.notifySessionCreated(session, ctx.store);
+			} catch (err) {
+				const persistenceError = err instanceof Error ? err : new Error(String(err));
+				handleSetupFailure(session, plan, persistenceError, ctx);
+				throw persistenceError;
+			}
 
 			// Finish the pipeline. Most callers keep the historical preparing-session UX
 			// and let setup complete in the background. Continue-Archived opts in to
@@ -12570,7 +12584,13 @@ export class SessionManager {
 			if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
 				await this.tryAutoSelectModel(session);
 			}
-			this.notifySessionCreated(session);
+			try {
+				await this.notifySessionCreated(session, ctx.store);
+			} catch (err) {
+				const persistenceError = err instanceof Error ? err : new Error(String(err));
+				handleSetupFailure(session, plan, persistenceError, ctx);
+				throw persistenceError;
+			}
 
 			// Persist session metadata (fire-and-forget, but tracked for terminate).
 			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
@@ -15388,6 +15408,48 @@ export class SessionManager {
 		return parseImageModelPref(pref);
 	}
 
+	/** Notify existing termination listeners from the one durable archive boundary. */
+	private async notifySessionArchived(
+		id: string,
+		source: SessionInfo | PersistedSession,
+	): Promise<void> {
+		const repoWorktrees = Array.isArray(source.repoWorktrees)
+			? source.repoWorktrees.map(worktree => ({ worktreePath: worktree.worktreePath }))
+			: source.repoWorktrees
+				? Object.values(source.repoWorktrees).map(worktreePath => ({ worktreePath }))
+				: undefined;
+		const info: SessionTerminationInfo = {
+			projectId: source.projectId,
+			reason: "archived",
+			cwd: source.cwd,
+			worktreePath: source.worktreePath,
+			repoWorktrees,
+		};
+		for (const listener of this._terminationListeners) {
+			try {
+				await listener(id, info);
+			} catch (err) {
+				console.error(`[session ${id}] termination listener failed:`, err);
+			}
+		}
+	}
+
+	/**
+	 * Archive one row and notify observers exactly once, after successful atomic
+	 * publication. Consumer failure remains observational and cannot roll back the
+	 * durable transition.
+	 */
+	private async archivePersistedSession(
+		id: string,
+		store: SessionStore,
+		source: SessionInfo | PersistedSession,
+	): Promise<boolean> {
+		const archived = await store.archiveAsync(id);
+		if (!archived) return false;
+		await this.notifySessionArchived(id, source);
+		return true;
+	}
+
 	/**
 	 * Cascade-reap an owner's child agents (OrchestrationCore §6).
 	 *
@@ -15420,7 +15482,10 @@ export class SessionManager {
 		for (const ps of allLiveForTerminate) {
 			const isChild = ps.delegateOf === id || (!!ps.childKind && ps.parentSessionId === id);
 			if (isChild && (!options.cascadeSessionIds || options.cascadeSessionIds.has(ps.id)) && !this.sessions.has(ps.id)) {
-				try { await this.getSessionStore(ps.projectId).archiveAsync(ps.id); } catch { /* project gone */ }
+				try {
+					await this.dispatchSessionShutdownInterceptor(ps, "archived");
+					await this.archivePersistedSession(ps.id, this.getSessionStore(ps.projectId), ps);
+				} catch { /* project gone or archive publication failed */ }
 			}
 		}
 		// Keep the OrchestrationCore in-memory index consistent.
@@ -15482,14 +15547,18 @@ export class SessionManager {
 		// Defense in depth for internal recovery and maintenance callers. Ordered
 		// goal archival has already made the canonical guard return undefined here.
 		this.assertPromotedSessionRecoveryAllowed(id, "archive its session record");
-		await this.cascadeReapOwner(id, options);
-		const live = this.sessions.get(id);
-		const persisted = live ? undefined : this.getPersistedSession(id);
-		const shutdownSource = live ?? persisted;
-		if (shutdownSource) await this.dispatchSessionShutdownInterceptor(shutdownSource, "archived");
 		const target = store ?? this.resolveStoreForId(id);
-		if (!target) return false;
-		try { return await target.archiveAsync(id); } catch { return false; }
+		const initial = target?.get(id);
+		if (!target || !initial || initial.archived) return false;
+		await this.cascadeReapOwner(id, options);
+		// A concurrent archive may have completed while the child cascade settled.
+		if (target.get(id)?.archived) return false;
+		const live = this.sessions.get(id);
+		const persisted = live ? undefined : target.get(id);
+		const shutdownSource = live ?? persisted;
+		if (!shutdownSource) return false;
+		await this.dispatchSessionShutdownInterceptor(shutdownSource, "archived");
+		try { return await this.archivePersistedSession(id, target, shutdownSource); } catch { return false; }
 	}
 
 	/**
@@ -15756,8 +15825,9 @@ export class SessionManager {
 		await this.dispatchSessionShutdownInterceptor(session, "terminated");
 		// Always archive — even without an agentSessionFile the metadata
 		// (title, goal association, timestamps) is valuable and the search
-		// index may reference this session.  Purge will clean it up later.
-		await terminateStore.archiveAsync(id);
+		// index may reference this session. Purge will clean it up later. Existing
+		// listeners observe the same post-success boundary as dormant/cascade paths.
+		await this.archivePersistedSession(id, terminateStore, session);
 
 		// Bug 2 (docs/design/orphan-remote-branch-cleanup.md): eagerly push-delete
 		// the remote branch for non-delegate `session/*` sessions whose branch is
@@ -15786,22 +15856,6 @@ export class SessionManager {
 			}).catch(err => {
 				console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
 			});
-		}
-
-		// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
-		// Pass cwd/worktreePath/repoWorktrees in the info so listeners
-		// can't be defeated by the `sessions.delete(id)` above —
-		// `getSession(id)` would return undefined here and refcounts would leak.
-		const projectIdForListeners = session.projectId;
-		const sessionCwd = session.cwd;
-		const sessionWorktreePath = session.worktreePath;
-		const sessionRepoWorktrees = session.repoWorktrees;
-		for (const listener of this._terminationListeners) {
-			try {
-				await listener(id, { projectId: projectIdForListeners, reason: "archived", cwd: sessionCwd, worktreePath: sessionWorktreePath, repoWorktrees: sessionRepoWorktrees });
-			} catch (err) {
-				console.error(`[session ${id}] termination listener failed:`, err);
-			}
 		}
 
 		// Don't remove color or session prompt — they're needed for archived view

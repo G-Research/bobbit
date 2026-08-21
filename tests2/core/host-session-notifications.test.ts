@@ -18,6 +18,13 @@ const { HostNotificationDispatcher } = await import("../../src/server/extension-
 
 const managers: any[] = [];
 
+function deferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
+}
+
 afterEach(() => {
 	for (const manager of managers.splice(0)) {
 		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
@@ -70,6 +77,38 @@ function makeHarness() {
 }
 
 describe("authoritative session host notifications", () => {
+	it("fences session creation listeners on successful initial persistence", async () => {
+		const manager: any = new SessionManager();
+		managers.push(manager);
+		const publication = deferred<void>();
+		const calls: string[] = [];
+		manager.addCreationListener((session: any) => calls.push(session.id));
+		const session = { id: "created-after-commit" } as any;
+		const notifying = manager.notifySessionCreated(session, {
+			flushAsync: () => publication.promise,
+		} as any);
+
+		await Promise.resolve();
+		assert.deepEqual(calls, [], "listeners must remain silent before the store barrier settles");
+		publication.resolve();
+		await notifying;
+		assert.deepEqual(calls, [session.id]);
+	});
+
+	it("keeps session creation listeners silent when initial persistence fails", async () => {
+		const manager: any = new SessionManager();
+		managers.push(manager);
+		const calls: string[] = [];
+		manager.addCreationListener((session: any) => calls.push(session.id));
+		await assert.rejects(
+			manager.notifySessionCreated({ id: "failed-creation" } as any, {
+				flushAsync: async () => { throw new Error("injected initial persistence failure"); },
+			} as any),
+			/injected initial persistence failure/,
+		);
+		assert.deepEqual(calls, []);
+	});
+
 	it("publishes status only after the legacy frame and suppresses unchanged status", () => {
 		const { session, facts, sent } = makeHarness();
 		broadcastStatus(session, "streaming", { streamingStartedAt: 10 });
@@ -118,10 +157,15 @@ describe("authoritative session host notifications", () => {
 		assert.equal(JSON.stringify(facts).includes("PRIVATE_PROVIDER_BODY"), false);
 	});
 
-	it("fences tool completion on accepted tool-result message metadata", () => {
+	it("publishes tool lifecycle facts without an installed interceptor and fences completion on the accepted result", () => {
 		const { manager, session, facts, dispatcher } = makeHarness();
+		assert.equal(manager.hostInterceptors, undefined, "precondition: lifecycle observation is not interceptor-gated");
 		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		assert.equal(manager.dispatchHostInterceptor(session.id, "beforeToolCall", {
+			toolCallId: "call-1", toolName: "read", args: {},
+		}), undefined);
 		manager.markToolCallAdmitted(session.id, "call-1", "read");
+		assert.equal(facts.filter((fact) => fact.name === "toolCallStarted").length, 1);
 		manager.handleAgentLifecycle(session, {
 			type: "tool_execution_end",
 			toolCallId: "call-1",
@@ -144,6 +188,8 @@ describe("authoritative session host notifications", () => {
 		});
 
 		assert.deepEqual(facts.slice(-2).map((fact) => fact.name), ["messageAppended", "toolCallCompleted"]);
+		assert.equal(facts.filter((fact) => fact.name === "toolCallStarted").length, 1);
+		assert.equal(facts.filter((fact) => fact.name === "toolCallCompleted").length, 1);
 		assert.deepEqual(facts.at(-1)?.publication.payload, {
 			toolCallId: "call-1",
 			toolName: "read",

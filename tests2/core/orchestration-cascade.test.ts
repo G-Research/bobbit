@@ -85,9 +85,15 @@ describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 		return manager;
 	}
 
-	it("TERMINATE cascades to live children of EVERY child kind (not just pr-walkthrough)", async () => {
+	it("TERMINATE cascades to live children and invokes each archive listener once after persistence", async () => {
 		const store = new SessionStore(stateRoot);
 		const manager = makeManager(store);
+		const archived: string[] = [];
+		manager.addTerminationListener((id: string, info: any) => {
+			assert.equal(info.reason, "archived");
+			assert.equal(store.get(id)?.archived, true, `${id} listener must follow durable archive publication`);
+			archived.push(id);
+		});
 
 		manager.sessions.set("parent", makeInfo(store, "parent", {}));
 		// delegate child is linked by delegateOf; the rest by parentSessionId+childKind.
@@ -101,12 +107,19 @@ describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 		for (const id of ["parent", "c-delegate", "c-team", "c-host", "c-prw"]) {
 			assert.equal(manager.sessions.has(id), false, `${id} must be terminated`);
 			assert.equal(store.get(id)?.archived, true, `${id} must be archived`);
+			assert.equal(archived.filter(archivedId => archivedId === id).length, 1, `${id} must notify exactly once`);
 		}
 	});
 
-	it("ARCHIVE (storeArchive) of a DORMANT parent cascade-reaps live + dormant children of every kind", async () => {
+	it("ARCHIVE of a dormant parent notifies live/dormant cascade rows once and suppresses repeat archive", async () => {
 		const store = new SessionStore(stateRoot);
 		const manager = makeManager(store);
+		const archived: string[] = [];
+		manager.addTerminationListener((id: string, info: any) => {
+			assert.equal(info.reason, "archived");
+			assert.equal(store.get(id)?.archived, true, `${id} listener must follow durable archive publication`);
+			archived.push(id);
+		});
 
 		// Parent exists only in the store (dormant — NOT in the in-memory map).
 		store.put({ id: "parent", title: "parent", cwd: stateRoot, agentSessionFile: "", createdAt: Date.now(), lastActivity: Date.now() } as any);
@@ -124,6 +137,45 @@ describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 		assert.equal(store.get("c-live-host")?.archived, true, "live host-agents child must be archived");
 		assert.equal(store.get("c-dormant-delegate")?.archived, true, "dormant delegate child must be archived");
 		assert.equal(store.get("c-dormant-team")?.archived, true, "dormant team child must be archived");
+		for (const id of ["parent", "c-live-host", "c-dormant-delegate", "c-dormant-team"]) {
+			assert.equal(archived.filter(archivedId => archivedId === id).length, 1, `${id} must notify exactly once`);
+		}
+
+		const firstArchivedAt = store.get("parent")?.archivedAt;
+		assert.equal(await manager.storeArchive("parent"), false, "repeat archive is not a transition");
+		assert.equal(store.get("parent")?.archivedAt, firstArchivedAt, "repeat archive keeps the stable revision");
+		assert.equal(archived.length, 4, "repeat archive must not notify parent or cascade rows again");
+	});
+
+	it("emits no archive listener when dormant persistence fails and permits a later retry", async () => {
+		const row: any = {
+			id: "failing-dormant",
+			title: "failing-dormant",
+			cwd: stateRoot,
+			agentSessionFile: "",
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+		};
+		let fail = true;
+		const store: any = {
+			get: (id: string) => id === row.id ? row : undefined,
+			getLive: () => row.archived ? [] : [row],
+			archiveAsync: async () => {
+				if (fail) throw new Error("injected archive publication failure");
+				row.archived = true;
+				row.archivedAt = Date.now();
+				return true;
+			},
+		};
+		const manager = makeManager(store);
+		const archived: string[] = [];
+		manager.addTerminationListener((id: string) => archived.push(id));
+
+		assert.equal(await manager.storeArchive(row.id), false);
+		assert.deepEqual(archived, []);
+		fail = false;
+		assert.equal(await manager.storeArchive(row.id), true);
+		assert.deepEqual(archived, [row.id]);
 	});
 
 	it("ARCHIVE does NOT touch sessions belonging to a different parent", async () => {
