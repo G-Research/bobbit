@@ -2836,6 +2836,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		for (const scope of ["server", "global-user", "project"] as const) {
 			for (const e of marketPackProvider.marketEntries(scope, effectiveProjectId)) {
+				const activation = e.manifest
+					? packActivationStore(scope, effectiveProjectId)?.getPackActivation(scope, e.manifest.name)
+					: undefined;
+				if (!isPackEffectivelyEnabled(e.manifest, activation)) continue;
 				const key = path.resolve(e.path);
 				if (seen.has(key)) continue;
 				seen.add(key);
