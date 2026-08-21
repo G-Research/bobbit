@@ -16,6 +16,7 @@ import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
 import { realClock, realCommandRunner, type Clock, type CommandRunner } from "../gateway-deps.js";
 import { isHeadquartersProject } from "./project-registry.js";
+import { canonicalExecutionCwd, executionPathIdentity } from "./resolve-project.js";
 
 /** Final worktree paths produced by provisioning, before the goalProvisioned hook + ready flip. */
 type ProvisionedWorktree = {
@@ -58,7 +59,10 @@ const GOAL_CREATION_PREFLIGHT = Symbol("goal-creation-preflight");
 /** Async repository support result bound to exact, later-validated coordinates. */
 export interface GoalCreationPreflight {
 	readonly [GOAL_CREATION_PREFLIGHT]: true;
+	/** Canonical cwd spelling retained for route compatibility. */
 	readonly cwd: string;
+	/** Read-only host identity used to bind the later commit. */
+	readonly cwdIdentity: string;
 	readonly projectId?: string;
 	readonly adoptedOwnerSessionId?: string;
 	readonly repoPath?: string;
@@ -429,7 +433,8 @@ export class GoalManager {
 		}
 		return Object.freeze({
 			[GOAL_CREATION_PREFLIGHT]: true as const,
-			cwd,
+			cwd: canonicalExecutionCwd(cwd),
+			cwdIdentity: executionPathIdentity(cwd),
 			componentsFingerprint,
 			...(projectId ? { projectId } : {}),
 			...(projectRoot ? { projectRoot } : {}),
@@ -450,7 +455,8 @@ export class GoalManager {
 		const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
 		return Object.freeze({
 			[GOAL_CREATION_PREFLIGHT]: true as const,
-			cwd,
+			cwd: canonicalExecutionCwd(cwd),
+			cwdIdentity: executionPathIdentity(cwd),
 			componentsFingerprint: JSON.stringify(components ?? []),
 			...(projectId ? { projectId } : {}),
 			...(projectRoot ? { projectRoot } : {}),
@@ -519,7 +525,7 @@ export class GoalManager {
 		const currentProjectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
 		const currentBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
 		if (preflight[GOAL_CREATION_PREFLIGHT] !== true
-			|| preflight.cwd !== cwd
+			|| preflight.cwdIdentity !== executionPathIdentity(cwd)
 			|| preflight.projectId !== projectId
 			|| preflight.adoptedOwnerSessionId !== adoptedWorkspace?.ownerSessionId
 			|| preflight.componentsFingerprint !== JSON.stringify(currentComponents ?? [])

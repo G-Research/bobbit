@@ -1025,6 +1025,7 @@ import { applyRuntimeSessionThinkingSelection } from "../ws/runtime-model-select
 import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { validateGoalCandidate, type GoalCandidateDeps } from "./goal-candidate-validator.js";
+import { executionPathIdentity } from "./resolve-project.js";
 import {
 	appendRetainedLogChunk,
 	finalizeGateStepDiagnostics,
@@ -8611,7 +8612,7 @@ export class VerificationHarness {
 				if (!freshParent) {
 					return { passed: false, output: `runSubgoalStep: parent goal ${parentGoalId} not found` };
 				}
-				if (freshParent.cwd !== creationPreflight.cwd) {
+				if (executionPathIdentity(freshParent.cwd) !== creationPreflight.cwdIdentity) {
 					return { passed: false, output: "runSubgoalStep: creation preflight became stale — retry the verification step" };
 				}
 				// Enforce nesting limit using the post-preflight parent snapshot.

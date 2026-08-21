@@ -46,6 +46,7 @@ import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS } from "../strict-body.js";
 import { validateGoalCandidate, type GoalCandidateDeps } from "./goal-candidate-validator.js";
+import { executionPathIdentity } from "./resolve-project.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -543,10 +544,15 @@ export async function tryHandleNestedGoalRoute(
 			dependsOn = ((body as { dependsOn: unknown[] }).dependsOn)
 				.filter((d): d is string => typeof d === "string");
 		}
-		// QA-1: workflowId vs workflow.id alignment. The body's workflowId
-		// (or "feature" fallback) is only authoritative when no inline
-		// snapshot is in play; final assignment after resolution below.
-		const bodyWorkflowId = typeof body.workflowId === "string" ? body.workflowId : undefined;
+		// Keep the raw own-property selection for canonical validation. Resolution
+		// may use only a typed string, but must not coerce malformed input into
+		// omission and accidentally inherit the parent's workflow.
+		const ownsBodyWorkflowId = Object.prototype.hasOwnProperty.call(body, "workflowId");
+		const rawBodyWorkflowId = ownsBodyWorkflowId
+			? (body as { workflowId?: unknown }).workflowId
+			: undefined;
+		const hasBodyWorkflowId = ownsBodyWorkflowId && rawBodyWorkflowId !== undefined;
+		const bodyWorkflowId = typeof rawBodyWorkflowId === "string" ? rawBodyWorkflowId : undefined;
 		const suggestedRole = typeof body.suggestedRole === "string" ? body.suggestedRole : undefined;
 		// Caller (children-tools extension) may identify the spawning
 		// team-lead session. Resolution is the four-tier cascade in
@@ -667,7 +673,7 @@ export async function tryHandleNestedGoalRoute(
 				return true;
 			}
 			childCwd = resolveChildCwd(freshParent);
-			if (childCwd !== creationPreflight.cwd) {
+			if (executionPathIdentity(childCwd) !== creationPreflight.cwdIdentity) {
 				json({ error: "Goal creation preflight became stale; retry the child creation", message: "Goal creation preflight became stale; retry the child creation", code: "GOAL_PREFLIGHT_STALE" }, 409);
 				return true;
 			}
@@ -722,7 +728,7 @@ export async function tryHandleNestedGoalRoute(
 			const rawBodyWorkflow = (body as { workflow?: unknown }).workflow;
 			const rawBodyInlineRoles = (body as { inlineRoles?: unknown }).inlineRoles;
 			const inheritsWorkflowSnapshot = rawBodyWorkflow === undefined
-				&& bodyWorkflowId === undefined
+				&& !hasBodyWorkflowId
 				&& resolvedWorkflowForChild !== undefined;
 			const validation = validateGoalCandidate({
 				title,
@@ -732,8 +738,8 @@ export async function tryHandleNestedGoalRoute(
 				parentGoalId: parentId,
 				...(rawBodyWorkflow !== undefined
 					? { inlineWorkflow: rawBodyWorkflow }
-					: bodyWorkflowId !== undefined
-						? { workflowId: bodyWorkflowId }
+					: hasBodyWorkflowId
+						? { workflowId: rawBodyWorkflowId }
 						: resolvedWorkflowForChild
 							? {}
 							: { workflowId }),

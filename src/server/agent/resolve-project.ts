@@ -8,6 +8,7 @@ import type { PersistedStaff } from "./staff-store.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	SYSTEM_PROJECT_ID,
+	createProjectPathIdentity,
 	isHeadquartersProject,
 	isSystemProject,
 	type ProjectRegistry,
@@ -88,11 +89,26 @@ export type CwdValidationResult =
 	| { ok: true; cwd?: string }
 	| { ok: false; status: 422; code: "CWD_OUTSIDE_PROJECT"; error: string };
 
-function realOrResolved(input: string): string {
+// Execution-cwd validation and goal-creation preflight must bind the same
+// host path identity. Disable ProjectRegistry's owned case probe here: request
+// validation/preflight is strictly read-only, so inconclusive filesystems keep
+// their case-preserving spelling rather than creating a temporary directory.
+const executionPathIdentityOwner = createProjectPathIdentity({
+	createCaseProbe: () => { throw new Error("read-only execution path identity"); },
+});
+
+/**
+ * Realpath-aware, separator-normalized identity for execution coordinates.
+ * Resolves the longest existing prefix and preserves case unless the host
+ * filesystem supplies bounded read-only evidence that aliases are equivalent.
+ */
+export function executionPathIdentity(input: string): string {
+	return executionPathIdentityOwner(input);
+}
+
+/** Preserve the established canonical cwd spelling while resolving aliases. */
+export function canonicalExecutionCwd(input: string): string {
 	const resolved = path.resolve(input);
-	// A cwd can legitimately be not-yet-created. Canonicalize its longest
-	// existing prefix so /var and /private/var aliases compare consistently
-	// without resolving an attacker-controlled nonexistent suffix.
 	let existing = resolved;
 	const suffix: string[] = [];
 	while (true) {
@@ -108,15 +124,13 @@ function realOrResolved(input: string): string {
 	}
 }
 
-function comparablePath(input: string): string {
-	const normalized = realOrResolved(input);
-	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
 function isSameOrDescendant(parent: string | undefined, candidate: string): boolean {
 	if (!parent || !candidate) return false;
-	const relative = path.relative(comparablePath(parent), comparablePath(candidate));
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+	const canonicalParent = executionPathIdentity(parent);
+	const canonicalCandidate = executionPathIdentity(candidate);
+	if (canonicalParent === canonicalCandidate) return true;
+	const prefix = canonicalParent.endsWith("/") ? canonicalParent : `${canonicalParent}/`;
+	return canonicalCandidate.startsWith(prefix);
 }
 
 function repoWorktreeRoots(repoWorktrees: Record<string, string> | undefined): string[] {
@@ -199,7 +213,7 @@ export function validateExecutionCwd(
 	source: CwdOwnershipSource,
 ): CwdValidationResult {
 	if (!cwd) return { ok: true };
-	const canonicalCwd = realOrResolved(cwd);
+	const canonicalCwd = canonicalExecutionCwd(cwd);
 	const project = registry.get(projectId);
 	if (!project) {
 		return { ok: false, status: 422, code: "CWD_OUTSIDE_PROJECT", error: `cwd cannot be validated for unknown project: ${projectId}` };
