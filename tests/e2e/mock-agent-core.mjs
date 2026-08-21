@@ -636,7 +636,7 @@ export class MockAgentCore {
 					title: "Outside Cwd Goal",
 					workflow: "general",
 					spec: "A draft intentionally using a cwd outside the selected project.",
-					cwd: path.join(path.parse(this.cwd).root, "__bobbit-outside-proposal__"),
+					cwd: path.join(path.parse(process.cwd()).root, "__bobbit-outside-proposal__"),
 				},
 				output: "Goal proposal failed cwd validation.",
 			};
