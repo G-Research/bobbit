@@ -400,6 +400,19 @@ export class SessionStore {
 	private persistenceFailureSequence = 0;
 	private lastPersistenceError: unknown = null;
 	private lastPersistenceMetrics: PersistenceMetrics | null = null;
+	/**
+	 * Archives hidden from live/restore reads but not yet acknowledged through an
+	 * async durability fence. The row remains archived after a failed write; this
+	 * process-only ledger distinguishes that retryable state from rows loaded as
+	 * durably archived on boot.
+	 */
+	private pendingArchives = new Map<string, {
+		generation: number;
+		row: PersistedSession;
+		archivedAt: number;
+	}>();
+	/** One archive writer/acknowledgement owner per row. */
+	private archiveAttempts = new Map<string, Promise<boolean>>();
 	/** Legacy delivery ledger rows were upgraded in-memory during load. */
 	private loadedDeliveryLedgerMigration = false;
 
@@ -941,44 +954,67 @@ export class SessionStore {
 	}
 
 	/**
-	 * Promise-based archive. Preserves archive()'s record mutation and immediate
-	 * durability without writing a deletion tombstone. Concurrent synchronous
-	 * mutations fold into the same serialized writer rather than racing its
-	 * snapshot.
+	 * Promise-based archive. The row is hidden from live/restore reads before the
+	 * write starts and remains hidden after failure. A failed publication stays
+	 * explicitly retryable in this process, while exactly one caller receives
+	 * `true` after the archive generation crosses a durable fence. Rows loaded as
+	 * archived, and calls after that acknowledgement, return `false`.
 	 */
 	async archiveAsync(id: string): Promise<boolean> {
 		const existing = this.sessions.get(id);
-		if (!existing || existing.archived) {
+		if (!existing) {
 			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
 			return false;
 		}
-		const previousArchived = existing.archived;
-		const previousArchivedAt = existing.archivedAt;
-		const failureSequence = this.persistenceFailureSequence;
-		this.generation++;
-		const targetGeneration = this.generation;
-		const archivedAt = this.clock.now();
-		existing.archived = true;
-		existing.archivedAt = archivedAt;
+
+		const activeAttempt = this.archiveAttempts.get(id);
+		if (activeAttempt) {
+			// Join the durability outcome, but leave transition ownership with the
+			// caller that started the attempt so SessionManager cannot notify twice.
+			await activeAttempt;
+			return false;
+		}
+
+		let pending = this.pendingArchives.get(id);
+		if (!pending) {
+			if (existing.archived) {
+				if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
+				return false;
+			}
+			this.generation++;
+			existing.archived = true;
+			existing.archivedAt = this.clock.now();
+			pending = {
+				generation: this.generation,
+				row: existing,
+				archivedAt: existing.archivedAt,
+			};
+			this.pendingArchives.set(id, pending);
+		}
+
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		try {
-			await this.persistThroughGeneration(targetGeneration, failureSequence);
-		} catch (err) {
-			// A failed publication is not an archive transition. Restore the exact
-			// in-memory shape so a later explicit retry can cross a fresh fence.
-			if (existing.archived === true && existing.archivedAt === archivedAt) {
-				if (previousArchived === undefined) delete existing.archived;
-				else existing.archived = previousArchived;
-				if (previousArchivedAt === undefined) delete existing.archivedAt;
-				else existing.archivedAt = previousArchivedAt;
+		const archivePending = pending;
+		const failureSequence = this.persistenceFailureSequence;
+		const attempt = (async (): Promise<boolean> => {
+			await this.persistThroughGeneration(archivePending.generation, failureSequence);
+			if (this.pendingArchives.get(id) !== archivePending) return false;
+			this.pendingArchives.delete(id);
+			const current = this.sessions.get(id);
+			if (current !== archivePending.row || current.archived !== true || current.archivedAt !== archivePending.archivedAt) {
+				return false;
 			}
-			throw err;
+			this.onIndexUpdate?.(current);
+			return true;
+		})();
+		this.archiveAttempts.set(id, attempt);
+		try {
+			return await attempt;
+		} finally {
+			if (this.archiveAttempts.get(id) === attempt) this.archiveAttempts.delete(id);
 		}
-		this.onIndexUpdate?.(existing);
-		return true;
 	}
 
 	/** Get all archived sessions. */
@@ -1082,16 +1118,16 @@ export class SessionStore {
 	 */
 	private async persistThroughGeneration(targetGeneration: number, failureSequence: number): Promise<void> {
 		// Stop as soon as this call's generation is durable; unrelated traffic
-		// must not make creation/shutdown barriers wait indefinitely.
+		// must not make creation/shutdown barriers wait indefinitely. A shared drain
+		// may publish the target and then fail a later generation, so publication is
+		// checked before attributing that unrelated failure to this barrier.
 		while (this.publishedGeneration < targetGeneration) {
 			const pending = this.asyncSaveInFlight ?? this.requestAsyncSave();
 			await pending;
+			if (this.publishedGeneration >= targetGeneration) return;
 			if (this.persistenceFailureSequence !== failureSequence) {
 				throw this.lastPersistenceError ?? new Error("Session persistence failed");
 			}
-		}
-		if (this.persistenceFailureSequence !== failureSequence) {
-			throw this.lastPersistenceError ?? new Error("Session persistence failed");
 		}
 	}
 }
