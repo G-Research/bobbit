@@ -15983,6 +15983,13 @@ async function handleApiRoute(
 					if (Object.prototype.hasOwnProperty.call(body, "workflow") || Object.prototype.hasOwnProperty.call(body, "workflowId")) {
 						delete rawCandidate.inlineWorkflow;
 					}
+					// Drafts serialize optional-step selections as `options`, while this
+					// acceptance boundary receives `enabledOptionalSteps`. An explicit
+					// body selection (including []) owns the final value; omission keeps
+					// the persisted draft selection.
+					if (Object.prototype.hasOwnProperty.call(body, "enabledOptionalSteps")) {
+						delete rawCandidate.options;
+					}
 					if (rawCandidate.parentGoalId) {
 						throw Object.assign(new Error("Current-session promotion creates a top-level goal."), { statusCode: 422, code: "PROMOTION_PARENT_UNSUPPORTED" });
 					}
