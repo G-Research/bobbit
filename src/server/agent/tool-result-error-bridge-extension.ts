@@ -17,7 +17,36 @@ import { bobbitStateDir } from "../bobbit-dir.js";
  * rejected property instead of reporting only a root additional-property error.
  */
 export function generateToolResultErrorBridgeExtension(): string {
-	return `function isObject(value) {
+	return `const HOST_HOOK_TIMEOUT_MS = 2000;
+
+async function postHostHook(route, body) {
+  if (process.env.BOBBIT_HOST_HOOKS_ENABLED !== "1") return undefined;
+  const gatewayUrl = process.env.BOBBIT_GATEWAY_URL;
+  const sessionId = process.env.BOBBIT_SESSION_ID;
+  const token = process.env.BOBBIT_TOKEN;
+  if (!gatewayUrl || !sessionId || typeof globalThis.fetch !== "function") return undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HOST_HOOK_TIMEOUT_MS);
+  try {
+    const response = await globalThis.fetch(gatewayUrl + "/api/sessions/" + sessionId + route, {
+      method: "POST",
+      headers: {
+        ...(token ? { "Authorization": "Bearer " + token } : {}),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    return await response.json();
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isObject(value) {
   return !!value && typeof value === "object";
 }
 
@@ -106,10 +135,75 @@ function messageFromToolResult(result) {
   try { return JSON.stringify(result); } catch { return "Tool returned an errored result."; }
 }
 
-function wrapHandler(handler) {
+function hostSyntheticError(code) {
+  return {
+    content: [{ type: "text", text: "Tool result was rejected by host policy (" + code + ")." }],
+    isError: true,
+  };
+}
+
+function beforeDecision(response, originalArgs) {
+  const decision = response && (response.decision || response.result?.decision);
+  if (response?.block === true || decision === "block") return { block: true };
+  const replacement = response?.args ?? response?.result?.args ?? response?.value?.args;
+  return { block: false, args: isObject(replacement) ? replacement : originalArgs };
+}
+
+function afterDecision(response, originalResult) {
+  const decision = response && (response.decision || response.result?.decision);
+  if (decision === "syntheticError" || response?.syntheticError === true) {
+    const code = typeof response?.code === "string" ? response.code : "policy_denied";
+    return hostSyntheticError(code);
+  }
+  const replacement = response?.replacement ?? response?.result?.result ?? response?.value?.result;
+  return replacement === undefined ? originalResult : replacement;
+}
+
+function wrapHandler(handler, toolName) {
   if (typeof handler !== "function" || handler.__bobbitErrorBridgeWrapped) return handler;
   async function bobbitToolResultErrorBridgeHandler(...args) {
-    const result = await handler.apply(this, args);
+    const toolCallId = typeof args[0] === "string" ? args[0] : "unknown";
+    const originalArgs = isObject(args[1]) ? args[1] : {};
+    const before = beforeDecision(await postHostHook("/host-hooks/before-tool-call", {
+      toolCallId,
+      toolName,
+      args: originalArgs,
+    }), originalArgs);
+    if (before.block) {
+      const denied = hostSyntheticError("policy_denied");
+      const err = new Error(messageFromToolResult(denied));
+      err.name = "BobbitToolPolicyError";
+      err.isError = true;
+      err.is_error = true;
+      err.bobbitToolResult = denied;
+      throw err;
+    }
+    if (args.length > 1) args[1] = before.args;
+
+    let result;
+    let afterAlreadyApplied = false;
+    try {
+      result = await handler.apply(this, args);
+    } catch (error) {
+      const afterThrown = await postHostHook("/host-hooks/after-tool-result", {
+        toolCallId,
+        toolName,
+        result: { isError: true },
+      });
+      const replacement = afterDecision(afterThrown, undefined);
+      if (replacement !== undefined) {
+        result = replacement;
+        afterAlreadyApplied = true;
+      } else throw error;
+    }
+
+    if (!afterAlreadyApplied) {
+      result = afterDecision(await postHostHook("/host-hooks/after-tool-result", {
+        toolCallId,
+        toolName,
+        result,
+      }), result);
+    }
     if (isErroredToolResult(result)) {
       const err = new Error(messageFromToolResult(result));
       err.name = "BobbitToolResultError";
@@ -127,26 +221,28 @@ function wrapHandler(handler) {
 function wrapRegistrationArgs(args) {
   const next = Array.from(args);
   if (typeof next[0] === "string") {
+    const toolName = next[0];
     if (isObject(next[1])) {
       const spec = { ...next[1] };
       installUnknownFieldRefinements(spec.parameters);
-      if (typeof spec.handler === "function") spec.handler = wrapHandler(spec.handler);
-      if (typeof spec.execute === "function") spec.execute = wrapHandler(spec.execute);
+      if (typeof spec.handler === "function") spec.handler = wrapHandler(spec.handler, toolName);
+      if (typeof spec.execute === "function") spec.execute = wrapHandler(spec.execute, toolName);
       next[1] = spec;
     } else if (typeof next[1] === "function") {
-      next[1] = wrapHandler(next[1]);
+      next[1] = wrapHandler(next[1], toolName);
     }
-    if (typeof next[2] === "function") next[2] = wrapHandler(next[2]);
+    if (typeof next[2] === "function") next[2] = wrapHandler(next[2], toolName);
     return next;
   }
   if (isObject(next[0])) {
     const spec = { ...next[0] };
+    const toolName = typeof spec.name === "string" ? spec.name : "unknown";
     installUnknownFieldRefinements(spec.parameters);
     if (typeof next[1] === "function") {
-      next[1] = wrapHandler(next[1]);
+      next[1] = wrapHandler(next[1], toolName);
     } else {
-      if (typeof spec.handler === "function") spec.handler = wrapHandler(spec.handler);
-      if (typeof spec.execute === "function") spec.execute = wrapHandler(spec.execute);
+      if (typeof spec.handler === "function") spec.handler = wrapHandler(spec.handler, toolName);
+      if (typeof spec.execute === "function") spec.execute = wrapHandler(spec.execute, toolName);
     }
     next[0] = spec;
   }
