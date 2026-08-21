@@ -175,6 +175,7 @@ describe("gateway-owned host hook boundaries", () => {
 		await ctx.taskStore.flush();
 
 		ctx.gateStore.initGatesForGoal("goal-1", ["implementation"]);
+		await ctx.gateStore.flush();
 		ctx.gateStore.updateGateStatus("goal-1", "implementation", "passed");
 		await ctx.gateStore.flush();
 		ctx.projectConfigStore.set("build_command", "npm run build");
@@ -186,12 +187,14 @@ describe("gateway-owned host hook boundaries", () => {
 			"goalUpdated",
 			"goalCompleted",
 			"taskCreated",
-			"taskUpdated",
-			"taskStateChanged",
 			"gateStatusChanged",
 			"settingsChanged",
 		]);
 		expect(delivered.every(notification => notification.projectId === "project-a")).toBe(true);
+		expect(delivered.find(notification => notification.name === "taskCreated")).toMatchObject({
+			aggregate: { id: task.id, revision: task.updatedAt },
+			payload: { taskId: task.id, goalId: "goal-1", type: "implementation", state: "in-progress" },
+		});
 		expect(delivered.find(notification => notification.name === "gateStatusChanged")).toMatchObject({
 			aggregate: { id: "goal-1:implementation", revision: 1 },
 			payload: { goalId: "goal-1", gateId: "implementation", previousStatus: "pending", status: "passed" },
