@@ -14,19 +14,22 @@ import { wireProjectHostNotificationBoundaries } from "../../src/server/server.j
 import { createMemFs } from "../harness/mem-fs.js";
 import { getGateway, type EntityCounts, type GatewayFixture } from "../harness/gateway.js";
 import { assertNoLeaks, snapshotEntities } from "../harness/leak-detector.js";
+import { createRunChild, removeOwnedRunChild } from "../harness/run-isolation.js";
 import { createScope, type TestScope } from "../harness/scope.js";
 
 const contexts: ProjectContext[] = [];
+const contextRoots: string[] = [];
 
 afterEach(async () => {
 	await Promise.allSettled(contexts.splice(0).map(context => context.close()));
+	for (const root of contextRoots.splice(0)) removeOwnedRunChild(root);
 });
 
-function project(id: string): RegisteredProject {
+function project(id: string, rootPath: string): RegisteredProject {
 	return {
 		id,
 		name: id,
-		rootPath: path.resolve(`/memfs/${id}`),
+		rootPath,
 		createdAt: 1,
 		kind: "normal",
 		colorLight: "oklch(0.6 0.1 250)",
@@ -35,16 +38,23 @@ function project(id: string): RegisteredProject {
 }
 
 function context(id: string, fs = createMemFs()): ProjectContext {
-	const registered = project(id);
+	const rootPath = createRunChild("host-hooks-project");
+	const registered = project(id, rootPath);
 	fs.mkdirSync(registered.rootPath, { recursive: true });
-	const ctx = new ProjectContext(registered, {
-		fsImpl: fs,
-		goalPersistence: "json",
-		taskPersistence: "json",
-		gatePersistence: "json",
-	});
-	contexts.push(ctx);
-	return ctx;
+	try {
+		const ctx = new ProjectContext(registered, {
+			fsImpl: fs,
+			goalPersistence: "json",
+			taskPersistence: "json",
+			gatePersistence: "json",
+		});
+		contexts.push(ctx);
+		contextRoots.push(rootPath);
+		return ctx;
+	} catch (error) {
+		removeOwnedRunChild(rootPath);
+		throw error;
+	}
 }
 
 async function settleFanout(): Promise<void> {
