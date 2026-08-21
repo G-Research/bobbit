@@ -221,9 +221,9 @@ describe("HostInterceptorRouter", () => {
 
 let tmp = "";
 beforeAll(() => {
-	// v2-core reuses forks with isolate:false. Re-assert the supported worker
-	// bootstrap resolver immediately before this file spawns real ModuleHost
-	// workers, after any sibling env guard may have restored NODE_OPTIONS.
+	// Establish the resolver for normal file execution. Each worker-spawning test
+	// reasserts it again at invoke time because isolate:false sibling env guards
+	// can restore NODE_OPTIONS after this hook has run.
 	enableTsWorkerResolver();
 	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "host-hook-module-")));
 });
@@ -235,6 +235,7 @@ describe("ModuleHost hooks execution", () => {
 		fs.writeFileSync(file, "export default { beforePrompt: async (_ctx, request) => ({ context: [{ id: request.sessionId, title: 't', authority: 'memory', content: 'c', reason: 'r', priority: 1 }] }) };\n");
 		const host = new ModuleHost({ timeoutMs: 30_000 });
 		try {
+			enableTsWorkerResolver();
 			const value = await host.invoke({
 				url: pathToFileURL(file).href, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",
 				ctx: { sessionId: "session-1", tool: "hook", host: {} } as any,
@@ -250,6 +251,7 @@ describe("ModuleHost hooks execution", () => {
 		const host = new ModuleHost({ timeoutMs: 10_000 });
 		const controller = new AbortController();
 		try {
+			enableTsWorkerResolver();
 			const invocation = host.invoke({
 				url: pathToFileURL(file).href, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",
 				ctx: { sessionId: "session-1", tool: "hook", host: {} } as any,
