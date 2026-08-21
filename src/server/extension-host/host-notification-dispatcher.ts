@@ -27,6 +27,11 @@ export type HostNotificationConsumer = "browser" | "module" | "staff";
  */
 export interface HostNotificationDeliveryAdapter {
 	readonly consumer: HostNotificationConsumer;
+	/** Durable subscriber adapters own their admission scheduling and persistence.
+	 * They bypass bounded live queues so browser/module pressure cannot discard an
+	 * event before the subscriber outbox sees it. Their deliver method must return
+	 * without awaiting durable delivery; failures remain observational. */
+	readonly admission?: "bounded-live" | "durable-subscriber";
 	deliver(notification: HostNotification): void | Promise<void>;
 	/** Called asynchronously after an overflow. Browser adapters use it to issue
 	 * a refresh-required frame; live module delivery simply reports the drop. */
@@ -265,6 +270,7 @@ function cloneProjection<T>(value: T): T | undefined {
  */
 export class HostNotificationDispatcher {
 	private readonly queues: ProjectOrderedQueue[];
+	private readonly durableAdapters: HostNotificationDeliveryAdapter[];
 	private readonly resolveSessionProject?: (sessionId: string) => string | undefined;
 	private readonly now: () => number;
 	private readonly idGenerator: () => string;
@@ -282,9 +288,14 @@ export class HostNotificationDispatcher {
 		this.onDiagnostic = options.onDiagnostic;
 		const seen = new Set<HostNotificationConsumer>();
 		this.queues = [];
+		this.durableAdapters = [];
 		for (const adapter of options.adapters ?? []) {
 			if (seen.has(adapter.consumer)) continue;
 			seen.add(adapter.consumer);
+			if (adapter.admission === "durable-subscriber") {
+				this.durableAdapters.push(adapter);
+				continue;
+			}
 			this.queues.push(new ProjectOrderedQueue(
 				adapter,
 				queueCapacity,
@@ -370,6 +381,23 @@ export class HostNotificationDispatcher {
 			if (queue.enqueue(notification)) continue;
 			this.diagnostic("queue_overflow", notification, queue.consumer);
 			queue.refreshRequired(notification);
+		}
+		for (const adapter of this.durableAdapters) {
+			if (!definition.consumers.has(adapter.consumer)) continue;
+			// The durable adapter owns matching, idempotency, and its disk-backed
+			// admission seam. Schedule it independently of bounded live queues so a
+			// browser/module burst cannot drop staff work before persistence.
+			queueMicrotask(() => {
+				let delivery: void | Promise<void>;
+				try { delivery = adapter.deliver(notification); }
+				catch {
+					this.diagnostic("consumer_failure", notification, adapter.consumer);
+					return;
+				}
+				void Promise.resolve(delivery).catch(() => {
+					this.diagnostic("consumer_failure", notification, adapter.consumer);
+				});
+			});
 		}
 		return notification;
 	}
