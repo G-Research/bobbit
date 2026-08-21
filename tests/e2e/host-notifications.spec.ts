@@ -297,6 +297,29 @@ test.describe.serial("canonical host notification E2E", () => {
 				.update(`${staff.id}|goal-created-notification|${originalNotification.id}`)
 				.digest("hex"));
 
+			// Seed the exact host-only turn authority a notification wake owns. It is
+			// deliberately live-only: a real restart must neither restore this context
+			// nor accept the old process's per-session capability secret.
+			if (!staffSessionId) throw new Error("notification staff fixture did not create a permanent session");
+			const liveSession = gateway.sessionManager?.getSession(staffSessionId);
+			if (!liveSession) throw new Error(`notification staff session ${staffSessionId} is not live`);
+			expect(liveSession.staffId).toBe(staff.id);
+			const preRestartSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(staffSessionId);
+			liveSession.staffNotificationTurnContext = Object.freeze({
+				sessionId: staffSessionId,
+				projectId: project.id,
+				staffId: staff.id,
+				triggerId: "goal-created-notification",
+				notificationId: originalNotification.id,
+				rootCorrelationId: accepted.row.deliveryId,
+				causationDepth: 1,
+				lifecycleGeneration: liveSession.lifecycleGeneration ?? 0,
+			});
+			expect(gateway.sessionManager.getStaffNotificationTurnContext(staffSessionId)).toMatchObject({
+				notificationId: originalNotification.id,
+				rootCorrelationId: accepted.row.deliveryId,
+			});
+
 			// Model the exact durable crash checkpoint: InboxStore.putStrict has
 			// committed the deterministic entry, but the outbox lease ACK did not.
 			await gateway.crash();
@@ -313,6 +336,8 @@ test.describe.serial("canonical host notification E2E", () => {
 			await gateway.restart();
 			serverOnline = true;
 			await waitForHealth(20_000);
+			expect(gateway.sessionManager?.getStaffNotificationTurnContext(staffSessionId!)).toBeUndefined();
+			expect(gateway.sessionManager?.sessionSecretStore.resolveSessionIdBySecret(preRestartSecret)).toBeUndefined();
 
 			const reconciled = await pollUntil(() => {
 				const rows = JSON.parse(readFileSync(deliveryFile, "utf8")) as DeliveryRow[];
