@@ -319,6 +319,11 @@ test.describe("editable proposals — REST API", () => {
 		const cases: Array<{ name: string; overrides: Record<string, unknown>; code: string }> = [
 			{ name: "title bound", overrides: { title: "x".repeat(MAX_GOAL_TITLE_LENGTH + 1) }, code: "TITLE_TOO_LONG" },
 			{ name: "spec bound", overrides: { spec: "x".repeat(20_001) }, code: "SPEC_TOO_LONG" },
+			{ name: "project selection type", overrides: { projectId: 42 }, code: "PROJECT_ID_REQUIRED" },
+			{ name: "workflow selection type", overrides: { workflow: 42 }, code: "WORKFLOW_INVALID" },
+			{ name: "workflow id selection type", overrides: { workflowId: 42 }, code: "WORKFLOW_INVALID" },
+			{ name: "options selection type", overrides: { options: 42 }, code: "OPTIONS_INVALID" },
+			{ name: "parent selection type", overrides: { parentGoalId: false }, code: "PARENT_NOT_FOUND" },
 			{
 				name: "malformed inline workflow",
 				overrides: { workflow: undefined, inlineWorkflow: { id: "bad", name: "Bad", gates: [{ id: "one", name: "One", dependsOn: ["missing"], verify: [] }] } },
@@ -387,6 +392,51 @@ test.describe("editable proposals — REST API", () => {
 			});
 			expect(nested.status, await nested.clone().text()).toBe(200);
 			expect(fs.readFileSync(proposalPath(gateway.bobbitDir, sid, "goal"), "utf8")).toContain("proposal-valid-subdirectory");
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("malformed options seed and edit preserve the valid draft and revision", async ({ gateway }) => {
+		const sid = await createSession();
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		try {
+			const seeded = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({ args: {
+					title: "Options transaction guard",
+					spec: "Malformed options must not replace this valid proposal.",
+					workflow: "feature",
+				} }),
+			});
+			expect(seeded.status, await seeded.clone().text()).toBe(200);
+			const before = fs.readFileSync(fp, "utf8");
+			const beforeRevision = latestProposalRevision(gateway.bobbitDir, sid, "goal");
+
+			const replacement = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({ args: {
+					title: "Rejected options replacement",
+					spec: "This malformed replacement must remain transactional.",
+					workflow: "feature",
+					options: 42,
+				} }),
+			});
+			expect(replacement.status, await replacement.clone().text()).toBe(400);
+			expect(await replacement.json()).toMatchObject({ ok: false, code: "OPTIONS_INVALID" });
+			expect(fs.readFileSync(fp, "utf8")).toBe(before);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(beforeRevision);
+
+			const workflowLine = before.match(/^workflow:.*$/m)?.[0];
+			expect(workflowLine).toBeTruthy();
+			const edited = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
+				method: "POST",
+				body: JSON.stringify({ old_text: workflowLine, new_text: `${workflowLine}\noptions: 42` }),
+			});
+			expect(edited.status, await edited.clone().text()).toBe(400);
+			expect(await edited.json()).toMatchObject({ ok: false, code: "STRUCTURAL_VALIDATION_FAILED" });
+			expect(fs.readFileSync(fp, "utf8")).toBe(before);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(beforeRevision);
 		} finally {
 			await deleteSession(sid);
 		}

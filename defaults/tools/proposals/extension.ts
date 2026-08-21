@@ -92,7 +92,9 @@ async function currentSessionProjectId(): Promise<string | undefined> {
 async function argsWithProjectId(type: ProposalType, args: unknown): Promise<unknown> {
 	if (type === "project" || !args || typeof args !== "object" || Array.isArray(args)) return args;
 	const record = args as Record<string, unknown>;
-	if (typeof record.projectId === "string" && record.projectId.trim()) return args;
+	// Session scope is a default for omission, never a coercion boundary. Keep a
+	// supplied malformed or empty projectId intact for canonical server validation.
+	if (Object.prototype.hasOwnProperty.call(record, "projectId")) return args;
 	const scoped = scopeProposalProjectId(await currentSessionProjectId());
 	return scoped ? { ...record, projectId: scoped } : args;
 }

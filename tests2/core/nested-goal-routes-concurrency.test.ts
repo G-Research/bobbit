@@ -96,9 +96,9 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 	// keeps the natural `setupStatus='ready'`. Fake git metadata is still stamped
 	// so integrate-child reaches the stubbed merge path instead of the no-worktree
 	// guard; these tests exercise scheduling, not git availability.
-	const realCreate = goalManager.createGoal.bind(goalManager);
-	(goalManager as any).createGoal = async (title: string, cwd: string, opts?: any) => {
-		const g = await realCreate(title, cwd, opts);
+	const realCreate = goalManager.createGoalFromPreflight.bind(goalManager);
+	(goalManager as any).createGoalFromPreflight = (title: string, cwd: string, opts: any) => {
+		const g = realCreate(title, cwd, opts);
 		if (opts?.parentGoalId) {
 			goalStore.update(g.id, {
 				branch: `goal/${g.id}`,

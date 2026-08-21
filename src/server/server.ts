@@ -8724,8 +8724,10 @@ async function handleApiRoute(
 					: typeof body?.workflow === "string" && body.workflow.trim()
 						? body.workflow.trim()
 						: undefined;
+				const workflowSelectionSupplied = Object.prototype.hasOwnProperty.call(body ?? {}, "workflowId")
+					|| Object.prototype.hasOwnProperty.call(body ?? {}, "workflow");
 				const bodyHasInlineWorkflow = !!body?.workflow && typeof body.workflow === "object";
-				const targetWorkflows = !explicitWorkflowId && !bodyHasInlineWorkflow && typeof body?.projectId === "string"
+				const targetWorkflows = !workflowSelectionSupplied && !explicitWorkflowId && !bodyHasInlineWorkflow && typeof body?.projectId === "string"
 					? goalCandidateDeps.workflows(body.projectId)
 					: [];
 				const requestedWorkflowId = explicitWorkflowId ?? targetWorkflows[0]?.id;
@@ -8759,12 +8761,23 @@ async function handleApiRoute(
 					return;
 				}
 			}
-			// Sandbox provisioning is awaited and project config can change while it
+			const targetGoalManager = targetCtx.goalManager;
+			// Repository support probing may await git. Complete it before the final
+			// state validation so workflow/parent/nesting changes during the probe are
+			// rejected before any goal or default-workflow mutation.
+			const creationPreflight = await targetGoalManager.preflightGoalCreation(initialCandidate.cwd, {
+				projectId: targetProjectId,
+			});
+			// Sandbox/preflight work is awaited and project state can change while it
 			// is in flight. Rebuild and re-run the same canonical candidate now, at
 			// the actual mutation boundary, and consume only this refreshed snapshot.
 			requestValidation = validateRequestCandidate();
 			if (!requestValidation.validation.ok) { writeGoalCandidateError(requestValidation.validation); return; }
 			const candidate = requestValidation.validation.candidate;
+			if (candidate.cwd !== creationPreflight.cwd || candidate.projectId !== creationPreflight.projectId) {
+				json({ error: "Goal creation preflight became stale; retry the request", message: "Goal creation preflight became stale; retry the request", code: "GOAL_PREFLIGHT_STALE" }, 409);
+				return;
+			}
 			const requestedWorkflowId = requestValidation.requestedWorkflowId;
 			const title = candidate.title;
 			const cwd = candidate.cwd;
@@ -8773,7 +8786,6 @@ async function handleApiRoute(
 			const metadata = candidate.metadata && Object.keys(candidate.metadata).length > 0 ? candidate.metadata : undefined;
 			const enabledOptionalSteps = candidate.enabledOptionalSteps;
 			const resolved = { project: candidate.project };
-			const targetGoalManager = targetCtx.goalManager;
 			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child).
 			const parentGoalId = candidate.parentGoalId;
 			let resolvedParentGoal: PersistedGoal | undefined = candidate.parent;
@@ -8884,13 +8896,6 @@ async function handleApiRoute(
 			// may reinterpret its workflow/options between validation and mutation.
 			let resolvedWorkflow: Workflow | undefined = candidate.workflow;
 			let resolvedWorkflowId = candidate.workflowId ?? workflowId;
-			if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
-				const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
-				console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
-				const persistedWorkflowId = workflowId ?? defaults[0]?.id;
-				resolvedWorkflow = persistedWorkflowId ? targetCtx.workflowStore.get(persistedWorkflowId) : undefined;
-				resolvedWorkflowId = resolvedWorkflow?.id || resolvedWorkflowId;
-			}
 			// Resolve per-goal subgoal-nesting overrides.
 			//
 			// Two inputs: the parent's effective inherited ceiling (if any) and the
@@ -8950,7 +8955,7 @@ async function handleApiRoute(
 					{ validateComponentReferences: false },
 				);
 			}
-			const goal = await targetGoalManager.createGoal(title, cwd, {
+			const goal = targetGoalManager.createGoalFromPreflight(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
 				workflowStore: targetCtx.workflowStore,
@@ -8966,8 +8971,22 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
+				preflight: creationPreflight,
 				...(body?.team !== false ? { team: true } : {}),
 			});
+			// Persist generated defaults only after the validated goal snapshot exists;
+			// the goal itself already carries the canonical frozen workflow.
+			if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
+				try {
+					const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
+					console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
+				} catch (error) {
+					// The goal already owns the validated frozen snapshot. A secondary
+					// convenience-store write cannot turn successful creation into a
+					// partial-failure response.
+					console.warn(`[api] Goal created but generated workflow defaults could not be persisted for project ${targetProjectId}:`, error);
+				}
+			}
 			// `team: false` historically meant "do not auto-enable yet", not a
 			// durable prohibition on a later manual start. GoalManager defaults new
 			// goals to team mode, so remove that default from this explicit legacy
@@ -16317,11 +16336,17 @@ async function handleApiRoute(
 			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
+				// Goal candidates reject malformed supplied selection centrally. Other
+				// proposal types retain their legacy default-enrichment behavior.
+				const projectSelectionSupplied = proposalType === "goal"
+					&& Object.prototype.hasOwnProperty.call(enrichedArgs, "projectId");
 				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
 					? enrichedArgs.projectId.trim()
 					: undefined;
 				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
-				const targetProjectId = explicitProjectId ?? defaultProjectId;
+				// Defaults apply only to true omission. Preserve supplied malformed or
+				// empty values so the canonical goal validator rejects them.
+				const targetProjectId = explicitProjectId ?? (projectSelectionSupplied ? undefined : defaultProjectId);
 				// Stamp the authenticated session default, but leave existence and
 				// visibility to the canonical goal validator below. Non-goal proposal
 				// types retain their existing project error contract.
@@ -16340,7 +16365,14 @@ async function handleApiRoute(
 						return;
 					}
 				}
-				enrichedArgs = { ...enrichedArgs, ...(targetProjectId ? { projectId: targetProjectId } : {}) };
+				enrichedArgs = {
+					...enrichedArgs,
+					...(explicitProjectId
+						? { projectId: explicitProjectId }
+						: !projectSelectionSupplied && targetProjectId
+							? { projectId: targetProjectId }
+							: {}),
+				};
 			}
 			// Enrich the serialization candidate first, then let the canonical
 			// validator exclusively own workflow/options and every other creation

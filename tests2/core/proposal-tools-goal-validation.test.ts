@@ -121,6 +121,29 @@ describe("propose_goal — surfaces workflow validation rejection", () => {
 		assert.doesNotMatch(text, /__proposal_rev_v1__/);
 	});
 
+	it("preserves a supplied malformed projectId for canonical server rejection", async () => {
+		let sentArgs: Record<string, unknown> | undefined;
+		globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as { args?: Record<string, unknown> };
+			sentArgs = body.args;
+			return fakeResponse(400, {
+				ok: false,
+				code: "PROJECT_ID_REQUIRED",
+				message: "projectId must be a non-empty string",
+			});
+		}) as any;
+
+		const result = await getExecute("propose_goal")("tu-project-type", {
+			title: "G",
+			spec: "s",
+			workflow: "feature",
+			projectId: 42,
+		});
+		assert.equal(sentArgs?.projectId, 42);
+		assert.equal(result?.isError, true);
+		assert.match(textOf(result), /projectId must be a non-empty string/);
+	});
+
 	it("returns isError with actionable CWD_OUTSIDE_PROJECT guidance and no revision on 422", async () => {
 		globalThis.fetch = (async () => fakeResponse(422, {
 			ok: false,

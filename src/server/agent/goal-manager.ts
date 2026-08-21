@@ -53,6 +53,43 @@ export interface AdoptedGoalWorkspace {
 	sandboxed?: boolean;
 }
 
+const GOAL_CREATION_PREFLIGHT = Symbol("goal-creation-preflight");
+
+/** Async repository support result bound to exact, later-validated coordinates. */
+export interface GoalCreationPreflight {
+	readonly [GOAL_CREATION_PREFLIGHT]: true;
+	readonly cwd: string;
+	readonly projectId?: string;
+	readonly adoptedOwnerSessionId?: string;
+	readonly repoPath?: string;
+	readonly projectRoot?: string;
+	readonly configuredBaseRef?: string;
+	readonly componentsFingerprint: string;
+}
+
+export interface GoalCreationOptions {
+	spec?: string;
+	workflowId?: string;
+	workflowStore?: WorkflowStore;
+	resolvedWorkflow?: Workflow;
+	preserveResolvedWorkflowSnapshot?: boolean;
+	sandboxed?: boolean;
+	enabledOptionalSteps?: string[];
+	projectId?: string;
+	parentGoalId?: string;
+	inlineRoles?: Record<string, import("./role-store.js").Role>;
+	subgoalsAllowed?: boolean;
+	maxNestingDepth?: number;
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren?: number;
+	metadata?: Record<string, unknown>;
+	worktree?: boolean;
+	adoptedWorkspace?: AdoptedGoalWorkspace;
+	team?: boolean;
+	/** Host-derived support probe completed before the caller's final validation. */
+	preflight?: GoalCreationPreflight;
+}
+
 function assertAdoptedGoalWorkspace(value: AdoptedGoalWorkspace): void {
 	for (const field of ["ownerSessionId", "cwd", "worktreePath", "branch", "repoPath"] as const) {
 		if (typeof value[field] !== "string" || value[field].length === 0) {
@@ -371,11 +408,89 @@ export class GoalManager {
 	}
 
 	/**
-	 * Create a goal instantly — persists to disk and returns immediately.
-	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
+	 * Complete the only asynchronous part of goal creation. Creation routes call
+	 * this before their last canonical validation, then pass the opaque result to
+	 * createGoal so persistence has no intervening await.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; preserveResolvedWorkflowSnapshot?: boolean; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; adoptedWorkspace?: AdoptedGoalWorkspace; team?: boolean }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, preserveResolvedWorkflowSnapshot, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, team = true } = opts ?? {};
+	async preflightGoalCreation(
+		cwd: string,
+		opts: Pick<GoalCreationOptions, "projectId" | "adoptedWorkspace"> = {},
+	): Promise<GoalCreationPreflight> {
+		const { projectId, adoptedWorkspace } = opts;
+		if (adoptedWorkspace) assertAdoptedGoalWorkspace(adoptedWorkspace);
+		let repoPath = adoptedWorkspace?.repoPath;
+		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
+		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
+		const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
+		const componentsFingerprint = JSON.stringify(components ?? []);
+		if (!isHeadquartersProject(projectId) && !adoptedWorkspace) {
+			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
+			if (support.supported) repoPath = support.repoPath;
+		}
+		return Object.freeze({
+			[GOAL_CREATION_PREFLIGHT]: true as const,
+			cwd,
+			componentsFingerprint,
+			...(projectId ? { projectId } : {}),
+			...(projectRoot ? { projectRoot } : {}),
+			...(configuredBaseRef ? { configuredBaseRef } : {}),
+			...(adoptedWorkspace ? { adoptedOwnerSessionId: adoptedWorkspace.ownerSessionId } : {}),
+			...(repoPath ? { repoPath } : {}),
+		});
+	}
+
+	private immediateGoalCreationPreflight(
+		cwd: string,
+		opts: Pick<GoalCreationOptions, "projectId" | "adoptedWorkspace">,
+	): GoalCreationPreflight {
+		const { projectId, adoptedWorkspace } = opts;
+		if (adoptedWorkspace) assertAdoptedGoalWorkspace(adoptedWorkspace);
+		const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
+		const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
+		const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
+		return Object.freeze({
+			[GOAL_CREATION_PREFLIGHT]: true as const,
+			cwd,
+			componentsFingerprint: JSON.stringify(components ?? []),
+			...(projectId ? { projectId } : {}),
+			...(projectRoot ? { projectRoot } : {}),
+			...(configuredBaseRef ? { configuredBaseRef } : {}),
+			...(adoptedWorkspace ? {
+				adoptedOwnerSessionId: adoptedWorkspace.ownerSessionId,
+				repoPath: adoptedWorkspace.repoPath,
+			} : {}),
+		});
+	}
+
+	/** Backwards-compatible one-shot creation for internal callers. */
+	async createGoal(title: string, cwd: string, opts?: GoalCreationOptions): Promise<PersistedGoal> {
+		if (opts?.preflight) return this.createGoalFromPreflight(title, cwd, { ...opts, preflight: opts.preflight });
+		// Adopted and Headquarters goals perform no asynchronous repository probe.
+		// Keep their validated commit synchronous through persistence.
+		if (opts?.adoptedWorkspace || isHeadquartersProject(opts?.projectId)) {
+			const preflight = this.immediateGoalCreationPreflight(cwd, {
+				projectId: opts?.projectId,
+				adoptedWorkspace: opts?.adoptedWorkspace,
+			});
+			return this.createGoalFromPreflight(title, cwd, { ...opts, preflight });
+		}
+		const preflight = await this.preflightGoalCreation(cwd, {
+			projectId: opts?.projectId,
+			adoptedWorkspace: opts?.adoptedWorkspace,
+		});
+		return this.createGoalFromPreflight(title, cwd, { ...opts, preflight });
+	}
+
+	/**
+	 * Synchronous validated commit boundary. Callers must finish all awaits,
+	 * canonical validation, and authorization before invoking this method.
+	 */
+	createGoalFromPreflight(
+		title: string,
+		cwd: string,
+		opts: GoalCreationOptions & { preflight: GoalCreationPreflight },
+	): PersistedGoal {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, preserveResolvedWorkflowSnapshot, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, preflight, team = true } = opts;
 		const headquartersGoal = isHeadquartersProject(projectId);
 		if (adoptedWorkspace) {
 			assertAdoptedGoalWorkspace(adoptedWorkspace);
@@ -398,19 +513,21 @@ export class GoalManager {
 		let setupStatus: "ready" | "preparing" = "ready";
 
 		// Detect git repo root — needed for team operations even without a worktree.
-		// Single source of truth shared with the session path (server.ts) and the
-		// staff path (staff-manager.ts): a multi-repo project resolves to its
-		// container root as `repoPath` (per-repo worktrees land beneath one shared
-		// `<rootPath>-wt/<branch>/`) ONLY when at least one component is a git repo
-		// root; otherwise it falls back to the single-repo `isGitRepo(cwd)` probe,
-		// and to no-worktree when that also fails (never throws).
-		if (!headquartersGoal && !adoptedWorkspace) {
-			const components = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
-			const projectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
-			const configuredBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
-			const support = await resolveWorktreeSupport(components ?? [], projectRoot, cwd, undefined, { configuredBaseRef, commandRunner: this.commandRunner });
-			if (support.supported) repoPath = support.repoPath;
+		// A route-supplied preflight removes the await from the final validated
+		// commit boundary. Legacy/internal callers retain the one-shot behavior.
+		const currentComponents = projectId && this.componentsResolver ? this.componentsResolver(projectId) : undefined;
+		const currentProjectRoot = projectId && this.projectRootResolver ? this.projectRootResolver(projectId) : undefined;
+		const currentBaseRef = projectId && this.baseRefResolver ? this.baseRefResolver(projectId) : undefined;
+		if (preflight[GOAL_CREATION_PREFLIGHT] !== true
+			|| preflight.cwd !== cwd
+			|| preflight.projectId !== projectId
+			|| preflight.adoptedOwnerSessionId !== adoptedWorkspace?.ownerSessionId
+			|| preflight.componentsFingerprint !== JSON.stringify(currentComponents ?? [])
+			|| preflight.projectRoot !== currentProjectRoot
+			|| preflight.configuredBaseRef !== currentBaseRef) {
+			throw new Error("GoalManager.createGoal: creation preflight no longer matches the validated candidate or repository config");
 		}
+		repoPath = preflight.repoPath;
 
 		// Compute worktree path and branch (but don't create yet)
 		if (!adoptedWorkspace && worktree && repoPath) {

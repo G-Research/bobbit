@@ -44,8 +44,9 @@ export function prepareGoalProposalSeed(
 	let enrichedArgs = args;
 	const session = deps.session;
 	if (session?.role === "team-lead" && session.teamGoalId) {
-		const existingParent = enrichedArgs.parentGoalId;
-		if (!existingParent || (typeof existingParent === "string" && existingParent.trim() === "")) {
+		// Only omission grants implicit-parent enrichment. A supplied malformed or
+		// empty selection must reach the canonical validator unchanged.
+		if (!Object.prototype.hasOwnProperty.call(enrichedArgs, "parentGoalId")) {
 			const parent = deps.getGoal(session.teamGoalId);
 			const targetProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
 				? enrichedArgs.projectId.trim()

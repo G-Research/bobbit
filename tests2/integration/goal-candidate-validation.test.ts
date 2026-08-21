@@ -320,9 +320,13 @@ describe("canonical goal candidate — trusted legacy snapshots", () => {
 describe("canonical goal candidate — project, workflow, and structured fields", () => {
 	it.each([
 		[{ projectId: undefined }, "PROJECT_ID_REQUIRED"],
+		[{ projectId: 42 }, "PROJECT_ID_REQUIRED"],
 		[{ projectId: "missing-project" }, "PROJECT_NOT_FOUND"],
 		[{ projectId: "hidden-project" }, "PROJECT_NOT_VISIBLE"],
+		[{ workflow: 42 }, "WORKFLOW_INVALID"],
+		[{ workflowId: 42 }, "WORKFLOW_INVALID"],
 		[{ workflow: "missing" }, "UNKNOWN_WORKFLOW"],
+		[{ workflow: "feature", options: 42 }, "OPTIONS_INVALID"],
 		[{ workflow: "feature", options: "Not optional" }, "UNKNOWN_OPTIONAL_STEP"],
 		[{ workflow: "feature", enabledOptionalSteps: ["QA testing", 1] }, "UNKNOWN_OPTIONAL_STEP"],
 	])("rejects invalid project/workflow input %#", (overrides, code) => {
@@ -363,6 +367,15 @@ describe("canonical goal candidate — project, workflow, and structured fields"
 			expect(accepted.candidate.enabledOptionalSteps).toEqual(["QA testing"]);
 			expect(accepted.candidate.seedDefaultWorkflows).toBe(true);
 		}
+	});
+
+	it("distinguishes omitted workflow selection from supplied empty or malformed aliases", () => {
+		fixture.workflows.set(fixture.projectId, []);
+		const omitted = validate({ workflow: undefined });
+		expect(omitted.ok).toBe(true);
+		if (omitted.ok) expect(omitted.candidate.seedDefaultWorkflows).toBe(true);
+		expectCode(validate({ workflow: "" }), "MISSING_WORKFLOW");
+		expectCode(validate({ workflow: false }), "WORKFLOW_INVALID");
 	});
 
 	it("selects and freezes the first generated default when an empty store has no explicit selection", () => {
@@ -465,6 +478,8 @@ describe("canonical goal candidate — parent and root/child policy", () => {
 	it.each([
 		["missing", "PARENT_NOT_FOUND"],
 		["", "PARENT_NOT_FOUND"],
+		[0, "PARENT_NOT_FOUND"],
+		[false, "PARENT_NOT_FOUND"],
 	])("rejects missing parent %j", (parentGoalId, code) => {
 		expectCode(validate({ parentGoalId }), code);
 	});

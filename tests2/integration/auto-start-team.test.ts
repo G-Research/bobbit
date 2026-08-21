@@ -49,12 +49,12 @@ async function createGoalForAutoStart(gateway: any, opts: Record<string, unknown
 	const autoStart = opts.autoStartTeam !== false;
 	const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
 	const goalManager = context.goalManager as any;
-	const originalCreateGoal = goalManager.createGoal;
+	const originalCreateGoal = goalManager.createGoalFromPreflight;
 	const originalSetupAndStart = goalManager.setupWorktreeAndStartTeam;
 
 	if (autoStart) {
-		goalManager.createGoal = async function (...args: any[]) {
-			const goal = await originalCreateGoal.apply(this, args);
+		goalManager.createGoalFromPreflight = function (...args: any[]) {
+			const goal = originalCreateGoal.apply(this, args);
 			Object.assign(goal, {
 				repoPath: nonGitCwd(),
 				worktreePath: nonGitCwd(),
@@ -83,7 +83,7 @@ async function createGoalForAutoStart(gateway: any, opts: Record<string, unknown
 		expect(resp.status).toBe(201);
 		return resp.json();
 	} finally {
-		goalManager.createGoal = originalCreateGoal;
+		goalManager.createGoalFromPreflight = originalCreateGoal;
 		goalManager.setupWorktreeAndStartTeam = originalSetupAndStart;
 	}
 }

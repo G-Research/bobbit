@@ -145,6 +145,20 @@ export function validateGoalInlineWorkflow(iw: unknown): ParseError | null {
 }
 
 function validateGoalInlineFields(fields: Record<string, unknown>): ParseError | null {
+	// Defense in depth for persisted/manual frontmatter: validated scalar fields
+	// must not be coerced by UI synchronization or crash consumers such as
+	// `options.split`. Business rules remain owned by validateGoalCandidate.
+	for (const key of ["projectId", "cwd", "options", "parentGoalId", "workflowId"] as const) {
+		const value = fields[key];
+		if (Object.prototype.hasOwnProperty.call(fields, key) && value !== undefined && typeof value !== "string") {
+			return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: `${key} must be a string` };
+		}
+	}
+	const workflowSelection = fields.workflow;
+	if (Object.prototype.hasOwnProperty.call(fields, "workflow") && workflowSelection !== undefined
+		&& typeof workflowSelection !== "string" && !isPlainObject(workflowSelection)) {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "workflow must be a workflow ID string or inline workflow object" };
+	}
 	const inlineWorkflowErr = validateGoalInlineWorkflow(fields.inlineWorkflow);
 	if (inlineWorkflowErr) return inlineWorkflowErr;
 	const ir = fields.inlineRoles;

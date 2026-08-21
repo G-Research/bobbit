@@ -448,7 +448,7 @@ test.describe("cross-project proposal seed @smoke", () => {
 		const tasksBefore = structuredClone(context.taskStore.getAll());
 		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
 		const originalEnsure = sandboxManager.ensureForProject.bind(sandboxManager);
-		const originalCreateGoal = context.goalManager.createGoal.bind(context.goalManager);
+		const originalCreateGoal = context.goalManager.createGoalFromPreflight.bind(context.goalManager);
 		let releaseSandbox!: () => void;
 		let sandboxEntered!: () => void;
 		const sandboxBlocker = new Promise<void>(resolve => { releaseSandbox = resolve; });
@@ -458,10 +458,10 @@ test.describe("cross-project proposal seed @smoke", () => {
 			sandboxEntered();
 			await sandboxBlocker;
 		};
-		context.goalManager.createGoal = ((...args: unknown[]) => {
+		context.goalManager.createGoalFromPreflight = ((...args: unknown[]) => {
 			createGoalCalls++;
 			return originalCreateGoal(...args as Parameters<typeof originalCreateGoal>);
-		}) as typeof context.goalManager.createGoal;
+		}) as typeof context.goalManager.createGoalFromPreflight;
 		try {
 			const pending = apiFetch("/api/goals", {
 				method: "POST",
@@ -494,7 +494,7 @@ test.describe("cross-project proposal seed @smoke", () => {
 		} finally {
 			releaseSandbox();
 			sandboxManager.ensureForProject = originalEnsure;
-			context.goalManager.createGoal = originalCreateGoal;
+			context.goalManager.createGoalFromPreflight = originalCreateGoal;
 			context.projectConfigStore.setWorkflows(workflowsBefore ?? {});
 		}
 	});

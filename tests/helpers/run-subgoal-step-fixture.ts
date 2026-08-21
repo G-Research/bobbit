@@ -104,6 +104,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 	// goal is created so its createGoal call doesn't pollute the recorded
 	// call sequence. The wrappers route through the realGm.
 	const realCreate = realGm.createGoal.bind(realGm);
+	const realCreateFromPreflight = realGm.createGoalFromPreflight.bind(realGm);
 	const realUpdate = realGm.updateGoal.bind(realGm);
 	const realArchiveAfterMerge = realGm.archiveGoalAfterMerge.bind(realGm);
 	const installWrappers = () => {
@@ -111,6 +112,10 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		wrappedGm.createGoal = async (title: string, cwd: string, options?: any) => {
 			calls.push({ kind: "createGoal", title, opts: options });
 			return realCreate(title, cwd, options);
+		};
+		wrappedGm.createGoalFromPreflight = (title: string, cwd: string, options: any) => {
+			calls.push({ kind: "createGoal", title, opts: options });
+			return realCreateFromPreflight(title, cwd, options);
 		};
 		wrappedGm.updateGoal = async (id: string, updates: any) => {
 			calls.push({ kind: "updateGoal", id, updates });

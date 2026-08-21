@@ -88,6 +88,9 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 	const proto = Object.getPrototypeOf(value);
 	return proto === Object.prototype || proto === null;
 }
+function supplied(raw: RawGoalCandidate, key: keyof RawGoalCandidate): boolean {
+	return Object.prototype.hasOwnProperty.call(raw, key) && raw[key] !== undefined;
+}
 function jsonSnapshot(value: unknown, label: string, code: string): { ok: true; value: any } | GoalCandidateError {
 	let json: string | undefined;
 	try { json = JSON.stringify(value); } catch { return fail(400, code, `${label} must be JSON-serializable`); }
@@ -115,6 +118,9 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	if (typeof spec !== "string") return fail(400, "SPEC_INVALID", "spec must be a string");
 	if (spec.length > MAX_GOAL_SPEC_LENGTH) return fail(400, "SPEC_TOO_LONG", `spec exceeds the maximum length of ${MAX_GOAL_SPEC_LENGTH} characters`, { limit: MAX_GOAL_SPEC_LENGTH, actual: spec.length });
 
+	if (supplied(raw, "projectId") && typeof raw.projectId !== "string") {
+		return fail(400, "PROJECT_ID_REQUIRED", "projectId must be a non-empty string");
+	}
 	const resolved = resolveProjectForRequest(deps.registry, { projectId: raw.projectId });
 	if (!resolved.ok) return fail(resolved.status, resolved.code, resolved.error);
 	if (context.source.kind === "current-session-promotion" && resolved.projectId !== context.source.serverDerivedProjectId) return fail(422, "PROJECT_SCOPE_MISMATCH", "projectId does not match the server-owned promotion project");
@@ -132,7 +138,7 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	}
 
 	const parentGoalId = typeof raw.parentGoalId === "string" && raw.parentGoalId.trim() ? raw.parentGoalId.trim() : undefined;
-	if (raw.parentGoalId !== undefined && !parentGoalId) return fail(422, "PARENT_NOT_FOUND", "parentGoalId must be a non-empty string");
+	if (supplied(raw, "parentGoalId") && !parentGoalId) return fail(422, "PARENT_NOT_FOUND", "parentGoalId must be a non-empty string");
 	if (context.source.kind === "server-child" && parentGoalId !== context.source.parentGoalId) return fail(422, "PARENT_SCOPE_MISMATCH", "parentGoalId does not match the server-owned child parent");
 	let parent: PersistedGoal | undefined;
 	const prefs = deps.nestingPrefs();
@@ -158,6 +164,15 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	}
 
 	const cascadeWorkflows = deps.workflows(resolved.projectId);
+	if (supplied(raw, "workflowId") && typeof raw.workflowId !== "string") {
+		return fail(400, "WORKFLOW_INVALID", "workflowId must be a workflow ID string");
+	}
+	if (supplied(raw, "workflow") && typeof raw.workflow !== "string" && !plainObject(raw.workflow)) {
+		return fail(400, "WORKFLOW_INVALID", "workflow must be a workflow ID string or inline workflow object");
+	}
+	if (supplied(raw, "options") && typeof raw.options !== "string") {
+		return fail(400, "OPTIONS_INVALID", "options must be a comma-separated string of optional step names");
+	}
 	const trustedInlineWorkflow = context.trustedSnapshots?.inlineWorkflow;
 	const inlineWorkflow = trustedInlineWorkflow !== undefined
 		? trustedInlineWorkflow
@@ -179,12 +194,16 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 	// caller omitted a selection, normalize to the first default supplied by the
 	// same dependency that creation will persist; default workflow ids are data,
 	// never a magic constant.
+	const workflowSelectionSupplied = supplied(raw, "workflowId") || supplied(raw, "workflow") || supplied(raw, "inlineWorkflow");
+	// An empty live store will persist generated defaults after successful goal
+	// creation. Validate explicit selections against those defaults too, but only
+	// auto-select the first default when selection was truly omitted.
 	const seedDefaultWorkflows = !inlineWorkflow && workflows.length === 0 && !registeredWorkflow;
 	if (seedDefaultWorkflows) workflows = deps.defaultWorkflows(resolved.projectId);
-	if (seedDefaultWorkflows && workflows.length === 0) {
+	if (!inlineWorkflow && workflows.length === 0) {
 		return fail(400, "MISSING_WORKFLOW", "Workflow is required for this project. Configure at least one workflow and retry.", { availableWorkflows: [] });
 	}
-	const workflowId = explicitWorkflowId || (seedDefaultWorkflows ? workflows[0]?.id ?? "" : "");
+	const workflowId = explicitWorkflowId || (!workflowSelectionSupplied && seedDefaultWorkflows ? workflows[0]?.id ?? "" : "");
 	const workflowArgs = { inlineWorkflow, workflow: workflowId, options };
 	const workflowError = validateGoalProposalWorkflow(workflowArgs, workflows);
 	if (workflowError) return fail(400, workflowError.code, workflowError.message, { ...(workflowError.availableWorkflows ? { availableWorkflows: workflowError.availableWorkflows } : {}), ...(workflowError.validOptionalSteps ? { validOptionalSteps: workflowError.validOptionalSteps } : {}) });
