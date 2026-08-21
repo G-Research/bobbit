@@ -22,6 +22,8 @@
  *   (d) propose_project preserves absent/explicit projectId seed semantics
  *   (e) goal workflow validated against the TARGET project's workflows
  */
+import fs from "node:fs";
+import path from "node:path";
 import { expect } from "./_e2e/in-process-harness.js";
 import { afterAll, beforeAll, test } from "vitest";
 import {
@@ -326,6 +328,160 @@ test.describe("cross-project proposal seed @smoke", () => {
 	});
 
 	// ── (e) goal workflow validated against the TARGET project ─────────
+	test("canonical seed validation passively resolves a hidden workflow in an unopened project", async () => {
+		await clearSourceProposals("goal");
+		const contexts = gateway.sessionManager.getProjectContextManager();
+		const registry = contexts.getRegistry();
+		const rootPath = path.join(gateway.bobbitDir, "proposal-projects", `unopened-hidden-${Date.now()}`);
+		fs.mkdirSync(rootPath, { recursive: true });
+		const projectYaml = [
+			"components:",
+			"  - name: unopened-hidden",
+			"    repo: .",
+			"workflows:",
+			"  feature:",
+			"    name: Visible Feature",
+			"    gates:",
+			"      - id: implementation",
+			"        name: Implementation",
+			"  runtime-only:",
+			"    name: Runtime Only",
+			"    hidden: true",
+			"    gates:",
+			"      - id: implementation",
+			"        name: Implementation",
+			"        verify:",
+			"          - name: Hidden QA",
+			"            type: command",
+			"            run: echo qa",
+			"            optional: true",
+			"            optionalLabel: Enable Hidden QA",
+			"",
+		].join("\n");
+		const project = registry.register("proposal-unopened-hidden", rootPath, { acceptCanonical: true });
+		const configDir = path.join(project.rootPath, ".bobbit", "config");
+		const configFile = path.join(configDir, "project.yaml");
+		fs.mkdirSync(configDir, { recursive: true });
+		fs.writeFileSync(configFile, projectYaml);
+		const configFs = (contexts as any).options?.fsImpl;
+		if (configFs && configFs !== fs) {
+			configFs.mkdirSync(configDir, { recursive: true });
+			configFs.writeFileSync(configFile, projectYaml);
+		}
+		const topologyBefore = [...contexts.all()].length;
+		try {
+			expect(contexts.getExisting(project.id)).toBeUndefined();
+			expect(contexts.readConfigSnapshot(project.id)?.workflows.map((workflow: { id: string }) => workflow.id)).toEqual(["feature", "runtime-only"]);
+			const rejected = await seed(sourceSessionId, "goal", {
+				title: "Unopened invalid option",
+				spec: "Canonical validation must remain passive.",
+				projectId: project.id,
+				workflow: "runtime-only",
+				options: "Not optional",
+			});
+			expect(rejected.status, await rejected.clone().text()).toBe(400);
+			expect(await rejected.json()).toMatchObject({ ok: false, code: "UNKNOWN_OPTIONAL_STEP" });
+			expect(contexts.getExisting(project.id)).toBeUndefined();
+			expect([...contexts.all()]).toHaveLength(topologyBefore);
+			expect(await seededFields(sourceSessionId, "goal")).toBeUndefined();
+
+			const accepted = await seed(sourceSessionId, "goal", {
+				title: "Unopened hidden workflow",
+				spec: "The exact creation-time lookup accepts the hidden runtime workflow.",
+				projectId: project.id,
+				workflow: "runtime-only",
+				options: "Hidden QA",
+			});
+			expect(accepted.status, await accepted.clone().text()).toBe(200);
+			expect(contexts.getExisting(project.id)).toBeUndefined();
+			expect([...contexts.all()]).toHaveLength(topologyBefore);
+
+			const created = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Unopened hidden workflow",
+					spec: "Ordinary creation uses the same exact hidden workflow lookup.",
+					projectId: project.id,
+					workflowId: "runtime-only",
+					enabledOptionalSteps: ["Hidden QA"],
+					worktree: false,
+					team: false,
+					autoStartTeam: false,
+				}),
+			});
+			expect(created.status, await created.clone().text()).toBe(201);
+			expect(await created.json()).toMatchObject({ workflowId: "runtime-only", enabledOptionalSteps: ["Hidden QA"] });
+		} finally {
+			await clearSourceProposals("goal");
+			await contexts.remove(project.id).catch(() => undefined);
+			registry.remove(project.id);
+			configFs?.rmSync(project.rootPath, { recursive: true, force: true });
+			fs.rmSync(project.rootPath, { recursive: true, force: true });
+			if (project.rootPath !== rootPath) fs.rmSync(rootPath, { recursive: true, force: true });
+		}
+	});
+
+	test("ordinary creation revalidates optional steps after awaited sandbox provisioning", async () => {
+		const context = gateway.sessionManager.getProjectContextManager().getOrCreate(sourceProjectId);
+		const sandboxManager = gateway.sessionManager.getSandboxManager();
+		expect(context).toBeTruthy();
+		expect(sandboxManager).toBeTruthy();
+		const workflowsBefore = context.projectConfigStore.getWorkflows();
+		const goalsBefore = structuredClone(context.goalStore.getAll());
+		const tasksBefore = structuredClone(context.taskStore.getAll());
+		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
+		const originalEnsure = sandboxManager.ensureForProject.bind(sandboxManager);
+		const originalCreateGoal = context.goalManager.createGoal.bind(context.goalManager);
+		let releaseSandbox!: () => void;
+		let sandboxEntered!: () => void;
+		const sandboxBlocker = new Promise<void>(resolve => { releaseSandbox = resolve; });
+		const entered = new Promise<void>(resolve => { sandboxEntered = resolve; });
+		let createGoalCalls = 0;
+		sandboxManager.ensureForProject = async () => {
+			sandboxEntered();
+			await sandboxBlocker;
+		};
+		context.goalManager.createGoal = ((...args: unknown[]) => {
+			createGoalCalls++;
+			return originalCreateGoal(...args as Parameters<typeof originalCreateGoal>);
+		}) as typeof context.goalManager.createGoal;
+		try {
+			const pending = apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Sandbox stale optional step",
+					spec: "The workflow changes while sandbox provisioning is awaited.",
+					projectId: sourceProjectId,
+					workflowId: "feature",
+					enabledOptionalSteps: ["QA testing"],
+					sandboxed: true,
+					worktree: false,
+					team: false,
+					autoStartTeam: false,
+				}),
+			});
+			await entered;
+			const changed = structuredClone(workflowsBefore ?? {});
+			for (const gate of changed.feature?.gates ?? []) {
+				for (const step of gate.verify ?? []) delete step.optional;
+			}
+			context.projectConfigStore.setWorkflows(changed);
+			releaseSandbox();
+			const rejected = await pending;
+			expect(rejected.status, await rejected.clone().text()).toBe(400);
+			expect(await rejected.json()).toMatchObject({ ok: false, code: "UNKNOWN_OPTIONAL_STEP" });
+			expect(createGoalCalls).toBe(0);
+			expect(context.goalStore.getAll()).toEqual(goalsBefore);
+			expect(context.taskStore.getAll()).toEqual(tasksBefore);
+			expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
+		} finally {
+			releaseSandbox();
+			sandboxManager.ensureForProject = originalEnsure;
+			context.goalManager.createGoal = originalCreateGoal;
+			context.projectConfigStore.setWorkflows(workflowsBefore ?? {});
+		}
+	});
+
 	test("zero-workflow seed validates defaults without draft or workflow mutation", async () => {
 		await clearSourceProposals("goal");
 		const context = gateway.sessionManager.getProjectContextManager().getOrCreate(zeroWorkflowProjectId);
