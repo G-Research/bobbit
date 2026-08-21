@@ -1012,10 +1012,12 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/proposal-edit-api.test.ts",
-		allowReason: "isolated integration gateway, project, or harness-owned output",
+		allowReason: "isolated integration gateway proposal drafts and revision snapshots read to prove failed validation preserves harness-owned transactional state",
 		reads: frozen([
 			{ expression: "p", count: 1 },
-			{ expression: "fp", count: 1 },
+			{ expression: "fp", count: 7 },
+			{ expression: "proposalPath(gateway.bobbitDir, sid, \"goal\")", count: 1 },
+			{ expression: "historyPath", count: 1 },
 		]),
 	},
 	{
