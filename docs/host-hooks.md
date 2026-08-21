@@ -229,7 +229,8 @@ function scheduleRefresh() {
       // Repeat when another invalidation arrives during the read.
       while (refreshPending) {
         refreshPending = false;
-        renderSnapshot(await host.callRoute("goal-snapshot"));
+        // This is the pack's own declared route, not a built-in Host API route.
+        renderSnapshot(await host.callRoute("your-snapshot-route"));
       }
     } finally {
       refreshRunning = false;

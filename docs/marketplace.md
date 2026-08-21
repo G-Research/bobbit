@@ -167,8 +167,9 @@ shown read-only as "support surfaces").
 > through the Lifecycle Hub, while an explicit `kind: interceptor | notification` hook is eligible
 > for Extension Host dispatch only while its `listName` is active. Installation and indexing never
 > invoke a hook by themselves; the host must also select it for the current canonical boundary,
-> authorize its grants, and recheck activation before invocation and result application. A kindless
-> legacy `{ events, mode }` hook remains listable but inert. **MCP** loads through `McpManager`
+> authorize its grants, and recheck activation before invocation, before interceptor result
+> application, and after observational-handler settlement. A kindless legacy `{ events, mode }`
+> hook remains listable but inert. **MCP** loads through `McpManager`
 > discovery; **pi extensions** resolve to standalone pi `--extension` entries. `runtimes` and
 > `workflows` remain catalogue-only reserved kinds. See
 > [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and
@@ -185,7 +186,7 @@ What disabling does:
   entrypoint never disables a panel.
 - **Disable an MCP contribution or operation** — the contribution id/list name is added to `DisabledRefs.mcp`, or operation names are added under `DisabledRefs.mcpOperations[contributionId]`. Disabled contributions are omitted from Marketplace MCP discovery/connection; disabled operations are omitted from route maps and external `mcp_*` tools. Runtime status refreshes immediately, while disabled rows remain visible in the activation catalogue so they can be re-enabled.
 - **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
-- **Disable a lifecycle hook** — its `contents.hooks` basename (`listName`) is added to `DisabledRefs.hooks`. Registry invalidation removes it from future active resolution and cancels invalidated worker work, so neither an interceptor nor a notification handler can run while disabled. The catalogue row remains visible for re-enable. Kindless legacy hook metadata remains inert whether enabled or disabled.
+- **Disable a lifecycle hook** — its `contents.hooks` basename (`listName`) is added to `DisabledRefs.hooks`. Registry invalidation removes it from future active resolution, so no new interceptor or notification-handler invocation is selected while disabled. An in-flight interceptor dispatch is aborted and cannot apply a result. A notification handler that already started remains bounded by its deadline; its return value is ignored and revocation is detected at settlement. Disabling never rolls back the already-published source fact. The catalogue row remains visible for re-enable. Kindless legacy hook metadata remains inert whether enabled or disabled.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands

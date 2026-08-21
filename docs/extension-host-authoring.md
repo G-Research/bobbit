@@ -1473,8 +1473,11 @@ pack contributions.
 
 Runtime ordering follows winning packs from low to high precedence and then declaration/name order.
 The host checks current activation and grants before invocation and again before applying an
-interceptor result or acknowledging module settlement. Workers have bounded deadlines and are
-cancelled on invalidation. Notification return values are ignored.
+interceptor result. Registry invalidation removes a disabled hook from future selection. It also
+aborts an in-flight interceptor dispatch, whose result cannot apply. An observational notification
+handler that already started is not aborted by registry invalidation: it remains bounded by its
+deadline, its return value is ignored, and the host detects revocation at settlement. Its settlement
+cannot affect other handlers or roll back the already-published source fact.
 
 A kindless legacy declaration using `events` plus `mode: observe | decide` remains listable metadata
 but is deliberately inert. Bobbit does not silently activate old files during upgrade. Existing
