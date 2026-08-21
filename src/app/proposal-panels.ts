@@ -1312,7 +1312,7 @@ function renderGoalForm(config: GoalFormConfig) {
 		if (restoreFocus) (details?.querySelector("summary") as HTMLElement | null)?.focus();
 	};
 	const selectWorktreeMode = (event: Event, mode: GoalWorktreeMode) => {
-		closeWorktreeModeMenu(event.currentTarget);
+		closeWorktreeModeMenu(event.currentTarget, true);
 		if (mode !== worktreeMode) config.onWorktreeModeChange?.(mode);
 	};
 	const handleWorktreeModeMenuKeydown = (event: KeyboardEvent) => {

@@ -179,6 +179,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			await expect(currentOption).toBeFocused();
 			await currentOption.press("Enter");
 			await expect(worktreeSelector).not.toHaveAttribute("open", "");
+			await expect(worktreeSummary).toBeFocused();
 			await expect(currentMode).toBeChecked();
 			await expect(worktreeSummary).toContainText("Current session");
 			await expect(page.locator("[data-testid='goal-form-worktree-branch']")).toHaveText(before.branch);

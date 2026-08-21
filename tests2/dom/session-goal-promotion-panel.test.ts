@@ -200,6 +200,12 @@ describe("current-session goal proposal panel", () => {
 		currentOption.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
 		expect(details.open).toBe(false);
 		expect(document.activeElement).toBe(summary);
+
+		details.open = true;
+		currentOption.focus();
+		currentOption.click();
+		expect(details.open).toBe(false);
+		expect(document.activeElement).toBe(summary);
 	});
 
 	it("persists Current session, renders authoritative coordinates, disables inherited controls, and accepts without coordinate authority", async () => {
