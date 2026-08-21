@@ -240,6 +240,36 @@ export class LifecycleHub {
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
 	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+		return this.dispatchInternal(hook, base, scopeInput);
+	}
+
+	/** Execute one already-normalized legacy provider without duplicating its
+	 * validation, budgets, provenance, trace, or scope-resolution semantics. */
+	async dispatchProvider(
+		hook: LifecycleHook,
+		base: HookDispatchBase,
+		providerRef: Readonly<{ id: string; listName: string; packRoot: string }>,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
+		execution?: Readonly<{ signal?: AbortSignal; timeoutMs?: number }>,
+	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+		return this.dispatchInternal(
+			hook,
+			base,
+			scopeInput,
+			(provider) => provider.id === providerRef.id
+				&& provider.listName === providerRef.listName
+				&& provider.packRoot === providerRef.packRoot,
+			execution,
+		);
+	}
+
+	private async dispatchInternal(
+		hook: LifecycleHook,
+		base: HookDispatchBase,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
+		selectProvider?: (provider: ReturnType<PackContributionRegistry["listProviders"]>[number]) => boolean,
+		execution?: Readonly<{ signal?: AbortSignal; timeoutMs?: number }>,
+	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
 		let scopeContext: HookScopeContext | undefined;
 		if (this.scopeContextResolver) {
 			try {
@@ -249,7 +279,9 @@ export class LifecycleHub {
 			}
 		}
 		const disabled = this.disabledProviders(base.goalId, base.projectId);
-		const providers = this.registry.listProviders(base.projectId).filter((p) => !disabled.has(p.id) && p.hooks.includes(hook));
+		const providers = this.registry.listProviders(base.projectId).filter(
+			(p) => !disabled.has(p.id) && p.hooks.includes(hook) && (!selectProvider || selectProvider(p)),
+		);
 		const diagnostics: HubDiagnostic[] = [];
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();
@@ -280,7 +312,8 @@ export class LifecycleHub {
 					ctx: { ...hookCtx, workingDir: base.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
 					arg: undefined,
 					workingDir: base.cwd,
-				}, provider.budget.timeoutMs);
+					signal: execution?.signal,
+				}, Math.min(provider.budget.timeoutMs, execution?.timeoutMs ?? Number.POSITIVE_INFINITY));
 				ms = Math.round(performance.now() - t0);
 
 				const candidates = extractBlocks(result);
