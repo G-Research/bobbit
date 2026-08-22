@@ -8,7 +8,7 @@
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 204
+    "v2-integration": 203
   },
   "methods": {
     "adapter": 276,
@@ -20,6 +20,69 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/context-clear-boundary.test.ts",
+      "reason": "Core coverage for durable context-clear boundary normalization, segment ownership, repeated clears, and clear-history projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/context-clear-lifecycle.test.ts",
+      "reason": "Core lifecycle coverage for atomic context replacement, active-turn fencing, exact-once queue release, repeated clears, and rollback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/context-clear-rpc.test.ts",
+      "reason": "Core protocol coverage for Pi new_session RPC transport and context-clear WebSocket authorization and error envelopes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/context-clear-session-store.test.ts",
+      "reason": "Core persistence coverage for context-clear boundary validation, atomic session pointer publication, and restart durability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/context-clear-command.test.ts",
+      "reason": "DOM coverage for slash discovery, exact standalone clear invocation, composer cleanup, and accepted-command transport behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/context-clear-recovery.test.ts",
+      "reason": "Integration coverage for cold and live recovery of unmaterialized clear generations across host and sandbox transcript realms.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/clear-session-context.journey.spec.ts",
+      "reason": "Browser journey covering autocomplete and invocation, durable expandable history boundaries, follow-up turns, repeated clears, reload, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
     {
       "path": "tests2/core/goal-candidate-validator.test.ts",
       "reason": "Core coverage for reusable canonical inline-role validation, normalization, and malformed contract rejection.",

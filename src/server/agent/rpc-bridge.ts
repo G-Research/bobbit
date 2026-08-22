@@ -191,7 +191,9 @@ export interface IRpcBridge {
 	setModel(provider: string, modelId: string): Promise<any>;
 	setThinkingLevel(level: string): Promise<any>;
 	compact(timeoutMs?: number): Promise<any>;
-	newSession(timeoutMs?: number): Promise<PiNewSessionRpcResponse>;
+	/** Optional for backward-compatible test/custom bridges. Context clear rejects
+	 * actionably when the active bridge does not support Pi's `new_session`. */
+	newSession?(timeoutMs?: number): Promise<PiNewSessionRpcResponse>;
 	waitForReady(overallTimeoutMs?: number): Promise<void>;
 	sendCommand(command: Record<string, any>, timeoutMs?: number): Promise<any>;
 	onEvent(listener: RpcEventListener): () => void;

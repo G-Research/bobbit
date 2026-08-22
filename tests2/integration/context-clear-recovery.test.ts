@@ -518,7 +518,11 @@ describe("unmaterialized recovery failures", () => {
 		const before = structuredClone(record);
 		const store = new RecoveryStore(record);
 		store.failRepair = true;
-		const candidate = makeRecoveryBridge({ freshPath: containerGeneration("failed-live-store-repair-fresh") });
+		const recoveryGate = deferred<void>();
+		const candidate = makeRecoveryBridge({
+			freshPath: containerGeneration("failed-live-store-repair-fresh"),
+			startGate: recoveryGate,
+		});
 		const manager = makeManager(store, () => candidate);
 		manager.applySandboxWiring = vi.fn(async (options: any) => {
 			options.containerId = "failed-repair-container";
@@ -530,9 +534,15 @@ describe("unmaterialized recovery failures", () => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
 
 		const restart = manager.restartAgent(record.id);
+		// Attach the rejection observer immediately: the lifecycle producer can
+		// fail publication while admission below is still awaiting its fence.
+		const restartError = restart.catch((error: unknown) => error);
 		await vi.waitFor(() => expect(candidate.start).toHaveBeenCalledTimes(1));
 		await manager.enqueuePrompt(record.id, "PARK_ON_FAILED_REPAIR", { intentId: "intent-failed-repair" });
-		await expect(restart).rejects.toThrow(/publication failed/i);
+		recoveryGate.resolve(undefined);
+		const error = await restartError;
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(/publication failed/i);
 
 		expect(store.record.agentSessionFile).toBe(before.agentSessionFile);
 		expect(store.record.contextClearBoundaries).toEqual(before.contextClearBoundaries);
