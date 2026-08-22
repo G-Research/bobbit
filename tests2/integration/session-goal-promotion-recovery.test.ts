@@ -45,6 +45,15 @@ async function sessionRecord(id: string): Promise<any> {
 	return record;
 }
 
+function promotionKickoff(title: string): string {
+	return `You have been promoted to the team lead for the goal "${title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`;
+}
+
+function transcriptTextOccurrences(transcriptPath: string, text: string): number {
+	const escapedText = JSON.stringify(text).slice(1, -1);
+	return fs.readFileSync(transcriptPath, "utf8").split(escapedText).length - 1;
+}
+
 async function createPromotionCandidate(gateway: any, label: string): Promise<{
 	ownerId: string;
 	context: any;
@@ -141,6 +150,8 @@ test.describe("current-session goal promotion recovery and ownership continuity"
 	test("keeps a committed lead attached when finalization fails, then finalizes the exact goal on retry", async ({ gateway, scope }) => {
 		const { ownerId, context } = await createPromotionCandidate(gateway, "finalizer-retry");
 		const teamManager = gateway.teamManager as any;
+		const transcriptPath = gateway.sessionManager.getPersistedSession(ownerId)?.agentSessionFile as string;
+		expect(transcriptPath).toBeTruthy();
 		const originalFinalize = teamManager.finalizeAdoptedLead;
 		let finalizeCalls = 0;
 		teamManager.finalizeAdoptedLead = async () => {
@@ -171,6 +182,7 @@ test.describe("current-session goal promotion recovery and ownership continuity"
 		});
 		expect(gateway.teamManager.getTeamState(goal.id)).toMatchObject({ teamLeadSessionId: ownerId, agents: [] });
 		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(200);
+		expect(transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title)), "failed finalization must not dispatch before the goal is in progress").toBe(0);
 
 		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
@@ -182,6 +194,10 @@ test.describe("current-session goal promotion recovery and ownership continuity"
 		expect(gateway.teamManager.getTeamState(goal.id)).toMatchObject({ teamLeadSessionId: ownerId, agents: [] });
 		expect(context.goalStore.getAll().filter((candidate: any) => candidate.worktreeOwnerSessionId === ownerId)).toHaveLength(1);
 		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(404);
+		await expect.poll(
+			() => transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title)),
+			{ timeout: 10_000, interval: 100, message: "retry finalization must append exactly one durable kickoff" },
+		).toBe(1);
 	});
 
 	test("preserves a real two-component worktree set through archive and removes it on final purge", async ({ gateway }) => {

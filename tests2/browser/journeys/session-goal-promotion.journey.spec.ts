@@ -139,6 +139,15 @@ function transcriptSnapshot(gateway: GatewayInfo, sessionId: string): { path: st
 	return { path: transcriptPath, bytes: readFileSync(transcriptPath, "utf8") };
 }
 
+function promotionKickoff(title: string): string {
+	return `You have been promoted to the team lead for the goal "${title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`;
+}
+
+function transcriptTextOccurrences(bytes: string, text: string): number {
+	const escapedText = JSON.stringify(text).slice(1, -1);
+	return bytes.split(escapedText).length - 1;
+}
+
 async function restartGateway(gateway: GatewayInfo): Promise<void> {
 	await gateway.crash();
 	await gateway.restart();
@@ -176,11 +185,13 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(before.branch).toBeTruthy();
 			expect(before.worktreePath).toBeTruthy();
 			const transcriptBefore = transcriptSnapshot(gateway, source.id);
+			const goalTitle = `Promote browser session ${Date.now()}`;
+			const kickoff = promotionKickoff(goalTitle);
 			await seedGoalProposal(
 				gateway,
 				source.id,
 				source.projectId,
-				`Promote browser session ${Date.now()}`,
+				goalTitle,
 				{ workflowId: "feature", options: "QA testing" },
 			);
 			await openSeededProposal(page, source.id);
@@ -236,8 +247,15 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(team.teamLeadSessionId).toBe(source.id);
 			expect(team.agents ?? []).toHaveLength(0);
 			expect(goal.state).toBe("in-progress");
+			expect(goal.title).toBe(goalTitle);
 			expect(goal.enabledOptionalSteps ?? []).toEqual([]);
-			expect(transcriptSnapshot(gateway, source.id)).toEqual(transcriptBefore);
+			await expect.poll(
+				() => transcriptTextOccurrences(transcriptSnapshot(gateway, source.id).bytes, kickoff),
+				{ timeout: 20_000, intervals: [50, 100, 250], message: "fresh promotion must append one exact kickoff" },
+			).toBe(1);
+			const transcriptAfterPromotion = transcriptSnapshot(gateway, source.id);
+			expect(transcriptAfterPromotion.path).toBe(transcriptBefore.path);
+			expect(transcriptAfterPromotion.bytes.startsWith(transcriptBefore.bytes), "promotion must retain the complete prior transcript as a prefix").toBe(true);
 
 			await restartGateway(gateway);
 			await waitForSessionStatus(source.id, "idle", 40_000);
@@ -263,6 +281,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			const transcriptAfterRestart = transcriptSnapshot(gateway, source.id);
 			expect(transcriptAfterRestart.path).toBe(transcriptBefore.path);
 			expect(transcriptAfterRestart.bytes.startsWith(transcriptBefore.bytes), "restart must preserve the complete pre-promotion transcript prefix").toBe(true);
+			expect(transcriptTextOccurrences(transcriptAfterRestart.bytes, kickoff), "restart recovery must not duplicate the promotion kickoff").toBe(1);
 
 			for (const suffix of ["", "?purge=true"]) {
 				const blocked = await apiFetch(`/api/sessions/${source.id}${suffix}`, { method: "DELETE" });
@@ -284,7 +303,10 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(guardedGoal.archived).not.toBe(true);
 			expect(guardedTeam.teamLeadSessionId).toBe(source.id);
 			expect(existsSync(before.worktreePath)).toBe(true);
-			expect(transcriptSnapshot(gateway, source.id)).toEqual(transcriptAfterRestart);
+			const transcriptAfterGuardedCleanup = transcriptSnapshot(gateway, source.id);
+			expect(transcriptAfterGuardedCleanup.path).toBe(transcriptAfterRestart.path);
+			expect(transcriptAfterGuardedCleanup.bytes.startsWith(transcriptBefore.bytes), "guarded cleanup must preserve the prior transcript prefix").toBe(true);
+			expect(transcriptTextOccurrences(transcriptAfterGuardedCleanup.bytes, kickoff), "guarded cleanup must not duplicate the promotion kickoff").toBe(1);
 
 			const archived = await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
 			expect(archived.status, await archived.clone().text()).toBe(200);
