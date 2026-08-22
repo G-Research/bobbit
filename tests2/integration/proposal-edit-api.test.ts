@@ -397,7 +397,7 @@ test.describe("editable proposals — REST API", () => {
 		}
 	});
 
-	test("malformed options seed and edit preserve the valid draft and revision", async ({ gateway }) => {
+	test("malformed candidate seed and edits return canonical errors without changing the draft", async ({ gateway }) => {
 		const sid = await createSession();
 		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
 		try {
@@ -428,15 +428,28 @@ test.describe("editable proposals — REST API", () => {
 			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(beforeRevision);
 
 			const workflowLine = before.match(/^workflow:.*$/m)?.[0];
+			const titleLine = before.match(/^title:.*$/m)?.[0];
 			expect(workflowLine).toBeTruthy();
-			const edited = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
-				method: "POST",
-				body: JSON.stringify({ old_text: workflowLine, new_text: `${workflowLine}\noptions: 42` }),
-			});
-			expect(edited.status, await edited.clone().text()).toBe(400);
-			expect(await edited.json()).toMatchObject({ ok: false, code: "STRUCTURAL_VALIDATION_FAILED" });
-			expect(fs.readFileSync(fp, "utf8")).toBe(before);
-			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(beforeRevision);
+			expect(titleLine).toBeTruthy();
+			const cases = [
+				{ name: "options type", oldText: workflowLine!, newText: `${workflowLine}\noptions: 42`, status: 400, code: "OPTIONS_INVALID" },
+				{ name: "cwd type", oldText: workflowLine!, newText: `${workflowLine}\ncwd: 42`, status: 422, code: "CWD_OUTSIDE_PROJECT" },
+				{ name: "metadata shape", oldText: workflowLine!, newText: `${workflowLine}\nmetadata:\n  - malformed`, status: 400, code: "METADATA_INVALID" },
+				{ name: "nesting bound", oldText: workflowLine!, newText: `${workflowLine}\nmaxNestingDepth: 0`, status: 400, code: "MAX_NESTING_DEPTH_INVALID" },
+				{ name: "concurrency bound", oldText: workflowLine!, newText: `${workflowLine}\nmaxConcurrentChildren: 9`, status: 400, code: "MAX_CONCURRENT_CHILDREN_INVALID" },
+				{ name: "title type", oldText: titleLine!, newText: "title: 42", status: 400, code: "TITLE_REQUIRED" },
+			];
+			for (const candidate of cases) {
+				const edited = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
+					method: "POST",
+					body: JSON.stringify({ old_text: candidate.oldText, new_text: candidate.newText }),
+				});
+				expect(edited.status, `${candidate.name}: ${await edited.clone().text()}`).toBe(candidate.status);
+				expect(await edited.json()).toMatchObject({ ok: false, code: candidate.code });
+				expect(fs.readFileSync(fp, "utf8"), candidate.name).toBe(before);
+				expect(latestProposalRevision(gateway.bobbitDir, sid, "goal"), candidate.name).toBe(beforeRevision);
+				expect(fs.existsSync(fp + ".tmp"), candidate.name).toBe(false);
+			}
 		} finally {
 			await deleteSession(sid);
 		}
@@ -479,7 +492,7 @@ test.describe("editable proposals — REST API", () => {
 		}
 	});
 
-	test("goal restore rejects a now-invalid snapshot before changing live bytes or revision", async ({ gateway }) => {
+	test("goal restore routes malformed candidate snapshots through canonical errors transactionally", async ({ gateway }) => {
 		const sid = await createSession();
 		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
 		try {
@@ -502,19 +515,28 @@ test.describe("editable proposals — REST API", () => {
 			const historyPath = path.join(path.dirname(fp), "goal.history", "1.md");
 			const snapshot = fs.readFileSync(historyPath, "utf8");
 			const cwdLine = snapshot.match(/^cwd:.*$/m)?.[0];
+			const workflowLine = snapshot.match(/^workflow:.*$/m)?.[0];
 			expect(cwdLine).toBeTruthy();
-			const outsideCwd = path.join(gateway.bobbitDir, "outside-restore-cwd", sid);
-			fs.writeFileSync(historyPath, snapshot.replace(cwdLine!, `cwd: ${JSON.stringify(outsideCwd)}`));
-
-			const restored = await apiFetch(`/api/sessions/${sid}/proposal/goal/restore`, {
-				method: "POST",
-				body: JSON.stringify({ rev: 1 }),
-			});
-			expect(restored.status, await restored.clone().text()).toBe(422);
-			expect(await restored.json()).toMatchObject({ ok: false, code: "CWD_OUTSIDE_PROJECT" });
-			expect(fs.readFileSync(fp, "utf8")).toBe(liveBefore);
-			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(revisionBefore);
-			expect(fs.existsSync(fp + ".tmp")).toBe(false);
+			expect(workflowLine).toBeTruthy();
+			const cases = [
+				{ name: "cwd type", content: snapshot.replace(cwdLine!, "cwd: 42"), status: 422, code: "CWD_OUTSIDE_PROJECT" },
+				{ name: "options type", content: snapshot.replace(workflowLine!, `${workflowLine}\noptions: 42`), status: 400, code: "OPTIONS_INVALID" },
+				{ name: "metadata shape", content: snapshot.replace(workflowLine!, `${workflowLine}\nmetadata:\n  - malformed`), status: 400, code: "METADATA_INVALID" },
+				{ name: "nesting bound", content: snapshot.replace(workflowLine!, `${workflowLine}\nmaxNestingDepth: 0`), status: 400, code: "MAX_NESTING_DEPTH_INVALID" },
+				{ name: "concurrency bound", content: snapshot.replace(workflowLine!, `${workflowLine}\nmaxConcurrentChildren: 9`), status: 400, code: "MAX_CONCURRENT_CHILDREN_INVALID" },
+			];
+			for (const candidate of cases) {
+				fs.writeFileSync(historyPath, candidate.content);
+				const restored = await apiFetch(`/api/sessions/${sid}/proposal/goal/restore`, {
+					method: "POST",
+					body: JSON.stringify({ rev: 1 }),
+				});
+				expect(restored.status, `${candidate.name}: ${await restored.clone().text()}`).toBe(candidate.status);
+				expect(await restored.json()).toMatchObject({ ok: false, code: candidate.code });
+				expect(fs.readFileSync(fp, "utf8"), candidate.name).toBe(liveBefore);
+				expect(latestProposalRevision(gateway.bobbitDir, sid, "goal"), candidate.name).toBe(revisionBefore);
+				expect(fs.existsSync(fp + ".tmp"), candidate.name).toBe(false);
+			}
 		} finally {
 			await deleteSession(sid);
 		}

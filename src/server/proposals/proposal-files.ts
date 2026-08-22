@@ -240,7 +240,7 @@ export async function restoreSnapshot(
 			message: `No snapshot rev ${rev} for ${type} proposal`,
 		};
 	}
-	const parsed = plugin.parse(content);
+	const parsed = plugin.parse(content, type === "goal" && preCommitValidator ? "precommit" : "strict");
 	if (!parsed.ok) return parsed;
 	const rejected = await runPreCommitValidator(preCommitValidator, parsed.value.fields);
 	if (rejected) return rejected;
@@ -373,8 +373,10 @@ export async function editProposalFile(
 
 	const next = current.slice(0, firstIdx) + newText + current.slice(firstIdx + oldText.length);
 
-	// Parse and dynamically validate first; only write/rename .tmp on success.
-	const parsed = plugin.parse(next);
+	// Goal mutation preflight parses YAML and presentation state only, then lets
+	// the canonical candidate validator own every creation field and error.
+	// Other proposal types and read consumers retain strict structural parsing.
+	const parsed = plugin.parse(next, type === "goal" && preCommitValidator ? "precommit" : "strict");
 	if (!parsed.ok) return parsed;
 	const rejected = await runPreCommitValidator(preCommitValidator, parsed.value.fields);
 	if (rejected) return rejected;
