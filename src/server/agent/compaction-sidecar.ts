@@ -111,39 +111,58 @@ export function appendCompactionSidecarEntry(
 	}
 }
 
+function parseCompactionSidecar(raw: string): CompactionSidecarEntry[] {
+	const out: CompactionSidecarEntry[] = [];
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed) as CompactionSidecarEntry;
+			if (
+				parsed &&
+				parsed.schemaVersion === 1 &&
+				typeof parsed.id === "string" &&
+				(parsed.trigger === "manual" || parsed.trigger === "auto" || parsed.trigger === "overflow")
+			) {
+				const { transcriptCompactionEntryId, ...legacyFields } = parsed;
+				out.push({
+					...legacyFields,
+					...(isPiTranscriptEntryId(transcriptCompactionEntryId)
+						? { transcriptCompactionEntryId }
+						: {}),
+				});
+			}
+		} catch { /* skip malformed legacy line */ }
+	}
+	return out;
+}
+
 /** Read all entries for a session. Empty array on any failure (back-compat). */
 export function readCompactionSidecarEntries(sessionId: string): CompactionSidecarEntry[] {
 	const file = sidecarPath(sessionId);
 	if (!file) return [];
 	try {
-		if (!fs.existsSync(file)) return [];
-		const raw = fs.readFileSync(file, "utf-8");
-		const out: CompactionSidecarEntry[] = [];
-		for (const line of raw.split(/\r?\n/)) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			try {
-				const parsed = JSON.parse(trimmed) as CompactionSidecarEntry;
-				if (
-					parsed &&
-					parsed.schemaVersion === 1 &&
-					typeof parsed.id === "string" &&
-					(parsed.trigger === "manual" || parsed.trigger === "auto" || parsed.trigger === "overflow")
-				) {
-					const { transcriptCompactionEntryId, ...legacyFields } = parsed;
-					out.push({
-						...legacyFields,
-						...(isPiTranscriptEntryId(transcriptCompactionEntryId)
-							? { transcriptCompactionEntryId }
-							: {}),
-					});
-				}
-			} catch { /* skip malformed line */ }
-		}
-		return out;
+		return parseCompactionSidecar(fs.readFileSync(file, "utf-8"));
 	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
 		console.warn(`[compaction-sidecar] Read failed for session ${sessionId}:`, err);
 		return [];
+	}
+}
+
+/**
+ * Transactional read used by context clear. A missing sidecar is empty, while
+ * any other path/read failure is surfaced so ownership cannot be committed
+ * from an incomplete view. Malformed individual legacy lines remain skipped.
+ */
+export function readCompactionSidecarEntriesStrict(sessionId: string): CompactionSidecarEntry[] {
+	const file = sidecarPath(sessionId);
+	if (!file) throw new Error("Compaction sidecar storage is not initialized");
+	try {
+		return parseCompactionSidecar(fs.readFileSync(file, "utf-8"));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+		throw err;
 	}
 }
 
@@ -416,9 +435,11 @@ export function syntheticCompactionRowsFromSidecar(
 export function mergeCompactionSidecarIntoMessages(
 	sessionId: string,
 	messages: any[],
+	excludedIds: ReadonlySet<string> = new Set(),
 ): any[] {
 	if (!Array.isArray(messages)) return messages;
-	const entries = readCompactionSidecarEntries(sessionId);
+	const entries = readCompactionSidecarEntries(sessionId)
+		.filter((entry) => !excludedIds.has(entry.id));
 	if (entries.length === 0) return messages;
 
 	// Collect existing __compaction_summary toolCall ids already in the array

@@ -12,6 +12,10 @@ import type {
 } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
+import {
+	normalizeContextClearBoundaries,
+	type ContextClearBoundary,
+} from "./context-clear-boundary.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -288,6 +292,8 @@ export interface PersistedSession {
 	repoWorktrees?: Record<string, string>;
 	/** Server-authoritative right-hand side-panel workspace. */
 	sidePanelWorkspace?: SidePanelWorkspace;
+	/** Durable, recovery-critical boundaries between model-context generations. */
+	contextClearBoundaries?: ContextClearBoundary[];
 }
 
 /**
@@ -345,7 +351,21 @@ export type UpdatableSessionFields = Pick<
 	| "projectId"
 	| "repoWorktrees"
 	| "sidePanelWorkspace"
+	| "contextClearBoundaries"
 >;
+
+export interface PersistedOptionalFieldShape<T = unknown> {
+	present: boolean;
+	value: T;
+}
+
+/** Exact fields mutated as one publication by the context-clear transaction. */
+export interface ContextClearPersistenceShape {
+	agentSessionFile: string;
+	contextClearBoundaries: PersistedOptionalFieldShape<unknown>;
+	wasStreaming: PersistedOptionalFieldShape<unknown>;
+	streamingStartedAt: PersistedOptionalFieldShape<unknown>;
+}
 
 /**
  * Simple JSON file store for gateway session metadata.
@@ -413,8 +433,8 @@ export class SessionStore {
 	}>();
 	/** One archive writer/acknowledgement owner per row. */
 	private archiveAttempts = new Map<string, Promise<boolean>>();
-	/** Legacy delivery ledger rows were upgraded in-memory during load. */
-	private loadedDeliveryLedgerMigration = false;
+	/** Legacy persisted rows were structurally normalized during load. */
+	private loadedStructuralMigration = false;
 
 	/**
 	 * Serialize whole-file publication across store instances in this process.
@@ -429,9 +449,8 @@ export class SessionStore {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
-		// Publish a structural delivery-ledger migration without waiting for a
-		// later queue mutation; otherwise a crash could reintroduce text-only rows.
-		if (this.loadedDeliveryLedgerMigration) this.saveNow();
+		// Publish structural migrations without waiting for a later mutation.
+		if (this.loadedStructuralMigration) this.saveNow();
 	}
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
@@ -464,12 +483,20 @@ export class SessionStore {
 				// JSON comparison is intentional at this disk boundary: the normalized
 				// shape is JSON-only and a structural difference must be durably saved.
 				if (JSON.stringify(originalLedger) !== JSON.stringify(normalizedLedger)) {
-					this.loadedDeliveryLedgerMigration = true;
+					this.loadedStructuralMigration = true;
 				}
 				s.inFlightSteerTexts = normalizedLedger;
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
-				this.loadedDeliveryLedgerMigration = true;
+				this.loadedStructuralMigration = true;
+			}
+			const rawBoundaries = (s as unknown as { contextClearBoundaries?: unknown }).contextClearBoundaries;
+			if (rawBoundaries !== undefined) {
+				const normalizedBoundaries = normalizeContextClearBoundaries(rawBoundaries);
+				if (JSON.stringify(rawBoundaries) !== JSON.stringify(normalizedBoundaries)) {
+					this.loadedStructuralMigration = true;
+				}
+				s.contextClearBoundaries = normalizedBoundaries;
 			}
 			this.sessions.set(s.id, s);
 		}
@@ -728,9 +755,16 @@ export class SessionStore {
 				await this.fs.promises.writeFile(tmp, json, "utf-8");
 			}
 			await this.fs.promises.rename(tmp, this.storeFile);
+			// Rename is the publication point. Everything below is bookkeeping and
+			// must not make a caller believe an already-canonical generation failed.
 			this.writtenEpoch = nextEpoch;
 			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
-			this.diskFingerprint = await this.currentDiskFingerprintAsync();
+			try {
+				this.diskFingerprint = await this.currentDiskFingerprintAsync();
+			} catch (error) {
+				this.diskFingerprint = null;
+				console.warn("[session-store] Published sessions but could not refresh its fingerprint:", error);
+			}
 			return serializedGeneration;
 		} catch (err) {
 			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
@@ -848,7 +882,7 @@ export class SessionStore {
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
 		"messageQueue", "manualRetryRequired", "inFlightSteerTexts", "user_tags",
-		"sidePanelWorkspace",
+		"sidePanelWorkspace", "contextClearBoundaries",
 	];
 
 	/** Update a subset of fields for an existing session */
@@ -893,6 +927,50 @@ export class SessionStore {
 		return true;
 	}
 
+	/** Capture the exact optional-field presence needed for clear rollback compensation. */
+	captureContextClearPersistenceShape(id: string): ContextClearPersistenceShape | undefined {
+		const existing = this.sessions.get(id);
+		if (!existing) return undefined;
+		const raw = existing as unknown as Record<string, unknown>;
+		const capture = (field: string): PersistedOptionalFieldShape<unknown> => {
+			const value = raw[field];
+			return {
+				present: Object.prototype.hasOwnProperty.call(raw, field),
+				// Persisted values are structured-cloneable JSON shapes. Clone the
+				// boundary array so an append performed after capture cannot mutate
+				// the rollback baseline by reference.
+				value: value === undefined ? undefined : structuredClone(value),
+			};
+		};
+		return {
+			agentSessionFile: existing.agentSessionFile,
+			contextClearBoundaries: capture("contextClearBoundaries"),
+			wasStreaming: capture("wasStreaming"),
+			streamingStartedAt: capture("streamingStartedAt"),
+		};
+	}
+
+	/**
+	 * Restore all clear-owned fields in one in-memory generation and one writer
+	 * admission, preserving absence on legacy records.
+	 */
+	restoreContextClearPersistenceShape(id: string, shape: ContextClearPersistenceShape): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		this.generation++;
+		existing.agentSessionFile = shape.agentSessionFile;
+		const raw = existing as unknown as Record<string, unknown>;
+		const restore = (field: string, fieldShape: PersistedOptionalFieldShape<unknown>) => {
+			if (fieldShape.present) raw[field] = fieldShape.value;
+			else delete raw[field];
+		};
+		restore("contextClearBoundaries", shape.contextClearBoundaries);
+		restore("wasStreaming", shape.wasStreaming);
+		restore("streamingStartedAt", shape.streamingStartedAt);
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
+		this.saveNow();
+		return true;
+	}
 
 	/** Get a draft for a session by type. */
 	getDraft(sessionId: string, type: string): unknown | undefined {

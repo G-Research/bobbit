@@ -11,6 +11,10 @@ import {
 	readAuthorSidecar,
 } from "./author-sidecar.js";
 import { mergeCompactionSidecarIntoMessages } from "./compaction-sidecar.js";
+import {
+	contextClearExcludedCompactionIds,
+	mergeContextClearBoundariesIntoMessages,
+} from "./context-clear-boundary.js";
 import { EventBuffer } from "./event-buffer.js";
 import type { AgentSessionIdentity, NormalizeVisibleMessageContext } from "./message-author.js";
 import type { PersistedInFlightSteer } from "./session-store.js";
@@ -28,6 +32,8 @@ export interface VisibleMessageSnapshotContext {
 	inFlightSteerTexts?: readonly PersistedInFlightSteer[];
 	/** Server-confirmed Pi entry ids aligned to the unmodified get_messages rows. */
 	transcriptPromptEntryIds?: readonly (string | undefined)[];
+	/** Validated durable boundaries injected only into this outward snapshot. */
+	contextClearBoundaries?: unknown;
 }
 
 export interface TranscriptCursorSnapshot {
@@ -211,7 +217,11 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 		context.inFlightSteerTexts,
 		authorBindings,
 	);
-	const withCompaction = mergeCompactionSidecarIntoMessages(context.sessionId, withInFlight);
+	const withCompaction = mergeCompactionSidecarIntoMessages(
+		context.sessionId,
+		withInFlight,
+		contextClearExcludedCompactionIds(context.contextClearBoundaries),
+	);
 	// This is the raw-content boundary. Binding-aware author correlation must
 	// see exact Pi model text so its digest can authorize removal of one injected
 	// prefix. Run it before truncation, cloning/order fields, or skill/file
@@ -228,9 +238,10 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 	);
 	const truncated = truncateLargeToolContentInMessages(withAuthors);
 	const skillEntries = readSkillSidecarEntries(context.sessionId);
-	return skillEntries.length > 0
+	const withSkills = skillEntries.length > 0
 		? mergeSidecarEntriesIntoMessages(skillEntries, truncated)
 		: truncated;
+	return mergeContextClearBoundariesIntoMessages(context.contextClearBoundaries, withSkills);
 }
 
 /**
