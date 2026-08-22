@@ -2911,7 +2911,7 @@ export interface StaffAgent {
 	currentSessionId?: string;
 	projectId?: string;
 	sandboxed?: boolean;
-	contextPolicy?: "preserve" | "compact";
+	contextPolicy?: "preserve" | "compact" | "clear";
 	accessory?: string;
 }
 
