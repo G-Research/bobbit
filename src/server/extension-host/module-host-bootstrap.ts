@@ -155,7 +155,9 @@ interface SerializableCtx {
 	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	/** Plain, parent-resolved binding. No resolver or live host object crosses here. */
+	localDataDirectory?: string;
+	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; localData?: boolean };
 }
 
 interface ChannelSerializableCtx {
@@ -468,8 +470,12 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			session: flags.session,
 			store: flags.store,
 			agents: flags.agents,
+			...(flags.localData === true ? { localData: true as const } : {}),
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
+		...(flags.localData === true && typeof ctx.localDataDirectory === "string"
+			? { localData: { directory: (): string => ctx.localDataDirectory! } }
+			: {}),
 		store: {
 			get: (key: string) => callHost(["store", "get"], [key]),
 			// Durable reads preserve absent/present/error across the worker boundary;

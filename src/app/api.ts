@@ -3264,6 +3264,8 @@ export interface ToolInfo {
 	 *  the panel within the renderer's OWN pack, never a global panel-id search that
 	 *  would collide when another installed pack shares the panel id. */
 	packId?: string;
+	/** Present only when the winning contributing pack declares project local data. */
+	hasLocalData?: true;
 	grantPolicy?: string;
 	providerType?: "pi-extension" | string;
 	origin?: "marketplace-pi-extension" | "builtin" | "server" | "user" | "project" | string;
@@ -3361,6 +3363,8 @@ export interface PackEntrypointWire {
 export interface PackContributionsWire {
 	packId: string;
 	packName: string;
+	/** Present only when this active winning pack declares project local data. */
+	hasLocalData?: true;
 	panels: PackPanelWire[];
 	entrypoints: PackEntrypointWire[];
 	/** Pack-local channel names only; module/handler paths stay server-side. */

@@ -43,6 +43,14 @@ export interface PackRoutesRef {
 	names?: string[];
 }
 
+/** Stable project-scoped storage declaration for trusted extension code. */
+export interface PackLocalDataDeclaration {
+	scope: "project";
+	directory: string;
+	access: "read-write";
+	preserveOnUninstall: true;
+}
+
 /** Parsed `pack.yaml`. `contents` is REQUIRED with all v1 entity-list keys. */
 export interface PackManifest {
 	name: string;
@@ -64,6 +72,8 @@ export interface PackManifest {
 	provides?: string[];
 	/** Capability names this pack depends on (schema 2+ metadata). */
 	requires?: string[];
+	/** Optional schema-2 project-scoped extension data directory. */
+	localData?: PackLocalDataDeclaration;
 	/**
 	 * Authoritative advertised contents. v1 keys are REQUIRED but each MAY be
 	 * empty. Schema 2 adds optional pack-scoped catalogues; only `providers` has

@@ -78,9 +78,9 @@ export interface PackPanel {
  *  `pack-panels.ts` stays free of a `host-api.ts` import cycle (host-api already
  *  imports `openPackPanel`). When the factory is unset (e.g. unit fixtures that
  *  never load host-api) panels render with `host === undefined` exactly as before. */
-let panelHostFactory: ((sessionId: string | undefined, packId: string, panelId: string) => HostApi) | undefined;
+let panelHostFactory: ((sessionId: string | undefined, packId: string, panelId: string, hasLocalData: boolean) => HostApi) | undefined;
 export function setPanelHostFactory(
-	fn: (sessionId: string | undefined, packId: string, panelId: string) => HostApi,
+	fn: (sessionId: string | undefined, packId: string, panelId: string, hasLocalData: boolean) => HostApi,
 ): void {
 	panelHostFactory = fn;
 }
@@ -99,12 +99,12 @@ export function setPanelHostFactory(
  *  `pr-walkthrough.git-widget`) — the surface-token mint validates it against the
  *  pack's registered entrypoints (`getEntrypoint`), so it MUST be a real entrypoint
  *  id, mirroring how {@link panelHostFactory} threads the panelId. */
-let launcherHostFactory: ((sessionId: string | undefined, packId: string, contributionId: string) => HostApi) | undefined;
-export function setLauncherHostFactory(fn: (sessionId: string | undefined, packId: string, contributionId: string) => HostApi): void {
+let launcherHostFactory: ((sessionId: string | undefined, packId: string, contributionId: string, hasLocalData: boolean) => HostApi) | undefined;
+export function setLauncherHostFactory(fn: (sessionId: string | undefined, packId: string, contributionId: string, hasLocalData: boolean) => HostApi): void {
 	launcherHostFactory = fn;
 }
-export function getLauncherHost(packId: string, contributionId: string, sessionId?: string): HostApi | undefined {
-	return launcherHostFactory?.(sessionId ?? currentSessionIdForPanel(), packId, contributionId);
+export function getLauncherHost(packId: string, contributionId: string, sessionId: string | undefined, hasLocalData: boolean): HostApi | undefined {
+	return launcherHostFactory?.(sessionId ?? currentSessionIdForPanel(), packId, contributionId, hasLocalData);
 }
 
 /** The CANONICAL session-switch entrypoint (`connectToSession(sessionId, false)`
@@ -149,6 +149,8 @@ export interface PackPanelInfo {
 	instanceMode?: "singleton" | "parameterized";
 	/** Allowlisted param name used as the instanceKey for parameterized panels. */
 	instanceParam?: string;
+	/** Present only when the winning contributing pack declares project local data. */
+	hasLocalData?: true;
 }
 
 /** A registered panel: the owning `packId` (used to build the pack-addressed
@@ -165,6 +167,7 @@ export interface PackPanelInstanceIdentityInfo {
 interface RegisteredPanel extends PackPanelInstanceIdentityInfo {
 	title?: string;
 	projectId?: string;
+	hasLocalData: boolean;
 }
 
 /** `{packId, panelId}` key → registration. Reconciled from /api/ext/contributions
@@ -224,7 +227,7 @@ export function registerPackPanels(
 		if (!info?.packId || !info.panelId) continue;
 		const instanceMode = info.instanceMode === "parameterized" ? "parameterized" : "singleton";
 		const instanceParam = typeof info.instanceParam === "string" && info.instanceParam.trim() ? info.instanceParam.trim() : undefined;
-		next.set(panelKey(info.packId, info.panelId), { packId: info.packId, panelId: info.panelId, title: info.title, projectId, instanceMode, instanceParam });
+		next.set(panelKey(info.packId, info.panelId), { packId: info.packId, panelId: info.panelId, title: info.title, projectId, instanceMode, instanceParam, hasLocalData: info.hasLocalData === true });
 	}
 	// RECONCILE: compare prior registry to the fresh one.
 	for (const [key, prev] of panels) {
@@ -298,6 +301,7 @@ export function panelInfosFromContributions(packs: ReadonlyArray<PackContributio
 				title: typeof panel?.title === "string" ? panel.title : undefined,
 				instanceMode: raw.instanceMode === "parameterized" ? "parameterized" : raw.instanceMode === "singleton" ? "singleton" : undefined,
 				instanceParam: typeof raw.instanceParam === "string" ? raw.instanceParam : undefined,
+				...(p.hasLocalData === true ? { hasLocalData: true } : {}),
 			});
 		}
 	}
@@ -528,8 +532,9 @@ function removePackPanelTab(packId: string, panelId: string): void {
  */
 function panelInvocationContext(packId: string, panelId: string, params?: Record<string, unknown>, boundSessionId?: string) {
 	const sessionId = boundSessionId || currentSessionIdForPanel();
+	const hasLocalData = panels.get(panelKey(packId, panelId))?.hasLocalData === true;
 	const host = panelHostFactory
-		? panelHostFactory(sessionId, packId, panelId)
+		? panelHostFactory(sessionId, packId, panelId, hasLocalData)
 		: undefined;
 	const renderParams = sessionId ? { ...(params ?? {}), __sessionId: sessionId } : params;
 	return { host, renderParams };

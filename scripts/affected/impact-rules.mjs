@@ -1005,6 +1005,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/pack-local-data-fixture.test.ts",
+		allowReason: "isolated test-owned local-data marker files written through the fixture route and Pi tool",
+		reads: frozen([
+			{ expression: "path.join(directory, \"host-marker.txt\")", count: 1 },
+			{ expression: "path.join(directory, \"pi-marker.txt\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/sandbox-security.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([

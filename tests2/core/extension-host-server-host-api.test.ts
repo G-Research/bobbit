@@ -62,6 +62,53 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	});
 });
 
+describe("createServerHostApi — project-scoped pack local data", () => {
+	it("exposes the exact pre-resolved directory synchronously when bound", () => {
+		const directory = path.join(os.tmpdir(), "project", ".performance-optimisation");
+		const host = createServerHostApi({
+			sessionId: "s",
+			packId: "performance-optimisation",
+			contributionId: "tools/performance",
+			localDataDirectory: directory,
+		});
+
+		assert.equal(host.capabilities.localData, true);
+		assert.equal(host.capabilities.has("localData"), true);
+		assert.equal(host.localData?.directory(), directory);
+		assert.equal(host.localData?.directory(), directory, "the stable binding is reused without caller input");
+	});
+
+	it("adds no namespace or capability property when no directory is bound", () => {
+		const host = createServerHostApi({ sessionId: "s", packId: "plain-pack", contributionId: "g/t" });
+		assert.equal(Object.hasOwn(host, "localData"), false);
+		assert.equal(Object.hasOwn(host.capabilities, "localData"), false);
+		assert.equal(host.capabilities.has("localData"), false);
+	});
+
+	it("honours a least-privilege mask for the declared binding", () => {
+		const directory = path.join(os.tmpdir(), ".p");
+		const denied = createServerHostApi({
+			sessionId: "s",
+			packId: "p",
+			contributionId: "providers/p",
+			localDataDirectory: directory,
+			capabilityMask: { store: true },
+		});
+		assert.equal(Object.hasOwn(denied, "localData"), false);
+		assert.equal(denied.capabilities.has("localData"), false);
+
+		const allowed = createServerHostApi({
+			sessionId: "s",
+			packId: "p",
+			contributionId: "providers/p",
+			localDataDirectory: directory,
+			capabilityMask: { store: true, localData: true },
+		});
+		assert.equal(allowed.localData?.directory(), directory);
+		assert.equal(allowed.capabilities.has("localData"), true);
+	});
+});
+
 describe("createServerHostApi — Fix B: NO server-side session.postMessage", () => {
 	it("the server host session API does NOT expose postMessage (driving the agent is client-only)", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "p", contributionId: "g/t" });

@@ -184,6 +184,10 @@ import {
 	normalizeSandboxCwdOffset,
 	relativeSandboxCwdOffset,
 } from "./session-setup.js";
+import {
+	resolvePackLocalDataEnvironment,
+	type PackLocalDataBindingsResolver,
+} from "./pack-local-data-runtime.js";
 
 
 function isSandboxContainerPath(cwd?: string): boolean {
@@ -3257,6 +3261,7 @@ export class SessionManager {
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	private packLocalDataBindingsResolver: PackLocalDataBindingsResolver | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
@@ -4534,6 +4539,7 @@ export class SessionManager {
 			toolManager: this.toolManager ?? null,
 			mcpManager: this.getMcpManagerForContext(projectId, cwd),
 			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
+			packLocalDataBindingsResolver: this.packLocalDataBindingsResolver,
 			goalManager: resolvedGoalManager,
 			taskManager: resolvedTaskManager,
 			projectConfigStore: resolvedProjectConfigStore,
@@ -5277,6 +5283,11 @@ export class SessionManager {
 		this.marketplacePiExtensionResolver = resolver ?? null;
 	}
 
+	/** Late-bound by server composition after the winning pack registry exists. */
+	setPackLocalDataBindingsResolver(resolver: PackLocalDataBindingsResolver | null | undefined): void {
+		this.packLocalDataBindingsResolver = resolver ?? null;
+	}
+
 	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
 		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? []);
 	}
@@ -5574,6 +5585,7 @@ export class SessionManager {
 		projectId?: string,
 		effectiveGoalId?: string,
 		grantedTools?: string[],
+		sandboxed = false,
 	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
@@ -5651,7 +5663,16 @@ export class SessionManager {
 			args.push("--extension", aigwDnsGuardPath);
 		}
 
-		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
+		const packLocalDataEnv = resolvePackLocalDataEnvironment(
+			this.packLocalDataBindingsResolver,
+			projectId,
+			sandboxed,
+		);
+		return {
+			args,
+			env: { ...activation.env, ...packLocalDataEnv },
+			runtimeExtensions: piExtensionActivation.runtimeExtensions,
+		};
 	}
 
 	private messageAuthorDependencies(
@@ -11263,7 +11284,7 @@ export class SessionManager {
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
@@ -14541,7 +14562,7 @@ export class SessionManager {
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
 		await this.ensureMcpManagerForContext(replacementSession.projectId, replacementSession.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -17349,7 +17370,7 @@ export class SessionManager {
 				? effective
 				: (effective.length > 0 ? effective : undefined);
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
+			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };

@@ -15,6 +15,7 @@ import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-level
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
+import { BOBBIT_PACK_LOCAL_DATA_ENV } from "./pack-local-data-runtime.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
@@ -286,6 +287,12 @@ export function registerRpcBridgeFactory(factory: RpcBridgeFactory | null): void
  * and emit exactly one leading `--no-approve` and `--no-context-files` that no
  * caller can override.
  */
+/** Build the explicit docker-exec forwarding args for the non-secret pack binding. */
+export function packLocalDataDockerExecArgs(env?: Readonly<Record<string, string>>): string[] {
+	const value = env?.[BOBBIT_PACK_LOCAL_DATA_ENV];
+	return value ? ["-e", `${BOBBIT_PACK_LOCAL_DATA_ENV}=${value}`] : [];
+}
+
 /**
  * Resolve the gateway credentials to inject into a direct (non-sandbox) child's
  * env: BOBBIT_TOKEN + BOBBIT_GATEWAY_URL.
@@ -981,6 +988,7 @@ export class RpcBridge {
 		if (this.options.env?.BOBBIT_GOAL_ID) {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
+		execArgs.push(...packLocalDataDockerExecArgs(this.options.env));
 		if (this.options.gatewayToken) {
 			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
 		}

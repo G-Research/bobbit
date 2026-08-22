@@ -12,7 +12,7 @@ __syncBeforeAll(() => __syncCE());
 // Module-level reconcile dedupe state persists across tests in a fork (the
 // legacy suite got a fresh page per test), so each test uses UNIQUE project ids.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerPackRenderers, reconcilePackRenderersForProject } from "../../src/app/pack-renderers.js";
+import { packHasLocalDataForTool, registerPackRenderers, reconcilePackRenderersForProject } from "../../src/app/pack-renderers.js";
 import { getToolRenderer } from "../../src/ui/tools/renderer-registry.js";
 
 let fetchCalls: string[];
@@ -51,6 +51,17 @@ const triggerLoad = (name: string) => { getToolRenderer(name); };
 const flush = async () => { await new Promise((r) => setTimeout(r, 30)); };
 
 describe("reconcilePackRenderersForProject (extension-host §4a/§4c)", () => {
+	it("projects local-data capability only for the current declared winning pack renderer", () => {
+		registerPackRenderers([{ name: "local_data_tool", rendererKind: "pack", packId: "declared", hasLocalData: true }]);
+		expect(packHasLocalDataForTool("local_data_tool")).toBe(true);
+
+		registerPackRenderers([{ name: "local_data_tool", rendererKind: "pack", packId: "undeclared" }]);
+		expect(packHasLocalDataForTool("local_data_tool")).toBe(false);
+
+		registerPackRenderers([]);
+		expect(packHasLocalDataForTool("local_data_tool")).toBe(false);
+	});
+
 	it("re-drives registration scoped to the active session's project; dedupes unchanged; swaps the loader on project change", async () => {
 		clearCalls();
 		await reconcile("A1");

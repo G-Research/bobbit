@@ -225,6 +225,27 @@ export class SandboxManager {
 		}
 	}
 
+	/**
+	 * Reconcile immutable pack local-data binds for one project or every tracked
+	 * project. Each ProjectSandbox serializes comparison/recreation with health
+	 * recovery and emits the normal recovery event only when its live plan differs.
+	 */
+	async refreshPackLocalDataMounts(projectId?: string): Promise<void> {
+		const sandboxes = projectId
+			? [this.sandboxes.get(projectId)].filter((sandbox): sandbox is ProjectSandbox => sandbox !== undefined)
+			: [...this.sandboxes.values()];
+		const results = await Promise.allSettled(sandboxes.map((sandbox) => sandbox.refreshPackLocalDataMounts()));
+		const failures = results.flatMap((result, index) => result.status === "rejected"
+			? [{ projectId: sandboxes[index].getStatus().projectId, reason: result.reason }]
+			: []);
+		if (failures.length > 0) {
+			throw new AggregateError(
+				failures.map((failure) => failure.reason),
+				`Failed to refresh pack local-data mounts for project(s): ${failures.map((failure) => failure.projectId).join(", ")}`,
+			);
+		}
+	}
+
 	/** Get stats for all sandboxes. */
 	getStats(): SandboxManagerStats {
 		const containers: ContainerState[] = [];
