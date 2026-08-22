@@ -49,7 +49,7 @@ The inbox sits between trigger fan-in and session fan-out:
                   │   .tick()/.tickOne() │
                   └──────────┬───────────┘
                              │ if staff is "idle" with pending entries:
-                             │   (optional) compact
+                             │   apply Compact / Preserve / Clear policy
                              │   enqueuePrompt(session, "[INBOX] You have N pending …")
                              ▼
                   ┌──────────────────────┐
@@ -93,11 +93,17 @@ UI surface (all in `src/app/` and `src/ui/inbox/`):
    `idle`, `nudgePending` is already set, or the pending list is empty. If all
    four checks pass, it enters `applyPolicyThenNudge`:
    - Sets `nudgePending = true` so a concurrent tick can't re-fire.
-   - If `staff.contextPolicy === "compact"` it awaits
-     `session.rpcClient.compact(120_000)` — same call surface as the manual
-     `/compact` skill.
+   - Applies the staff's context policy: await bridge compaction for Compact,
+     do nothing for Preserve, or await `SessionManager.clearContext(sessionId)`
+     for Clear.
+   - After Clear, rechecks that the active staff still owns the same idle
+     session and that no competing prompt is queued. This ensures the digest is
+     the first prompt delivered into the cleared context.
    - Updates `staff.lastWakeAt` (best-effort; warn-only on failure).
    - Calls `sessionManager.enqueuePrompt(sessionId, "[INBOX] You have N pending …", { isSteered: true })`.
+   A policy or post-clear admission failure clears `nudgePending` without
+   delivering the digest or changing inbox entries, so the next eligible tick
+   retries.
 3. **Agent processes.** The agent sees the digest, calls `inbox_list` to fetch
    pending entries, then `inbox_complete` or `inbox_dismiss` per entry. Each
    tool hits `POST /api/staff/:id/inbox/:entryId/{complete,dismiss}`, which
@@ -136,28 +142,41 @@ where an entry came from:
 
 ## `contextPolicy`
 
-`PersistedStaff.contextPolicy: "preserve" | "compact"` (default **`compact`**)
-controls what the nudger does to conversation context immediately before
-delivering a wake digest:
+`PersistedStaff.contextPolicy: "compact" | "preserve" | "clear"` controls what
+the nudger does immediately before each wake digest:
 
-- **`compact`** — the nudger awaits a full `/compact` over the session's RPC
-  bridge (`session.rpcClient.compact(120_000)`) and only enqueues the digest
-  prompt after compaction completes. This keeps long-running staff agents
-  inside the model's effective context window across many wake cycles.
-- **`preserve`** — the nudger enqueues the digest directly into the existing
-  conversation. Appropriate for short-lived threads or when you specifically
-  want the agent to remember its previous decisions verbatim.
+- **`compact` (default)** — awaits bridge compaction before enqueueing the
+  digest. The generated summary and retained tail remain model-facing, keeping
+  long-running staff within the effective context window.
+- **`preserve`** — enqueues the digest directly into the current conversation.
+  Use it when the next wake needs the prior conversation verbatim.
+- **`clear`** — awaits the existing `SessionManager.clearContext(sessionId)`
+  transaction before enqueueing the digest. The digest becomes the first prompt
+  in an empty model-facing conversation generation: prior user, assistant,
+  tool, and compaction-summary traffic is not restored to model context.
 
-Edit on the staff page's **Context Policy** radio group between "Pinned
-Context" and the save bar. The value is persisted via `PUT /api/staff/:id` and
-normalised to `compact` for any legacy record that lacks the field. Existing
-staff records get `compact` on first load — see `staff-store.ts` (load and
-update normalisation).
+Clear reuses the same durable transaction as manual `/clear`; it does not
+terminate, recreate, or change the Bobbit staff session. Staff and session IDs,
+worktree and runtime configuration, pinned/system context, tools, permissions,
+model and thinking settings, and inbox entries remain unchanged. The normal
+**Context Cleared** transcript boundary is persisted, and earlier conversation
+remains available only through the display-only history fold; both survive
+reload and gateway restart. See
+[Session context controls](features.md#session-context-controls) for the shared
+clear contract.
 
-A future `clear` policy (terminate + respawn subprocess with a fresh jsonl)
-is deliberately out of scope. The enum is forward-compatible — see
-[design/staff-inbox.md §10](design/staff-inbox.md#10-out-of-scope) for the
-reasoning.
+The staff page's **Context Policy** control changes form state; the choice takes
+effect after **Save**. `PUT /api/staff/:id` persists all three values across
+reload and gateway restart. Compact remains the compatibility default: missing,
+legacy, unknown, or malformed values read from `staff.json` normalize to
+`compact`. An unknown value sent to `PUT` is ignored for that field, leaving the
+previous stored policy unchanged while other valid update fields still apply.
+
+Clear fails closed. If the clear transaction fails, races an incompatible
+lifecycle operation, or its post-clear ownership/idle/queue check fails, the
+nudger delivers no digest into the old or contested context. It clears
+`nudgePending`, leaves every inbox entry pending, and retries on a later normal
+idle tick.
 
 ## Tools
 
@@ -402,8 +421,10 @@ For anyone upgrading from a pre-inbox checkout:
 - **`TriggerEngine.wakingInProgress` is gone**, as is the streaming/starting
   skip in `fireTrigger`. Enqueueing is pure I/O against the JSON store, so
   there is no race to guard against — the trigger always lands.
-- **`PersistedStaff.contextPolicy` is new.** Legacy records normalise to
-  `compact` on load and on next write.
+- **`PersistedStaff.contextPolicy` is new.** Compact is the compatibility
+  default: legacy, missing, unknown, and malformed stored values normalise to
+  `compact` on load and on next write. Valid Compact, Preserve, and Clear
+  values round-trip unchanged.
 - **`lastWakeAt` is now updated by the nudger**, not by the old `wake()`
   method, and reflects the moment the nudger delivers a digest (regardless of
   source).
@@ -423,7 +444,6 @@ operation today.
 | `InboxStore.update` mutates entries in place | low | Cosmetic; doesn't affect persistence but makes the store less reasonable about. |
 | `InboxNudger.onAgentStart` is O(n_staff) | low | A reverse `sessionId → staffId` map would make it O(1). |
 | Search index ingestion of completed entries | out of scope | Entries are addressable via REST but not searchable in the cross-project search. Tracked in the original design doc. |
-| `contextPolicy: "clear"` | out of scope | Terminate + respawn the agent subprocess with a fresh jsonl. The enum is forward-compatible; see [design/staff-inbox.md §10](design/staff-inbox.md#10-out-of-scope). |
 
 ## See also
 

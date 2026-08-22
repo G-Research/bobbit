@@ -36,7 +36,7 @@ let editPromptEditMode = false;
 let editRuntimeCwd = "";
 let editTriggers: TriggerDef[] = [];
 let editMemory = "";
-let editContextPolicy: "preserve" | "compact" = "compact";
+let editContextPolicy: "preserve" | "compact" | "clear" = "compact";
 let editTab: "prompt" | "triggers" = "prompt";
 
 // Session appearance state
@@ -173,7 +173,9 @@ function showEdit(agent: StaffAgent): void {
 	editRuntimeCwd = "";
 	editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 	editMemory = agent.memory || "";
-	editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
+	editContextPolicy = agent.contextPolicy === "preserve" || agent.contextPolicy === "clear"
+		? agent.contextPolicy
+		: "compact";
 	editRoleId = agent.roleId || null;
 	colorUserTouched = false;
 	roleDropdownOpen = false;
@@ -200,7 +202,9 @@ export function navigateToStaffEdit(staffId: string): void {
 		editRuntimeCwd = "";
 		editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 		editMemory = agent.memory || "";
-		editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
+		editContextPolicy = agent.contextPolicy === "preserve" || agent.contextPolicy === "clear"
+			? agent.contextPolicy
+			: "compact";
 		editRoleId = agent.roleId || null;
 		colorUserTouched = false;
 		roleDropdownOpen = false;
@@ -636,10 +640,16 @@ function renderPromptTab(): TemplateResult {
 					@input=${(e: Event) => { editMemory = (e.target as HTMLTextAreaElement).value; }}
 				></textarea>
 			</div>
-			<div class="context-policy-group" data-testid="context-policy">
-				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Context Policy</label>
-				<p class="text-[10px] text-muted-foreground mb-1">What happens before a wake digest is sent when the inbox has pending entries.</p>
-				<div class="flex gap-3">
+			<fieldset
+				class="context-policy-group min-w-0 border-0 p-0 m-0"
+				data-testid="context-policy"
+				aria-describedby="context-policy-help"
+			>
+				<legend class="text-xs text-muted-foreground mb-1.5 block font-medium">Context Policy</legend>
+				<p id="context-policy-help" class="text-[10px] text-muted-foreground mb-1">
+					Before each inbox wake: Compact summarizes prior conversation, Preserve keeps it, and Clear removes it from model context. Clear keeps pinned context and prior history visible (display only).
+				</p>
+				<div class="flex flex-wrap gap-x-3 gap-y-2">
 					<label class="flex items-center gap-1.5 text-sm cursor-pointer">
 						<input
 							type="radio"
@@ -660,8 +670,18 @@ function renderPromptTab(): TemplateResult {
 						/>
 						<span>Preserve</span>
 					</label>
+					<label class="flex items-center gap-1.5 text-sm cursor-pointer">
+						<input
+							type="radio"
+							name="contextPolicy"
+							value="clear"
+							.checked=${editContextPolicy === "clear"}
+							@change=${() => { editContextPolicy = "clear"; renderApp(); }}
+						/>
+						<span>Clear</span>
+					</label>
 				</div>
-			</div>
+			</fieldset>
 		</div>
 	`;
 }
