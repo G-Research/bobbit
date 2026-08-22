@@ -1160,7 +1160,7 @@ Session/goal/search endpoints accept optional `?projectId=` filter:
 
 ## Editable proposals
 
-Successful `propose_*` payloads (`goal`, `project`, `role`, `tool`, `staff`) are mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth for draft content; the in-memory `state.activeProposals[type]` slot is a parsed content projection rebuilt on every change. Failed goal workflow-validation seeds are the exception: they write no draft and remain inspectable from the transcript tool call/result. Side-panel tab presence is separate and comes from the server-backed workspace. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
+Successful `propose_*` payloads (`goal`, `project`, `role`, `tool`, `staff`) are mirrored to a real file under `.bobbit/state/proposal-drafts/<sessionId>/<type>.{md,yaml}`. The file is the single source of truth for draft content; the in-memory `state.activeProposals[type]` slot is a parsed content projection rebuilt on every change. An invalid goal candidate is never promoted to the live draft: the failed tool input/result remains inspectable in the transcript, while the previous valid file and revision remain unchanged. Side-panel tab presence is separate and comes from the server-backed workspace. Two new tools - `view_proposal(type)` and `edit_proposal(type, old_text, new_text)` - let the agent apply surgical changes via exact-string replacement, with structured rollback on parse failure.
 
 ### Why
 
@@ -1169,6 +1169,12 @@ Agents previously had to re-emit the entire payload via `propose_*` to tweak one
 The refactor also unified the per-type proposal slots into one keyed map and lifted the goal-proposal UX behaviours (draft persistence, dismissal stickiness, "Open proposal" reopen, first-emit auto-select, streaming shallow-merge, per-session scoping) so every supported type inherits them. Bespoke per-type renderers (project's Components/Workflows/Diff, role/tool/staff preview forms, goal's spec markdown) are unchanged - only the surrounding plumbing was rewritten.
 
 Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
+
+### Goal-candidate commit boundary
+
+Goal drafts have a stronger contract than syntax-valid proposal files. Seed, validated frontmatter edit, worktree-mode change, and restore run the canonical side-effect-free goal-candidate validator as a pre-commit callback. Ordinary creation, both proposal acceptance modes, direct child creation, and verification-harness child creation consume the same validator. This keeps proposal validity and creation validity from drifting as project, workflow, parent, role, path-ownership, nesting, or policy state changes.
+
+The pre-commit callback runs before the proposal file, revision history, workspace tab, or WebSocket event changes. Acceptance validates again against current state immediately before goal mutation; repository/worktree support preflight is completed before that final validation. A validation failure therefore retains the editable draft and produces no goal, task, gate, worktree, team reservation, or generated-workflow persistence. See [Goals, Workflows, Tasks & Gates — Canonical goal-candidate validation](goals-workflows-tasks.md#canonical-goal-candidate-validation) for path authority, ownership, trusted legacy snapshots, and workflow precedence.
 
 ### On-disk layout
 
