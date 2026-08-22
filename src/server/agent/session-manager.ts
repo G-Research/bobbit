@@ -919,14 +919,54 @@ export interface SessionHostInterceptorPort {
 	requiresFailClosed?(name: string, projectId?: string, goalId?: string): boolean;
 }
 
+type ToolCallLifecyclePhase =
+	| "observed"
+	| "before-running"
+	| "admitted"
+	| "after-running"
+	| "after-applied"
+	| "ended";
+
 interface ToolCallLifecycleEntry {
 	toolCallId: string;
 	toolName: string;
+	generation: number;
 	turnIndex: number;
 	startedAt: number;
+	startCursor?: number;
+	phase: ToolCallLifecyclePhase;
+	lease: number;
+	controller: AbortController;
 	status?: "succeeded" | "errored";
 	errorStatus?: "handler_error";
 }
+
+interface ToolCallBeforeWaiter {
+	toolCallId: string;
+	toolName: string;
+	generation: number;
+	timer: ReturnType<typeof setTimeout>;
+	resolve: (claim: ToolCallInterceptorClaim | undefined) => void;
+}
+
+declare const toolCallInterceptorClaimBrand: unique symbol;
+/** Opaque, process-local authority for one exact host-observed Pi tool boundary. */
+export type ToolCallInterceptorClaim = {
+	readonly [toolCallInterceptorClaimBrand]: true;
+};
+
+interface OwnedToolCallInterceptorClaim {
+	kind: "before" | "after";
+	session: SessionInfo;
+	entry: ToolCallLifecycleEntry;
+	generation: number;
+	lease: number;
+	settled: boolean;
+}
+
+const MAX_TRACKED_HOST_TOOL_CALLS = 128;
+const TOOL_CALL_START_ARRIVAL_GRACE_MS = 100;
+const MAX_HOST_TOOL_IDENTITY_LENGTH = 512;
 
 export interface SessionInfo {
 	id: string;
@@ -1053,8 +1093,10 @@ export interface SessionInfo {
 	staffNotificationTurnContext?: StaffNotificationTurnContext;
 	/** Last turn index whose canonical agent_start notification was published. */
 	hostTurnStartedIndex?: number;
-	/** Bounded, metadata-only tool calls admitted by the host interceptor seam. */
+	/** Bounded, metadata-only tool provenance created only by accepted Pi lifecycle events. */
 	hostToolCallLifecycle?: Map<string, ToolCallLifecycleEntry>;
+	/** Bounded pre-arrival reservations for HTTP callbacks that race Pi stdout. */
+	hostToolCallBeforeWaiters?: Map<string, ToolCallBeforeWaiter>;
 	/** Post-authority status observer installed by SessionManager. */
 	onStatusChanged?: import("./session-status.js").BroadcastableSession["onStatusChanged"];
 	/** Called only after a live event entered EventBuffer and its legacy frame was queued. */
@@ -3277,6 +3319,8 @@ type PendingVerifierPromptReceipt = {
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
+	/** Opaque claims keep lifecycle authority out of route-visible values. */
+	private readonly _toolCallInterceptorClaims = new WeakMap<object, OwnedToolCallInterceptorClaim>();
 	/** Exact verifier rows waiting for provider acceptance, keyed by session/row. */
 	private _verifierPromptReceipts?: Map<string, Map<string, PendingVerifierPromptReceipt>>;
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -3605,6 +3649,16 @@ export class SessionManager {
 		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
 	}
 
+	private clearToolCallProvenance(session: SessionInfo): void {
+		for (const entry of session.hostToolCallLifecycle?.values() ?? []) entry.controller.abort("tool-lifecycle-cleared");
+		session.hostToolCallLifecycle?.clear();
+		for (const waiter of session.hostToolCallBeforeWaiters?.values() ?? []) {
+			this.clock.clearTimeout(waiter.timer);
+			waiter.resolve(undefined);
+		}
+		session.hostToolCallBeforeWaiters?.clear();
+	}
+
 	/** Read-only admission view over the existing replacement coordinator. */
 	getModelSelectionRecoveryAdmission(sessionId: string): {
 		condition?: ModelSelectionRequiredCondition;
@@ -3636,7 +3690,7 @@ export class SessionManager {
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
 		session.staffNotificationTurnContext = undefined;
-		session.hostToolCallLifecycle?.clear();
+		this.clearToolCallProvenance(session);
 		session.dormant = true;
 		session.status = "terminated";
 		session.clients.clear();
@@ -3738,6 +3792,11 @@ export class SessionManager {
 				generation: this._nextRespawnGeneration(sessionId),
 				kind,
 			};
+			// Advancing the canonical generation invalidates every outstanding tool
+			// callback claim, including in-place bridge replacements that retain the
+			// same SessionInfo object and session secret.
+			const priorWriter = this.sessions.get(sessionId);
+			if (priorWriter) this.clearToolCallProvenance(priorWriter);
 			owned.active = token;
 			try {
 				const result = await operation(token);
@@ -3899,7 +3958,7 @@ export class SessionManager {
 		session.onStatusChanged = (change) => {
 			if (change.status === "terminated") {
 				session.staffNotificationTurnContext = undefined;
-				session.hostToolCallLifecycle?.clear();
+				this.clearToolCallProvenance(session);
 			}
 			this.publishSessionNotification(session, "statusChanged", session.id, change.statusVersion, {
 				previousStatus: change.previousStatus,
@@ -3916,38 +3975,238 @@ export class SessionManager {
 		session.onEventAccepted = (event, cursor) => this.publishAcceptedSessionEvent(session, event, cursor);
 	}
 
-	/**
-	 * Admission seam called by the beforeToolCall route after permission and the
-	 * interceptor router have approved the final tool name/arguments.
-	 */
-	markToolCallAdmitted(sessionId: string, toolCallId: string, toolName: string): void {
-		const session = this.sessions.get(sessionId);
-		if (!session || !this._sessionWriterIsCurrent(session)) return;
-		if (!toolCallId || !toolName) return;
+	private isBoundedToolIdentity(value: unknown): value is string {
+		return typeof value === "string" && value.length > 0 && value.length <= MAX_HOST_TOOL_IDENTITY_LENGTH;
+	}
+
+	private deleteToolCallEntry(session: SessionInfo, entry: ToolCallLifecycleEntry, reason: string): void {
+		if (session.hostToolCallLifecycle?.get(entry.toolCallId) === entry) {
+			session.hostToolCallLifecycle.delete(entry.toolCallId);
+		}
+		entry.controller.abort(reason);
+	}
+
+	private createToolCallClaim(
+		session: SessionInfo,
+		entry: ToolCallLifecycleEntry,
+		kind: "before" | "after",
+	): ToolCallInterceptorClaim | undefined {
+		const expectedPhase = kind === "before" ? "observed" : "admitted";
+		if (!this._sessionWriterIsCurrent(session)
+			|| entry.generation !== (session.lifecycleGeneration ?? 0)
+			|| session.hostToolCallLifecycle?.get(entry.toolCallId) !== entry
+			|| entry.phase !== expectedPhase
+			|| (kind === "before" && entry.startCursor === undefined)) return undefined;
+		entry.phase = kind === "before" ? "before-running" : "after-running";
+		entry.lease += 1;
+		const claim = Object.freeze({}) as ToolCallInterceptorClaim;
+		this._toolCallInterceptorClaims.set(claim, {
+			kind,
+			session,
+			entry,
+			generation: entry.generation,
+			lease: entry.lease,
+			settled: false,
+		});
+		return claim;
+	}
+
+	private toolCallClaimIsCurrent(owned: OwnedToolCallInterceptorClaim): boolean {
+		return !owned.settled
+			&& this._sessionWriterIsCurrent(owned.session)
+			&& owned.generation === (owned.session.lifecycleGeneration ?? 0)
+			&& owned.session.hostToolCallLifecycle?.get(owned.entry.toolCallId) === owned.entry
+			&& owned.entry.lease === owned.lease
+			&& owned.entry.phase === (owned.kind === "before" ? "before-running" : "after-running")
+			&& !owned.entry.controller.signal.aborted;
+	}
+
+	private resolveToolCallBeforeWaiter(session: SessionInfo, toolCallId: string, claim: ToolCallInterceptorClaim | undefined): void {
+		const waiter = session.hostToolCallBeforeWaiters?.get(toolCallId);
+		if (!waiter) return;
+		session.hostToolCallBeforeWaiters!.delete(toolCallId);
+		this.clock.clearTimeout(waiter.timer);
+		waiter.resolve(claim);
+	}
+
+	private observeToolCallStart(session: SessionInfo, event: any): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
+		const toolCallId = event?.toolCallId;
+		const toolName = event?.toolName;
+		if (!this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return;
+		const generation = session.lifecycleGeneration ?? 0;
 		const tracker = session.hostToolCallLifecycle ??= new Map<string, ToolCallLifecycleEntry>();
-		if (tracker.has(toolCallId)) return;
-		while (tracker.size >= 128) tracker.delete(tracker.keys().next().value!);
-		const turnIndex = (session.completedTurnCount ?? 0) + 1;
-		tracker.set(toolCallId, { toolCallId, toolName, turnIndex, startedAt: performance.now() });
-		this.publishSessionNotification(session, "toolCallStarted", toolCallId, toolCallId, {
+		const existing = tracker.get(toolCallId);
+		if (existing) {
+			if (existing.generation === generation && existing.toolName === toolName) return;
+			this.deleteToolCallEntry(session, existing, "tool-start-conflict");
+			this.resolveToolCallBeforeWaiter(session, toolCallId, undefined);
+			return;
+		}
+		if (tracker.size >= MAX_TRACKED_HOST_TOOL_CALLS) {
+			const evictable = Array.from(tracker.values()).find(entry => entry.phase === "observed");
+			if (!evictable) {
+				this.resolveToolCallBeforeWaiter(session, toolCallId, undefined);
+				return;
+			}
+			this.deleteToolCallEntry(session, evictable, "tool-provenance-capacity");
+			this.resolveToolCallBeforeWaiter(session, evictable.toolCallId, undefined);
+		}
+		tracker.set(toolCallId, {
 			toolCallId,
 			toolName,
-			turnIndex,
+			generation,
+			turnIndex: (session.completedTurnCount ?? 0) + 1,
+			startedAt: this.clock.now(),
+			phase: "observed",
+			lease: 0,
+			controller: new AbortController(),
 		});
 	}
 
+	private acceptToolCallStartCursor(session: SessionInfo, event: any, cursor: number): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
+		const toolCallId = event?.toolCallId;
+		const toolName = event?.toolName;
+		if (!this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return;
+		const entry = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!entry || entry.phase !== "observed" || entry.toolName !== toolName
+			|| entry.generation !== (session.lifecycleGeneration ?? 0)) return;
+		entry.startCursor = cursor;
+		const waiter = session.hostToolCallBeforeWaiters?.get(toolCallId);
+		if (!waiter) return;
+		if (waiter.toolName !== toolName || waiter.generation !== entry.generation) {
+			this.resolveToolCallBeforeWaiter(session, toolCallId, undefined);
+			return;
+		}
+		this.resolveToolCallBeforeWaiter(session, toolCallId, this.createToolCallClaim(session, entry, "before"));
+	}
+
+	/** Claim one exact accepted Pi start. Waiting covers only stdout/HTTP transport reordering. */
+	claimToolCallBefore(sessionId: string, toolCallId: string, toolName: string): Promise<ToolCallInterceptorClaim | undefined> {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this._sessionWriterIsCurrent(session)
+			|| !this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) {
+			return Promise.resolve(undefined);
+		}
+		const entry = session.hostToolCallLifecycle?.get(toolCallId);
+		if (entry) {
+			if (entry.toolName !== toolName || entry.generation !== (session.lifecycleGeneration ?? 0) || entry.phase !== "observed") {
+				return Promise.resolve(undefined);
+			}
+			if (entry.startCursor !== undefined) return Promise.resolve(this.createToolCallClaim(session, entry, "before"));
+		}
+		const waiters = session.hostToolCallBeforeWaiters ??= new Map<string, ToolCallBeforeWaiter>();
+		if (waiters.has(toolCallId) || waiters.size >= MAX_TRACKED_HOST_TOOL_CALLS) return Promise.resolve(undefined);
+		return new Promise(resolve => {
+			const generation = session.lifecycleGeneration ?? 0;
+			const waiter: ToolCallBeforeWaiter = {
+				toolCallId,
+				toolName,
+				generation,
+				resolve,
+				timer: this.clock.setTimeout(() => {
+					if (session.hostToolCallBeforeWaiters?.get(toolCallId) !== waiter) return;
+					session.hostToolCallBeforeWaiters.delete(toolCallId);
+					resolve(undefined);
+				}, TOOL_CALL_START_ARRIVAL_GRACE_MS),
+			};
+			waiters.set(toolCallId, waiter);
+		});
+	}
+
+	/** Claim the single post-handler callback for an admitted current-generation call. */
+	claimToolCallAfter(sessionId: string, toolCallId: string, toolName: string): ToolCallInterceptorClaim | undefined {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this._sessionWriterIsCurrent(session)
+			|| !this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return undefined;
+		const entry = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!entry || entry.toolName !== toolName || entry.generation !== (session.lifecycleGeneration ?? 0)) return undefined;
+		return this.createToolCallClaim(session, entry, "after");
+	}
+
+	/** Dispatch through a claim-derived context; routes never receive lifecycle state or generation. */
+	dispatchClaimedToolInterceptor(
+		claim: ToolCallInterceptorClaim,
+		input: { args?: Record<string, unknown>; result?: unknown },
+	): Promise<any> | undefined {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || !this.toolCallClaimIsCurrent(owned) || !this.hostInterceptors) return undefined;
+		const request = owned.kind === "before"
+			? { toolCallId: owned.entry.toolCallId, toolName: owned.entry.toolName, args: input.args ?? {} }
+			: { toolCallId: owned.entry.toolCallId, toolName: owned.entry.toolName, result: input.result };
+		return this.hostInterceptors.dispatch(owned.kind === "before" ? "beforeToolCall" : "afterToolResult", request, {
+			projectId: owned.session.projectId,
+			sessionId: owned.session.id,
+			goalId: owned.session.goalId ?? owned.session.teamGoalId,
+			cwd: owned.session.cwd,
+			signal: owned.entry.controller.signal,
+		});
+	}
+
+	/** Apply one before decision. A block consumes provenance without publishing a start fact. */
+	settleToolCallBefore(claim: ToolCallInterceptorClaim, admitted: boolean): boolean {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || owned.kind !== "before" || !this.toolCallClaimIsCurrent(owned)) return false;
+		owned.settled = true;
+		if (!admitted) {
+			this.deleteToolCallEntry(owned.session, owned.entry, "tool-call-blocked");
+			return true;
+		}
+		owned.entry.phase = "admitted";
+		this.publishSessionNotification(owned.session, "toolCallStarted", owned.entry.toolCallId, owned.entry.startCursor, {
+			toolCallId: owned.entry.toolCallId,
+			toolName: owned.entry.toolName,
+			turnIndex: owned.entry.turnIndex,
+		});
+		return true;
+	}
+
+	/** Apply one approved/synthetic post-policy result before Pi can persist it. */
+	settleToolCallAfter(claim: ToolCallInterceptorClaim): boolean {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || owned.kind !== "after" || !this.toolCallClaimIsCurrent(owned)) return false;
+		owned.settled = true;
+		owned.entry.phase = "after-applied";
+		return true;
+	}
+
+	cancelToolCallInterceptorClaim(claim: ToolCallInterceptorClaim): void {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || owned.settled) return;
+		owned.settled = true;
+		this.deleteToolCallEntry(owned.session, owned.entry, "tool-callback-cancelled");
+	}
+
 	private recordToolCallTerminal(session: SessionInfo, event: any): void {
-		const toolCallId = typeof event?.toolCallId === "string" ? event.toolCallId : undefined;
-		if (!toolCallId) return;
+		if (!this._sessionWriterIsCurrent(session)) return;
+		const toolCallId = event?.toolCallId;
+		const toolName = event?.toolName;
+		if (!this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return;
 		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
 		if (!tracked) return;
+		if (tracked.toolName !== toolName || tracked.generation !== (session.lifecycleGeneration ?? 0)) {
+			this.deleteToolCallEntry(session, tracked, "tool-end-mismatch");
+			return;
+		}
+		if (tracked.phase === "ended") return;
+		if (tracked.phase !== "admitted" && tracked.phase !== "after-applied") {
+			this.deleteToolCallEntry(session, tracked, "tool-end-before-policy-settlement");
+			return;
+		}
+		tracked.phase = "ended";
 		tracked.status = event.isError === true ? "errored" : "succeeded";
 		tracked.errorStatus = event.isError === true ? "handler_error" : undefined;
+		tracked.controller.abort("tool-execution-ended");
 	}
 
 	private publishAcceptedSessionEvent(session: SessionInfo, accepted: unknown, cursor: number): void {
-		if (!accepted || typeof accepted !== "object") return;
-		const event = accepted as { type?: unknown; message?: any };
+		if (!this._sessionWriterIsCurrent(session) || !accepted || typeof accepted !== "object") return;
+		const event = accepted as { type?: unknown; toolCallId?: unknown; toolName?: unknown; message?: any };
+		if (event.type === "tool_execution_start") {
+			this.acceptToolCallStartCursor(session, event, cursor);
+			return;
+		}
 		if (event.type !== "message_end" || !event.message || typeof event.message !== "object") return;
 		const message = event.message;
 		const rawRole = typeof message.role === "string" ? message.role : "";
@@ -3977,14 +4236,18 @@ export class SessionManager {
 		const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
 		if (!toolCallId) return;
 		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
-		if (!tracked) return;
+		if (!tracked || tracked.phase !== "ended" || tracked.generation !== (session.lifecycleGeneration ?? 0)) return;
+		if (typeof message.toolName === "string" && message.toolName !== tracked.toolName) {
+			this.deleteToolCallEntry(session, tracked, "tool-result-mismatch");
+			return;
+		}
 		session.hostToolCallLifecycle!.delete(toolCallId);
 		const failed = tracked.status === "errored" || message.isError === true;
 		this.publishSessionNotification(session, "toolCallCompleted", toolCallId, cursor, {
 			toolCallId,
 			toolName: tracked.toolName,
 			status: failed ? "errored" : "succeeded",
-			durationMs: Math.max(0, Math.round(performance.now() - tracked.startedAt)),
+			durationMs: Math.max(0, Math.round(this.clock.now() - tracked.startedAt)),
 			...(failed ? { errorStatus: tracked.errorStatus ?? "handler_error" } : {}),
 		});
 	}
@@ -8909,8 +9172,11 @@ export class SessionManager {
 			session.latestMessageUpdate = undefined;
 		}
 
-		// Track tool execution during this turn
+		// Track tool execution during this turn. Provenance is created only from a
+		// current Pi writer; the later EventBuffer acceptance attaches its cursor
+		// before any waiting HTTP callback can claim it.
 		if (event.type === "tool_execution_start") {
+			if (writerIsCurrent) this.observeToolCallStart(session, event);
 			session.turnHadToolCalls = true;
 
 			// Enforce allowedTools — log when a disallowed tool slips past the guard
@@ -9180,7 +9446,7 @@ export class SessionManager {
 			if (completedNotificationId) {
 				queueMicrotask(() => this.clearStaffNotificationTurnContext(session.id, completedNotificationId));
 			}
-			session.hostToolCallLifecycle?.clear();
+			this.clearToolCallProvenance(session);
 			this.resolveIdleWaiters(session.id);
 			this.schedulePromptCursorRefresh(session, { settleBindings: true });
 			// Don't drain the queue if the turn ended with a model error —
@@ -15621,6 +15887,7 @@ export class SessionManager {
 		session.lifecycleFenced = true;
 		session.dormant = true;
 		session.staffNotificationTurnContext = undefined;
+		this.clearToolCallProvenance(session);
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
 		if (session.pendingMetadataPersist) {
@@ -17961,6 +18228,7 @@ export class SessionManager {
 			const session = this.sessions.get(id);
 			if (!session) continue;
 
+			this.clearToolCallProvenance(session);
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
 			// Snapshot the current active state before we kill the process.

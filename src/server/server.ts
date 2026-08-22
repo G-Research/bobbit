@@ -8153,32 +8153,54 @@ async function handleApiRoute(
 			json({ error: "Invalid bounded tool hook body" }, 400);
 			return;
 		}
+		const claim = isBefore
+			? await sessionManager.claimToolCallBefore(sessionId, body.toolCallId, body.toolName)
+			: sessionManager.claimToolCallAfter(sessionId, body.toolCallId, body.toolName);
+		if (!claim) {
+			json({ error: "Tool callback provenance unavailable" }, 409);
+			return;
+		}
 		try {
 			if (isBefore) {
-				const routed = await sessionManager.dispatchHostInterceptor(sessionId, "beforeToolCall", {
-					toolCallId: body.toolCallId,
-					toolName: body.toolName,
+				const routed = await sessionManager.dispatchClaimedToolInterceptor(claim, {
 					args: body.args as Record<string, any>,
 				});
 				const terminal = routed?.terminal as any;
-				if (terminal?.action === "block") { json(terminal); return; }
+				if (terminal?.action === "block") {
+					if (!sessionManager.settleToolCallBefore(claim, false)) {
+						json({ error: "Tool callback provenance unavailable" }, 409);
+						return;
+					}
+					json(terminal);
+					return;
+				}
 				const args = (routed?.value as any)?.args;
-				sessionManager.markToolCallAdmitted(sessionId, body.toolCallId, body.toolName);
+				if (!sessionManager.settleToolCallBefore(claim, true)) {
+					json({ error: "Tool callback provenance unavailable" }, 409);
+					return;
+				}
 				json({ action: "replaceArgs", args });
 			} else {
-				const routed = await sessionManager.dispatchHostInterceptor(sessionId, "afterToolResult", {
-					toolCallId: body.toolCallId,
-					toolName: body.toolName,
+				const routed = await sessionManager.dispatchClaimedToolInterceptor(claim, {
 					result: body.result as any,
 				});
 				const terminal = routed?.terminal as any;
+				if (!sessionManager.settleToolCallAfter(claim)) {
+					json({ error: "Tool callback provenance unavailable" }, 409);
+					return;
+				}
 				if (terminal?.action === "syntheticError") { json(terminal); return; }
 				json({ action: "replaceResult", result: (routed?.value as any)?.result });
 			}
 		} catch (err: any) {
 			if (!isBefore) {
+				if (!sessionManager.settleToolCallAfter(claim)) {
+					json({ error: "Tool callback provenance unavailable" }, 409);
+					return;
+				}
 				json({ action: "syntheticError", code: "handler_error" });
 			} else {
+				sessionManager.cancelToolCallInterceptorClaim(claim);
 				jsonError(err instanceof TypeError ? 400 : 500, err);
 			}
 		}
