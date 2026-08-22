@@ -789,6 +789,37 @@ export class ToolMessage extends LitElement {
 		if (this.toolCall?.name === "ask_user_choices") this.requestUpdate();
 	};
 
+	private _liveSubscriptionsConnected = false;
+
+	/** History uses the central static renderer and must not subscribe to any
+	 * renderer-upgrade or active-transcript event path. */
+	private _connectLiveSubscriptions(): void {
+		if (this._liveSubscriptionsConnected || this.capabilityMode === "history") return;
+		this._liveSubscriptionsConnected = true;
+		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
+		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		document.addEventListener("bobbit-review-open-state", this._onReviewOpenState);
+		this.addEventListener("load-full-content", this._onLoadFullContent);
+	}
+
+	private _disconnectLiveSubscriptions(): void {
+		if (!this._liveSubscriptionsConnected) return;
+		this._liveSubscriptionsConnected = false;
+		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
+		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
+		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		document.removeEventListener("bobbit-review-open-state", this._onReviewOpenState);
+		this.removeEventListener("load-full-content", this._onLoadFullContent);
+	}
+
+	private _syncLiveSubscriptions(): void {
+		if (this.isConnected && this.capabilityMode !== "history") this._connectLiveSubscriptions();
+		else this._disconnectLiveSubscriptions();
+	}
+
 	private _onLoadFullContent = (e: Event) => {
 		e.stopPropagation();
 		this._loadFullContent();
@@ -833,22 +864,16 @@ export class ToolMessage extends LitElement {
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
-		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
-		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
-		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
-		document.addEventListener("bobbit-review-open-state", this._onReviewOpenState);
-		this.addEventListener("load-full-content", this._onLoadFullContent);
+		this._syncLiveSubscriptions();
+	}
+
+	protected override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
+		if (changedProperties.has("capabilityMode")) this._syncLiveSubscriptions();
 	}
 
 	override disconnectedCallback(): void {
+		this._disconnectLiveSubscriptions();
 		super.disconnectedCallback();
-		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
-		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
-		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
-		document.removeEventListener("bobbit-review-open-state", this._onReviewOpenState);
-		this.removeEventListener("load-full-content", this._onLoadFullContent);
 	}
 
 	override render() {

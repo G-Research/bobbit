@@ -103,18 +103,38 @@ export class ToolGroup extends LitElement {
 	// updated renderer-local state — props are unchanged so renderApp() alone
 	// would not re-run it (design §4a).
 	private _onRenderRequested = () => { this.requestUpdate(); };
+	private _liveSubscriptionsConnected = false;
+
+	private _syncLiveSubscriptions(): void {
+		const shouldConnect = this.isConnected && this.capabilityMode !== "history";
+		if (shouldConnect === this._liveSubscriptionsConnected) return;
+		this._liveSubscriptionsConnected = shouldConnect;
+		if (shouldConnect) {
+			document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+			document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		} else {
+			document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+			document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		}
+	}
 
 	override connectedCallback(): void {
 		super.connectedCallback();
 		this.style.display = "block";
-		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		this._syncLiveSubscriptions();
+	}
+
+	protected override willUpdate(changedProperties: Map<PropertyKey, unknown>): void {
+		if (changedProperties.has("capabilityMode")) this._syncLiveSubscriptions();
 	}
 
 	override disconnectedCallback(): void {
+		if (this._liveSubscriptionsConnected) {
+			this._liveSubscriptionsConnected = false;
+			document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
+			document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
+		}
 		super.disconnectedCallback();
-		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
-		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 	}
 
 	private _toggle() {

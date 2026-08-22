@@ -14,6 +14,7 @@ import "../../src/ui/components/AskUserChoicesWidget.js";
 
 let state: typeof import("../../src/app/state.js")["state"];
 let registerToolRenderer: typeof import("../../src/ui/tools/renderer-registry.js")["registerToolRenderer"];
+let registerLazyToolRenderer: typeof import("../../src/ui/tools/renderer-registry.js")["registerLazyToolRenderer"];
 
 beforeAll(async () => {
 	// Match the app boot order before loading Messages' host-capability graph.
@@ -21,7 +22,7 @@ beforeAll(async () => {
 	await import("../../src/ui/components/Messages.js");
 	await import("../../src/ui/components/MessageList.js");
 	({ state } = await import("../../src/app/state.js"));
-	({ registerToolRenderer } = await import("../../src/ui/tools/renderer-registry.js"));
+	({ registerToolRenderer, registerLazyToolRenderer } = await import("../../src/ui/tools/renderer-registry.js"));
 	__syncCE();
 });
 
@@ -46,6 +47,7 @@ async function renderAsk(params: any, result: any, ctx?: ToolRenderContext): Pro
 	return container;
 }
 const count = (el: HTMLElement, sel: string) => el.querySelectorAll(sel).length;
+let lazyProbeId = 0;
 
 afterEach(() => {
 	document.body.innerHTML = "";
@@ -125,7 +127,39 @@ describe("AskUserChoicesRenderer error-vs-interactive gating", () => {
 });
 
 describe("historical tool renderer capabilities", () => {
-	it("omits current session, goal, answer lookup, and host while active tools keep them", async () => {
+	const mount = async (messages: any[], mode: "active" | "history") => {
+		const list = document.createElement("message-list") as any;
+		list.messages = messages;
+		list.capabilityMode = mode;
+		document.body.appendChild(list);
+		await list.updateComplete;
+		for (let i = 0; i < 4; i++) {
+			await Promise.resolve();
+			await Promise.all(Array.from(list.querySelectorAll("*")).map((el: any) => el.updateComplete));
+		}
+		return list;
+	};
+
+	const toolMessages = (calls: Array<{ name: string; arguments: unknown; output: unknown; details?: unknown }>) => [
+		{
+			id: "assistant-tools",
+			role: "assistant",
+			content: calls.map((call, index) => ({ type: "toolCall", id: `call-${index}`, name: call.name, arguments: call.arguments })),
+			timestamp: 1,
+		},
+		...calls.map((call, index) => ({
+			id: `result-${index}`,
+			role: "toolResult",
+			toolCallId: `call-${index}`,
+			toolName: call.name,
+			content: [{ type: "text", text: typeof call.output === "string" ? call.output : JSON.stringify(call.output) }],
+			details: call.details,
+			isError: false,
+			timestamp: index + 2,
+		})),
+	];
+
+	it("never invokes registry renderers for history while active tools retain their context and controls", async () => {
 		const contexts: ToolRenderContext[] = [];
 		registerToolRenderer("capability_probe_dom", {
 			render: (_params, _result, _streaming, ctx) => {
@@ -138,47 +172,18 @@ describe("historical tool renderer capabilities", () => {
 			findAskResponseAnswers: vi.fn(),
 		} as any;
 		state.gatewaySessions = [{ id: "current-session", goalId: "current-goal" }] as any;
+		const messages = toolMessages([{ name: "capability_probe_dom", arguments: { secret: "input-readable" }, output: "result-readable", details: { retained: true } }]);
 
-		const messages = [
-			{
-				id: "assistant-probe",
-				role: "assistant",
-				content: [{ type: "toolCall", id: "probe-call", name: "capability_probe_dom", arguments: {} }],
-				timestamp: 1,
-			},
-			{
-				id: "result-probe",
-				role: "toolResult",
-				toolCallId: "probe-call",
-				toolName: "capability_probe_dom",
-				content: [{ type: "text", text: "done" }],
-				isError: false,
-				timestamp: 2,
-			},
-		];
-		const mount = async (mode: "active" | "history") => {
-			const list = document.createElement("message-list") as any;
-			list.messages = messages;
-			list.capabilityMode = mode;
-			document.body.appendChild(list);
-			await list.updateComplete;
-			for (let i = 0; i < 3; i++) {
-				await Promise.resolve();
-				await Promise.all(Array.from(list.querySelectorAll("*")).map((el: any) => el.updateComplete));
-			}
-			return list;
-		};
+		const history = await mount(messages, "history");
+		expect(history.querySelector(".probe-action")).toBeNull();
+		expect(contexts).toHaveLength(0);
+		expect(history.querySelector('[data-history-tool-name="capability_probe_dom"]')).not.toBeNull();
+		expect(history.textContent).toContain("Recorded result — read-only history");
+		expect(history.textContent).toContain("Input JSON payload");
+		expect(history.textContent).toContain("Output text payload");
+		expect(history.textContent).toContain("Complete result JSON payload");
 
-		const history = await mount("history");
-		expect(history.querySelector(".probe-action")).not.toBeNull();
-		const historical = contexts.at(-1)!;
-		expect(historical.capabilityMode).toBe("history");
-		expect("sessionId" in historical).toBe(false);
-		expect("goalId" in historical).toBe(false);
-		expect("getAskResponseAnswers" in historical).toBe(false);
-		expect("host" in historical).toBe(false);
-
-		const active = await mount("active");
+		const active = await mount(messages, "active");
 		expect(active.querySelector(".probe-action")).not.toBeNull();
 		const live = contexts.at(-1)!;
 		expect(live.capabilityMode).toBe("active");
@@ -186,5 +191,68 @@ describe("historical tool renderer capabilities", () => {
 		expect(live.goalId).toBe("current-goal");
 		expect(live.getAskResponseAnswers).toBeTypeOf("function");
 		expect(live.host).toBeDefined();
+	});
+
+	it("renders known escape-hatch tools statically without requests, events, timers, dialogs, or live controls", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const dispatchSpy = vi.spyOn(document, "dispatchEvent");
+		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		const calls = [
+			{ name: "gate_signal", arguments: { gate_id: "implementation" }, output: { signal: { id: "sig-old", goalId: "goal-old", status: "running", verification: { steps: [{ name: "Security", status: "timeout" }] } } } },
+			{ name: "gate_status", arguments: { gate_id: "implementation" }, output: { goalId: "goal-old", gateId: "implementation", latestSignal: { id: "sig-old", verification: { status: "running", steps: [{ name: "Security", status: "timeout" }] } } } },
+			{ name: "edit", arguments: { path: "old.html", oldText: "old", newText: "new" }, output: "edited", details: { diff: "-old\\n+new" } },
+			{ name: "read_session", arguments: { session_id: "old-session" }, output: { messages: [{ role: "assistant", content: "retained transcript" }] } },
+			{ name: "propose_goal", arguments: { title: "Old proposal", spec: "retained spec" }, output: { status: "pending" } },
+			{ name: "edit_proposal", arguments: { type: "goal", old_text: "old", new_text: "new" }, output: { status: "updated" } },
+		];
+		const history = await mount(toolMessages(calls), "history");
+
+		expect(history.querySelectorAll("[data-history-tool-static]")).toHaveLength(calls.length);
+		expect(history.querySelector("gate-verification-live, iframe, ask-user-choices-widget")).toBeNull();
+		expect(history.textContent).not.toContain("Open full transcript");
+		expect(history.textContent).not.toContain("Open proposal");
+		expect(history.textContent).not.toContain("Change timeout");
+		expect(history.textContent).toContain("retained transcript");
+		expect(fetchSpy).not.toHaveBeenCalled();
+		expect(dispatchSpy).not.toHaveBeenCalled();
+		expect(timeoutSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not start lazy renderers before or after resolution from a historical row", async () => {
+		let loads = 0;
+		let renders = 0;
+		const toolName = `history_lazy_probe_${++lazyProbeId}`;
+		registerLazyToolRenderer(toolName, async () => {
+			loads++;
+			return {
+				render: () => {
+					renders++;
+					return { content: html`<button class="lazy-active-action">Active lazy action</button>`, isCustom: false };
+				},
+			};
+		});
+		const messages = toolMessages([{ name: toolName, arguments: { input: "kept" }, output: "kept output" }]);
+
+		const history = await mount(messages, "history");
+		expect(loads).toBe(0);
+		expect(renders).toBe(0);
+		expect(history.querySelector("[data-lazy-renderer-placeholder-btn], .lazy-active-action")).toBeNull();
+
+		const active = await mount(messages, "active");
+		for (let i = 0; i < 4 && !active.querySelector(".lazy-active-action"); i++) {
+			await Promise.resolve();
+			await Promise.all(Array.from(active.querySelectorAll("*")).map((el: any) => el.updateComplete));
+		}
+		expect(loads).toBe(1);
+		expect(active.querySelector(".lazy-active-action")).not.toBeNull();
+		expect(renders).toBeGreaterThan(0);
+		active.remove();
+		const rendersAfterActive = renders;
+
+		document.dispatchEvent(new CustomEvent("bobbit-tool-renderer-loaded", { detail: { toolName } }));
+		await Promise.resolve();
+		expect(history.querySelector(".lazy-active-action")).toBeNull();
+		expect(history.querySelector("[data-history-tool-static]")).not.toBeNull();
+		expect(renders).toBe(rendersAfterActive);
 	});
 });

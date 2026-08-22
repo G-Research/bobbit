@@ -185,22 +185,12 @@ test.describe("Journey: Clear Session Context", () => {
 			await expect(segmentAHistory).toContainText(SEGMENT_A_PLAIN);
 			await expect(segmentAHistory).toContainText(SEGMENT_A_TOOL);
 			await expect(segmentAHistory).toContainText("Done. Used Bash tool.");
-			await expect(segmentAHistory).toContainText("This unanswered question is from read-only history.");
-			const historicalAsk = segmentAHistory.locator("ask-user-choices-widget");
-			await expect(historicalAsk.locator(".ask-option")).toHaveCount(4);
-			await expect(historicalAsk.locator(".ask-submit")).toHaveCount(0);
-			const historicalSubmitRequests: string[] = [];
-			const observeHistoricalSubmit = (request: { url(): string; method(): string }) => {
-				if (request.method() === "POST" && request.url().includes("/api/internal/user-question/submit")) {
-					historicalSubmitRequests.push(request.url());
-				}
-			};
-			page.on("request", observeHistoricalSubmit);
-			await historicalAsk.locator(".ask-option").first().click({ force: true });
-			await historicalAsk.evaluate((widget) => widget.dispatchEvent(new KeyboardEvent("keydown", { key: "1", bubbles: true })));
-			await page.waitForTimeout(150);
-			page.off("request", observeHistoricalSubmit);
-			expect(historicalSubmitRequests).toEqual([]);
+			const historicalAsk = segmentAHistory.locator('[data-history-tool-name="ask_user_choices"]');
+			await expect(historicalAsk).toHaveCount(1);
+			await expect(historicalAsk).toContainText("Recorded result — read-only history");
+			await expect(historicalAsk).toContainText("Input JSON payload");
+			await expect(historicalAsk).toContainText("Output JSON payload");
+			await expect(historicalAsk.locator("ask-user-choices-widget, .ask-submit")).toHaveCount(0);
 
 			const historicalTool = segmentAHistory.locator('[data-tool-name="Bash"]');
 			await expect(historicalTool).toHaveCount(1);
@@ -209,8 +199,11 @@ test.describe("Journey: Clear Session Context", () => {
 			await historicalTool.evaluate(() => new Promise<void>((resolve) => {
 				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
 			}));
-			await historicalTool.getByRole("button", { name: /Output text payload/ }).click();
+			const historicalOutputToggle = historicalTool.getByRole("button", { name: /Output text payload/ });
+			const historicalOutputRegionId = await historicalOutputToggle.getAttribute("aria-controls");
+			await historicalOutputToggle.click();
 			await expect(historicalOutput).toBeVisible();
+			await expect(historicalTool.locator(`#${historicalOutputRegionId} copy-button button`)).toBeVisible();
 			await toggles(page).nth(0).click();
 			await expectCollapsedHistory(page, 0, 8);
 
@@ -241,9 +234,99 @@ test.describe("Journey: Clear Session Context", () => {
 			expect(boundaryBeforeFollowUp).toBe(true);
 
 			// Drive both a retained and active tool card through a probe renderer.
-			// Capturing the exact context proves history owns no live capabilities.
+			// The history card must bypass the registry entirely; the active card must
+			// still invoke it with its established authority and disclosure control.
 			await toggles(page).nth(0).click();
 			await expect(histories(page).nth(0)).toHaveAttribute("data-state", "expanded");
+
+			const rendererRequests: string[] = [];
+			const observeRendererRequest = (request: { url(): string; method(): string }) => {
+				const isHistoryRead = request.method() === "GET" && request.url().includes("/context-clear-history/");
+				if (!isHistoryRead && request.url().includes("/api/")) rendererRequests.push(`${request.method()} ${request.url()}`);
+			};
+			page.on("request", observeRendererRequest);
+			const staticAudit = await page.evaluate(async () => {
+				const eventNames = ["proposal-open", "gate-resignal-request", "goal-open-tab", "signoff-review-open"];
+				const events: string[] = [];
+				for (const name of eventNames) document.addEventListener(name, () => events.push(name));
+				const host = document.querySelector('[data-testid="pre-clear-rows"]')!;
+				const definitions = [
+					["gate_signal", { gate_id: "implementation" }, { signal: { id: "old-signal", goalId: "old-goal", status: "running", verification: { steps: [{ name: "Security", status: "timeout" }] } } }],
+					["gate_status", { gate_id: "implementation" }, { goalId: "old-goal", gateId: "implementation", latestSignal: { id: "old-signal", verification: { status: "running", steps: [{ name: "Security", status: "timeout" }] } } }],
+					["edit", { path: "old.html", oldText: "old", newText: "new" }, "historical edit result"],
+					["read_session", { session_id: "old-session" }, { messages: [{ role: "assistant", content: "historical transcript result" }] }],
+					["propose_goal", { title: "Historical proposal", spec: "proposal body" }, { status: "pending" }],
+					["edit_proposal", { type: "goal", old_text: "old", new_text: "new" }, { status: "updated" }],
+				] as const;
+				const historicalTools: any[] = [];
+				for (const [name, args, output] of definitions) {
+					const tool = document.createElement("tool-message") as any;
+					tool.capabilityMode = "history";
+					tool.toolCall = { id: `audit-${name}`, name, arguments: args };
+					tool.result = {
+						role: "toolResult",
+						toolCallId: `audit-${name}`,
+						toolName: name,
+						isError: false,
+						content: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output) }],
+						timestamp: Date.now(),
+					};
+					host.appendChild(tool);
+					historicalTools.push(tool);
+				}
+				await Promise.all(historicalTools.map((tool) => tool.updateComplete));
+				await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+				return {
+					staticCount: historicalTools.filter((tool) => tool.querySelector("[data-history-tool-static]")).length,
+					lazyPlaceholders: historicalTools.filter((tool) => tool.querySelector("[data-lazy-renderer-placeholder-btn]")).length,
+					liveControls: host.querySelectorAll("gate-verification-live, iframe, ask-user-choices-widget, signoff-review-launcher").length,
+					activeLabels: ["Open full transcript", "Open proposal", "Change timeout", "Re-signal gate"].filter((label) => host.textContent?.includes(label)),
+					readable: host.textContent?.includes("historical transcript result") && host.textContent?.includes("historical edit result"),
+					events,
+				};
+			});
+			await page.waitForTimeout(100);
+			page.off("request", observeRendererRequest);
+			expect(staticAudit).toEqual({
+				staticCount: 6,
+				lazyPlaceholders: 0,
+				liveControls: 0,
+				activeLabels: [],
+				readable: true,
+				events: [],
+			});
+			expect(rendererRequests).toEqual([]);
+
+			// Resolve one of the same lazy built-ins from an active card. Its active
+			// control appears, while the already-mounted historical proposal remains
+			// on the central static renderer after the lazy upgrade event.
+			const activeProposal = page.locator("[data-browser-active-proposal]");
+			await page.evaluate(async () => {
+				const w = window as any;
+				const container = document.createElement("div");
+				container.setAttribute("data-browser-active-proposal", "");
+				document.body.appendChild(container);
+				const params = { title: "Active proposal", spec: "active body" };
+				const result = {
+					role: "toolResult",
+					toolCallId: "active-proposal-audit",
+					toolName: "propose_goal",
+					isError: false,
+					content: [{ type: "text", text: JSON.stringify({ status: "pending" }) }],
+					timestamp: Date.now(),
+				};
+				for (let attempt = 0; attempt < 20; attempt++) {
+					const rendered = w.__bobbitRenderTool("propose_goal", params, result, false, { capabilityMode: "active" });
+					w.__bobbitLitRender(rendered.content, container);
+					if (container.querySelector('[data-testid="proposal-open-button"]')) break;
+					await new Promise((resolve) => setTimeout(resolve, 25));
+				}
+			});
+			await expect(activeProposal.getByRole("button", { name: "Open proposal" })).toBeVisible({ timeout: 10_000 });
+			await expect(activeProposal.locator("[data-history-tool-static]")).toHaveCount(0);
+			await expect(rows(page).nth(0).locator('[data-history-tool-name="propose_goal"]')).toHaveCount(1);
+			await expect(rows(page).nth(0).getByRole("button", { name: "Open proposal" })).toHaveCount(0);
+
 			const capabilityProbe = await page.evaluate(() => {
 				const w = window as any;
 				w.__clearCapabilityContexts = [];
@@ -257,7 +340,7 @@ test.describe("Journey: Clear Session Context", () => {
 							hasHost: Object.prototype.hasOwnProperty.call(ctx, "host"),
 							hostActionable: typeof (ctx.host as any)?.invokeAction === "function",
 						});
-						return w.__bobbitRenderTool("read", params, result, false, { capabilityMode: "history" });
+						return w.__bobbitRenderTool("read", params, result, false, { ...ctx, capabilityMode: "active" });
 					},
 				});
 				const tools = Array.from(document.querySelectorAll("tool-message")) as any[];
@@ -269,24 +352,24 @@ test.describe("Journey: Clear Session Context", () => {
 					tool.requestUpdate();
 				}
 				return Promise.all([historical.updateComplete, active.updateComplete])
-					.then(() => w.__clearCapabilityContexts);
+					.then(() => ({
+						contexts: w.__clearCapabilityContexts,
+						historyStatic: !!historical.querySelector("[data-history-tool-static]"),
+						activeStatic: !!active.querySelector("[data-history-tool-static]"),
+						activeDisclosure: !!active.querySelector("button"),
+					}));
 			});
-			expect(capabilityProbe).toContainEqual({
-				mode: "history",
-				hasSessionId: false,
-				hasGoalId: false,
-				hasAnswerLookup: false,
-				hasHost: false,
-				hostActionable: false,
-			});
-			expect(capabilityProbe).toContainEqual({
+			expect(capabilityProbe.contexts).toEqual([{
 				mode: "active",
 				hasSessionId: true,
 				hasGoalId: true,
 				hasAnswerLookup: true,
 				hasHost: true,
 				hostActionable: true,
-			});
+			}]);
+			expect(capabilityProbe.historyStatic).toBe(true);
+			expect(capabilityProbe.activeStatic).toBe(false);
+			expect(capabilityProbe.activeDisclosure).toBe(true);
 			await toggles(page).nth(0).click();
 			await expectCollapsedHistory(page, 0, 8);
 

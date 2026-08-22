@@ -20,6 +20,7 @@ import { ScreenshotRenderer } from "./renderers/ScreenshotRenderer.js";
 import { WebFetchRenderer } from "./renderers/WebFetchRenderer.js";
 import { WebSearchRenderer } from "./renderers/WebSearchRenderer.js";
 import { WriteRenderer } from "./renderers/WriteRenderer.js";
+import { HistoryRenderer } from "./renderers/HistoryRenderer.js";
 import type { ToolRenderContext, ToolRenderResult } from "./types.js";
 
 // Register all built-in tool renderers
@@ -189,6 +190,7 @@ registerLazyClass("goal_set_policy", () => import("./renderers/GoalSetPolicyRend
 
 const defaultRenderer = new DefaultRenderer();
 const mcpDefaultRenderer = new McpDefaultRenderer("mcp");
+const historyRenderer = new HistoryRenderer("tool");
 
 // Global flag to force default JSON rendering for all tools
 let showJsonMode = false;
@@ -211,6 +213,13 @@ export function renderTool(
 	isStreaming?: boolean,
 	ctx?: ToolRenderContext,
 ): ToolRenderResult {
+	// Retained transcript segments are a hard capability boundary. Resolve them
+	// before consulting the registry so neither eager built-ins, pack renderers,
+	// nor pending lazy loaders can run or schedule an upgrade from history.
+	if (ctx?.capabilityMode === "history") {
+		return historyRenderer.withToolName(toolName).render(params, result, isStreaming, ctx);
+	}
+
 	// If showJsonMode is enabled, always use the default renderer
 	if (showJsonMode) {
 		return defaultRenderer.render(params, result, isStreaming);
