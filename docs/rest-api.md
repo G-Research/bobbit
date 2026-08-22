@@ -1594,7 +1594,7 @@ interface AgentDirApiState {
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
+`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, `contextWindow` as the runtime-authoritative context target, output limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `modelCapacity`, `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`. When present, `modelCapacity` is the provider-published hard request capacity for display only. Bobbit emits it only from exact catalog metadata matching the provider, model ID, and `contextWindow`; a mismatch omits it rather than inferring a capacity, and it never changes `contextWindow` compaction behavior. See [Context target and model capacity](internals.md#context-target-and-model-capacity) for ownership and fallback semantics.
 
 #### Pi 0.84.1 Claude Opus 5 catalog
 
