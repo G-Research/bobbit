@@ -3294,6 +3294,8 @@ type SessionReplacementCoordinator = {
 	tail: Promise<void>;
 	pending: number;
 	active?: SessionReplacementToken;
+	/** Closes runtime model/thinking admission synchronously for the sole in-place transcript replacement. */
+	contextClearPending: boolean;
 	promptOwner?: SessionInfo;
 	coalesced: Map<string, Promise<unknown>>;
 	drainOnRelease: boolean;
@@ -3464,6 +3466,8 @@ export class SessionManager {
 	 * `promptOwner` until the final replacement commits or rolls back.
 	 */
 	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/** Last admitted clear token generation; unlike lifecycleGeneration, generic bridge replacements never advance it. */
+	private _contextClearGenerations = new Map<string, number>();
 	/**
 	 * Short-lived owner reservation spanning goal/gate/team mutation and the
 	 * coordinated runtime replacement. This is deliberately distinct from the
@@ -3692,16 +3696,20 @@ export class SessionManager {
 	}
 
 	/**
-	 * Narrow read-only ownership view for runtime controls that must not cross a
-	 * SessionManager-owned bridge/transcript replacement. The coordinator's
-	 * presence closes admission synchronously, before its async operation receives
-	 * an active token; the generation then fences work that started earlier.
+	 * Narrow read-only ownership view for runtime controls that must not cross an
+	 * in-place context clear. Role replacement, rehydrate, recovery, and terminal
+	 * coordinators retain their established runtime-selection ownership semantics.
 	 */
 	getSessionReplacementAdmission(sessionId: string): { active: boolean; generation: number } {
 		const coordinator = this._sessionReplacementCoordinators?.get(sessionId);
+		let generation = this._contextClearGenerations?.get(sessionId);
+		if (generation === undefined) {
+			generation = this._currentRespawnGeneration(sessionId);
+			this._contextClearGenerations?.set(sessionId, generation);
+		}
 		return {
-			active: coordinator !== undefined,
-			generation: coordinator?.active?.generation ?? this._currentRespawnGeneration(sessionId),
+			active: coordinator?.contextClearPending === true,
+			generation,
 		};
 	}
 
@@ -3811,6 +3819,7 @@ export class SessionManager {
 			coordinator = {
 				tail: Promise.resolve(),
 				pending: 0,
+				contextClearPending: false,
 				promptOwner: this.sessions.get(sessionId),
 				coalesced: new Map(),
 				drainOnRelease: false,
@@ -3825,6 +3834,7 @@ export class SessionManager {
 
 		coordinator.pending += 1;
 		coordinator.drainOnRelease ||= opts?.drainOnRelease === true;
+		if (kind === "clear-context") coordinator.contextClearPending = true;
 		const owned = coordinator;
 		const operationPromise = owned.tail.then(async () => {
 			// Terminal intent is sticky for the coordinator lifetime. A replacement
@@ -3844,6 +3854,7 @@ export class SessionManager {
 			const priorWriter = this.sessions.get(sessionId);
 			if (priorWriter) this.clearToolCallProvenance(priorWriter);
 			owned.active = token;
+			if (kind === "clear-context") this._contextClearGenerations.set(sessionId, token.generation);
 			try {
 				const result = await operation(token);
 				if (!this._replacementTokenIsCurrent(sessionId, token)) {
@@ -3866,6 +3877,7 @@ export class SessionManager {
 			if (opts?.coalesceKey && owned.coalesced.get(opts.coalesceKey) === resultPromise) {
 				owned.coalesced.delete(opts.coalesceKey);
 			}
+			if (kind === "clear-context") owned.contextClearPending = false;
 			owned.pending -= 1;
 			this._mergeReplacementPromptOwner(owned, this.sessions.get(sessionId));
 			if (owned.pending !== 0 || this._sessionReplacementCoordinators.get(sessionId) !== owned) return;

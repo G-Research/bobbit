@@ -24,7 +24,7 @@ type RuntimeModelSessionManager = Omit<
 	restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void>;
 	/** Atomic durable tuple seam; SessionManager owns the store implementation. */
 	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel): void;
-	/** SessionManager-owned lifecycle fence; optional only for narrow legacy test doubles. */
+	/** SessionManager-owned context-clear epoch; optional only for narrow legacy test doubles. */
 	getSessionReplacementAdmission?(sessionId: string): { active: boolean; generation: number };
 };
 type RuntimeModelStateSessionManager = Pick<RuntimeModelSessionManager, "getPersistedSession">;
@@ -482,7 +482,7 @@ function captureRuntimeReplacementOwnership(
 	sessionId: string,
 ): RuntimeReplacementOwnership {
 	const admission = sessionManager.getSessionReplacementAdmission?.(sessionId);
-	if (admission?.active) throw new RuntimeMutationSupersededError("A session replacement is already active; retry the selection after it finishes");
+	if (admission?.active) throw new RuntimeMutationSupersededError("A context clear is already active; retry the selection after it finishes");
 	return { generation: admission?.generation };
 }
 
@@ -502,12 +502,24 @@ function runtimeBridgeIsCanonical(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
 	rpcClient: RuntimeModelRpcClient,
-	ownership: RuntimeReplacementOwnership,
 ): boolean {
 	const canonical = sessionManager.getSession(session.id);
-	return canonical === session
-		&& canonical.rpcClient === rpcClient
-		&& runtimeReplacementOwnershipIsCurrent(sessionManager, session.id, ownership);
+	return canonical === session && canonical.rpcClient === rpcClient;
+}
+
+function assertRuntimeMutationOwner(
+	sessionManager: RuntimeModelSessionManager,
+	session: RuntimeModelSession,
+	rpcClient: RuntimeModelRpcClient,
+	ownership: RuntimeReplacementOwnership,
+	bridgeError: string,
+): void {
+	if (!runtimeReplacementOwnershipIsCurrent(sessionManager, session.id, ownership)) {
+		throw new RuntimeMutationSupersededError();
+	}
+	if (!runtimeBridgeIsCanonical(sessionManager, session, rpcClient)) {
+		throw new Error(bridgeError);
+	}
 }
 
 export async function applyRuntimeSessionModelSelection(
@@ -522,9 +534,13 @@ export async function applyRuntimeSessionModelSelection(
 	const mutationRpcClient = session.rpcClient;
 	const replacementOwnership = captureRuntimeReplacementOwnership(sessionManager, session.id);
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
-	if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-		throw new RuntimeMutationSupersededError();
-	}
+	assertRuntimeMutationOwner(
+		sessionManager,
+		session,
+		mutationRpcClient,
+		replacementOwnership,
+		"runtime model read-back mismatch: the session bridge was replaced before selection",
+	);
 	const durable = persistedTuple(sessionManager, session.id, liveBefore);
 	let mutationStarted = false;
 
@@ -536,9 +552,13 @@ export async function applyRuntimeSessionModelSelection(
 			selectedModel,
 		);
 		const requested: RuntimeModelTuple = { provider, id: modelId, thinkingLevel: effectiveThinkingLevel };
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime model read-back mismatch: the session bridge was replaced before selection",
+		);
 
 		mutationStarted = true;
 		await applyModelString(mutationRpcClient, `${provider}/${modelId}`, {
@@ -547,9 +567,13 @@ export async function applyRuntimeSessionModelSelection(
 			retryDelayMs: 0,
 			readBackAttempts: 1,
 		});
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime model read-back mismatch: the session bridge was replaced during selection",
+		);
 		const modelReadBack = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (modelReadBack?.provider !== provider || modelReadBack.id !== modelId) {
 			throw new Error(
@@ -557,13 +581,21 @@ export async function applyRuntimeSessionModelSelection(
 				`agent reports ${modelReadBack?.provider ?? "?"}/${modelReadBack?.id ?? "?"}`,
 			);
 		}
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime model read-back mismatch: the session bridge was replaced during selection",
+		);
 		await mutationRpcClient.setThinkingLevel(effectiveThinkingLevel);
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime tuple read-back mismatch: the session bridge was replaced during selection",
+		);
 		const finalState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (!tuplesEqual(finalState, requested)) {
 			throw new Error(
@@ -571,16 +603,20 @@ export async function applyRuntimeSessionModelSelection(
 				`agent reports ${finalState?.provider ?? "?"}/${finalState?.id ?? "?"}/${finalState?.thinkingLevel ?? "?"}`,
 			);
 		}
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime tuple read-back mismatch: the session bridge was replaced before commit",
+		);
 
 		commitRuntimeTuple(sessionManager, session, requested);
 		mutationStarted = false;
 		if (broadcastModelState) broadcastTuple(session, requested, broadcastModelState);
 		return requested;
 	} catch (error) {
-		// A clear/respawn generation now owns this bridge. Never commit, rollback,
+		// A context-clear generation now owns this bridge. Never commit, rollback,
 		// stop, or restart through the superseded mutation's session-id path.
 		if (error instanceof RuntimeMutationSupersededError
 			|| !runtimeReplacementOwnershipIsCurrent(sessionManager, session.id, replacementOwnership)) {
@@ -608,9 +644,13 @@ export async function applyRuntimeSessionThinkingSelection(
 	const mutationRpcClient = session.rpcClient;
 	const replacementOwnership = captureRuntimeReplacementOwnership(sessionManager, session.id);
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
-	if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-		throw new RuntimeMutationSupersededError();
-	}
+	assertRuntimeMutationOwner(
+		sessionManager,
+		session,
+		mutationRpcClient,
+		replacementOwnership,
+		"runtime thinking read-back mismatch: the session bridge was replaced before selection",
+	);
 	const durable = persistedTuple(sessionManager, session.id, liveBefore);
 	let mutationStarted = false;
 
@@ -647,15 +687,23 @@ export async function applyRuntimeSessionThinkingSelection(
 			throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider}/${current.id}`);
 		}
 		const expected: RuntimeModelTuple = { ...current, thinkingLevel: effectiveThinkingLevel };
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime thinking read-back mismatch: the session bridge was replaced before selection",
+		);
 
 		mutationStarted = true;
 		await mutationRpcClient.setThinkingLevel(effectiveThinkingLevel);
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime thinking read-back mismatch: the session bridge was replaced during selection",
+		);
 		const finalState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (!tuplesEqual(finalState, expected)) {
 			throw new Error(
@@ -663,9 +711,13 @@ export async function applyRuntimeSessionThinkingSelection(
 				`agent reports ${finalState?.provider ?? "?"}/${finalState?.id ?? "?"}/${finalState?.thinkingLevel ?? "?"}`,
 			);
 		}
-		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient, replacementOwnership)) {
-			throw new RuntimeMutationSupersededError();
-		}
+		assertRuntimeMutationOwner(
+			sessionManager,
+			session,
+			mutationRpcClient,
+			replacementOwnership,
+			"runtime thinking read-back mismatch: the session bridge was replaced before commit",
+		);
 
 		commitRuntimeTuple(sessionManager, session, expected);
 		mutationStarted = false;
