@@ -555,7 +555,7 @@ export class StaffManager {
 			roleId?: string;
 			accessory?: string;
 			currentSessionId?: string;
-			contextPolicy?: "preserve" | "compact";
+			contextPolicy?: "preserve" | "compact" | "clear";
 			/** Updated by `InboxNudger.applyPolicyThenNudge`; no longer mutated by `StaffManager`. */
 			lastWakeAt?: number;
 		},

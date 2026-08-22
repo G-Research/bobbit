@@ -964,6 +964,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/staff-clear-context-policy.test.ts",
+		allowReason: "test-owned prior-generation transcript and isolated SessionStore payload used to prove durable clear history and reload",
+		reads: frozen([
+			{ expression: "oldPath", count: 1 },
+			{ expression: "path.join(sessionStateDir, \"sessions.json\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/staff-accessory-persistence.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
@@ -1424,6 +1432,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "promptPath", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/staff-context-policy-store.test.ts",
+		allowReason: "test-owned StaffStore JSON under per-case temporary directories used to prove policy persistence and normalization",
+		reads: frozen([
+			{ expression: "path.join(dir, \"staff.json\")", count: 1 },
 		]),
 	},
 	{

@@ -30,7 +30,7 @@ This guide is the practical how-to.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
-**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session access, unified lifecycle hooks, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `5`. Base capabilities report `true` on a current host; feature-detect additive capabilities through `host.capabilities`. `sessionNotifications` and `projectNotifications` are available on the current host, while `localData` is present only for a winning pack that declares it.
+**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session access, unified lifecycle hooks, and worker isolation are all **implemented**. `HOST_API_VERSION` remains `1`; `HOST_CONTRACT_VERSION` is `6`. Base capabilities report `true` on a current host; feature-detect optional capabilities through `host.capabilities`. The v6 `host.ui.createBobbitSprite` method is required and has no capability flag. `sessionNotifications` and `projectNotifications` are available on the current host, while `localData` is present only for a winning pack that declares it.
 
 The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), `market-packs/terminal/` (the first-party xterm terminal over `host.channels`), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
@@ -638,8 +638,10 @@ additionally receives `localData: true`; otherwise that flag and namespace are a
 **server-side** base capabilities are `{ session, store, agents }`, with `localData: true` added only
 for a bound declared directory. `host.version`
 (`HOST_API_VERSION`, `1`) and `host.contractVersion`
-(`HOST_CONTRACT_VERSION`) identify the contract revision. All capabilities are purely additive
+(`HOST_CONTRACT_VERSION`) identify the contract revision. Optional capabilities are additive
 (no signature churn), so code written against `capabilities` stays forward/backward-compatible.
+Required methods declared by the active contract are different: for contract v6,
+`host.ui.createBobbitSprite` is always present and must be called without feature detection.
 
 ## Step 5 — install, test, iterate
 
@@ -1201,6 +1203,83 @@ Run focused retry-free coverage after changing terminal lifecycle or worker chan
 npx vitest run tests2/core/extension-host-terminal.test.ts tests2/core/extension-host-channel-registry.test.ts --config vitest.config.ts --retry=0
 BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- tests2/browser/e2e/terminal-pack.spec.ts --retries=0
 ```
+
+### Canonical Bobbit avatars (`host.ui.createBobbitSprite`)
+
+Browser extension surfaces can show the same Bobbit identity and presentation as the main
+application without copying sprite data, appearance rules, or animation. The host owns those
+details so an extension remains aligned when Bobbit's canonical renderer or persisted appearance
+changes. The extension supplies only a project-bound identity and presentation state.
+
+`createBobbitSprite` is a required member of `host.ui` in Host contract v6. Call it directly;
+do not feature-detect the method or add a compatibility fallback. `HOST_API_VERSION` remains `1`
+because the browser Host API change is additive.
+
+```ts
+type HostBobbitState = "active" | "idle" | "paused";
+
+type HostBobbitSubject =
+  | { kind: "session"; id: string }
+  | { kind: "staff"; id: string };
+
+interface HostBobbitSpriteOptions {
+  subject: HostBobbitSubject;
+  state: HostBobbitState;
+  label: string;
+  size?: number;
+  animated?: boolean;
+}
+
+host.ui.createBobbitSprite(options: HostBobbitSpriteOptions): HTMLElement;
+```
+
+For example, a panel can create and append an active session avatar:
+
+```js
+const avatar = host.ui.createBobbitSprite({
+  subject: { kind: "session", id: sessionId },
+  state: "active",
+  label: "Build session",
+});
+panelRoot.append(avatar);
+```
+
+Options have the following contract:
+
+- `subject` selects a session or staff identity. For a session, the host uses its persisted colour
+  and accessory. For staff, the host uses the staff accessory and the current session's persisted
+  colour when available; otherwise it uses the canonical default colour.
+- `state` selects the canonical main-app presentation: `active` uses the busy presentation,
+  `idle` uses the settled sleeping presentation, and `paused` uses the centred, open-eye awake
+  rest frame. Paused presentation is static even when animation is requested.
+- `label` is copied exactly to the returned avatar's accessible name. It must be a string with
+  non-whitespace content and at most 200 UTF-16 code units.
+- `size` is an optional integer CSS-pixel square size from `16` through `96`, inclusive. Omitting
+  it uses the canonical panel size of `40` CSS pixels.
+- `animated` defaults to `true`. Setting it to `false` renders the matching canonical static
+  state. The host always honours `prefers-reduced-motion`, including live preference changes, so
+  a caller cannot force motion. Active becomes the open centre frame, idle remains the sleeping
+  rest frame, and paused remains the awake rest frame when motion is disabled.
+
+Validation is synchronous and happens before rendering. The options and subject must be non-null
+objects; the subject kind, state, label, optional size, and optional animation flag must have the
+shapes and values above, and `subject.id` must be a string. A violation throws `TypeError`.
+Unknown extra properties are allowed. A structurally valid ID that is empty, missing from loaded
+state, backed by malformed appearance data, or foreign to the project is not a validation error:
+it renders the canonical default Bobbit.
+
+Identity lookup is private to the authenticated browser surface's bound session project. An
+out-of-project subject and an unknown subject produce the same canonical fallback, so extensions
+cannot probe whether an ID belongs to another project. Project snapshots do not expose colour,
+accessory, sprite, or rendering fields; pass an identity to this method instead of retaining
+appearance data.
+
+The result is a plain, non-interactive `HTMLElement` with `role="img"`; its `aria-label` is exactly
+the supplied `label`, and its visual descendants are hidden from assistive technology. The element
+is self-contained: it can be appended, moved, removed, and re-appended. Disconnecting immediately
+stops animation work and releases motion listeners, observers, timers, and rendered descendants;
+re-appending safely renders it again. Treat the element as opaque rather than reading or changing
+its visual descendants.
 
 ### Panels — persistent side panels (`host.ui.openPanel`)
 
@@ -2233,7 +2312,7 @@ sandbox/read-only enforcement. As an author, your obligations are:
 - [ ] **Use the bound Pack Local Data directory** — declare the fixed schema-2 `localData` block and call `host.localData.directory()` or select your exact pack id from `BOBBIT_PACK_LOCAL_DATA_JSON`; never reconstruct a project root from `cwd` or accept a caller-supplied directory.
 - [ ] **Server modules are trusted code with full ambient parity** — `child_process`/`fs`/network/`process.env` are available directly (no declaration). The worker is resource/crash isolation only; design handlers to be fast.
 - [ ] **Standalone pi extensions are host/runtime code** — source-level trust is required before executable discovery, and enabled extensions load into matching agent sessions by default via `--extension`.
-- [ ] **Feature-detect via `host.capabilities`**, never member presence.
+- [ ] **Feature-detect optional capabilities via `host.capabilities`**, never member presence; call required contract-v6 `host.ui.createBobbitSprite` directly.
 
 The deeper model — the allowlist-bypass fix, `toolUseId` ownership verification, the
 `authorizeScopedRequest` vs `authorizeActionRequest` split, the tool-or-pack surface binding,

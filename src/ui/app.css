@@ -5673,3 +5673,27 @@ canvas.bobbit-blob__sprite {
 .bobbit-blob.bobbit-blob--archived .bobbit-blob__zzz-letter {
 	opacity: 0 !important;
 }
+
+/* Hosted sprites reuse canonical layers while owning their local composition.
+ * Counter document-level accessory layout classes; only the renderer-emitted
+ * accessory layer can affect the hosted identity. */
+.bobbit-blob.bobbit-blob--hosted {
+	padding-top: 0;
+	margin-left: 0;
+}
+.bobbit-blob.bobbit-blob--hosted.bobbit-blob--hosted-tall {
+	padding-top: 6px;
+}
+
+/* Static/reduced-motion presentation has no CSS, transition, or pseudo-element
+ * animation. Rest transforms are the matching canonical 0% poses. */
+.bobbit-blob.bobbit-blob--hosted-static,
+.bobbit-blob.bobbit-blob--hosted-static *,
+.bobbit-blob.bobbit-blob--hosted-static *::before,
+.bobbit-blob.bobbit-blob--hosted-static *::after {
+	animation: none !important;
+	transition: none !important;
+}
+.bobbit-blob.bobbit-blob--hosted-static.bobbit-blob--idle canvas.bobbit-blob__sprite {
+	transform: translateX(-28px);
+}

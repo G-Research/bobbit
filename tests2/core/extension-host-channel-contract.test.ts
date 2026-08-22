@@ -10,19 +10,52 @@
  * clear messages so the production slices know which contract points are still
  * missing.
  */
-import { describe, it } from "vitest";
+import { describe, expectTypeOf, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../src/shared/extension-host/host-api.ts";
+import {
+	HOST_API_VERSION,
+	HOST_CONTRACT_VERSION,
+	type HostBobbitSpriteOptions,
+	type HostBobbitState,
+	type HostBobbitSubject,
+	type HostProjectApi,
+	type HostUiApi,
+} from "../../src/shared/extension-host/host-api.ts";
 import { createServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
 
 const hostApiSource = () => fs.readFileSync(path.join(process.cwd(), "src", "shared", "extension-host", "host-api.ts"), "utf-8");
 
+describe("host.ui.createBobbitSprite — public Host API contract", () => {
+	it("pins the exact required sprite types and method signature", () => {
+		expectTypeOf<HostBobbitState>().toEqualTypeOf<"active" | "idle" | "paused">();
+		expectTypeOf<HostBobbitSubject>().toEqualTypeOf<
+			| { kind: "session"; id: string }
+			| { kind: "staff"; id: string }
+		>();
+		expectTypeOf<HostBobbitSpriteOptions>().toEqualTypeOf<{
+			subject: HostBobbitSubject;
+			state: HostBobbitState;
+			label: string;
+			size?: number;
+			animated?: boolean;
+		}>();
+		expectTypeOf<keyof HostUiApi>().toEqualTypeOf<"openPanel" | "navigate" | "createBobbitSprite">();
+		expectTypeOf<HostUiApi["createBobbitSprite"]>().toEqualTypeOf<
+			(options: HostBobbitSpriteOptions) => HTMLElement
+		>();
+	});
+
+	it("does not add appearance data to the project contract", () => {
+		expectTypeOf<keyof HostProjectApi>().toEqualTypeOf<"notifications">();
+	});
+});
+
 describe("host.channels — public Host API contract", () => {
 	it("keeps the Host API version stable and bumps only the owned contract version", () => {
-		assert.equal(HOST_API_VERSION, 1, "host.channels is additive; HOST_API_VERSION must remain v1");
-		assert.equal(HOST_CONTRACT_VERSION, 5, "host notifications are additive; HOST_CONTRACT_VERSION must be 5");
+		assert.equal(HOST_API_VERSION, 1, "host.ui.createBobbitSprite is additive; HOST_API_VERSION must remain v1");
+		assert.equal(HOST_CONTRACT_VERSION, 6, "host.ui.createBobbitSprite is additive; HOST_CONTRACT_VERSION must be 6");
 	});
 
 	it("declares a generic text/json channel API with no terminal-specific core method", () => {
