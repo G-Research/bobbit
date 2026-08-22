@@ -445,7 +445,11 @@ proposal types keep their existing seed behavior.
 The goal validator covers title/spec bounds; visible project and `cwd` authority;
 workflow selection, optional steps, and inline workflow/role contracts;
 parent/nesting rules; metadata; sub-goal settings; and root/child policy
-combinations. Rejection preserves the creation-equivalent structured status,
+combinations. An omitted, `null`, or empty input serializes as the valid empty
+Markdown body and round-trips through seed, edit, rehydration, and acceptance.
+Blank titles, malformed frontmatter, other non-string raw specs, and oversized
+specs remain invalid.
+Rejection preserves the creation-equivalent structured status,
 code, and message family, including `CWD_OUTSIDE_PROJECT`. It writes no draft or
 history snapshot, does not advance the revision, and opens no proposal tab or
 emits a proposal-update event. `propose_goal` returns an `isError` tool result,
