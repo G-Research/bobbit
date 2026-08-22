@@ -204,7 +204,7 @@ describe("runSubgoalStep — canonical candidate validation before child mutatio
 		assert.equal(fx.goalStore.getAll().filter(goal => goal.parentGoalId === fx.parent.id).length, 0,
 			"invalid generated candidates must not persist a child");
 		assert.equal(gateInitCalls, 0, "invalid generated candidates must not initialize gates");
-		assert.equal(schedulerCalls, 0, "invalid generated candidates must not touch the child scheduler");
+		assert.equal(schedulerCalls, 1, "releasing the root permit must drain the child scheduler exactly once");
 		assert.equal(setupCalls, 0, "invalid generated candidates must not start worktree/team setup");
 	});
 });
