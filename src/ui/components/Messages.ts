@@ -30,6 +30,7 @@ import type { BobbitMessage, MessageAuthor } from "../../shared/message-author.j
 import type { PromptAuthorAppearance } from "../../app/message-author-appearance.js";
 import { getAccessoryDef, renderStaticSidebarBobbitCanvas } from "../bobbit-render.js";
 import { presentPromptAuthor } from "../message-author-presentation.js";
+import type { ToolCapabilityMode, ToolRenderContext } from "../tools/types.js";
 
 /** Format a message timestamp for display (locale-appropriate time). */
 export function formatTimestamp(ts: number | string | undefined): string {
@@ -455,6 +456,8 @@ export class AssistantMessage extends LitElement {
 	 *  run auto-compaction (detected via an immediately-following synthetic
 	 *  compaction-summary row) — not a user-initiated Stop. */
 	@property({ type: Boolean }) suppressAbortedBanner = false;
+	/** Explicit tool-renderer authority inherited from the owning message list. */
+	@property({ attribute: false }) capabilityMode: ToolCapabilityMode = "active";
 	@state() private _retrying = false;
 
 	private _throttledContent: string = "";
@@ -522,7 +525,7 @@ export class AssistantMessage extends LitElement {
 					const mdContent = this.isStreaming ? this._getThrottledContent(displayText) : displayText;
 					// Local image fetches begin only after the final assistant row is stable;
 					// reparsing streaming Markdown would repeatedly abort and restart them.
-					orderedParts.push(html`<markdown-block .content=${mdContent} .sessionId=${this.isStreaming ? "" : this.sessionId}></markdown-block>`);
+					orderedParts.push(html`<markdown-block .content=${mdContent} .sessionId=${this.isStreaming || this.capabilityMode === "history" ? "" : this.sessionId}></markdown-block>`);
 				}
 				i++;
 			} else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {
@@ -576,6 +579,7 @@ export class AssistantMessage extends LitElement {
 							.toolCalls=${run}
 							.tools=${this.tools || []}
 							.toolResultsById=${this.toolResultsById}
+							.capabilityMode=${this.capabilityMode}
 						></tool-group>`,
 					);
 					i = j;
@@ -602,6 +606,7 @@ export class AssistantMessage extends LitElement {
 							.permissionBlocked=${permissionBlocked}
 							.aborted=${aborted}
 							.isStreaming=${this.isStreaming}
+							.capabilityMode=${this.capabilityMode}
 						></tool-message>`,
 					);
 					i++;
@@ -611,7 +616,7 @@ export class AssistantMessage extends LitElement {
 			}
 		}
 
-		if (hasSuggestGoal) {
+		if (hasSuggestGoal && this.capabilityMode === "active") {
 			orderedParts.push(html`
 				<button class="suggest-goal-btn" @click=${(e: Event) => {
 					e.stopPropagation();
@@ -743,6 +748,8 @@ export class ToolMessage extends LitElement {
 	/** Server-stamped timestamp of the assistant message that issued this call.
 	 *  Threaded to renderers as a reload-stable timer anchor (e.g. bash_bg wait). */
 	@property({ type: Number }) callStartTime?: number;
+	/** Historical tool cards retain display affordances but receive no live authority. */
+	@property({ attribute: false }) capabilityMode: ToolCapabilityMode = "active";
 
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
 		return this;
@@ -788,6 +795,7 @@ export class ToolMessage extends LitElement {
 	};
 
 	private async _loadFullContent(): Promise<void> {
+		if (this.capabilityMode === "history") return;
 		const sessionId = appState.remoteAgent?.gatewaySessionId;
 		if (!sessionId) return;
 
@@ -865,37 +873,43 @@ export class ToolMessage extends LitElement {
 				details: this.partialResult.details,
 			} as ToolResultMessageType<any>;
 		}
-		const sessionIdCtx = appState.remoteAgent?.gatewaySessionId;
-		const getAskResponseAnswers = appState.remoteAgent?.findAskResponseAnswers?.bind(appState.remoteAgent);
-		// Thread current session's goalId so renderers (e.g. goal_plan_propose's
-		// approval flow) can target the right goal. Looked up via the session
-		// record (single source of truth) rather than tracked on remote-agent.
+		const isHistory = this.capabilityMode === "history";
+		const sessionIdCtx = isHistory ? undefined : appState.remoteAgent?.gatewaySessionId;
+		const getAskResponseAnswers = isHistory
+			? undefined
+			: appState.remoteAgent?.findAskResponseAnswers?.bind(appState.remoteAgent);
+		// Thread current session's goalId only for the active transcript. Retained
+		// history must not accidentally bind old cards to the currently selected goal.
 		let goalIdCtx: string | undefined;
-		if (sessionIdCtx) {
+		if (!isHistory && sessionIdCtx) {
 			const rec = appState.gatewaySessions.find((s: any) => s.id === sessionIdCtx)
 				?? appState.archivedSessions.find((s: any) => s.id === sessionIdCtx);
 			goalIdCtx = (rec as any)?.goalId || (rec as any)?.teamGoalId || undefined;
 		}
+		const renderContext: ToolRenderContext = {
+			capabilityMode: this.capabilityMode,
+			toolUseId: this.toolCall.id,
+			toolCallInput: (this.toolCall as any).input,
+			toolCallStartTime: this.callStartTime,
+			packTool: toolName,
+			...(!isHistory ? {
+				sessionId: sessionIdCtx,
+				goalId: goalIdCtx,
+				getAskResponseAnswers,
+				host: getHostApi(sessionIdCtx, this.toolCall.id, {
+					kind: "tool" as const,
+					tool: toolName,
+					packId: packIdForTool(toolName),
+					...(packHasLocalDataForTool(toolName) ? { hasLocalData: true as const } : {}),
+				}),
+			} : {}),
+		};
 		const renderResult = renderTool(
 			toolName,
 			this.toolCall.arguments,
 			result,
 			!this.aborted && (this.isStreaming || this.pending || this.permissionBlocked),
-			{
-				toolUseId: this.toolCall.id,
-				toolCallInput: (this.toolCall as any).input,
-				toolCallStartTime: this.callStartTime,
-				sessionId: sessionIdCtx,
-				goalId: goalIdCtx,
-				getAskResponseAnswers,
-				packTool: toolName,
-				host: getHostApi(sessionIdCtx, this.toolCall.id, {
-					kind: "tool",
-					tool: toolName,
-					packId: packIdForTool(toolName),
-					...(packHasLocalDataForTool(toolName) ? { hasLocalData: true } : {}),
-				}),
-			},
+			renderContext,
 		);
 
 		// Handle custom rendering (no card wrapper)

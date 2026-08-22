@@ -34,6 +34,7 @@ import type {
 	SidebarActionsPopover,
 	SidebarActionsPopoverItem,
 } from "./SidebarActionsPopover.js";
+import type { ToolCapabilityMode } from "../tools/types.js";
 
 const HISTORY_ENTRY_ID_MAX_LENGTH = 256;
 const HISTORY_FORK_HELP_TEXT = "The new session will include the conversation up to, but not including, this prompt.";
@@ -234,6 +235,8 @@ export class MessageList extends LitElement {
 	@property({ attribute: false }) onRetry?: () => void;
 	/** Hide active permission request cards when the same controls are pinned near the prompt. */
 	@property({ type: Boolean }) hideActionablePermissionRows: boolean = false;
+	/** Explicit renderer authority. Nested retained history is always read-only. */
+	@property({ attribute: false }) capabilityMode: ToolCapabilityMode = "active";
 	/** Session id — forwarded to `<bobbit-pre-compaction-history>` when a
 	 *  compaction card appears in the transcript, so the inline expand
 	 *  affordance can call the orphan-transcript API. */
@@ -567,6 +570,7 @@ export class MessageList extends LitElement {
 									.toolCalls=${groupCalls}
 									.tools=${this.tools}
 									.toolResultsById=${resultByCallId}
+									.capabilityMode=${this.capabilityMode}
 								></tool-group>
 							</div>`,
 						});
@@ -615,6 +619,7 @@ export class MessageList extends LitElement {
 						.onCostClick=${this.onCostClick}
 						.onRetry=${showRetry ? this.onRetry : undefined}
 						.suppressAbortedBanner=${suppressAbortedBanner}
+						.capabilityMode=${this.capabilityMode}
 					></assistant-message>`,
 				});
 				i++;

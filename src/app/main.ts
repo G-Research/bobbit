@@ -40,7 +40,7 @@ import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
 import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavailable, hasActiveSidePanel, getSidePanelSizeMode, setSidePanelSizeMode } from "./render.js";
 import { getSidePanelWorkspace, hydrateSidePanelWorkspace, setActiveSidePanelTab } from "./side-panel-workspace.js";
-import { renderTool } from "../ui/tools/index.js";
+import { registerToolRenderer, renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
 import { toggleRolePicker } from "./sidebar.js";
 import { startNewGoalFlow } from "./goal-entry.js";
@@ -138,6 +138,7 @@ document.addEventListener("click", captureSidePanelTabActivation, true);
 // tests can mount renderers directly without going through the session
 // pipeline. Used by tests/e2e/ui/children-tool-renderers.spec.ts.
 (window as any).__bobbitRenderTool = renderTool;
+(window as any).__bobbitRegisterToolRenderer = registerToolRenderer;
 import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
 
 // E2E test hook: re-drive pack-renderer reconciliation (extension-host §4a) the

@@ -96,7 +96,7 @@
     },
     {
       "path": "tests2/browser/journeys/clear-session-context.journey.spec.ts",
-      "reason": "Browser journey covering autocomplete and invocation, durable expandable history boundaries, follow-up turns, repeated clears, reload, and cleanup.",
+      "reason": "Browser journey covering autocomplete and invocation, durable expandable history boundaries, read-only historical tool capabilities and unanswered asks, active tool actions, follow-up turns, repeated clears, reload, and cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -4199,7 +4199,7 @@
       "bucket": "v2-dom",
       "method": "rewrite",
       "replacement": [],
-      "rationale": "Non-geometry browser fixture â€” rewrite to render under happy-dom (vitest dom project).",
+      "rationale": "Non-geometry renderer coverage under happy-dom, including read-only historical asks and tool capability isolation.",
       "migrated": true,
       "v2Path": "tests2/dom/ask-user-choices-renderer.test.ts",
       "execution": {

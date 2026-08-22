@@ -111,6 +111,7 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 		}
 
 		const posted = isPostedStub(result);
+		const historyMode = ctx?.capabilityMode === "history";
 		// Preferred path: the tool returned the `{status:"posted"}` stub and the
 		// user has submitted; answers live in a later envelope user message.
 		const fromTranscript = posted && ctx?.toolUseId && ctx?.getAskResponseAnswers
@@ -130,7 +131,8 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 		// Interactive mode: tool posted, no envelope yet, not errored.
 		//   - If `posted` is false but the tool has produced a non-stub result,
 		//     the card is effectively complete (legacy path with answers or an error).
-		const showHeaderInProgress = state === "inprogress" || (posted && !answers && !errored);
+		const showHeaderInProgress = !historyMode
+			&& (state === "inprogress" || (posted && !answers && !errored));
 
 		return {
 			content: html`
@@ -148,11 +150,17 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 								</span>`,
 							)
 							: renderHeader(state, HelpCircle, "Multiple-choice question")}
+					${historyMode && !answers && !errored ? html`
+						<div class="ask-history-readonly text-xs text-muted-foreground" role="status">
+							This unanswered question is from read-only history.
+						</div>
+					` : ""}
 					<ask-user-choices-widget
 						.questions=${params.questions}
 						.answers=${answers}
-						.sessionId=${ctx?.sessionId ?? ""}
+						.sessionId=${historyMode ? "" : (ctx?.sessionId ?? "")}
 						.toolUseId=${ctx?.toolUseId ?? ""}
+						.readOnly=${historyMode}
 						.errored=${errored}
 						.errorText=${errored ? getErrorText(result) : ""}
 					></ask-user-choices-widget>
