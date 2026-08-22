@@ -44,6 +44,7 @@ import {
 import { navigateToTarget } from "./pack-entrypoints.js";
 import { createHostChannelsApi, type HostChannelsApi } from "./channel-bridge.js";
 import { mintPackSurfaceTokenOverWs } from "./surface-token-bridge.js";
+import { createHostBobbitSprite, type BrowserHostBobbitSpriteOptions } from "./host-bobbit-sprite.js";
 
 /** Add the `x-bobbit-session-id` header to a fetch init, mirroring the
  *  propagation `defaults/tools/agent/extension.ts` uses (server reads it). The
@@ -402,6 +403,10 @@ export function getHostApi(
 			},
 		} as HostApi["project"],
 		ui: {
+			// Required browser-only sprite construction is bound to this closure's
+			// trusted session. Extensions cannot choose the authority project.
+			createBobbitSprite: (options: BrowserHostBobbitSpriteOptions) =>
+				createHostBobbitSprite(sessionId, options),
 			// Slice B4: open (or focus) a pack-contributed side panel via the client
 			// pack-panel registry (lazy Blob-URL import + mount). PACK-RELATIVE: BOTH a
 			// pack-bound surface (panel/entrypoint) AND a tool-renderer surface supply
