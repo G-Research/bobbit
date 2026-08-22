@@ -84,6 +84,12 @@ session receives the full metadata, using its gateway-issued `BOBBIT_SESSION_SEC
 verifies staff and project ownership. A bearer token, cookie, public session ID, request body, or
 client project claim is not enough. See [Staff inbox](staff-inbox.md#notification-entry-security).
 
+For tool notifications, the session secret on the Pi callback authenticates only the exact callback
+transport. Bobbit separately requires matching current-writer execution provenance and an accepted
+host cursor before it invokes `beforeToolCall` or `afterToolResult` or publishes a tool fact. Forged,
+duplicate, mismatched, terminal, and stale-generation callbacks therefore match no notification
+trigger: they invoke no hook, create no durable delivery intent or inbox entry, and wake no staff.
+
 ### Durable acceptance and retries
 
 Bobbit persists one matching delivery intent per deterministic

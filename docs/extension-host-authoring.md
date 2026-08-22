@@ -1656,6 +1656,13 @@ handler that already started is not aborted by registry invalidation: it remains
 deadline, its return value is ignored, and the host detects revocation at settlement. Its settlement
 cannot affect other handlers or roll back the already-published source fact.
 
+For a session-scoped notification handler, declared `ctx.host.session` and `ctx.host.agents`
+capabilities remain feature-detectable but are live-authorized against the source session and the
+project captured for the handler. Each operation checks before work and after asynchronous
+settlement. Moving the session to another project therefore makes later operations fail, withholds
+an in-flight read/result, and best-effort dismisses a child whose spawn raced the move. The handler
+may finish its own bounded computation, but it cannot carry old-project session authority forward.
+
 A kindless legacy declaration using `events` plus `mode: observe | decide` remains listable metadata
 but is deliberately inert. Bobbit does not silently activate old files during upgrade. Existing
 `providers/*.yaml` remain the compatibility runtime for Lifecycle Hub context hooks.
@@ -1792,9 +1799,11 @@ await host.session.postMessage({ role: "user", text: "re-run the tests", resumeT
 - **Cross-session posting is impossible** — the target is the WS connection's own session.
 - **Canonical notifications are snapshot invalidations, not replay.** Session facts are bound to
   this session; project facts are bound to its server-resolved project with no client-supplied ID.
-  Mount, reconnect, stream gaps, and pressure call `onRefreshRequired`; re-read the authoritative
-  snapshot instead of reconstructing state from event history. Subscription cleanup functions are
-  idempotent. See [Unified Host hooks](host-hooks.md#browser-host-api).
+  Mount, a server-observed session project move, reconnect, stream gaps, and pressure call
+  `onRefreshRequired`; re-read the authoritative snapshot instead of reconstructing state from
+  event history. On a move, the server rebinds the live socket and suppresses project deltas until
+  that refresh, so the next read must use the destination project's authoritative state.
+  Subscription cleanup functions are idempotent. See [Unified Host hooks](host-hooks.md#browser-host-api).
 
 ### `host.agents` — launch and orchestrate child agents
 

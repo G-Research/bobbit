@@ -318,20 +318,27 @@ One dispatch deadline prevents `number of extensions × timeout` latency. Cancel
 
 ### 3.3 Tool lifecycle order
 
-Compose the current generated permission guard and tool wrapper seams (`generateToolGuardExtension`, `generateToolResultErrorBridgeExtension`) rather than observing Pi's `tool_execution_end` after persistence. Permission checks remain first:
+Compose the generated permission guard and tool wrapper seams (`generateToolGuardExtension`, `generateToolResultErrorBridgeExtension`) with the current Pi writer's lifecycle stream. Pi emits `tool_execution_start` before its `tool_call` permission listeners; Bobbit treats that early event only as provenance. Permission remains the first policy decision, and no public start fact exists until permission and `beforeToolCall` both admit the call:
 
 ```text
-role/tool permission guard
+current Pi writer emits tool_execution_start
+-> session event owner accepts it at a cursor
+-> role/tool permission guard
+-> exact one-use before callback claim
 -> beforeToolCall router
+-> admitted settlement publishes toolCallStarted
 -> approved or host-schema-valid mutated handler invocation
--> handler completes
--> protected afterToolResult router/policy gate
--> approved/replaced/constant synthetic result returned to Pi
--> Pi persists and publishes the corresponding tool-result message_end
+-> handler completes or throws
+-> bridge attempts the exact admitted-call after callback claim
+-> protected afterToolResult router/policy or host-owned transport fallback
+-> approved/replaced/original-error/constant synthetic result returned to Pi
+-> matching current-writer tool_execution_end classifies safe outcome
+-> Pi publishes the corresponding post-policy tool-result message_end
+-> session event owner accepts messageAppended at its cursor
 -> toolCallCompleted notification
 ```
 
-Add a bounded per-session `ToolCallLifecycleTracker` inside `SessionManager` (or its event adapter), keyed by `toolCallId`, holding only tool name, monotonic start time, turn index, and safe terminal outcome. `tool_execution_start` is recorded only after admission. `tool_execution_end` may classify safe outcome but cannot publish completion. The matching accepted, non-replay `message_end` for the tool result is the publication fence. Clear entries on completion, process replacement, turn terminal, archive, and shutdown; cap the map to prevent leaks.
+The bounded per-session tracker is keyed by `toolCallId` and retains only tool name, session generation, accepted start cursor, monotonic start time, turn index, phase/lease, cancellation, and safe terminal outcome. The exact-session secret authenticates callback transport but cannot create lifecycle provenance. A process-local opaque claim is minted only for the matching current writer, generation, tool ID/name, cursor, and phase, then consumed once. A before callback may wait briefly for stdout/event-buffer arrival ordering; no event means no claim. Forged, duplicate, mismatched, terminal, and stale-generation callbacks invoke no interceptor and publish no fact. `tool_execution_end` classifies outcome but cannot publish completion; the accepted non-replay tool-result `message_end` remains the completion fence. Clear provenance on completion, writer/process replacement, turn terminal, archive, and shutdown; bound both tracker and waiters to prevent leaks.
 
 ## 4. Notification dispatcher
 
@@ -372,6 +379,8 @@ export default {
 
 `ctx` contains only server-derived project/pack identity, effective config, cancellation, and granted Host APIs. The frozen canonical event is the only argument. Return values are ignored. The dispatcher rechecks winning pack, activation, disabled ref, and grants before invocation and ignores late settlement after invalidation. Each handler has its declared timeout capped by the catalogue. Errors/timeouts are isolated and recorded by code and attribution only. A handler cannot block the source operation because dispatch begins after publication and runs on a per-project ordered async queue.
 
+A session-scoped handler's granted `host.session` and `host.agents` operations additionally revalidate the source session's current host-owned project before work and after asynchronous settlement. A project move withholds an in-flight read/result, rejects later operations, and best-effort dismisses a child whose spawn raced revocation. The handler itself can continue to its bounded deadline, but it cannot exercise the captured old-project session authority.
+
 Queues preserve publication order within one project; projects may run concurrently. Queue capacity is bounded. On overflow, module deliveries are dropped with a diagnostic and modules recover by reading authoritative snapshots; no unbounded memory or replay journal is introduced.
 
 ## 5. Authoritative publication map
@@ -386,8 +395,8 @@ A publisher must build an allowlisted payload from captured before/after scalars
 | `turnStarted` | `SessionManager.handleAgentLifecycle()` first canonical current-writer `agent_start`, after persisted `wasStreaming`/`streamingStartedAt` update and streaming status transition. Add/use the session's turn index; duplicate start/replay does not republish. | `turn/<sessionId>:<turnIndex>`, revision `turnIndex` |
 | `turnCompleted` | Sole final `agent_end` path after `willRetry !== true`, terminal identity dedupe, `turnTerminalHandled` test/set, outcome classification, persisted streaming marker clear, completed-turn increment, and idle/error status publication. Retry attempts, duplicate terminal frames, restore replay, and late frames cannot reach publication. Error and abort use explicit outcomes. | `turn/<sessionId>:<turnIndex>`, revision completed turn index |
 | `messageAppended` | Normal non-restoring `subscribeToEvents`/`message_end` path after `prepareVisibleAgentEvent` and `emitSessionEvent` accept the event into `EventBuffer`. Use the accepted buffer seq/cursor and stable message identity. Do not publish client remapping, snapshots, partial streaming, or restore replay. | `message/<messageId>`, revision accepted event cursor |
-| `toolCallStarted` | Pi `tool_execution_start` only after permission plus `beforeToolCall` admission, recorded in the bounded tracker. | `toolCall/<toolCallId>`, revision tool-call identity/start cursor |
-| `toolCallCompleted` | Matching non-replay tool-result `message_end` after handler -> protected `afterToolResult` -> final approved/synthetic result -> Pi persistence/publication. Join only safe tracker metadata; never emit at `tool_execution_end`. | `toolCall/<toolCallId>`, revision result message cursor |
+| `toolCallStarted` | Current-writer Pi `tool_execution_start` after EventBuffer acceptance gives the matching callback an opaque one-use claim. Publish only after the permission guard and claimed `beforeToolCall` settle as admitted; blocked, forged, duplicate, mismatched, or stale claims emit nothing. | `toolCall/<toolCallId>`, revision accepted start-event cursor |
+| `toolCallCompleted` | Matching non-replay tool-result `message_end` after handler, claimed/fallback protected `afterToolResult`, final approved/replaced/original-error/synthetic result, and matching current-writer `tool_execution_end`. Join only safe tracker metadata; never emit completion at `tool_execution_end`. | `toolCall/<toolCallId>`, revision accepted result-message cursor |
 
 The existing `isRetryableAgentEnd`, `turnTerminalHandled`, and `assistantTerminalIdentities` fences remain the single turn-terminal suppression mechanism. A new parallel dedupe owner is prohibited.
 
@@ -465,17 +474,17 @@ Add bounded protocol frames in `src/server/ws/protocol.ts`:
 
 The stream epoch/sequence is transport metadata, not semantic envelope state. It is ephemeral per authenticated connection/scope and is not a durable event cursor.
 
-Tag each authenticated UI socket in `ws/handler.ts` with its server-resolved session and persisted/live project binding. A dedicated `HostNotificationSocketRouter` sends:
+Tag each authenticated UI socket in `ws/handler.ts` with its server-resolved session and persisted/live project binding. Before every delta and refresh, the dedicated `HostNotificationSocketRouter` re-resolves current host-owned session authority and sends:
 
 - a session notification only to sockets bound to that exact session;
-- a project notification only to sockets whose server-tagged project exactly equals the envelope project;
+- a project notification only to sockets whose current server-tagged project exactly equals the envelope project;
 - nothing to `__viewer__`, unbound, projectless, foreign-project, or future system-scope sockets.
 
-Do not use `broadcastToProject`: it intentionally includes unscoped viewers and is unsuitable as this security boundary. Client filtering is defense-in-depth only. Surface-token validation proves that a mounted contributed panel belongs to the bound session/pack, but project isolation remains server-owned.
+A detected session project move suppresses the discovering frame, rebinds the socket, and fences old- and new-project deltas behind one project refresh-required frame. Missing or conflicting live/persisted authority unbinds the socket rather than selecting a partition. Do not use `broadcastToProject`: it intentionally includes unscoped viewers and is unsuitable as this security boundary. Client filtering is defense-in-depth only. Surface-token validation proves that a mounted contributed panel belongs to the bound session/pack, but project isolation remains server-owned.
 
 Add `src/app/host-notification-bus.ts`, fed by `RemoteAgent`'s canonical frame handler. It deduplicates bounded recent envelope IDs, verifies monotonically contiguous sequence within the current epoch, routes by name, and generation-fences handlers. The client never accepts a project ID from extension code.
 
-Initial mount, socket re-auth/reconnect, epoch change, explicit refresh-required frame, or sequence gap calls `onRefreshRequired` once through a short coalescer. Mounted panels reread their authoritative REST/Host projection; they do not reconstruct state from missed deltas. Event bursts may debounce/coalesce refreshes because correctness comes from the snapshot. Reload repeats snapshot-first initialization, then resumes live observation. No historical notification replay endpoint is added.
+Initial mount, a session project move, socket re-auth/reconnect, epoch change, explicit refresh-required frame, or sequence gap calls `onRefreshRequired` once through a short coalescer. Mounted panels reread their authoritative REST/Host projection; after a move this means the destination project's snapshot. They do not reconstruct state from missed deltas. Event bursts may debounce/coalesce refreshes because correctness comes from the snapshot. Reload repeats snapshot-first initialization, then resumes live observation. No historical notification replay endpoint is added.
 
 ## 7. Notification-based staff triggers
 
@@ -572,6 +581,8 @@ The shared catalogue and payload projectors enforce these invariants:
 - no provider error text, host exception message, stack trace, or worker output;
 - no cwd, worktree, repository, absolute path, or mutable store/session object;
 - no arbitrary consumer-supplied project/session/pack identity;
+- the per-session secret authenticates Pi callback transport only; current-writer generation, accepted cursor, tool identity, and phase establish one-use tool lifecycle provenance;
+- provenance-invalid callbacks invoke no hook, publish no browser/module fact, and create no matching staff intent or wake;
 - public error fields are closed enums such as `timeout`, `denied`, `handler_error`, not messages;
 - filter fields are catalogue allowlists over bounded scalars only.
 

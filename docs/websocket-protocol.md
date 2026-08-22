@@ -471,15 +471,24 @@ semantics and the shared clamp order.
 The envelope schema, payload catalogue, privacy limits, and browser examples are documented in
 [Unified Extension Host hooks](host-hooks.md).
 
-The server binds each authenticated **app** session socket to its persisted session and project.
-Session facts route only to that exact socket binding. Project facts route only to app sockets
-bound to the same project. Extension code supplies neither binding, and sandbox principals,
-unbound sockets, and viewer sockets cannot subscribe to this stream. Project isolation is a
-server routing property, not client filtering.
+The server initially binds each authenticated **app** session socket to its host-resolved session
+and project. Before every notification delta and refresh frame, it revalidates that
+authentication-time binding against current live and persisted session authority. Session facts route only to the
+exact session binding; project facts route only to app sockets whose current binding is in that
+project. Extension code supplies neither binding, and sandbox principals, unbound sockets, and
+viewer sockets cannot subscribe to this stream. Project isolation is a server routing property,
+not client filtering.
+
+If a session moves projects, the frame that discovers the move is suppressed. The router rebinds
+the socket, fences both the old-project fact and racing destination-project deltas, and emits one
+project-scoped `host_notifications_refresh_required` before later destination deltas resume. The
+panel must replace its project state from the destination's authoritative snapshot; it must not
+merge pre-move and post-move deltas. If live and persisted ownership conflict, or neither resolves,
+the router unbinds the socket and sends no Host notification rather than guessing a partition.
 
 `stream.epoch` and `stream.sequence` provide ephemeral per-connection ordering for each scope.
-They are not durable event cursors. Initial authentication, reconnect, epoch change, sequence gap,
-queue overflow, or persistent socket pressure schedules/coalesces
+They are not durable event cursors. Initial authentication, a session project move, reconnect, epoch
+change, sequence gap, queue overflow, or persistent socket pressure schedules/coalesces
 `host_notifications_refresh_required`. The browser drops discontinuous facts instead of applying
 a plausible partial delta. Panels then read their authoritative REST or Host API snapshot; Bobbit
 does not replay canonical Host notifications and does not expose a global notification journal.

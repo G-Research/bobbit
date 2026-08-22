@@ -482,6 +482,13 @@ session's gateway-issued secret: the process receives `BOBBIT_SESSION_SECRET`, s
 body. A public session ID or bearer token alone cannot invoke another session's interceptor.
 Diagnostic trace reads retain their normal authenticated inspector policy.
 
+The secret authenticates callback **transport identity**; it is not proof that a particular Pi
+lifecycle boundary occurred. Provider callbacks originate from their named Pi bridge events. Tool
+callbacks use the stronger unified-hook rule: the current session writer must first emit a matching
+execution event that Bobbit accepts at an event-buffer cursor, and the callback can consume that
+exact `{ generation, toolCallId, toolName, phase }` provenance only once. A valid secret therefore
+cannot fabricate or replay tool lifecycle work. See [Unified Host hooks](host-hooks.md#publication-and-delivery-guarantees).
+
 | Method + path | Caller | Behaviour |
 |---|---|---|
 | `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks, tail }` while `tail` remains as temporary legacy back-compat for old bridges. |
@@ -537,9 +544,10 @@ The generated extension subscribes to three pi events:
 Transport reads `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN` from the environment, falling back to
 `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`, and sends the host-issued
 `BOBBIT_SESSION_SECRET` as `X-Bobbit-Session-Secret`. The secret is injected only into the owning
-local or sandbox process, held in gateway memory, and regenerated when gateway restart respawns the process. A missing gateway URL
-short-circuits to "proceed unchanged"; a missing or mismatched session secret fails exact-session
-authentication.
+local or sandbox process, held in gateway memory, and regenerated when gateway restart respawns
+the process. A missing gateway URL short-circuits to "proceed unchanged"; a missing or mismatched
+session secret fails exact-session transport authentication. It does not replace the separate
+current-writer/cursor provenance required by unified tool hooks.
 
 ### The injection invariant (non-negotiable)
 

@@ -81,8 +81,8 @@ Each publisher calls the shared dispatcher only after the named authority bounda
 | `turnStarted` | Session manager accepted the canonical `agent_start`. | `turnIndex` |
 | `turnCompleted` | Session manager accepted the final non-retrying `agent_end`. | completed turn index |
 | `messageAppended` | Session event owner accepted `message_end` into the event buffer. | event-buffer cursor |
-| `toolCallStarted` | Session manager admitted tool execution. | tool-call start cursor |
-| `toolCallCompleted` | The post-policy result `message_end` was accepted. | result-message cursor |
+| `toolCallStarted` | A current-writer Pi `tool_execution_start` entered the session event buffer, the exact callback claimed its cursor, and permission plus `beforeToolCall` settled as admitted. | accepted start-event cursor |
+| `toolCallCompleted` | The admitted call reached `tool_execution_end` only after post-result policy, then its matching post-policy tool-result `message_end` entered the event buffer. | accepted result-message cursor |
 | `sessionCreated` | Strict session persistence succeeded. | persisted session `updatedAt` |
 | `sessionArchived` | Asynchronous session-store archive committed. | persisted `archivedAt` |
 | `sessionForked` | Destination history/session materialisation completed. | destination session `updatedAt` |
@@ -195,6 +195,8 @@ export default {
 
 Notification handlers receive the same frozen canonical envelope as browsers and staff triggers. They run asynchronously after publication, in deterministic order, with bounded deadlines and live activation/grant checks. Return values are ignored. Throws, timeouts, revocation, and diagnostics are isolated from both other handlers and the already-committed source operation.
 
+A session-scoped handler's `ctx.host.session` and `ctx.host.agents` capabilities are also fenced to the source session's captured project. Every operation revalidates current host-owned session authority before work and after asynchronous settlement. If that session moves projects while the handler is running, transcript and agent results are withheld; a child minted during the race is best-effort dismissed before the call fails. The observational handler itself may continue until its deadline, but its old-project capabilities cannot cross the move.
+
 ### Interceptor catalogue
 
 | Name | Result | Deadline: default / max / whole dispatch | Authority and failure behavior |
@@ -249,7 +251,9 @@ offRefresh();
 
 `host.session.notifications` is bound to the panel's current session. `host.project.notifications` is bound to that session's server-resolved project and accepts no client-supplied project ID. The server routes session facts only to the exact authenticated session socket and project facts only to authenticated app sockets in the same project. Sandbox principals and unbound/viewer sockets do not receive this Host API stream.
 
-Delivery is ordered and live per connection, not durable replay. `onRefreshRequired` schedules one initial snapshot read when registered and coalesces reconnect, epoch change, sequence gap, queue overflow, and burst invalidations. A discontinuous event is not applied as a delta. Always re-read the authoritative snapshot on mount or refresh-required; do not reconstruct state from notification history.
+The server revalidates the socket's authentication-time binding against current live and persisted session authority before every delta and refresh. When a session moves projects, the frame that discovers the move is suppressed, the socket is rebound, and old- and new-project deltas remain fenced behind one project `onRefreshRequired` callback. The panel must then read the destination project's authoritative snapshot. Missing or conflicting live/persisted authority unbinds the socket and fails closed rather than selecting a project.
+
+Delivery is ordered and live per connection, not durable replay. `onRefreshRequired` schedules one initial snapshot read when registered and coalesces project moves, reconnect, epoch change, sequence gap, queue overflow, and burst invalidations. A discontinuous event is not applied as a delta. Always re-read the authoritative snapshot on mount or refresh-required; do not reconstruct state from notification history.
 
 The legacy `host.session.subscribe("status" | "message" | "tool_result", handler)` remains available and unchanged. It is a separate adapter over rich session events, not a source for canonical notifications.
 
@@ -281,13 +285,16 @@ Pausing/retiring staff or disabling/deleting a trigger cancels pending work. Bou
 
 Notification input is not interpolated into prompt text. The inbox stores it as host-owned metadata and emits a generic wake prompt. Browser/operator inbox lists and WebSocket events return a redacted entry with `notificationInput`, root correlation, and causation depth removed. Only the exact live owning staff session may read or transition a notification entry with full metadata, authenticated by its gateway-issued `BOBBIT_SESSION_SECRET` sent as `X-Bobbit-Session-Secret`. The server resolves that secret to the live staff session and verifies staff and project ownership; bearer/cookie auth, public session IDs, request bodies, and client project claims are insufficient. The secret is per-session, in-memory, injected only into the owning process, and regenerated when a gateway restart respawns that process. Same-project sandbox sessions retain the existing shared-container, same-UID `/proc` residual risk; stronger isolation requires per-session containers.
 
+For Pi tool-hook callbacks, that exact-session secret authenticates only the callback transport. Lifecycle authority comes separately from a current-writer Pi execution event accepted at a host-owned cursor. Each matching `{ session generation, toolCallId, toolName, phase }` claim is single-use. A missing or forged secret is rejected before body processing; forged, duplicate, mismatched, terminal, or stale-generation callbacks cannot invoke an interceptor, publish a tool fact, or admit downstream staff delivery.
+
 See [Staff triggers](staff-triggers.md) for legacy trigger compatibility and [Staff inbox](staff-inbox.md) for the redacted/full read surfaces.
 
 ## Publication and delivery guarantees
 
 - Publication occurs after each catalogue definition's authoritative persistence/publication boundary. Consumer failure is observational and cannot roll back the mutation.
 - `turnCompleted` is emitted only at the final non-retrying terminal boundary. Retry attempts, duplicate/late terminal frames, and restore replay cannot emit another completion. Errored and aborted turns remain explicit outcomes.
-- Tool completion order is: handler result → protected `afterToolResult` policy → approved or synthetic result persisted/published → `toolCallCompleted`. Only safe post-policy metadata enters the event.
+- Tool start order is: current-writer Pi `tool_execution_start` observed → start accepted at an event-buffer cursor → Pi permission guard → exact one-use callback claim → `beforeToolCall` → admitted settlement → `toolCallStarted` → handler. A blocked or provenance-invalid call publishes no start fact.
+- Tool completion order is: handler result/error → bridge callback attempts the exact admitted-call claim → protected `afterToolResult` policy or its host-owned transport fallback → approved, replaced, preserved original error, or synthetic result returned to Pi → matching current-writer `tool_execution_end` classification → post-policy tool-result `message_end` accepted/published → `messageAppended` → `toolCallCompleted`. Only safe post-policy metadata enters the completion event.
 - `goalCompleted` is a durable completion transition with a stable revision and is distinct from `goalArchived`.
 - `settingsChanged` follows atomic settings commit and carries only the committed revision plus bounded target/key identifiers, never values or secrets.
 - Browser and module delivery are bounded, live, ordered per project, and best-effort. Browser pressure produces refresh-required; module pressure produces bounded diagnostics.
