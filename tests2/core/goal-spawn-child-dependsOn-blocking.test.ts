@@ -98,8 +98,8 @@ async function makeHarness(): Promise<Harness> {
 		worktreePath: tmpRoot,
 	} as any);
 	const realCreateGoal = goalManager.createGoalFromPreflight.bind(goalManager);
-	(goalManager as any).createGoalFromPreflight = (title: string, cwd: string, opts: any) => {
-		const goal = realCreateGoal(title, cwd, opts);
+	(goalManager as any).createGoalFromPreflight = async (title: string, cwd: string, opts: any) => {
+		const goal = await realCreateGoal(title, cwd, opts);
 		if (opts?.parentGoalId) {
 			goalStore.update(goal.id, {
 				branch: `goal/${goal.id}`,

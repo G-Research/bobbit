@@ -92,7 +92,7 @@ describe("canonical goal commit boundary", () => {
 			const canonicalCwd = path.join(target, "future");
 			const preflight = await manager.preflightGoalCreation(aliasedCwd);
 
-			const goal = manager.createGoalFromPreflight("Canonical alias", canonicalCwd, {
+			const goal = await manager.createGoalFromPreflight("Canonical alias", canonicalCwd, {
 				preflight,
 				worktree: false,
 			});
@@ -117,10 +117,10 @@ describe("canonical goal commit boundary", () => {
 			const manager = new GoalManager(store);
 			const preflight = await manager.preflightGoalCreation(first);
 
-			expect(() => manager.createGoalFromPreflight("Stale cwd", second, {
+			await expect(manager.createGoalFromPreflight("Stale cwd", second, {
 				preflight,
 				worktree: false,
-			})).toThrow(GoalPreflightStaleError);
+			})).rejects.toThrow(GoalPreflightStaleError);
 			expect(store.getAll()).toEqual([]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -166,7 +166,7 @@ describe("canonical goal commit boundary", () => {
 				expect(preflight.repoPath).toBe(projectRoot);
 				expect(fakeGit.probeCwds.at(-1)).toBe(path.join(projectRoot, components[0].repo));
 
-				const goal = manager.createGoalFromPreflight("Retained tuple", rootA, {
+				const goal = await manager.createGoalFromPreflight("Retained tuple", rootA, {
 					projectId: "project",
 					preflight,
 					worktree: false,

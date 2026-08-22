@@ -11,6 +11,7 @@ import { bobbitConfigDir, normalProjectBobbitDir } from "../bobbit-dir.js";
 import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
 import { bootLog, SLOW_PHASE_MS } from "../boot-profile.js";
+import type { HostNotificationDispatcher } from "../extension-host/host-notification-dispatcher.js";
 
 /**
  * Minimal session-resolver surface needed by the search orphan filter.
@@ -44,6 +45,7 @@ export class ProjectContextManager {
    * ProjectContext gets the same dispatcher reference.
    */
   private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
+  private hostNotificationDispatcher: HostNotificationDispatcher | null = null;
   private goalArchiveReconciler: ((goalId: string) => Promise<unknown>) | undefined;
   /**
    * Optional post-create configurator applied to every context (existing and
@@ -145,6 +147,9 @@ export class ProjectContextManager {
     if (this.goalTriggerDispatcher) {
       ctx.setGoalTriggerDispatcher(this.goalTriggerDispatcher);
     }
+    if (this.hostNotificationDispatcher) {
+      ctx.setHostNotificationDispatcher(this.hostNotificationDispatcher);
+    }
     if (this.goalArchiveReconciler) {
       ctx.setGoalArchiveReconciler(this.goalArchiveReconciler);
     }
@@ -166,6 +171,14 @@ export class ProjectContextManager {
     this.goalTriggerDispatcher = dispatcher;
     for (const ctx of this.contexts.values()) {
       ctx.setGoalTriggerDispatcher(dispatcher);
+    }
+  }
+
+  /** Late-bind canonical notification fanout to existing and future contexts. */
+  setHostNotificationDispatcher(dispatcher: HostNotificationDispatcher | null): void {
+    this.hostNotificationDispatcher = dispatcher;
+    for (const ctx of this.contexts.values()) {
+      ctx.setHostNotificationDispatcher(dispatcher);
     }
   }
 

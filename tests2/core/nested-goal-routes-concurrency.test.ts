@@ -97,8 +97,8 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 	// so integrate-child reaches the stubbed merge path instead of the no-worktree
 	// guard; these tests exercise scheduling, not git availability.
 	const realCreate = goalManager.createGoalFromPreflight.bind(goalManager);
-	(goalManager as any).createGoalFromPreflight = (title: string, cwd: string, opts: any) => {
-		const g = realCreate(title, cwd, opts);
+	(goalManager as any).createGoalFromPreflight = async (title: string, cwd: string, opts: any) => {
+		const g = await realCreate(title, cwd, opts);
 		if (opts?.parentGoalId) {
 			goalStore.update(g.id, {
 				branch: `goal/${g.id}`,

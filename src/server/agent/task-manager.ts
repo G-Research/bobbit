@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { TaskStore, type TaskState, type PersistedTask } from "./task-store.js";
+import { TaskStore, type TaskCommittedFact, type TaskState, type PersistedTask } from "./task-store.js";
+import type { HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
 
 /** Valid state transitions. Terminal states (complete, skipped) have no outgoing transitions. */
 const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
@@ -9,6 +10,51 @@ const VALID_TRANSITIONS: Record<TaskState, TaskState[]> = {
 	complete: [],
 	skipped: [],
 };
+
+const TASK_UPDATED_FIELDS = [
+	"title", "spec", "assignedSessionId", "dependsOn", "workflowGateId", "inputGateIds",
+	"headSha", "baseSha", "branch", "resultSummary",
+] as const;
+
+type TaskUpdatedField = (typeof TASK_UPDATED_FIELDS)[number];
+type CatalogueTaskUpdatedPublicField = HostNotificationPayload<"taskUpdated">["changedFields"][number];
+
+/** Internal checkout coordinates are persisted on the task but are not public
+ * notification metadata. Every exposed identifier comes from the catalogue. */
+const TASK_UPDATED_PUBLIC_FIELD_MAP = {
+	title: "title",
+	spec: "spec",
+	assignedSessionId: "assignedSessionId",
+	dependsOn: "dependsOn",
+	workflowGateId: "workflowGateId",
+	inputGateIds: "inputGateIds",
+	headSha: "headSha",
+	resultSummary: "resultSummary",
+} as const satisfies Partial<Record<TaskUpdatedField, CatalogueTaskUpdatedPublicField>>;
+
+type TaskUpdatedPublicField = (typeof TASK_UPDATED_PUBLIC_FIELD_MAP)[keyof typeof TASK_UPDATED_PUBLIC_FIELD_MAP];
+
+function isTaskUpdatedPublicField(field: TaskUpdatedField): field is keyof typeof TASK_UPDATED_PUBLIC_FIELD_MAP {
+	return Object.prototype.hasOwnProperty.call(TASK_UPDATED_PUBLIC_FIELD_MAP, field);
+}
+
+function projectTaskUpdatedFields(changedFields: readonly TaskUpdatedField[]): TaskUpdatedPublicField[] {
+	const projected = changedFields.flatMap((field): TaskUpdatedPublicField[] => {
+		return isTaskUpdatedPublicField(field) ? [TASK_UPDATED_PUBLIC_FIELD_MAP[field]] : [];
+	});
+	return [...new Set(projected)].sort();
+}
+
+function valuesEqual(left: unknown, right: unknown): boolean {
+	if (Array.isArray(left) && Array.isArray(right)) {
+		return left.length === right.length && left.every((value, index) => value === right[index]);
+	}
+	return left === right;
+}
+
+function monotonicNow(previous: number): number {
+	return Math.max(Date.now(), previous + 1);
+}
 
 export class TaskManager {
 	private store: TaskStore;
@@ -70,7 +116,15 @@ export class TaskManager {
 			inputGateIds: opts?.inputGateIds?.length ? opts.inputGateIds : undefined,
 		};
 
-		this.store.put(task);
+		this.commitTask(task, [{
+			kind: "taskCreated",
+			taskId: task.id,
+			goalId: task.goalId,
+			type: task.type,
+			state: task.state,
+			parentTaskId: task.parentTaskId,
+			revision: task.updatedAt,
+		}]);
 		return task;
 	}
 
@@ -138,19 +192,48 @@ export class TaskManager {
 			this.detectCycle(id, updates.dependsOn);
 		}
 
-		const now = Date.now();
 		const cleaned: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(updates)) {
 			if (v !== undefined) cleaned[k] = v;
 		}
+		const changedFields = TASK_UPDATED_FIELDS.filter(field =>
+			Object.prototype.hasOwnProperty.call(cleaned, field)
+			&& !valuesEqual(task[field], cleaned[field]),
+		);
+		const previousState = task.state;
+		const stateChanged = updates.state !== undefined && updates.state !== previousState;
+		if (!stateChanged && changedFields.length === 0) return true;
 
+		const publicChangedFields = projectTaskUpdatedFields(changedFields);
+		const now = monotonicNow(task.updatedAt);
 		// Handle completedAt for terminal states
-		if (updates.state === "complete" || updates.state === "skipped") {
+		if (stateChanged && (updates.state === "complete" || updates.state === "skipped")) {
 			cleaned.completedAt = now;
 		}
 
 		Object.assign(task, cleaned, { updatedAt: now });
-		this.store.put(task);
+		const facts: TaskCommittedFact[] = [];
+		if (changedFields.length > 0) {
+			facts.push({
+				kind: "taskUpdated",
+				taskId: task.id,
+				goalId: task.goalId,
+				state: task.state,
+				changedFields: publicChangedFields,
+				revision: task.updatedAt,
+			});
+		}
+		if (stateChanged) {
+			facts.push({
+				kind: "taskStateChanged",
+				taskId: task.id,
+				goalId: task.goalId,
+				previousState,
+				state: task.state,
+				revision: task.updatedAt,
+			});
+		}
+		this.commitTask(task, facts);
 		return true;
 	}
 
@@ -177,24 +260,40 @@ export class TaskManager {
 		const task = this.store.get(taskId);
 		if (!task) return false;
 
-		const now = Date.now();
-		task.assignedSessionId = sessionId;
-		task.updatedAt = now;
-
-		// Auto-transition to in-progress if currently todo
-		if (task.state === "todo") {
-			task.state = "in-progress";
+		const assignmentChanged = task.assignedSessionId !== sessionId;
+		const previousState = task.state;
+		const stateChanged = previousState === "todo";
+		if (assignmentChanged || stateChanged) {
+			task.assignedSessionId = sessionId;
+			task.updatedAt = monotonicNow(task.updatedAt);
+			if (stateChanged) task.state = "in-progress";
+			const facts: TaskCommittedFact[] = [];
+			if (assignmentChanged) {
+				facts.push({
+					kind: "taskUpdated", taskId: task.id, goalId: task.goalId,
+					state: task.state, changedFields: ["assignedSessionId"], revision: task.updatedAt,
+				});
+			}
+			if (stateChanged) {
+				facts.push({
+					kind: "taskStateChanged", taskId: task.id, goalId: task.goalId,
+					previousState, state: task.state, revision: task.updatedAt,
+				});
+			}
+			this.commitTask(task, facts);
 		}
-
-		this.store.put(task);
 
 		// Auto-transition parent to in-progress if a sub-task starts
 		if (task.parentTaskId) {
 			const parent = this.store.get(task.parentTaskId);
 			if (parent && parent.state === "todo") {
+				const parentPreviousState = parent.state;
 				parent.state = "in-progress";
-				parent.updatedAt = now;
-				this.store.put(parent);
+				parent.updatedAt = monotonicNow(parent.updatedAt);
+				this.commitTask(parent, [{
+					kind: "taskStateChanged", taskId: parent.id, goalId: parent.goalId,
+					previousState: parentPreviousState, state: parent.state, revision: parent.updatedAt,
+				}]);
 			}
 		}
 
@@ -223,11 +322,15 @@ export class TaskManager {
 			}
 		}
 
-		const now = Date.now();
+		const previousState = task.state;
+		const now = monotonicNow(task.updatedAt);
 		task.state = "complete";
 		task.completedAt = now;
 		task.updatedAt = now;
-		this.store.put(task);
+		this.commitTask(task, [{
+			kind: "taskStateChanged", taskId: task.id, goalId: task.goalId,
+			previousState, state: task.state, revision: task.updatedAt,
+		}]);
 		return true;
 	}
 
@@ -252,7 +355,8 @@ export class TaskManager {
 			return this.completeTask(taskId);
 		}
 
-		const now = Date.now();
+		const previousState = task.state;
+		const now = monotonicNow(task.updatedAt);
 		task.state = newState;
 		task.updatedAt = now;
 
@@ -260,7 +364,10 @@ export class TaskManager {
 			task.completedAt = now;
 		}
 
-		this.store.put(task);
+		this.commitTask(task, [{
+			kind: "taskStateChanged", taskId: task.id, goalId: task.goalId,
+			previousState, state: task.state, revision: task.updatedAt,
+		}]);
 		return true;
 	}
 
@@ -271,6 +378,15 @@ export class TaskManager {
 	}
 
 	// --- Private helpers ---
+
+	private commitTask(task: PersistedTask, facts: readonly TaskCommittedFact[]): void {
+		void this.store.putCommitted(task, facts).catch(error => {
+			// Existing TaskManager methods are synchronous. The strict store barrier
+			// remains observable through TaskStore.flush/close while avoiding an
+			// unhandled rejection on legacy callers.
+			console.error(`[task-manager] Failed to publish task ${task.id}:`, error);
+		});
+	}
 
 	private isValidTransition(from: TaskState, to: TaskState): boolean {
 		return VALID_TRANSITIONS[from].includes(to);

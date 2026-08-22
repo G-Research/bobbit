@@ -777,7 +777,7 @@ export async function tryHandleNestedGoalRoute(
 				return true;
 			}
 			const candidate = validation.candidate;
-			const child = goalManager.createGoalFromPreflight(candidate.title, candidate.cwd, {
+			const child = await goalManager.createGoalFromPreflight(candidate.title, candidate.cwd, {
 				spec: candidate.spec,
 				workflowId: candidate.workflowId,
 				resolvedWorkflow: candidate.workflow,

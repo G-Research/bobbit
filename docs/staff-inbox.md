@@ -39,7 +39,8 @@ The inbox sits between trigger fan-in and session fan-out:
                   ┌──────────────────────┐
    cron / git ───►│                      │
    manual API ───►│   InboxManager       │── persist ──► <projectStateDir>/inbox/<staffId>.json
-   manual UI ────►│   .enqueue()         │── broadcast ► WS  inbox.entry.added
+   manual UI ────►│   enqueue*()          │── redacted WS ► exact owning staff session
+   host facts ───►│                      │◄─ durable notification subscriber outbox
                   └──────────┬───────────┘
                              │ poke(staffId)
                              ▼
@@ -68,6 +69,7 @@ Component map (all in `src/server/agent/`):
 | `inbox-nudger.ts` | 15 s tick + microtask poke. Owns the only path that wakes a staff. |
 | `staff-trigger-engine.ts` | Polled `schedule` / `git` triggers — `fireTrigger()` calls `inboxManager.enqueue()`. |
 | `goal-trigger-dispatcher.ts` | Push-based `goal_created` / `goal_archived` triggers fired synchronously from `GoalStore` mutations. See [staff-triggers.md](staff-triggers.md). |
+| `notification-staff-dispatcher.ts` | Matches canonical Host facts, persists project-partitioned delivery intents, and idempotently calls `InboxManager.enqueueWithId()`. |
 
 UI surface (all in `src/app/` and `src/ui/inbox/`):
 
@@ -80,16 +82,12 @@ UI surface (all in `src/app/` and `src/ui/inbox/`):
 
 ## Lifecycle
 
-1. **Enqueue.** A trigger fires, a REST caller hits `POST /api/staff/:id/inbox`,
-   or the UI's "+ Add to inbox" submits the dialog.
-   `InboxManager.enqueue(staffId, { title, prompt, context, source })` runs
-   synchronously:
-   - Stamp `id = randomUUID()`, `createdAt = Date.now()`, `state = "pending"`.
-   - `InboxStore.put(entry)` — synchronous JSON write to
-     `<projectStateDir>/inbox/<staffId>.json`.
-   - Broadcast `{ type: "inbox.entry.added", staffId, entry }` to all WS clients.
-   - Call `inboxNudger.poke(staffId)`, which schedules a one-shot
-     `tickOne(staffId)` on the next microtask.
+1. **Enqueue.** A legacy trigger fires, a REST caller hits `POST /api/staff/:id/inbox`,
+   or the UI submits the dialog. `InboxManager.enqueue()` assigns a random ID and writes the
+   entry synchronously. A matching notification trigger instead enters the durable subscriber
+   outbox first, then calls `enqueueWithId()` with a deterministic delivery ID and the exact
+   canonical event as host-owned metadata. Both paths publish a bounded, redacted live projection
+   only to the exact owning staff session and poke the nudger.
 2. **Nudge.** `InboxNudger.tickOne` runs (either from `poke` or from the 15 s
    `setInterval`). It bails when the staff isn't active, the session isn't
    `idle`, `nudgePending` is already set, or the pending list is empty. If all
@@ -131,7 +129,8 @@ where an entry came from:
 
 | Source | How it gets there | UI badge |
 |---|---|---|
-| `trigger` | Any staff trigger fires — `schedule` / `git` via the polled engine, or `goal_created` / `goal_archived` via the push dispatcher. `source.triggerId` is set in either case. See [staff-triggers.md](staff-triggers.md). | "trigger" + trigger id. |
+| `trigger` | A legacy `schedule`, `git`, `goal_created`, or `goal_archived` trigger fires. `source.triggerId` is set. See [staff-triggers.md](staff-triggers.md). | "trigger" + trigger id. |
+| `notification` | A matching canonical Host notification is durably accepted. Full event input remains protected metadata. | "notification" + trigger id. |
 | `manual_api` | External integration `POST`s `/api/staff/:id/inbox`. The server normalises `source.type` to `manual_api` when the caller doesn't supply `manual_ui`. | "manual_api" + optional `actorId`. |
 | `manual_ui` | User clicks "+ Add to inbox" in the inbox panel or hits "Wake Now" on the staff edit page (both POST `/api/staff/:id/inbox` with `source.type = "manual_ui"`). | "manual_ui" + optional `actorId`. |
 
@@ -166,9 +165,9 @@ Three tools are registered only when the agent process has both
 `BOBBIT_SESSION_ID` and `BOBBIT_STAFF_ID` set in its environment — i.e. only
 for staff sessions. The extension in `defaults/tools/inbox/extension.ts` early-
 returns otherwise, so the tools never appear in the tool catalogue on
-non-staff sessions. This mirrors `defaults/tools/tasks/` and is the only
-gating layer the agent sees; REST handlers additionally verify
-`session.staffId === :id` as defence-in-depth.
+non-staff sessions. REST handlers additionally verify legacy entries against
+staff ownership. Notification entries use the stronger exact-owner rule described
+under [Notification entry security](#notification-entry-security).
 
 | Tool | Params | Effect |
 |---|---|---|
@@ -191,21 +190,40 @@ rest of the gateway.
 
 | Method | Path | Body | 2xx | Notable errors |
 |---|---|---|---|---|
-| `GET` | `/api/staff/:id/inbox?state=&limit=` | — | `200 { entries: InboxEntry[] }` | `404` if staff unknown. |
-| `POST` | `/api/staff/:id/inbox` | `{ title, prompt, context?, source?: { type?: "manual_api" \| "manual_ui" \| "trigger", actorId? } }` | `201 { entry: InboxEntry }` | `400` missing `title`/`prompt`; `404` staff unknown. |
-| `POST` | `/api/staff/:id/inbox/:entryId/complete` | `{ sessionId, summary? }` | `200 { entry }` | `403` if `sessionId.staffId !== :id`; `409` if entry not pending; `404` staff/entry. |
-| `POST` | `/api/staff/:id/inbox/:entryId/dismiss` | `{ sessionId, outcome: "failed" \| "cancelled", reason }` | `200 { entry }` | `400` empty `reason` or bad outcome; `403`; `409`; `404`. |
-| `DELETE` | `/api/staff/:id/inbox/:entryId` | — | `200 { ok: true }` | `404`. |
+| `GET` | `/api/staff/:id/inbox?state=&limit=` | — | `200 { entries }`; full notification metadata only for the exact owner, otherwise redacted | `404` if staff unknown. |
+| `POST` | `/api/staff/:id/inbox` | `{ title, prompt, context?, source?: { type?: "manual_api" \| "manual_ui" \| "trigger", actorId? } }` | `201 { entry }` | `400` missing `title`/`prompt`; `404` staff unknown. |
+| `POST` | `/api/staff/:id/inbox/:entryId/complete` | legacy: `{ sessionId, summary? }`; notification: owner-secret header plus `{ summary? }` | `200 { entry }` | `403` on ownership failure; `409` if not pending; `404`. |
+| `POST` | `/api/staff/:id/inbox/:entryId/dismiss` | legacy: `{ sessionId, outcome, reason }`; notification: owner-secret header plus `{ outcome, reason }` | `200 { entry }` | `400` invalid reason/outcome; `403`; `409`; `404`. |
+| `DELETE` | `/api/staff/:id/inbox/:entryId` | notification deletion requires owner-secret header | `200 { ok: true }` | `403` on notification ownership failure; `404`. |
 
 `source.type` in `POST /api/staff/:id/inbox` defaults to `manual_api` when the
-caller omits it. The `sessionId` body field on `complete` and `dismiss` is the
-defence-in-depth check — only sessions whose `staffId` matches `:id` may
-transition entries.
+caller omits it. For legacy entries, the `sessionId` body field on `complete` and `dismiss` is
+the defence-in-depth check: only sessions whose `staffId` matches `:id` may transition them.
+Notification entries ignore that weaker claim and require exact-owner secret authentication.
 
 The legacy `POST /api/staff/:id/wake` route has been **deleted**. The UI's
 "Wake Now" button is rewired to `POST /api/staff/:id/inbox` with
 `source.type = "manual_ui"`. External callers that previously hit `/wake`
 must migrate.
+
+## Notification entry security
+
+Notification entries keep the exact bounded canonical event in `notificationInput`, alongside
+host-owned root correlation and causation depth. This metadata is never copied into the prompt.
+The stored prompt is the fixed sentence `A host notification is available in this inbox entry's
+notification metadata.`
+
+The browser/operator REST projection and every `inbox.entry.*` WebSocket frame omit
+`notificationInput`. The live projection also copies and bounds ordinary display fields instead
+of returning a mutable store object. Full metadata is returned only when the request presents the
+owning process's gateway-issued `BOBBIT_SESSION_SECRET` as `X-Bobbit-Session-Secret` and the
+server verifies that it resolves to the staff's exact current live, non-dormant session in the
+same project. Public session IDs, body `sessionId`, bearer/cookie auth, and client project claims
+do not establish this authority.
+
+The gateway holds each secret in memory and injects it only into its owning local or sandbox
+process. It is never persisted and rotates when the process is respawned after gateway restart.
+The same exact-owner check protects notification completion, dismissal, and deletion.
 
 ### Examples
 
@@ -236,8 +254,8 @@ panel and in `inbox_list` responses.
 
 ## WebSocket events
 
-Broadcast to all connected clients via `broadcastToAll`. Defined in
-`src/server/ws/protocol.ts`:
+Published only to the exact live owning staff session. Notification metadata and loop controls are
+redacted before publication. Frames are defined in `src/server/ws/protocol.ts`:
 
 | Type | Payload | When |
 |---|---|---|
@@ -311,9 +329,11 @@ they affect.
 
 ## Idempotency contract
 
-The server never auto-cancels, auto-completes, or coalesces entries. Two
-triggers that fire 100 ms apart create two distinct entries. The agent is
-responsible for deduping:
+Legacy/manual inbox entries are neither coalesced nor automatically completed: two fires create
+two distinct IDs and the agent handles semantic deduplication. Notification delivery is different:
+its deterministic staff/trigger/notification identity makes inbox acceptance idempotent across
+retry and restart. That prevents duplicate entries for one canonical fact but does not claim
+exactly-once staff execution. For legacy/manual work:
 
 - **Before doing work**, the agent should call `inbox_list(state="completed")`
   (or check its memory) to detect whether the same work has already been
@@ -350,7 +370,11 @@ One JSON file per staff at `<projectStateDir>/inbox/<staffId>.json`:
 ```
 
 `projectStateDir` is `<project-root>/.bobbit/state/` (single-source from
-`ProjectContext`). Entries are stored FIFO by insertion order.
+`ProjectContext`). Entries are stored FIFO by insertion order. A notification entry additionally stores
+`source.type: "notification"` and its exact canonical `notificationInput`; operator/browser reads
+remain redacted as described above. Matching notification delivery intents live separately in the
+project's `notification-deliveries.json` outbox so pending/leased work can be reconciled after a
+restart.
 
 The file is safe to hand-inspect; it is rewritten on every transition (full-
 file synchronous write, last-writer-wins per id). Hand-editing while the
@@ -405,9 +429,8 @@ operation today.
 
 - [docs/staff-agents.md](staff-agents.md) — staff agent lifecycle, sandbox
   mode, edit page conventions.
-- [docs/staff-triggers.md](staff-triggers.md) — trigger type reference,
-  including the push-based `goal_created` / `goal_archived` dispatcher
-  and its required-prompt rule.
+- [docs/staff-triggers.md](staff-triggers.md) — legacy and canonical notification trigger semantics.
+- [Unified Extension Host hooks](host-hooks.md) — shared envelope, catalogue, and delivery guarantees.
 - [docs/design/staff-inbox.md](design/staff-inbox.md) — original design
   document (kept for reference).
 - [docs/rest-api.md](rest-api.md) — REST surface index.

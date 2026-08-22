@@ -37,6 +37,10 @@ import { openPackPanel, setPanelHostFactory, setLauncherHostFactory } from "./pa
 import { consumeGesture } from "./gesture-context.js";
 import { postSessionMessageOverWs } from "./session-write-bridge.js";
 import { subscribeHostSessionEvent } from "./session-event-bus.js";
+import {
+	subscribeHostNotification,
+	subscribeHostNotificationRefresh,
+} from "./host-notification-bus.js";
 import { navigateToTarget } from "./pack-entrypoints.js";
 import { createHostChannelsApi, type HostChannelsApi } from "./channel-bridge.js";
 import { mintPackSurfaceTokenOverWs } from "./surface-token-bridge.js";
@@ -246,10 +250,12 @@ export function getHostApi(
 		store: true,
 		...(surface?.hasLocalData === true ? { localData: true } : {}),
 		channels: true,
+		sessionNotifications: true,
+		projectNotifications: true,
 	};
 	const api = {
 		version: HOST_API_VERSION,
-		contractVersion: Math.max(HOST_CONTRACT_VERSION, 4),
+		contractVersion: HOST_CONTRACT_VERSION,
 		capabilities: {
 			...flags,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -380,7 +386,21 @@ export function getHostApi(
 				event: E,
 				cb: (payload: HostSessionEventMap[E]) => void,
 			): (() => void) => subscribeHostSessionEvent(sessionId, event, cb),
+			// Canonical facts use the separate privacy-bounded bus. The closure supplies
+			// the trusted RemoteAgent session binding; extension code supplies no ID.
+			notifications: {
+				subscribe: (name, handler) => subscribeHostNotification(sessionId, "session", name, handler),
+				onRefreshRequired: (handler) => subscribeHostNotificationRefresh(sessionId, "session", handler),
+			},
 		} as HostApi["session"],
+		project: {
+			// Project authority is the project already bound to this session's socket.
+			// There is intentionally no projectId parameter or client-side selector.
+			notifications: {
+				subscribe: (name, handler) => subscribeHostNotification(sessionId, "project", name, handler),
+				onRefreshRequired: (handler) => subscribeHostNotificationRefresh(sessionId, "project", handler),
+			},
+		} as HostApi["project"],
 		ui: {
 			// Slice B4: open (or focus) a pack-contributed side panel via the client
 			// pack-panel registry (lazy Blob-URL import + mount). PACK-RELATIVE: BOTH a

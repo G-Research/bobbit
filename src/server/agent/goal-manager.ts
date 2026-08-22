@@ -558,7 +558,7 @@ export class GoalManager {
 	async createGoal(title: string, cwd: string, opts?: GoalCreationOptions): Promise<PersistedGoal> {
 		if (opts?.preflight) return this.createGoalFromPreflight(title, cwd, { ...opts, preflight: opts.preflight });
 		// Adopted and Headquarters goals perform no asynchronous repository probe.
-		// Keep their validated commit synchronous through persistence.
+		// Skip repository probing and proceed directly to the validated strict commit.
 		if (opts?.adoptedWorkspace || isHeadquartersProject(opts?.projectId)) {
 			const preflight = this.immediateGoalCreationPreflight(cwd, {
 				projectId: opts?.projectId,
@@ -574,14 +574,14 @@ export class GoalManager {
 	}
 
 	/**
-	 * Synchronous validated commit boundary. Callers must finish all awaits,
+	 * Validated commit boundary. Callers must finish repository probing,
 	 * canonical validation, and authorization before invoking this method.
 	 */
-	createGoalFromPreflight(
+	async createGoalFromPreflight(
 		title: string,
 		cwd: string,
 		opts: GoalCreationOptions & { preflight: GoalCreationPreflight },
-	): PersistedGoal {
+	): Promise<PersistedGoal> {
 		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, preserveResolvedWorkflowSnapshot, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, preflight, team = true } = opts;
 		const headquartersGoal = isHeadquartersProject(projectId);
 		if (adoptedWorkspace) {
@@ -638,7 +638,10 @@ export class GoalManager {
 			} : {}),
 			branch,
 			repoPath,
-			team,
+			// Explicit false is the legacy standalone shape: omit the durable team
+			// capability before the authoritative create rather than publishing a
+			// transient true value and silently rewriting the stored record later.
+			...(team ? { team: true } : {}),
 			setupStatus,
 			sandboxed: adoptedWorkspace ? adoptedWorkspace.sandboxed : sandboxed,
 		};
@@ -750,7 +753,7 @@ export class GoalManager {
 			goal.workflow = JSON.parse(JSON.stringify(first));
 		}
 
-		this.store.put(goal);
+		await this.store.putStrict(goal);
 		return goal;
 	}
 
@@ -1176,9 +1179,10 @@ export class GoalManager {
 			console.warn(`[goal-manager] archiveGoalAfterMerge: child ${childId} not found`);
 			return;
 		}
-		// 1. State first.
+		// 1. State first, through the same strict completion boundary as direct
+		// team completion so the durable goalCompleted fact cannot be skipped.
 		if (goal.state !== "complete") {
-			this.store.update(childId, { state: "complete" });
+			await this.updateGoal(childId, { state: "complete" });
 		}
 		// 2. Archive. Always replay the boundary for an already-archived child:
 		// a prior crash may have committed goal intent but not session cleanup.
@@ -1401,7 +1405,7 @@ export class GoalManager {
 			}
 		}
 
-		return this.store.update(id, updates);
+		return this.store.updateStrict(id, updates);
 	}
 
 	/** Narrow explicit deletion because GoalStore.update deliberately ignores undefined fields. */

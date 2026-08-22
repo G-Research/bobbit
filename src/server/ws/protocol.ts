@@ -1,9 +1,10 @@
-import type { InboxEntry } from "../agent/inbox-store.js";
+import type { InboxLiveEntry } from "../agent/inbox-manager.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
 import type { GoalState } from "../agent/goal-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+import type { HostHookScope, HostNotification } from "../../shared/extension-host/host-hooks.js";
 
 export interface GateResetReopenOutcome {
 	reopened: boolean;
@@ -299,6 +300,8 @@ export interface RemoteStateSnapshotMessage {
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
 	| { type: "auth_ok"; surfaceTokenKey?: string; capabilities?: SessionStreamCapabilities }
+	| { type: "host_notification"; notification: HostNotification; stream: { epoch: string; sequence: number } }
+	| { type: "host_notifications_refresh_required"; scope: HostHookScope; epoch: string; sequence: number }
 	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }
@@ -375,8 +378,8 @@ export type ServerMessage =
 	| { type: "team_agent_spawned"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_dismissed"; goalId: string; sessionId: string; role: string; name: string }
 	| { type: "team_agent_finished"; goalId: string; sessionId: string; role: string; name: string }
-	| { type: "inbox.entry.added"; staffId: string; entry: InboxEntry }
-	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
+	| { type: "inbox.entry.added"; staffId: string; entry: InboxLiveEntry }
+	| { type: "inbox.entry.updated"; staffId: string; entry: InboxLiveEntry }
 	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
 	| RemoteStateSnapshotMessage
 	| { type: "pr_status_changed"; goalId: string }

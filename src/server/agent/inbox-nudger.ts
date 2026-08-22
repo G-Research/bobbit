@@ -4,7 +4,7 @@ import { realClock } from "../gateway-deps.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import type { SessionManager } from "./session-manager.js";
 import type { StaffManager } from "./staff-manager.js";
-import type { InboxStore } from "./inbox-store.js";
+import type { InboxEntry, InboxStore } from "./inbox-store.js";
 import type { PersistedStaff } from "./staff-store.js";
 
 /**
@@ -162,7 +162,7 @@ export class InboxNudger {
 			if (counters) counters.pendingEntries = pending.length;
 			if (pending.length === 0) { if (counters) counters.skippedNoPending = 1; return; }
 			if (counters) counters.nudgesScheduled = 1;
-			void this.applyPolicyThenNudge(staff, pending.length);
+			void this.applyPolicyThenNudge(staff, pending);
 		} finally {
 			if (diagEnabled) {
 				getCpuDiagnostics().recordTimer("inbox-nudger:tickOne", performance.now() - diagStart, counters);
@@ -170,7 +170,7 @@ export class InboxNudger {
 		}
 	}
 
-	private async applyPolicyThenNudge(staff: PersistedStaff, count: number): Promise<void> {
+	private async applyPolicyThenNudge(staff: PersistedStaff, pending: InboxEntry[]): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? { attempts: 1, compactCalls: 0, updateStaffErrors: 0, nudgesSent: 0, errors: 0 } : undefined;
@@ -180,10 +180,15 @@ export class InboxNudger {
 				if (counters) counters.compactCalls = 1;
 				await this.runCompact(staff.currentSessionId!);
 			}
+			// Never merge unrelated notification roots into one staff turn. If any
+			// notification is pending, reserve this wake for its exact entry only;
+			// later roots are delivered by later idle ticks.
+			const notificationEntry = pending.find((entry) => entry.source.type === "notification");
+			const count = notificationEntry ? 1 : pending.length;
 			const word = count === 1 ? "item" : "items";
-			const msg =
-				`[INBOX] You have ${count} pending ${word}. ` +
-				`Use inbox_list to inspect, then process each with inbox_complete or inbox_dismiss.`;
+			const msg = notificationEntry
+				? `[INBOX] Process only pending inbox entry ${notificationEntry.id}, then use inbox_complete or inbox_dismiss for that entry.`
+				: `[INBOX] You have ${count} pending ${word}. Use inbox_list to inspect, then process each with inbox_complete or inbox_dismiss.`;
 			// `lastWakeAt` is now owned by the nudger — the sole driver of staff
 			// wakes post-inbox (the legacy public method on StaffManager is
 			// removed; see docs/design/staff-inbox.md §9). Persists across
@@ -195,7 +200,21 @@ export class InboxNudger {
 				if (counters) counters.updateStaffErrors = 1;
 				console.warn(`[inbox-nudger] updateStaff(lastWakeAt) failed for ${staff.id} (non-fatal):`, err);
 			}
-			await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true, source: "system" });
+			if (notificationEntry?.notificationInput && notificationEntry.source.triggerId) {
+				const input = notificationEntry.notificationInput;
+				const notification = input.notification;
+				const result = await this.sessionManager.enqueueStaffNotificationPrompt(staff.currentSessionId!, msg, {
+					projectId: notification.projectId,
+					staffId: staff.id,
+					triggerId: notificationEntry.source.triggerId,
+					notificationId: notification.id,
+					rootCorrelationId: input.rootCorrelationId,
+					causationDepth: input.causationDepth,
+				});
+				if (result.status !== "dispatched") this.nudgePending.delete(staff.id);
+			} else {
+				await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true, source: "system" });
+			}
 			if (counters) counters.nudgesSent = 1;
 		} catch (err) {
 			if (counters) counters.errors = 1;

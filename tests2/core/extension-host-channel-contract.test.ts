@@ -22,7 +22,7 @@ const hostApiSource = () => fs.readFileSync(path.join(process.cwd(), "src", "sha
 describe("host.channels — public Host API contract", () => {
 	it("keeps the Host API version stable and bumps only the owned contract version", () => {
 		assert.equal(HOST_API_VERSION, 1, "host.channels is additive; HOST_API_VERSION must remain v1");
-		assert.equal(HOST_CONTRACT_VERSION, 4, "host.channels adds owned frame/channel contracts; HOST_CONTRACT_VERSION must be 4");
+		assert.equal(HOST_CONTRACT_VERSION, 5, "host notifications are additive; HOST_CONTRACT_VERSION must be 5");
 	});
 
 	it("declares a generic text/json channel API with no terminal-specific core method", () => {

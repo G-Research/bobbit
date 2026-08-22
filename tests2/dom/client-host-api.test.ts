@@ -39,6 +39,8 @@ function caps() {
 		session: h.capabilities.session,
 		ui: h.capabilities.ui,
 		store: h.capabilities.store,
+		sessionNotifications: h.capabilities.sessionNotifications,
+		projectNotifications: h.capabilities.projectNotifications,
 		localData: h.capabilities.localData,
 		hasLocalDataMember: Object.prototype.hasOwnProperty.call(h, "localData"),
 		localDataDirectory: h.localData ? typeof h.localData.directory : "missing",
@@ -356,7 +358,7 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 	it("capabilities reports Phase-1 caps true, Phase-2 caps false; no gateway member", () => {
 		const c = caps();
 		expect(c.version).toBe(1);
-		expect(c.contractVersion).toBe(4);
+		expect(c.contractVersion).toBe(5);
 		expect(c.invokeAction).toBe(true);
 		expect(c.requestRender).toBe(true);
 		expect(c.hasInvokeAction).toBe(true);
@@ -364,6 +366,8 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 		expect(c.session).toBe(true);
 		expect(c.ui).toBe(true);
 		expect(c.store).toBe(true);
+		expect(c.sessionNotifications).toBe(true);
+		expect(c.projectNotifications).toBe(true);
 		expect(c.localData).toBeUndefined();
 		expect(c.hasLocalDataMember).toBe(false);
 		expect(c.localDataDirectory).toBe("missing");

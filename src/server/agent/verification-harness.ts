@@ -8724,7 +8724,7 @@ export class VerificationHarness {
 				const childWorkflow = freshParent.branch && candidate.workflow
 					? adaptReadyToMergeForChild(candidate.workflow, { parentBranch: freshParent.branch })
 					: candidate.workflow;
-				const child = goalManager.createGoalFromPreflight(candidate.title, candidate.cwd, {
+				const child = await goalManager.createGoalFromPreflight(candidate.title, candidate.cwd, {
 					spec: candidate.spec,
 					workflowId: candidate.workflowId,
 					resolvedWorkflow: childWorkflow,

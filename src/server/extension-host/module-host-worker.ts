@@ -62,7 +62,7 @@ export interface InvokeRequest {
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
-	exportKind: "actions" | "routes" | "providers";
+	exportKind: "actions" | "routes" | "providers" | "hooks";
 	/** The member (action/route name) to invoke — pre-validated by the dispatcher. */
 	member: string;
 	/** The FULL handler context. Its `host` (a live ServerHostApi) stays in the
@@ -76,6 +76,9 @@ export interface InvokeRequest {
 	 *  `chdir`, so the bootstrap overrides `process.cwd` to this). Relative spawns +
 	 *  bare-relative fs paths resolve under it. Absent ⇒ the worker's real cwd. */
 	workingDir?: string;
+	/** Parent-owned cancellation. The signal is never cloned into pack code; abort
+	 * terminates the worker and fences any later result. */
+	signal?: AbortSignal;
 }
 
 /** Flag NAMES safe to forward to a `worker_threads.Worker` execArgv. Node rejects
@@ -181,8 +184,9 @@ export class ModuleHost {
 	 *     dispatcher passes its own per-call timeout).
 	 * The worker is ALWAYS terminated before this settles (no zombie threads).
 	 */
-	invoke(req: InvokeRequest, timeoutMs?: number): Promise<unknown> {
+	invoke(req: InvokeRequest, timeoutMs?: number, signal: AbortSignal | undefined = req.signal): Promise<unknown> {
 		if (this.disposed) return Promise.reject(new ActionError(500, "module host disposed"));
+		if (signal?.aborted) return Promise.reject(new ActionError(499, "pack server module invocation cancelled"));
 		const limit = timeoutMs ?? this.defaultTimeoutMs;
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
 		const capSrc = (host as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
@@ -206,7 +210,7 @@ export class ModuleHost {
 		// worker tier gets `capabilities.store === true`; `callRoute` is always false
 		// (a server module reaches its own routes directly).
 		const { host: _liveProviderHost, ...providerCtxNoHost } = providerCtx;
-		const serCtx = req.exportKind === "providers"
+		const serCtx = req.exportKind === "providers" || req.exportKind === "hooks"
 			? {
 				...providerCtxNoHost,
 				workingDir: providerCtx.workingDir ?? req.workingDir,
@@ -268,10 +272,13 @@ export class ModuleHost {
 
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let onAbort: () => void = () => undefined;
 			const finish = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
-				clearTimeout(timer);
+				if (timer) clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
 				this.live.delete(worker);
 				// True terminate-on-timeout (and unconditional teardown so a completed
 				// worker never lingers). terminate() is fire-and-forget.
@@ -284,9 +291,15 @@ export class ModuleHost {
 			};
 			// Wall-time termination IS the CPU-exhaustion control (a runaway
 			// while(1) is KILLED here; worker_threads has no per-core throttle).
-			const timer = setTimeout(() => {
+			timer = setTimeout(() => {
 				finish(() => reject(new ActionError(504, "pack server module timed out")));
 			}, limit);
+			onAbort = (): void => {
+				finish(() => reject(new ActionError(499, "pack server module invocation cancelled")));
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
+			if (settled) return;
 
 			worker.on("message", (msg: { kind?: string; ok?: boolean; value?: unknown; status?: number; error?: string; id?: number; path?: unknown; args?: unknown[]; pid?: number }) => {
 				if (msg?.kind === "result") {

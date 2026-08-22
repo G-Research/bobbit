@@ -53,8 +53,8 @@ async function createGoalForAutoStart(gateway: any, opts: Record<string, unknown
 	const originalSetupAndStart = goalManager.setupWorktreeAndStartTeam;
 
 	if (autoStart) {
-		goalManager.createGoalFromPreflight = function (...args: any[]) {
-			const goal = originalCreateGoal.apply(this, args);
+		goalManager.createGoalFromPreflight = async function (...args: any[]) {
+			const goal = await originalCreateGoal.apply(this, args);
 			Object.assign(goal, {
 				repoPath: nonGitCwd(),
 				worktreePath: nonGitCwd(),

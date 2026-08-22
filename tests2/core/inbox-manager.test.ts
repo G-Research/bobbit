@@ -30,31 +30,45 @@ interface MockCtx {
 	inboxStore: InstanceType<typeof InboxStore>;
 }
 
+interface MockStaff {
+	id: string;
+	projectId?: string;
+	currentSessionId?: string;
+}
+
 /** Build a minimal PCM with one project and one or more registered staff ids. */
-function buildHarness(staffIds: string[]) {
+function buildHarness(staffInput: Array<string | MockStaff>) {
 	const memfs = createMemFs();
 	const stateDir = path.resolve("/memfs/inbox-mgr", `h-${dirSeq++}`);
 	memfs.mkdirSync(stateDir);
 	const inboxStore = new InboxStore(stateDir, memfs);
-	const staffSet = new Set(staffIds);
+	const staff = new Map(staffInput.map((value) => {
+		const record = typeof value === "string" ? { id: value } : value;
+		return [record.id, record];
+	}));
 	const ctx: MockCtx = {
 		project: { id: "p1" },
-		staffStore: { get: (id: string) => (staffSet.has(id) ? { id } : undefined) },
+		staffStore: { get: (id: string) => staff.get(id) },
 		inboxStore,
 	};
 	const pcm = {
 		all: () => [ctx][Symbol.iterator](),
 	};
 	const events: any[] = [];
-	const broadcastToAll = (event: any) => { events.push(event); };
+	const deliveries: Array<{ event: any; address: any }> = [];
+	const publishLive = (event: any, address: any) => {
+		events.push(event);
+		deliveries.push({ event, address });
+	};
 	const nudger = { poke: vi.fn((_id: string) => {}) };
+	const staffManager = { getStaff: (id: string) => staff.get(id) };
 
 	// InboxManager's typed signature wants real classes; we cast at the call
 	// site because the methods we exercise touch only the subset we vi.
-	const mgr = new InboxManager(pcm as any, {} as any, broadcastToAll);
+	const mgr = new InboxManager(pcm as any, staffManager as any, publishLive);
 	mgr.setNudger(nudger as any);
 
-	return { mgr, events, nudger, inboxStore };
+	return { mgr, events, deliveries, nudger, inboxStore };
 }
 
 describe("InboxManager.enqueue", () => {
@@ -99,6 +113,78 @@ describe("InboxManager.enqueue", () => {
 		mgr.enqueue("s", { title: "a", prompt: "p", source: { type: "trigger", triggerId: "t" } });
 		assert.equal(inboxStore.listPending("s").length, 2);
 		assert.equal(nudger.poke.mock.calls.length, 2);
+	});
+});
+
+describe("InboxManager.enqueueWithId", () => {
+	it("keeps canonical notification controls durable while publishing a redacted DTO to the exact staff session", () => {
+		const { mgr, deliveries, nudger, inboxStore } = buildHarness([{
+			id: "staff-a",
+			projectId: "p1",
+			currentSessionId: "staff-session-a",
+		}]);
+		const notification = {
+			id: "notification-1",
+			scope: "project",
+			name: "goalUpdated",
+			payloadVersion: 1,
+			occurredAt: 1_700_000_000_000,
+			projectId: "p1",
+			aggregate: { kind: "goal", id: "goal-1", revision: 7 },
+			correlationId: "public-correlation",
+			causationId: "public-causation",
+			payload: { goalId: "goal-1", state: "in-progress", changedFields: ["title"] },
+		} as const;
+
+		const accepted = mgr.enqueueWithId("delivery-1", "staff-a", {
+			title: "Host notification: goalUpdated",
+			triggerId: "trigger-1",
+			notification: notification as any,
+			rootCorrelationId: "host-only-root",
+			causationDepth: 3,
+		});
+
+		assert.deepEqual(accepted.notificationInput, {
+			notification,
+			rootCorrelationId: "host-only-root",
+			causationDepth: 3,
+		});
+		assert.deepEqual(inboxStore.get("staff-a", "delivery-1")?.notificationInput, accepted.notificationInput);
+		assert.equal(deliveries.length, 1);
+		assert.deepEqual(deliveries[0].address, {
+			staffId: "staff-a",
+			staffSessionId: "staff-session-a",
+			projectId: "p1",
+		});
+		assert.deepEqual(deliveries[0].event, {
+			type: "inbox.entry.added",
+			staffId: "staff-a",
+			entry: {
+				id: "delivery-1",
+				staffId: "staff-a",
+				source: { type: "notification", triggerId: "trigger-1" },
+				title: "Host notification: goalUpdated",
+				prompt: "A host notification is available in this inbox entry's notification metadata.",
+				state: "pending",
+				createdAt: accepted.createdAt,
+			},
+		});
+		assert.equal("notificationInput" in deliveries[0].event.entry, false);
+		assert.equal(JSON.stringify(deliveries[0]).includes("host-only-root"), false);
+		assert.equal(JSON.stringify(deliveries[0]).includes("public-causation"), false);
+		assert.equal(nudger.poke.mock.calls.length, 1);
+
+		// Durable acceptance is idempotent and cannot re-publish or re-wake.
+		const duplicate = mgr.enqueueWithId("delivery-1", "staff-a", {
+			title: "Host notification: goalUpdated",
+			triggerId: "trigger-1",
+			notification: notification as any,
+			rootCorrelationId: "host-only-root",
+			causationDepth: 3,
+		});
+		assert.deepEqual(duplicate.notificationInput, accepted.notificationInput);
+		assert.equal(deliveries.length, 1);
+		assert.equal(nudger.poke.mock.calls.length, 1);
 	});
 });
 

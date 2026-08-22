@@ -33,9 +33,10 @@ async function promptSectionsText(sessionId: string): Promise<string> {
 		.join("\n\n---\n\n");
 }
 
-async function refreshPromptSections(sessionId: string): Promise<void> {
+async function refreshPromptSections(sessionId: string, sessionSecret: string): Promise<void> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt: "refresh prompt-section snapshot" }),
 	});
 	expect(resp.status).toBe(200);
@@ -45,7 +46,7 @@ for (const { name, readOnly } of [
 	{ name: "normal delegate", readOnly: false },
 	{ name: "read-only delegate", readOnly: true },
 ]) {
-	test(`${name} keeps durable instructions in prompt sections after before-prompt refresh`, async () => {
+	test(`${name} keeps durable instructions in prompt sections after before-prompt refresh`, async ({ gateway }) => {
 		const parentId = await createSession();
 		const marker = `delegate-prompt-viewer-${readOnly ? "readonly" : "normal"}-${Date.now()}`;
 		const instructions = `Preserve this durable delegate task marker in prompt sections: ${marker}`;
@@ -60,7 +61,8 @@ for (const { name, readOnly } of [
 				"Delegate prompt sections should initially expose the durable instructions before the provider hook refresh",
 			).toContain(marker);
 
-			await refreshPromptSections(delegateId);
+			const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(delegateId);
+			await refreshPromptSections(delegateId, sessionSecret);
 
 			const afterRefresh = await promptSectionsText(delegateId);
 			expect(afterRefresh, PROMPT_REFRESH_ASSERTION).toContain(marker);
