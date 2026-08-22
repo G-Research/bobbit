@@ -1481,7 +1481,7 @@ export class TeamManager {
 			if (!this.isRestoredAdoptedLeadFinalizationCandidate(goalId, entry)) continue;
 			adoptedFinalizationAttempts.add(goalId);
 			try {
-				await this.finalizeAdoptedLead(goalId);
+				await this.finalizeAdoptedLead(goalId, { coldStart: true });
 			} catch (err) {
 				console.error(`[team-manager] Adopted team-lead finalization failed for goal=${goalId}:`, err);
 			}
@@ -2332,7 +2332,7 @@ export class TeamManager {
 	 * an in-place lead promotion. This installs the ordinary lead subscription,
 	 * activates a todo goal, then reliably kicks off the canonical promoted runtime.
 	 */
-	async finalizeAdoptedLead(goalId: string): Promise<TeamState> {
+	async finalizeAdoptedLead(goalId: string, options: { coldStart?: boolean } = {}): Promise<TeamState> {
 		if (!this.restoreCompleted) await this.restorePromise;
 		return this.runAdoptedGoalLifecycleLocked(goalId, async () => {
 			const goal = this.resolveGoal(goalId);
@@ -2368,6 +2368,7 @@ export class TeamManager {
 					source: "system",
 					suppressTitleGen: true,
 					intentId: `promotion-kickoff:${goal.id}`,
+					coldStart: options.coldStart,
 				},
 			);
 			return this.getTeamState(goalId)!;
