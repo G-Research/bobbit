@@ -1658,9 +1658,47 @@ export class AgentInterface extends LitElement {
 		if (!session) throw new Error("No session set on AgentInterface");
 		// Defensive backstop for programmatic callers. The editor performs the
 		// user-visible synchronous fence before message-send; this check must still
-		// precede /compact and every composer/attachment clear path.
+		// precede /clear, /compact, and every composer/attachment clear path.
 		if ((session.state as any)?.condition?.code === "MODEL_SELECTION_REQUIRED") {
 			this._messageEditor?.showBlockedSendError("Choose a replacement model before sending.");
+			return;
+		}
+
+		// /clear is a Bobbit control command, never a prompt. Dispatch it before
+		// provider-key/send hooks and do not append an optimistic user row. The
+		// transport may become async, so only clear the exact submitted composer
+		// snapshot after it accepts the command; edits and newly-added/in-flight
+		// attachments made while dispatch is pending must survive.
+		if (input.trim().toLowerCase() === "/clear") {
+			const clearContext = (session as any).clearContext;
+			const editor = this._messageEditor;
+			const submittedEditorAttachments = editor?.attachments;
+			const clearFailure = "Context wasn't cleared. Your previous context is still active. Try /clear again.";
+			if (typeof clearContext !== "function") {
+				editor?.showBlockedSendError(clearFailure);
+				return;
+			}
+			try {
+				const accepted = await clearContext.call(session);
+				if (accepted !== true) {
+					editor?.showBlockedSendError(clearFailure);
+					return;
+				}
+			} catch (error) {
+				console.error("Failed to clear session context:", error);
+				editor?.showBlockedSendError(clearFailure);
+				return;
+			}
+			if (
+				editor
+				&& editor.value === input
+				&& editor.attachments === submittedEditorAttachments
+				&& !editor.processingFiles
+			) {
+				editor.value = "";
+				editor.attachments = [];
+				this._clearAttachmentDraft();
+			}
 			return;
 		}
 
@@ -2122,6 +2160,7 @@ export class AgentInterface extends LitElement {
 				<message-list
 					.messages=${visibleMessages}
 					.sessionId=${this.session?.sessionId ?? ""}
+					.capabilityMode=${"active"}
 					.canForkSource=${canForkSource}
 					.promptActionsBusy=${this._historyForkPending || appState.creatingSession}
 					.tools=${state.tools}

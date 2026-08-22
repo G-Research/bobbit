@@ -152,6 +152,50 @@ function startFailedSelection(harness: ReturnType<typeof makeHarness>): Promise<
 }
 
 describe("runtime recovery bridge ownership", () => {
+	it("does not commit, rollback, or restart a mutation superseded by clear generation ownership", async () => {
+		let tuple: Tuple = { ...DURABLE_A };
+		let replacement = { active: false, generation: 7 };
+		const bridge = makeBridge("clear-owned", async () => state(tuple));
+		bridge.setThinkingLevel.mockImplementation(async (thinkingLevel: string) => {
+			tuple = { ...tuple, thinkingLevel };
+			// Simulate clear installing its coordinator while the Pi mutation RPC is
+			// settling. The retained bridge identity alone is not canonical ownership.
+			replacement = { active: true, generation: 8 };
+			return { success: true };
+		});
+		const session = makeSession("clear-owned", bridge);
+		const persistSessionModel = vi.fn();
+		const restartAgent = vi.fn();
+		const terminateSession = vi.fn();
+		const storeArchive = vi.fn();
+		const manager: any = {
+			getPersistedSession: () => ({
+				modelProvider: DURABLE_A.provider,
+				modelId: DURABLE_A.id,
+				effectiveThinkingLevel: DURABLE_A.thinkingLevel,
+			}),
+			persistSessionModel,
+			updateModelNameFile: vi.fn(),
+			getSession: () => session,
+			getSessionReplacementAdmission: () => replacement,
+			restartAgent,
+			terminateSession,
+			storeArchive,
+		};
+
+		await assert.rejects(
+			applyRuntimeSessionThinkingSelection(manager, session as any, "medium"),
+			/superseded|replacement/i,
+		);
+
+		assert.equal(persistSessionModel.mock.calls.length, 0, `${MARKER}: superseded tuple was persisted`);
+		assert.equal(restartAgent.mock.calls.length, 0, `${MARKER}: clear-owned bridge was restarted`);
+		assert.equal(terminateSession.mock.calls.length, 0, `${MARKER}: clear-owned bridge was terminated`);
+		assert.equal(storeArchive.mock.calls.length, 0, `${MARKER}: clear-owned session was archived`);
+		assert.equal(bridge.stop.mock.calls.length, 0, `${MARKER}: clear-owned bridge was stopped`);
+		assert.equal(bridge.setModel.mock.calls.length, 0, `${MARKER}: superseded mutation attempted rollback`);
+	});
+
 	it("retains B when it replaces restart bridge R during R read-back", async () => {
 		const rReadStarted = deferred<void>();
 		const rRead = deferred<unknown>();

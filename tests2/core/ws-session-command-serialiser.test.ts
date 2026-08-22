@@ -80,10 +80,14 @@ describe("SessionCommandSerialiser", () => {
 		await firstStarted.promise;
 		await drainMicrotasks();
 		expect(events).toEqual(["first:start"]);
+		expect(serialiser.has("session-a")).toBe(true);
+		expect(serialiser.has("session-b")).toBe(false);
 
 		firstMayFinish.resolve();
 		await expect(Promise.all([first, second, third])).resolves.toEqual([1, 2, 3]);
+		await drainMicrotasks();
 		expect(events).toEqual(["first:start", "first:end", "second", "third"]);
+		expect(serialiser.has("session-a")).toBe(false);
 	});
 
 	it("holds default-resume extension posts and later commands behind delayed mention preprocessing", async () => {

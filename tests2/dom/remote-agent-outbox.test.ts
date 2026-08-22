@@ -54,6 +54,43 @@ afterEach(() => {
 	localStorage.clear();
 });
 
+describe("RemoteAgent context clear transport", () => {
+	it("rejects clear when the socket is missing or closed without creating an outbox or model row", () => {
+		const missingSocket: any = new RemoteAgent();
+		const closedSocket = makeAgent(CLOSED);
+
+		expect(missingSocket.clearContext()).toBe(false);
+		expect(closedSocket.clearContext()).toBe(false);
+		expect(closedSocket.__sentFrames).toEqual([]);
+		expect(closedSocket._pendingOutbox).toEqual([]);
+		expect(closedSocket._state.messages).toEqual([]);
+	});
+
+	it("rejects clear when WebSocket.send throws without creating an outbox or model row", () => {
+		const ra: any = new RemoteAgent();
+		ra.ws = {
+			readyState: OPEN,
+			send: vi.fn(() => { throw new Error("socket closed during send"); }),
+		};
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		expect(ra.clearContext()).toBe(false);
+		expect(ra.ws.send).toHaveBeenCalledOnce();
+		expect(ra._pendingOutbox).toEqual([]);
+		expect(ra._state.messages).toEqual([]);
+	});
+
+	it("accepts clear only after handing one clear frame to an open socket", () => {
+		const ra = makeAgent(OPEN);
+		const beforeMessages = [...ra._state.messages];
+
+		expect(ra.clearContext()).toBe(true);
+		expect(ra.__sentFrames.map((frame: string) => JSON.parse(frame))).toEqual([{ type: "clear" }]);
+		expect(ra._pendingOutbox).toEqual([]);
+		expect(ra._state.messages).toEqual(beforeMessages);
+	});
+});
+
 describe("RemoteAgent live preference sync", () => {
 	it("preferences_changed keeps Headquarters visibility state in sync", async () => {
 		const ra = makeAgent(OPEN);

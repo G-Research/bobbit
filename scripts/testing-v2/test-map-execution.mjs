@@ -20,6 +20,7 @@ export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
 export const ISOLATED_VITEST_FILES = Object.freeze({
 	"tests2/core/bobbit-dir-agent-dir.test.ts": "Reads BOBBIT_DIR and the agent directory through module-level singleton state.",
 	"tests2/core/container-path-translation.test.ts": "Reads HOME and container path state during module initialization.",
+	"tests2/core/context-clear-lifecycle.test.ts": "Initializes author and compaction sidecar module singletons against per-file temporary roots.",
 	"tests2/core/extension-host-action-dispatcher.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global dispatcher state.",
 	"tests2/core/extension-host-channel-registry.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global channel state.",
 	"tests2/core/extension-host-isolation-config-invariant.test.ts": "Extension-host isolation configuration is evaluated from process state at module load.",
@@ -29,6 +30,7 @@ export const ISOLATED_VITEST_FILES = Object.freeze({
 	"tests2/core/extension-host-session-event-bus.test.ts": "Exercises a module-global EventTarget that must not retain sibling listeners.",
 	"tests2/core/goal-metadata-edges.test.ts": "Reads BOBBIT_DIR-backed goal metadata state during module initialization.",
 	"tests2/core/lifecycle-hub.test.ts": "Exercises module-global lifecycle listeners that must not leak across files.",
+	"tests2/integration/context-clear-recovery.test.ts": "Initializes author and compaction sidecar module singletons against per-file temporary roots.",
 	"tests2/integration/maintenance-request-runner-isolation.test.ts": "It intentionally constructs multiple gateways that mutate module-global serverCommandRunner, so it needs a dedicated isolated fork.",
 });
 
@@ -146,7 +148,7 @@ export function loadVitestExecutionMap({
 	for (const [path, owners] of materializedOwnership) {
 		if (owners.length > 1) errors.push(`${path}: duplicate materialized execution ownership (${owners.join(", ")})`);
 	}
-	if (projects.isolated.length > 12) errors.push(`isolated execution has ${projects.isolated.length} files; maximum is 12`);
+	if (projects.isolated.length > 14) errors.push(`isolated execution has ${projects.isolated.length} files; maximum is 14`);
 
 	const physicalVitest = collectVitestFiles(repoRoot);
 	for (const path of physicalVitest) {

@@ -10,29 +10,13 @@ import {
 import "./MessageList.js";
 
 /**
- * Inline expansion above a compaction card showing the orphaned
- * pre-compaction transcript entries.
- *
- * Lifecycle:
- *   1. On first viewport hit (IntersectionObserver), fetches a
- *      `limit=1` count probe to learn `total`. Renders nothing when
- *      total === 0.
- *   2. Renders an affordance `\u25be Show N messages before compaction`.
- *   3. Click expands: fetches first page (limit=50), renders rows dimmed
- *      and pointer-events: none so the user can copy text but not
- *      interact. Paginated load-more if `nextCursor != null`.
- *
- * State is component-local; not persisted across reload (intentional \u2014
- * the collapsed default keeps reload noise low).
- *
- * See docs/design/persist-compaction-history.md \u00a75.3.
+ * Lazy, inline read-only transcript history shown immediately above a
+ * compaction or context-clear boundary. Compaction remains the default contract
+ * for existing callers; clear callers provide an independent boundary kind/id.
+ * Loaded rows stay component-local and can never enter the live message state.
  */
 
-/** Verbose orphan row — the full agent message object plus index/ts decoration.
- *  Server returns this when `verbose=1`; we feed `row.message` into
- *  `<message-list>` which already knows how to render every agent message
- *  shape (user, assistant, toolResult, attachments, tool groups, …). */
-interface VerboseOrphanRow {
+interface VerboseHistoryRow {
 	index: number;
 	role: string;
 	ts: string | null;
@@ -40,103 +24,111 @@ interface VerboseOrphanRow {
 	message?: Record<string, unknown>;
 }
 
-interface OrphanEnvelope {
+interface HistoryEnvelope {
 	total: number;
 	returned: number;
 	nextCursor: number | null;
-	messages: VerboseOrphanRow[];
+	messages: VerboseHistoryRow[];
 }
+
+type HistoryBoundaryKind = "compaction" | "clear";
+type ErrorPhase = "count" | "page" | null;
 
 @customElement("bobbit-pre-compaction-history")
 export class PreCompactionHistory extends LitElement {
+	/** Backward-compatible compaction identity. */
 	@property({ type: String, attribute: "compaction-id" }) compactionId: string = "";
+	/** General boundary contract used by context clears. */
+	@property({ type: String, attribute: "boundary-id" }) boundaryId: string = "";
+	@property({ type: String, attribute: "boundary-kind" }) boundaryKind: HistoryBoundaryKind = "compaction";
 	@property({ type: String, attribute: "session-id" }) sessionId: string = "";
 	@property({ attribute: false }) promptAuthorDisplayMode: PromptAuthorDisplayMode = NO_PROMPT_AUTHOR_LABELS;
 	@property({ attribute: false }) resolvePromptAuthorAppearance?: (author: unknown) => PromptAuthorAppearance;
 	@property({ attribute: false }) reportPromptAuthorSlice?: (
 		sessionId: string,
-		compactionId: string,
+		boundaryId: string,
 		messages: readonly unknown[] | undefined,
 	) => void;
 
 	@state() private _total: number | null = null;
 	@state() private _loading = false;
 	@state() private _error: string | null = null;
+	@state() private _errorPhase: ErrorPhase = null;
 	@state() private _expanded = false;
-	@state() private _rows: VerboseOrphanRow[] = [];
-	/** Lowest orphan index currently loaded. The window we hold is
-	 *  `[_firstLoadedIndex, _firstLoadedIndex + _rows.length)`. Pagination
-	 *  extends UPWARD — "Load older" at the top fetches
-	 *  `[max(0, _firstLoadedIndex - 50), _firstLoadedIndex)` and prepends. */
-	@state() private _firstLoadedIndex: number = 0;
+	@state() private _rows: VerboseHistoryRow[] = [];
+	/** Lowest history index loaded; older pages prepend toward index zero. */
+	@state() private _firstLoadedIndex = 0;
 
 	private _observer: IntersectionObserver | null = null;
-	/** True once the count fetch has reached a TERMINAL outcome (a resolved
-	 *  total, a non-retryable error, or an exhausted retry budget). While
-	 *  retries are pending this stays false so the safety-net timer / IO can
-	 *  still re-drive, but `_inFlight` / `_retryTimer` prevent overlap. */
 	private _countLoaded = false;
-	/** Guards against overlapping in-flight count fetches (IO hit + safety-net
-	 *  timer + retry timer can all fire). */
 	private _inFlight = false;
-	/** Pending retry timer handle (transient-404 backoff). */
 	private _retryTimer: ReturnType<typeof setTimeout> | null = null;
-	/** Number of transient-404 retries attempted so far. */
 	private _countRetries = 0;
 	private _reportedSlice?: {
 		reporter: NonNullable<PreCompactionHistory["reportPromptAuthorSlice"]>;
 		sessionId: string;
-		compactionId: string;
+		boundaryId: string;
 	};
-	/** Bounded retry budget for a freshly-minted compactionId whose sidecar
-	 *  is written a beat AFTER the client mounts this widget (the live manual
-	 *  `/compact` race: the card mounts on the `compaction_end` event, which
-	 *  fires just before the server finishes appending the sidecar row). The
-	 *  backoff schedule (≈400ms→2s, capped) tops out around 12s — comfortably
-	 *  longer than the RPC-response propagation gap, but still bounded so a
-	 *  genuinely-missing (legacy/purged) id collapses to no-affordance rather
-	 *  than spinning forever. */
+	/** Compaction cards can precede their sidecar by a beat; retain its bounded retry. */
 	private static readonly MAX_COUNT_RETRIES = 8;
 
 	protected override createRenderRoot() {
-		return this; // no shadow DOM so theme tokens cascade
+		return this;
+	}
+
+	private get _kind(): HistoryBoundaryKind {
+		return this.boundaryKind === "clear" ? "clear" : "compaction";
+	}
+
+	private get _id(): string {
+		return this.boundaryId || this.compactionId;
+	}
+
+	private get _reportId(): string {
+		return this._kind === "clear" ? `clear:${this._id}` : this._id;
+	}
+
+	private get _testPrefix(): "pre-clear" | "pre-compaction" {
+		return this._kind === "clear" ? "pre-clear" : "pre-compaction";
+	}
+
+	private get _controlsId(): string {
+		return `bobbit-${this._testPrefix}-rows-${this._id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+	}
+
+	private get _toggleId(): string {
+		return `${this._controlsId}-toggle`;
+	}
+
+	private _requestUrl(cursor?: number, limit = 1, verbose = false): string {
+		const route = this._kind === "clear" ? "before-clear" : "before-compaction";
+		const idParam = this._kind === "clear" ? "clearId" : "compactionId";
+		const params = new URLSearchParams({ [idParam]: this._id, limit: String(limit) });
+		if (cursor !== undefined) params.set("cursor", String(cursor));
+		if (verbose) params.set("verbose", "1");
+		return gatewayRoute(
+			`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/${route}?${params.toString()}`,
+		);
 	}
 
 	override connectedCallback() {
 		super.connectedCallback();
-		// A previously hydrated instance can be detached and reinserted by a
-		// keyed/deferred transcript render. Re-register it after connection;
-		// first-mount property updates will harmlessly replace the same slice.
 		queueMicrotask(() => {
 			if (this.isConnected) this._syncPromptAuthorReport();
 		});
-		// Lazy count fetch on first viewport hit. Prefetch slack via
-		// rootMargin keeps cards just below the fold from showing a flash
-		// of the affordance after scrolling.
 		if (typeof IntersectionObserver !== "undefined") {
 			this._observer = new IntersectionObserver((entries) => {
-				for (const e of entries) {
-					if (e.isIntersecting) {
-						this._loadCount();
-						this._observer?.disconnect();
-						this._observer = null;
-						break;
-					}
-				}
+				if (!entries.some((entry) => entry.isIntersecting)) return;
+				void this._loadCount();
+				this._observer?.disconnect();
+				this._observer = null;
 			}, { rootMargin: "200px" });
-			// Defer to after first paint so getBoundingClientRect is valid.
-			queueMicrotask(() => {
-				if (this._observer) this._observer.observe(this);
-			});
-			// Safety-net eager fetch after 500ms in case IO never fires
-			// (zero-height parent, animated reveal, headless quirks). Skip when a
-			// retry is already pending so we don't short-circuit the backoff.
+			queueMicrotask(() => this._observer?.observe(this));
 			setTimeout(() => {
-				if (!this._countLoaded && !this._inFlight && !this._retryTimer) this._loadCount();
+				if (!this._countLoaded && !this._inFlight && !this._retryTimer) void this._loadCount();
 			}, 500);
 		} else {
-			// No IO support \u2014 fetch eagerly.
-			this._loadCount();
+			void this._loadCount();
 		}
 	}
 
@@ -145,10 +137,8 @@ export class PreCompactionHistory extends LitElement {
 		this._clearPromptAuthorReport();
 		this._observer?.disconnect();
 		this._observer = null;
-		if (this._retryTimer) {
-			clearTimeout(this._retryTimer);
-			this._retryTimer = null;
-		}
+		if (this._retryTimer) clearTimeout(this._retryTimer);
+		this._retryTimer = null;
 	}
 
 	protected override updated(changedProperties: PropertyValues<this>): void {
@@ -156,268 +146,267 @@ export class PreCompactionHistory extends LitElement {
 			changedProperties.has("_rows" as never)
 			|| changedProperties.has("sessionId")
 			|| changedProperties.has("compactionId")
+			|| changedProperties.has("boundaryId")
+			|| changedProperties.has("boundaryKind")
 			|| changedProperties.has("reportPromptAuthorSlice")
-		) {
-			this._syncPromptAuthorReport();
-		}
+		) this._syncPromptAuthorReport();
 	}
 
 	private _clearPromptAuthorReport(): void {
 		const reported = this._reportedSlice;
 		if (!reported) return;
 		this._reportedSlice = undefined;
-		reported.reporter(reported.sessionId, reported.compactionId, undefined);
+		reported.reporter(reported.sessionId, reported.boundaryId, undefined);
 	}
 
 	private _syncPromptAuthorReport(): void {
 		const reporter = this.reportPromptAuthorSlice;
+		const reportId = this._reportId;
 		const identityChanged = !!this._reportedSlice && (
 			this._reportedSlice.reporter !== reporter
 			|| this._reportedSlice.sessionId !== this.sessionId
-			|| this._reportedSlice.compactionId !== this.compactionId
+			|| this._reportedSlice.boundaryId !== reportId
 		);
 		if (identityChanged) this._clearPromptAuthorReport();
 
 		const messages = this._hydrateMessages();
-		if (!reporter || !this.sessionId || !this.compactionId || messages.length === 0) {
+		if (!reporter || !this.sessionId || !reportId || messages.length === 0) {
 			this._clearPromptAuthorReport();
 			return;
 		}
-
-		reporter(this.sessionId, this.compactionId, messages);
-		this._reportedSlice = {
-			reporter,
-			sessionId: this.sessionId,
-			compactionId: this.compactionId,
-		};
+		reporter(this.sessionId, reportId, messages);
+		this._reportedSlice = { reporter, sessionId: this.sessionId, boundaryId: reportId };
 	}
 
 	private _hydrateMessages(): Record<string, unknown>[] {
+		// Keep the long-standing `orphan:` compaction key contract intact. Clear
+		// rows use a separate boundary-qualified namespace so repeated folds can
+		// never collide with each other or with active transcript rows.
+		const prefix = this._kind === "clear" ? `preclear:${this._id}` : `orphan:${this._id}`;
 		return this._rows
-			.map((r) => r.message)
-			.filter((m): m is Record<string, unknown> => !!m)
-			.map((m, i) => {
-				const content = typeof m.content === "string"
-					? [{ type: "text", text: m.content }]
-					: m.content;
-				return {
-					...m,
-					content,
-					id: typeof m.id === "string" && m.id.length > 0
-						? `orphan:${this.compactionId}:${m.id}`
-						: `orphan:${this.compactionId}:${i}`,
-				};
-			});
+			.map((row) => row.message)
+			.filter((message): message is Record<string, unknown> => !!message)
+			.map((message, index) => ({
+				...message,
+				content: typeof message.content === "string"
+					? [{ type: "text", text: message.content }]
+					: message.content,
+				id: typeof message.id === "string" && message.id.length > 0
+					? `${prefix}:${message.id}`
+					: `${prefix}:${index}`,
+			}));
 	}
 
-	/** Public test/refresh hook: re-runs the count fetch from scratch.
-	 *  Production paths never call this directly (IO + safety-net timer
-	 *  handle initial load); browser E2E uses it to refetch after seeding
-	 *  fixture data post-mount. */
+	/** Public browser-test and user-retry hook. */
 	async refreshCount(): Promise<void> {
-		if (this._retryTimer) {
-			clearTimeout(this._retryTimer);
-			this._retryTimer = null;
-		}
+		if (this._retryTimer) clearTimeout(this._retryTimer);
+		this._retryTimer = null;
 		this._countLoaded = false;
 		this._countRetries = 0;
 		this._total = null;
+		this._error = null;
+		this._errorPhase = null;
 		await this._loadCount();
 	}
 
-	/** Schedule a bounded backoff retry of the count fetch for a transient
-	 *  404 (sidecar not persisted yet). Keeps `_total === null` so the widget
-	 *  stays in its no-render "loading" state — no flash of the affordance,
-	 *  and crucially no permanently-cached "empty". Returns true if a retry
-	 *  was scheduled, false if the budget is exhausted. */
 	private _scheduleCountRetry(): boolean {
 		if (this._countRetries >= PreCompactionHistory.MAX_COUNT_RETRIES) return false;
 		this._countRetries++;
 		const delay = Math.min(2000, 400 * this._countRetries);
 		this._retryTimer = setTimeout(() => {
 			this._retryTimer = null;
-			this._loadCount();
+			void this._loadCount();
 		}, delay);
 		return true;
 	}
 
 	private async _loadCount(): Promise<void> {
-		if (this._countLoaded || this._inFlight || !this.sessionId || !this.compactionId) return;
+		if (this._countLoaded || this._inFlight || !this.sessionId || !this._id) return;
 		this._inFlight = true;
 		try {
-			const res = await gatewayFetch(gatewayRoute(
-				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&limit=1`,
-			));
+			const res = await gatewayFetch(this._requestUrl());
 			if (!res.ok) {
-				// 404 compaction_not_found / transcript_unavailable is transient
-				// right after a live (esp. manual) compaction: the widget mounts on
-				// the `compaction_end` event a beat before the server appends the
-				// sidecar row. Retry with bounded backoff before giving up so we
-				// never permanently cache "empty" while the sidecar is still being
-				// written. A genuinely-missing (legacy/purged) id exhausts the
-				// budget and collapses to no-affordance.
-				if (res.status === 404 && this._scheduleCountRetry()) return;
-				if (res.status !== 404) {
-					console.warn(`[pre-compaction-history] count fetch HTTP ${res.status}`);
+				if (this._kind === "compaction" && res.status === 404 && this._scheduleCountRetry()) return;
+				if (this._kind === "compaction") {
+					if (res.status !== 404) console.warn(`[pre-compaction-history] count fetch HTTP ${res.status}`);
+					this._countLoaded = true;
+					this._total = 0;
+					return;
 				}
+				this._countLoaded = true;
+				this._total = 0;
+				this._error = `Couldn’t load history (HTTP ${res.status}).`;
+				this._errorPhase = "count";
+				return;
+			}
+			const envelope = (await res.json()) as HistoryEnvelope;
+			this._countLoaded = true;
+			this._total = typeof envelope.total === "number" ? envelope.total : 0;
+			this._error = null;
+			this._errorPhase = null;
+		} catch (error) {
+			if (this._kind === "compaction" && this._scheduleCountRetry()) return;
+			if (this._kind === "compaction") {
+				console.warn("[pre-compaction-history] count fetch failed:", error);
 				this._countLoaded = true;
 				this._total = 0;
 				return;
 			}
-			const env = (await res.json()) as OrphanEnvelope;
-			this._countLoaded = true;
-			this._total = typeof env.total === "number" ? env.total : 0;
-		} catch (err) {
-			// Network/transport error — retry within budget too, then give up.
-			if (this._scheduleCountRetry()) return;
-			console.warn(`[pre-compaction-history] count fetch failed:`, err);
 			this._countLoaded = true;
 			this._total = 0;
+			this._error = "Couldn’t load history. Check your connection and try again.";
+			this._errorPhase = "count";
 		} finally {
 			this._inFlight = false;
 		}
 	}
 
-	/** Load the LAST 50 orphan messages first — the ones immediately
-	 *  preceding the compaction. Reading backward through history matches
-	 *  the natural "scroll up to see older" mental model. */
+	/** Load the last 50 messages first. */
 	private async _loadFirstPage(): Promise<void> {
-		if (this._loading) return;
+		if (this._loading || (this._total ?? 0) <= 0) return;
 		this._loading = true;
 		this._error = null;
-		const PAGE = 50;
+		this._errorPhase = null;
 		const total = this._total ?? 0;
-		const start = Math.max(0, total - PAGE);
-		const limit = total - start;
+		const start = Math.max(0, total - 50);
 		try {
-			const res = await gatewayFetch(gatewayRoute(
-				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${start}&limit=${limit}&verbose=1`,
-			));
+			const res = await gatewayFetch(this._requestUrl(start, total - start, true));
 			if (!res.ok) {
-				this._error = `Failed to load (HTTP ${res.status})`;
+				this._error = `Couldn’t load history (HTTP ${res.status}).`;
+				this._errorPhase = "page";
 				return;
 			}
-			const env = (await res.json()) as OrphanEnvelope;
-			this._rows = env.messages || [];
+			const envelope = (await res.json()) as HistoryEnvelope;
+			this._rows = envelope.messages || [];
 			this._firstLoadedIndex = start;
-			if (typeof env.total === "number") this._total = env.total;
-		} catch (err) {
-			this._error = err instanceof Error ? err.message : String(err);
+			if (typeof envelope.total === "number") this._total = envelope.total;
+		} catch (error) {
+			this._error = error instanceof Error ? error.message : String(error);
+			this._errorPhase = "page";
 		} finally {
 			this._loading = false;
 		}
 	}
 
-	/** Extend the loaded window UPWARD by another page (toward index 0). */
 	private async _loadOlder(): Promise<void> {
 		if (this._loading || this._firstLoadedIndex <= 0) return;
 		this._loading = true;
 		this._error = null;
-		const PAGE = 50;
-		const newStart = Math.max(0, this._firstLoadedIndex - PAGE);
-		const limit = this._firstLoadedIndex - newStart;
+		this._errorPhase = null;
+		const start = Math.max(0, this._firstLoadedIndex - 50);
+		const limit = this._firstLoadedIndex - start;
 		try {
-			const res = await gatewayFetch(gatewayRoute(
-				`/api/sessions/${encodeURIComponent(this.sessionId)}/transcript/before-compaction?compactionId=${encodeURIComponent(this.compactionId)}&cursor=${newStart}&limit=${limit}&verbose=1`,
-			));
+			const res = await gatewayFetch(this._requestUrl(start, limit, true));
 			if (!res.ok) {
-				this._error = `Failed to load (HTTP ${res.status})`;
+				this._error = `Couldn’t load history (HTTP ${res.status}).`;
+				this._errorPhase = "page";
 				return;
 			}
-			const env = (await res.json()) as OrphanEnvelope;
-			this._rows = [...(env.messages || []), ...this._rows];
-			this._firstLoadedIndex = newStart;
-		} catch (err) {
-			this._error = err instanceof Error ? err.message : String(err);
+			const envelope = (await res.json()) as HistoryEnvelope;
+			this._rows = [...(envelope.messages || []), ...this._rows];
+			this._firstLoadedIndex = start;
+		} catch (error) {
+			this._error = error instanceof Error ? error.message : String(error);
+			this._errorPhase = "page";
 		} finally {
 			this._loading = false;
 		}
 	}
 
 	private _onToggle(): void {
-		if (this._expanded) {
-			this._expanded = false;
-			return;
-		}
-		this._expanded = true;
-		if (this._rows.length === 0 && !this._loading) {
-			this._loadFirstPage();
+		this._expanded = !this._expanded;
+		if (this._expanded && this._rows.length === 0 && !this._loading && (this._total ?? 0) > 0) {
+			void this._loadFirstPage();
 		}
 	}
 
+	private _retry = (): void => {
+		if (this._errorPhase === "count") void this.refreshCount();
+		else void this._loadFirstPage();
+	};
+
 	override render() {
-		// Pre-count: render a placeholder distinguishable from total=0 so
-		// test harnesses can tell "haven't fetched yet" from "genuinely empty".
+		const testPrefix = this._testPrefix;
+		const rootTestId = `${testPrefix}-history`;
+		const boundaryAttr = this._kind === "clear" ? this._id : nothing;
 		if (this._total === null) {
-			return html`<div data-testid="pre-compaction-history" data-state="loading"></div>`;
+			return html`<div
+				data-testid=${rootTestId}
+				data-boundary-id=${boundaryAttr}
+				data-state="loading"
+			><span class="sr-only" role="status">Loading history…</span></div>`;
 		}
-		if (this._total === 0) {
-			return html`<div data-testid="pre-compaction-history" data-state="empty"></div>`;
+		// Preserve the historical compaction behavior: zero orphan rows have no
+		// affordance. Clear boundaries remain inspectable even when the preceding
+		// generation was intentionally empty or its retained file is unavailable.
+		if (this._total === 0 && this._kind === "compaction") {
+			return html`<div data-testid=${rootTestId} data-state="empty"></div>`;
 		}
-		const stateAttr = this._expanded ? "expanded" : "collapsed";
-		const chevron = this._expanded ? "\u25be" : "\u25b8";
+
+		const total = this._total;
+		const noun = total === 1 ? "message" : "messages";
+		const relation = this._kind === "clear" ? "this clear" : "compaction";
 		const olderRemaining = this._firstLoadedIndex;
-		const hasOlder = olderRemaining > 0;
-		// Hydrate verbose orphan rows into the same AgentMessage shape
-		// `<message-list>` consumes for the live transcript. `row.message`
-		// is the full `entry.message` object from the JSONL — typically already
-		// in the right shape (role, content blocks, toolCallId for toolResult
-		// rows, etc.). Normalise string-content (some fixtures and legacy
-		// agent rows write `content: "hi"` directly) to the canonical
-		// `[{ type: "text", text: ... }]` shape `<assistant-message>` expects.
-		// Stamp a synthetic id so `<message-list>`'s diff key is stable.
 		const hydratedMessages = this._hydrateMessages();
 		return html`
 			<div
-				data-testid="pre-compaction-history"
-				data-state=${stateAttr}
+				data-testid=${rootTestId}
+				data-boundary-id=${boundaryAttr}
+				data-state=${this._expanded ? "expanded" : "collapsed"}
 				data-test-row-count=${this._rows.length}
-				data-test-total=${this._total}
-				style="margin-bottom: 0.5rem;"
+				data-test-total=${total}
+				style="margin-bottom:0.5rem;min-width:0;max-width:100%;"
 			>
 				<button
+					id=${this._toggleId}
 					type="button"
 					@click=${this._onToggle}
-					data-testid="pre-compaction-toggle"
-					class="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-					style="background: none; border: none; padding: 0.25rem 0; cursor: pointer;"
+					data-testid=${`${testPrefix}-toggle`}
+					aria-expanded=${String(this._expanded)}
+					aria-controls=${this._controlsId}
+					class="inline-flex min-h-9 max-w-full items-center gap-1 text-left text-xs text-muted-foreground hover:text-foreground"
+					style="background:none;border:none;padding:0.375rem 0;cursor:pointer;white-space:normal;"
 				>
-					<span aria-hidden="true">${chevron}</span>
-					${this._expanded
-						? html`Hide ${this._total} message${this._total === 1 ? "" : "s"} before compaction`
-						: html`Show ${this._total} message${this._total === 1 ? "" : "s"} before compaction`}
+					<span aria-hidden="true">${this._expanded ? "▾" : "▸"}</span>
+					${this._expanded ? "Hide" : "Show"} ${total} ${noun} before ${relation}
 				</button>
-				${this._expanded
-					? html`
-						<div
-							data-testid="pre-compaction-rows"
-							style="border-left: 2px solid var(--border); padding-left: 0.75rem; margin-top: 0.5rem; opacity: 0.7;"
-						>
-							${this._error
-								? html`<div class="text-xs text-destructive">${this._error}</div>`
-								: nothing}
-							${hasOlder && !this._loading
-								? html`<button
-									type="button"
-									@click=${this._loadOlder}
-									data-testid="pre-compaction-load-more"
-									class="text-xs text-muted-foreground hover:text-foreground"
-									style="background: none; border: none; padding: 0.25rem 0; cursor: pointer; margin-bottom: 0.5rem;"
-								>\u25b2 Load ${Math.min(50, olderRemaining)} older</button>`
-								: nothing}
-							${this._loading
-								? html`<div class="text-xs text-muted-foreground">Loading\u2026</div>`
-								: nothing}
-							<message-list
-								.messages=${hydratedMessages as any}
-								.isStreaming=${false}
-								.hasStreamMessage=${false}
-								.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
-								.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
-							></message-list>
-						</div>
-					`
-					: nothing}
+				${this._expanded ? html`
+					<div
+						id=${this._controlsId}
+						role="region"
+						aria-labelledby=${this._toggleId}
+						data-testid=${`${testPrefix}-rows`}
+						data-boundary-id=${boundaryAttr}
+						style="border-left:2px solid var(--border);padding-left:0.75rem;margin-top:0.5rem;opacity:0.7;min-width:0;max-width:100%;box-sizing:border-box;overflow-x:hidden;"
+					>
+						${this._error ? html`
+							<div class="mb-2 flex min-w-0 flex-wrap items-center gap-2 text-xs text-destructive" role="alert">
+								<span>${this._error}</span>
+								<button type="button" class="min-h-8 underline" style="background:none;border:none;color:inherit;cursor:pointer;padding:0.25rem;" @click=${this._retry}>Try again</button>
+							</div>
+						` : nothing}
+						${olderRemaining > 0 && !this._loading ? html`
+							<button
+								type="button"
+								@click=${this._loadOlder}
+								data-testid=${`${testPrefix}-load-more`}
+								data-boundary-id=${boundaryAttr}
+								class="min-h-9 text-xs text-muted-foreground hover:text-foreground"
+								style="background:none;border:none;padding:0.375rem 0;cursor:pointer;margin-bottom:0.5rem;"
+							>▲ Load ${Math.min(50, olderRemaining)} older</button>
+						` : nothing}
+						${this._loading ? html`<div class="text-xs text-muted-foreground" role="status">Loading…</div>` : nothing}
+						<message-list
+							.messages=${hydratedMessages as any}
+							.isStreaming=${false}
+							.hasStreamMessage=${false}
+							.hideActionablePermissionRows=${true}
+							.capabilityMode=${"history"}
+							.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
+							.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
+						></message-list>
+					</div>
+				` : nothing}
 			</div>
 		`;
 	}

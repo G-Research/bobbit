@@ -97,6 +97,8 @@ export class AskUserChoicesWidget extends LitElement {
 	@property({ attribute: false }) answers: AskAnswer[] | null = null;
 	@property({ type: String }) sessionId = "";
 	@property({ type: String }) toolUseId = "";
+	/** Explicit retained-history mode for unanswered questions. */
+	@property({ type: Boolean }) readOnly = false;
 	@property({ type: Boolean }) errored = false;
 	@property({ type: String }) errorText = "";
 
@@ -370,7 +372,7 @@ export class AskUserChoicesWidget extends LitElement {
 	}
 
 	private _isReadOnly(): boolean {
-		return Array.isArray(this.answers) || this.errored;
+		return this.readOnly || Array.isArray(this.answers) || this.errored;
 	}
 
 	private _isLastTab(): boolean {
@@ -410,7 +412,9 @@ export class AskUserChoicesWidget extends LitElement {
 	}
 
 	private async _submit(): Promise<void> {
-		if (!this._canSubmit() || this._submitting) return;
+		// Defense in depth: retained-history cards cannot submit even if a stale
+		// event or direct method call reaches this private handler.
+		if (this._isReadOnly() || !this._canSubmit() || this._submitting) return;
 		this._submitting = true;
 		this._submitError = "";
 		const answers: AskAnswer[] = this.questions.map((q, i) => {

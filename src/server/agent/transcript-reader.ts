@@ -21,6 +21,7 @@ import {
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
+import { activeTranscriptBranch, parseTranscript } from "./transcript-tree.js";
 
 // ── Types ──
 
@@ -1168,6 +1169,86 @@ export async function readOrphanedBeforeCompaction(
 		: window.map((m) => toCompact(m));
 	const nextCursor = end < total ? end : null;
 	return { total, returned: messages.length, nextCursor, messages };
+}
+
+// ── Clear-boundary history reader ──
+
+/**
+ * Parameters for one historical Pi generation retained by a context-clear
+ * boundary. Cursor semantics deliberately match pre-compaction history so the
+ * same read-only UI can count, fetch the newest page, then prepend older pages.
+ */
+export interface ReadClearHistoryParams {
+	/** Zero-based message cursor. Default 0. */
+	cursor?: number;
+	/** Default 50, range 1..200. */
+	limit?: number;
+	/** Return renderer-ready full Pi message objects. */
+	verbose?: boolean;
+}
+
+export type ReadClearHistoryEnvelope = ReadOrphanedEnvelope;
+
+/**
+ * Project only message rows on the parent-linked active branch of one complete
+ * Pi transcript generation. Unlike the ordinary transcript reader, this never
+ * flattens abandoned branches into the visible historical segment.
+ */
+export async function readClearHistory(
+	params: ReadClearHistoryParams,
+	opts: ReadTranscriptOptions,
+): Promise<ReadClearHistoryEnvelope> {
+	const limit = params.limit ?? 50;
+	if (typeof limit !== "number" || !Number.isFinite(limit) || !Number.isInteger(limit)) {
+		throw new TranscriptReaderError("invalid_params", "limit must be an integer");
+	}
+	if (limit < 1 || limit > MAX_LIMIT) {
+		throw new TranscriptReaderError("invalid_params", `limit must be in [1, ${MAX_LIMIT}]`);
+	}
+
+	const cursor = params.cursor ?? 0;
+	if (typeof cursor !== "number" || !Number.isFinite(cursor) || !Number.isInteger(cursor) || cursor < 0) {
+		throw new TranscriptReaderError("invalid_params", "cursor must be a non-negative integer");
+	}
+
+	const content = await opts.readContent();
+	if (content === null || content === undefined || content === "") {
+		throw new TranscriptReaderError("transcript_unavailable", "transcript file missing or empty");
+	}
+
+	const branchMessages: RawMessage[] = [];
+	for (const record of activeTranscriptBranch(parseTranscript(content))) {
+		const entry = record.entry;
+		const message = entry.message;
+		if (entry.type !== "message" || !message || typeof message !== "object" || Array.isArray(message)) continue;
+		const fullMessage = message as Record<string, unknown>;
+		branchMessages.push({
+			index: branchMessages.length,
+			role: typeof fullMessage.role === "string" ? fullMessage.role : "?",
+			ts: typeof entry.ts === "string" ? entry.ts
+				: typeof entry.timestamp === "string" ? entry.timestamp
+				: null,
+			content: fullMessage.content,
+			entryId: record.id,
+			entryType: "message",
+			fullMessage,
+		});
+	}
+
+	const authored = resolveRawMessageAuthors(branchMessages, opts.authorContext);
+	const total = authored.length;
+	const start = Math.min(cursor, total);
+	const end = Math.min(total, start + limit);
+	const window = authored.slice(start, end);
+	const messages = params.verbose
+		? window.map((message) => toVerbose(message, /* includeFullMessage */ true))
+		: window.map((message) => toCompact(message));
+	return {
+		total,
+		returned: messages.length,
+		nextCursor: end < total ? end : null,
+		messages,
+	};
 }
 
 export async function readTranscript(

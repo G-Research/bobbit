@@ -165,10 +165,66 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Legacy positional lazy-load for a truncated block; retained for compatibility (see [Large content truncation](#large-content-truncation)). |
 | `GET` | `/api/sessions/:id/transcript` | Without `operation`, preserves legacy direct REST/UI paging and the `verbose`, `include_tool_results`, and `includeToolResults` aliases. Agent calls use `operation=list` for compact discovery or `operation=inspect` for one exact message/result. See [Focused transcript reads](read-session.md). |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
+| `GET` | `/api/sessions/:id/transcript/before-clear` | Authenticated, display-only pagination over the transcript segment immediately before one durable context-clear boundary. Requires `clearId`; see [Before-clear history](#before-clear-history). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+#### Before-clear history
+
+`GET /api/sessions/:id/transcript/before-clear` returns only the message rows on
+the active parent-linked branch of the transcript segment associated with one
+**Context Cleared** boundary. It is a display API: neither compact-preview nor
+verbose responses modify the active transcript or add history back to model
+context. See [Session context controls](features.md#session-context-controls)
+for `/clear` behavior.
+
+The route uses normal bearer/session authentication and the same gateway-wide
+target-session access as `read_session`, the ordinary transcript endpoint, and
+before-compaction history. Any authenticated same-gateway caller that can reach
+the target session may read the segment.
+
+Query parameters:
+
+| Parameter | Contract |
+|---|---|
+| `clearId` | Required opaque boundary ID. It must be at most 256 characters and match `clr_[A-Za-z0-9_-]+`. |
+| `cursor` | Optional zero-based message offset; defaults to `0`. Pass a non-null `nextCursor` to continue forward. |
+| `offset` | Alias for `cursor`. If both are present, their raw values must match. |
+| `limit` | Optional integer from `1` through `200`; defaults to `50`. |
+| `verbose` | Optional boolean: `1` or `true` returns renderer-ready rows with the full message projection; `0` or `false` returns compact previews. Matching is case-insensitive. |
+
+Successful reads return messages in transcript order:
+
+```json
+{
+  "total": 1,
+  "returned": 1,
+  "nextCursor": null,
+  "messages": [
+    { "index": 0, "role": "user", "ts": "2026-08-22T19:05:00.000Z", "text": "..." }
+  ]
+}
+```
+
+`total` is independent of pagination, `returned` is the number of rows in this
+page, and `nextCursor` is `null` after the final page. A valid boundary whose
+preceding transcript generation was intentionally unmaterialized returns
+`200 { "total": 0, "returned": 0, "nextCursor": null, "messages": [] }`.
+
+Route errors are:
+
+| Status | Payload | Meaning |
+|---|---|---|
+| `400` | `{ "error": "invalid_params", "detail": "..." }` | `clearId`, cursor/offset, limit, or verbose validation failed. |
+| `404` | `{ "error": "session_not_found" }` | The target session does not exist. |
+| `404` | `{ "error": "clear_not_found" }` | The target session has no boundary with that `clearId`. |
+| `404` | `{ "error": "transcript_unavailable", "detail": "..." }` | The retained display transcript cannot be read. |
+| `500` | `{ "error": "internal_error", "detail": "..." }` | An unexpected request-processing failure occurred. |
+
+The implementation entry points are the `beforeClearMatch` route in the server
+and `readClearHistory` in the transcript reader.
 
 ### Standard session role resolution
 
