@@ -107,7 +107,7 @@ async function capturePanelSprite(sprite: Locator, accessoryClass: string): Prom
 }
 
 async function ensureSidebarRow(page: Page, sessionId: string, staff = false): Promise<Locator> {
-	const row = page.locator(`[data-testid="sidebar-expanded"] button[data-session-id="${sessionId}"]`).first();
+	const row = page.locator(`[data-nav-id="session:${sessionId}"]`).first();
 	if (staff && !(await row.isVisible().catch(() => false))) {
 		const header = page.getByTestId("sidebar-staff-header").first();
 		if (await header.isVisible().catch(() => false)) await header.click();
