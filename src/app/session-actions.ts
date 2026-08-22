@@ -131,7 +131,6 @@ export function canForkSession(session: GatewaySession): boolean {
 
 export function isArchivedSessionActionSource(session: GatewaySession): boolean {
 	return session.archived === true
-		|| session.readOnly === true
 		|| session.status === "archived"
 		|| session.status === "terminated";
 }

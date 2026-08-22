@@ -2298,7 +2298,7 @@ function renderCollapsedStatusSidebar(sections: SidebarStatusSections): Template
 				data-nav-active=${active ? "true" : "false"}
 				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"} ${candidate.archived ? "opacity-60" : ""}"
 				title=${displayTitle}
-				@click=${() => { if (!active) connectToSession(session.id, true, candidate.archived ? { readOnly: true } : undefined); }}
+				@click=${() => { if (!active) connectToSession(session.id, true, candidate.archived ? { archived: true } : undefined); }}
 			>
 				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(candidate.archived ? "terminated" : session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}</span>
 				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family:ui-monospace,monospace;line-height:1;font-size:.6667em;">${sessionAcronym(displayTitle)}</span>
