@@ -2591,7 +2591,7 @@ export function handleWebSocketConnection(
 			});
 			return;
 		}
-		const orderedSessionCommand = msg.type === "prompt" ||
+		const serialisedSessionCommand = msg.type === "prompt" ||
 			msg.type === "retry" ||
 			msg.type === "retry_intent" ||
 			(msg.type === "steer" && !liveStreamingSteer);
@@ -2606,7 +2606,7 @@ export function handleWebSocketConnection(
 				// frames must reach SessionManager's durable replacement queue immediately.
 				result = SESSION_MUTATOR_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes);
 			} else {
-				result = authenticated && orderedSessionCommand
+				result = authenticated && serialisedSessionCommand
 					? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes)
 					: dispatch();
 			}
