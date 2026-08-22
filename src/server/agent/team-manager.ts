@@ -2282,8 +2282,8 @@ export class TeamManager {
 
 	/**
 	 * Complete the normal active-team lifecycle after SessionManager has committed
-	 * an in-place lead promotion. This installs the ordinary lead subscription and
-	 * activates a todo goal, but deliberately creates no runtime and sends no kickoff.
+	 * an in-place lead promotion. This installs the ordinary lead subscription,
+	 * activates a todo goal, then reliably kicks off the canonical promoted runtime.
 	 */
 	async finalizeAdoptedLead(goalId: string): Promise<TeamState> {
 		if (!this.restoreCompleted) await this.restorePromise;
@@ -2314,6 +2314,15 @@ export class TeamManager {
 			if (goal.state === "todo") {
 				await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
 			}
+			await this.sessionManager.enqueuePrompt(
+				goal.worktreeOwnerSessionId,
+				`You have been promoted to the team lead for the goal "${goal.title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`,
+				{
+					source: "system",
+					suppressTitleGen: true,
+					intentId: `promotion-kickoff:${goal.id}`,
+				},
+			);
 			return this.getTeamState(goalId)!;
 		});
 	}
