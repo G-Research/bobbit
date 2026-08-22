@@ -156,7 +156,9 @@ Live session sockets enforce the independent `readOnly` capability and
 not only in the browser UI. The server checks both the live session and its
 persisted row; `true` in either source activates that policy. This closes the
 window where one representation has updated before the other. A frame covered
-by both policies is rejected by the `readOnly` capability check first.
+by both policies is normally rejected by the `readOnly` capability check first.
+The narrow model-recovery exception described below yields to `nonInteractive`,
+so server-driven sessions do not become interactive during recovery.
 
 The guarded work classifier contains these frames:
 
@@ -176,12 +178,24 @@ it does not mean the transcript is archived or the session is unpromptable. A
 live read-only delegate therefore accepts normal prompt, steer, queue, and
 retry work. Owner orchestration remains available through its separate API.
 The session transport blocks only controls that could widen or alter the
-child's capability-bearing configuration: `set_model`, `set_image_model`,
-`set_thinking_level`, and `grant_tool_permission`. Those frames receive:
+child's capability-bearing configuration: ordinary `set_model`,
+`set_image_model`, `set_thinking_level`, and `grant_tool_permission`. Those
+frames receive:
 
 ```json
 { "type": "error", "code": "SESSION_READ_ONLY", "message": "..." }
 ```
+
+There is one exception: when authoritative admission reports an active
+`MODEL_SELECTION_REQUIRED` condition, a read-only session may send `set_model`
+so it can recover from its unavailable persisted text model. This bypasses only
+the read-only policy check. The frame still uses the existing per-session
+command serializer, and the existing recovery path remains responsible for
+exact selectable-tuple validation, thinking-level clamping, activation,
+transcript restoration, verification, and durable persistence. The exception
+does not admit ordinary `set_model`, `set_image_model`, `set_thinking_level`, or
+permission changes. If `nonInteractive` is also true, that policy still rejects
+the recovery frame with `NON_INTERACTIVE_WORK_CONTROL` before recovery starts.
 
 Archive/termination lifecycle and `nonInteractive` policy are evaluated
 separately; neither is inferred from `readOnly`.
