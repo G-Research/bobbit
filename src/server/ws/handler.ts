@@ -154,6 +154,10 @@ type ReliableIntentClientMessage =
 	| { type: "steer"; text: string; intentId?: string }
 	| { type: "retry_intent"; intentId: string };
 
+type ClearContextManager = SessionManager & {
+	clearContext(sessionId: string): Promise<unknown> | unknown;
+};
+
 type ModelSelectionRecoveryManager = SessionManager & {
 	recoverModelSelectionRequired(
 		sessionId: string,
@@ -600,6 +604,7 @@ const SESSION_WORK_MESSAGE_TYPES = [
 	"set_image_model",
 	"set_thinking_level",
 	"compact",
+	"clear",
 	"grant_tool_permission",
 	"ext_session_write_permit",
 	"ext_session_post",
@@ -1675,6 +1680,39 @@ export function handleWebSocketConnection(
 					}
 					break;
 				}
+				case "clear": {
+					const clearContext = (sessionManager as ClearContextManager).clearContext;
+					if (typeof clearContext !== "function") {
+						send(ws, {
+							type: "error",
+							message: "Context wasn't cleared. Your previous context is still active. Try /clear again.",
+							code: "CONTEXT_CLEAR_UNAVAILABLE",
+						});
+						break;
+					}
+					try {
+						// SessionManager installs the replacement fence synchronously before
+						// its first await. Keeping the transport free of a second lifecycle
+						// owner lets prompts and steers admitted around this boundary flow
+						// through the manager's durable replacement queue.
+						await clearContext.call(sessionManager, sessionId);
+					} catch (err: any) {
+						const safeError = redactSensitive(String(err?.message || err));
+						const rawCode = typeof err?.code === "string" ? err.code : "";
+						const code = /^[A-Z][A-Z0-9_]{0,63}$/.test(rawCode)
+							? rawCode
+							: "CONTEXT_CLEAR_FAILED";
+						console.error(`[ws-handler] clear context failed for session ${sessionId}:`, safeError);
+						send(ws, {
+							type: "error",
+							message: code === "CLEAR_ACTIVE"
+								? "Context clear is already in progress."
+								: "Context wasn't cleared. Your previous context is still active. Try /clear again.",
+							code,
+						});
+					}
+					break;
+				}
 				case "compact": {
 					if (session.isCompacting || session.status === "aborting") {
 						send(ws, { type: "error", message: "Compaction is already active or the turn is stopping", code: "COMPACTION_ACTIVE" });
@@ -2442,7 +2480,8 @@ export function handleWebSocketConnection(
 				|| msg.type === "retry"
 				|| msg.type === "retry_intent"
 				|| msg.type === "restart_agent"
-				|| msg.type === "set_thinking_level")
+				|| msg.type === "set_thinking_level"
+				|| msg.type === "clear")
 		) {
 			sendIntentRejection(
 				msg,
