@@ -4169,6 +4169,7 @@ export class SessionManager {
 		let terminalListener: (() => void) | undefined;
 		const deferredTerminalEvents: any[] = [];
 		let replacementAttempted = false;
+		let replacementConfirmedComplete = false;
 		let replacementCancelled = false;
 		let terminalReplayed = false;
 		let durableCommitted = false;
@@ -4265,6 +4266,10 @@ export class SessionManager {
 			if (!replacement?.success || typeof replacement.data?.cancelled !== "boolean") {
 				throw new Error(`new_session failed: ${replacement?.error ?? "invalid response"}`);
 			}
+			// Only a complete, structurally valid response proves that Pi's concurrent
+			// new_session handler has settled. A bridge timeout removes Bobbit's pending
+			// response only; the handler may still replace the runtime later.
+			replacementConfirmedComplete = true;
 			if (replacement.data.cancelled === true) {
 				replacementCancelled = true;
 				throw new ContextClearError("CLEAR_CANCELLED", "Pi cancelled context replacement");
@@ -4435,7 +4440,15 @@ export class SessionManager {
 			}
 			try {
 				if (!capturedTuple) throw new Error("The original model tuple was not captured");
-				await this._rollbackContextClear(id, session, persisted, capturedTuple, token, replayTerminalEvidence);
+				await this._rollbackContextClear(
+					id,
+					session,
+					persisted,
+					capturedTuple,
+					token,
+					replayTerminalEvidence,
+					replacementConfirmedComplete,
+				);
 			} catch (rollbackError) {
 				console.error(`[session-manager] Context clear rollback failed for ${id}:`, rollbackError);
 				throw new ContextClearError(
@@ -4454,38 +4467,44 @@ export class SessionManager {
 		tuple: ClearCapturedTuple,
 		token: SessionReplacementToken,
 		replayTerminalEvidence: () => void,
+		replacementConfirmedComplete: boolean,
 	): Promise<void> {
 		const oldPath = persisted.agentSessionFile;
-		try {
-			const switched = await session.rpcClient.sendCommand({
-				type: "switch_session",
-				sessionPath: switchSessionPathForAgent(persisted),
-			}, persisted.sandboxed ? 60_000 : 15_000);
-			if (!switched?.success || switched.data?.cancelled === true) {
-				throw new Error(`switch_session rollback failed: ${switched?.error ?? "cancelled"}`);
-			}
-			await this._applyAndVerifyRollbackTuple(session.rpcClient, tuple, oldPath, persisted);
-			try { replayTerminalEvidence(); }
-			catch (error) { console.warn(`[session-manager] Terminal replay persistence failed during rollback for ${id}:`, error); }
-			session.lifecycleGeneration = token.generation;
-			session.lifecycleFenced = false;
-			session.dormant = false;
-			session.messagesSnapshotCache = undefined;
-			session.messagesSnapshotCursorProjection = undefined;
-			session.promptCursorRefreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+		if (replacementConfirmedComplete) {
 			try {
-				this.resolveStoreForSession(id).update(id, { wasStreaming: false, streamingStartedAt: undefined });
-			} catch { /* runtime rollback remains usable even if auxiliary persistence is unavailable */ }
-			broadcastStatus(session, "idle");
-			return;
-		} catch (switchError) {
-			console.warn(`[session-manager] In-process context rollback failed for ${id}; respawning old generation:`, switchError);
+				const switched = await session.rpcClient.sendCommand({
+					type: "switch_session",
+					sessionPath: switchSessionPathForAgent(persisted),
+				}, persisted.sandboxed ? 60_000 : 15_000);
+				if (!switched?.success || switched.data?.cancelled === true) {
+					throw new Error(`switch_session rollback failed: ${switched?.error ?? "cancelled"}`);
+				}
+				await this._applyAndVerifyRollbackTuple(session.rpcClient, tuple, oldPath, persisted);
+				try { replayTerminalEvidence(); }
+				catch (error) { console.warn(`[session-manager] Terminal replay persistence failed during rollback for ${id}:`, error); }
+				session.lifecycleGeneration = token.generation;
+				session.lifecycleFenced = false;
+				session.dormant = false;
+				session.messagesSnapshotCache = undefined;
+				session.messagesSnapshotCursorProjection = undefined;
+				session.promptCursorRefreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+				try {
+					this.resolveStoreForSession(id).update(id, { wasStreaming: false, streamingStartedAt: undefined });
+				} catch { /* runtime rollback remains usable even if auxiliary persistence is unavailable */ }
+				broadcastStatus(session, "idle");
+				return;
+			} catch (switchError) {
+				console.warn(`[session-manager] In-process context rollback failed for ${id}; respawning old generation:`, switchError);
+			}
+		} else {
+			console.warn(`[session-manager] Context replacement outcome is ambiguous for ${id}; stopping the stale bridge before rollback`);
 		}
 		try { replayTerminalEvidence(); }
 		catch (error) { console.warn(`[session-manager] Terminal replay persistence failed before respawn rollback for ${id}:`, error); }
 		const restored = await this._respawnAgentInPlaceOwned(id, session, persisted, {
 			preserveSandboxRealm: persisted.sandboxed === true,
 			deferQueueDrain: true,
+			useRequestedPersistedSnapshot: true,
 		}, token);
 		if (!restored) throw new Error("Old context respawn did not install a runtime");
 		await this._applyAndVerifyRollbackTuple(restored.rpcClient, tuple, oldPath, persisted);
@@ -11360,6 +11379,8 @@ export class SessionManager {
 			expectedOwner?: SessionBridgeOwner;
 			/** Apply restartAgent's persisted zombie guard only after serialized ownership admission. */
 			restartZombieGuard?: boolean;
+			/** Restore an immutable caller-owned record rather than re-reading a possibly advanced store object. */
+			useRequestedPersistedSnapshot?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
 		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
@@ -11384,6 +11405,7 @@ export class SessionManager {
 			deferQueueDrain?: boolean;
 			expectedOwner?: SessionBridgeOwner;
 			restartZombieGuard?: boolean;
+			useRequestedPersistedSnapshot?: boolean;
 		} | undefined,
 		token: SessionReplacementToken,
 	): Promise<SessionInfo | undefined> {
@@ -11403,7 +11425,9 @@ export class SessionManager {
 		const session = canonical ?? requestedSession;
 		const ps = opts?.restartZombieGuard
 			? this._admitRestartPersistedSession(id)
-			: this.resolveStoreForId(id)?.get(id) ?? requestedPs;
+			: opts?.useRequestedPersistedSnapshot
+				? requestedPs
+				: this.resolveStoreForId(id)?.get(id) ?? requestedPs;
 		const savedClients = new Set(session.clients);
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
