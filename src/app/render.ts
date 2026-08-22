@@ -26,7 +26,7 @@ export { showHeaderToast } from "./header-toast.js";
 import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
-import { applyKnownSessionLifecyclePresentation, backToSessions, createAndConnectSession } from "./session-manager.js";
+import { applyKnownSessionLifecyclePresentation, backToSessions, createAndConnectSession, sessionLifecycleRecordForPresentation } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureHeaderSessionActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -2363,8 +2363,15 @@ export function doRenderApp(): void {
 			?? state.archivedSessions.find(session => session.id === panelBoundSessionId)
 		: undefined;
 	if (panelAgentInterface && panelBoundSession) {
-		applyKnownSessionLifecyclePresentation(panelAgentInterface, [panelBoundSession], {
-			remoteArchived: state.remoteAgent?.state.isArchived === true,
+		const panelRemote = state.remoteAgent;
+		let presentationRecord: Partial<GatewaySession> | undefined = panelBoundSession;
+		if (panelRemote
+			&& panelRemote.gatewaySessionId === panelBoundSessionId
+			&& panelAgentInterface.session === panelRemote) {
+			presentationRecord = sessionLifecycleRecordForPresentation(panelBoundSession, panelRemote);
+		}
+		applyKnownSessionLifecyclePresentation(panelAgentInterface, [presentationRecord], {
+			remoteArchived: panelRemote?.state.isArchived === true,
 		});
 	}
 	// Archived panel agents may not expose `session.sessionId`; when the current
