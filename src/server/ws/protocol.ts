@@ -91,6 +91,15 @@ export interface ManualRetryRequiredEvent {
 
 export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent | ManualRetryRequiredEvent;
 
+/** Durable clear boundary replacement delivered through the sequenced event plane. */
+export interface ContextClearedEvent {
+	type: "context_cleared";
+	clearId: string;
+	clearedAt: string;
+	/** Complete outward snapshot for destructive client replacement. */
+	messages: unknown[];
+}
+
 export type StaffChangedReason = "created" | "updated" | "reassigned" | "deleted";
 
 export type DeliveryIntentKind = "prompt" | "steer";
@@ -203,6 +212,7 @@ export type ClientMessage =
 	| { type: "set_image_model"; provider: string; modelId: string }
 	| { type: "set_thinking_level"; level: string }
 	| { type: "compact" }
+	| { type: "clear" }
 	| { type: "get_state" }
 	| { type: "get_messages" }
 	| { type: "set_title"; title: string }

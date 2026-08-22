@@ -160,6 +160,21 @@ export type RpcEventListener = (event: any) => void;
  */
 export type PromptStreamingBehavior = "steer" | "followUp";
 
+/** Pi's successful `new_session` payload. The new transcript path is read from
+ * a subsequent `get_state`; Pi intentionally returns only cancellation state. */
+export interface PiNewSessionResult {
+	cancelled: boolean;
+}
+
+/** Typed wire response for Pi's `new_session` RPC command. */
+export interface PiNewSessionRpcResponse {
+	type: "response";
+	command: "new_session";
+	success: boolean;
+	data?: PiNewSessionResult;
+	error?: string;
+}
+
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
@@ -176,6 +191,9 @@ export interface IRpcBridge {
 	setModel(provider: string, modelId: string): Promise<any>;
 	setThinkingLevel(level: string): Promise<any>;
 	compact(timeoutMs?: number): Promise<any>;
+	/** Optional for backward-compatible test/custom bridges. Context clear rejects
+	 * actionably when the active bridge does not support Pi's `new_session`. */
+	newSession?(timeoutMs?: number): Promise<PiNewSessionRpcResponse>;
 	waitForReady(overallTimeoutMs?: number): Promise<void>;
 	sendCommand(command: Record<string, any>, timeoutMs?: number): Promise<any>;
 	onEvent(listener: RpcEventListener): () => void;
@@ -899,6 +917,11 @@ export class RpcBridge {
 
 	compact(timeoutMs = 120_000) {
 		return this.sendCommand({ type: "compact" }, timeoutMs);
+	}
+
+	/** Start a fresh Pi transcript generation without supplying a parent session. */
+	newSession(timeoutMs = 120_000): Promise<PiNewSessionRpcResponse> {
+		return this.sendCommand({ type: "new_session" }, timeoutMs);
 	}
 
 	async getMessages() {

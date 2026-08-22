@@ -33,7 +33,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, containerPathToHost, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import {
 	canonicalContainerAgentSessionPath,
 	sessionFileDelete,
@@ -72,7 +72,7 @@ import {
 	type AgentAuthorDependencies,
 	type AgentSessionIdentity,
 } from "./message-author.js";
-import { resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, restoreAgentTranscriptSnapshot, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
+import { isWithinAgentSessionsDir, resolveReadablePersistedAgentSessionFile, resolveSafeSessionsPath, restoreAgentTranscriptSnapshot, sanitizeAgentTranscriptFile, trustPersistedAgentSessionFile } from "./transcript-sanitizer.js";
 import { isOrphanToolResultOrderingError } from "./poisoned-history.js";
 import type { SkillExpansion } from "../skills/resolve-skill-expansions.js";
 import type { FileMention } from "../skills/resolve-file-mentions.js";
@@ -84,16 +84,26 @@ import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
 	parseCompactionStartMs,
+	readCompactionSidecarEntriesStrict,
 	resolveCompactionTranscriptEntryId,
 	type CompactionSidecarEntry,
 	type TranscriptEntriesSnapshot,
 } from "./compaction-sidecar.js";
 import {
+	createContextClearBoundary,
+	currentGenerationCompactionIds,
+	latestContextClearBoundary,
+	normalizeContextClearBoundaries,
+	type ContextClearBoundary,
+} from "./context-clear-boundary.js";
+import {
 	SessionStore,
 	normalizePersistedInFlightSteers,
+	type ContextClearPersistenceShape,
 	type InFlightSteerRecord,
 	type PersistedSession,
 } from "./session-store.js";
+import { activeTranscriptBranch, parseTranscript } from "./transcript-tree.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
@@ -3244,6 +3254,28 @@ type SessionReplacementToken = {
 	kind: string;
 };
 
+export class ContextClearError extends Error {
+	readonly code: string;
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "ContextClearError";
+		this.code = code;
+	}
+}
+
+type ClearCapturedTuple = {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+};
+
+type UnmaterializedClearRecovery = {
+	boundary: ContextClearBoundary;
+	newAgentSessionFile: string;
+	boundaries: ContextClearBoundary[];
+	persistenceShape: ContextClearPersistenceShape;
+};
+
 type SessionRoleReplacementProjection = {
 	goalId: string;
 	teamGoalId: string;
@@ -3876,11 +3908,617 @@ export class SessionManager {
 		return resultPromise;
 	}
 
+	private _captureContextClearPersistenceShape(store: SessionStore, id: string): ContextClearPersistenceShape | undefined {
+		if (typeof store.captureContextClearPersistenceShape === "function") {
+			return store.captureContextClearPersistenceShape(id);
+		}
+		// Lightweight lifecycle fixtures may provide only the SessionStore's public
+		// get/update surface. Production always uses the exact-shape store method.
+		const current = store.get(id);
+		if (!current) return undefined;
+		const raw = current as unknown as Record<string, unknown>;
+		const capture = (field: string) => ({
+			present: Object.prototype.hasOwnProperty.call(raw, field),
+			value: raw[field] === undefined ? undefined : structuredClone(raw[field]),
+		});
+		return {
+			agentSessionFile: current.agentSessionFile,
+			contextClearBoundaries: capture("contextClearBoundaries"),
+			wasStreaming: capture("wasStreaming"),
+			streamingStartedAt: capture("streamingStartedAt"),
+		};
+	}
+
+	private _restoreContextClearPersistenceShape(
+		store: SessionStore,
+		id: string,
+		shape: ContextClearPersistenceShape,
+	): void {
+		if (typeof store.restoreContextClearPersistenceShape === "function") {
+			store.restoreContextClearPersistenceShape(id, shape);
+			return;
+		}
+		const current = store.get(id) as unknown as Record<string, unknown> | undefined;
+		if (!current) return;
+		current.agentSessionFile = shape.agentSessionFile;
+		for (const [field, fieldShape] of Object.entries({
+			contextClearBoundaries: shape.contextClearBoundaries,
+			wasStreaming: shape.wasStreaming,
+			streamingStartedAt: shape.streamingStartedAt,
+		})) {
+			if (fieldShape.present) current[field] = fieldShape.value;
+			else delete current[field];
+		}
+	}
+
+	private _validatedAgentSessionPathIdentity(ps: PersistedSession, filePath: string): string {
+		if (!filePath || filePath.includes("\0")) throw new Error("Agent session path is empty or invalid");
+		const containerPath = canonicalContainerAgentSessionPath(filePath);
+		if (containerPath) return `container:${containerPath}`;
+		trustPersistedAgentSessionFile(filePath);
+		if (ps.sandboxed) {
+			const translated = switchSessionPathForAgent({ ...ps, agentSessionFile: filePath });
+			const canonical = canonicalContainerAgentSessionPath(translated);
+			if (canonical) return `container:${canonical}`;
+		}
+		const readable = resolveReadablePersistedAgentSessionFile(filePath);
+		if (!readable && !isWithinAgentSessionsDir(filePath)) {
+			throw new Error("Agent session path is outside readable roots");
+		}
+		const resolved = path.resolve(readable ?? filePath);
+		return `host:${process.platform === "win32" ? resolved.toLowerCase() : resolved}`;
+	}
+
+	private _sameAgentSessionPath(ps: PersistedSession, left: string, right: string): boolean {
+		return this._validatedAgentSessionPathIdentity(ps, left)
+			=== this._validatedAgentSessionPathIdentity(ps, right);
+	}
+
+	private _messageRowsFromRpc(response: any, operation: string): any[] {
+		if (!response?.success) throw new Error(`${operation} failed: ${response?.error ?? "unknown error"}`);
+		const data = response.data;
+		const messages = Array.isArray(data)
+			? data
+			: data && typeof data === "object" && Array.isArray(data.messages)
+				? data.messages
+				: undefined;
+		if (!messages) throw new Error(`${operation} returned an invalid message list`);
+		return messages;
+	}
+
+	private _activeTranscriptEntriesFromRpc(response: any, operation: string): Record<string, any>[] {
+		if (!response?.success) throw new Error(`${operation} failed: ${response?.error ?? "unknown error"}`);
+		const snapshot = response.data;
+		if (!snapshot || !Array.isArray(snapshot.entries)) {
+			throw new Error(`${operation} returned an invalid transcript tree`);
+		}
+		const entries = snapshot.entries as Record<string, any>[];
+		const byId = new Map<string, Record<string, any>>();
+		for (const entry of entries) {
+			if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+				throw new Error(`${operation} returned a malformed transcript entry`);
+			}
+			if (typeof entry.id === "string" && entry.id.length > 0) {
+				if (byId.has(entry.id)) throw new Error(`${operation} returned duplicate transcript ids`);
+				byId.set(entry.id, entry);
+			}
+		}
+		if (entries.length === 0 && (snapshot.leafId === null || snapshot.leafId === undefined)) return [];
+		if (typeof snapshot.leafId !== "string" || !byId.has(snapshot.leafId)) {
+			throw new Error(`${operation} returned an invalid transcript leaf`);
+		}
+		const reverse: Record<string, any>[] = [];
+		const seen = new Set<string>();
+		let cursor: string | null = snapshot.leafId;
+		while (cursor !== null) {
+			if (seen.has(cursor)) throw new Error(`${operation} returned a cyclic transcript tree`);
+			seen.add(cursor);
+			const entry = byId.get(cursor);
+			if (!entry) throw new Error(`${operation} returned a missing transcript parent`);
+			reverse.push(entry);
+			if (entry.parentId !== null && typeof entry.parentId !== "string") {
+				throw new Error(`${operation} returned an invalid transcript parent`);
+			}
+			cursor = entry.parentId;
+		}
+		return reverse.reverse();
+	}
+
+	private _stateData(response: any, operation: string): any {
+		if (!response?.success || !response.data || typeof response.data !== "object") {
+			throw new Error(`${operation} failed: ${response?.error ?? "invalid state"}`);
+		}
+		return response.data;
+	}
+
+	private _captureClearTuple(state: any): ClearCapturedTuple {
+		const provider = state?.model?.provider;
+		const modelId = state?.model?.id;
+		const thinkingLevel = isKnownThinkingLevel(state?.thinkingLevel);
+		if (typeof provider !== "string" || !provider || typeof modelId !== "string" || !modelId || !thinkingLevel) {
+			throw new Error("The active model and thinking level could not be captured");
+		}
+		return { provider, modelId, thinkingLevel };
+	}
+
+	private async _applyAndVerifyClearTuple(
+		rpcClient: RpcBridge,
+		tuple: ClearCapturedTuple,
+		expectedPath: string,
+		ps: PersistedSession,
+	): Promise<any> {
+		const model = await rpcClient.setModel(tuple.provider, tuple.modelId);
+		if (model?.success === false) throw new Error(`set_model failed: ${model.error ?? "rejected"}`);
+		const thinking = await rpcClient.setThinkingLevel(tuple.thinkingLevel);
+		if (thinking?.success === false) throw new Error(`set_thinking_level failed: ${thinking.error ?? "rejected"}`);
+		const state = this._stateData(await rpcClient.getState(), "get_state after context replacement");
+		if (!this._sameAgentSessionPath(ps, state.sessionFile, expectedPath)
+			|| state.model?.provider !== tuple.provider
+			|| state.model?.id !== tuple.modelId
+			|| isKnownThinkingLevel(state.thinkingLevel) !== tuple.thinkingLevel) {
+			throw new Error("Fresh context configuration read-back did not match the active session");
+		}
+		if (state.messageCount !== 0 || state.pendingMessageCount !== 0) {
+			throw new Error("Fresh context state was not empty");
+		}
+		if (this._messageRowsFromRpc(await rpcClient.getMessages(), "get_messages after context configuration").length !== 0) {
+			throw new Error("Fresh context gained messages while configuration was restored");
+		}
+		return state;
+	}
+
+	private async _applyAndVerifyRollbackTuple(
+		rpcClient: RpcBridge,
+		tuple: ClearCapturedTuple,
+		expectedPath: string,
+		ps: PersistedSession,
+	): Promise<void> {
+		const model = await rpcClient.setModel(tuple.provider, tuple.modelId);
+		if (model?.success === false) throw new Error(`rollback set_model failed: ${model.error ?? "rejected"}`);
+		const thinking = await rpcClient.setThinkingLevel(tuple.thinkingLevel);
+		if (thinking?.success === false) throw new Error(`rollback set_thinking_level failed: ${thinking.error ?? "rejected"}`);
+		const state = this._stateData(await rpcClient.getState(), "get_state after context rollback");
+		if (!this._sameAgentSessionPath(ps, state.sessionFile, expectedPath)
+			|| state.model?.provider !== tuple.provider
+			|| state.model?.id !== tuple.modelId
+			|| isKnownThinkingLevel(state.thinkingLevel) !== tuple.thinkingLevel) {
+			throw new Error("Rolled-back context configuration could not be verified");
+		}
+	}
+
+	private _hostTrackedTranscriptPath(_ps: PersistedSession, filePath: string): string | undefined {
+		try {
+			const container = canonicalContainerAgentSessionPath(filePath);
+			if (container) {
+				const host = containerPathToHost(container);
+				return host === container ? undefined : path.normalize(host);
+			}
+			trustPersistedAgentSessionFile(filePath);
+			const readable = resolveReadablePersistedAgentSessionFile(filePath);
+			return readable
+				? path.normalize(readable)
+				: isWithinAgentSessionsDir(filePath)
+					? path.normalize(path.resolve(filePath))
+					: undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(ps.id, "restore", async (_token) => {
+		return this._coordinateSessionReplacement(ps.id, "restore", async () => {
 			await this.restoreSession(ps);
 			return this.sessions.get(ps.id);
 		}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined });
+	}
+
+	/**
+	 * Replace only Pi's model-facing transcript generation. The existing
+	 * replacement coordinator is the sole admission fence and queue release owner.
+	 */
+	clearContext(id: string): Promise<void> {
+		this.assertSessionGoalPromotionMutationAllowed(id);
+		this._assertModelSelectionReady(id);
+		if (this._sessionReplacementCoordinators.has(id)) {
+			throw new ContextClearError("CLEAR_ACTIVE", "A session replacement is already active");
+		}
+		const session = this.sessions.get(id);
+		if (!session || session.dormant || session.lifecycleFenced || session.status === "terminated") {
+			throw new ContextClearError("SESSION_UNAVAILABLE", `Session ${id} is not available`);
+		}
+		if (session.readOnly || session.nonInteractive) {
+			throw new ContextClearError("SESSION_READ_ONLY", `Session ${id} does not allow context replacement`);
+		}
+		if (typeof session.rpcClient.newSession !== "function") {
+			throw new ContextClearError(
+				"CLEAR_UNSUPPORTED",
+				"The active agent runtime does not support context clearing. Restart or update the agent runtime and try again.",
+			);
+		}
+		if (session.isCompacting || session.status === "aborting" || session.status === "preparing" || session.status === "starting") {
+			throw new ContextClearError("CLEAR_ACTIVE", "The session is busy with another lifecycle operation");
+		}
+		return this._coordinateSessionReplacement(id, "clear-context", (token) =>
+			this._clearContextOwned(id, token), {
+				drainOnRelease: true,
+				cancelOnTerminal: () => {
+					throw new ContextClearError("CLEAR_CANCELLED", "Context clear was cancelled by session termination");
+			},
+		});
+	}
+
+	private async _clearContextOwned(id: string, token: SessionReplacementToken): Promise<void> {
+		const session = this.sessions.get(id);
+		if (!session || !this._replacementTokenIsCurrent(id, token)) {
+			throw new ContextClearError("CLEAR_CANCELLED", "The session changed before context clear started");
+		}
+		const store = this.resolveStoreForSession(id);
+		const persistedRecord = store.get(id);
+		const persistenceShape = this._captureContextClearPersistenceShape(store, id);
+		if (!persistedRecord?.agentSessionFile || !persistenceShape) {
+			throw new Error("The active transcript metadata is unavailable");
+		}
+		// SessionStore.update mutates its canonical object in place. Rollback and
+		// path validation must retain an immutable view of the old generation.
+		const persisted = structuredClone(persistedRecord);
+		const oldPath = persisted.agentSessionFile;
+		const oldStatus = session.status;
+		const oldStreamingStartedAt = session.streamingStartedAt;
+		const oldSetupComplete = session.setupComplete;
+		const priorBoundaries = normalizeContextClearBoundaries(persisted.contextClearBoundaries);
+		let terminalListener: (() => void) | undefined;
+		const deferredTerminalEvents: any[] = [];
+		let replacementAttempted = false;
+		let replacementConfirmedComplete = false;
+		let replacementCancelled = false;
+		let terminalReplayed = false;
+		let durableCommitted = false;
+		let capturedTuple: ClearCapturedTuple | undefined;
+
+		const replayTerminalEvidence = (reconcileReplacement = true) => {
+			if (terminalReplayed) return;
+			terminalReplayed = true;
+			const setupComplete = session.setupComplete;
+			// A clear publishes the pointer itself. Prevent deferred first-turn setup
+			// from racing a stale metadata write across that transaction.
+			session.setupComplete = true;
+			for (const event of deferredTerminalEvents) {
+				this.handleAgentLifecycle(session, event, {
+					replacementOwnedTerminal: true,
+					deferQueueDrain: true,
+				});
+				this.trackCostFromEvent(session, event, true);
+			}
+			if (reconcileReplacement) {
+				this._reconcileAfterAbort(session, {
+					outcome: "proven-no-start",
+					retargetQueuedContinuation: true,
+				});
+			}
+			session.setupComplete = setupComplete;
+		};
+
+		const restoreOldWriter = () => {
+			session.lifecycleFenced = false;
+			session.dormant = false;
+			session.lifecycleGeneration = token.generation;
+			const naturallySettled = deferredTerminalEvents.some((event) =>
+				event.type === "agent_settled" || (event.type === "agent_end" && event.willRetry !== true));
+			session.streamingStartedAt = naturallySettled ? undefined : oldStreamingStartedAt;
+			session.setupComplete = oldSetupComplete;
+			const desiredStatus: SessionStatus = naturallySettled ? "idle" : oldStatus;
+			if (session.status !== desiredStatus) broadcastStatus(session, desiredStatus, {
+				streamingStartedAt: naturallySettled ? undefined : oldStreamingStartedAt,
+			});
+		};
+
+		// The coordinator has already advanced the writer generation. Capture
+		// terminal evidence before the first fallible RPC so a naturally finishing
+		// active turn cannot disappear in the preflight window.
+		session.lifecycleFenced = true;
+		session.messagesSnapshotCache = undefined;
+		session.messagesSnapshotCursorProjection = undefined;
+		session.promptCursorRefreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+		terminalListener = session.rpcClient.onEvent((event: any) => {
+			if (event.type === "message_end"
+				|| event.type === "compaction_end"
+				|| event.type === "auto_compaction_end"
+				|| event.type === "agent_settled"
+				|| (event.type === "agent_end" && event.willRetry !== true)) {
+				deferredTerminalEvents.push(event);
+			}
+		});
+
+		try {
+			if (session.pendingMetadataPersist) await session.pendingMetadataPersist;
+			const [oldStateResponse, oldMessagesResponse, oldEntriesResponse] = await Promise.all([
+				session.rpcClient.getState(),
+				session.rpcClient.getMessages(),
+				session.rpcClient.getTranscriptEntries?.()
+					?? session.rpcClient.sendCommand({ type: "get_entries" }),
+			]);
+			const oldState = this._stateData(oldStateResponse, "get_state before context clear");
+			if (typeof oldState.sessionFile !== "string"
+				|| !this._sameAgentSessionPath(persisted, oldState.sessionFile, oldPath)) {
+				throw new Error("The live transcript path does not match durable session metadata");
+			}
+			const tuple = this._captureClearTuple(oldState);
+			capturedTuple = tuple;
+			const oldMessages = this._messageRowsFromRpc(oldMessagesResponse, "get_messages before context clear");
+			const baselineBranch = this._activeTranscriptEntriesFromRpc(oldEntriesResponse, "get_entries before context clear");
+			const baselineMessageIds = new Set(baselineBranch
+				.filter((entry) => entry.type === "message" && typeof entry.id === "string")
+				.map((entry) => entry.id as string));
+			const previousHasMessages = oldMessages.length > 0 || baselineMessageIds.size > 0;
+
+			if (this._markModernInFlightAttemptsUncertain(session)) this.broadcastQueue(session);
+			if (oldStatus === "streaming") broadcastStatus(session, "aborting");
+
+			const newSession = session.rpcClient.newSession?.bind(session.rpcClient);
+			if (!newSession) {
+				throw new ContextClearError(
+					"CLEAR_UNSUPPORTED",
+					"The active agent runtime does not support context clearing. Restart or update the agent runtime and try again.",
+				);
+			}
+			replacementAttempted = true;
+			const replacement = await newSession(120_000);
+			if (replacement?.type !== "response"
+				|| replacement.command !== "new_session"
+				|| replacement.success !== true
+				|| typeof replacement.data?.cancelled !== "boolean") {
+				throw new Error(`new_session failed: ${replacement?.error ?? "invalid response"}`);
+			}
+			// Only the exact conclusive response proves that Pi's concurrent new_session
+			// handler has settled. RpcBridge correlates by id, so a malformed or
+			// wrong-command response is as ambiguous as a timeout: the handler may still
+			// replace the runtime later.
+			replacementConfirmedComplete = true;
+			if (replacement.data.cancelled === true) {
+				replacementCancelled = true;
+				throw new ContextClearError("CLEAR_CANCELLED", "Pi cancelled context replacement");
+			}
+			if (token.coordinator.terminalRequest) {
+				throw new ContextClearError("CLEAR_CANCELLED", `Context clear was superseded by ${token.coordinator.terminalRequest}`);
+			}
+
+			const [newStateResponse, newMessagesResponse, newEntriesResponse] = await Promise.all([
+				session.rpcClient.getState(),
+				session.rpcClient.getMessages(),
+				session.rpcClient.getTranscriptEntries?.()
+					?? session.rpcClient.sendCommand({ type: "get_entries" }),
+			]);
+			const newState = this._stateData(newStateResponse, "get_state after context clear");
+			const newPath = newState.sessionFile;
+			if (typeof newPath !== "string" || !newPath
+				|| this._sameAgentSessionPath(persisted, newPath, oldPath)) {
+				throw new Error("Pi did not activate a distinct fresh transcript path");
+			}
+			this._validatedAgentSessionPathIdentity(persisted, newPath);
+			if (newState.messageCount !== 0 || newState.pendingMessageCount !== 0) {
+				throw new Error("Pi's fresh context state was not empty");
+			}
+			if (this._messageRowsFromRpc(newMessagesResponse, "get_messages after context clear").length !== 0) {
+				throw new Error("Pi's fresh context contained prior messages");
+			}
+			const newBranch = this._activeTranscriptEntriesFromRpc(newEntriesResponse, "get_entries after context clear");
+			if (newBranch.some((entry) => entry.type === "message"
+				|| entry.type === "compaction"
+				|| entry.type === "branch_summary"
+				|| entry.type === "custom_message")) {
+				throw new Error("Pi's fresh transcript tree contained non-empty model-facing entries");
+			}
+			await this._applyAndVerifyClearTuple(session.rpcClient, tuple, newPath, persisted);
+
+			let previousTranscriptMaterialized = false;
+			if (previousHasMessages) {
+				const oldContent = await sessionFileRead(
+					sessionFsContextForAgentFile(persisted, oldPath),
+					oldPath,
+					this.sandboxManager,
+				);
+				if (oldContent === null) throw new Error("The previous transcript could not be captured");
+				const captured = parseTranscript(oldContent);
+				const capturedBranch = activeTranscriptBranch(captured);
+				const capturedBranchIds = new Set(capturedBranch
+					.map((record) => record.id)
+					.filter((entryId): entryId is string => typeof entryId === "string"));
+				if (oldMessages.length > 0
+					&& !capturedBranch.some((record) => record.entry.type === "message")) {
+					throw new Error("The previous transcript did not contain the active message segment");
+				}
+				for (const entryId of baselineMessageIds) {
+					if (!capturedBranchIds.has(entryId)) {
+						throw new Error("The previous transcript changed before it could be captured");
+					}
+				}
+				previousTranscriptMaterialized = true;
+			} else {
+				// A lazy JSONL containing only metadata is still an empty model-facing
+				// segment. The history endpoint returns the stable empty envelope.
+				previousTranscriptMaterialized = false;
+			}
+
+			terminalListener();
+			terminalListener = undefined;
+			replayTerminalEvidence();
+			const compactionIds = currentGenerationCompactionIds(
+				readCompactionSidecarEntriesStrict(id).map((entry) => entry.id),
+				priorBoundaries,
+			);
+			const clearedAt = new Date(this.clock.now()).toISOString();
+			const boundary = createContextClearBoundary({
+				clearedAt,
+				previousAgentSessionFile: oldPath,
+				activatedAgentSessionFile: newPath,
+				activatedTranscriptMaterialized: false,
+				previousTranscriptMaterialized,
+				compactionIds,
+			});
+			const contextClearBoundaries = [...priorBoundaries, boundary];
+			if (token.coordinator.terminalRequest) {
+				throw new ContextClearError("CLEAR_CANCELLED", `Context clear was superseded by ${token.coordinator.terminalRequest}`);
+			}
+			store.update(id, {
+				agentSessionFile: newPath,
+				contextClearBoundaries,
+				wasStreaming: false,
+				streamingStartedAt: undefined,
+				messageQueue: session.promptQueue.toArray(),
+				inFlightSteerTexts: this.persistedInFlightSteerTexts(session),
+			});
+			try {
+				await store.flushAsync();
+			} catch (error) {
+				this._restoreContextClearPersistenceShape(store, id, persistenceShape);
+				await store.flushAsync().catch(() => {});
+				throw error;
+			}
+			durableCommitted = true;
+
+			this.cancelPendingAutoRetry(session, "terminated");
+			session.latestMessageUpdate = undefined;
+			session.previousAssistantStreamMessage = undefined;
+			session.activeAssistantStreamId = undefined;
+			session.pendingRecoverableLengthStreamId = undefined;
+			session.latestTurnUserText = undefined;
+			session.latestTurnAssistantText = undefined;
+			session.lastPromptText = undefined;
+			session.lastPromptImages = undefined;
+			session.lastTurnErrored = false;
+			session.lastTurnErrorMessage = undefined;
+			session.manualRetryRequired = false;
+			session.transientRetryAttempts = 0;
+			session.consecutiveErrorTurns = 0;
+			session.streamingStartedAt = undefined;
+			session._piAgentRunSettled = true;
+			session.isCompacting = false;
+			session._reliableCompactionId = undefined;
+			session._reliableCompactionReason = undefined;
+			this.clearToolCallProvenance(session);
+			if (session.pendingGrantRequest) {
+				const pending = session.pendingGrantRequest;
+				const requests = pending.requests?.length
+					? pending.requests
+					: [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+				for (const request of requests) {
+					this.clock.clearTimeout(request.timer);
+					request.resolve({ granted: false, reason: "Context was cleared." });
+				}
+				session.pendingGrantRequest = undefined;
+			}
+			session.messagesSnapshotCache = undefined;
+			session.messagesSnapshotCursorProjection = undefined;
+			session.promptCursorRefreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+			session.lifecycleGeneration = token.generation;
+			session.lifecycleFenced = false;
+			session.dormant = false;
+			const visible = this.buildVisibleMessageSnapshot(id, [] as any[]);
+			try {
+				emitSessionEvent(session, {
+					type: "context_cleared",
+					clearId: boundary.id,
+					clearedAt: boundary.clearedAt,
+					messages: visible,
+				});
+				broadcast(session.clients, {
+					type: "state",
+					data: this.withSessionCostInState(id, await session.rpcClient.getState().then((response) => response.data)),
+				});
+			} catch (error) {
+				// Persistence is already canonical. Reconnect/reload reconstructs the
+				// same boundary, so transport failure must never roll context back.
+				console.warn(`[session-manager] Context clear committed but client publication failed for ${id}:`, error);
+			} finally {
+				broadcastStatus(session, "idle");
+			}
+		} catch (error) {
+			terminalListener?.();
+			terminalListener = undefined;
+			if (durableCommitted) return;
+			if (replacementCancelled || !replacementAttempted) {
+				try { replayTerminalEvidence(false); }
+				catch (replayError) { console.warn(`[session-manager] Pre-clear terminal replay failed for ${id}:`, replayError); }
+				restoreOldWriter();
+				throw error;
+			}
+			try {
+				if (!capturedTuple) throw new Error("The original model tuple was not captured");
+				await this._rollbackContextClear(
+					id,
+					session,
+					persisted,
+					capturedTuple,
+					token,
+					replayTerminalEvidence,
+					replacementConfirmedComplete,
+				);
+			} catch (rollbackError) {
+				console.error(`[session-manager] Context clear rollback failed for ${id}:`, rollbackError);
+				throw new ContextClearError(
+					"CLEAR_RECOVERY_REQUIRED",
+					"Context clear failed and the prior runtime could not be verified. Refresh the agent or restart the gateway.",
+				);
+			}
+			throw error;
+		}
+	}
+
+	private async _rollbackContextClear(
+		id: string,
+		session: SessionInfo,
+		persisted: PersistedSession,
+		tuple: ClearCapturedTuple,
+		token: SessionReplacementToken,
+		replayTerminalEvidence: () => void,
+		replacementConfirmedComplete: boolean,
+	): Promise<void> {
+		const oldPath = persisted.agentSessionFile;
+		if (replacementConfirmedComplete) {
+			try {
+				const switched = await session.rpcClient.sendCommand({
+					type: "switch_session",
+					sessionPath: switchSessionPathForAgent(persisted),
+				}, persisted.sandboxed ? 60_000 : 15_000);
+				if (!switched?.success || switched.data?.cancelled === true) {
+					throw new Error(`switch_session rollback failed: ${switched?.error ?? "cancelled"}`);
+				}
+				await this._applyAndVerifyRollbackTuple(session.rpcClient, tuple, oldPath, persisted);
+				try { replayTerminalEvidence(); }
+				catch (error) { console.warn(`[session-manager] Terminal replay persistence failed during rollback for ${id}:`, error); }
+				session.lifecycleGeneration = token.generation;
+				session.lifecycleFenced = false;
+				session.dormant = false;
+				session.messagesSnapshotCache = undefined;
+				session.messagesSnapshotCursorProjection = undefined;
+				session.promptCursorRefreshGeneration = (session.promptCursorRefreshGeneration ?? 0) + 1;
+				try {
+					this.resolveStoreForSession(id).update(id, { wasStreaming: false, streamingStartedAt: undefined });
+				} catch { /* runtime rollback remains usable even if auxiliary persistence is unavailable */ }
+				broadcastStatus(session, "idle");
+				return;
+			} catch (switchError) {
+				console.warn(`[session-manager] In-process context rollback failed for ${id}; respawning old generation:`, switchError);
+			}
+		} else {
+			console.warn(`[session-manager] Context replacement outcome is ambiguous for ${id}; stopping the stale bridge before rollback`);
+		}
+		try { replayTerminalEvidence(); }
+		catch (error) { console.warn(`[session-manager] Terminal replay persistence failed before respawn rollback for ${id}:`, error); }
+		const restored = await this._respawnAgentInPlaceOwned(id, session, persisted, {
+			preserveSandboxRealm: persisted.sandboxed === true,
+			deferQueueDrain: true,
+			useRequestedPersistedSnapshot: true,
+		}, token);
+		if (!restored) throw new Error("Old context respawn did not install a runtime");
+		await this._applyAndVerifyRollbackTuple(restored.rpcClient, tuple, oldPath, persisted);
+		restored.lifecycleGeneration = token.generation;
+		restored.lifecycleFenced = false;
+		restored.dormant = false;
+		try {
+			this.resolveStoreForSession(id).update(id, { wasStreaming: false, streamingStartedAt: undefined });
+		} catch { /* retain the verified rollback runtime */ }
+		broadcastStatus(restored, "idle");
 	}
 
 	setOnPrCreationDetected(cb: (session: SessionInfo) => void): void {
@@ -7671,6 +8309,15 @@ export class SessionManager {
 		} catch (error) {
 			return Promise.reject(error);
 		}
+		// Replacement ownership precedes continuation classification. A clear-time
+		// steer is always durable successor work and can never reach the old Pi run.
+		const staged = this._queuePromptBehindReplacement(sessionId, message, {
+			isSteered: true,
+			source: opts?.source,
+			author: opts?.author,
+			intentId: opts?.intentId,
+		});
+		if (staged) return Promise.resolve({ queued: true, id: opts?.intentId });
 		const session = this.sessions.get(sessionId);
 		if (!session) return Promise.reject(new Error(`Session ${sessionId} not found`));
 		const source = opts?.source ?? "user";
@@ -7729,7 +8376,8 @@ export class SessionManager {
 	 * current turn instead of waiting for a later tool boundary or agent_end.
 	 */
 	steerQueued(sessionId: string, messageId: string): boolean {
-		const session = this.sessions.get(sessionId);
+		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
+		const session = coordinator?.promptOwner ?? this.sessions.get(sessionId);
 		if (!session) return false;
 		const ok = session.promptQueue.steer(messageId);
 		if (!ok) return false;
@@ -7737,10 +8385,15 @@ export class SessionManager {
 		const promoted = (session.promptQueue.toArray() as ReliableQueuedMessage[]).find((row) => row.id === messageId);
 		if (promoted?.kind) {
 			promoted.kind = "steer";
-			promoted.targetTurn = session.status === "streaming"
+			promoted.targetTurn = !coordinator
+				&& session.status === "streaming"
 				&& (!session.isCompacting || session._reliableCompactionReason !== "manual")
 				? "continuation"
 				: "next-turn";
+		}
+		if (coordinator) {
+			this.broadcastQueue(session);
+			return true;
 		}
 		if (session.status === "streaming" && !session.isCompacting) {
 			const steered = (session.promptQueue.toArray() as ReliableQueuedMessage[])
@@ -9267,6 +9920,23 @@ export class SessionManager {
 				// Only stopReason:"error" advances the counter.
 				session.consecutiveErrorTurns = 0;
 			}
+			// Established sessions already have setupComplete=true, so their first
+			// post-clear assistant flush would otherwise never revisit metadata. Flip
+			// the latest false materialization marker through the same atomic path.
+			if (writerIsCurrent) {
+				try {
+					const persisted = this.resolveStoreForSession(session.id).get(session.id);
+					if (latestContextClearBoundary(persisted?.contextClearBoundaries)?.activatedTranscriptMaterialized === false
+						&& !session.pendingMetadataPersist) {
+						const pending = this.persistSessionMetadata(session).catch((error) => {
+							console.warn(`[session-manager] Failed to mark cleared transcript materialized for ${session.id}:`, error);
+						}).finally(() => {
+							if (session.pendingMetadataPersist === pending) session.pendingMetadataPersist = undefined;
+						});
+						session.pendingMetadataPersist = pending;
+					}
+				} catch { /* a later lifecycle pass can retry metadata healing */ }
+			}
 		}
 
 		if (event.type === "agent_start") {
@@ -10713,6 +11383,8 @@ export class SessionManager {
 			expectedOwner?: SessionBridgeOwner;
 			/** Apply restartAgent's persisted zombie guard only after serialized ownership admission. */
 			restartZombieGuard?: boolean;
+			/** Restore an immutable caller-owned record rather than re-reading a possibly advanced store object. */
+			useRequestedPersistedSnapshot?: boolean;
 		},
 	): Promise<SessionInfo | undefined> {
 		return this._coordinateSessionReplacement(session.id, "respawn", (token) =>
@@ -10737,6 +11409,7 @@ export class SessionManager {
 			deferQueueDrain?: boolean;
 			expectedOwner?: SessionBridgeOwner;
 			restartZombieGuard?: boolean;
+			useRequestedPersistedSnapshot?: boolean;
 		} | undefined,
 		token: SessionReplacementToken,
 	): Promise<SessionInfo | undefined> {
@@ -10756,7 +11429,9 @@ export class SessionManager {
 		const session = canonical ?? requestedSession;
 		const ps = opts?.restartZombieGuard
 			? this._admitRestartPersistedSession(id)
-			: this.resolveStoreForId(id)?.get(id) ?? requestedPs;
+			: opts?.useRequestedPersistedSnapshot
+				? requestedPs
+				: this.resolveStoreForId(id)?.get(id) ?? requestedPs;
 		const savedClients = new Set(session.clients);
 		session.unsubscribe();
 		const frameOfRef = this._snapshotStreamingFrameOfReference(session);
@@ -10911,7 +11586,7 @@ export class SessionManager {
 	}
 
 	private emitAgentEvent(session: SessionInfo, event: unknown): void {
-		if (isRetryableAgentEnd(event)) return;
+		if (isRetryableAgentEnd(event) || !this._sessionWriterIsCurrent(session)) return;
 		emitSessionEvent(session, truncateLargeToolContent(event));
 	}
 
@@ -11033,7 +11708,8 @@ export class SessionManager {
 	 * Check an event for usage data and record it via the cost tracker.
 	 * Broadcasts a cost_update to connected clients if cost data is found.
 	 */
-	private trackCostFromEvent(session: SessionInfo, event: any): void {
+	private trackCostFromEvent(session: SessionInfo, event: any, replacementOwned = false): void {
+		if (!replacementOwned && !this._sessionWriterIsCurrent(session)) return;
 		// Message updates repeat the same usage on every streaming chunk, so only
 		// completed assistant messages are accounted. Pi 0.81 additionally reports
 		// summarizer usage once on each completed compaction event.
@@ -11272,7 +11948,15 @@ export class SessionManager {
 				? [...this.projectContextManager.getAllSessions()]
 				: (this._testStore?.getAll() ?? []);
 			for (const ps of allPersisted) {
-				if (ps.agentSessionFile) tracked.add(ps.agentSessionFile);
+				if (ps.agentSessionFile) {
+					const activePath = this._hostTrackedTranscriptPath(ps, ps.agentSessionFile);
+					if (activePath) tracked.add(activePath);
+				}
+				for (const boundary of normalizeContextClearBoundaries(ps.contextClearBoundaries)) {
+					if (!boundary.previousTranscriptMaterialized) continue;
+					const historicalPath = this._hostTrackedTranscriptPath(ps, boundary.previousAgentSessionFile);
+					if (historicalPath) tracked.add(historicalPath);
+				}
 				if (ps.lastActivity && ps.lastActivity > mostRecent) mostRecent = ps.lastActivity;
 			}
 			// If the store is empty (fresh install), use a 24h floor so we don't
@@ -11425,6 +12109,21 @@ export class SessionManager {
 		const fileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
 		const fileFound = await sessionFileExists(fileCtx, ps.agentSessionFile, this.sandboxManager);
 		if (!fileFound) {
+			const latestClear = latestContextClearBoundary(ps.contextClearBoundaries);
+			const activeMatchesLatestClear = !!latestClear && (() => {
+				try { return this._sameAgentSessionPath(ps, ps.agentSessionFile, latestClear.activatedAgentSessionFile); }
+				catch { return false; }
+			})();
+			// An intentionally empty clear generation is recovered only by the shared
+			// fresh-runtime branch in restoreSession; never switch to its missing path.
+			if (activeMatchesLatestClear && latestClear?.activatedTranscriptMaterialized === false) {
+				console.log(`[session-manager] Session ${ps.id} has an unmaterialized cleared generation — recreating an empty runtime`);
+				// fall through to restoreSession()
+			} else if (activeMatchesLatestClear && latestClear?.activatedTranscriptMaterialized === true) {
+				console.warn(`[session-manager] Session ${ps.id} lost its materialized cleared transcript: ${ps.agentSessionFile}`);
+				this.addDormantSession(ps, "Materialized cleared transcript is unavailable");
+				return;
+			} else {
 			// `agentSessionFile` is set (persistSessionMetadata only records it after a
 			// live getState) but no transcript exists on disk. Pi (>=0.77) creates the
 			// session JSONL lazily on the first assistant flush with an exclusive
@@ -11452,6 +12151,7 @@ export class SessionManager {
 				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its missing-transcript record")) return;
 				sessionStore.archive(ps.id);
 				return;
+			}
 			}
 		}
 		// A completed catalog is authoritative. Discovery failures deliberately fall
@@ -11703,12 +12403,90 @@ export class SessionManager {
 		}
 	}
 
+	private async _prepareUnmaterializedClearRecovery(
+		ps: PersistedSession,
+		rpcClient: RpcBridge,
+		store: SessionStore,
+	): Promise<UnmaterializedClearRecovery | undefined> {
+		const boundary = latestContextClearBoundary(ps.contextClearBoundaries);
+		if (!boundary || boundary.activatedTranscriptMaterialized
+			|| !this._sameAgentSessionPath(ps, ps.agentSessionFile, boundary.activatedAgentSessionFile)) return undefined;
+		const oldExists = await sessionFileExists(
+			sessionFsContextForAgentFile(ps, ps.agentSessionFile),
+			ps.agentSessionFile,
+			this.sandboxManager,
+		);
+		if (oldExists) return undefined;
+		const persistenceShape = this._captureContextClearPersistenceShape(store, ps.id);
+		if (!persistenceShape) throw new Error("Cleared-generation persistence metadata is unavailable");
+		const state = this._stateData(await rpcClient.getState(), "get_state for empty clear recovery");
+		const newAgentSessionFile = state.sessionFile;
+		if (typeof newAgentSessionFile !== "string" || !newAgentSessionFile
+			|| this._sameAgentSessionPath(ps, newAgentSessionFile, ps.agentSessionFile)) {
+			throw new Error("Empty clear recovery did not create a distinct safe transcript path");
+		}
+		this._validatedAgentSessionPathIdentity(ps, newAgentSessionFile);
+		if (state.messageCount !== 0 || state.pendingMessageCount !== 0
+			|| this._messageRowsFromRpc(await rpcClient.getMessages(), "get_messages for empty clear recovery").length !== 0) {
+			throw new Error("Empty clear recovery runtime was not empty");
+		}
+		const entries = this._activeTranscriptEntriesFromRpc(
+			await (rpcClient.getTranscriptEntries?.() ?? rpcClient.sendCommand({ type: "get_entries" })),
+			"get_entries for empty clear recovery",
+		);
+		if (entries.some((entry) => entry.type === "message"
+			|| entry.type === "compaction"
+			|| entry.type === "branch_summary"
+			|| entry.type === "custom_message")) {
+			throw new Error("Empty clear recovery runtime contained model-facing transcript entries");
+		}
+		const boundaries = normalizeContextClearBoundaries(ps.contextClearBoundaries);
+		const latestIndex = boundaries.findIndex((candidate) => candidate.id === boundary.id);
+		if (latestIndex !== boundaries.length - 1) throw new Error("Empty clear recovery boundary is not the latest generation");
+		boundaries[latestIndex] = { ...boundary, activatedAgentSessionFile: newAgentSessionFile };
+		return { boundary, newAgentSessionFile, boundaries, persistenceShape };
+	}
+
+	private async _commitUnmaterializedClearRecovery(
+		ps: PersistedSession,
+		rpcClient: RpcBridge,
+		store: SessionStore,
+		recovery: UnmaterializedClearRecovery,
+	): Promise<PersistedSession> {
+		const thinkingLevel = isKnownThinkingLevel(ps.effectiveThinkingLevel);
+		if (!ps.modelProvider || !ps.modelId || !thinkingLevel) {
+			throw new Error("Empty clear recovery requires an exact persisted model and thinking tuple");
+		}
+		await this._applyAndVerifyClearTuple(rpcClient, {
+			provider: ps.modelProvider,
+			modelId: ps.modelId,
+			thinkingLevel,
+		}, recovery.newAgentSessionFile, ps);
+		try {
+			store.update(ps.id, {
+				agentSessionFile: recovery.newAgentSessionFile,
+				contextClearBoundaries: recovery.boundaries,
+			});
+			await store.flushAsync();
+		} catch (error) {
+			this._restoreContextClearPersistenceShape(store, ps.id, recovery.persistenceShape);
+			await store.flushAsync().catch(() => {});
+			throw error;
+		}
+		return {
+			...ps,
+			agentSessionFile: recovery.newAgentSessionFile,
+			contextClearBoundaries: recovery.boundaries,
+		};
+	}
+
 	private async restoreSession(ps: PersistedSession): Promise<void> {
 		// Verifier-owned work is re-driven by VerificationHarness. Reliable user
 		// occurrences are reconciled against their terminal sidecar before install.
 		const preparedRestore = this.preparePersistedIntentRestore(ps);
 		ps = preparedRestore.ps;
 		const restoreStore = preparedRestore.store;
+		const activeReplacementToken = this._sessionReplacementCoordinators.get(ps.id)?.active;
 		const restoredAuthorBindings = preparedRestore.bindings;
 		const restoredQueue = ps.messageQueue ?? [];
 		if (preparedRestore.changed) await restoreStore.flushAsync();
@@ -12192,27 +12970,33 @@ export class SessionManager {
 			throw err;
 		}
 
-		// Resume the agent's previous session file. Persisted host paths are still
-		// readable by Bobbit; sandboxed agents receive the active mount's container
-		// path when the host path maps to the active sessions mount.
+		// Resume ordinary history, or recreate a deliberately unmaterialized clear
+		// generation without ever switching to a historical/missing path.
+		let unmaterializedClearRecovery: UnmaterializedClearRecovery | undefined;
 		try {
-			trustPersistedAgentSessionFile(ps.agentSessionFile);
-			const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			const switchSessionPath = switchSessionPathForAgent(ps);
-			// Un-poison the persisted transcript before the agent rehydrates it
-			// (best-effort, non-fatal).
-			await sanitizeAgentTranscriptFile(
-				transcriptFileCtx,
-				ps.agentSessionFile,
-				this.sandboxManager,
-			);
-			const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
-			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: switchSessionPath },
-				switchTimeout,
-			);
-			if (!switchResp.success) {
-				throw new Error(`switch_session failed: ${switchResp.error}`);
+			if (activeReplacementToken && !this._replacementTokenIsCurrent(ps.id, activeReplacementToken)) {
+				throw new Error(`Session ${ps.id} restore ownership changed before transcript selection`);
+			}
+			unmaterializedClearRecovery = await this._prepareUnmaterializedClearRecovery(ps, rpcClient, restoreStore);
+			if (!unmaterializedClearRecovery) {
+				trustPersistedAgentSessionFile(ps.agentSessionFile);
+				const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+				const switchSessionPath = switchSessionPathForAgent(ps);
+				// Un-poison the persisted transcript before the agent rehydrates it
+				// (best-effort, non-fatal).
+				await sanitizeAgentTranscriptFile(
+					transcriptFileCtx,
+					ps.agentSessionFile,
+					this.sandboxManager,
+				);
+				const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
+				const switchResp = await rpcClient.sendCommand(
+					{ type: "switch_session", sessionPath: switchSessionPath },
+					switchTimeout,
+				);
+				if (!switchResp.success) {
+					throw new Error(`switch_session failed: ${switchResp.error}`);
+				}
 			}
 		} catch (err) {
 			// A thrown/timed-out switch is just as terminal as an explicit failure
@@ -12244,6 +13028,25 @@ export class SessionManager {
 			} else {
 				try { unsub(); } catch { /* best-effort listener cleanup */ }
 				await rpcClient.stop();
+				throw err;
+			}
+		}
+
+		if (unmaterializedClearRecovery) {
+			try {
+				if (activeReplacementToken && !this._replacementTokenIsCurrent(ps.id, activeReplacementToken)) {
+					throw new Error(`Session ${ps.id} empty-generation recovery was superseded before publication`);
+				}
+				ps = await this._commitUnmaterializedClearRecovery(
+					ps,
+					rpcClient,
+					restoreStore,
+					unmaterializedClearRecovery,
+				);
+			} catch (err) {
+				try { unsub(); } catch { /* best-effort listener cleanup */ }
+				this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
+				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
 		}
@@ -13371,6 +14174,40 @@ export class SessionManager {
 	 * sidecar merges, truncation, ordering stamps, and serialization.
 	 */
 	async getMessagesSnapshotBase(session: SessionInfo): Promise<MessageSnapshotBaseResponse> {
+		// Lightweight unit seams may instantiate the prototype without field
+		// initializers. Real managers always own this map and retain both clear fences.
+		if (!this._sessionReplacementCoordinators) {
+			return this._getMessagesSnapshotBaseUnfenced(session);
+		}
+		let candidate = session;
+		for (;;) {
+			const before = this._sessionReplacementCoordinators.get(candidate.id);
+			if (before?.active?.kind === "clear-context") {
+				await before.tail;
+				const canonical = this.sessions.get(candidate.id);
+				if (!canonical) return { success: false, error: "Session is unavailable after context clear" };
+				candidate = canonical;
+				continue;
+			}
+			const seq = candidate.eventBuffer.lastSeq;
+			const response = await this._getMessagesSnapshotBaseUnfenced(candidate);
+			const after = this._sessionReplacementCoordinators.get(candidate.id);
+			const canonical = this.sessions.get(candidate.id);
+			if (after?.active?.kind === "clear-context"
+				|| canonical !== candidate
+				|| candidate.eventBuffer.lastSeq !== seq) {
+				if (after?.active?.kind === "clear-context") await after.tail;
+				const refreshed = this.sessions.get(candidate.id);
+				if (!refreshed) return { success: false, error: "Session is unavailable after context replacement" };
+				candidate = refreshed;
+				continue;
+			}
+			return response;
+		}
+	}
+
+	/** Transaction-internal snapshot read. Clear must never wait on its own fence. */
+	private async _getMessagesSnapshotBaseUnfenced(session: SessionInfo): Promise<MessageSnapshotBaseResponse> {
 		const seq = session.eventBuffer.lastSeq;
 		const cached = session.messagesSnapshotCache;
 		if (cached?.seq === seq) return cached.promise;
@@ -14245,41 +15082,58 @@ export class SessionManager {
 
 				// Store the path as returned by the agent — always in the agent's
 				// coordinate system (container path for sandbox, host path for local).
-				// The session-fs module handles routing reads/checks to the right place.
 				const agentSessionFile = stateResp.data.sessionFile;
-
-				// NEVER pre-create this file. Pi (>=0.77) creates the session JSONL
-				// lazily on the first assistant flush with an exclusive `openSync(file, "wx")`.
-				// If Bobbit touches the path first, that open throws
-				// `EEXIST: file already exists` and the agent loses every transcript
-				// write for the session. We only record the path; restoreOneSession()
-				// tolerates the file not yet existing (a session that crashed before its
-				// first assistant message has no transcript to restore anyway).
-				// Pinned by tests/session-manager-no-precreate.test.ts.
-				this.resolveStoreForSession(session.id).update(session.id, { agentSessionFile });
-
-				// Write the bobbit sidecar alongside the .jsonl so a future
-				// recovery (when sessions.json loses this entry) can restore the
-				// ORIGINAL bobbit session id, title, role, team links, and model
-				// prefs instead of inventing fresh ones. Fire-and-forget;
-				// atomic write makes repeat invocations safe.
-				try {
-					const ps = this.resolveStoreForSession(session.id).get(session.id);
-					if (ps) {
-						// pi-coding-agent names .jsonl files after the agent session id
-						// (path/<agent-id>.jsonl). Use the basename as a stable id when
-						// the rpc response doesn't expose it directly.
-						const agentSessionId = (stateResp.data?.sessionId as string | undefined)
-							|| path.basename(agentSessionFile).replace(/\.jsonl$/, "");
-						const sidecar = buildSessionSidecar(
-							ps,
-							agentSessionId,
-							undefined,
-						);
-						writeSessionSidecar(agentSessionFile, sidecar);
+				const metadataStore = this.resolveStoreForSession(session.id);
+				const current = metadataStore.get(session.id);
+				if (!current) {
+					// Preserve the historical lightweight-store seam used before a full
+					// persisted record exists. There is no clear boundary to validate and
+					// Pi must remain the sole owner of lazy transcript creation.
+					metadataStore.update(session.id, { agentSessionFile });
+					return;
+				}
+				const latestClear = latestContextClearBoundary(current.contextClearBoundaries);
+				const transcriptMaterialized = await sessionFileExists(
+					sessionFsContextForAgentFile(current, agentSessionFile),
+					agentSessionFile,
+					this.sandboxManager,
+				);
+				if (latestClear && !latestClear.activatedTranscriptMaterialized) {
+					if (!this._sameAgentSessionPath(current, current.agentSessionFile, latestClear.activatedAgentSessionFile)
+						|| !this._sameAgentSessionPath(current, agentSessionFile, latestClear.activatedAgentSessionFile)) {
+						throw new Error("Refusing to rotate an unmaterialized cleared generation outside its atomic recovery path");
 					}
-				} catch (err) {
-					console.warn(`[session-manager] Failed to write session sidecar for ${session.id}: ${err}`);
+					if (transcriptMaterialized) {
+						const boundaries = normalizeContextClearBoundaries(current.contextClearBoundaries);
+						boundaries[boundaries.length - 1] = {
+							...latestClear,
+							activatedTranscriptMaterialized: true,
+						};
+						metadataStore.update(session.id, { agentSessionFile, contextClearBoundaries: boundaries });
+						await metadataStore.flushAsync();
+					} else {
+						// NEVER pre-create this file. Pi uses exclusive creation on the first
+						// assistant flush; keep the durable false marker for restart recovery.
+						metadataStore.update(session.id, { agentSessionFile });
+					}
+				} else {
+					metadataStore.update(session.id, { agentSessionFile });
+				}
+
+				// A recovery sidecar is meaningful only once Pi has materialized the
+				// transcript. Writing it earlier must not manufacture the JSONL itself.
+				if (transcriptMaterialized) {
+					try {
+						const ps = metadataStore.get(session.id);
+						if (ps) {
+							const agentSessionId = (stateResp.data?.sessionId as string | undefined)
+								|| path.basename(agentSessionFile).replace(/\.jsonl$/, "");
+							const sidecar = buildSessionSidecar(ps, agentSessionId, undefined);
+							writeSessionSidecar(agentSessionFile, sidecar);
+						}
+					} catch (err) {
+						console.warn(`[session-manager] Failed to write session sidecar for ${session.id}: ${err}`);
+					}
 				}
 				return; // success
 			} catch (err) {
@@ -14325,6 +15179,7 @@ export class SessionManager {
 			agentDeps: this.messageAuthorDependencies(identity),
 			latestMessageUpdate: live?.latestMessageUpdate,
 			inFlightSteerTexts: live?.inFlightSteerTexts,
+			contextClearBoundaries: persisted?.contextClearBoundaries,
 			...(cursorProjection?.data === snapshot
 				? { transcriptPromptEntryIds: cursorProjection.entryIds }
 				: {}),
@@ -17185,27 +18040,37 @@ export class SessionManager {
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
-		// Delete .jsonl file. Exact persisted paths outside trusted sessions
-		// roots are read-compatible only; never purge/delete them or sidecars.
-		if (ps.agentSessionFile) {
-			const safeFile = isHostAbsoluteAgentSessionPath(ps.agentSessionFile)
-				? resolveSafeSessionsPath(ps.agentSessionFile)
-				: ps.agentSessionFile;
-			if (safeFile) {
-				const purgeCtx = sessionFsContextForAgentFile(ps, safeFile);
-				await sessionFileDelete(purgeCtx, safeFile, this.sandboxManager).catch(err => {
-					console.error(`[session-manager] Failed to delete .jsonl for ${ps.id}:`, err);
-				});
+		// Delete the active and every retained pre-clear transcript exactly once.
+		// Exact host paths outside purge-safe roots remain read-compatible only.
+		const transcriptPaths = [
+			ps.agentSessionFile,
+			...normalizeContextClearBoundaries(ps.contextClearBoundaries)
+				.map((boundary) => boundary.previousAgentSessionFile),
+		].filter((filePath): filePath is string => typeof filePath === "string" && filePath.length > 0);
+		const deletedIdentities = new Set<string>();
+		for (const transcriptPath of transcriptPaths) {
+			let identity: string;
+			let safeFile: string | null;
+			try {
+				identity = this._validatedAgentSessionPathIdentity(ps, transcriptPath);
+				if (deletedIdentities.has(identity)) continue;
+				deletedIdentities.add(identity);
+				safeFile = canonicalContainerAgentSessionPath(transcriptPath)
+					?? (isHostAbsoluteAgentSessionPath(transcriptPath)
+						? resolveSafeSessionsPath(transcriptPath)
+						: null);
+			} catch {
+				continue;
 			}
-			// Delete the bobbit sidecar alongside the .jsonl. Best-effort —
-			// host-side path lookup (sidecars are bobbit-owned, never written
-			// by sandboxed agents). Missing file is fine.
-			if (safeFile) {
-				try {
-					await sessionSidecarDelete(safeFile);
-				} catch (err) {
-					console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err);
-				}
+			if (!safeFile) continue;
+			const purgeCtx = sessionFsContextForAgentFile(ps, safeFile);
+			await sessionFileDelete(purgeCtx, safeFile, this.sandboxManager).catch(err => {
+				console.error(`[session-manager] Failed to delete retained .jsonl for ${ps.id}:`, err);
+			});
+			// Recovery sidecars are host-owned and adjacent only to safe host paths.
+			if (!canonicalContainerAgentSessionPath(safeFile)) {
+				try { await sessionSidecarDelete(safeFile); }
+				catch (err) { console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err); }
 			}
 		}
 

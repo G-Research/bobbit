@@ -144,17 +144,20 @@ A unified registry (`assistant-registry.ts`) maps assistant types to their promp
 
 Sessions created with an `assistantType` get the corresponding system prompt automatically. Assistant prompts can be edited via their YAML files and are reloaded on change.
 
-## Compaction
+## Session context controls
 
-Context compaction reduces token usage while remaining part of the active turn lifecycle.
+Use the built-in context commands when a conversation is approaching its context limit or when the agent should start over without creating another Bobbit session.
 
-- **Manual**: User triggers via `/compact`; input accepted during it targets the next turn.
-- **Threshold/overflow**: Pi triggers compaction under context pressure; continuation steers can remain attached to the interrupted turn.
-- All user input remains visible, but no Pi prompt/steer RPC is attempted while the compaction fence is active.
-- One idempotent finisher releases eligible work exactly once.
-- Recoverable `length` overflow invalidates the first truncated assistant stream before Pi retries once.
+- **`/compact`** reduces token use by replacing older conversation context with a generated summary and retaining a recent tail. The summary and retained messages remain available to the model.
+- **`/clear`** starts with an empty model-facing conversation. It retains the same Bobbit session, worktree, role or staff and goal association, system prompt, model, thinking level, permissions, and other session configuration. Unlike compaction, it creates no summary: prior user, assistant, tool, and compaction messages are never restored to model context, and the `/clear` command itself is not model input.
 
-See [Context compaction](compaction.md#reliable-turn-fence-and-release).
+Select `/clear` from slash-command autocomplete or submit it as a standalone command; matching is case-insensitive. Once the invocation is accepted, Bobbit clears the submitted composer text and attachment drafts. If a turn is active, Bobbit interrupts it using the same safe admission boundary as `/compact`. Prompts and steers accepted around that boundary remain durable but cannot reach the old context; Bobbit releases them in order, exactly once, only when the cleared context is safe to use.
+
+A durable **Context Cleared** boundary remains in the transcript. Expand it to inspect the immediately preceding segment using the dimmed, read-only history view. The boundary and its display-only history survive browser reloads, gateway restarts, agent respawns, and repeated clears; each boundary owns only its preceding segment. Expanding history never adds it back to the active transcript or model context.
+
+The replacement is atomic. If Bobbit cannot capture history, activate the empty context, or persist both the new transcript pointer and boundary, it rolls back to the prior usable context and reports an actionable retry or recovery error instead of publishing a partial clear.
+
+For compaction's automatic threshold and overflow behavior, queue fencing, and recovery details, see [Context compaction](compaction.md#reliable-turn-fence-and-release).
 
 ## System Prompt Assembly
 
