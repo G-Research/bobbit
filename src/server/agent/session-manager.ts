@@ -4106,8 +4106,8 @@ export class SessionManager {
 	}
 
 	private _restoreSessionCoalesced(ps: PersistedSession): Promise<SessionInfo | undefined> {
-		return this._coordinateSessionReplacement(ps.id, "restore", async (token) => {
-			await this.restoreSession(ps, token);
+		return this._coordinateSessionReplacement(ps.id, "restore", async () => {
+			await this.restoreSession(ps);
 			return this.sessions.get(ps.id);
 		}, { coalesceKey: "rehydrate", drainOnRelease: true, cancelOnTerminal: () => undefined });
 	}
@@ -11422,7 +11422,7 @@ export class SessionManager {
 		if (opts?.preserveSandboxRealm) (ps as any)._preserveSandboxRealm = true;
 		opts?.mutatePs?.(ps);
 		try {
-			await this.restoreSession(ps, token);
+			await this.restoreSession(ps);
 			if (token.coordinator.terminalRequest) {
 				const cancelled = this.sessions.get(id);
 				if (cancelled && cancelled !== session) {
@@ -12452,14 +12452,13 @@ export class SessionManager {
 		};
 	}
 
-	private async restoreSession(ps: PersistedSession, replacementToken?: SessionReplacementToken): Promise<void> {
+	private async restoreSession(ps: PersistedSession): Promise<void> {
 		// Verifier-owned work is re-driven by VerificationHarness. Reliable user
 		// occurrences are reconciled against their terminal sidecar before install.
 		const preparedRestore = this.preparePersistedIntentRestore(ps);
 		ps = preparedRestore.ps;
 		const restoreStore = preparedRestore.store;
-		const activeReplacementToken = replacementToken
-			?? this._sessionReplacementCoordinators.get(ps.id)?.active;
+		const activeReplacementToken = this._sessionReplacementCoordinators.get(ps.id)?.active;
 		const restoredAuthorBindings = preparedRestore.bindings;
 		const restoredQueue = ps.messageQueue ?? [];
 		if (preparedRestore.changed) await restoreStore.flushAsync();
@@ -13159,7 +13158,7 @@ export class SessionManager {
 			let candidateRestoreStarted = false;
 			try {
 				candidateRestoreStarted = true;
-				await this.restoreSession(replacementPs, token);
+				await this.restoreSession(replacementPs);
 				candidate = this.sessions.get(sessionId);
 				const verifiedModel = `${selectedProvider}/${selectedModelId}`;
 				if (
@@ -15058,7 +15057,13 @@ export class SessionManager {
 				const agentSessionFile = stateResp.data.sessionFile;
 				const metadataStore = this.resolveStoreForSession(session.id);
 				const current = metadataStore.get(session.id);
-				if (!current) throw new Error("Persisted session metadata disappeared");
+				if (!current) {
+					// Preserve the historical lightweight-store seam used before a full
+					// persisted record exists. There is no clear boundary to validate and
+					// Pi must remain the sole owner of lazy transcript creation.
+					metadataStore.update(session.id, { agentSessionFile });
+					return;
+				}
 				const latestClear = latestContextClearBoundary(current.contextClearBoundaries);
 				const transcriptMaterialized = await sessionFileExists(
 					sessionFsContextForAgentFile(current, agentSessionFile),
