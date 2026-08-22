@@ -90,12 +90,24 @@ function messageRows(snapshot: { data?: unknown }): any[] {
 	return Array.isArray(data?.messages) ? data.messages : [];
 }
 
-function explicitConditionClearFrames(client: any): any[] {
+function sentFrames(client: any): any[] {
 	return client.send.mock.calls
-		.map(([payload]: [unknown]) => JSON.parse(String(payload)))
+		.map(([payload]: [unknown]) => JSON.parse(String(payload)));
+}
+
+function explicitConditionClearFrames(client: any): any[] {
+	return sentFrames(client)
 		.filter((frame: any) => frame?.type === "state"
 			&& Object.prototype.hasOwnProperty.call(frame.data, "condition")
 			&& frame.data.condition === null);
+}
+
+function statusImmediatelyBeforeConditionClear(client: any): any {
+	const frames = sentFrames(client);
+	const clearIndex = frames.findIndex((frame: any) => frame?.type === "state"
+		&& Object.prototype.hasOwnProperty.call(frame.data, "condition")
+		&& frame.data.condition === null);
+	return clearIndex > 0 ? frames[clearIndex - 1] : undefined;
 }
 
 function readFixtureUtf8(file: string): string {
@@ -484,6 +496,8 @@ describe("retired persisted model cold recovery", () => {
 			assert.equal(restoreBackgroundProcesses.mock.calls.length, 1, "fixture must hold activation after candidate install");
 		});
 		const stagedCandidate = manager.getSession(SESSION_ID);
+		const statusVersionBeforeClientTransfer = stagedCandidate?.statusVersion;
+		assert.equal(statusVersionBeforeClientTransfer, 1, "candidate restore must publish its initial live status before client transfer");
 		assert.deepEqual(stagedCandidate?.condition, EXPECTED_CONDITION, "canonical staging must retain the retired tuple condition");
 		assert.deepEqual(
 			manager.listSessions().find((session: any) => session.id === SESSION_ID)?.condition,
@@ -518,6 +532,21 @@ describe("retired persisted model cold recovery", () => {
 		const duringActivationConditionClearFrames = explicitConditionClearFrames(duringActivationClient);
 		assert.equal(firstConditionClearFrames.length, 1, "verified activation must publish one explicit condition clear");
 		assert.equal(duringActivationConditionClearFrames.length, 1, "verified activation must clear the condition for clients attached during staging");
+		const expectedReplayVersion = statusVersionBeforeClientTransfer! + 1;
+		assert.deepEqual(statusImmediatelyBeforeConditionClear(firstClient), {
+			type: "session_status",
+			status: "idle",
+			statusVersion: expectedReplayVersion,
+		}, "the original client must receive the canonical live status immediately before recovery clears its condition");
+		assert.deepEqual(statusImmediatelyBeforeConditionClear(duringActivationClient), {
+			type: "session_status",
+			status: "idle",
+			statusVersion: expectedReplayVersion,
+		}, "a client attached during activation must receive the same ordered live-status replay");
+		assert.ok(
+			(manager.getSession(SESSION_ID)?.statusVersion ?? 0) >= expectedReplayVersion,
+			"the recovery replay must advance the canonical monotonic status version before any released queue work",
+		);
 		assert.deepEqual(
 			firstConditionClearFrames[0]?.data?.model?.input,
 			["text", "image"],

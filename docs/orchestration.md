@@ -90,6 +90,38 @@ mutating (file-changing) tool.
   prompt, no accessory, inherits your stripped tools).
 - **Timeout** — blocking-mode default is 10 minutes.
 
+#### Capability, interaction, and lifecycle are independent
+
+A delegate's persisted `readOnly` flag describes its **tool capability**, not
+its chat lifecycle. It removes mutating tools from the child, but a live,
+non-archived read-only delegate remains a normal active session: its sprite
+follows its real status, its composer accepts follow-up prompts, and owner
+orchestration such as `team_prompt` and `team_wait` continues to work. This
+separation lets an owner ask a safe research or review helper to refine its
+answer without granting it write access.
+
+Two other fields have separate owners:
+
+- **Lifecycle/archive state** controls ended presentation. An explicit archive
+  or ordinary termination desaturates the session and removes its composer;
+  this evidence remains authoritative across navigation, session-list refresh,
+  reload, and reconnect.
+- **`nonInteractive`** is a server-driven interaction policy for verification
+  and similar agents. It keeps normal user prompting disabled independently of
+  both tool capability and archive state; a streaming verifier retains only its
+  intentional steer path.
+
+The one recoverable terminal-looking state is `MODEL_SELECTION_REQUIRED`. It
+remains readable and model-selectable rather than being presented as an
+ordinary ended session. On successful recovery, the gateway transfers clients
+to the verified replacement, publishes its canonical live status, and only
+then publishes the exact model/thinking tuple with an explicit
+`condition: null`. That order prevents a refresh or reconnect from briefly
+combining stale `terminated` status with a cleared condition and closing the
+composer. Partial state frames that omit `condition` never clear recovery,
+while explicit archive or ordinary termination evidence still wins over a
+generic live snapshot.
+
 > **One shared role pipeline (no ad-hoc per-path code).** The bare delegate path
 > (`session-manager.ts::createDelegateSession`) now threads `role` / `roleName` / `rolePrompt`
 > into its `SessionSetupPlan`, so the **same** role-prompt + role-accessory application in

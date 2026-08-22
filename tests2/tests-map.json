@@ -8,7 +8,7 @@
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 204
+    "v2-integration": 203
   },
   "methods": {
     "adapter": 276,
@@ -3553,6 +3553,24 @@
     {
       "path": "tests2/browser/journeys/host-notifications.journey.spec.ts",
       "reason": "Browser journey for scoped session/project Host notifications, authoritative refresh after load/reload/gaps, clean unsubscribe, and project isolation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/delegate-interaction-mode.test.ts",
+      "reason": "Focused DOM coverage for independent lifecycle archive, read-only tool capability, and non-interactive interaction-mode projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/read-only-delegate-interaction.journey.spec.ts",
+      "reason": "Browser journey proving an active read-only delegate stays live and promptable through navigation, reload, reconnect, and authoritative refresh while mutating tools remain withheld.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

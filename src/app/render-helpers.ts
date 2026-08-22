@@ -1278,7 +1278,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			class="group ${treeOptions?.goalTitle ? "sidebar-status-goal-row" : ""} relative flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 				${active ? `bg-secondary text-foreground sidebar-session-active${hasChildren ? "" : " sidebar-active-no-chevron"}` : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
 			style=${`padding-left:var(--sidebar-chevron-w);filter:grayscale(1);opacity:0.75;${flat ? `--sidebar-status-motion-accent:${treeOptions?.projectColor || "var(--muted-foreground)"};` : ""}`}
-			@click=${() => connectToSession(session.id, true, { readOnly: true })}
+			@click=${() => connectToSession(session.id, true, { archived: true })}
 		>
 			${hasChildren ? html`<span
 				class="sidebar-chevron-slot sidebar-chevron-slot--absolute text-muted-foreground select-none cursor-pointer"

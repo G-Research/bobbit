@@ -107,6 +107,12 @@ const MODEL_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "set_image_model", provider: "openai", modelId: "gpt-image-2" },
 ];
 
+const MODEL_SELECTION_CONDITION = {
+	code: "MODEL_SELECTION_REQUIRED",
+	provider: "retired-provider",
+	modelId: "retired-model",
+} as const;
+
 const TITLE_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "generate_title" },
 	{ type: "summarize_goal_title", goalTitle: "Attacker controlled goal title" },
@@ -209,7 +215,7 @@ async function expectTaskControlsRejected(conn: WsConnection, code: string): Pro
 }
 
 test.describe("authenticated WebSocket session write policy", () => {
-	test("persisted read-only policy rejects every agent work frame while reads remain available", async ({ gateway }) => {
+	test("persisted read-only capability permits interaction but blocks permission widening", async ({ gateway }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		const live = gateway.sessionManager.getSession(sessionId);
@@ -218,45 +224,57 @@ test.describe("authenticated WebSocket session write policy", () => {
 		persistPolicy(gateway, sessionId, { readOnly: true });
 
 		const conn = await connectWs(sessionId);
-		const enqueuePrompt = vi.spyOn(gateway.sessionManager, "enqueuePrompt");
-		const deliverLiveSteer = vi.spyOn(gateway.sessionManager, "deliverLiveSteer");
-		const steerQueued = vi.spyOn(gateway.sessionManager, "steerQueued");
-		const removeQueued = vi.spyOn(gateway.sessionManager, "removeQueued");
-		const reorderQueue = vi.spyOn(gateway.sessionManager, "reorderQueue");
-		const retryLastPrompt = vi.spyOn(gateway.sessionManager, "retryLastPrompt").mockRejectedValue(new Error("policy guard missed retry"));
-		const restartAgent = vi.spyOn(gateway.sessionManager, "restartAgent").mockRejectedValue(new Error("policy guard missed restart"));
-		const grantToolPermission = vi.spyOn(gateway.sessionManager, "grantToolPermission").mockRejectedValue(new Error("policy guard missed grant"));
-		const compact = vi.spyOn(live.rpcClient, "compact").mockRejectedValue(new Error("policy guard missed compact"));
-		const modelControlSpies = spyOnModelControlMutations(gateway, live);
-		const titleControlSpies = spyOnTitleControlMutations(gateway);
-		const taskControlSpies = spyOnTaskControlPaths(gateway);
+		const enqueuePrompt = vi.spyOn(gateway.sessionManager, "enqueuePrompt").mockResolvedValue(undefined);
+		const deliverLiveSteer = vi.spyOn(gateway.sessionManager, "deliverLiveSteer").mockResolvedValue(undefined);
+		const steerQueued = vi.spyOn(gateway.sessionManager, "steerQueued").mockReturnValue(true);
+		const removeQueued = vi.spyOn(gateway.sessionManager, "removeQueued").mockReturnValue(true);
+		const reorderQueue = vi.spyOn(gateway.sessionManager, "reorderQueue").mockReturnValue(true);
+		const grantToolPermission = vi.spyOn(gateway.sessionManager, "grantToolPermission")
+			.mockRejectedValue(new Error("read-only capability guard missed permission widening"));
 		try {
-			await expectPolicyError(conn, { type: "prompt", text: "must not run" }, "SESSION_READ_ONLY");
-			// A read-only session has no streaming-steer carve-out.
-			live.status = "streaming";
-			await expectPolicyError(conn, { type: "steer", text: "must not redirect" }, "SESSION_READ_ONLY");
-			live.status = "idle";
-			for (const frame of [...QUEUE_CONTROL_FRAMES, ...WORK_CONTROL_FRAMES]) {
-				await expectPolicyError(conn, frame, "SESSION_READ_ONLY");
-			}
-			await expectModelControlsRejected(conn, "SESSION_READ_ONLY");
-			await expectTitleControlsRejected(conn, "SESSION_READ_ONLY");
-			clearTaskControlSpies(taskControlSpies);
-			await expectTaskControlsRejected(conn, "SESSION_READ_ONLY");
-			expectNoTaskControlPaths(taskControlSpies);
-			await expectExtensionWritesRejected(conn, "SESSION_READ_ONLY", "read-only");
+			conn.send({ type: "prompt", text: "direct read-only delegate follow-up", intentId: "readonly-prompt" });
+			await vi.waitFor(() => {
+				expect(
+					enqueuePrompt,
+					"READ_ONLY_DELEGATE_PROMPT_REJECTED: capability-only readOnly blocked a direct follow-up prompt",
+				).toHaveBeenCalledWith(
+					sessionId,
+					"direct read-only delegate follow-up",
+					expect.objectContaining({ source: "user", intentId: "readonly-prompt" }),
+				);
+			}, { timeout: 2_000 });
 
-			expect(enqueuePrompt).not.toHaveBeenCalled();
-			expect(deliverLiveSteer).not.toHaveBeenCalled();
-			expect(steerQueued).not.toHaveBeenCalled();
-			expect(removeQueued).not.toHaveBeenCalled();
-			expect(reorderQueue).not.toHaveBeenCalled();
-			expect(retryLastPrompt).not.toHaveBeenCalled();
-			expect(restartAgent).not.toHaveBeenCalled();
+			live.status = "streaming";
+			conn.send({ type: "steer", text: "redirect active read-only delegate", intentId: "readonly-live-steer" });
+			await vi.waitFor(() => expect(deliverLiveSteer).toHaveBeenCalledWith(
+				sessionId,
+				"redirect active read-only delegate",
+				expect.objectContaining({ source: "user", intentId: "readonly-live-steer" }),
+			), { timeout: 2_000 });
+
+			live.status = "idle";
+			conn.send({ type: "steer", text: "queue read-only delegate follow-up", intentId: "readonly-queued-steer" });
+			await vi.waitFor(() => expect(enqueuePrompt).toHaveBeenCalledWith(
+				sessionId,
+				"queue read-only delegate follow-up",
+				expect.objectContaining({ isSteered: true, source: "user", intentId: "readonly-queued-steer" }),
+			), { timeout: 2_000 });
+
+			for (const frame of QUEUE_CONTROL_FRAMES) conn.send(frame);
+			await vi.waitFor(() => {
+				expect(steerQueued).toHaveBeenCalledWith(sessionId, "queued-1");
+				expect(removeQueued).toHaveBeenCalledWith(sessionId, "queued-1");
+				expect(reorderQueue).toHaveBeenCalledWith(sessionId, ["queued-1"]);
+			}, { timeout: 2_000 });
+
+			await expectPolicyError(conn, {
+				type: "grant_tool_permission",
+				toolName: "bash",
+				scope: "tool",
+				mode: "session-only",
+			}, "SESSION_READ_ONLY");
 			expect(grantToolPermission).not.toHaveBeenCalled();
-			expect(compact).not.toHaveBeenCalled();
-			expectNoModelControlMutations(modelControlSpies);
-			await expectNoTitleControlMutations(titleControlSpies);
+			expect(gateway.sessionManager.getPersistedSession(sessionId)?.readOnly).toBe(true);
 			await expectReadFramesStillWork(conn);
 		} finally {
 			live.status = "idle";
@@ -265,13 +283,7 @@ test.describe("authenticated WebSocket session write policy", () => {
 			steerQueued.mockRestore();
 			removeQueued.mockRestore();
 			reorderQueue.mockRestore();
-			retryLastPrompt.mockRestore();
-			restartAgent.mockRestore();
 			grantToolPermission.mockRestore();
-			compact.mockRestore();
-			restoreModelControlSpies(modelControlSpies);
-			restoreTitleControlSpies(titleControlSpies);
-			restoreTaskControlSpies(taskControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}
@@ -356,6 +368,95 @@ test.describe("authenticated WebSocket session write policy", () => {
 			restoreModelControlSpies(modelControlSpies);
 			restoreTitleControlSpies(titleControlSpies);
 			restoreTaskControlSpies(taskControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("read-only capability admits set_model only through active model-selection recovery", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		persistPolicy(gateway, sessionId, { readOnly: true });
+		live.condition = MODEL_SELECTION_CONDITION;
+
+		const conn = await connectWs(sessionId);
+		const recoverModelSelection = vi.spyOn(gateway.sessionManager, "recoverModelSelectionRequired")
+			.mockResolvedValue(undefined);
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			conn.send({
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-20250514",
+				thinkingLevel: "high",
+			});
+			await vi.waitFor(() => expect(recoverModelSelection).toHaveBeenCalledWith(
+				sessionId,
+				"anthropic",
+				"claude-sonnet-4-20250514",
+				"high",
+			), { timeout: 2_000 });
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			live.condition = undefined;
+			recoverModelSelection.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("read-only capability still blocks ordinary set_model without a recovery condition", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		persistPolicy(gateway, sessionId, { readOnly: true });
+
+		const conn = await connectWs(sessionId);
+		const recoverModelSelection = vi.spyOn(gateway.sessionManager, "recoverModelSelectionRequired");
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			await expectPolicyError(conn, {
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-20250514",
+			}, "SESSION_READ_ONLY");
+			expect(recoverModelSelection).not.toHaveBeenCalled();
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			recoverModelSelection.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("non-interactive policy blocks read-only model-selection recovery", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		persistPolicy(gateway, sessionId, { readOnly: true, nonInteractive: true });
+		live.condition = MODEL_SELECTION_CONDITION;
+
+		const conn = await connectWs(sessionId);
+		const recoverModelSelection = vi.spyOn(gateway.sessionManager, "recoverModelSelectionRequired");
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			await expectPolicyError(conn, {
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-20250514",
+			}, "NON_INTERACTIVE_WORK_CONTROL");
+			expect(recoverModelSelection).not.toHaveBeenCalled();
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			live.condition = undefined;
+			recoverModelSelection.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}

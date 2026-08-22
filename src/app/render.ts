@@ -26,7 +26,7 @@ export { showHeaderToast } from "./header-toast.js";
 import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
-import { backToSessions, createAndConnectSession } from "./session-manager.js";
+import { applyKnownSessionLifecyclePresentation, backToSessions, createAndConnectSession, sessionLifecycleRecordForPresentation } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureHeaderSessionActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -2354,11 +2354,31 @@ export function doRenderApp(): void {
 	const routeArchivedSession = routeCachedSession ? isArchivedSessionActionSource(routeCachedSession) : false;
 	const panelAgentInterface = state.chatPanel?.agentInterface as any;
 	const panelSessionId = typeof panelAgentInterface?.session?.sessionId === "string" ? panelAgentInterface.session.sessionId : undefined;
-	// Archived read-only panel agents may not expose `session.sessionId`; when
-	// the current route is archived or not yet cached, the route id is the only
-	// stable action source. Keep this read-only-only so live routes don't get
-	// normal live session actions until their session binding is explicit.
-	const routeHasReadOnlyPanel = Boolean(routeSessionId && panelAgentInterface?.readOnly && (
+	// An authoritative session-list refresh also renders the app. Reconcile the
+	// bound panel here so lifecycle presentation updates even without a new WS
+	// status frame or navigation, while capability-only `readOnly` remains inert.
+	const panelBoundSessionId = panelSessionId ?? state.remoteAgent?.gatewaySessionId;
+	const panelBoundSession = panelBoundSessionId
+		? state.gatewaySessions.find(session => session.id === panelBoundSessionId)
+			?? state.archivedSessions.find(session => session.id === panelBoundSessionId)
+		: undefined;
+	if (panelAgentInterface && panelBoundSession) {
+		const panelRemote = state.remoteAgent;
+		let presentationRecord: Partial<GatewaySession> | undefined = panelBoundSession;
+		if (panelRemote
+			&& panelRemote.gatewaySessionId === panelBoundSessionId
+			&& panelAgentInterface.session === panelRemote) {
+			presentationRecord = sessionLifecycleRecordForPresentation(panelBoundSession, panelRemote);
+		}
+		applyKnownSessionLifecyclePresentation(panelAgentInterface, [presentationRecord], {
+			remoteArchived: panelRemote?.state.isArchived === true,
+		});
+	}
+	// Archived panel agents may not expose `session.sessionId`; when the current
+	// route is archived or not yet cached, the route id is the only stable action
+	// source. Keep this archive-only so live routes do not gain session actions
+	// until their session binding is explicit.
+	const routeHasArchivedPanel = Boolean(routeSessionId && panelAgentInterface?.archived && (
 		panelSessionId === routeSessionId
 		|| (!panelSessionId && (routeArchivedSession || !routeCachedSession))
 	));
@@ -2367,7 +2387,7 @@ export function doRenderApp(): void {
 		|| state.connectingSessionId === routeSessionId
 		|| state.remoteAgent?.gatewaySessionId === routeSessionId
 		|| routeArchivedSession
-		|| routeHasReadOnlyPanel
+		|| routeHasArchivedPanel
 	));
 	const activeSid = (routeSessionId && routeIsCurrentSession) ? routeSessionId : activeSessionId();
 	const sessionTitle = connected && state.remoteAgent ? (state.remoteAgent.title || "New session") : "";
@@ -2379,8 +2399,8 @@ export function doRenderApp(): void {
 		if (cached) return cached;
 		const ai = panelAgentInterface;
 		const aiSessionId = typeof ai?.session?.sessionId === "string" ? ai.session.sessionId : undefined;
-		const routeReadOnlyPanelSource = activeSid === routeSessionId && routeHasReadOnlyPanel;
-		if (!ai?.readOnly || (state.selectedSessionId !== activeSid && state.remoteAgent?.gatewaySessionId !== activeSid && aiSessionId !== activeSid && !routeReadOnlyPanelSource)) return undefined;
+		const routeArchivedPanelSource = activeSid === routeSessionId && routeHasArchivedPanel;
+		if (!ai?.archived || (state.selectedSessionId !== activeSid && state.remoteAgent?.gatewaySessionId !== activeSid && aiSessionId !== activeSid && !routeArchivedPanelSource)) return undefined;
 		return {
 			id: activeSid,
 			title: sessionTitle || "New session",
@@ -2394,7 +2414,6 @@ export function doRenderApp(): void {
 			delegateOf: ai.delegateOf,
 			teamGoalId: ai.teamGoalId,
 			assistantType: ai.assistantType,
-			readOnly: true,
 			archived: true,
 		} as GatewaySession;
 	})() : undefined;

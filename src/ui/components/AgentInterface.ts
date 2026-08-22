@@ -153,8 +153,8 @@ export class AgentInterface extends LitElement {
 	// Optional callback called when cost display is clicked
 	@property({ attribute: false }) onCostClick?: () => void;
 	private get _showGitStatusWidget(): boolean { return this.gitRepoKnown !== 'no' && this.gitRepoKnown !== 'hidden'; }
-	// When true, hide the message editor (for archived/read-only sessions)
-	@property({ type: Boolean }) readOnly = false;
+	// Lifecycle-only presentation state. Tool capability restrictions live on GatewaySession.readOnly.
+	@property({ type: Boolean }) archived = false;
 	// When true, show the editor only while agent is streaming (steer-only mode)
 	@property({ type: Boolean }) nonInteractive = false;
 
@@ -165,6 +165,7 @@ export class AgentInterface extends LitElement {
 	 * same rules; this is defence-in-depth UX.
 	 */
 	private get canContinueArchived(): boolean {
+		if (!this.archived) return false;
 		const record = this._archivedSessionRecord();
 		return !!record && canContinueArchivedSession(record);
 	}
@@ -174,20 +175,20 @@ export class AgentInterface extends LitElement {
 		if (!sid) return null;
 		const fromState = appState.archivedSessions.find((s) => s.id === sid)
 			|| appState.gatewaySessions.find((s) => s.id === sid);
-		if (fromState) return { ...fromState, readOnly: fromState.readOnly || this.readOnly };
+		if (fromState) return { ...fromState, archived: fromState.archived || this.archived };
 		return {
 			id: sid,
 			title: (this.session as any)?.title || "Archived session",
 			cwd: this.cwd || "",
 			projectId: this.projectId,
 			status: "archived",
+			archived: true,
 			createdAt: 0,
 			lastActivity: 0,
 			clientCount: 0,
 			goalId: this.goalId,
 			delegateOf: this.delegateOf,
 			teamGoalId: this.teamGoalId,
-			readOnly: this.readOnly,
 			nonInteractive: this.nonInteractive,
 		};
 	}
@@ -477,7 +478,7 @@ export class AgentInterface extends LitElement {
 		if (!source) return undefined;
 		const effective: GatewaySession = {
 			...source,
-			readOnly: source.readOnly || this.readOnly,
+			archived: source.archived || this.archived,
 			nonInteractive: source.nonInteractive || this.nonInteractive,
 		};
 		return canForkSession(effective) ? source : undefined;
@@ -577,7 +578,7 @@ export class AgentInterface extends LitElement {
 	/**
 	 * Per-session composer attachment draft, lifted out of the transient
 	 * <message-editor> element so it survives element recreation (slow-path
-	 * session switch, reload, readOnly/isPreparing re-render). Bound INTO the
+	 * session switch, reload, archived/isPreparing re-render). Bound INTO the
 	 * editor via `.attachments` and updated back via `.onFilesChange`. Durable
 	 * across reload via the IndexedDB PromptDraftAttachmentsStore.
 	 * See docs/design/composer-draft-persistence.md.
@@ -929,7 +930,7 @@ export class AgentInterface extends LitElement {
 			const newSid = this.session?.sessionId;
 			// Restore the per-session composer attachment draft (lifted out of the
 			// transient <message-editor>) whenever the bound session changes —
-			// covers slow-path switch, reload, and readOnly/isPreparing re-renders.
+			// covers slow-path switch, reload, and archived/isPreparing re-renders.
 			if (this._attachmentDraftSessionId !== newSid) {
 				this._loadAttachmentDraft(newSid);
 			}
@@ -941,7 +942,7 @@ export class AgentInterface extends LitElement {
 			}
 		}
 		// Lazily populate the archived-session proposal-type list when we know
-		// the session is read-only and continuable. Fire-and-forget; the result
+		// the session is archived and continuable. Fire-and-forget; the result
 		// triggers a follow-up render via @state.
 		this._maybeRefreshArchivedProposals();
 	}
@@ -2171,7 +2172,7 @@ export class AgentInterface extends LitElement {
 					.tools=${state.tools}
 					.sessionId=${this.session?.sessionId ?? ""}
 					.isStreaming=${state.isStreaming}
-					.archived=${this.readOnly && !this.nonInteractive}
+					.archived=${this.archived}
 					.pendingToolCalls=${state.pendingToolCalls}
 					.permissionBlockedTools=${this._activePermissionToolNames()}
 					.toolResultsById=${toolResultsById}
@@ -2687,7 +2688,7 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : nothing}
-						${(this.readOnly && !(this.nonInteractive && state.isStreaming)) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
+						${this.archived || (this.nonInteractive && !state.isStreaming) || (state as any).isPreparing ? nothing : html`<message-editor style="position:relative;z-index:20"
 							.sessionId=${this.session?.sessionId}
 							.cwd=${this.cwd}
 							.projectId=${this.projectId}
