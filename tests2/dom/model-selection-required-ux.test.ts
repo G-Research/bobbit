@@ -3,7 +3,13 @@ import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { connectToSession, selectSession, uncacheSession } from "../../src/app/session-manager.js";
+import {
+	applyKnownSessionLifecyclePresentation,
+	connectToSession,
+	installSessionConditionLifecycleReconciliation,
+	selectSession,
+	uncacheSession,
+} from "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
 import { setRenderApp, state } from "../../src/app/state.js";
 import { AgentInterface } from "../../src/ui/components/AgentInterface.js";
@@ -189,6 +195,64 @@ describe("retired-model session interaction mode", () => {
 });
 
 describe("retired-model recovery surface", () => {
+	it("reconciles ordered termination and authoritative condition frames without weakening archive precedence", async () => {
+		const agent = new RemoteAgent() as any;
+		agent._sessionId = SESSION_ID;
+		const ui = document.createElement("agent-interface") as AgentInterface;
+		ui.session = agent;
+		ui.gitRepoKnown = "no";
+		document.body.appendChild(ui);
+		state.gatewaySessions = [sessionRecord({ status: "idle", condition: undefined })];
+		state.selectedSessionId = SESSION_ID;
+		state.remoteAgent = agent;
+		state.chatPanel = { agent, agentInterface: ui } as any;
+		agent.onStatusChange = (status: string) => {
+			applyKnownSessionLifecyclePresentation(ui, [{
+				status,
+				condition: agent.state.condition,
+			} as any], { remoteArchived: agent.state.isArchived === true });
+		};
+		installSessionConditionLifecycleReconciliation(agent, SESSION_ID);
+
+		await agent.handleServerMessage({ type: "session_status", status: "terminated" });
+		await settle(ui);
+		expect(ui.archived).toBe(true);
+		expect(ui.querySelector("message-editor")).toBeNull();
+
+		await agent.handleServerMessage({
+			type: "state",
+			data: { status: "terminated", condition: CONDITION },
+		});
+		await settle(ui);
+		expect(ui.archived).toBe(false);
+		expect(ui.querySelector('[data-testid="model-selection-required-banner"]')).toBeTruthy();
+		expect(ui.querySelector("message-editor")).toBeTruthy();
+
+		await agent.handleServerMessage({
+			type: "state",
+			data: { status: "idle", condition: null },
+		});
+		await settle(ui);
+		expect(ui.archived).toBe(false);
+		expect(ui.querySelector('[data-testid="model-selection-required-banner"]')).toBeNull();
+		expect(ui.querySelector("message-editor")).toBeTruthy();
+
+		await agent.handleServerMessage({ type: "session_status", status: "terminated" });
+		await agent.handleServerMessage({ type: "state", data: { status: "terminated", serverCost: null } });
+		await settle(ui);
+		expect(ui.archived, "a partial state frame must not reverse ordinary termination").toBe(true);
+
+		state.gatewaySessions = [];
+		state.archivedSessions = [sessionRecord({ archived: true, status: "archived" })];
+		await agent.handleServerMessage({
+			type: "state",
+			data: { status: "terminated", condition: CONDITION },
+		});
+		await settle(ui);
+		expect(ui.archived, "archive lifecycle must win over a recovery condition").toBe(true);
+		expect(ui.querySelector("message-editor")).toBeNull();
+	});
+
 	it("shows the exact tuple and keeps the warning until an explicit verified state clears it", async () => {
 		const agent = new RemoteAgent() as any;
 		const sent: Array<Record<string, unknown>> = [];

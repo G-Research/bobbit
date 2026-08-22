@@ -183,6 +183,14 @@ const SESSION_CACHE_MAX = 10;
 type SessionLifecyclePresentationTarget = {
 	archived?: boolean;
 	nonInteractive?: boolean;
+	requestUpdate?: () => void;
+};
+
+type SessionLifecyclePresentationOptions = {
+	explicitArchived?: boolean;
+	remoteArchived?: boolean;
+	/** Only an explicit condition-bearing server frame may reverse transient termination. */
+	authoritativeCondition?: boolean;
 };
 
 function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefined): boolean {
@@ -192,24 +200,87 @@ function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefi
 		&& typeof condition.modelId === "string";
 }
 
+/**
+ * Prefer an explicit RemoteAgent condition snapshot over a possibly older list
+ * status, while retaining independent archive and non-interactive evidence.
+ */
+export function sessionLifecycleRecordForPresentation(
+	record: Partial<GatewaySession> | undefined,
+	remote: Pick<RemoteAgent, "conditionSnapshotReceived" | "state">,
+): Partial<GatewaySession> | undefined {
+	if (!remote.conditionSnapshotReceived) return record;
+	const archivedLifecycle = record?.archived === true || record?.status === "archived";
+	return {
+		...record,
+		status: archivedLifecycle
+			? record?.status
+			: (remote.state?.status as GatewaySession["status"] | undefined) ?? record?.status,
+		condition: remote.state?.condition,
+	} as Partial<GatewaySession>;
+}
+
 /** Apply known lifecycle presentation and independent server-driven interaction policy. */
 export function applyKnownSessionLifecyclePresentation(
 	target: SessionLifecyclePresentationTarget,
 	records: ReadonlyArray<Partial<GatewaySession> | undefined>,
-	options?: { explicitArchived?: boolean; remoteArchived?: boolean },
+	options?: SessionLifecyclePresentationOptions,
 ): void {
 	if (records.some((record) => record?.nonInteractive === true)) {
 		target.nonInteractive = true;
 	}
-	if (
-		options?.explicitArchived
+	const hasArchiveEvidence = options?.explicitArchived
 		|| options?.remoteArchived
-		|| records.some((record) => record?.archived === true
-			|| record?.status === "archived"
-			|| (record?.status === "terminated" && !isModelSelectionRequiredRecord(record)))
-	) {
+		|| records.some((record) => record?.archived === true || record?.status === "archived");
+	if (hasArchiveEvidence) {
+		target.archived = true;
+		return;
+	}
+	const hasRecoveryCondition = records.some((record) =>
+		record?.status === "terminated" && isModelSelectionRequiredRecord(record));
+	if (options?.authoritativeCondition && hasRecoveryCondition) {
+		target.archived = false;
+		return;
+	}
+	if (records.some((record) =>
+		record?.status === "terminated" && !isModelSelectionRequiredRecord(record))) {
 		target.archived = true;
 	}
+}
+
+/** Reconcile the one recoverable terminal state from explicit authoritative condition frames. */
+export function installSessionConditionLifecycleReconciliation(
+	remote: RemoteAgent,
+	sessionId: string,
+	explicitArchived = false,
+): () => void {
+	return remote.subscribe((event: any) => {
+		if (event?.type !== "state_update"
+			|| !event.data
+			|| !Object.prototype.hasOwnProperty.call(event.data, "condition")) return;
+		const panel = state.chatPanel;
+		const target = panel?.agentInterface as SessionLifecyclePresentationTarget | undefined;
+		const panelAgent: unknown = panel?.agent;
+		const interfaceSession: unknown = panel?.agentInterface?.session;
+		if (activeSessionId() !== sessionId
+			|| state.selectedSessionId !== sessionId
+			|| state.remoteAgent !== remote
+			|| remote.gatewaySessionId !== sessionId
+			|| panelAgent !== remote
+			|| interfaceSession !== remote
+			|| !target) return;
+		const knownRecord = state.gatewaySessions.find((record) => record.id === sessionId)
+			?? state.archivedSessions.find((record) => record.id === sessionId);
+		applyKnownSessionLifecyclePresentation(
+			target,
+			[sessionLifecycleRecordForPresentation(knownRecord, remote)],
+			{
+				explicitArchived,
+				remoteArchived: remote.state?.isArchived === true,
+				authoritativeCondition: true,
+			},
+		);
+		target.requestUpdate?.();
+	});
 }
 
 function cacheSession(sessionId: string, chatPanel: ChatPanel, remoteAgent: RemoteAgent): void {
@@ -1463,10 +1534,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const cachedKnownSession = state.gatewaySessions.find((s) => s.id === sessionId)
 			|| state.archivedSessions.find((s) => s.id === sessionId);
 		if (state.chatPanel.agentInterface) {
-			applyKnownSessionLifecyclePresentation(state.chatPanel.agentInterface, [cachedKnownSession], {
-				explicitArchived: options?.archived === true,
-				remoteArchived: cached.remoteAgent.state?.isArchived === true,
-			});
+			applyKnownSessionLifecyclePresentation(
+				state.chatPanel.agentInterface,
+				[sessionLifecycleRecordForPresentation(cachedKnownSession, cached.remoteAgent)],
+				{
+					explicitArchived: options?.archived === true,
+					remoteArchived: cached.remoteAgent.state?.isArchived === true,
+					authoritativeCondition: cached.remoteAgent.conditionSnapshotReceived,
+				},
+			);
 		}
 		state.remoteAgent.registerHostApiTransports();
 		state.connectionStatus = "connected";
@@ -1575,10 +1651,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				ai.delegateOf = s.delegateOf;
 				ai.teamGoalId = s.teamGoalId;
 				ai.assistantType = s.assistantType;
-				applyKnownSessionLifecyclePresentation(ai, [s], {
-					explicitArchived: options?.archived === true,
-					remoteArchived: cached.remoteAgent.state?.isArchived === true,
-				});
+				applyKnownSessionLifecyclePresentation(
+					ai,
+					[sessionLifecycleRecordForPresentation(s, cached.remoteAgent)],
+					{
+						explicitArchived: options?.archived === true,
+						remoteArchived: cached.remoteAgent.state?.isArchived === true,
+						authoritativeCondition: cached.remoteAgent.conditionSnapshotReceived,
+					},
+				);
 			};
 			applyFrom(sessionData);
 			const archivedMatch: any = state.archivedSessions?.find((s: any) => s.id === sessionId);
@@ -1788,6 +1869,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 			renderApp();
 		};
+		installSessionConditionLifecycleReconciliation(remote, sessionId, options?.archived === true);
 
 		remote.onConnectionStatusChange = (status: ConnectionStatus) => {
 			const isActive = activeSessionId() === sessionId;
@@ -2463,10 +2545,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			onApiKeyRequired: async () => true,
 		});
 		if (bindingPanel.agentInterface) {
-			applyKnownSessionLifecyclePresentation(bindingPanel.agentInterface, [sessionDataAny], {
-				explicitArchived: options?.archived === true,
-				remoteArchived: remote.state.isArchived === true,
-			});
+			applyKnownSessionLifecyclePresentation(
+				bindingPanel.agentInterface,
+				[sessionLifecycleRecordForPresentation(sessionDataAny, remote)],
+				{
+					explicitArchived: options?.archived === true,
+					remoteArchived: remote.state.isArchived === true,
+					authoritativeCondition: remote.conditionSnapshotReceived,
+				},
+			);
 		}
 		await setAgentPromise;
 		if (isStale()) { cleanupRemote(remote); return; }
@@ -2524,10 +2611,15 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Reconcile any record discovered by the fallback fetch. The common case
 		// already applied these flags synchronously during setAgent above.
 		if (state.chatPanel.agentInterface) {
-			applyKnownSessionLifecyclePresentation(state.chatPanel.agentInterface, [sessionDataAny], {
-				explicitArchived: options?.archived === true,
-				remoteArchived: remote.state.isArchived === true,
-			});
+			applyKnownSessionLifecyclePresentation(
+				state.chatPanel.agentInterface,
+				[sessionLifecycleRecordForPresentation(sessionDataAny, remote)],
+				{
+					explicitArchived: options?.archived === true,
+					remoteArchived: remote.state.isArchived === true,
+					authoritativeCondition: remote.conditionSnapshotReceived,
+				},
+			);
 		}
 
 		// Set up bg process kill/dismiss handlers
