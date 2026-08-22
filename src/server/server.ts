@@ -19778,7 +19778,7 @@ async function handleApiRoute(
 				roleId: body.roleId,
 				accessory: hasAccessoryUpdate ? body.accessory : undefined,
 				contextPolicy:
-					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
+					body.contextPolicy === "preserve" || body.contextPolicy === "compact" || body.contextPolicy === "clear"
 						? body.contextPolicy
 						: undefined,
 			});

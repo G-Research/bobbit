@@ -71,8 +71,8 @@ export function normalizeStaffAccessory(value: unknown): string {
 function normalizeStaffRecord(staff: PersistedStaff): PersistedStaff {
 	// Legacy records lack `sandboxed`; normalise to false.
 	staff.sandboxed = !!staff.sandboxed;
-	// Legacy records lack `contextPolicy`; normalise to "compact".
-	if (staff.contextPolicy !== "preserve" && staff.contextPolicy !== "compact") {
+	// Legacy/malformed records lack a valid `contextPolicy`; normalise to "compact".
+	if (staff.contextPolicy !== "preserve" && staff.contextPolicy !== "compact" && staff.contextPolicy !== "clear") {
 		staff.contextPolicy = "compact";
 	}
 	// Legacy/malformed records lack a valid accessory; normalise to "none".
@@ -114,14 +114,15 @@ export interface PersistedStaff {
 	 * What the InboxNudger does to context before injecting a wake digest.
 	 * - "preserve" — leave conversation context as-is (long-running threads).
 	 * - "compact"  — run /compact before nudging (default).
+	 * - "clear"    — clear model-facing context in place before nudging.
 	 *
 	 * Optional at the type level so creation paths can omit it; both load
 	 * normalisation (see `StaffStore.load`) and put-time normalisation
 	 * (see `StaffStore.put`) coerce missing/invalid values to "compact".
-	 * A future "clear" policy (terminate + respawn) is deferred — see
-	 * docs/design/staff-inbox.md §10.
+	 * Clear reuses `SessionManager.clearContext`, preserving staff/session
+	 * identity and the display-only transcript history.
 	 */
-	contextPolicy?: "preserve" | "compact";
+	contextPolicy?: "preserve" | "compact" | "clear";
 }
 
 /**
