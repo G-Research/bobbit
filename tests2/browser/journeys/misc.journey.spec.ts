@@ -356,10 +356,12 @@ test.describe("Journey: Prompt Stats", () => {
 			const statsBar = page.getByTestId("session-stats-bar");
 			await expect(statsBar).toBeVisible({ timeout: 15_000 });
 			await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
-			const contextSpan = statsBar.locator("span[title*='Context:']");
-			await expect(contextSpan).toBeVisible({ timeout: 15_000 });
-			await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
-			await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
+			const contextTrigger = statsBar.getByTestId("context-meter-trigger");
+			await expect(contextTrigger).toBeVisible({ timeout: 15_000 });
+			await expect(contextTrigger).toHaveAttribute("type", "button");
+			await expect(contextTrigger).toContainText(/\d+%/, { timeout: 15_000 });
+			await expect(contextTrigger).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
+			await expect(contextTrigger).toHaveAttribute("aria-label", /Context:.*tokens/, { timeout: 10_000 });
 			await expect(statsBar).toContainText("$", { timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
