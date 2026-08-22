@@ -130,8 +130,8 @@ export type SurfaceRef =
 	// server (the server derives the trusted packId from the `tool`) — it exists
 	// purely so `host.ui.openPanel({panelId})` resolves the panel WITHIN the
 	// renderer's pack (panel ids are pack-local). Absent for a built-in renderer.
-	| { kind: "tool"; tool: string; packId?: string }
-	| { kind: "pack"; packId: string; contributionKind: "panel" | "entrypoint" | "route"; contributionId: string };
+	| { kind: "tool"; tool: string; packId?: string; hasLocalData?: true }
+	| { kind: "pack"; packId: string; contributionKind: "panel" | "entrypoint" | "route"; contributionId: string; hasLocalData?: true };
 
 // Pack schema V1 §8.4: give pack PANELS a host API bound to the active session +
 // the panel's PACK-BOUND surface, so `panel.render(params, host)` can reach the
@@ -140,8 +140,14 @@ export type SurfaceRef =
 // contributionKind:"panel", contributionId:panelId}`. Registered from host-api
 // (which already imports pack-panels) so pack-panels stays free of a reverse
 // import cycle.
-setPanelHostFactory((sessionId, packId, panelId) =>
-	getHostApi(sessionId, undefined, { kind: "pack", packId, contributionKind: "panel", contributionId: panelId }),
+setPanelHostFactory((sessionId, packId, panelId, hasLocalData) =>
+	getHostApi(sessionId, undefined, {
+		kind: "pack",
+		packId,
+		contributionKind: "panel",
+		contributionId: panelId,
+		...(hasLocalData ? { hasLocalData: true } : {}),
+	}),
 );
 
 // Pack schema V1 §8.4: give pack LAUNCHER entrypoints (composer-slash /
@@ -155,8 +161,14 @@ setPanelHostFactory((sessionId, packId, panelId) =>
 // (`getEntrypoint`), so it must be a real entrypoint id (mirroring how the panel
 // factory threads the panelId). Registered from host-api (which already imports
 // pack-panels) so pack-panels stays free of a reverse cycle.
-setLauncherHostFactory((sessionId, packId, contributionId) =>
-	getHostApi(sessionId, undefined, { kind: "pack", packId, contributionKind: "entrypoint", contributionId }),
+setLauncherHostFactory((sessionId, packId, contributionId, hasLocalData) =>
+	getHostApi(sessionId, undefined, {
+		kind: "pack",
+		packId,
+		contributionKind: "entrypoint",
+		contributionId,
+		...(hasLocalData ? { hasLocalData: true } : {}),
+	}),
 );
 
 export function getHostApi(
@@ -236,6 +248,7 @@ export function getHostApi(
 		session: true,
 		ui: true,
 		store: true,
+		...(surface?.hasLocalData === true ? { localData: true } : {}),
 		channels: true,
 		sessionNotifications: true,
 		projectNotifications: true,
@@ -405,6 +418,22 @@ export function getHostApi(
 			// no-op (e.g. owning pack uninstalled).
 			navigate: (target) => navigateToTarget(target),
 		} as HostApi["ui"],
+		...(surface?.hasLocalData === true ? {
+			localData: {
+				directory: async (): Promise<string> => {
+					const resp = await scopedFetch((token) => ({
+						path: "/api/ext/local-data/directory",
+						init: { method: "POST", body: JSON.stringify({ sessionId, toolUseId, surfaceToken: token }) },
+					}));
+					if (!resp.ok) throw new Error(`localData.directory HTTP ${resp.status}`);
+					const data = (await resp.json()) as { directory?: unknown };
+					if (typeof data?.directory !== "string" || data.directory.length === 0) {
+						throw new Error("localData.directory: empty response");
+					}
+					return data.directory;
+				},
+			},
+		} : {}),
 		store: {
 			get: async (key: string) => (await storeOp("get", { key })) as never,
 			read: async <T = unknown>(key: string): Promise<StoreReadResult<T>> =>

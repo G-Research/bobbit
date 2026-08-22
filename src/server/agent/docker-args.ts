@@ -100,10 +100,48 @@ export function e2eSandboxVolumeCreateArgs(projectId: string, runId = process.en
 	return projectSandboxVolumeCreateArgs(projectId, runId);
 }
 
+export const PACK_LOCAL_DATA_CONTAINER_ROOT = "/bobbit/local-data";
+
+/** One winning pack's canonical project-local data bind mount. */
+export interface PackLocalDataMountPlan {
+	packId: string;
+	hostDirectory: string;
+	containerDirectory: string;
+}
+
+/** Stable sandbox path for a pack's local data. Pack names are manifest-validated. */
+export function packLocalDataContainerDirectory(packId: string): string {
+	if (!/^[a-z0-9][a-z0-9-]*$/.test(packId)) {
+		throw new Error(`[docker-args] Invalid pack ID for local-data mount: ${JSON.stringify(packId)}`);
+	}
+	return `${PACK_LOCAL_DATA_CONTAINER_ROOT}/${encodeURIComponent(packId)}`;
+}
+
+function sortedPackLocalDataMountPlans(plans: readonly PackLocalDataMountPlan[]): PackLocalDataMountPlan[] {
+	const sorted = [...plans].sort((a, b) => a.packId.localeCompare(b.packId));
+	const seenPackIds = new Set<string>();
+	for (const plan of sorted) {
+		if (seenPackIds.has(plan.packId)) {
+			throw new Error(`[docker-args] Duplicate pack local-data mount for ${plan.packId}`);
+		}
+		seenPackIds.add(plan.packId);
+		if (!plan.hostDirectory || !path.isAbsolute(plan.hostDirectory)) {
+			throw new Error(`[docker-args] Pack local-data host directory must be absolute for ${plan.packId}`);
+		}
+		const expectedContainerDirectory = packLocalDataContainerDirectory(plan.packId);
+		if (plan.containerDirectory !== expectedContainerDirectory) {
+			throw new Error(`[docker-args] Pack local-data container directory must be ${expectedContainerDirectory}`);
+		}
+	}
+	return sorted;
+}
+
 export interface DockerRunConfig {
 	image: string;
 	/** Host path to mount as /workspace (used for bind-mount mode when projectId is not set). */
 	workspaceDir: string;
+	/** Canonical project-local directories mounted read-write for winning packs. */
+	packLocalDataMounts?: readonly PackLocalDataMountPlan[];
 
 	// ── Labels ───────────────────────────────────────────────────────────
 	/** Label value for the label prefix. */
@@ -243,6 +281,13 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		// Legacy pool mode: bind-mount host directory as /workspace
 		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);
 	}
+	// Pack local-data mounts are writable by contract. Sort by pack identity so
+	// equivalent winning contribution sets always produce byte-identical args.
+	// Omitting the capability (or resolving no declarations) adds no args.
+	for (const mount of sortedPackLocalDataMountPlans(config.packLocalDataMounts ?? [])) {
+		args.push("-v", `${toDockerPath(mount.hostDirectory)}:${mount.containerDirectory}`);
+	}
+
 	// pi-coding-agent is baked into the Docker image (avoids 20x slower
 	// bind-mount I/O on Docker Desktop Windows/macOS). No node_modules mount needed.
 	args.push("-v", `${toDockerPath(toolsDir)}:/tools:ro`);

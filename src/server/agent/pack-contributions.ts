@@ -33,7 +33,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
-import type { PackManifest } from "./pack-types.js";
+import type { PackLocalDataDeclaration, PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
@@ -334,6 +334,8 @@ export interface PackContributions {
 	packId: string; // structural, from the pack root dir name
 	packName: string;
 	packRoot: string;
+	/** Present only when the winning schema-2 manifest declares local data. */
+	localData?: PackLocalDataDeclaration;
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
@@ -378,6 +380,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		hooks: loadHooks(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
+	if (manifest.localData) out.localData = manifest.localData;
 	const routes = loadRoutes(packRoot, manifest);
 	if (routes) out.routes = routes;
 	return out;

@@ -56,6 +56,7 @@ import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
+import { BOBBIT_PACK_LOCAL_DATA_ENV, resolvePackLocalDataEnvironment, type PackLocalDataBindingsResolver } from "./pack-local-data-runtime.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
@@ -422,6 +423,8 @@ export interface PipelineContext {
 	toolManager: ToolManager | null;
 	mcpManager: McpManager | null;
 	marketplacePiExtensionResolver?: MarketplacePiExtensionResolver | null;
+	/** Server-bound project/pack resolver. It never receives cwd or worktree paths. */
+	packLocalDataBindingsResolver?: PackLocalDataBindingsResolver | null;
 	goalManager: GoalManager;
 	taskManager: TaskManager;
 	projectConfigStore: import("./project-config-store.js").ProjectConfigStore | null;
@@ -1091,9 +1094,18 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
+	const packLocalDataEnv = resolvePackLocalDataEnvironment(
+		ctx.packLocalDataBindingsResolver,
+		plan.projectId,
+		plan.sandboxed === true,
+	);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
+	// Once the server binding is installed this is a reserved, server-derived
+	// value. An empty winning declaration set means the variable is absent rather
+	// than falling back to a caller-provided path map.
+	if (ctx.packLocalDataBindingsResolver) delete plan.bridgeOptions.env?.[BOBBIT_PACK_LOCAL_DATA_ENV];
 	const goalId = effectiveGoalId(plan);
 	const beforeToolCallFailClosed = ctx.hostInterceptors?.requiresFailClosed?.(
 		"beforeToolCall", plan.projectId, goalId,
@@ -1104,6 +1116,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	plan.bridgeOptions.env = {
 		...(plan.bridgeOptions.env || {}),
 		...activation.env,
+		...packLocalDataEnv,
 		// Tool lifecycle notifications use this exact-auth callback path even when
 		// no interceptor contributes a decision. Only failure policy is opt-in.
 		BOBBIT_HOST_HOOKS_ENABLED: "1",

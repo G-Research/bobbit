@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1142,
+  "censusTotal": 1143,
   "buckets": {
     "daily": 68,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 202
+    "v2-integration": 203
   },
   "methods": {
-    "adapter": 275,
+    "adapter": 276,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -21,8 +21,8 @@
   },
   "v2Native": [
     {
-      "path": "tests2/core/inbox-tool-credentials.test.ts",
-      "reason": "Core coverage that the first-party inbox tool forwards only the host-issued staff-session capability and no caller-controlled causation fields.",
+      "path": "tests2/core/pack-local-data.test.ts",
+      "reason": "Core coverage for schema-2 localData validation, canonical project-root materialization, worktree/polyrepo independence, link and non-directory rejection, stable sandbox projection, and no-declaration compatibility.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -30,8 +30,8 @@
       }
     },
     {
-      "path": "tests2/integration/notification-staff-inbox-auth.test.ts",
-      "reason": "Integration coverage for exact owning staff-session authority, redacted operator reads, cross-project isolation, and protected notification entry mutations.",
+      "path": "tests2/integration/pack-local-data-fixture.test.ts",
+      "reason": "Integration coverage proving the reusable fixture shares one canonical directory across a confined server route, Pi-extension tool, ordinary filesystem access, nested component cwd, and disabled-pack preservation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -39,134 +39,8 @@
       }
     },
     {
-      "path": "tests2/core/host-goal-notifications.test.ts",
-      "reason": "Core coverage for authoritative goal notification transitions, revisions, ordering, and non-fatal publication.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-hook-contributions.test.ts",
-      "reason": "Core coverage for declarative interceptor and notification contributions, activation, grants, ordering, and compatibility.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-hooks-catalogue.test.ts",
-      "reason": "Core contract coverage for the canonical host-hook catalogue, schemas, scopes, filters, versions, and privacy bounds.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-interceptor-router.test.ts",
-      "reason": "Core coverage for typed interceptor routing, deterministic folding, deadlines, authority rechecks, validation, and failure policy.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-notification-dispatcher.test.ts",
-      "reason": "Core coverage for canonical notification validation, immutable fanout, ordered queues, isolation, and diagnostics.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-pr-settings-notifications.test.ts",
-      "reason": "Core coverage for authoritative pull-request and settings notification publication with bounded value-free payloads.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-session-notifications.test.ts",
-      "reason": "Core coverage for canonical session and turn notification boundaries, retry suppression, revisions, and privacy.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-task-gate-notifications.test.ts",
-      "reason": "Core coverage for authoritative task and gate notification transitions, revisions, and publication ordering.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/host-tool-interceptor-order.test.ts",
-      "reason": "Core coverage for protected afterToolResult interception before persistence and safe toolCallCompleted publication.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/dom/extension-host-notification-bus.test.ts",
-      "reason": "DOM coverage for scoped Host notification subscriptions, generation fencing, gaps, coalesced refresh, unsubscribe, and legacy isolation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "dom"
-      }
-    },
-    {
-      "path": "tests2/integration/host-hooks-server-boundaries.test.ts",
-      "reason": "Integration coverage for real server hook publication boundaries and canonical payload projection.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/host-notification-routing.test.ts",
-      "reason": "Integration coverage for exact session/project WebSocket notification routing, binding, ordering, and project isolation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/host-notification-sandbox-ws.test.ts",
-      "reason": "Integration regression proving sandbox tokens cannot claim app client metadata to receive canonical notification deltas or refresh signals.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/notification-staff-dispatcher.test.ts",
-      "reason": "Integration coverage for notification staff filtering, canonical durable envelopes, deduplication, retry, cancellation, loop protection, and reconciliation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/browser/journeys/host-notifications.journey.spec.ts",
-      "reason": "Browser journey for scoped session/project Host notifications, authoritative refresh after load/reload/gaps, clean unsubscribe, and project isolation.",
+      "path": "tests2/browser/e2e/pack-local-data.spec.ts",
+      "reason": "Chromium journey proving an installed and enabled pack panel receives host.localData, shares its canonical project directory with a server route, survives reload, and preserves route-written data through uninstall and cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -3495,159 +3369,312 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/inbox-tool-credentials.test.ts",
+      "reason": "Core coverage that the first-party inbox tool forwards only the host-issued staff-session capability and no caller-controlled causation fields.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/notification-staff-inbox-auth.test.ts",
+      "reason": "Integration coverage for exact owning staff-session authority, redacted operator reads, cross-project isolation, and protected notification entry mutations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/host-goal-notifications.test.ts",
+      "reason": "Core coverage for authoritative goal notification transitions, revisions, ordering, and non-fatal publication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-hook-contributions.test.ts",
+      "reason": "Core coverage for declarative interceptor and notification contributions, activation, grants, ordering, and compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-hooks-catalogue.test.ts",
+      "reason": "Core contract coverage for the canonical host-hook catalogue, schemas, scopes, filters, versions, and privacy bounds.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-interceptor-router.test.ts",
+      "reason": "Core coverage for typed interceptor routing, deterministic folding, deadlines, authority rechecks, validation, and failure policy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-notification-dispatcher.test.ts",
+      "reason": "Core coverage for canonical notification validation, immutable fanout, ordered queues, isolation, and diagnostics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-pr-settings-notifications.test.ts",
+      "reason": "Core coverage for authoritative pull-request and settings notification publication with bounded value-free payloads.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-session-notifications.test.ts",
+      "reason": "Core coverage for canonical session and turn notification boundaries, retry suppression, revisions, and privacy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-task-gate-notifications.test.ts",
+      "reason": "Core coverage for authoritative task and gate notification transitions, revisions, and publication ordering.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-tool-interceptor-order.test.ts",
+      "reason": "Core coverage for protected afterToolResult interception before persistence and safe toolCallCompleted publication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/extension-host-notification-bus.test.ts",
+      "reason": "DOM coverage for scoped Host notification subscriptions, generation fencing, gaps, coalesced refresh, unsubscribe, and legacy isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/host-hooks-server-boundaries.test.ts",
+      "reason": "Integration coverage for real server hook publication boundaries and canonical payload projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/host-notification-routing.test.ts",
+      "reason": "Integration coverage for exact session/project WebSocket notification routing, binding, ordering, and project isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/host-notification-sandbox-ws.test.ts",
+      "reason": "Integration regression proving sandbox tokens cannot claim app client metadata to receive canonical notification deltas or refresh signals.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/notification-staff-dispatcher.test.ts",
+      "reason": "Integration coverage for notification staff filtering, canonical durable envelopes, deduplication, retry, cancellation, loop protection, and reconciliation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/host-notifications.journey.spec.ts",
+      "reason": "Browser journey for scoped session/project Host notifications, authoritative refresh after load/reload/gaps, clean unsubscribe, and project isolation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
     {
-      "path": "tests2/browser/journeys/app-smoke.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/crash-restart.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/cross-project-proposal-banner.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-editing.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-team-gates.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-team-gates-signoff.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-team-gates-reset.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/marketplace-packs.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/misc.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-multi-repo-subset.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-post-archive.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-onboarding-select-all.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-settings.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/preview-reopen-snapshot.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/read-session-renderer.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/prompt-interaction.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/proposals.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/project-proposal-accept.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/session-activity-restart.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/session-lifecycle.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/sidebar-nav.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/sidebar-status.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/sidebar-reveal-current.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/staff-debug.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/support-launcher.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/stories-registry.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/team-operations.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-dashboard-agent-duration.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/goal-dashboard-agent-dedupe.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
-      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -18572,6 +18599,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
+    },
+    {
+      "file": "tests/e2e/pack-local-data-runtime.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "Real gateway/runtime adapter for canonical host and ordinary/Pi agent bindings, lifecycle preservation, and the conditional real-Docker bidirectional mount round trip; browser ownership lives in tests2/browser/e2e/pack-local-data.spec.ts."
     },
     {
       "file": "tests/e2e/host-notifications.spec.ts",

@@ -464,6 +464,33 @@ describe("#7 install / uninstall / update", () => {
 		}
 	});
 
+	it("rejects project installs whose local data overlaps the managed pack tree", () => {
+		w(path.join(repo, "qa-pack", "pack.yaml"),
+			"name: qa-pack\nschema: 2\ndescription: qa tools\nversion: 1.0.0\n"
+			+ "localData:\n  scope: project\n  directory: .bobbit/config/market-packs/qa-pack/data\n"
+			+ "  access: read-write\n  preserveOnUninstall: true\n"
+			+ "contents:\n  roles: []\n  tools: [qa]\n  skills: []\n");
+		const sourceMarker = path.join(repo, "qa-pack", "source-marker.txt");
+		w(sourceMarker, "must remain");
+		const projectBase = path.join(root, "project");
+		const projectPackOrder = new ProjectConfigStore(path.join(projectBase, ".bobbit", "config"));
+
+		assert.throws(
+			() => inst.installPack({
+				sourceId: sourceId(),
+				dirName: "qa-pack",
+				scope: "project",
+				projectBase,
+				packOrderStore: projectPackOrder,
+			}),
+			(e: any) => e instanceof MarketplaceError && e.code === "invalid_pack",
+		);
+		const { marketPacksRoot } = scopePaths("project", projectBase);
+		assert.equal(fs.existsSync(path.join(marketPacksRoot, "qa-pack")), false);
+		assert.deepEqual(projectPackOrder.getPackOrder("project"), []);
+		assert.equal(fs.readFileSync(sourceMarker, "utf8"), "must remain");
+	});
+
 	it("uninstall deletes exactly the added dir and cleans pack_order", () => {
 		inst.installPack({ sourceId: sourceId(), dirName: "research-pack", scope: "server", packOrderStore: packOrder });
 		inst.installPack({ sourceId: sourceId(), dirName: "qa-pack", scope: "server", packOrderStore: packOrder });

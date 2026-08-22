@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "yaml";
-import type { PackManifest, PackMeta, PackRoutesRef, PackScope } from "./pack-types.js";
+import type { PackLocalDataDeclaration, PackManifest, PackMeta, PackRoutesRef, PackScope } from "./pack-types.js";
 
 /** Route name guard — mirrors the per-pack route allowlist token shape. */
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -64,6 +64,54 @@ function asStringArray(v: unknown): string[] | null {
 	return out;
 }
 
+const WINDOWS_RESERVED_LOCAL_DATA_NAMES = new Set([
+	"CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
+	...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
+	...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
+	...(["¹", "²", "³"] as const).flatMap(suffix => [`COM${suffix}`, `LPT${suffix}`]),
+]);
+
+const MANAGED_MARKETPLACE_LOCAL_DATA_ROOTS = [
+	".bobbit/config/market-packs",
+	"config/market-packs",
+] as const;
+
+/** Normalize one portable local-data directory declaration. The accepted form
+ * is already-trimmed, forward-slash-separated, and relative on every host. */
+export function normalizePackLocalDataDirectory(value: unknown): string | null {
+	if (typeof value !== "string" || value.length === 0 || value.trim() !== value) return null;
+	if (value.includes("\\") || value.includes(":")) return null;
+	if (path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || /^[A-Za-z]:/.test(value)) return null;
+	if (/[<>"|?*\0-\x1f\x7f]/.test(value)) return null;
+
+	const components = value.split("/");
+	for (const component of components) {
+		if (component.length === 0 || component === "." || component === "..") return null;
+		if (/[. ]$/.test(component)) return null;
+		const deviceStem = component.split(".", 1)[0]?.toUpperCase();
+		if (deviceStem && WINDOWS_RESERVED_LOCAL_DATA_NAMES.has(deviceStem)) return null;
+	}
+	const normalized = components.join("/");
+	const comparable = normalized.toLowerCase();
+	if (MANAGED_MARKETPLACE_LOCAL_DATA_ROOTS.some(root => comparable === root || comparable.startsWith(`${root}/`))) {
+		return null;
+	}
+	return normalized;
+}
+
+function parseLocalDataDeclaration(raw: unknown): PackLocalDataDeclaration | null {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+	const data = raw as Record<string, unknown>;
+	const directory = normalizePackLocalDataDirectory(data.directory);
+	if (
+		data.scope !== "project"
+		|| directory === null
+		|| data.access !== "read-write"
+		|| data.preserveOnUninstall !== true
+	) return null;
+	return { scope: "project", directory, access: "read-write", preserveOnUninstall: true };
+}
+
 /**
  * Validate a parsed object as a {@link PackManifest}. Returns the normalized
  * manifest, or `null` with a reason pushed onto `problems`.
@@ -113,6 +161,17 @@ export function validateManifest(
 	if (provides === null) return null;
 	const requires = schemaSupportsExtensionKeys ? parseCapabilities("requires") : undefined;
 	if (requires === null) return null;
+	let localData: PackLocalDataDeclaration | undefined;
+	if (schemaSupportsExtensionKeys && d.localData !== undefined) {
+		const parsed = parseLocalDataDeclaration(d.localData);
+		if (!parsed) {
+			return fail(
+				"pack.yaml: localData must declare scope=project, a portable relative directory, "
+				+ "access=read-write, and preserveOnUninstall=true",
+			);
+		}
+		localData = parsed;
+	}
 
 	const contents = d.contents;
 	if (!contents || typeof contents !== "object" || Array.isArray(contents)) {
@@ -192,6 +251,7 @@ export function validateManifest(
 	if (d.defaultDisabled === true) manifest.defaultDisabled = true;
 	if (provides !== undefined) manifest.provides = provides;
 	if (requires !== undefined) manifest.requires = requires;
+	if (localData !== undefined) manifest.localData = localData;
 	// NEW (pack-schema-v1 §1.2): optional top-level `routes: { module?, names? }`.
 	// Tolerant — a malformed routes block is dropped (no routes), never fatal.
 	const routes = parseRoutesRef(d.routes);

@@ -45,6 +45,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
 import { ActionError, type ActionHandlerCtx } from "../../src/server/extension-host/action-dispatcher.ts";
+import { createServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
 let tmp: string;
@@ -107,9 +108,51 @@ describe.concurrent("ModuleHost — confined execution (happy path + identity)",
 	it("runs a handler in a worker and returns its (structured-cloned) result", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
-			const url = writeModule(`export const actions = { run: async (ctx, arg) => ({ ok: true, echo: arg, tool: ctx.tool, sid: ctx.sessionId }) };`);
+			const url = writeModule(`export const actions = { run: async (ctx, arg) => ({ ok: true, echo: arg, tool: ctx.tool, sid: ctx.sessionId, hasLocalData: Object.hasOwn(ctx.host, "localData"), hasLocalDataCapability: Object.hasOwn(ctx.host.capabilities, "localData") }) };`);
 			const result = await mh.invoke(req(url, "run", bareCtx(), { n: 7 }));
-			assert.deepEqual(result, { ok: true, echo: { n: 7 }, tool: "demo_tool", sid: "sess-1" });
+			assert.deepEqual(result, { ok: true, echo: { n: 7 }, tool: "demo_tool", sid: "sess-1", hasLocalData: false, hasLocalDataCapability: false });
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("copies a declared local-data binding into the worker as a synchronous local namespace", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const directory = path.join(tmp, ".performance-optimisation");
+			const host = createServerHostApi({
+				sessionId: "sess-1",
+				packId: "performance-optimisation",
+				contributionId: "tools/performance",
+				localDataDirectory: directory,
+			});
+			let parentDirectoryReads = 0;
+			const countedHost = {
+				...host,
+				localData: { directory: () => { parentDirectoryReads++; return host.localData!.directory(); } },
+			};
+			const ctx: ActionHandlerCtx = { ...bareCtx(), host: countedHost };
+			const url = writeModule(
+				`const readBinding = (ctx) => ({` +
+				` value: ctx.host.localData.directory(),` +
+				` isPromise: typeof ctx.host.localData.directory()?.then === "function",` +
+				` hasCapability: ctx.host.capabilities.has("localData"),` +
+				` capability: ctx.host.capabilities.localData` +
+				` });` +
+				` export const actions = { directory: readBinding };` +
+				` export default { provider: readBinding };`,
+			);
+			const expected = {
+				value: directory,
+				isPromise: false,
+				hasCapability: true,
+				capability: true,
+			};
+
+			assert.deepEqual(await mh.invoke(req(url, "directory", ctx)), expected);
+			const providerRequest: InvokeRequest = { ...req(url, "provider", ctx), exportKind: "providers" };
+			assert.deepEqual(await mh.invoke(providerRequest), expected);
+			assert.equal(parentDirectoryReads, 2, "each worker receives one serialized string rather than proxying directory() calls");
 		} finally {
 			mh.dispose();
 		}

@@ -19,7 +19,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, projectSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
+import {
+	buildDockerRunArgs,
+	PACK_LOCAL_DATA_CONTAINER_ROOT,
+	packLocalDataContainerDirectory,
+	projectSandboxVolumeCreateArgs,
+	projectSandboxVolumeNames,
+	SANDBOX_STATE_MOUNTS,
+	validatedE2ERunId,
+	type PackLocalDataMountPlan,
+} from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -67,6 +76,11 @@ export interface AgentDirMountStalenessResult {
 export interface StateDirMountExpectation {
 	stateDir: string;
 }
+
+/** Live project-aware resolver; callers must not snapshot winning pack mounts. */
+export type PackLocalDataMountPlanResolver = (
+	projectId: string,
+) => readonly PackLocalDataMountPlan[] | Promise<readonly PackLocalDataMountPlan[]>;
 
 export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
 	return hostContent === containerContent
@@ -180,6 +194,49 @@ export function getStateDirMountStaleness(
 			const mode = readOnly ? "read-only" : "writable";
 			return { stale: true, reason: `state mount ${destination} does not match the active ${mode} state directory` };
 		}
+	}
+	return { stale: false };
+}
+
+/**
+ * Compare the immutable Docker bind set with the current winning declarations.
+ * This is intentionally exact: missing, duplicate, read-only, retargeted, and
+ * stale-extra local-data mounts all require container recreation.
+ */
+export function getPackLocalDataMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: readonly PackLocalDataMountPlan[],
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+
+	const actual = mounts.filter((mount) => {
+		const destination = normalizeContainerMountDestination(mount?.Destination);
+		return destination === PACK_LOCAL_DATA_CONTAINER_ROOT
+			|| destination.startsWith(`${PACK_LOCAL_DATA_CONTAINER_ROOT}/`);
+	});
+	const seenPackIds = new Set<string>();
+	for (const plan of expected) {
+		if (seenPackIds.has(plan.packId)) {
+			return { stale: true, reason: `duplicate expected pack local-data mount for ${plan.packId}` };
+		}
+		seenPackIds.add(plan.packId);
+		const destination = packLocalDataContainerDirectory(plan.packId);
+		if (plan.containerDirectory !== destination) {
+			return { stale: true, reason: `pack local-data destination for ${plan.packId} is not stable` };
+		}
+		const matches = actual.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
+		if (matches.length === 0) return { stale: true, reason: `missing pack local-data mount ${destination}` };
+		if (matches.length !== 1) return { stale: true, reason: `duplicate pack local-data mount ${destination}` };
+		const match = matches[0];
+		if (!mountSourceMatches(match.Source, plan.hostDirectory)) {
+			return { stale: true, reason: `pack local-data mount ${destination} has a stale host source` };
+		}
+		if (match.RW !== true || isMountReadOnly(match)) {
+			return { stale: true, reason: `pack local-data mount ${destination} is not writable` };
+		}
+	}
+	if (actual.length !== expected.length) {
+		return { stale: true, reason: "container has stale extra pack local-data mounts" };
 	}
 	return { stale: false };
 }
@@ -323,6 +380,8 @@ export interface ProjectSandboxOptions {
 	 * container. See `docs/design/base-ref.md` §6.
 	 */
 	baseRefResolver?: () => string | undefined;
+	/** Re-resolved for reconnect checks, explicit refreshes, and every create. */
+	resolvePackLocalDataMounts?: PackLocalDataMountPlanResolver;
 }
 
 export interface ContainerState {
@@ -959,6 +1018,36 @@ export class ProjectSandbox {
 		}
 	}
 
+	/**
+	 * Apply changed winning pack local-data mounts to the immutable container.
+	 * Returns false without disruption when the live plan already matches.
+	 */
+	async refreshPackLocalDataMounts(): Promise<boolean> {
+		if (!this.options.resolvePackLocalDataMounts) return false;
+		return this._withContainerLifecycle(async () => {
+			if (this._status === "starting" && this._readyPromise) await this._readyPromise;
+			const oldContainerId = this.containerId;
+			if (!oldContainerId) return false;
+
+			const expected = await this._resolvePackLocalDataMounts();
+			if (!(await this._hasStalePackLocalDataMounts(oldContainerId, expected))) return false;
+
+			this._recovering = true;
+			this._status = "error";
+			this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+			try {
+				await this._removeContainer(oldContainerId);
+				this.containerId = null;
+				await this.init();
+				this._emitHealthEvent({ type: "container-recovered", projectId: this.options.projectId, containerId: this.containerId! });
+				console.log(`[project-sandbox] Refreshed pack local-data mounts for project ${this.options.projectId}`);
+				return true;
+			} finally {
+				this._recovering = false;
+			}
+		});
+	}
+
 	/** Graceful shutdown: stop the container (don't remove — named volume persists). */
 	async shutdown(): Promise<void> {
 		this.stopHealthMonitor();
@@ -1042,6 +1131,14 @@ export class ProjectSandbox {
 			const staleStateMounts = await this._hasStaleStateDirMounts(existingId);
 			if (staleStateMounts) {
 				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale state mounts; recreating`);
+				await this._removeContainer(existingId);
+				await this._createContainer(e2eRunId);
+				await this._runInitSequence();
+				return;
+			}
+
+			if (this.options.resolvePackLocalDataMounts && await this._hasStalePackLocalDataMounts(existingId)) {
+				console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has stale pack local-data mounts; recreating`);
 				await this._removeContainer(existingId);
 				await this._createContainer(e2eRunId);
 				await this._runInitSequence();
@@ -1165,6 +1262,9 @@ export class ProjectSandbox {
 		// replacement can repair a failed prior initialization without taking over
 		// an unproven pre-existing workspace volume.
 		const volumeEvidence = await this._createSandboxVolumes(e2eRunId);
+		const packLocalDataMounts = this.options.resolvePackLocalDataMounts
+			? await this._resolvePackLocalDataMounts()
+			: undefined;
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
@@ -1186,6 +1286,7 @@ export class ProjectSandbox {
 			sandboxNetwork,
 			toolManager: this.options.toolManager,
 			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
+			packLocalDataMounts,
 		}, this.commandRunner);
 
 		// Inject GITHUB_TOKEN for git push/PR inside container. Only the name goes
@@ -1512,6 +1613,36 @@ export class ProjectSandbox {
 		} catch (err: any) {
 			console.warn(`[project-sandbox] Could not inspect state mounts for container ${containerId.substring(0, 12)}; keeping existing container: ${err?.message || err}`);
 			return false;
+		}
+	}
+
+	private async _resolvePackLocalDataMounts(): Promise<readonly PackLocalDataMountPlan[]> {
+		return await this.options.resolvePackLocalDataMounts?.(this.options.projectId) ?? [];
+	}
+
+	private async _hasStalePackLocalDataMounts(
+		containerId: string,
+		expected: readonly PackLocalDataMountPlan[] | Promise<readonly PackLocalDataMountPlan[]> = this._resolvePackLocalDataMounts(),
+	): Promise<boolean> {
+		const resolvedExpected = await expected;
+		try {
+			const { stdout } = await this.execDocker([
+				"inspect", "--format", "{{json .Mounts}}", containerId,
+			], {
+				timeout: 5_000,
+				env: DOCKER_ENV,
+			});
+			const mounts = JSON.parse(stdout.trim() || "[]") as DockerMountInfo[];
+			const result = getPackLocalDataMountStaleness(mounts, resolvedExpected);
+			if (result.stale && result.reason) {
+				console.warn(`[project-sandbox] Container ${containerId.substring(0, 12)} ${result.reason}`);
+			}
+			return result.stale;
+		} catch (err: any) {
+			throw new Error(
+				`[project-sandbox] Could not inspect pack local-data mounts for container ${containerId.substring(0, 12)}: ${err?.message || err}`,
+				{ cause: err },
+			);
 		}
 	}
 

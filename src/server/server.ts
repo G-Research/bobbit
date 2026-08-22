@@ -85,6 +85,7 @@ import { ModuleHost, type InvokeRequest } from "./extension-host/module-host-wor
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
+import { PackLocalDataError, PackLocalDataResolver } from "./extension-host/pack-local-data.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
@@ -102,7 +103,7 @@ import {
 	normalizeHookContributions,
 	type NormalizedNotificationContribution,
 } from "./extension-host/host-hook-contributions.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -716,7 +717,7 @@ import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, typ
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
-import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
@@ -2940,6 +2941,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		for (const scope of ["server", "global-user", "project"] as const) {
 			for (const e of marketPackProvider.marketEntries(scope, effectiveProjectId)) {
+				const activation = e.manifest
+					? packActivationStore(scope, effectiveProjectId)?.getPackActivation(scope, e.manifest.name)
+					: undefined;
+				if (!isPackEffectivelyEnabled(e.manifest, activation)) continue;
 				const key = path.resolve(e.path);
 				if (seen.has(key)) continue;
 				seen.add(key);
@@ -3006,6 +3011,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
 			const manifest = entry.manifest;
+			const packId = packIdFromRoot(entry.path);
+			const winningPack = packContributionRegistry.getPack(projectId, packId);
+			if ((manifest.localData !== undefined || winningPack?.localData !== undefined)
+				&& (!winningPack || path.resolve(winningPack.packRoot) !== path.resolve(entry.path))) continue;
 			const store = packActivationStore(entry.scope, projectId);
 			const disabled = new Set(store?.getPackActivation(entry.scope as PackOrderScope, manifest.name).piExtensions ?? []);
 			const origin = {
@@ -3063,7 +3072,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		return contributions;
 	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
-	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
@@ -3094,6 +3102,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
+	// Pi winner filtering consults the contribution registry, so bind the resolver
+	// only after the registry is initialized.
+	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
+	const packLocalDataResolver = new PackLocalDataResolver(
+		projectRegistry,
+		packContributionRegistry,
+		() => [
+			scopePaths("server", headquartersDir()).marketPacksRoot,
+			scopePaths("global-user", os.homedir()).marketPacksRoot,
+			...projectRegistry.list().map(project => scopePaths("project", project.rootPath).marketPacksRoot),
+		],
+	);
+	const resolveDeclaredPackLocalData = (projectId: string | undefined, packId: string): string | undefined => {
+		if (!projectId || !packId || !packContributionRegistry.getPack(projectId, packId)?.localData) return undefined;
+		return packLocalDataResolver.resolveHostDirectory(projectId, packId);
+	};
+	sessionManager.setPackLocalDataBindingsResolver(({ projectId, realm }) => {
+		const mounts = packLocalDataResolver.resolveMounts(projectId);
+		if (mounts.length === 0) return undefined;
+		return Object.fromEntries(mounts.map((mount) => [
+			mount.packId,
+			realm === "sandbox" ? mount.containerDirectory : mount.hostDirectory,
+		]));
+	});
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -3116,16 +3148,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// only coordinates owned by the dispatched session and never falls back to
 		// another project by goal id.
 		scopeContextResolver: (input) => resolveHookScopeContext(projectContextManager, input),
-		// Least-privilege, store-only host for provider hooks (capabilities.store ===
-		// true; session/agents denied) — gives a provider its own pack-scoped durable
-		// store via the same parent-authorized path routes use.
-		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
-			sessionId,
-			packId,
-			contributionId: "",
-			packStore: getPackStore(),
-			capabilityMask: { store: true, session: false, agents: false },
-		}),
+		// Least-privilege provider host: durable store plus the provider pack's
+		// declared local-data binding; session/agents remain denied.
+		providerHostApi: ({ sessionId, packId, projectId }) => {
+			const localDataDirectory = resolveDeclaredPackLocalData(projectId, packId);
+			return createServerHostApi({
+				sessionId,
+				packId,
+				contributionId: "",
+				packStore: getPackStore(),
+				...(localDataDirectory ? { localDataDirectory } : {}),
+				capabilityMask: {
+					store: true,
+					session: false,
+					agents: false,
+					...(localDataDirectory ? { localData: true } : {}),
+				},
+			});
+		},
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -4039,7 +4079,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -4121,28 +4161,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		packId: string,
 		contributionId: string,
 		capabilities: readonly string[],
-	) => createServerHostApi({
-		sessionId: context.sessionId ?? `project:${context.projectId ?? "unbound"}`,
-		packId,
-		contributionId,
-		packStore: getPackStore(),
-		capabilityMask: {
-			store: capabilities.includes("store"),
-			session: capabilities.includes("session") && context.sessionId !== undefined,
-			agents: capabilities.includes("agents") && context.sessionId !== undefined,
-		},
-		...(context.sessionId ? {
-			readOwnTranscript: async () => {
-				const persisted = sessionManager.getPersistedSession(context.sessionId!);
-				if (!persisted?.agentSessionFile) return null;
-				const fsContext = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
-				const jsonl = await sessionFileRead(fsContext, persisted.agentSessionFile, sandboxManager);
-				return projectOwnTranscriptJsonl(context.sessionId!, jsonl);
+	) => {
+		const localDataDirectory = resolveDeclaredPackLocalData(context.projectId, packId);
+		return createServerHostApi({
+			sessionId: context.sessionId ?? `project:${context.projectId ?? "unbound"}`,
+			packId,
+			contributionId,
+			packStore: getPackStore(),
+			...(localDataDirectory ? { localDataDirectory } : {}),
+			capabilityMask: {
+				store: capabilities.includes("store"),
+				session: capabilities.includes("session") && context.sessionId !== undefined,
+				agents: capabilities.includes("agents") && context.sessionId !== undefined,
+				...(localDataDirectory ? { localData: true } : {}),
 			},
-			orchestrationCore,
-			readChildStatus: (sessionId: string) => sessionManager.getSession(sessionId)?.status,
-		} : {}),
-	});
+			...(context.sessionId ? {
+				readOwnTranscript: async () => {
+					const persisted = sessionManager.getPersistedSession(context.sessionId!);
+					if (!persisted?.agentSessionFile) return null;
+					const fsContext = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
+					const jsonl = await sessionFileRead(fsContext, persisted.agentSessionFile, sandboxManager);
+					return projectOwnTranscriptJsonl(context.sessionId!, jsonl);
+				},
+				orchestrationCore,
+				readChildStatus: (sessionId: string) => sessionManager.getSession(sessionId)?.status,
+			} : {}),
+		});
+	};
 
 	const validateBoundedToolResult = (toolName: string, result: unknown): boolean => {
 		const knownTool = toolManager.resolveScopedPiExtensionTools().some(tool =>
@@ -5058,6 +5103,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					// reads the current project-config-store value rather than a snapshot taken at
 					// sandbox bootstrap. Same shape as the worktree-pool baseRefResolver.
 					baseRefResolver: () => cfg.get("base_ref"),
+					// Docker mounts are immutable, so every reconnect/recovery/create reads
+					// the current winning declarations rather than retaining a boot snapshot.
+					resolvePackLocalDataMounts: (resolvedProjectId) => packLocalDataResolver.resolveMounts(resolvedProjectId),
 				};
 			};
 			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
@@ -5624,6 +5672,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	packLocalDataResolverArg?: PackLocalDataResolver,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5647,6 +5696,13 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	const packLocalDataResolver = packLocalDataResolverArg!;
+	const packDeclaresLocalData = (projectId: string | undefined, packId: string): boolean =>
+		!!projectId && !!packId && packContributionRegistry.getPack(projectId, packId)?.localData !== undefined;
+	const resolveDeclaredPackLocalData = (projectId: string | undefined, packId: string): string | undefined => {
+		if (!projectId || !packDeclaresLocalData(projectId, packId)) return undefined;
+		return packLocalDataResolver.resolveHostDirectory(projectId, packId);
+	};
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -5725,6 +5781,36 @@ async function handleApiRoute(
 		const result = await sessionManager.reloadMcpAfterMarketplaceMutation(scope, projectId);
 		refreshMcpExternalTools();
 		return result;
+	};
+	type PackLocalDataDeclarationSnapshot = Map<string, string>;
+	const snapshotPackLocalDataDeclarations = (scope: InstallScope, projectId?: string): PackLocalDataDeclarationSnapshot => {
+		const projectIds = scope === "project" && projectId
+			? [projectId]
+			: [...new Set((sandboxManager?.getStats().containers ?? []).map((container) => container.projectId))];
+		return new Map(projectIds.map((id) => [
+			id,
+			JSON.stringify(packContributionRegistry.list(id)
+				.filter((pack) => pack.localData !== undefined)
+				.map((pack) => ({ packId: pack.packId, localData: pack.localData }))
+				.sort((left, right) => left.packId.localeCompare(right.packId))),
+		]));
+	};
+	const refreshPackLocalDataAfterMarketplaceMutation = async (
+		scope: InstallScope,
+		projectId: string | undefined,
+		before: PackLocalDataDeclarationSnapshot,
+	): Promise<void> => {
+		const after = snapshotPackLocalDataDeclarations(scope, projectId);
+		const changedProjectIds = [...new Set([...before.keys(), ...after.keys()])]
+			.filter((id) => before.get(id) !== after.get(id));
+		if (changedProjectIds.length === 0) return;
+		try {
+			await Promise.all(changedProjectIds.map((id) => sandboxManager?.refreshPackLocalDataMounts(id)));
+		} catch (err) {
+			// The pack mutation is already durable. Keep its data intact and report the
+			// recoverable exposure mismatch without pretending the old container changed.
+			console.warn("[pack-local-data] sandbox mount refresh failed after marketplace mutation:", err);
+		}
 	};
 	// Host-owned activation-cache invalidation: a pack persisting provider config
 	// (key `provider-config:*`) must drop the activation-filtered provider index so
@@ -9857,7 +9943,10 @@ async function handleApiRoute(
 			const out = withOrigin(r as any);
 			if (r.originPackId && toolPackTm) {
 				const packId = resolvePackIdentityForTool(toolPackTm, r.item.name).packId;
-				if (packId) out.packId = packId;
+				if (packId) {
+					out.packId = packId;
+					if (packDeclaresLocalData(effectiveConfigProjectId, packId)) out.hasLocalData = true;
+				}
 			}
 			return out;
 		});
@@ -9906,7 +9995,15 @@ async function handleApiRoute(
 				// pack-schema-v1: mirror the LIST endpoint's structural packId so the
 				// tools edit page keeps the same own-pack identity for a market-pack tool.
 				const packId = cascadeEntry.originPackId ? resolvePackIdentityForTool(tm, name).packId : "";
-				const detail: Record<string, unknown> = { ...tool, origin: withMeta.origin, ...(withMeta.overrides ? { overrides: withMeta.overrides } : {}), originPackId: withMeta.originPackId, originPackName: withMeta.originPackName, ...(packId ? { packId } : {}) };
+				const detail: Record<string, unknown> = {
+					...tool,
+					origin: withMeta.origin,
+					...(withMeta.overrides ? { overrides: withMeta.overrides } : {}),
+					originPackId: withMeta.originPackId,
+					originPackName: withMeta.originPackName,
+					...(packId ? { packId } : {}),
+					...(packDeclaresLocalData(effectiveConfigProjectId, packId) ? { hasLocalData: true } : {}),
+				};
 				if (piTool) appendPiExtensionToolRows([detail], [piTool]);
 				attachToolDiagnostics([detail], toolDiagnostics);
 				json(detail);
@@ -10083,6 +10180,7 @@ async function handleApiRoute(
 		const packs = packContributionRegistry.list(contribScope.effectiveProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
+			...(p.localData !== undefined ? { hasLocalData: true } : {}),
 			panels: p.panels.map((panel) => {
 				const out: Record<string, unknown> = { id: panel.id };
 				if (panel.title !== undefined) out.title = panel.title;
@@ -10199,12 +10297,14 @@ async function handleApiRoute(
 			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
+		const actionLocalDataDirectory = resolveDeclaredPackLocalData(actionSessionProjectId, ident.packId);
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
 			toolUseId,
 			packId: ident.packId,
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
+			...(actionLocalDataDirectory ? { localDataDirectory: actionLocalDataDirectory } : {}),
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
@@ -10348,6 +10448,71 @@ async function handleApiRoute(
 		}
 		console.log(`[ext-channel-grant] channel=${result.channelName} packId=${result.packId} session=${result.sessionId} outcome=ok`);
 		json({ openGrant: result.openGrant });
+		return;
+	}
+
+	// POST /api/ext/local-data/directory — resolve the calling surface's winning
+	// pack against the authenticated session's canonical project. The request has
+	// no project, pack, or path input; all three coordinates are server-derived.
+	if (url.pathname === "/api/ext/local-data/directory" && req.method === "POST") {
+		const body = (await readBody(req)) ?? {};
+		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const headerSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const sessionProjectId = headerSid
+			? (sessionManager.getSession(headerSid)?.projectId
+				?? sessionManager.getPersistedSession(headerSid)?.projectId)
+			: undefined;
+		const sessionToolManager = resolveActionToolManager(
+			toolManager,
+			sessionProjectId ? projectContextManager.getOrCreate(sessionProjectId)?.toolManager : undefined,
+		);
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			return persisted ? { allowedTools: persisted.allowedTools } : undefined;
+		};
+		const surf = resolveSurfaceIdentity({
+			token: (body as { surfaceToken?: unknown }).surfaceToken,
+			headerSessionId: headerSid,
+			resolver: sessionToolManager,
+			contributions: packContributionRegistry,
+			projectId: sessionProjectId,
+		});
+		if (!surf.ok) {
+			json({ error: surf.error }, surf.status);
+			return;
+		}
+		// `surf.tool` comes only from an HMAC-validated, session-bound token whose
+		// winning contribution was re-resolved above. Its absence intentionally selects
+		// the installed+active+own-session contract for pack-bound surfaces.
+		// codeql[js/user-controlled-bypass] Signed surface kind selects one of two complete authorization contracts.
+		const guard = surf.tool !== undefined
+			? authorizeScopedRequest({
+				tool: surf.tool,
+				headerSessionId,
+				bodySessionId: (body as { sessionId?: unknown }).sessionId,
+				resolveSession,
+			})
+			: packBoundScopedGuard(headerSid, (body as { sessionId?: unknown }).sessionId, resolveSession);
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		if (!sessionProjectId) {
+			json({ error: "pack local data is unavailable", code: "project_not_found" }, 404);
+			return;
+		}
+		try {
+			json({ directory: packLocalDataResolver.resolveHostDirectory(sessionProjectId, surf.packId) });
+		} catch (err) {
+			if (err instanceof PackLocalDataError) {
+				const status = err.code === "local_data_undeclared" || err.code === "pack_not_active" || err.code === "project_not_found" ? 404 : 409;
+				json({ error: "pack local data is unavailable", code: err.code }, status);
+				return;
+			}
+			throw err;
+		}
 		return;
 	}
 
@@ -10619,12 +10784,14 @@ async function handleApiRoute(
 			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
+		const routeLocalDataDirectory = resolveDeclaredPackLocalData(routeSessionProjectId, ident.packId);
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
 			toolUseId,
 			packId: ident.packId,
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
+			...(routeLocalDataDirectory ? { localDataDirectory: routeLocalDataDirectory } : {}),
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
@@ -11263,8 +11430,10 @@ async function handleApiRoute(
 			try {
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
 			} catch (err) { handleMarketErr(err); }
@@ -11288,10 +11457,12 @@ async function handleApiRoute(
 			try {
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
 				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
@@ -11316,9 +11487,11 @@ async function handleApiRoute(
 			try {
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+				const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
 				res.writeHead(204); res.end();
 			} catch (err) { handleMarketErr(err, 404); }
@@ -11377,8 +11550,10 @@ async function handleApiRoute(
 			const filtered = (body.order as string[]).filter((n) => installedSet.has(n));
 			const missing = installedNames.filter((n) => !filtered.includes(n));
 			const normalized = [...missing, ...filtered];
+			const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 			st.target.store.setPackOrder(targetScope, normalized);
 			invalidateResolverCaches();
+			await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 			const hasMcp = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).some((p) => p.scope === targetScope && (p.manifest.contents.mcp?.length ?? 0) > 0);
 			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 			json({ scope: targetScope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
@@ -11693,8 +11868,10 @@ async function handleApiRoute(
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
+			const localDataBefore = snapshotPackLocalDataDeclarations(targetScope, targetProjectId);
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
+			await refreshPackLocalDataAfterMarketplaceMutation(targetScope, targetProjectId, localDataBefore);
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
 			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId) ?? catalogue : catalogue;
