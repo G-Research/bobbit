@@ -26,13 +26,15 @@ function sessionRecord(extra: Partial<GatewaySession> = {}): GatewaySession {
 	};
 }
 
-async function projectedModeFor(record: GatewaySession): Promise<ProjectedMode> {
+async function projectedModeFor(
+	record: GatewaySession,
+	remoteSnapshot?: {
+		conditionSnapshotReceived: boolean;
+		state: { status: GatewaySession["status"]; condition: unknown };
+	},
+): Promise<ProjectedMode> {
 	uncacheSession(SESSION_ID);
 	const agentInterface = {
-		// `readOnly` is retained in this fixture only as a compatibility probe for
-		// the reproducing revision. The corrected UI owns archive presentation in
-		// a lifecycle-specific property instead.
-		readOnly: false,
 		archived: false,
 		nonInteractive: false,
 		session: null as any,
@@ -40,7 +42,8 @@ async function projectedModeFor(record: GatewaySession): Promise<ProjectedMode> 
 	const remote = {
 		connected: true,
 		gatewaySessionId: SESSION_ID,
-		state: { isArchived: false },
+		conditionSnapshotReceived: remoteSnapshot?.conditionSnapshotReceived ?? false,
+		state: { isArchived: false, ...remoteSnapshot?.state },
 		registerHostApiTransports: vi.fn(),
 		disconnect: vi.fn(),
 	};
@@ -61,14 +64,8 @@ async function projectedModeFor(record: GatewaySession): Promise<ProjectedMode> 
 	// synchronous, before any workspace or transcript hydration can paint.
 	selectSession("parking-session");
 	const pending = connectToSession(SESSION_ID, true);
-	const hasLifecycleArchiveProperty = Object.prototype.hasOwnProperty.call(agentInterface, "archived")
-		&& agentInterface.archived === true;
-	const lifecycleRecordIsArchived = record.archived === true
-		|| record.status === "archived"
-		|| (record.status === "terminated" && (record as any).condition?.code !== "MODEL_SELECTION_REQUIRED");
-	const legacyArchivePresentation = agentInterface.readOnly === true && agentInterface.nonInteractive !== true;
 	const result = {
-		archived: hasLifecycleArchiveProperty || lifecycleRecordIsArchived || legacyArchivePresentation,
+		archived: agentInterface.archived,
 		nonInteractive: agentInterface.nonInteractive,
 	};
 	state.switchGeneration++;
@@ -126,6 +123,33 @@ describe("delegate interaction-mode projection", () => {
 				modelId: "retired-model",
 			},
 		} as any))).toEqual({ archived: false, nonInteractive: false });
+	});
+
+	it("preserves ordinary termination across a generic live condition snapshot", async () => {
+		expect(await projectedModeFor(
+			sessionRecord({ status: "terminated" }),
+			{
+				conditionSnapshotReceived: true,
+				state: { status: "idle", condition: null },
+			},
+		)).toEqual({ archived: true, nonInteractive: false });
+	});
+
+	it("uses the canonical live snapshot only for explicit model-selection recovery", async () => {
+		expect(await projectedModeFor(
+			sessionRecord({
+				status: "terminated",
+				condition: {
+					code: "MODEL_SELECTION_REQUIRED",
+					provider: "retired-provider",
+					modelId: "retired-model",
+				},
+			} as any),
+			{
+				conditionSnapshotReceived: true,
+				state: { status: "idle", condition: null },
+			},
+		)).toEqual({ archived: false, nonInteractive: false });
 	});
 
 	it("preserves non-interactive policy independently and lets archive lifecycle win", async () => {

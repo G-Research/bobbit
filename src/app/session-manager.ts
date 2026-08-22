@@ -202,19 +202,22 @@ function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefi
 
 /**
  * Prefer an explicit RemoteAgent condition snapshot over a possibly older list
- * status, while retaining independent archive and non-interactive evidence.
+ * status, except when the list carries absolute archive or ordinary termination
+ * evidence. Only an explicitly recoverable termination may be reopened by the
+ * canonical remote lifecycle.
  */
 export function sessionLifecycleRecordForPresentation(
 	record: Partial<GatewaySession> | undefined,
 	remote: Pick<RemoteAgent, "conditionSnapshotReceived" | "state">,
 ): Partial<GatewaySession> | undefined {
 	if (!remote.conditionSnapshotReceived) return record;
-	const archivedLifecycle = record?.archived === true || record?.status === "archived";
+	const absoluteTerminalLifecycle = record?.archived === true
+		|| record?.status === "archived"
+		|| (record?.status === "terminated" && !isModelSelectionRequiredRecord(record));
+	if (absoluteTerminalLifecycle) return record;
 	return {
 		...record,
-		status: archivedLifecycle
-			? record?.status
-			: (remote.state?.status as GatewaySession["status"] | undefined) ?? record?.status,
+		status: (remote.state?.status as GatewaySession["status"] | undefined) ?? record?.status,
 		condition: remote.state?.condition,
 	} as Partial<GatewaySession>;
 }
