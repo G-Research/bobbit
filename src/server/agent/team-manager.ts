@@ -1417,9 +1417,10 @@ export class TeamManager {
 
 	/**
 	 * Re-subscribe to team-lead and worker agent events. Must run AFTER
-	 * restoreSessions() — needs live session objects.
+	 * restoreSessions() — needs live session objects. Adopted leads are finalized
+	 * serially first so their deterministic kickoff is admitted before boot nudges.
 	 */
-	resubscribeTeamEvents(): void {
+	async resubscribeTeamEvents(): Promise<void> {
 		// Defense-in-depth: a retained TeamStore row is passive retry evidence,
 		// never authority to reactivate an archived goal's runtime.
 		for (const [goalId, entry] of [...this.teams]) {
@@ -1469,9 +1470,27 @@ export class TeamManager {
 			}
 		}
 
+		// A crash can land after promoteToGoalLead's canonical commit but before
+		// finalizeAdoptedLead. restoreTeams repairs the durable graph before session
+		// restoration; now that the canonical runtime is live, complete that same
+		// finalization seam. Keep boot deterministic and isolate a broken relation so
+		// other teams still resume. Attempted adopted leads own their subscription in
+		// finalizeAdoptedLead and must not be subscribed a second time below.
+		const adoptedFinalizationAttempts = new Set<string>();
 		for (const [goalId, entry] of this.teams) {
-			// Re-subscribe to team lead events and restart idle timer if needed
-			if (entry.teamLeadSessionId) {
+			if (!this.isRestoredAdoptedLeadFinalizationCandidate(goalId, entry)) continue;
+			adoptedFinalizationAttempts.add(goalId);
+			try {
+				await this.finalizeAdoptedLead(goalId);
+			} catch (err) {
+				console.error(`[team-manager] Adopted team-lead finalization failed for goal=${goalId}:`, err);
+			}
+		}
+
+		for (const [goalId, entry] of this.teams) {
+			// Re-subscribe to team lead events and restart idle timer if needed.
+			// Recovered adopted leads already did both through their finalization seam.
+			if (entry.teamLeadSessionId && !adoptedFinalizationAttempts.has(goalId)) {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 				if (tlSession && tlSession.status !== "terminated") {
 					this.subscribeTeamLeadEvents(goalId);
@@ -2259,6 +2278,34 @@ export class TeamManager {
 			&& persistedSource?.projectId === goal.projectId
 			&& hasExactAdoptedLeadAttachment(liveSource, goal.id)
 			&& hasExactAdoptedLeadAttachment(persistedSource, goal.id);
+	}
+
+	private isRestoredAdoptedLeadFinalizationCandidate(goalId: string, entry: TeamEntry): boolean {
+		const goal = this.resolveGoal(goalId);
+		const pcm = this.config.projectContextManager;
+		if (!pcm || !goal?.worktreeOwnerSessionId || goal.team !== true || goal.archived || goal.paused) return false;
+		if (goal.state !== "todo" && goal.state !== "in-progress") return false;
+		if (goal.setupStatus !== undefined && goal.setupStatus !== "ready") return false;
+		if (!this.hasExactAdoptedLeadAttachment(goal, entry)) return false;
+
+		// A reverse-map winner is not sufficient authority when another restored
+		// team row or adopted goal claims the same source. Boot reconciliation
+		// deliberately fails closed on that ambiguity; finalization must do the same.
+		let leadClaims = 0;
+		for (const candidate of this.teams.values()) {
+			if (candidate.teamLeadSessionId === goal.worktreeOwnerSessionId) leadClaims++;
+			if (leadClaims > 1) return false;
+		}
+		if (leadClaims !== 1) return false;
+
+		let adoptedGoalClaims = 0;
+		for (const context of pcm.all()) {
+			for (const candidate of context.goalStore.getAll()) {
+				if (!candidate.archived && candidate.worktreeOwnerSessionId === goal.worktreeOwnerSessionId) adoptedGoalClaims++;
+				if (adoptedGoalClaims > 1) return false;
+			}
+		}
+		return adoptedGoalClaims === 1;
 	}
 
 	private async runAdoptedGoalLifecycleLocked<T>(goalId: string, action: () => Promise<T>): Promise<T> {
