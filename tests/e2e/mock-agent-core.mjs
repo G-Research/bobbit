@@ -200,6 +200,11 @@ export class MockAgentCore {
 		// transcript at firstKeptEntryId. Null until a compaction fires.
 		this._postCompactionEntries = null;
 		this.currentAbortController = null;
+		// Tracks the complete turn independently of the transport's prompt chain.
+		// Child-process mode owns its chain outside this class, while in-process
+		// mode owns it here; new_session must be able to settle either one before
+		// rotating transcript state.
+		this._activeTurn = null;
 		this._sleep = options.sleep || realSleep;
 		this.mockPiTools = options.mockPiTools || new Map();
 		this.mockPiToolCallHandlers = options.mockPiToolCallHandlers || [];
@@ -296,6 +301,11 @@ export class MockAgentCore {
 	 * surface. */
 	emit(event) {
 		this._onEvent(event);
+		if (this._activeTurn) {
+			if (event?.type === "agent_end") this._activeTurn.agentEndEmitted = true;
+			if (event?.type === "agent_settled") this._activeTurn.agentSettledEmitted = true;
+			if (event?.type === "session_status" && event.status === "idle") this._activeTurn.idleEmitted = true;
+		}
 		if (event?.type === "message_end" && event.message && typeof event.message === "object") {
 			this._appendTranscriptMessage(event.message);
 		}
@@ -1069,7 +1079,18 @@ export class MockAgentCore {
 
 	/** Simulate a full agent turn: streaming start → tool calls → assistant text → end */
 	async handlePrompt(text, images, delivery = {}) {
-		this.currentAbortController = new AbortController();
+		const controller = new AbortController();
+		const settled = deferred();
+		const activeTurn = {
+			controller,
+			settled: settled.promise,
+			agentEndEmitted: false,
+			agentSettledEmitted: false,
+			idleEmitted: false,
+		};
+		this.currentAbortController = controller;
+		this._activeTurn = activeTurn;
+		try {
 
 		// Reliable-turn fixtures expose Pi's actual acknowledgement boundary:
 		// message_start means the accepted occurrence is entering the transcript;
@@ -1493,6 +1514,11 @@ export class MockAgentCore {
 		await this._crossBarrier("turn:after-agent-end");
 		this.emit({ type: "agent_settled" });
 		this.emit({ type: "session_status", status: "idle" });
+		} finally {
+			if (this.currentAbortController === controller) this.currentAbortController = null;
+			if (this._activeTurn === activeTurn) this._activeTurn = null;
+			settled.resolve();
+		}
 	}
 
 	/**
@@ -3515,6 +3541,45 @@ export class MockAgentCore {
 				return { success: true };
 			}
 
+			case "new_session": {
+				// Pi's new_session tears down the current agent run before replacing its
+				// SessionManager. Persist the outgoing generation after that settlement,
+				// then rotate every conversation-owned structure while retaining the
+				// runtime instance and its cwd/model/thinking configuration.
+				const previousPath = this.ensureSessionFile();
+				this._persistTranscript();
+				const activeTurn = this._activeTurn;
+				if (activeTurn) {
+					activeTurn.controller.abort();
+					await activeTurn.settled;
+					if (!activeTurn.agentEndEmitted) this.emit({ type: "agent_end" });
+					if (!activeTurn.agentSettledEmitted) this.emit({ type: "agent_settled" });
+					if (!activeTurn.idleEmitted) this.emit({ type: "session_status", status: "idle" });
+				}
+				// Settlement may have appended the final outgoing message entry.
+				this._persistTranscript();
+
+				this.conversationMessages = [];
+				this._transcriptEntries = [];
+				this._postCompactionEntries = null;
+				this._sessionHeader = this._createSessionHeader();
+				this._runtimeCwdMetadata = [];
+				this._lastTranscriptEntryId = null;
+				this._nextTranscriptEntrySequence = 1;
+				this._reliableOverflowRetryActive = false;
+				this._abortedRecently = false;
+				this.sessionFilePath = null;
+				const nextPath = this.ensureSessionFile();
+				if (nextPath === previousPath) {
+					throw new Error("new_session failed to rotate the mock transcript path");
+				}
+				return {
+					command: "new_session",
+					success: true,
+					data: { cancelled: false },
+				};
+			}
+
 			case "get_state": {
 				const sf = this.ensureSessionFile();
 				// A few E2E seams replace conversationMessages directly. Rebuild the
@@ -3540,6 +3605,8 @@ export class MockAgentCore {
 						sessionFile: sf,
 						model: this.currentModel,
 						thinkingLevel: this.currentThinkingLevel,
+						messageCount: this.conversationMessages.length,
+						pendingMessageCount: 0,
 					},
 				};
 			}
