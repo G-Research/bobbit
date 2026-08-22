@@ -8534,7 +8534,6 @@ export class VerificationHarness {
 		// re-acquires before the in-flight ready-to-merge wait. The `finally`
 		// only releases when we actually hold the permit.
 		let permitHeld = true;
-		let managedChild = !!resolved.child;
 		try {
 			let childGoalId: string;
 			if (resolved.child) {
@@ -8750,7 +8749,6 @@ export class VerificationHarness {
 					...(_blocked ? { state: "blocked" as const } : {}),
 				});
 				// END stamp-immediately invariant critical sequence.
-				managedChild = true;
 
 				// R-001 — initialise the child's gate state. Mirrors the
 				// `initGatesForGoal` call in POST /api/goals/:id/spawn-child.
@@ -8868,12 +8866,9 @@ export class VerificationHarness {
 		} finally {
 			if (permitHeld) {
 				sem.release();
-				if (managedChild) {
-					// Terminal release for this harness-managed child — drive the next
-					// capacity-blocked REST/POST child into the freed slot so the
-					// per-root cap is unified across all start paths.
-					this.childScheduler.startNextEligible(rootGoalId);
-				}
+				// Every actual release must drive the next capacity-blocked child,
+				// including validation failures before a child is created.
+				this.childScheduler.startNextEligible(rootGoalId);
 			}
 		}
 	}
