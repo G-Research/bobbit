@@ -3643,6 +3643,15 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/host-bobbit-sprite.journey.spec.ts",
+      "reason": "Project-scoped fixture-pack journey proving host.ui.createBobbitSprite directly appends accessible session and staff avatars with persisted colour/accessory fidelity and canonical active, idle, paused, and static presentation before and after reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/dom/delegate-interaction-mode.test.ts",
       "reason": "Focused DOM coverage for independent lifecycle archive, read-only tool capability, and non-interactive interaction-mode projection.",
       "execution": {
