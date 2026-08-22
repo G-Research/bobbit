@@ -40,7 +40,7 @@
     },
     {
       "path": "tests2/core/context-clear-rpc.test.ts",
-      "reason": "Core protocol coverage for Pi new_session RPC transport and context-clear WebSocket authorization and error envelopes.",
+      "reason": "Core protocol coverage for Pi new_session typed contract, exact RPC transport and timeout, and cancellation response preservation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

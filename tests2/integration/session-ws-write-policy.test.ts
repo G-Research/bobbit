@@ -74,6 +74,16 @@ function persistPolicy(
 	gateway.sessionManager.getSessionStore(persisted.projectId).update(sessionId, updates);
 }
 
+function captureContextClearPersistence(gateway: any, sessionId: string): Record<string, unknown> {
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	expect(persisted, "session has a durable context-clear row").toBeTruthy();
+	return {
+		agentSessionFile: persisted.agentSessionFile,
+		contextClearBoundariesPresent: Object.prototype.hasOwnProperty.call(persisted, "contextClearBoundaries"),
+		contextClearBoundaries: structuredClone(persisted.contextClearBoundaries),
+	};
+}
+
 async function expectReadFramesStillWork(conn: WsConnection): Promise<void> {
 	let cursor = conn.messageCount();
 	conn.send({ type: "get_state" });
@@ -98,6 +108,7 @@ const WORK_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "retry" },
 	{ type: "restart_agent" },
 	{ type: "compact" },
+	{ type: "clear" },
 	{ type: "grant_tool_permission", toolName: "bash", scope: "tool", mode: "session-only" },
 ];
 
@@ -216,8 +227,11 @@ test.describe("authenticated WebSocket session write policy", () => {
 		expect(live).toBeTruthy();
 		expect(live.readOnly).not.toBe(true);
 		persistPolicy(gateway, sessionId, { readOnly: true });
+		const contextClearPersistenceBefore = captureContextClearPersistence(gateway, sessionId);
 
 		const conn = await connectWs(sessionId);
+		const clearContext = vi.spyOn(gateway.sessionManager, "clearContext").mockRejectedValue(new Error("policy guard missed clear"));
+		const newSession = vi.spyOn(live.rpcClient, "newSession").mockRejectedValue(new Error("policy guard missed new_session"));
 		const enqueuePrompt = vi.spyOn(gateway.sessionManager, "enqueuePrompt");
 		const deliverLiveSteer = vi.spyOn(gateway.sessionManager, "deliverLiveSteer");
 		const steerQueued = vi.spyOn(gateway.sessionManager, "steerQueued");
@@ -255,11 +269,16 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(restartAgent).not.toHaveBeenCalled();
 			expect(grantToolPermission).not.toHaveBeenCalled();
 			expect(compact).not.toHaveBeenCalled();
+			expect(clearContext).not.toHaveBeenCalled();
+			expect(newSession).not.toHaveBeenCalled();
+			expect(captureContextClearPersistence(gateway, sessionId)).toEqual(contextClearPersistenceBefore);
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
 			await expectReadFramesStillWork(conn);
 		} finally {
 			live.status = "idle";
+			clearContext.mockRestore();
+			newSession.mockRestore();
 			enqueuePrompt.mockRestore();
 			deliverLiveSteer.mockRestore();
 			steerQueued.mockRestore();
@@ -284,8 +303,11 @@ test.describe("authenticated WebSocket session write policy", () => {
 		expect(live).toBeTruthy();
 		expect(live.nonInteractive).not.toBe(true);
 		persistPolicy(gateway, sessionId, { nonInteractive: true });
+		const contextClearPersistenceBefore = captureContextClearPersistence(gateway, sessionId);
 
 		const conn = await connectWs(sessionId);
+		const clearContext = vi.spyOn(gateway.sessionManager, "clearContext").mockRejectedValue(new Error("policy guard missed clear"));
+		const newSession = vi.spyOn(live.rpcClient, "newSession").mockRejectedValue(new Error("policy guard missed new_session"));
 		const enqueuePrompt = vi.spyOn(gateway.sessionManager, "enqueuePrompt");
 		const deliverLiveSteer = vi.spyOn(gateway.sessionManager, "deliverLiveSteer").mockResolvedValue(undefined);
 		const steerQueued = vi.spyOn(gateway.sessionManager, "steerQueued");
@@ -326,9 +348,10 @@ test.describe("authenticated WebSocket session write policy", () => {
 					expect.objectContaining({ intentId: expect.any(String), source: "user" }),
 				);
 			}, { timeout: 2_000 });
-			// Streaming only carves out the direct steer frame. Alternate retry and
-			// extension redirect/enqueue paths stay forbidden.
+			// Streaming only carves out the direct steer frame. Alternate retry,
+			// context replacement, and extension redirect/enqueue paths stay forbidden.
 			await expectPolicyError(conn, { type: "retry" }, "NON_INTERACTIVE_WORK_CONTROL");
+			await expectPolicyError(conn, { type: "clear" }, "NON_INTERACTIVE_WORK_CONTROL");
 			await expectExtensionWritesRejected(conn, "NON_INTERACTIVE_WORK_CONTROL", "non-interactive-streaming");
 
 			expect(enqueuePrompt).not.toHaveBeenCalled();
@@ -340,10 +363,15 @@ test.describe("authenticated WebSocket session write policy", () => {
 			expect(restartAgent).not.toHaveBeenCalled();
 			expect(grantToolPermission).not.toHaveBeenCalled();
 			expect(compact).not.toHaveBeenCalled();
+			expect(clearContext).not.toHaveBeenCalled();
+			expect(newSession).not.toHaveBeenCalled();
+			expect(captureContextClearPersistence(gateway, sessionId)).toEqual(contextClearPersistenceBefore);
 			expectNoModelControlMutations(modelControlSpies);
 			await expectNoTitleControlMutations(titleControlSpies);
 		} finally {
 			live.status = "idle";
+			clearContext.mockRestore();
+			newSession.mockRestore();
 			enqueuePrompt.mockRestore();
 			deliverLiveSteer.mockRestore();
 			steerQueued.mockRestore();
