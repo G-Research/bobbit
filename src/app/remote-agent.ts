@@ -1507,8 +1507,16 @@ export class RemoteAgent {
 	}
 
 	/** Start a fresh Pi conversation generation while retaining this Bobbit session. */
-	clearContext(): void {
-		this.send({ type: "clear" });
+	clearContext(): boolean {
+		const ws = this.ws;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+		try {
+			ws.send(JSON.stringify({ type: "clear" }));
+			return true;
+		} catch (error) {
+			console.error("[RemoteAgent] Failed to send context clear:", error);
+			return false;
+		}
 	}
 
 	/**
