@@ -3641,6 +3641,24 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/dom/delegate-interaction-mode.test.ts",
+      "reason": "Focused DOM coverage for independent lifecycle archive, read-only tool capability, and non-interactive interaction-mode projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/read-only-delegate-interaction.journey.spec.ts",
+      "reason": "Browser journey proving an active read-only delegate stays live and promptable through navigation, reload, reconnect, and authoritative refresh while mutating tools remain withheld.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

@@ -13255,6 +13255,11 @@ export class SessionManager {
 					if ((client as any).readyState === 1) candidate.clients.add(client);
 				}
 				this._trackConnectedSession(candidate);
+				// restoreSession published the candidate's live status before it owned the
+				// capsule's clients. Replay that canonical status through the monotonic
+				// lifecycle publisher now that transfer is complete, before the condition
+				// clear lets clients derive their recovered interaction state.
+				broadcastStatus(candidate, candidate.status);
 				broadcast(candidate.clients, {
 					type: "state",
 					data: {

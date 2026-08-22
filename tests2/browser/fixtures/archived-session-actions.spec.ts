@@ -177,14 +177,14 @@ async function expectArchivedSafeMenu(page: Page, expectedIds: readonly string[]
 
 async function openArchivedSession(page: Page, sessionId: string): Promise<void> {
 	await navigateToHash(page, `#/session/${sessionId}`);
-	await expect(headerTrigger(page), "archived session header actions should render after read-only open").toBeVisible({ timeout: 15_000 });
+	await expect(headerTrigger(page), "archived session header actions should render after archived open").toBeVisible({ timeout: 15_000 });
 	await expect.poll(() => page.evaluate(() => {
 		const s = (window as any).bobbitState;
 		return {
 			selected: s?.selectedSessionId ?? null,
-			readOnly: s?.chatPanel?.agentInterface?.readOnly === true,
+			archived: s?.chatPanel?.agentInterface?.archived === true,
 		};
-	}), { timeout: 15_000 }).toEqual({ selected: sessionId, readOnly: true });
+	}), { timeout: 15_000 }).toEqual({ selected: sessionId, archived: true });
 }
 
 async function stubWindowOpen(page: Page): Promise<void> {
@@ -255,7 +255,7 @@ test.describe("archived session actions", () => {
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toContain(`#/session/${archivedId}`);
 		await expect.poll(() => page.evaluate((id) => {
 			const s = (window as any).bobbitState;
-			return s?.selectedSessionId === id && s?.chatPanel?.agentInterface?.readOnly === true;
+			return s?.selectedSessionId === id && s?.chatPanel?.agentInterface?.archived === true;
 		}, archivedId), { timeout: 15_000 }).toBe(true);
 
 		const headerPin = page.locator('[data-session-action-surface="header"][data-session-action-id="pin"]');
