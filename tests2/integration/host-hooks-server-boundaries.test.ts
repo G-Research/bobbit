@@ -1,8 +1,9 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectContext } from "../../src/server/agent/project-context.js";
+import { broadcastStatus } from "../../src/server/agent/session-status.js";
 import type { RegisteredProject } from "../../src/server/agent/project-registry.js";
 import { TaskManager } from "../../src/server/agent/task-manager.js";
 import {
@@ -156,6 +157,45 @@ async function refreshServerPackIndex(gw: GatewayFixture): Promise<void> {
 		body: JSON.stringify({ scope: "server", order: current.order }),
 	});
 	expect(response.status, await response.clone().text()).toBe(200);
+}
+
+function writeSessionAuthorityPack(gw: GatewayFixture, packName: string) {
+	const packDir = path.join(gw.bobbitDir, "config", "market-packs", packName);
+	const startedPath = path.join(packDir, "handler-started");
+	const releasePath = path.join(packDir, "handler-release");
+	const resultPath = path.join(packDir, "handler-result.json");
+	mkdirSync(path.join(packDir, "hooks"), { recursive: true });
+	mkdirSync(path.join(packDir, "lib"), { recursive: true });
+	writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2", `name: ${packName}`, "description: Session authority fixture", "version: 1.0.0",
+		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  hooks: [session-authority]",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
+		"sourceUrl: integration", "sourceRef: local", "commit: test", `packName: ${packName}`, "version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "hooks", "session-authority.yaml"), [
+		"id: session.authority", "module: ../lib/hooks.mjs", "kind: notification",
+		"notifications:", "  - { scope: session, name: statusChanged }",
+		"capabilities: [session, agents]", "budget: { timeoutMs: 5000 }",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "lib", "hooks.mjs"), [
+		'import { existsSync, writeFileSync } from "node:fs";',
+		`const started = ${JSON.stringify(startedPath)};`,
+		`const release = ${JSON.stringify(releasePath)};`,
+		`const result = ${JSON.stringify(resultPath)};`,
+		"const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));",
+		"export default { statusChanged: async (ctx, notification) => {",
+		"  if (notification.payload.status !== 'streaming') return;",
+		"  writeFileSync(started, 'started');",
+		"  while (!existsSync(release)) await sleep(5);",
+		"  const out = {};",
+		"  try { out.transcript = await ctx.host.session.readTranscript(); } catch (error) { out.transcriptError = String(error?.message ?? error); }",
+		"  try { out.spawn = await ctx.host.agents.spawn({ instructions: 'must-not-cross-project-move' }); } catch (error) { out.spawnError = String(error?.message ?? error); }",
+		"  writeFileSync(result, JSON.stringify(out));",
+		"} };",
+	].join("\n") + "\n");
+	return { packDir, startedPath, releasePath, resultPath };
 }
 
 function writeInterceptorAuditPack(gw: GatewayFixture, packName: string): string {
@@ -474,6 +514,62 @@ describe("real gateway notification authority", () => {
 				body: JSON.stringify({ projectId: gw.defaultProjectId }),
 			});
 			captured.ws.close();
+		}
+	});
+
+	it("revokes paused session and agents capabilities when the source session moves projects", async () => {
+		const defaultProject = gw.projectContextManager.getRegistry().get(gw.defaultProjectId);
+		const foreignRoot = path.join(path.dirname(gw.bobbitDir), `host-hooks-capability-move-${Date.now()}`);
+		tempRoots.push(foreignRoot);
+		mkdirSync(foreignRoot, { recursive: true });
+		const destination = await gw.apiJson("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `host-hooks-capability-move-${Date.now()}`, rootPath: foreignRoot }),
+		});
+		scope.trackProject(destination.id);
+		const source = await scope.createSession({ cwd: defaultProject.rootPath });
+		await waitForIdle(gw, source.id);
+		const fixture = writeSessionAuthorityPack(gw, `host-authority-${process.pid}-${Date.now()}`);
+		try {
+			await refreshServerPackIndex(gw);
+			const sourceSession = gw.sessionManager.getSession(source.id);
+			const beforeChildren = gw.orchestrationCore.list(source.id).map((row: any) => row.sessionId);
+			broadcastStatus(sourceSession, "streaming");
+			await poll(() => existsSync(fixture.startedPath) ? true : undefined, "paused notification handler");
+
+			const moved = await gw.api(`/api/sessions/${encodeURIComponent(source.id)}`, {
+				method: "PATCH",
+				body: JSON.stringify({ projectId: destination.id }),
+			});
+			expect(moved.status, await moved.clone().text()).toBe(200);
+			const persisted = gw.sessionManager.getPersistedSession(source.id);
+			expect(persisted?.projectId).toBe(destination.id);
+			expect(persisted?.agentSessionFile).toEqual(expect.any(String));
+			appendFileSync(persisted.agentSessionFile, `${JSON.stringify({
+				type: "message",
+				message: { role: "assistant", content: "destination-project-transcript-sentinel" },
+			})}\n`);
+			writeFileSync(fixture.releasePath, "release");
+			await poll(() => existsSync(fixture.resultPath) ? true : undefined, "fenced notification result", 5_000);
+			const result = JSON.parse(readFileSync(fixture.resultPath, "utf8"));
+
+			expect(result).not.toHaveProperty("transcript");
+			expect(result).not.toHaveProperty("spawn");
+			expect(result.transcriptError).toMatch(/session authority is no longer valid/);
+			expect(result.spawnError).toMatch(/session authority is no longer valid/);
+			expect(JSON.stringify(result)).not.toContain("destination-project-transcript-sentinel");
+			expect(gw.orchestrationCore.list(source.id).map((row: any) => row.sessionId)).toEqual(beforeChildren);
+		} finally {
+			const live = gw.sessionManager.getSession(source.id);
+			if (live) {
+				broadcastStatus(live, "idle");
+				await gw.api(`/api/sessions/${encodeURIComponent(source.id)}`, {
+					method: "PATCH",
+					body: JSON.stringify({ projectId: gw.defaultProjectId }),
+				});
+			}
+			rmSync(fixture.packDir, { recursive: true, force: true });
+			await refreshServerPackIndex(gw);
 		}
 	});
 

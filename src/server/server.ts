@@ -4156,6 +4156,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
+	const resolveHostNotificationSessionProject = (sessionId: string): string | undefined => {
+		const liveProjectId = sessionManager.getSession(sessionId)?.projectId;
+		const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+		// Both are host-owned authorities. Refuse an ambiguous transition rather than
+		// choosing a partition; a completed live reassignment may temporarily have no
+		// row in the destination store, in which case the live owner is authoritative.
+		if (liveProjectId && persistedProjectId && liveProjectId !== persistedProjectId) return undefined;
+		return liveProjectId ?? persistedProjectId;
+	};
+
 	const createHookHostApi = (
 		context: { projectId?: string; sessionId?: string; cwd: string },
 		packId: string,
@@ -4163,12 +4173,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		capabilities: readonly string[],
 	) => {
 		const localDataDirectory = resolveDeclaredPackLocalData(context.projectId, packId);
+		const isSessionAuthorized = context.sessionId
+			? () => typeof context.projectId === "string"
+				&& resolveHostNotificationSessionProject(context.sessionId!) === context.projectId
+			: undefined;
 		return createServerHostApi({
 			sessionId: context.sessionId ?? `project:${context.projectId ?? "unbound"}`,
 			packId,
 			contributionId,
 			packStore: getPackStore(),
 			...(localDataDirectory ? { localDataDirectory } : {}),
+			...(isSessionAuthorized ? { isSessionAuthorized } : {}),
 			capabilityMask: {
 				store: capabilities.includes("store"),
 				session: capabilities.includes("session") && context.sessionId !== undefined,
@@ -4177,10 +4192,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			},
 			...(context.sessionId ? {
 				readOwnTranscript: async () => {
+					if (isSessionAuthorized && !isSessionAuthorized()) throw new Error("host.session authority is no longer valid");
 					const persisted = sessionManager.getPersistedSession(context.sessionId!);
 					if (!persisted?.agentSessionFile) return null;
 					const fsContext = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
 					const jsonl = await sessionFileRead(fsContext, persisted.agentSessionFile, sandboxManager);
+					if (isSessionAuthorized && !isSessionAuthorized()) throw new Error("host.session authority is no longer valid");
 					return projectOwnTranscriptJsonl(context.sessionId!, jsonl);
 				},
 				orchestrationCore,
@@ -4252,6 +4269,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		isAuthorized: (handler, notification) => {
 			const contribution = (handler as RuntimeNotificationHandler).contribution;
 			return handler.projectId === notification.projectId
+				&& (!notification.sessionId
+					|| resolveHostNotificationSessionProject(notification.sessionId) === notification.projectId)
 				&& packContributionRegistry.isHookAuthorized(
 					notification.projectId,
 					contribution.packId,
@@ -4263,6 +4282,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		invoke: (handler, notification, signal) => {
 			const contribution = (handler as RuntimeNotificationHandler).contribution;
+			if (notification.sessionId
+				&& resolveHostNotificationSessionProject(notification.sessionId) !== notification.projectId) {
+				throw new Error("notification session authority is no longer valid");
+			}
 			const persisted = notification.sessionId
 				? sessionManager.getPersistedSession(notification.sessionId)
 				: undefined;
@@ -4295,15 +4318,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}, handler.timeoutMs, signal);
 		},
 	});
-	const resolveHostNotificationSessionProject = (sessionId: string): string | undefined => {
-		const liveProjectId = sessionManager.getSession(sessionId)?.projectId;
-		const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
-		// Both are host-owned authorities. Refuse an ambiguous transition rather than
-		// choosing a partition; a completed live reassignment may temporarily have no
-		// row in the destination store, in which case the live owner is authoritative.
-		if (liveProjectId && persistedProjectId && liveProjectId !== persistedProjectId) return undefined;
-		return liveProjectId ?? persistedProjectId;
-	};
 	const hostNotificationDispatcher = new HostNotificationDispatcher({
 		adapters: [
 			new HostNotificationSocketRouter(() => wss.clients, {
