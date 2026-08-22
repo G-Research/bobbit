@@ -4,7 +4,10 @@
  * Consolidated from: goal-proposal-*, project-proposal-*, proposal-panel-*,
  *   proposal-open-all-types, proposal-panel-streaming, api-error-modal, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProjectId } from "../_helpers/journey-fixture.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, createGoal, deleteGoal, waitForSessionStatus, apiFetch, defaultProjectId, registerProject } from "../_helpers/journey-fixture.js";
 import { createSessionViaUI, sendMessage } from "../_helpers/journey-fixture.js";
 import { nonGitCwd } from "../e2e-setup.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
@@ -43,6 +46,48 @@ async function waitForProposalSlot(page: import("@playwright/test").Page, type: 
 		type,
 		{ timeout: 20_000 },
 	);
+}
+
+async function setSubgoalsEnabledPreference(value: boolean): Promise<void> {
+	const response = await apiFetch("/api/preferences", {
+		method: "PUT",
+		body: JSON.stringify({ subgoalsEnabled: value }),
+	});
+	expect(response.status).toBe(200);
+}
+
+async function seedGoalProposal(
+	page: import("@playwright/test").Page,
+	sessionId: string,
+	args: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
+	return page.evaluate(async ({ sid, candidate }) => {
+		const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposal/goal/seed`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ args: candidate }),
+		});
+		return { status: response.status, body: await response.json().catch(() => null) };
+	}, { sid: sessionId, candidate: args });
+}
+
+async function waitForGoalProposal(
+	page: import("@playwright/test").Page,
+	title: string,
+): Promise<{ rev: number; fields: Record<string, unknown> }> {
+	await page.waitForFunction(
+		(expectedTitle: string) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.goal?.fields?.title === expectedTitle;
+		},
+		title,
+		{ timeout: 20_000 },
+	);
+	return page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const slot = state.activeProposals.goal;
+		return { rev: slot.rev, fields: { ...slot.fields } };
+	});
 }
 
 // ── Shell / navigation tests ────────────────────────────────────────────────
@@ -305,6 +350,198 @@ test.describe("Journey: Proposals — API error handling", () => {
 		// Tool card summary + Open button.
 		await expect(page.getByText("Goal Proposal").first()).toBeVisible({ timeout: 20_000 });
 		await expect(page.locator('[data-testid="proposal-open-button"]').first()).toBeVisible({ timeout: 15_000 });
+	});
+});
+
+// Acceptance projection regressions: the regular proposal panel must submit
+// the persisted candidate identity and let POST /api/goals own current-state
+// validation. The sibling goal-preview handler is pinned in the core source
+// contract without duplicating this browser setup.
+test.describe("Journey: Goal Proposal — canonical acceptance projection", () => {
+	test("stale child proposal keeps its parent through SUBGOALS_DISABLED and succeeds after correction", async ({ page }) => {
+		test.setTimeout(90_000);
+		await setSubgoalsEnabledPreference(true);
+		const projectId = await defaultProjectId();
+		expect(projectId).toBeTruthy();
+		const parent = await createGoal({
+			title: `proposal-parent-${Date.now()}`,
+			projectId,
+			team: false,
+			subgoalsAllowed: true,
+			maxNestingDepth: 3,
+		});
+		const sessionId = await createSession({ projectId });
+		let acceptCurrentState = false;
+		const submitted: Array<Record<string, unknown>> = [];
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const seeded = await seedGoalProposal(page, sessionId, {
+				title: "Stale Child Proposal",
+				spec: "A child proposal that must retain its parent through acceptance-time validation.",
+				workflow: "general",
+				parentGoalId: parent.id,
+			});
+			expect(seeded.status, JSON.stringify(seeded.body)).toBe(200);
+			const initial = await waitForGoalProposal(page, "Stale Child Proposal");
+			expect(initial.fields.parentGoalId).toBe(parent.id);
+			expect(initial.rev).toBeGreaterThan(0);
+
+			await page.route("**/api/goals", async (route) => {
+				if (route.request().method() !== "POST") return route.continue();
+				const body = route.request().postDataJSON() as Record<string, unknown>;
+				submitted.push(body);
+				if (!acceptCurrentState) {
+					await route.fulfill({
+						status: 403,
+						contentType: "application/json",
+						body: JSON.stringify({
+							error: "Sub-goals are disabled in system settings.",
+							message: "Sub-goals are disabled in system settings.",
+							code: "SUBGOALS_DISABLED",
+						}),
+					});
+					return;
+				}
+				await route.fulfill({
+					status: 201,
+					contentType: "application/json",
+					body: JSON.stringify({
+						id: "corrected-child-goal",
+						title: body.title,
+						spec: body.spec,
+						cwd: body.cwd || nonGitCwd(),
+						state: "active",
+						team: true,
+						projectId,
+						parentGoalId: parent.id,
+						createdAt: Date.now(),
+						updatedAt: Date.now(),
+					}),
+				});
+			});
+
+			await setSubgoalsEnabledPreference(false);
+			await expect.poll(
+				() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
+				{ timeout: 10_000 },
+			).toBe("false");
+
+			const panel = page.locator('[data-panel="goal-proposal"]').first();
+			const createButton = panel.getByRole("button", { name: "Create Goal" });
+			await expect(createButton).toBeEnabled({ timeout: 10_000 });
+			await createButton.click();
+
+			await expect(page.locator('[data-testid="error-details-code"]')).toHaveText("SUBGOALS_DISABLED", { timeout: 15_000 });
+			await expect(page.locator('[data-testid="error-details-message"]')).toContainText("Sub-goals are disabled");
+			expect(submitted).toHaveLength(1);
+			expect(submitted[0].parentGoalId, "visibility changes must not rewrite the child candidate into a root").toBe(parent.id);
+
+			const retained = await waitForGoalProposal(page, "Stale Child Proposal");
+			expect(retained.rev, "failed acceptance must not advance the draft revision").toBe(initial.rev);
+			expect(retained.fields.parentGoalId).toBe(parent.id);
+			await expect(panel).toBeVisible();
+			const rawDraft = await page.evaluate(async (sid) => {
+				const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposal/goal`);
+				return { status: response.status, text: await response.text() };
+			}, sessionId);
+			expect(rawDraft.status).toBe(200);
+			expect(rawDraft.text).toContain(parent.id);
+
+			const goalsAfterFailure = await (await apiFetch("/api/goals")).json();
+			const goalList: any[] = Array.isArray(goalsAfterFailure) ? goalsAfterFailure : goalsAfterFailure.goals ?? [];
+			expect(goalList.some(goal => goal.title === "Stale Child Proposal"), "no root/child goal may exist before correction").toBe(false);
+
+			await page.getByRole("button", { name: "OK" }).click();
+			acceptCurrentState = true;
+			await setSubgoalsEnabledPreference(true);
+			await expect.poll(
+				() => page.evaluate(() => document.documentElement.dataset.subgoalsEnabled),
+				{ timeout: 10_000 },
+			).toBe("true");
+			await createButton.click();
+
+			await expect.poll(() => submitted.length, { timeout: 10_000 }).toBe(2);
+			expect(submitted[1].parentGoalId).toBe(parent.id);
+			await expect.poll(
+				() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null),
+				{ timeout: 10_000 },
+			).toBeNull();
+			await expect(page).toHaveURL(/#\/goal\/corrected-child-goal$/);
+		} finally {
+			await page.unroute("**/api/goals").catch(() => {});
+			await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(parent.id).catch(() => {});
+			await setSubgoalsEnabledPreference(true).catch(() => {});
+		}
+	});
+
+	test("workflowless omitted-workflow proposal stays enabled and reaches createGoal without a workflow", async ({ page }) => {
+		test.setTimeout(90_000);
+		const rootPath = mkdtempSync(join(tmpdir(), "bobbit-v2-proposal-workflowless-"));
+		const project = await registerProject({
+			name: `proposal-workflowless-${Date.now()}`,
+			rootPath,
+			seedWorkflows: false,
+		});
+		const sessionId = await createSession({ cwd: rootPath, projectId: project.id });
+		let submitted: Record<string, unknown> | undefined;
+		try {
+			const before = await (await apiFetch(`/api/workflows?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(Array.isArray(before) ? before : before.workflows ?? []).toHaveLength(0);
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+			const seeded = await seedGoalProposal(page, sessionId, {
+				title: "Generated Default Proposal",
+				spec: "A workflowless proposal whose omitted selection is resolved canonically at creation time.",
+			});
+			expect(seeded.status, JSON.stringify(seeded.body)).toBe(200);
+			const proposal = await waitForGoalProposal(page, "Generated Default Proposal");
+			expect(proposal.fields).not.toHaveProperty("workflow");
+			expect(proposal.fields).not.toHaveProperty("workflowId");
+
+			const afterSeed = await (await apiFetch(`/api/workflows?projectId=${encodeURIComponent(project.id)}`)).json();
+			expect(Array.isArray(afterSeed) ? afterSeed : afterSeed.workflows ?? [], "proposal validation must not persist generated defaults").toHaveLength(0);
+
+			await page.route("**/api/goals", async (route) => {
+				if (route.request().method() !== "POST") return route.continue();
+				submitted = route.request().postDataJSON() as Record<string, unknown>;
+				await route.fulfill({
+					status: 201,
+					contentType: "application/json",
+					body: JSON.stringify({
+						id: "generated-default-goal",
+						title: submitted.title,
+						spec: submitted.spec,
+						cwd: rootPath,
+						state: "active",
+						team: true,
+						projectId: project.id,
+						createdAt: Date.now(),
+						updatedAt: Date.now(),
+					}),
+				});
+			});
+
+			const panel = page.locator('[data-panel="goal-proposal"]').first();
+			const createButton = panel.getByRole("button", { name: "Create Goal" });
+			await expect(createButton, "an empty workflow cache must not hard-stop an omitted selection").toBeEnabled({ timeout: 10_000 });
+			await createButton.click();
+			await expect.poll(() => submitted, { timeout: 10_000 }).toBeTruthy();
+			expect(submitted).not.toHaveProperty("workflowId");
+			expect(submitted).not.toHaveProperty("workflow");
+			await expect(page.locator('[data-testid="error-details-message"]')).toHaveCount(0);
+			await expect(page).toHaveURL(/#\/goal\/generated-default-goal$/);
+		} finally {
+			await page.unroute("**/api/goals").catch(() => {});
+			await deleteSession(sessionId).catch(() => {});
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			rmSync(rootPath, { recursive: true, force: true });
+		}
 	});
 });
 
