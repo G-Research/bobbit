@@ -883,6 +883,15 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/mock-agent-new-session.test.ts",
+		allowReason: "test-owned generated transcript files emitted by the isolated in-process mock runtime",
+		reads: frozen([
+			{ expression: "filePath", count: 1 },
+			{ expression: "oldPath", count: 2 },
+			{ expression: "newPath", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/session-fs-sandbox-publication.test.ts",
 		allowReason: "isolated test-owned sandbox filesystem transcript, canary, and staging artifacts",
 		reads: frozen([
