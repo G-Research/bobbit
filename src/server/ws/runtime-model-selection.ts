@@ -53,6 +53,7 @@ type RuntimeModelSnapshot = {
 
 type OptionalStateMetadata = {
 	contextWindow?: unknown;
+	modelCapacity?: unknown;
 	maxTokens?: unknown;
 	reasoning?: unknown;
 	thinkingLevelMap?: unknown;
@@ -72,6 +73,9 @@ function modelStateMessage(tuple: RuntimeModelTuple): ServerMessage {
 	const model: Record<string, unknown> = { provider: tuple.provider, id: tuple.id };
 	if (typeof meta?.contextWindow === "number" && Number.isFinite(meta.contextWindow) && meta.contextWindow > 0) {
 		model.contextWindow = meta.contextWindow;
+	}
+	if (typeof meta?.modelCapacity === "number" && Number.isFinite(meta.modelCapacity) && meta.modelCapacity > 0) {
+		model.modelCapacity = meta.modelCapacity;
 	}
 	if (typeof meta?.maxTokens === "number" && Number.isFinite(meta.maxTokens) && meta.maxTokens > 0) {
 		model.maxTokens = meta.maxTokens;

@@ -101,6 +101,7 @@ const isInputModalityList = (v: unknown): v is ("text" | "image")[] => Array.isA
 
 type OptionalResolvedModelStateMeta = {
 	contextWindow?: unknown;
+	modelCapacity?: unknown;
 	maxTokens?: unknown;
 	reasoning?: unknown;
 	thinkingLevelMap?: unknown;
@@ -112,6 +113,7 @@ type OptionalResolvedModelStateMeta = {
 function isExactResolvedMeta(meta: OptionalResolvedModelStateMeta | undefined): meta is OptionalResolvedModelStateMeta {
 	if (!meta || meta.available === false || meta.source === "inferred" || meta.source === "unavailable") return false;
 	return isPositiveNumber(meta.contextWindow)
+		|| isPositiveNumber(meta.modelCapacity)
 		|| isPositiveNumber(meta.maxTokens)
 		|| typeof meta.reasoning === "boolean"
 		|| isThinkingLevelMap(meta.thinkingLevelMap)
@@ -136,6 +138,8 @@ export function buildResolvedModelStateModel(provider: string, id: string, base?
 
 	if (isPositiveNumber(source?.contextWindow)) model.contextWindow = source.contextWindow;
 	else delete model.contextWindow;
+	if (isPositiveNumber(source?.modelCapacity)) model.modelCapacity = source.modelCapacity;
+	else delete model.modelCapacity;
 	if (isPositiveNumber(source?.maxTokens)) model.maxTokens = source.maxTokens;
 	else delete model.maxTokens;
 	if (typeof source?.reasoning === "boolean") model.reasoning = source.reasoning;
