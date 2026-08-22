@@ -290,14 +290,6 @@ const goalPlugin: ProposalTypePlugin = {
 					message: "goal proposal frontmatter must include a non-empty `title`",
 				};
 			}
-			if (typeof fields.spec !== "string" || fields.spec.trim() === "") {
-				return {
-					ok: false,
-					code: "MISSING_REQUIRED_FIELD",
-					field: "spec",
-					message: "goal proposal must have a non-empty body (spec)",
-				};
-			}
 			const inlineErr = validateGoalInlineFields(fields);
 			if (inlineErr) return inlineErr;
 		} else {
