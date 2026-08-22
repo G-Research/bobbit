@@ -33,6 +33,7 @@ type StaffStatus = "idle" | "streaming" | "starting" | "terminated";
 
 interface FakeSession {
 	id: string;
+	staffId: string;
 	status: StaffStatus;
 	promptQueue: {
 		readonly isEmpty: boolean;
@@ -74,6 +75,7 @@ function makeHarness(opts: {
 	const promptQueueRows: unknown[] = [];
 	const session: FakeSession = {
 		id: sessionId,
+		staffId,
 		status: opts.sessionStatus ?? "idle",
 		promptQueue: {
 			get isEmpty() { return promptQueueRows.length === 0; },
