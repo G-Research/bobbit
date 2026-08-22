@@ -1679,7 +1679,7 @@ export class AgentInterface extends LitElement {
 			}
 			try {
 				const accepted = await clearContext.call(session);
-				if (accepted === false) {
+				if (accepted !== true) {
 					editor?.showBlockedSendError(clearFailure);
 					return;
 				}

@@ -65,7 +65,7 @@ function makeInterface(
 			isStreaming: true,
 			messages: [{ role: "user", content: "existing conversation" }],
 		},
-		clearContext: vi.fn(),
+		clearContext: vi.fn(() => true),
 		prompt: vi.fn(),
 		appendMessage: vi.fn(),
 		...overrides,
@@ -139,8 +139,33 @@ describe("AgentInterface /clear interception", () => {
 		expect(deleteDraft).toHaveBeenCalledWith("clear-command-session");
 	});
 
+	it("preserves the exact composer and attachment draft when transport rejects clear", async () => {
+		const { ui, editor, session } = makeInterface({ clearContext: vi.fn(() => false) });
+		const attachment = { id: "unsent", type: "document", fileName: "unsent.txt" };
+		const editorAttachments = [attachment];
+		const liftedAttachments = [attachment];
+		editor.value = " /ClEaR ";
+		editor.attachments = editorAttachments;
+		ui._attachments = liftedAttachments;
+		const deleteDraft = vi.spyOn(getAppStorage().promptDraftAttachments, "deleteAttachments").mockResolvedValue();
+		const before = structuredClone(session.state.messages);
+
+		await ui.sendMessage(editor.value, editorAttachments as any);
+
+		expect(session.clearContext).toHaveBeenCalledOnce();
+		expect(editor.showBlockedSendError).toHaveBeenCalledWith(
+			"Context wasn't cleared. Your previous context is still active. Try /clear again.",
+		);
+		expect(editor.value).toBe(" /ClEaR ");
+		expect(editor.attachments).toBe(editorAttachments);
+		expect(ui._attachments).toBe(liftedAttachments);
+		expect(deleteDraft).not.toHaveBeenCalled();
+		expect(session.state.messages).toEqual(before);
+		expect(session.prompt).not.toHaveBeenCalled();
+	});
+
 	it("preserves a newer composer and attachment draft created while clear admission is pending", async () => {
-		const admission = deferred<void>();
+		const admission = deferred<boolean>();
 		const { ui, editor, session } = makeInterface({ clearContext: vi.fn(() => admission.promise) });
 		const submittedAttachment = { id: "submitted", type: "document", fileName: "old.txt" };
 		const newerAttachment = { id: "newer", type: "document", fileName: "new.txt" };
@@ -153,7 +178,7 @@ describe("AgentInterface /clear interception", () => {
 		editor.value = "new prompt typed during admission";
 		editor.attachments = [newerAttachment];
 		ui._attachments = [newerAttachment];
-		admission.resolve();
+		admission.resolve(true);
 		await sending;
 
 		expect(session.clearContext).toHaveBeenCalledOnce();
