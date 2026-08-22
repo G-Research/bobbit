@@ -169,10 +169,13 @@ import {
 import {
 	projectOwnTranscriptJsonl,
 	readAgentTranscript,
+	readClearHistory,
 	readOrphanedBeforeCompaction,
 	readTranscript,
 	TranscriptReaderError,
 } from "./agent/transcript-reader.js";
+import { findContextClearBoundary } from "./agent/context-clear-boundary.js";
+import { trustPersistedAgentSessionFile } from "./agent/transcript-sanitizer.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
@@ -180,6 +183,7 @@ import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import {
+	canonicalContainerAgentSessionPath,
 	sessionFileDeleteContainerOnly,
 	sessionFileExists,
 	sessionFileRead,
@@ -17890,6 +17894,116 @@ async function handleApiRoute(
 				json({ error: err.code, detail: err.message }, status);
 			} else {
 				jsonError(500, err, { error: "internal_error", detail: String(err) });
+			}
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/transcript/before-clear — complete active-branch
+	// history for the server-owned transcript generation named by a clear boundary.
+	const beforeClearMatch = url.pathname.match(
+		/^\/api\/sessions\/([^/]+)\/transcript\/before-clear$/,
+	);
+	if (beforeClearMatch && req.method === "GET") {
+		const [, targetId] = beforeClearMatch;
+		const targetPs = sessionManager.getPersistedSession(targetId);
+		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
+
+		const qp = url.searchParams;
+		const clearId = qp.get("clearId");
+		if (!clearId || clearId.length > 256 || !/^clr_[A-Za-z0-9_-]+$/.test(clearId)) {
+			json({ error: "invalid_params", detail: "clearId must be a valid context-clear boundary id" }, 400);
+			return;
+		}
+
+		let cursor: number | undefined;
+		let limit: number | undefined;
+		let verbose = false;
+		try {
+			const cursorRaw = qp.get("cursor");
+			const offsetRaw = qp.get("offset");
+			if (cursorRaw !== null && offsetRaw !== null && cursorRaw !== offsetRaw) {
+				throw new TranscriptReaderError("invalid_params", "cursor and offset must match when both are supplied");
+			}
+			const positionRaw = cursorRaw ?? offsetRaw;
+			if (positionRaw !== null) {
+				cursor = Number(positionRaw);
+				if (!Number.isFinite(cursor) || !Number.isInteger(cursor) || cursor < 0) {
+					throw new TranscriptReaderError("invalid_params", "cursor must be a non-negative integer");
+				}
+			}
+			if (qp.has("limit")) {
+				limit = Number(qp.get("limit"));
+				if (!Number.isFinite(limit) || !Number.isInteger(limit) || limit < 1 || limit > 200) {
+					throw new TranscriptReaderError("invalid_params", "limit must be an integer in [1, 200]");
+				}
+			}
+			const verboseRaw = qp.get("verbose");
+			if (verboseRaw !== null) {
+				const normalized = verboseRaw.toLowerCase();
+				if (normalized === "1" || normalized === "true") verbose = true;
+				else if (normalized !== "0" && normalized !== "false") {
+					throw new TranscriptReaderError("invalid_params", "verbose must be a boolean");
+				}
+			}
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				json({ error: err.code, detail: err.message }, 400);
+			} else {
+				jsonError(500, err, { error: "internal_error", detail: String(err) });
+			}
+			return;
+		}
+
+		const boundary = findContextClearBoundary(targetPs.contextClearBoundaries, clearId);
+		if (!boundary) {
+			json({ error: "clear_not_found" }, 404);
+			return;
+		}
+		if (!boundary.previousTranscriptMaterialized) {
+			json({ total: 0, returned: 0, nextCursor: null, messages: [] });
+			return;
+		}
+
+		const historicalPath = boundary.previousAgentSessionFile;
+		const historyContext = sessionFsContextForAgentFile(targetPs, historicalPath);
+		try {
+			// Boundary validation proves only the persisted shape. Re-validate its
+			// server-owned path in the correct realm immediately before any read.
+			if (historyContext.sandboxed) {
+				if (!canonicalContainerAgentSessionPath(historicalPath)) {
+					throw new TranscriptReaderError("transcript_unavailable", "retained sandbox transcript path is invalid");
+				}
+			} else {
+				trustPersistedAgentSessionFile(historicalPath);
+			}
+
+			const envelope = await readClearHistory(
+				{ cursor, limit, verbose },
+				{
+					readContent: () => sessionFileRead(historyContext, historicalPath, sandboxManager),
+					authorContext: {
+						session: targetPs,
+						sidecarEntries: readAuthorSidecar(targetId),
+						agentDeps: {
+							getStaff: (id) => staffManager.getStaff(id),
+							getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+						},
+					},
+				},
+			);
+			json(envelope);
+		} catch (err) {
+			if (err instanceof TranscriptReaderError) {
+				const status = err.code === "transcript_unavailable" ? 404 : 400;
+				json({ error: err.code, detail: err.message }, status);
+			} else {
+				// Invalid persisted paths and filesystem failures are intentionally
+				// indistinguishable from a missing retained transcript to the client.
+				json({
+					error: "transcript_unavailable",
+					detail: "The conversation before this clear is unavailable. Retry after refreshing the session.",
+				}, 404);
 			}
 		}
 		return;
