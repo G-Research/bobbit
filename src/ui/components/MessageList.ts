@@ -14,10 +14,9 @@ import "./ErrorMessage.js";
 import "./ToolGroup.js";
 import "./ToolPermissionCard.js";
 // <bobbit-pre-compaction-history> is loaded on demand the first time a
-// compaction-summary card appears in the transcript. Most chat sessions
-// never compact, so keeping this 8 kB element out of entry saves cold
-// load. Lit upgrades the unknown tag once the chunk's customElement
-// landing fires.
+// compaction or context-clear boundary appears. Most chat sessions have
+// neither, so keeping the history element out of entry saves cold load. Lit
+// upgrades the unknown tag once the chunk's customElement landing fires.
 import { ensurePreCompactionHistory } from "../../app/lazy-widgets.js";
 import "./DeferredBlock.js";
 import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
@@ -149,6 +148,21 @@ function getCompactionSidecarId(msg: any): string | null {
 	if (!block || block.type !== "toolCall" || block.name !== COMPACTION_TOOL_NAME) return null;
 	const cid = block.arguments?.compactionId;
 	return typeof cid === "string" && cid.length > 0 ? cid : null;
+}
+
+const CONTEXT_CLEARED_TOOL_NAME = "__context_cleared";
+
+/** Detect a durable outward-only clear boundary and return its stable id. */
+function getContextClearBoundaryId(msg: any): string | null {
+	if (!msg || msg.role !== "assistant") return null;
+	const content = msg.content;
+	if (!Array.isArray(content) || content.length !== 1) return null;
+	const block = content[0];
+	if (!block || block.type !== "toolCall" || block.name !== CONTEXT_CLEARED_TOOL_NAME) return null;
+	const clearId = block.arguments?.clearId;
+	return typeof clearId === "string" && clearId.length > 0 && clearId.length <= 256
+		? clearId
+		: null;
 }
 
 /** Live (in-progress / no-sidecar-id-yet) compaction-summary detection —
@@ -410,6 +424,26 @@ export class MessageList extends LitElement {
 					key: `precompact:${compactionId}`,
 					template: html`<bobbit-pre-compaction-history
 						compaction-id=${compactionId}
+						session-id=${this.sessionId}
+						.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
+						.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
+						.reportPromptAuthorSlice=${this.reportPromptAuthorSlice}
+					></bobbit-pre-compaction-history>`,
+				});
+			}
+
+			// Clear boundaries use the same lazy, read-only history interaction but
+			// carry an independent identity and endpoint. Keeping the component as a
+			// sibling immediately above its card preserves chronological segmentation
+			// across repeated clears without putting historical rows in app state.
+			const clearId = getContextClearBoundaryId(msg);
+			if (clearId && this.sessionId) {
+				void ensurePreCompactionHistory();
+				items.push({
+					key: `preclear:${clearId}`,
+					template: html`<bobbit-pre-compaction-history
+						boundary-kind="clear"
+						boundary-id=${clearId}
 						session-id=${this.sessionId}
 						.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
 						.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
