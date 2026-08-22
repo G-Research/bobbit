@@ -151,6 +151,50 @@ function persistedEmptyGeneration(options: {
 	};
 }
 
+function materializedEntries(): any[] {
+	return [
+		{
+			type: "message",
+			id: "restored-old-user",
+			parentId: null,
+			message: { role: "user", content: [{ type: "text", text: "SECRET_RESTORED_OLD_USER" }], timestamp: 1_700_000_000_001 },
+		},
+		{
+			type: "message",
+			id: "restored-old-assistant",
+			parentId: "restored-old-user",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "SECRET_RESTORED_OLD_ASSISTANT" }],
+				provider: PROVIDER,
+				model: MODEL_ID,
+				stopReason: "stop",
+				timestamp: 1_700_000_000_002,
+			},
+		},
+	];
+}
+
+function persistedMaterializedGeneration(id: string): Record<string, any> {
+	const agentSessionFile = hostGeneration(`${id}-old`);
+	fs.mkdirSync(path.dirname(agentSessionFile), { recursive: true });
+	fs.writeFileSync(agentSessionFile, `${materializedEntries().map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+	return {
+		id,
+		title: `Materialized clear recovery ${id}`,
+		cwd: tmpRoot,
+		projectId: "clear-recovery-project",
+		agentSessionFile,
+		createdAt: 1_700_000_000_000,
+		lastActivity: 1_700_000_000_000,
+		modelProvider: PROVIDER,
+		modelId: MODEL_ID,
+		effectiveThinkingLevel: THINKING,
+		sandboxed: false,
+		messageQueue: [],
+	};
+}
+
 class RecoveryStore {
 	record: Record<string, any>;
 	readonly updates: Record<string, any>[] = [];
@@ -266,6 +310,86 @@ function makeRecoveryBridge(options: RecoveryBridgeOptions): any {
 	return bridge;
 }
 
+function makeRestoredClearBridge(options: {
+	oldPath: string;
+	newPath: string;
+	clearGate: Deferred<void>;
+	nonEmptyReplacement?: boolean;
+}): any {
+	let generation = 0;
+	let model = { provider: PROVIDER, id: MODEL_ID };
+	let thinkingLevel = THINKING;
+	const listeners = new Set<(event: any) => void>();
+	const commandJournal: any[] = [];
+	const oldEntries = materializedEntries();
+	const replacementEntries = options.nonEmptyReplacement
+		? [{ type: "message", id: "replacement-leak", parentId: null, message: { role: "user", content: "NON_EMPTY_REPLACEMENT" } }]
+		: [];
+	const prompt = vi.fn(async (text: string) => {
+		commandJournal.push({ type: "prompt", text });
+		return { success: true };
+	});
+	const bridge: any = {
+		running: true,
+		commandJournal,
+		start: vi.fn(async () => {}),
+		stop: vi.fn(async () => {}),
+		waitForReady: vi.fn(async () => {}),
+		prompt,
+		promptWhenReady: prompt,
+		steer: vi.fn(async (text: string) => {
+			commandJournal.push({ type: "steer", text });
+			return { success: true };
+		}),
+		abort: vi.fn(async () => ({ success: true })),
+		getState: vi.fn(async () => ({
+			success: true,
+			data: {
+				sessionFile: generation === 0 ? options.oldPath : options.newPath,
+				model,
+				thinkingLevel,
+				messageCount: generation === 0 ? oldEntries.length : replacementEntries.length,
+				pendingMessageCount: 0,
+			},
+		})),
+		getMessages: vi.fn(async () => ({
+			success: true,
+			data: { messages: (generation === 0 ? oldEntries : replacementEntries).map((entry) => entry.message) },
+		})),
+		getTranscriptEntries: vi.fn(async () => {
+			const entries = generation === 0 ? oldEntries : replacementEntries;
+			return { success: true, data: { entries, leafId: entries.at(-1)?.id ?? null } };
+		}),
+		getTranscriptCursorSnapshot: vi.fn(async () => ({ success: true, data: { forkMessages: [], entries: [], leafId: null } })),
+		setModel: vi.fn(async (provider: string, id: string) => {
+			model = { provider, id };
+			return { success: true };
+		}),
+		setThinkingLevel: vi.fn(async (level: string) => {
+			thinkingLevel = level;
+			return { success: true };
+		}),
+		newSession: vi.fn(async () => {
+			await options.clearGate.promise;
+			generation = 1;
+			return { type: "response", command: "new_session", success: true, data: { cancelled: false } };
+		}),
+		compact: vi.fn(async () => ({ success: true })),
+		sendCommand: vi.fn(async (command: any) => {
+			commandJournal.push(command);
+			if (command?.type === "switch_session") generation = 0;
+			return { success: true };
+		}),
+		onEvent(listener: (event: any) => void) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+		emit(event: any) { for (const listener of [...listeners]) listener(event); },
+		get generation() { return generation; },
+	};
+	return bridge;
+}
+
 const preferencesStore = new PreferencesStore(path.resolve("/memfs/context-clear-recovery"), createMemFs());
 preferencesStore.set("customProviders", [{
 	id: PROVIDER,
@@ -343,6 +467,22 @@ function liveSession(record: Record<string, any>, bridge: any, clients = new Set
 		unsubscribe: vi.fn(),
 		rpcClient: bridge,
 	};
+}
+
+function eventClient(): any {
+	return {
+		readyState: 1,
+		bufferedAmount: 0,
+		frames: [] as any[],
+		send(payload: string) { this.frames.push(JSON.parse(payload)); },
+		close: vi.fn(),
+	};
+}
+
+function emittedEventTypes(client: any): string[] {
+	return client.frames
+		.filter((frame: any) => frame.type === "event" && typeof frame.data?.type === "string")
+		.map((frame: any) => frame.data.type);
 }
 
 function repairUpdates(store: RecoveryStore): Record<string, any>[] {
@@ -522,6 +662,139 @@ describe("unmaterialized clear generation live respawn", () => {
 		expect(restored.promptQueue.toArray()).toEqual([]);
 		expect(replacement.sendCommand.mock.calls.some(([command]: [any]) => command?.type === "switch_session")).toBe(false);
 	});
+});
+
+describe("restored session clear event fencing", () => {
+	for (const restoreMode of ["cold restore", "live respawn"] as const) {
+		for (const outcome of ["success", "rollback"] as const) {
+			test(`${restoreMode} active-turn clear ${outcome} gives the temporary terminal listener exclusive ownership`, async () => {
+				const slug = `${restoreMode.replaceAll(" ", "-")}-${outcome}`;
+				const record = persistedMaterializedGeneration(`fenced-${slug}`);
+				const before = structuredClone(record);
+				const clearGate = deferred<void>();
+				const bridge = makeRestoredClearBridge({
+					oldPath: record.agentSessionFile,
+					newPath: hostGeneration(`fenced-${slug}-new`),
+					clearGate,
+					nonEmptyReplacement: outcome === "rollback",
+				});
+				const store = new RecoveryStore(record);
+				const manager = makeManager(store, () => bridge);
+				manager.readCompactionTranscriptEntries = vi.fn(async () => undefined);
+				manager.finalizeCompactionSidecar = vi.fn(async () => undefined);
+
+				if (restoreMode === "cold restore") {
+					await manager._restoreSessionCoalesced(store.record);
+				} else {
+					const oldBridge = makeRecoveryBridge({ freshPath: record.agentSessionFile });
+					manager.sessions.set(record.id, liveSession(record, oldBridge));
+					await manager.restartAgent(record.id);
+				}
+
+				const session = manager.sessions.get(record.id);
+				expect(session?.rpcClient).toBe(bridge);
+				const client = eventClient();
+				session.clients.add(client);
+				session.status = "streaming";
+				session.streamingStartedAt = 1_700_000_000_500;
+				session._piAgentRunSettled = false;
+
+				const prepareSpy = vi.spyOn(manager, "prepareVisibleAgentEvent");
+				const lifecycleSpy = vi.spyOn(manager, "handleAgentLifecycle");
+				const costSpy = vi.spyOn(manager, "trackCostFromEvent");
+				const clear = manager.clearContext(record.id);
+				await vi.waitFor(() => expect(bridge.newSession).toHaveBeenCalledTimes(1));
+				await Promise.all([
+					manager.enqueuePrompt(record.id, "PROMPT_AFTER_RESTORED_CLEAR", { intentId: `prompt-${slug}` }),
+					manager.deliverLiveSteer(record.id, "STEER_AFTER_RESTORED_CLEAR", { intentId: `steer-${slug}` }),
+				]);
+				const activityBeforeStaleEvents = session.lastActivity;
+				const eventSeqBeforeStaleEvents = session.eventBuffer.lastSeq;
+
+				const staleEvents = [
+					{ type: "agent_start" },
+					{ type: "message_start", message: { role: "assistant", id: `stale-start-${slug}` } },
+					{ type: "auto_compaction_start", reason: "threshold" },
+					{
+						type: "message_end",
+						message: { role: "assistant", id: `stale-end-${slug}`, stopReason: "stop", content: "stale terminal" },
+					},
+					{ type: "agent_end", willRetry: true, messages: [] },
+					{
+						type: "auto_compaction_end",
+						reason: "threshold",
+						result: { summary: "stale compaction", tokensBefore: 100, firstKeptEntryId: "kept" },
+					},
+					{ type: "agent_end", willRetry: false, messages: [] },
+					{ type: "agent_settled" },
+				];
+				for (const event of staleEvents) bridge.emit(event);
+
+				// The restored callback must stop at its first line. Only clear's temporary
+				// listener may retain terminal evidence while the lifecycle fence is active.
+				expect(prepareSpy).not.toHaveBeenCalled();
+				expect(lifecycleSpy).not.toHaveBeenCalled();
+				expect(costSpy).not.toHaveBeenCalled();
+				expect(session.lastActivity).toBe(activityBeforeStaleEvents);
+				expect(session.eventBuffer.lastSeq).toBe(eventSeqBeforeStaleEvents);
+				expect(emittedEventTypes(client)).toEqual([]);
+				expect(bridge.prompt).not.toHaveBeenCalled();
+				expect(bridge.steer).not.toHaveBeenCalled();
+
+				clearGate.resolve(undefined);
+				if (outcome === "success") await clear;
+				else await expect(clear).rejects.toThrow(/empty|message/i);
+				await flushMicrotasks();
+
+				const replayedTypes = lifecycleSpy.mock.calls.map(([, event]: any[]) => event.type);
+				expect(replayedTypes).toEqual(["message_end", "auto_compaction_end", "agent_end", "agent_settled"]);
+				expect(costSpy.mock.calls.map(([, event]: any[]) => event.type)).toEqual(replayedTypes);
+				expect(prepareSpy).not.toHaveBeenCalled();
+				expect(bridge.prompt).toHaveBeenCalledTimes(1);
+				expect(bridge.prompt.mock.calls[0]?.[0]).toContain("PROMPT_AFTER_RESTORED_CLEAR");
+				expect(bridge.steer).not.toHaveBeenCalled();
+				expect(session.promptQueue.toArray()).toHaveLength(1);
+				expect(session.lifecycleFenced).not.toBe(true);
+				if (outcome === "success") {
+					expect(store.record.agentSessionFile).toBe(hostGeneration(`fenced-${slug}-new`));
+					expect(store.record.contextClearBoundaries).toHaveLength(1);
+				} else {
+					expect(store.record.agentSessionFile).toBe(before.agentSessionFile);
+					expect(store.record.contextClearBoundaries).toBeUndefined();
+					expect(bridge.generation).toBe(0);
+				}
+
+				// Once unfenced, the same restored subscriber resumes ordinary preparation,
+				// lifecycle, cost bookkeeping, client publication, and the next FIFO drain.
+				client.frames.length = 0;
+				bridge.emit({ type: "agent_start" });
+				bridge.emit({
+					type: "message_end",
+					message: { role: "assistant", id: `current-end-${slug}`, stopReason: "stop", content: "current terminal" },
+				});
+				bridge.emit({ type: "agent_end", willRetry: false, messages: [] });
+				bridge.emit({ type: "agent_settled" });
+				await flushMicrotasks();
+
+				expect(prepareSpy.mock.calls.map(([, event]: any[]) => event.type)).toEqual([
+					"agent_start", "message_end", "agent_end", "agent_settled",
+				]);
+				expect(lifecycleSpy.mock.calls.map(([, event]: any[]) => event.type)).toEqual([
+					...replayedTypes,
+					"agent_start", "message_end", "agent_end", "agent_settled",
+				]);
+				expect(costSpy.mock.calls.map(([, event]: any[]) => event.type)).toEqual([
+					...replayedTypes,
+					"agent_start", "message_end", "agent_end", "agent_settled",
+				]);
+				expect(emittedEventTypes(client)).toEqual(["agent_start", "message_end", "agent_end", "agent_settled"]);
+				expect(bridge.prompt).toHaveBeenCalledTimes(2);
+				expect(bridge.prompt.mock.calls[1]?.[0]).toContain("STEER_AFTER_RESTORED_CLEAR");
+				expect(bridge.steer).not.toHaveBeenCalled();
+				expect(session.promptQueue.toArray()).toEqual([]);
+			});
+		}
+	}
 });
 
 describe("unmaterialized recovery failures", () => {

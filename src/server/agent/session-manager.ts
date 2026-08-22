@@ -12975,6 +12975,7 @@ export class SessionManager {
 			suppressUntilPrompt: true,
 		});
 		const unsub = rpcClient.onEvent((event: any) => {
+			if (session.lifecycleFenced) return;
 			// During restore, switch_session replays every persisted message as an
 			// rpc event. Bumping lastActivity here would clobber the pre-restart
 			// timestamp with Date.now(). More importantly, replayed lifecycle frames
