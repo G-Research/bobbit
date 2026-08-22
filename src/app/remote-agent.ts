@@ -622,6 +622,9 @@ export class RemoteAgent {
 	 *  complete/error card; in-progress card uses the same start to power
 	 *  the live <live-timer> ticker). */
 	private _compactionStartedAt: number | null = null;
+	/** Invalidates deferred compaction-card transitions when the conversation
+	 * generation is replaced before their minimum-visible timer fires. */
+	private _compactionGeneration = 0;
 
 	// Proposal deferral — when set, incoming messages are stored but
 	// _checkProposals is skipped until runDeferredProposalCheck() is called.
@@ -1503,6 +1506,11 @@ export class RemoteAgent {
 		this.send({ type: "compact" });
 	}
 
+	/** Start a fresh Pi conversation generation while retaining this Bobbit session. */
+	clearContext(): void {
+		this.send({ type: "clear" });
+	}
+
 	/**
 	 * Best-effort sample of current context-token usage. Walks the transcript
 	 * backwards for the latest assistant message carrying `usage`, mirroring
@@ -1594,6 +1602,58 @@ export class RemoteAgent {
 		if (event?.type === "auto_compaction_start" || event?.type === "auto_compaction_end")
 			return "auto";
 		return "manual";
+	}
+
+	/** Apply the server's durable generation-replacement snapshot. Delivery
+	 * projections deliberately live outside this reset: prompts and steers queued
+	 * behind the replacement fence must remain visible and settle normally. */
+	private _applyContextCleared(messages: any[]): void {
+		this._state.streamingMessage = null;
+		this.streamingMessageId = undefined;
+		this._previousRawAssistantStreamMessage = undefined;
+		this._state.pendingToolCalls = new Set();
+		this._state.toolPartialResults = undefined;
+		this._toolCallInputsById.clear();
+		this._proposalToolCallsById.clear();
+		this._pendingReviewToolCalls.clear();
+		this._toolProposalMessageIds.clear();
+		this._processedProposalIds.clear();
+		if (this._sessionId) {
+			try { sessionStorage.removeItem(`processed-proposals-${this._sessionId}`); }
+			catch { /* storage is best-effort */ }
+		}
+		this._streamingProposalBlockIdByTag = {};
+		if (this._isActiveSession()) {
+			for (const key of Object.keys(state.proposalStreamingByTag)) {
+				state.proposalStreamingByTag[key] = false;
+			}
+		}
+
+		const wasCompacting = this._isCompacting;
+		this._isCompacting = false;
+		this._compactionGeneration++;
+		this._usageStaleAfterCompaction = false;
+		this._compactionStartPct = null;
+		this._lastKnownContextTokens = null;
+		this._overflowRecoveryDeadline = null;
+		this._pendingCompactionAmend = null;
+		this._compactionStartedAt = null;
+		if (wasCompacting) this.onCompactionChange?.(false);
+
+		this._state.error = undefined;
+		this._state.autoRetryPending = null;
+		this._state.manualRetryRequired = null;
+		this._state.turnStartTime = null;
+		this._taskStartTime = null;
+		this._pendingAttachments = null;
+		this._pendingSkillExpansions = null;
+		this._lastTruncatedStreamUpdate = 0;
+		this._hasDeferredProposals = false;
+
+		// Destructive replacement is required here. A normal snapshot action keeps
+		// live/synthetic survivors and could carry old-generation rows across clear.
+		this.replaceMessages(messages);
+		this._hadDisconnectSinceLastSnapshot = false;
 	}
 
 	requestMessages(): void {
@@ -3588,6 +3648,19 @@ export class RemoteAgent {
 				this._pendingReviewToolCalls.clear();
 				break;
 
+			case "context_cleared":
+				if (Array.isArray(event.messages)) {
+					this._applyContextCleared(event.messages);
+					// Reuse the established bulk-replacement commit/tail-pin seam; the
+					// context_cleared event itself is still forwarded below for consumers.
+					this.emit({ type: "messages_snapshot" } as any);
+				} else {
+					// Never destructively replace from a malformed boundary event. The
+					// authoritative snapshot converges to the committed clear on retry.
+					this.requestMessages();
+				}
+				break;
+
 			case "agent_end": {
 				this._previousRawAssistantStreamMessage = undefined;
 				this.streamingMessageId = undefined;
@@ -3906,6 +3979,7 @@ export class RemoteAgent {
 			case "auto_compaction_start":
 				// Don't set isStreaming — compaction uses its own blob animation
 				this._isCompacting = true;
+				this._compactionGeneration++;
 				this.onCompactionChange?.(true);
 				this._compactionStartedAt = Date.now();
 				// Mark context-bar usage stale until the next clean assistant
@@ -4053,7 +4127,9 @@ export class RemoteAgent {
 				}
 				const { message, toolResult } = buildCompactionSummaryMessages(payload);
 				const elapsedSinceStart = startedAtMs != null ? nowMs - startedAtMs : COMPACT_CARD_MIN_DURATION;
+				const compactionGeneration = this._compactionGeneration;
 				const transitionCard = () => {
+					if (compactionGeneration !== this._compactionGeneration) return;
 					this.apply({
 						type: "compaction-result",
 						message: withClientSystemAuthor(message),
