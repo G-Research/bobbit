@@ -466,10 +466,30 @@ describe("SessionManager context clear transaction", () => {
 });
 
 describe("SessionManager context clear rollback", () => {
-	it("stops an ambiguous timed-out bridge before late completion and restores queued work once", async () => {
+	it.each([
+		[
+			"timed-out response",
+			(gate: Deferred<any>) => gate.reject(new Error("new_session RPC timed out")),
+			/timed out/i,
+		],
+		[
+			"wrong-command success response",
+			(gate: Deferred<any>) => gate.resolve({
+				type: "response", command: "compact", success: true, data: { cancelled: false },
+			}),
+			/invalid response/i,
+		],
+		[
+			"success response missing a cancelled boolean",
+			(gate: Deferred<any>) => gate.resolve({
+				type: "response", command: "new_session", success: true, data: {},
+			}),
+			/invalid response/i,
+		],
+	] as const)("stops an ambiguous %s before late completion and restores queued work once", async (_label, settleResponse, errorPattern) => {
 		const responseGate = deferred<any>();
 		const lateCompletionGate = deferred<void>();
-		const fx = makeFixture({ id: "ambiguous-timeout-clear" });
+		const fx = makeFixture({ id: `ambiguous-${String(_label).replaceAll(" ", "-")}-clear` });
 		const staleBridge = fx.bridge;
 		const order: string[] = [];
 		staleBridge.newSession.mockImplementation(() => {
@@ -505,13 +525,15 @@ describe("SessionManager context clear rollback", () => {
 
 		const clear = fx.manager.clearContext(fx.session.id);
 		await vi.waitFor(() => expect(staleBridge.newSession).toHaveBeenCalledTimes(1));
-		await fx.manager.enqueuePrompt(fx.session.id, "FOLLOW_UP_AFTER_TIMEOUT", { intentId: "intent-timeout-follow-up" });
+		await fx.manager.enqueuePrompt(fx.session.id, "FOLLOW_UP_AFTER_AMBIGUOUS_RESPONSE", {
+			intentId: "intent-ambiguous-response-follow-up",
+		});
 		staleBridge.emit({ type: "agent_settled" });
-		responseGate.reject(new Error("new_session RPC timed out"));
+		settleResponse(responseGate);
 		await vi.waitFor(() => expect(staleBridge.stop).toHaveBeenCalledTimes(1));
 		lateCompletionGate.resolve(undefined);
 
-		await expect(clear).rejects.toThrow(/timed out/i);
+		await expect(clear).rejects.toThrow(errorPattern);
 		await flushMicrotasks();
 
 		expect(order).toEqual([
@@ -520,6 +542,7 @@ describe("SessionManager context clear rollback", () => {
 			"stale-new-session-completed",
 		]);
 		expect(staleBridge.sendCommand.mock.calls.some(([command]: [any]) => command?.type === "switch_session")).toBe(false);
+		expect(staleBridge.prompt).not.toHaveBeenCalled();
 		expect(staleBridge.generation).toBe(1);
 		expect(fx.manager.sessions.get(fx.session.id)).toBe(restoredSession);
 		expect((await restoredBridge.getState()).data).toEqual(expect.objectContaining({
@@ -530,7 +553,8 @@ describe("SessionManager context clear rollback", () => {
 		expect(restoredBridge.setModel).toHaveBeenCalledWith(PROVIDER, MODEL_ID);
 		expect(restoredBridge.setThinkingLevel).toHaveBeenCalledWith(THINKING);
 		expect(restoredBridge.prompt).toHaveBeenCalledTimes(1);
-		expect(restoredBridge.prompt.mock.calls[0]?.[0]).toContain("FOLLOW_UP_AFTER_TIMEOUT");
+		expect(restoredBridge.prompt.mock.calls[0]?.[0]).toContain("FOLLOW_UP_AFTER_AMBIGUOUS_RESPONSE");
+		expect(restoredSession.promptQueue.toArray()).toEqual([]);
 		expect(lifecycleSpy.mock.calls.filter(([, event]: any[]) => event?.type === "agent_settled")).toHaveLength(1);
 		expect(fx.store.record.agentSessionFile).toBe(fx.oldPath);
 		expect(fx.store.record.contextClearBoundaries).toBeUndefined();

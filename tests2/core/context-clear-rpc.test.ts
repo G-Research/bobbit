@@ -24,6 +24,7 @@ function attachFakeChild(bridge: RpcBridge, child: FakeRpcChild): void {
 function replyingChild(
 	commands: Array<Record<string, unknown>>,
 	cancelled: boolean,
+	responsePatch: Record<string, unknown> = {},
 ): FakeRpcChild {
 	const child = new EventEmitter() as FakeRpcChild;
 	child.pid = 84;
@@ -43,6 +44,7 @@ function replyingChild(
 				command: "new_session",
 				success: true,
 				data: { cancelled },
+				...responsePatch,
 				id: command.id,
 			};
 			queueMicrotask(() => child.stdout.emit("data", Buffer.from(`${JSON.stringify(response)}\n`)));
@@ -80,6 +82,24 @@ describe("clear-context Pi RPC bridge", () => {
 		expect(sendCommand).toHaveBeenCalledExactlyOnceWith({ type: "new_session" }, 120_000);
 		expect(sendCommand.mock.calls[0][0]).not.toHaveProperty("parentSession");
 		expect(response).toMatchObject({ success: true, data: { cancelled: false } });
+	});
+
+	it.each([
+		["a wrong command", { command: "compact", data: { cancelled: false } }],
+		["a missing cancellation boolean", { data: {} }],
+	] as const)("returns %s response unchanged for lifecycle validation", async (_label, responsePatch) => {
+		const commands: Array<Record<string, unknown>> = [];
+		const bridge = new RpcBridge({});
+		attachFakeChild(bridge, replyingChild(commands, false, responsePatch));
+
+		try {
+			const response = await bridge.newSession(7_654);
+			expect(response).toMatchObject(responsePatch);
+			expect(commands).toHaveLength(1);
+			expect(commands[0]).toMatchObject({ type: "new_session", id: "req_1" });
+		} finally {
+			await bridge.stop();
+		}
 	});
 
 	it("preserves a caller timeout and Pi's cancellation result without issuing a follow-up command", async () => {

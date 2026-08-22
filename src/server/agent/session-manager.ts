@@ -4263,12 +4263,16 @@ export class SessionManager {
 			}
 			replacementAttempted = true;
 			const replacement = await newSession(120_000);
-			if (!replacement?.success || typeof replacement.data?.cancelled !== "boolean") {
+			if (replacement?.type !== "response"
+				|| replacement.command !== "new_session"
+				|| replacement.success !== true
+				|| typeof replacement.data?.cancelled !== "boolean") {
 				throw new Error(`new_session failed: ${replacement?.error ?? "invalid response"}`);
 			}
-			// Only a complete, structurally valid response proves that Pi's concurrent
-			// new_session handler has settled. A bridge timeout removes Bobbit's pending
-			// response only; the handler may still replace the runtime later.
+			// Only the exact conclusive response proves that Pi's concurrent new_session
+			// handler has settled. RpcBridge correlates by id, so a malformed or
+			// wrong-command response is as ambiguous as a timeout: the handler may still
+			// replace the runtime later.
 			replacementConfirmedComplete = true;
 			if (replacement.data.cancelled === true) {
 				replacementCancelled = true;
