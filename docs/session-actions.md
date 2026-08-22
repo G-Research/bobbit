@@ -38,12 +38,12 @@ Staff and team-lead labels are derived in `buildSessionActions()` so all surface
 
 ## Archived session actions
 
-Archived sessions use `buildArchivedSessionActions()` instead of `buildSessionActions()`. This keeps read-only archived contexts on a separate built-in-only descriptor source: active-session controls and pack-provided `session-menu` launchers are never appended to archived menus.
+Archived sessions use `buildArchivedSessionActions()` instead of `buildSessionActions()`. This keeps ended lifecycle contexts on a separate built-in-only descriptor source: active-session controls and pack-provided `session-menu` launchers are never appended to archived menus.
 
 Archived actions appear in the same two places users already look for live session commands:
 
 - **Archived sidebar rows** — `renderArchivedSessionRow()` renders the `Session actions` hamburger on archived rows, including nested archived delegate rows. On desktop the trigger appears in the row action cluster; on mobile/touch it remains visible with the row metadata. The trigger and menu handlers prevent default activation and stop propagation so clicking the hamburger does not open or select the archived row.
-- **Open archived session header** — `renderHeaderSessionActions()` switches to archived descriptors when the open session is archived/read-only. Desktop and mobile both expose the `Session actions` hamburger in the top-right session action area. The archived header forces the overflow trigger to stay available, so the full archived-safe menu is reachable even when desktop direct action shortcuts are also visible.
+- **Open archived session header** — `renderHeaderSessionActions()` switches to archived descriptors only when lifecycle state marks the open session archived or terminated. A capability-only `readOnly` flag does not select this menu. Desktop and mobile both expose the `Session actions` hamburger in the top-right session action area. The archived header forces the overflow trigger to stay available, so the full archived-safe menu is reachable even when desktop direct action shortcuts are also visible.
 
 Archived menus contain only these built-in actions, in this order:
 
@@ -52,7 +52,7 @@ Archived menus contain only these built-in actions, in this order:
 3. `view-system-prompt` — `View system prompt` for the archived session id.
 4. `open-new-window` — `Open in new window` using the same path-style session URL.
 
-`Continue in new session` uses `canContinueArchivedSession()` for client-side visibility. It is shown only for archived/read-only sources that are not goal sessions, delegates, child/delegate rows, team sessions, team leads, or non-interactive sessions; whose `projectId` still resolves to a registered project; and whose transcript is available (`agentSessionFile` is present when supplied, and `transcriptAvailable` is not `false`). Ineligible sessions hide Continue rather than rendering a disabled item, while the other read-only actions remain available.
+`Continue in new session` uses `canContinueArchivedSession()` for client-side visibility. It is shown only for archived or terminated lifecycle sources that are not goal sessions, delegates, child/delegate rows, team sessions, team leads, or non-interactive sessions; whose `projectId` still resolves to a registered project; and whose transcript is available (`agentSessionFile` is present when supplied, and `transcriptAvailable` is not `false`). Ineligible sessions hide Continue rather than rendering a disabled item, while the other archive-safe actions remain available.
 
 Running Continue opens the confirm-only `ContinueSessionChooser`, then posts an empty JSON body to `POST /api/sessions/:id/continue`. On success the client refreshes sessions and connects to the returned session id as an existing session with message refetch enabled. The action intentionally does **not** call the live `/api/sessions/:id/fork` endpoint: Continue-Archived clones the archived `.jsonl` transcript into a fresh session slot and lets the agent rehydrate through the normal archived-continue flow. See [REST API — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) and [Internals — Continue-Archived sessions](internals.md#continue-archived-sessions).
 

@@ -151,11 +151,12 @@ Hold or roll back the candidate on transcript divergence, reconstruction loops, 
 
 ## Authenticated session work policy
 
-Live session sockets enforce `readOnly` and `nonInteractive` at the authenticated
-transport boundary, not only in the browser UI. The server checks both the live
-session and its persisted row; `true` in either source activates the restriction.
-This closes the window where one representation has updated before the other.
-If both restrictions apply, `readOnly` takes precedence.
+Live session sockets enforce the independent `readOnly` capability and
+`nonInteractive` interaction policies at the authenticated transport boundary,
+not only in the browser UI. The server checks both the live session and its
+persisted row; `true` in either source activates that policy. This closes the
+window where one representation has updated before the other. A frame covered
+by both policies is rejected by the `readOnly` capability check first.
 
 The guarded work classifier contains these frames:
 
@@ -168,29 +169,22 @@ The guarded work classifier contains these frames:
   `task_delete`, `grant_tool_permission`.
 - Extension session writes: `ext_session_write_permit`, `ext_session_post`.
 
-### Read-only sessions
+### Read-only capability
 
-Every guarded frame is rejected with `SESSION_READ_ONLY`. Ordinary guarded
-frames receive the generic error envelope:
+For a delegate, `readOnly` means it was launched without mutating agent tools;
+it does not mean the transcript is archived or the session is unpromptable. A
+live read-only delegate therefore accepts normal prompt, steer, queue, and
+retry work. Owner orchestration remains available through its separate API.
+The session transport blocks only controls that could widen or alter the
+child's capability-bearing configuration: `set_model`, `set_image_model`,
+`set_thinking_level`, and `grant_tool_permission`. Those frames receive:
 
 ```json
 { "type": "error", "code": "SESSION_READ_ONLY", "message": "..." }
 ```
 
-Extension session-write callers require a correlated response so their Host API
-call does not wait for a generic error until timeout. They receive:
-
-```json
-{ "type": "ext_session_write_permit_result", "requestId": "...", "ok": false, "error": "SESSION_READ_ONLY" }
-```
-
-or:
-
-```json
-{ "type": "ext_session_post_result", "requestId": "...", "ok": false, "error": "SESSION_READ_ONLY" }
-```
-
-A read-only session has no streaming-steer exception.
+Archive/termination lifecycle and `nonInteractive` policy are evaluated
+separately; neither is inferred from `readOnly`.
 
 ### Non-interactive sessions
 
@@ -314,8 +308,15 @@ When `state.data.condition` is
 recovery request rather than an ordinary live mutation. The gateway accepts
 only an exact currently session-selectable tuple, clamps thinking, starts a
 replacement pinned to that tuple, rehydrates the existing transcript, and
-verifies model read-back. It persists and publishes the replacement tuple with
-`condition: null` only after activation succeeds.
+verifies model read-back. It persists the replacement only after activation
+succeeds. After transferring attached clients to the verified replacement, the
+gateway publishes the replacement's canonical live status first, then publishes
+the exact model and
+thinking tuple with explicit `condition: null`. Clients must preserve this
+ordering: a partial state frame that omits `condition` cannot clear recovery,
+and a stale terminated list row may be reopened only when it carries the
+recoverable condition and an explicit condition snapshot supplies the canonical
+live state. Explicit archive or ordinary termination evidence remains terminal.
 
 An ordinary retryable activation failure returns
 `MODEL_SELECTION_RECOVERY_FAILED` with a sanitized message that says to choose
