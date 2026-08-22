@@ -287,7 +287,7 @@ Callers cannot obtain either allowance by placing a session, goal, or ownership 
 
 ##### Ownership and trusted snapshots
 
-Mutating a proposal requires either the exact proposal owner's session capability or a signed same-origin operator cookie. A route session id, shared bearer credential, or caller-supplied public session identity is not ownership. Parent authority granted to a team lead is likewise derived only after authenticating that exact owner capability; operator requests use the normal signed-cookie authorization path.
+Mutating a proposal requires either the exact proposal owner's session capability or a signed same-origin operator cookie. A route session id, shared bearer credential, or caller-supplied public session identity is not ownership. Ordinary authenticated creation without a parent remains a valid top-level goal. A request that names a parent additionally requires authentic authority from that parent's team lead or a signed operator; neither a caller-supplied parent id nor public session identity grants it.
 
 New inline workflows and roles receive strict current validation. Compatibility for older state is narrower: unchanged workflow/role snapshots read by the server from an existing proposal, or inherited from a persisted parent goal, may use the trusted compatibility path. The server compares persisted proposal snapshots for equality and constructs provenance internally; request fields cannot assert that a new payload is legacy or trusted. Editing a snapshot changes its identity and therefore subjects the replacement to strict validation.
 
