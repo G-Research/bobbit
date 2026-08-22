@@ -358,7 +358,7 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 	it("capabilities reports Phase-1 caps true, Phase-2 caps false; no gateway member", () => {
 		const c = caps();
 		expect(c.version).toBe(1);
-		expect(c.contractVersion).toBe(5);
+		expect(c.contractVersion).toBe(6);
 		expect(c.invokeAction).toBe(true);
 		expect(c.requestRender).toBe(true);
 		expect(c.hasInvokeAction).toBe(true);

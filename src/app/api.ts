@@ -2970,6 +2970,7 @@ export async function refreshStaffStateFromApi(): Promise<void> {
 		currentSessionId: s.currentSessionId,
 		triggers: s.triggers,
 		projectId: s.projectId,
+		accessory: s.accessory,
 	}));
 	state.orphanedStaff = orphanedStaff.map((s) => ({
 		id: s.id,

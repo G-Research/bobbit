@@ -3643,6 +3643,24 @@
       }
     },
     {
+      "path": "tests2/dom/host-bobbit-sprite.test.ts",
+      "reason": "DOM coverage for Host Bobbit sprite validation, privacy-bounded session and staff appearance resolution, canonical states and sizing, reduced-motion changes, tall-accessory layout, and disconnect/reconnect cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/host-bobbit-sprite.journey.spec.ts",
+      "reason": "Project-scoped fixture-pack journey proving host.ui.createBobbitSprite directly appends accessible session and staff avatars with persisted colour/accessory fidelity and canonical active, idle, paused, and static presentation before and after reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/dom/delegate-interaction-mode.test.ts",
       "reason": "Focused DOM coverage for independent lifecycle archive, read-only tool capability, and non-interactive interaction-mode projection.",
       "execution": {

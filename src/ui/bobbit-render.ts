@@ -61,6 +61,22 @@ export interface SidebarBobbitOptions {
 	centerInContainer?: boolean;
 }
 
+/** Presentation states supported by the framework-neutral hosted composition. */
+export type HostedBobbitState = "active" | "idle" | "paused";
+
+export interface HostedBobbitOptions {
+	state: HostedBobbitState;
+	hueRotate?: number;
+	accessory?: AccessoryDef;
+	/** CSS-pixel size. Validation of the public 16–96 range belongs to Host API. */
+	size?: number;
+	/** Whether canonical motion should run. Paused is always a rest frame. */
+	animated?: boolean;
+}
+
+const INLINE_BOBBIT_NATURAL_SIZE = 76;
+const INLINE_BOBBIT_DEFAULT_SIZE = 40;
+
 // ============================================================================
 // PALETTES
 // ============================================================================
@@ -508,6 +524,18 @@ function stopCanvasEyeAnimation(canvas: HTMLCanvasElement): void {
 	canvasEyeAnimations.delete(canvas);
 }
 
+/**
+ * Immediately release canonical canvas eye controllers below a lifecycle owner.
+ * Hosted elements call this before Lit removes their subtree so no deferred ref
+ * cleanup can retain animation work after disconnect.
+ */
+export function disposeHostBobbitSprite(root: ParentNode): void {
+	if (root instanceof HTMLCanvasElement) stopCanvasEyeAnimation(root);
+	for (const canvas of root.querySelectorAll("canvas.bobbit-blob__sprite")) {
+		if (canvas instanceof HTMLCanvasElement) stopCanvasEyeAnimation(canvas);
+	}
+}
+
 function scheduleCanvasEyeAnimationStop(canvas: HTMLCanvasElement): void {
 	const existing = canvasEyeAnimations.get(canvas);
 	if (!existing || existing.releaseTimer !== null) return;
@@ -532,16 +560,18 @@ function scheduleCanvasEyeAnimationStop(canvas: HTMLCanvasElement): void {
  * eyes at any DPR/zoom level. CSS animations use -canvas keyframe variants
  * (no scale(4), translates ×4).
  */
-export function renderBlobSpriteCanvas(isIdle: boolean, archived = false): TemplateResult {
-	if (archived) {
-		// Static frame: center gaze, no blink, no animation loop
+export function renderBlobSpriteCanvas(isIdle: boolean, archived = false, animated = true): TemplateResult {
+	if (archived || !animated) {
+		// Static rest frame: hosted idle sleeps; active/paused and archived stay
+		// center-facing and awake. No eye controller is created.
 		let attachedCanvas: HTMLCanvasElement | null = null;
 		const onRef = (el: Element | undefined) => {
 			if (el && el instanceof HTMLCanvasElement) {
 				attachedCanvas = el;
 				stopCanvasEyeAnimation(el);
-				const cache = buildEyePixelCache(CANONICAL_PALETTE, [{ pct: 0, gaze: "center", blink: false }]);
-				const pixels = cache.get("center-false");
+				const blink = !archived && isIdle;
+				const cache = buildEyePixelCache(CANONICAL_PALETTE, [{ pct: 0, gaze: "center", blink }]);
+				const pixels = cache.get(`center-${blink}`);
 				if (pixels) {
 					const dpr = window.devicePixelRatio || 1;
 					const devW = Math.round(BODY_WIDTH * CANVAS_HI * dpr);
@@ -640,9 +670,9 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
  * Only the sprite body is canvas-rendered; accessories use CSS box-shadow.
  */
 export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
-	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0, clip = true } = opts;
+	const { accId: _accId, accClass, size = INLINE_BOBBIT_DEFAULT_SIZE, hueIndex = 0, phaseIndex = 0, clip = true } = opts;
 	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
-	const naturalSize = 76;
+	const naturalSize = INLINE_BOBBIT_NATURAL_SIZE;
 	const s = size / naturalSize;
 	const hue = BOBBIT_HUE_ROTATIONS[hueIndex % BOBBIT_HUE_ROTATIONS.length];
 	// Negative animation-delay: each blob starts at a different point in the
@@ -682,6 +712,51 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__headset"></div>
 					<div class="bobbit-blob__ponytail"></div>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
+/** Map a canonical accessory id to the existing local CSS scope class. */
+function hostedAccessoryClass(accessory: AccessoryDef): string {
+	if (accessory.id === "none") return "";
+	return `bobbit-${accessory.id === "crown" ? "crowned" : accessory.id}`;
+}
+
+/**
+ * Render the canonical chat sprite in the established 76px composition used by
+ * inline panels. Only the requested accessory layer is emitted, preventing the
+ * application's document-level active-session class from changing its identity.
+ */
+export function renderHostBobbitSprite(opts: HostedBobbitOptions): TemplateResult {
+	const { state, hueRotate = 0, accessory = NO_ACCESSORY, size = INLINE_BOBBIT_DEFAULT_SIZE } = opts;
+	const isIdle = state === "idle";
+	const animated = opts.animated !== false && state !== "paused";
+	const naturalSize = INLINE_BOBBIT_NATURAL_SIZE;
+	const scale = size / naturalSize;
+	const accessoryClass = hostedAccessoryClass(accessory);
+	const blobClass = [
+		"bobbit-blob",
+		"bobbit-blob--inline",
+		"bobbit-blob--hosted",
+		accessory.addsHeight ? "bobbit-blob--hosted-tall" : "",
+		`bobbit-blob--hosted-${state}`,
+		isIdle ? "bobbit-blob--idle" : "",
+		animated ? "" : "bobbit-blob--hosted-static",
+		accessoryClass,
+	].filter(Boolean).join(" ");
+	const accessoryLayer = accessory.id === "none"
+		? ""
+		: html`<div class="bobbit-blob__${accessory.id}"></div>`;
+
+	return html`
+		<div class="bobbit-hosted-composition" aria-hidden="true" style="width:${size}px;height:${size}px;flex-shrink:0;position:relative;overflow:visible;">
+			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:visible;transform:scale(${scale.toFixed(3)});transform-origin:top left;">
+				<div class="${blobClass}" style="--bobbit-hue-rotate:${hueRotate}deg;">
+					${renderBlobSpriteCanvas(isIdle, false, animated)}
+					${accessoryLayer}
+					<div class="bobbit-blob__shadow"></div>
 				</div>
 			</div>
 		</div>

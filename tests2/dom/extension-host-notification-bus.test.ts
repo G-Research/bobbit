@@ -154,7 +154,7 @@ describe("additive scoped Host API", () => {
 			contributionId: "fixture-panel",
 		});
 		expect(host.version).toBe(1);
-		expect(host.contractVersion).toBe(5);
+		expect(host.contractVersion).toBe(6);
 		expect(host.capabilities.sessionNotifications).toBe(true);
 		expect(host.capabilities.projectNotifications).toBe(true);
 		expect(host.capabilities.has("sessionNotifications")).toBe(true);
