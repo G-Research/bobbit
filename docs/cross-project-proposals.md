@@ -1,12 +1,14 @@
 # Cross-project proposals
 
-Every `propose_*` tool accepts an optional `projectId`, but there are two
+Every `propose_*` tool accepts an optional `projectId`, but there are three
 contracts:
 
-- For `propose_goal`, `propose_role`, `propose_tool`, and `propose_staff`, an
-  omitted or blank `projectId` defaults to the session's project. An explicit id
-  targets that registered project, whether it is the source project or another
-  one.
+- For `propose_goal`, only omission defaults to the authenticated session's
+  project. Supplying an empty, whitespace-only, or non-string value is invalid;
+  a supplied non-empty id must name a visible registered project.
+- For `propose_role`, `propose_tool`, and `propose_staff`, the legacy contract is
+  unchanged: an omitted or blank `projectId` defaults to the session's project,
+  while an explicit id targets that registered project.
 - For `propose_project`, `fields.projectId` is the create-versus-existing
   discriminator. Omitted or blank means **create a new project**; a non-empty id
   means **target that registered or provisional project**. The source session's
@@ -34,11 +36,14 @@ proposal whose `projectId` differed from the session's (`PROJECT_ID_MISMATCH`,
 proposals were impossible even though the accept side already read
 `fields.projectId`.
 
-For goal, role, tool, and staff proposals, the design keeps the default path
-unchanged while making `proposal.fields.projectId` the accepted target. Project
-proposals intentionally differ: only their own `fields.projectId` determines
-create-versus-existing intent, so accepting a draft from Headquarters cannot
-accidentally turn an omitted-id create into a protected Headquarters mutation.
+For goal, role, tool, and staff proposals, `proposal.fields.projectId` is the
+accepted target. Goal proposals additionally use the canonical goal-candidate
+validator, so a successfully seeded draft represents a currently creatable
+candidate rather than deferring project, workflow, path, or nesting errors until
+Accept. Project proposals intentionally differ: only their own
+`fields.projectId` determines create-versus-existing intent, so accepting a
+draft from Headquarters cannot accidentally turn an omitted-id create into a
+protected Headquarters mutation.
 
 ## The five proposal types
 
@@ -55,44 +60,68 @@ Cross-project targeting applies to all five `propose_*` tools:
 ## Target resolution and validation (at seed time)
 
 Resolution happens in the seed endpoint
-(`POST /api/sessions/:id/proposal/:type/seed`), so it is identical whether the
-proposal arrives via the tool or a direct API call. For the four project-scoped
-types (`goal`, `role`, `tool`, `staff`):
+(`POST /api/sessions/:id/proposal/:type/seed`), so tool-mediated and direct API
+calls meet the same boundary. Goal candidates use the canonical goal-creation
+contract; non-goal proposal types retain their existing resolver.
 
-1. **Explicit `projectId` wins.** A trimmed, non-empty `projectId` in the tool
-   args is used as the target.
-2. **Otherwise the session's project is the default.** A session in the hidden
-   `system` scope maps to `headquarters` (matching the tool-side
-   `argsWithProjectId` normalisation, so tool-mediated and direct-seed paths
-   agree).
-3. **The resolved target must be registered.** If it names no registered
-   project, the seed is rejected with `422 UNKNOWN_PROJECT`. Because every
-   resolvable *default* (a real project, or always-registered `headquarters`) is
-   registered, this check is a no-op on the default path and only bites a
-   caller-supplied unknown id.
-4. **Hidden/synthetic projects are not valid explicit targets.** An explicit
-   `projectId` naming a hidden project — notably the internal `system` anchor —
-   is rejected with `422 UNKNOWN_PROJECT`. Callers must target `headquarters`,
-   not `system`. The `system → headquarters` mapping applies to the *omitted
-   default* only; it never silently rewrites an explicit target.
-5. **The resolved target is stamped** onto the draft as `fields.projectId`,
-   making it the single source of truth for the accept path.
+### Goal seed validation
 
-Why validate the *resolved* target uniformly rather than trying to distinguish
-"user typed it" from "tool injected it"? Because that distinction is invisible
-to the server and differs across call paths. Validating the resolved value is
-deterministic regardless of how the request was constructed, and stays a no-op
-for the default path.
+For `propose_goal`, presence is significant:
 
-### Goal workflow validation uses the target
+1. **Only true omission defaults.** If the request has no `projectId` property,
+   the target comes from the authenticated proposal-owning session. Its hidden
+   `system` scope maps to the user-facing `headquarters` project.
+2. **A supplied value must be usable.** Blank, whitespace-only, and non-string
+   values fail before persistence with `400 PROJECT_ID_REQUIRED`. They are not
+   treated as omission.
+3. **The project must exist and be visible.** An unknown id fails with
+   `404 PROJECT_NOT_FOUND`. A hidden or synthetic target, including an
+   explicitly supplied `system`, fails with `400 PROJECT_NOT_VISIBLE`; callers
+   that intend Headquarters must supply `headquarters`.
+4. **The whole goal candidate is validated before persistence.** The shared
+   validator checks the resolved project together with the workflow, execution
+   directory, parent/nesting rules, roles, metadata, and creation policies. A
+   rejection creates or overwrites no draft and advances no proposal revision.
 
-For `propose_goal`, the workflow named in the spec is validated against the
-**target** project's registered workflows (with the inline-workflow fallback),
-not the session's. A goal targeting project X must reference a workflow X
-actually has; a workflow that only exists in the proposer's project will be
-rejected. This prevents seeding a draft that can never be accepted in its target.
-`parentGoalId` auto-injection for team-lead sessions and the inline-workflow
-contract are unchanged.
+The same validator runs again immediately before acceptance against current
+state. This keeps a once-valid draft editable if its project, workflow, parent,
+or ownership state later becomes invalid, without creating partial goal state.
+See [Canonical goal-candidate validation](goals-workflows-tasks.md#canonical-goal-candidate-validation)
+for the full contract.
+
+### Non-goal target resolution
+
+For `propose_role`, `propose_tool`, and `propose_staff`, the legacy resolver is
+unchanged:
+
+1. A trimmed, non-empty explicit `projectId` wins.
+2. Omission or blank input defaults to the session project, with `system`
+   normalized to `headquarters`.
+3. An unknown or hidden target is rejected with `422 UNKNOWN_PROJECT`.
+4. The resolved target is stamped onto the draft as `fields.projectId`.
+
+These rules intentionally do not redefine `propose_project`, whose separate
+create-versus-existing classifier is documented below.
+
+### Goal workflow selection uses the target
+
+Goal workflow validation always uses the **target** project's workflows, never
+the proposer's project's workflows. Selection follows the canonical order:
+
+1. a valid inline workflow snapshot;
+2. an explicit workflow id that resolves in the target project;
+3. for ordinary goal creation, the first visible target workflow when no
+   selection was supplied; then
+4. only when the target's live workflow store is empty, the first
+   project-derived workflow generated in memory.
+
+`propose_goal` is stricter than ordinary creation when the target store is
+non-empty: without an inline snapshot it must supply an explicit, resolvable
+workflow id so the draft records the agent's choice. There is no magic workflow
+id. Generated defaults are frozen into the candidate and are persisted only
+after successful goal creation, and only if the store is still empty. Proposal
+acceptance repeats the same resolution against current state. See
+[Default workflow resolution](goals-workflows-tasks.md#default-workflow-resolution).
 
 ### `propose_project`: edit vs create
 
@@ -197,9 +226,12 @@ budget pinned by `tests2/core/tool-description-budget.test.ts`.
 
 ## Omitted-id guarantees
 
-For goal, role, tool, and staff, omission preserves the normal same-project
-path: the tool and seed endpoint resolve the session project (mapping `system →
-headquarters`), stamp it onto the draft, and render no cross-project banner.
+For goal proposals, true omission preserves the normal same-project path: the
+seed endpoint derives the authenticated session project (mapping `system →
+headquarters`) and stamps it onto the validated draft. A present blank,
+whitespace-only, or non-string value does not take this path. For role, tool,
+and staff proposals, both omission and blank input retain the legacy
+same-project default.
 
 For project proposals, omission or blank input has the opposite and equally
 strict meaning: create. It remains create regardless of whether the source

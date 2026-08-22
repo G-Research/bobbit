@@ -364,13 +364,7 @@ Workflow "general", gate "implementation", step 3:
   component "apii" not found in components[]. Did you mean "api"?
 ```
 
-**Empty/missing workflow block** at goal creation → `POST /api/goals` returns 400:
-
-```
-This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.
-```
-
-No silent fallback to a built-in workflow.
+**Empty/missing persisted workflow block** is valid at the canonical public goal-creation boundary when the caller supplies neither an inline workflow nor an explicit workflow id. Bobbit derives project defaults in memory, freezes the selected snapshot onto the candidate, and persists the generated set only after the goal commits successfully and only while the store remains empty. An explicitly selected invalid workflow still fails. This is deferred canonical resolution—not eager registration seeding or a system/builtin fallback. It does not describe low-level `GoalManager` callers that bypass canonical validation. See [Default workflow resolution](../goals-workflows-tasks.md#default-workflow-resolution).
 
 ### 3.5 Feature-parity audit (acceptance criterion 7)
 

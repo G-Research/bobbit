@@ -1,5 +1,14 @@
 # Cross-project proposals
 
+> **Historical design notice — goal proposals:** The goal-specific seed
+> pseudocode, error statuses, and validation matrix in this document are
+> superseded. Use the active
+> [goal seed validation contract](../cross-project-proposals.md#goal-seed-validation)
+> and [canonical goal-candidate validation](../goals-workflows-tasks.md#canonical-goal-candidate-validation)
+> as normative behavior. The non-goal rationale remains useful historical
+> context; this notice does not change the legacy role, tool, staff, or
+> `propose_project` contracts.
+
 ## Goal
 
 Let a proposal made from one project (typically Headquarters) target a *different*
