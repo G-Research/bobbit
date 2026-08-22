@@ -372,7 +372,16 @@ function isKnownWorkflowId(id: string): boolean {
 }
 
 function isWorkflowSelectionInvalid(id: string, inlineWorkflow?: Workflow | null): boolean {
-	return _cachedWorkflows.length > 0 && !hasValidInlineWorkflowDraft(inlineWorkflow) && !isKnownWorkflowId(id);
+	if (!id || hasValidInlineWorkflowDraft(inlineWorkflow)) return false;
+	const projectId = state.previewProjectId || undefined;
+	if (projectId) {
+		const projectWorkflows = _workflowCacheByProject.get(projectId);
+		// Defer authority while this project's cache is loading. Once loaded, an
+		// explicit id remains invalid even when the store is empty; only omission
+		// is eligible for the server-generated default.
+		return projectWorkflows ? !projectWorkflows.some(workflow => workflow.id === id) : false;
+	}
+	return _cachedWorkflows.length > 0 && !isKnownWorkflowId(id);
 }
 
 function hasValidInlineWorkflowDraft(inlineWorkflow?: Workflow | null): inlineWorkflow is Workflow {
@@ -979,6 +988,9 @@ function renderGoalMetadataEditor(config: GoalFormConfig): TemplateResult {
  *   untouched control stays unset so the server default stands.
  * - When the goal sits at the inherited cap (no room below), sub-goals are
  *   forced off — matching the disabled toggle in the UI.
+ * - When the global controls are unavailable, the form cannot project a new
+ *   value. Preserve the candidate values that were seeded or explicitly edited
+ *   earlier so current-state server validation sees the same candidate.
  */
 function proposalSubgoalSubmission(opts: {
 	subgoalsEnabled: boolean;
@@ -988,7 +1000,11 @@ function proposalSubgoalSubmission(opts: {
 	configuredValue: number | null;
 }): { subgoalsAllowed: boolean | undefined; maxNestingDepth: number | undefined; allowsChildren: boolean } {
 	if (!opts.subgoalsEnabled) {
-		return { subgoalsAllowed: undefined, maxNestingDepth: undefined, allowsChildren: false };
+		return {
+			subgoalsAllowed: opts.allowedValue ?? undefined,
+			maxNestingDepth: opts.configuredValue ?? undefined,
+			allowsChildren: opts.allowedValue === true,
+		};
 	}
 	const parent = opts.parentGoalId ? state.goals.find(g => g.id === opts.parentGoalId) : undefined;
 	const proposedDepth = parent ? nestingDepthOf(parent.id, state.goals) + 1 : 1;
@@ -1305,7 +1321,7 @@ function renderGoalForm(config: GoalFormConfig) {
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
 
 	const createBusy = !!config.saving;
-	const createDisabled = (config.createDisabled ?? !config.title.trim()) || createBusy || !!config.streaming || noWorkflows || workflowProblem || currentUnavailable;
+	const createDisabled = (config.createDisabled ?? !config.title.trim()) || createBusy || !!config.streaming || workflowProblem || currentUnavailable;
 	const closeWorktreeModeMenu = (target: EventTarget | null, restoreFocus = false) => {
 		const details = target instanceof Element ? target.closest("details") : null;
 		details?.removeAttribute("open");
@@ -1361,7 +1377,7 @@ function renderGoalForm(config: GoalFormConfig) {
 					data-testid="goal-form-no-workflows-banner"
 				>
 					<div class="text-sm font-medium">This project has no workflows yet</div>
-					<p class="text-xs text-muted-foreground">Goals need a workflow to define gates and verification. Run the project assistant to scaffold workflows for this project.</p>
+					<p class="text-xs text-muted-foreground">Creating this goal will add the generated default workflow after validation succeeds. Run the project assistant first if you want to customise it.</p>
 					<button
 						class="self-start text-xs px-3 py-1.5 rounded-md border border-border bg-background hover:bg-secondary text-foreground"
 						@click=${config.onOpenProjectAssistant}
@@ -1642,7 +1658,7 @@ function renderGoalForm(config: GoalFormConfig) {
 					${ref(goalCreateButtonContainerRef)}
 					data-testid="proposal-primary-submit"
 					aria-busy=${createBusy ? "true" : "false"}
-					title=${noWorkflows ? "This project has no workflows yet — run the project assistant first." : workflowErrorMessage ? workflowErrorMessage : ""}
+					title=${noWorkflows ? "A generated default workflow will be added after the goal is created." : workflowErrorMessage ? workflowErrorMessage : ""}
 				>${Button({
 					variant: "default",
 					onClick: config.onCreate,
@@ -2018,10 +2034,14 @@ function goalPreviewPanel() {
 	const workflowValidationError = inlineWorkflowDraft ? undefined : activeGoalWorkflowValidationError();
 	const workflowErrorMessage = workflowErrorMessageWithAvailable(workflowValidationError);
 	const failedWorkflowId = failedGoalWorkflowId(workflowValidationError);
-	const assistantWorkflowId = inlineWorkflowDraft?.id ?? failedWorkflowId ?? _selectedWorkflowId;
+	const hasPersistedGoalCandidate = !!activeGoalProposalFormSnapshot();
+	const assistantWorkflowId = inlineWorkflowDraft?.id
+		?? failedWorkflowId
+		?? (hasPersistedGoalCandidate ? _proposalWorkflowId : _selectedWorkflowId);
 	const assistantWorkflowBlocked = !!workflowValidationError || isWorkflowSelectionInvalid(assistantWorkflowId, inlineWorkflowDraft);
 	const setAssistantWorkflowId = (id: string) => {
 		_selectedWorkflowId = id;
+		if (hasPersistedGoalCandidate) _proposalWorkflowId = id;
 		if (isKnownWorkflowId(_selectedWorkflowId)) clearActiveGoalWorkflowValidationError();
 	};
 
@@ -2033,17 +2053,6 @@ function goalPreviewPanel() {
 			return;
 		}
 		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
-		const hasInlineWorkflowForSubmission = hasValidInlineWorkflowDraft(inlineWorkflowField);
-		// Guard: refuse to accept while the linked project has no workflows unless
-		// the proposal carries its own inline workflow body.
-		// The form's banner handles the affordance; this is the defensive backstop.
-		if (workflowStateFor(state.previewProjectId) === "empty" && !hasInlineWorkflowForSubmission) {
-			showConnectionError(
-				"This project has no workflows yet",
-				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
-			);
-			return;
-		}
 
 		if (assistantWorkflowBlocked) {
 			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
@@ -2064,7 +2073,10 @@ function goalPreviewPanel() {
 		const enabledOptionalSteps = _assistantEnabledOptionalSteps;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
-		const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
+		// Feature visibility must never change candidate identity. If the global
+		// flag turned off after seeding, retain the parent and hidden policy fields
+		// so canonical acceptance returns the current-state validation error.
+		const parentGoalIdField = _proposalParentGoalId || undefined;
 		const subgoalSubmission = proposalSubgoalSubmission({
 			subgoalsEnabled,
 			parentGoalId: parentGoalIdField,
@@ -2074,12 +2086,16 @@ function goalPreviewPanel() {
 		});
 		const isRootProposal = !parentGoalIdField;
 		const allowsChildren = subgoalSubmission.allowsChildren;
-		const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
-			? _proposalDivergencePolicy
-			: undefined;
-		const maxConcurrentChildrenField = isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
-			? _proposalMaxConcurrentChildren
-			: undefined;
+		const divergencePolicyField = !subgoalsEnabled
+			? (_proposalDivergencePolicy ?? undefined)
+			: isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
+				? _proposalDivergencePolicy
+				: undefined;
+		const maxConcurrentChildrenField = !subgoalsEnabled
+			? (_proposalMaxConcurrentChildren ?? undefined)
+			: isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
+				? _proposalMaxConcurrentChildren
+				: undefined;
 
 		_goalPreviewSaving = true;
 		renderApp();
@@ -4341,14 +4357,6 @@ function goalProposalPanel() {
 			return;
 		}
 		const inlineWorkflowField = _proposalInlineWorkflow ?? undefined;
-		const hasInlineWorkflowForSubmission = hasValidInlineWorkflowDraft(inlineWorkflowField);
-		if (workflowStateFor(state.previewProjectId) === "empty" && !hasInlineWorkflowForSubmission) {
-			showConnectionError(
-				"This project has no workflows yet",
-				"Run the project assistant from the goal panel banner (or Settings → Components) to scaffold workflows before creating a goal.",
-			);
-			return;
-		}
 		if (workflowInvalid || !!workflowValidationError) {
 			showConnectionError("Select a valid workflow", workflowErrorMessage || "Choose one of the available workflows before creating this goal.");
 			return;
@@ -4370,16 +4378,13 @@ function goalProposalPanel() {
 			try {
 				if (worktreeMode === "current-session"
 					&& !(await revalidateCurrentSessionGoalPromotion(worktreeOwnerSessionId))) return;
-				// Parent goal is meaningful only while the system Subgoals feature is
-				// enabled. A stale/auto-filled parentGoalId from a team-lead proposal
-				// must not be submitted while the Sub-goals tab is hidden/off; accepting
-				// that proposal should create a top-level goal.
-				const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
-				// Per-goal sub-goals default to OFF. The submitted allow + max-depth
-				// MUST mirror the displayed stepper exactly (shared resolveDepthControl),
-				// so a value clamped up by the selected parent's cap is the value sent —
-				// never the raw `_proposalMaxNestingDepth` the user typed before
-				// switching parents (the stale-payload bug).
+				// Preserve the seeded/edited parent even when the global feature flag
+				// hides its controls. The server owns current-state acceptance and must
+				// reject a stale child candidate rather than receive a rewritten root.
+				const parentGoalIdField = _proposalParentGoalId || undefined;
+				// While controls are active, allow + depth mirror the displayed stepper
+				// exactly (shared resolveDepthControl). Hidden controls retain their raw
+				// candidate values because the user cannot project a replacement.
 				const subgoalSubmission = proposalSubgoalSubmission({
 					subgoalsEnabled,
 					parentGoalId: parentGoalIdField,
@@ -4389,22 +4394,20 @@ function goalProposalPanel() {
 				});
 				const subgoalsAllowedField = subgoalSubmission.subgoalsAllowed;
 				const maxNestingDepthField = subgoalSubmission.maxNestingDepth;
-				// Root-only orchestration. Only forwarded for a top-level goal
-				// (no parent) that allows subgoals, and only when the user
-				// actually picked a value (null = inherit server default).
 				const isRootProposal = !parentGoalIdField;
 				const allowsChildren = subgoalSubmission.allowsChildren;
-				const divergencePolicyField = isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
-					? _proposalDivergencePolicy
-					: undefined;
-				// Only forward an explicit value when the user actually changed the
-				// stepper; an untouched control stays unset so the goal resolves to
-				// the server default (resolveRootMaxConcurrentChildren). This avoids
-				// baking a literal default into stored data and keeps the default a
-				// single source of truth on the server.
-				const maxConcurrentChildrenField = isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
-					? _proposalMaxConcurrentChildren
-					: undefined;
+				const divergencePolicyField = !subgoalsEnabled
+					? (_proposalDivergencePolicy ?? undefined)
+					: isRootProposal && allowsChildren && _proposalDivergencePolicy !== null
+						? _proposalDivergencePolicy
+						: undefined;
+				// Active controls forward explicit root-only values only for roots that
+				// allow children. Hidden controls preserve the existing candidate.
+				const maxConcurrentChildrenField = !subgoalsEnabled
+					? (_proposalMaxConcurrentChildren ?? undefined)
+					: isRootProposal && allowsChildren && _proposalMaxConcurrentChildren !== null
+						? _proposalMaxConcurrentChildren
+						: undefined;
 				// Customised inline workflow takes precedence over the library
 				// workflowId. inlineRoles is only forwarded when non-empty.
 				const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
