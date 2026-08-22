@@ -6058,26 +6058,28 @@ async function handleApiRoute(
 	};
 	const validateCurrentGoalCandidate = (
 		raw: RawGoalCandidate,
-		source: GoalCandidateSource = { kind: "user-input" },
-		authorizeParent = true,
+		source: Exclude<GoalCandidateSource, { kind: "server-child" }> = { kind: "user-input" },
 		authenticatedProposalOwner?: AuthenticatedProposalOwner,
 		trustedSnapshots?: GoalCandidateContext["trustedSnapshots"],
-	) => validateGoalCandidate(raw, {
-		source,
-		...(trustedSnapshots ? { trustedSnapshots } : {}),
-		...(authorizeParent ? {
-			authorizeParent: (parent: PersistedGoal) => {
-				// Session-owned parent authority is available only after the exact
-				// owner capability was authenticated. The URL session id alone is
-				// never caller identity; signed operators use the normal cookie path.
-				const owner = authenticatedProposalOwner?.authenticatedBy === "session-capability"
-					? sessionManager.getSession(authenticatedProposalOwner.ownerSessionId)
-					: undefined;
-				if (owner?.role === "team-lead" && owner.teamGoalId === parent.id) return true;
-				return authorizeGoalCandidateParent(parent);
-			},
-		} : {}),
-	} satisfies GoalCandidateContext, goalCandidateDeps);
+	) => {
+		const contextBase = trustedSnapshots ? { trustedSnapshots } : {};
+		const authorizeParent = (parent: PersistedGoal | undefined): true | GoalCandidateError => {
+			// Authenticated request sources explicitly authorize root creation.
+			if (!parent) return true;
+			// Session-owned parent authority is available only after the exact
+			// owner capability was authenticated. The URL session id alone is
+			// never caller identity; signed operators use the normal cookie path.
+			const owner = authenticatedProposalOwner?.authenticatedBy === "session-capability"
+				? sessionManager.getSession(authenticatedProposalOwner.ownerSessionId)
+				: undefined;
+			if (owner?.role === "team-lead" && owner.teamGoalId === parent.id) return true;
+			return authorizeGoalCandidateParent(parent);
+		};
+		const context: GoalCandidateContext = source.kind === "user-input"
+			? { ...contextBase, source, authorizeParent }
+			: { ...contextBase, source };
+		return validateGoalCandidate(raw, context, goalCandidateDeps);
+	};
 	const goalCandidateErrorBody = (validation: GoalCandidateError) => ({
 		ok: false,
 		code: validation.code,
@@ -6104,7 +6106,7 @@ async function handleApiRoute(
 				? { inlineRoles: persistedFields.inlineRoles }
 				: {}),
 		} : undefined;
-		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, true, owner, trustedSnapshots);
+		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, owner, trustedSnapshots);
 		return validation.ok ? undefined : validation;
 	};
 	const writeSpecialProjectMutationError = (err: unknown): boolean => {
@@ -16649,7 +16651,7 @@ async function handleApiRoute(
 						sessionId: ownerSessionId,
 						serverDerivedProjectId: coordinates.projectId,
 						serverDerivedCwd: coordinates.cwd,
-					}, false, proposalOwner);
+					}, proposalOwner);
 					if (!validation.ok) throw new GoalCandidateValidationResponseError(validation);
 					const targetCtx = existingProjectContext(coordinates.projectId);
 					if (!targetCtx) throw Object.assign(new Error("Proposal project is unavailable."), { statusCode: 404, code: "PROJECT_NOT_FOUND" });
@@ -17009,7 +17011,7 @@ async function handleApiRoute(
 					return;
 				}
 				enrichedArgs = prepared.args;
-				const validation = validateCurrentGoalCandidate(enrichedArgs, { kind: "user-input" }, true, proposalOwner);
+				const validation = validateCurrentGoalCandidate(enrichedArgs, { kind: "user-input" }, proposalOwner);
 				if (!validation.ok) { writeGoalCandidateError(validation); return; }
 			}
 			try {

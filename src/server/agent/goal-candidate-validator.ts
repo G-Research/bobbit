@@ -23,8 +23,10 @@ export const MAX_GOAL_STRUCTURED_BYTES = 1024 * 1024;
 export type GoalCandidateSource =
 	| { kind: "user-input" }
 	| { kind: "current-session-promotion"; sessionId: string; serverDerivedProjectId: string; serverDerivedCwd: string }
-	/** Server-owned child coordinates after the parent has been authenticated/resolved. */
-	| { kind: "server-child"; parentGoalId: string; cwdAuthority: "goal" | "verification" };
+	/** Request-backed child coordinates after the parent has been authenticated/resolved. */
+	| { kind: "server-child"; parentGoalId: string; cwdAuthority: "goal" }
+	/** Trusted verification child coordinates derived from an already-owned goal. */
+	| { kind: "server-child"; parentGoalId: string; cwdAuthority: "verification" };
 
 export interface GoalCandidateTrustedSnapshots {
 	/**
@@ -36,13 +38,19 @@ export interface GoalCandidateTrustedSnapshots {
 	inlineRoles?: unknown;
 }
 
-export interface GoalCandidateContext {
-	source: GoalCandidateSource;
-	/** Authenticated parent authorization. Omit only for human/operator validation. */
-	authorizeParent?: (parent: PersistedGoal) => true | GoalCandidateError;
+interface GoalCandidateContextBase {
 	/** Host-derived unchanged snapshots; never derive this from request fields. */
 	trustedSnapshots?: GoalCandidateTrustedSnapshots;
 }
+
+export type GoalParentAuthorizer = (parent: PersistedGoal | undefined) => true | GoalCandidateError;
+
+export type GoalCandidateContext = GoalCandidateContextBase & (
+	| { source: Extract<GoalCandidateSource, { kind: "user-input" }>; authorizeParent: GoalParentAuthorizer }
+	| { source: Extract<GoalCandidateSource, { kind: "server-child" }> & { cwdAuthority: "goal" }; authorizeParent: GoalParentAuthorizer }
+	| { source: Extract<GoalCandidateSource, { kind: "current-session-promotion" }>; authorizeParent?: never }
+	| { source: Extract<GoalCandidateSource, { kind: "server-child" }> & { cwdAuthority: "verification" }; authorizeParent?: never }
+);
 
 export interface GoalCandidateDeps {
 	registry: ProjectRegistry;
@@ -139,6 +147,7 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 
 	const parentGoalId = typeof raw.parentGoalId === "string" && raw.parentGoalId.trim() ? raw.parentGoalId.trim() : undefined;
 	if (supplied(raw, "parentGoalId") && !parentGoalId) return fail(422, "PARENT_NOT_FOUND", "parentGoalId must be a non-empty string");
+	if (context.source.kind === "current-session-promotion" && parentGoalId) return fail(422, "PROMOTION_PARENT_UNSUPPORTED", "Current-session promotion creates a top-level goal.");
 	if (context.source.kind === "server-child" && parentGoalId !== context.source.parentGoalId) return fail(422, "PARENT_SCOPE_MISMATCH", "parentGoalId does not match the server-owned child parent");
 	let parent: PersistedGoal | undefined;
 	const prefs = deps.nestingPrefs();
@@ -146,8 +155,18 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 		parent = deps.getGoal(parentGoalId);
 		if (!parent) return fail(422, "PARENT_NOT_FOUND", "Parent goal not found");
 		if (parent.projectId !== resolved.projectId) return fail(422, "PARENT_CROSS_PROJECT", "Parent goal belongs to a different project. Select a parent in the same project.");
-		const authorized = context.authorizeParent?.(parent);
-		if (authorized !== undefined && authorized !== true) return authorized;
+	}
+	const parentAuthorizationRequired = context.source.kind === "user-input"
+		|| (context.source.kind === "server-child" && context.source.cwdAuthority === "goal");
+	if (parentAuthorizationRequired) {
+		const authorizeParent = context.authorizeParent;
+		if (typeof authorizeParent !== "function") {
+			return fail(500, "PARENT_AUTHORIZATION_REQUIRED", "Parent authorization is required for this goal candidate source");
+		}
+		const authorized = authorizeParent(parent);
+		if (authorized !== true) return authorized;
+	}
+	if (parent) {
 		let cursor: PersistedGoal | undefined = parent;
 		const seen = new Set<string>();
 		while (cursor && !seen.has(cursor.id)) {

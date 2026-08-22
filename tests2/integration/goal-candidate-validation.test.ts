@@ -8,6 +8,7 @@ import {
 	MAX_GOAL_STRUCTURED_BYTES,
 	MAX_GOAL_TITLE_LENGTH,
 	validateGoalCandidate,
+	type GoalCandidateContext,
 	type GoalCandidateDeps,
 	type GoalCandidateSource,
 	type GoalCandidateTrustedSnapshots,
@@ -134,7 +135,13 @@ function validate(
 	source: GoalCandidateSource = { kind: "user-input" },
 	trustedSnapshots?: GoalCandidateTrustedSnapshots,
 ) {
-	return validateGoalCandidate(candidate(overrides), { source, ...(trustedSnapshots ? { trustedSnapshots } : {}) }, fixture.deps);
+	const contextBase = trustedSnapshots ? { trustedSnapshots } : {};
+	let context: GoalCandidateContext;
+	if (source.kind === "user-input") context = { ...contextBase, source, authorizeParent: () => true };
+	else if (source.kind === "current-session-promotion") context = { ...contextBase, source };
+	else if (source.cwdAuthority === "goal") context = { ...contextBase, source, authorizeParent: () => true };
+	else context = { ...contextBase, source };
+	return validateGoalCandidate(candidate(overrides), context, fixture.deps);
 }
 
 function expectCode(result: ReturnType<typeof validate>, code: string): void {
@@ -489,9 +496,25 @@ describe("canonical goal candidate — parent and root/child policy", () => {
 		expectCode(validate({ parentGoalId: foreign.id }), "PARENT_CROSS_PROJECT");
 	});
 
-	it("applies authenticated parent authorization before accepting a child", () => {
+	it("requires request-backed authorization independently of caller-controlled parent input", () => {
+		const missingAuthorization = validateGoalCandidate(candidate(), {
+			source: { kind: "user-input" },
+		} as GoalCandidateContext, fixture.deps);
+		expectCode(missingAuthorization, "PARENT_AUTHORIZATION_REQUIRED");
+
+		const authorizedParents: Array<PersistedGoal | undefined> = [];
+		const rootResult = validateGoalCandidate(candidate(), {
+			source: { kind: "user-input" },
+			authorizeParent: parent => {
+				authorizedParents.push(parent);
+				return true;
+			},
+		}, fixture.deps);
+		expect(rootResult.ok).toBe(true);
+		expect(authorizedParents).toEqual([undefined]);
+
 		const root = parent();
-		const result = validateGoalCandidate(candidate({ parentGoalId: root.id }), {
+		const childResult = validateGoalCandidate(candidate({ parentGoalId: root.id }), {
 			source: { kind: "user-input" },
 			authorizeParent: () => ({
 				ok: false,
@@ -500,7 +523,7 @@ describe("canonical goal candidate — parent and root/child policy", () => {
 				message: "Caller is not the authenticated parent team lead",
 			}),
 		}, fixture.deps);
-		expectCode(result, "NOT_TEAM_LEAD");
+		expectCode(childResult, "NOT_TEAM_LEAD");
 	});
 
 	it("rejects paused ancestors, disabled spawning, and exhausted nesting depth", () => {
