@@ -16,9 +16,25 @@ const memfs = createMemFs();
 const stateDir = path.resolve("/memfs/model-meta-resolver");
 
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { getAvailableModels, invalidateModelCache, resolveModelStateMeta } = await import("../../src/server/agent/model-registry.ts");
+const {
+	getAvailableModels,
+	invalidateModelCache,
+	resolveAuthoritativeModelCapacity,
+	resolveModelStateMeta,
+} = await import("../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
+
+const AUTHORITATIVE_CAPACITY_ROWS = [
+	["openai", "gpt-5.4"],
+	["openai", "gpt-5.5"],
+	["openai", "gpt-5.6-luna"],
+	["openai", "gpt-5.6-sol"],
+	["openai", "gpt-5.6-terra"],
+	["openai-codex", "gpt-5.6-luna"],
+	["openai-codex", "gpt-5.6-sol"],
+	["openai-codex", "gpt-5.6-terra"],
+] as const;
 
 describe("resolveModelStateMeta", () => {
 	it("returns the exact assembled cache row", async () => {
@@ -29,6 +45,7 @@ describe("resolveModelStateMeta", () => {
 
 		assert.deepEqual(resolveModelStateMeta(row.provider, row.id), {
 			contextWindow: row.contextWindow,
+			...(row.modelCapacity !== undefined ? { modelCapacity: row.modelCapacity } : {}),
 			maxTokens: row.maxTokens,
 			reasoning: row.reasoning,
 			...(row.thinkingLevelMap ? { thinkingLevelMap: row.thinkingLevelMap } : {}),
@@ -73,6 +90,72 @@ describe("resolveModelStateMeta", () => {
 			input: ["text", "image"],
 			source: "catalog",
 		});
+	});
+
+	it("enriches all and only the reviewed exact built-in rows without changing the target", async () => {
+		invalidateModelCache();
+		const models = await getAvailableModels(prefs);
+
+		for (const [provider, id] of AUTHORITATIVE_CAPACITY_ROWS) {
+			const row = models.find((model) => model.provider === provider && model.id === id);
+			assert.ok(row, `expected built-in ${provider}/${id}`);
+			assert.equal(row.contextWindow, 272_000, `${provider}/${id} must keep the Pi compaction target`);
+			assert.equal(row.modelCapacity, 1_050_000, `${provider}/${id} capacity`);
+
+			const cached = resolveModelStateMeta(provider, id);
+			assert.equal(cached.source, "cache");
+			assert.equal(cached.contextWindow, 272_000);
+			assert.equal(cached.modelCapacity, 1_050_000);
+		}
+		assert.deepEqual(
+			models
+				.filter((model) => model.modelCapacity !== undefined)
+				.map((model) => `${model.provider}/${model.id}`)
+				.sort(),
+			AUTHORITATIVE_CAPACITY_ROWS.map(([provider, id]) => `${provider}/${id}`).sort(),
+			"no unreviewed built-in row may gain capacity",
+		);
+
+		invalidateModelCache();
+		for (const [provider, id] of AUTHORITATIVE_CAPACITY_ROWS) {
+			const direct = resolveModelStateMeta(provider, id);
+			assert.equal(direct.source, "catalog", `${provider}/${id} direct fallback`);
+			assert.equal(direct.contextWindow, 272_000);
+			assert.equal(direct.modelCapacity, 1_050_000);
+		}
+	});
+
+	it("fails closed for target drift, aliases, snapshots, and family lookalikes", () => {
+		const omissions = [
+			["openai", "gpt-5.4", 271_999, "target drift"],
+			["openai-codex", "gpt-5.4", 272_000, "unreviewed Codex generation"],
+			["openai-codex", "gpt-5.5", 272_000, "unreviewed Codex generation"],
+			["aigw", "gpt-5.6-sol", 272_000, "AIGW route alias"],
+			["custom", "gpt-5.6-sol", 272_000, "custom provider alias"],
+			["OpenAI", "gpt-5.6-sol", 272_000, "provider case mismatch"],
+			["openai", "gpt-5.4-2026-08-22", 272_000, "snapshot"],
+			["openai", "gpt-5.6-sol-extra", 272_000, "family lookalike"],
+		] as const;
+
+		for (const [provider, id, target, description] of omissions) {
+			assert.equal(
+				resolveAuthoritativeModelCapacity(provider, id, target),
+				undefined,
+				description,
+			);
+		}
+	});
+
+	it("does not attach capacity to non-authoritative resolver fallbacks", () => {
+		for (const [provider, id] of [
+			["openai-codex", "gpt-5.4"],
+			["aigw", "gpt-5.6-sol"],
+			["openrouter", "openai/gpt-5.6-sol"],
+			["openai", "gpt-5.6-sol-extra"],
+		] as const) {
+			invalidateModelCache();
+			assert.equal("modelCapacity" in resolveModelStateMeta(provider, id), false, `${provider}/${id}`);
+		}
 	});
 
 	it("returns unavailable without fabricated family metadata", () => {
