@@ -180,8 +180,8 @@ interface CachedSession {
 const sessionCache = new Map<string, CachedSession>();
 const SESSION_CACHE_MAX = 10;
 
-type InteractionModeTarget = {
-	readOnly?: boolean;
+type SessionLifecyclePresentationTarget = {
+	archived?: boolean;
 	nonInteractive?: boolean;
 };
 
@@ -192,24 +192,23 @@ function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefi
 		&& typeof condition.modelId === "string";
 }
 
-/** Apply every interaction restriction already known without ever clearing one. */
-function applyKnownSessionInteractionMode(
-	target: InteractionModeTarget,
+/** Apply known lifecycle presentation and independent server-driven interaction policy. */
+export function applyKnownSessionLifecyclePresentation(
+	target: SessionLifecyclePresentationTarget,
 	records: ReadonlyArray<Partial<GatewaySession> | undefined>,
-	options?: { explicitReadOnly?: boolean; remoteArchived?: boolean },
+	options?: { explicitArchived?: boolean; remoteArchived?: boolean },
 ): void {
-	const nonInteractive = records.some((record) => record?.nonInteractive === true);
-	if (nonInteractive) target.nonInteractive = true;
+	if (records.some((record) => record?.nonInteractive === true)) {
+		target.nonInteractive = true;
+	}
 	if (
-		options?.explicitReadOnly
+		options?.explicitArchived
 		|| options?.remoteArchived
-		|| nonInteractive
-		|| records.some((record) => record?.readOnly === true
-			|| record?.archived === true
+		|| records.some((record) => record?.archived === true
 			|| record?.status === "archived"
 			|| (record?.status === "terminated" && !isModelSelectionRequiredRecord(record)))
 	) {
-		target.readOnly = true;
+		target.archived = true;
 	}
 }
 
@@ -1426,7 +1425,7 @@ export function installConfirmedSessionModelPersistence(remote: RemoteAgent, ses
 	});
 }
 
-export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; readOnly?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
+export async function connectToSession(sessionId: string, isExisting: boolean, options?: { isGoalAssistant?: boolean; isRoleAssistant?: boolean; isToolAssistant?: boolean; isStaffAssistant?: boolean; isPreview?: boolean; assistantType?: string; archived?: boolean; projectDirPath?: string; projectEditContext?: { name: string; rootPath: string }; projectInitialScanContext?: import("./project-assistant-autoprompt.js").ProjectAssistantScanContext; onMissing?: "toast" | "modal"; refetchMessagesOnReady?: boolean }): Promise<void> {
 	// Capture the current route BEFORE selectSession changes the hash.
 	const startingRoute = getRouteFromHash();
 	const replaceHistory = startingRoute.view === "goal-dashboard";
@@ -1464,8 +1463,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		const cachedKnownSession = state.gatewaySessions.find((s) => s.id === sessionId)
 			|| state.archivedSessions.find((s) => s.id === sessionId);
 		if (state.chatPanel.agentInterface) {
-			applyKnownSessionInteractionMode(state.chatPanel.agentInterface, [cachedKnownSession], {
-				explicitReadOnly: options?.readOnly === true,
+			applyKnownSessionLifecyclePresentation(state.chatPanel.agentInterface, [cachedKnownSession], {
+				explicitArchived: options?.archived === true,
 				remoteArchived: cached.remoteAgent.state?.isArchived === true,
 			});
 		}
@@ -1562,7 +1561,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		markSessionVisited(sessionId);
 		canonicalizePathSessionRoute(sessionId);
 
-		// Refresh scope-gate fields + archived readOnly on the restored
+		// Refresh scope-gate fields + archived presentation on the restored
 		// AgentInterface. Between disconnect and reconnect the session may
 		// have been terminated elsewhere; without this the cached panel keeps
 		// showing the live chrome and hides the "Continue in new session"
@@ -1576,8 +1575,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				ai.delegateOf = s.delegateOf;
 				ai.teamGoalId = s.teamGoalId;
 				ai.assistantType = s.assistantType;
-				applyKnownSessionInteractionMode(ai, [s], {
-					explicitReadOnly: options?.readOnly === true,
+				applyKnownSessionLifecyclePresentation(ai, [s], {
+					explicitArchived: options?.archived === true,
 					remoteArchived: cached.remoteAgent.state?.isArchived === true,
 				});
 			};
@@ -1759,9 +1758,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 			// Only update active session's UI state — cached sessions must not corrupt current panel
 			if (activeSessionId() === sessionId) {
-				// Set readOnly when archived status arrives (may come after initial connect)
-				if (status === "archived" && state.chatPanel?.agentInterface) {
-					state.chatPanel.agentInterface.readOnly = true;
+				// Project terminal lifecycle updates independently from tool capability.
+				if (state.chatPanel?.agentInterface) {
+					applyKnownSessionLifecyclePresentation(state.chatPanel.agentInterface, [{
+						status: status as GatewaySession["status"],
+						condition: remote.state.condition,
+					} as Partial<GatewaySession>], { remoteArchived: remote.state.isArchived === true });
 				}
 				// Trigger Lit re-render for aborting indicator — isAborting is read
 				// from the session object (same reference), so Lit won't detect the change.
@@ -2461,8 +2463,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			onApiKeyRequired: async () => true,
 		});
 		if (bindingPanel.agentInterface) {
-			applyKnownSessionInteractionMode(bindingPanel.agentInterface, [sessionDataAny], {
-				explicitReadOnly: options?.readOnly === true,
+			applyKnownSessionLifecyclePresentation(bindingPanel.agentInterface, [sessionDataAny], {
+				explicitArchived: options?.archived === true,
 				remoteArchived: remote.state.isArchived === true,
 			});
 		}
@@ -2522,8 +2524,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Reconcile any record discovered by the fallback fetch. The common case
 		// already applied these flags synchronously during setAgent above.
 		if (state.chatPanel.agentInterface) {
-			applyKnownSessionInteractionMode(state.chatPanel.agentInterface, [sessionDataAny], {
-				explicitReadOnly: options?.readOnly === true,
+			applyKnownSessionLifecyclePresentation(state.chatPanel.agentInterface, [sessionDataAny], {
+				explicitArchived: options?.archived === true,
 				remoteArchived: remote.state.isArchived === true,
 			});
 		}
