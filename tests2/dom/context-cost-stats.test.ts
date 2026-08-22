@@ -15,6 +15,7 @@ __syncBeforeAll(() => __syncCE());
 //     stats template directly. This avoids mounting its canvas and scroll lifecycle
 //     while still exercising the real footer/popover DOM and event handlers.
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { html, render } from "lit";
 import "../../src/ui/components/CostPopover.js";
@@ -276,7 +277,7 @@ describe("AgentInterface context target and capacity meter", () => {
 	});
 
 	it("pins the unchanged footer geometry and themed meter surfaces", () => {
-		const css = readFileSync(new URL("../../src/ui/app.css", import.meta.url), "utf8");
+		const css = readFileSync(resolve("src/ui/app.css"), "utf8");
 		expect(css).toMatch(/\.context-meter\s*\{[^}]*height:\s*6px;[^}]*background:\s*var\(--input\)/s);
 		expect(css).toMatch(/\.context-meter--footer\s*\{[^}]*width:\s*48px/s);
 		expect(css).toMatch(/\.context-meter-primary\s*\{[^}]*var\(--primary\)/s);
