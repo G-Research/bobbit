@@ -35,7 +35,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "core"
+        "project": "isolated",
+        "reason": "Initializes author and compaction sidecar module singletons against per-file temporary roots."
       }
     },
     {
@@ -80,7 +81,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "integration"
+        "project": "isolated",
+        "reason": "Initializes author and compaction sidecar module singletons against per-file temporary roots."
       }
     },
     {
