@@ -17,7 +17,9 @@ const originalEnv = {
 	session: process.env.BOBBIT_SESSION_ID,
 	token: process.env.BOBBIT_TOKEN,
 	hooks: process.env.BOBBIT_HOST_HOOKS_ENABLED,
+	sessionSecret: process.env.BOBBIT_SESSION_SECRET,
 	beforeFailClosed: process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED,
+	afterFailClosed: process.env.BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED,
 };
 
 afterEach(() => {
@@ -27,7 +29,9 @@ afterEach(() => {
 		BOBBIT_SESSION_ID: originalEnv.session,
 		BOBBIT_TOKEN: originalEnv.token,
 		BOBBIT_HOST_HOOKS_ENABLED: originalEnv.hooks,
+		BOBBIT_SESSION_SECRET: originalEnv.sessionSecret,
 		BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: originalEnv.beforeFailClosed,
+		BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: originalEnv.afterFailClosed,
 	})) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
@@ -63,6 +67,7 @@ function installHostEnv(): void {
 	process.env.BOBBIT_GATEWAY_URL = "http://host-hooks.test";
 	process.env.BOBBIT_SESSION_ID = "session-tool-order";
 	process.env.BOBBIT_TOKEN = "token";
+	process.env.BOBBIT_SESSION_SECRET = "current-session-secret";
 	process.env.BOBBIT_HOST_HOOKS_ENABLED = "1";
 	process.env.BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED = "0";
 }
@@ -73,6 +78,8 @@ describe("Pi host tool interceptor ordering", () => {
 		const order: string[] = [];
 		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
 			const pathname = new URL(String(url)).pathname;
+			const headers = new Headers(init?.headers);
+			assert.equal(headers.get("X-Bobbit-Session-Secret"), "current-session-secret", "the bridge must bind callbacks to the owning session secret");
 			const body = JSON.parse(String(init?.body));
 			if (pathname.endsWith("/before-tool-call")) {
 				order.push("beforeToolCall");
@@ -137,6 +144,7 @@ describe("Pi host tool interceptor ordering", () => {
 			{ name: "disabled", configure: () => { delete process.env.BOBBIT_HOST_HOOKS_ENABLED; } },
 			{ name: "missing gateway", configure: () => { delete process.env.BOBBIT_GATEWAY_URL; } },
 			{ name: "forbidden", configure: () => { globalThis.fetch = (async () => new Response(null, { status: 403 })) as typeof fetch; } },
+			{ name: "missing provenance", configure: () => { globalThis.fetch = (async () => new Response(null, { status: 409 })) as typeof fetch; } },
 			{ name: "non-2xx", configure: () => { globalThis.fetch = (async () => new Response(null, { status: 503 })) as typeof fetch; } },
 			{ name: "malformed", configure: () => { globalThis.fetch = (async () => Response.json({ unexpected: true })) as typeof fetch; } },
 			{ name: "unavailable", configure: () => { globalThis.fetch = (async () => { throw new Error("PRIVATE_TRANSPORT_FAILURE"); }) as typeof fetch; } },

@@ -33,6 +33,12 @@ afterEach(() => {
 	}
 });
 
+function acceptToolStart(manager: any, session: any, toolCallId: string, toolName: string): void {
+	const start = { type: "tool_execution_start", toolCallId, toolName };
+	manager.handleAgentLifecycle(session, start);
+	emitSessionEvent(session, start);
+}
+
 function makeHarness() {
 	const facts: Array<{ name: string; publication: any; frameCount: number }> = [];
 	const sent: any[] = [];
@@ -175,15 +181,25 @@ describe("authoritative session host notifications", () => {
 		assert.equal(JSON.stringify(facts).includes("PRIVATE_PROVIDER_BODY"), false);
 	});
 
-	it("publishes tool lifecycle facts without an installed interceptor and fences completion on the accepted result", () => {
+	it("publishes one private-safe tool completion only after an accepted Pi start, both policy claims, and the persisted result", async () => {
 		const { manager, session, facts, dispatcher } = makeHarness();
 		assert.equal(manager.hostInterceptors, undefined, "precondition: lifecycle observation is not interceptor-gated");
 		manager.handleAgentLifecycle(session, { type: "agent_start" });
-		assert.equal(manager.dispatchHostInterceptor(session.id, "beforeToolCall", {
-			toolCallId: "call-1", toolName: "read", args: {},
-		}), undefined);
-		manager.markToolCallAdmitted(session.id, "call-1", "read");
+		acceptToolStart(manager, session, "call-1", "read");
+
+		const beforeClaim = await manager.claimToolCallBefore(session.id, "call-1", "read");
+		assert.ok(beforeClaim, "the exact accepted Pi start must mint one before-call claim");
+		assert.equal(manager.dispatchClaimedToolInterceptor(beforeClaim, { args: {} }), undefined);
+		assert.equal(manager.settleToolCallBefore(beforeClaim, true), true);
+		assert.equal(manager.settleToolCallBefore(beforeClaim, true), false, "a settled claim cannot be replayed");
 		assert.equal(facts.filter((fact) => fact.name === "toolCallStarted").length, 1);
+
+		const afterClaim = manager.claimToolCallAfter(session.id, "call-1", "read");
+		assert.ok(afterClaim, "only the admitted exact call can enter after-result policy");
+		assert.equal(manager.dispatchClaimedToolInterceptor(afterClaim, { result: { isError: true } }), undefined);
+		assert.equal(manager.settleToolCallAfter(afterClaim), true);
+		assert.equal(manager.claimToolCallAfter(session.id, "call-1", "read"), undefined, "after-result admission is single-use");
+
 		manager.handleAgentLifecycle(session, {
 			type: "tool_execution_end",
 			toolCallId: "call-1",
@@ -193,7 +209,7 @@ describe("authoritative session host notifications", () => {
 		});
 		assert.equal(facts.filter((fact) => fact.name === "toolCallCompleted").length, 0);
 
-		emitSessionEvent(session, {
+		const persistedResult = {
 			type: "message_end",
 			message: {
 				id: "result-message",
@@ -203,20 +219,61 @@ describe("authoritative session host notifications", () => {
 				isError: true,
 				content: [{ type: "text", text: "PRIVATE_TOOL_BODY" }],
 			},
-		});
+		};
+		emitSessionEvent(session, persistedResult);
+		emitSessionEvent(session, persistedResult);
 
-		assert.deepEqual(facts.slice(-2).map((fact) => fact.name), ["messageAppended", "toolCallCompleted"]);
+		assert.deepEqual(facts.slice(-3).map((fact) => fact.name), ["messageAppended", "toolCallCompleted", "messageAppended"]);
 		assert.equal(facts.filter((fact) => fact.name === "toolCallStarted").length, 1);
 		assert.equal(facts.filter((fact) => fact.name === "toolCallCompleted").length, 1);
-		assert.deepEqual(facts.at(-1)?.publication.payload, {
+		const completion = facts.find((fact) => fact.name === "toolCallCompleted")!;
+		assert.deepEqual(completion.publication.payload, {
 			toolCallId: "call-1",
 			toolName: "read",
 			status: "errored",
-			durationMs: facts.at(-1)?.publication.payload.durationMs,
+			durationMs: completion.publication.payload.durationMs,
 			errorStatus: "handler_error",
 		});
 		assert.equal(JSON.stringify(facts).includes("PRIVATE_TOOL_BODY"), false);
 		assert.deepEqual(dispatcher.getDiagnostics(), [], "session facts must satisfy the canonical dispatcher schema");
 		assert.equal(session.hostToolCallLifecycle.size, 0);
+	});
+
+	it("rejects forged, mismatched, duplicate, stale-generation, and terminal callbacks before facts are published", async () => {
+		const forged = makeHarness();
+		const forgedClaim = forged.manager.claimToolCallBefore(forged.session.id, "forged-call", "read");
+		await new Promise((resolve) => setTimeout(resolve, 110));
+		assert.equal(await forgedClaim, undefined, "a callback cannot create its own Pi provenance");
+		assert.equal(forged.session.hostToolCallLifecycle, undefined);
+		assert.equal(forged.facts.some((fact) => fact.name.startsWith("toolCall")), false);
+
+		const preArrival = makeHarness();
+		const waitingClaim = preArrival.manager.claimToolCallBefore(preArrival.session.id, "racing-call", "read");
+		acceptToolStart(preArrival.manager, preArrival.session, "racing-call", "read");
+		const claimedAfterAcceptance = await waitingClaim;
+		assert.ok(claimedAfterAcceptance, "HTTP may arrive first only while waiting for the real accepted Pi cursor");
+		assert.equal(preArrival.manager.settleToolCallBefore(claimedAfterAcceptance, true), true);
+		assert.equal(await preArrival.manager.claimToolCallBefore(preArrival.session.id, "racing-call", "read"), undefined);
+		assert.equal(preArrival.manager.claimToolCallAfter(preArrival.session.id, "racing-call", "other-tool"), undefined);
+		assert.equal(preArrival.facts.filter((fact) => fact.name === "toolCallStarted").length, 1);
+
+		const stale = makeHarness();
+		acceptToolStart(stale.manager, stale.session, "stale-call", "read");
+		const staleClaim = await stale.manager.claimToolCallBefore(stale.session.id, "stale-call", "read");
+		assert.ok(staleClaim);
+		stale.manager._sessionRespawnGenerations.set(stale.session.id, 1);
+		assert.equal(stale.manager.settleToolCallBefore(staleClaim, true), false, "generation replacement invalidates an in-flight claim");
+		assert.equal(await stale.manager.claimToolCallBefore(stale.session.id, "stale-call", "read"), undefined);
+		assert.equal(stale.facts.some((fact) => fact.name.startsWith("toolCall")), false);
+
+		const terminal = makeHarness();
+		acceptToolStart(terminal.manager, terminal.session, "terminal-call", "read");
+		const terminalClaim = await terminal.manager.claimToolCallBefore(terminal.session.id, "terminal-call", "read");
+		assert.ok(terminalClaim);
+		assert.equal(terminal.manager.settleToolCallBefore(terminalClaim, true), true);
+		terminal.manager.handleAgentLifecycle(terminal.session, { type: "agent_end", willRetry: false, messages: [] });
+		assert.equal(terminal.session.hostToolCallLifecycle.size, 0, "terminal turn cleanup removes admitted provenance");
+		assert.equal(terminal.manager.claimToolCallAfter(terminal.session.id, "terminal-call", "read"), undefined);
+		assert.equal(terminal.facts.filter((fact) => fact.name === "toolCallCompleted").length, 0);
 	});
 });

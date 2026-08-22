@@ -267,6 +267,70 @@ describe("Pi 0.81 tool lifecycle contract", () => {
 		expect(persistedResult.message.addedToolNames).toEqual(["dynamic_search"]);
 	});
 
+	it("creates callback authority only from the current writer's accepted execution-start cursor", async () => {
+		const manager = makeManager();
+		let listener: ((event: any) => void) | undefined;
+		const session = makeSession(manager, {
+			onEvent: (fn: (event: any) => void) => {
+				listener = fn;
+				return () => { listener = undefined; };
+			},
+		});
+		const ctx: any = {
+			store: manager._testStore,
+			handleAgentLifecycle: (current: any, event: any) => manager.handleAgentLifecycle(current, event),
+			trackCostFromEvent: (current: any, event: any) => manager.trackCostFromEvent(current, event),
+		};
+		const unsub = subscribeToEvents(session, ctx);
+
+		const start = {
+			type: "tool_execution_start",
+			toolCallId: "call-provenance",
+			toolName: "read",
+			args: { path: "PRIVATE_ARGS" },
+		} satisfies ToolExecutionStartEvent;
+		listener?.(start);
+
+		const bufferedStart = session.eventBuffer.getAll()[0];
+		expect(bufferedStart.event).toBe(start);
+		const tracked = session.hostToolCallLifecycle.get(start.toolCallId);
+		expect(tracked).toMatchObject({
+			toolCallId: start.toolCallId,
+			toolName: start.toolName,
+			generation: 0,
+			startCursor: bufferedStart.seq,
+			phase: "observed",
+		});
+
+		const beforeClaim = await manager.claimToolCallBefore(session.id, start.toolCallId, start.toolName);
+		assert.ok(beforeClaim);
+		expect(await manager.claimToolCallBefore(session.id, start.toolCallId, start.toolName)).toBeUndefined();
+		expect(manager.settleToolCallBefore(beforeClaim, true)).toBe(true);
+		const afterClaim = manager.claimToolCallAfter(session.id, start.toolCallId, start.toolName);
+		assert.ok(afterClaim);
+		expect(manager.settleToolCallAfter(afterClaim)).toBe(true);
+
+		listener?.({
+			type: "tool_execution_end",
+			toolCallId: start.toolCallId,
+			toolName: start.toolName,
+			result: { content: [{ type: "text", text: "PRIVATE_RESULT" }] },
+			isError: false,
+		} satisfies ToolExecutionEndEvent);
+		expect(session.hostToolCallLifecycle.get(start.toolCallId)?.phase).toBe("ended");
+		listener?.({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolCallId: start.toolCallId,
+				toolName: start.toolName,
+				content: [{ type: "text", text: "PRIVATE_RESULT" }],
+			},
+		});
+		expect(session.hostToolCallLifecycle.has(start.toolCallId)).toBe(false);
+		unsub();
+	});
+
 	it("forwards partial/final payloads unchanged while policy and steer side effects stay on their boundaries", async () => {
 		const manager = makeManager();
 		let listener: ((event: any) => void) | undefined;
