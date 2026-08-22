@@ -23,6 +23,7 @@ export const ISOLATED_VITEST_FILES = Object.freeze({
 	"tests2/core/extension-host-action-dispatcher.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global dispatcher state.",
 	"tests2/core/extension-host-channel-registry.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global channel state.",
 	"tests2/core/extension-host-isolation-config-invariant.test.ts": "Extension-host isolation configuration is evaluated from process state at module load.",
+	"tests2/core/extension-host-module-isolation.test.ts": "Spawns real ModuleHost workers and must not share a reusable core fork whose sibling environment guards can restore its worker resolver.",
 	"tests2/core/extension-host-module-memory-isolation.test.ts": "Deliberately OOMs a ModuleHost worker under a 16 MB old-generation limit and must own a dedicated isolated Vitest fork.",
 	"tests2/core/extension-host-route-dispatcher.test.ts": "Extension-host worker registration mutates NODE_OPTIONS and module-global route state.",
 	"tests2/core/extension-host-session-event-bus.test.ts": "Exercises a module-global EventTarget that must not retain sibling listeners.",
@@ -145,7 +146,7 @@ export function loadVitestExecutionMap({
 	for (const [path, owners] of materializedOwnership) {
 		if (owners.length > 1) errors.push(`${path}: duplicate materialized execution ownership (${owners.join(", ")})`);
 	}
-	if (projects.isolated.length > 11) errors.push(`isolated execution has ${projects.isolated.length} files; maximum is 11`);
+	if (projects.isolated.length > 12) errors.push(`isolated execution has ${projects.isolated.length} files; maximum is 12`);
 
 	const physicalVitest = collectVitestFiles(repoRoot);
 	for (const path of physicalVitest) {

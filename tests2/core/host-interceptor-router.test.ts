@@ -1,16 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
-guardProcessEnv();
-enableTsWorkerResolver();
-import fs from "node:fs";
-import os from "node:os";
+import { describe, expect, it, vi } from "vitest";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
 import { hostInterceptorAuditSink } from "../../src/server/extension-host/host-interceptor-audit.ts";
 import { HostInterceptorRouter } from "../../src/server/extension-host/host-interceptor-router.ts";
-import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
+import type { InvokeRequest, ModuleHost } from "../../src/server/extension-host/module-host-worker.ts";
 import type { PackContributions } from "../../src/server/agent/pack-contributions.ts";
 import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
 
@@ -216,49 +209,5 @@ describe("HostInterceptorRouter", () => {
 		expect((result.value as any).context).toEqual([{
 			id: "memory-1", title: "Memory", authority: "memory", content: "safe", reason: "relevant", priority: 1,
 		}]);
-	});
-});
-
-let tmp = "";
-beforeAll(() => {
-	// Establish the resolver for normal file execution. Each worker-spawning test
-	// reasserts it again at invoke time because isolate:false sibling env guards
-	// can restore NODE_OPTIONS after this hook has run.
-	enableTsWorkerResolver();
-	tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "host-hook-module-")));
-});
-afterAll(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
-
-describe("ModuleHost hooks execution", () => {
-	it("resolves canonical members from the default hooks export", async () => {
-		const file = path.join(tmp, "hooks.mjs");
-		fs.writeFileSync(file, "export default { beforePrompt: async (_ctx, request) => ({ context: [{ id: request.sessionId, title: 't', authority: 'memory', content: 'c', reason: 'r', priority: 1 }] }) };\n");
-		const host = new ModuleHost({ timeoutMs: 30_000 });
-		try {
-			enableTsWorkerResolver();
-			const value = await host.invoke({
-				url: pathToFileURL(file).href, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",
-				ctx: { sessionId: "session-1", tool: "hook", host: {} } as any,
-				arg: { sessionId: "session-1" }, workingDir: tmp,
-			});
-			expect(value).toMatchObject({ context: [{ id: "session-1" }] });
-		} finally { host.dispose(); }
-	});
-
-	it("terminates a worker when the host cancellation signal aborts", async () => {
-		const file = path.join(tmp, "hanging.mjs");
-		fs.writeFileSync(file, "export default { beforePrompt: async () => new Promise(() => {}) };\n");
-		const host = new ModuleHost({ timeoutMs: 10_000 });
-		const controller = new AbortController();
-		try {
-			enableTsWorkerResolver();
-			const invocation = host.invoke({
-				url: pathToFileURL(file).href, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",
-				ctx: { sessionId: "session-1", tool: "hook", host: {} } as any,
-				arg: {}, workingDir: tmp, signal: controller.signal,
-			});
-			setTimeout(() => controller.abort(), 25);
-			await expect(invocation).rejects.toMatchObject({ status: 499 });
-		} finally { host.dispose(); }
 	});
 });

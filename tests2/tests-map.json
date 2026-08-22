@@ -10217,7 +10217,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "core"
+        "project": "isolated",
+        "reason": "Spawns real ModuleHost workers and must not share a reusable core fork whose sibling environment guards can restore its worker resolver."
       }
     },
     {

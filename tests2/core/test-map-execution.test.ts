@@ -22,6 +22,7 @@ const MATERIALIZED_PATHS = [
 	"tests2/dom/example.test.ts",
 	"tests2/integration/example.test.ts",
 	"tests2/core/bobbit-dir-agent-dir.test.ts",
+	"tests2/core/extension-host-module-isolation.test.ts",
 	"tests2/core/file-mentions-authenticated-boundary.test.ts",
 	"tests2/core/git-lifecycle-no-publication-real-git.test.ts",
 	"tests2/core/marketplace-install.test.ts",
@@ -83,7 +84,10 @@ describe("tests-map execution metadata", () => {
 		expect(execution.core).toEqual(["tests2/core/example.test.ts"]);
 		expect(execution.dom).toEqual(["tests2/dom/example.test.ts"]);
 		expect(execution.integration).toEqual(["tests2/integration/example.test.ts"]);
-		expect(execution.isolated).toEqual(["tests2/core/bobbit-dir-agent-dir.test.ts"]);
+		expect(execution.isolated).toEqual([
+			"tests2/core/bobbit-dir-agent-dir.test.ts",
+			"tests2/core/extension-host-module-isolation.test.ts",
+		]);
 		expect(execution.e2e).toEqual([
 			"tests2/core/file-mentions-authenticated-boundary.test.ts",
 			"tests2/core/git-lifecycle-no-publication-real-git.test.ts",
