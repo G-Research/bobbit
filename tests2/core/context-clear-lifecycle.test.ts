@@ -212,6 +212,7 @@ function makeGenerationBridge(options: BridgeOptions): any {
 			return () => listeners.delete(listener);
 		},
 		emit(event: any) { for (const listener of listeners) listener(event); },
+		completeLateNewSession() { generation += 1; },
 		get generation() { return generation; },
 		get switchedToOld() { return switchedToOld; },
 	};
@@ -465,6 +466,78 @@ describe("SessionManager context clear transaction", () => {
 });
 
 describe("SessionManager context clear rollback", () => {
+	it("stops an ambiguous timed-out bridge before late completion and restores queued work once", async () => {
+		const responseGate = deferred<any>();
+		const lateCompletionGate = deferred<void>();
+		const fx = makeFixture({ id: "ambiguous-timeout-clear" });
+		const staleBridge = fx.bridge;
+		const order: string[] = [];
+		staleBridge.newSession.mockImplementation(() => {
+			void lateCompletionGate.promise.then(() => {
+				order.push("stale-new-session-completed");
+				staleBridge.completeLateNewSession();
+			});
+			return responseGate.promise;
+		});
+		staleBridge.stop.mockImplementation(async () => { order.push("stale-bridge-stopped"); });
+
+		const restoredBridge = makeGenerationBridge({ oldPath: fx.oldPath });
+		let restoredSession: any;
+		fx.manager.restoreSession = vi.fn(async (record: Record<string, any>) => {
+			order.push("old-context-restore-started");
+			expect(record.agentSessionFile).toBe(fx.oldPath);
+			expect(record.contextClearBoundaries).toBeUndefined();
+			restoredSession = {
+				...fx.session,
+				status: "idle",
+				clients: new Set(),
+				promptQueue: new PromptQueue(record.messageQueue ?? []),
+				eventBuffer: new EventBuffer(),
+				lifecycleFenced: true,
+				dormant: false,
+				unsubscribe: vi.fn(),
+				rpcClient: restoredBridge,
+			};
+			fx.manager.sessions.set(record.id, restoredSession);
+		});
+		const lifecycleSpy = vi.spyOn(fx.manager, "handleAgentLifecycle");
+		fx.session.status = "streaming";
+
+		const clear = fx.manager.clearContext(fx.session.id);
+		await vi.waitFor(() => expect(staleBridge.newSession).toHaveBeenCalledTimes(1));
+		await fx.manager.enqueuePrompt(fx.session.id, "FOLLOW_UP_AFTER_TIMEOUT", { intentId: "intent-timeout-follow-up" });
+		staleBridge.emit({ type: "agent_settled" });
+		responseGate.reject(new Error("new_session RPC timed out"));
+		await vi.waitFor(() => expect(staleBridge.stop).toHaveBeenCalledTimes(1));
+		lateCompletionGate.resolve(undefined);
+
+		await expect(clear).rejects.toThrow(/timed out/i);
+		await flushMicrotasks();
+
+		expect(order).toEqual([
+			"stale-bridge-stopped",
+			"old-context-restore-started",
+			"stale-new-session-completed",
+		]);
+		expect(staleBridge.sendCommand.mock.calls.some(([command]: [any]) => command?.type === "switch_session")).toBe(false);
+		expect(staleBridge.generation).toBe(1);
+		expect(fx.manager.sessions.get(fx.session.id)).toBe(restoredSession);
+		expect((await restoredBridge.getState()).data).toEqual(expect.objectContaining({
+			sessionFile: fx.oldPath,
+			model: { provider: PROVIDER, id: MODEL_ID },
+			thinkingLevel: THINKING,
+		}));
+		expect(restoredBridge.setModel).toHaveBeenCalledWith(PROVIDER, MODEL_ID);
+		expect(restoredBridge.setThinkingLevel).toHaveBeenCalledWith(THINKING);
+		expect(restoredBridge.prompt).toHaveBeenCalledTimes(1);
+		expect(restoredBridge.prompt.mock.calls[0]?.[0]).toContain("FOLLOW_UP_AFTER_TIMEOUT");
+		expect(lifecycleSpy.mock.calls.filter(([, event]: any[]) => event?.type === "agent_settled")).toHaveLength(1);
+		expect(fx.store.record.agentSessionFile).toBe(fx.oldPath);
+		expect(fx.store.record.contextClearBoundaries).toBeUndefined();
+		expect(clearPublishUpdates(fx.store)).toEqual([]);
+		expect(contextClearedFrames(fx.client)).toEqual([]);
+	});
+
 	it.each([
 		["cancelled new_session", { cancel: true }, /cancel/i, false],
 		["same replacement path", { samePath: true }, /path|session/i, true],
