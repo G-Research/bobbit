@@ -3659,6 +3659,33 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/staff-context-policy-store.test.ts",
+      "reason": "Core persistence coverage for Compact, Preserve, and Clear staff context-policy round trips, reload durability, and legacy or malformed Compact normalization.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/staff-clear-context-policy.test.ts",
+      "reason": "Integration coverage proving a Clear inbox wake removes prior model-facing history while retaining staff and session identity, configuration, inbox state, and the durable clear boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/staff-context-policy.journey.spec.ts",
+      "reason": "Browser journey covering the Compact default and selecting, saving, reloading, and responsively rendering Preserve and Clear staff context policies.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
