@@ -4129,6 +4129,12 @@ export class SessionManager {
 		if (session.readOnly || session.nonInteractive) {
 			throw new ContextClearError("SESSION_READ_ONLY", `Session ${id} does not allow context replacement`);
 		}
+		if (typeof session.rpcClient.newSession !== "function") {
+			throw new ContextClearError(
+				"CLEAR_UNSUPPORTED",
+				"The active agent runtime does not support context clearing. Restart or update the agent runtime and try again.",
+			);
+		}
 		if (session.isCompacting || session.status === "aborting" || session.status === "preparing" || session.status === "starting") {
 			throw new ContextClearError("CLEAR_ACTIVE", "The session is busy with another lifecycle operation");
 		}
@@ -4247,8 +4253,15 @@ export class SessionManager {
 			if (this._markModernInFlightAttemptsUncertain(session)) this.broadcastQueue(session);
 			if (oldStatus === "streaming") broadcastStatus(session, "aborting");
 
+			const newSession = session.rpcClient.newSession?.bind(session.rpcClient);
+			if (!newSession) {
+				throw new ContextClearError(
+					"CLEAR_UNSUPPORTED",
+					"The active agent runtime does not support context clearing. Restart or update the agent runtime and try again.",
+				);
+			}
 			replacementAttempted = true;
-			const replacement = await session.rpcClient.newSession(120_000);
+			const replacement = await newSession(120_000);
 			if (!replacement?.success || typeof replacement.data?.cancelled !== "boolean") {
 				throw new Error(`new_session failed: ${replacement?.error ?? "invalid response"}`);
 			}

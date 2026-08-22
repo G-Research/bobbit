@@ -140,8 +140,8 @@ interface BridgeOptions {
 	newSessionGate?: Deferred<any>;
 	cancel?: boolean;
 	samePath?: boolean;
-	newMessages?: any[];
-	newEntries?: any[];
+	newMessages?: readonly any[];
+	newEntries?: readonly any[];
 	modelReadbackMismatch?: boolean;
 	getMessagesImpl?: () => Promise<any>;
 }
@@ -296,7 +296,8 @@ function makeFixture(options: Omit<BridgeOptions, "oldPath"> & { id?: string; ol
 }
 
 function contextClearedFrames(client: any): any[] {
-	return client.frames.filter((frame: any) => frame.type === "context_cleared");
+	return client.frames.filter((frame: any) =>
+		frame.type === "event" && frame.data?.type === "context_cleared");
 }
 
 function clearPublishUpdates(store: AtomicStore): Record<string, any>[] {
