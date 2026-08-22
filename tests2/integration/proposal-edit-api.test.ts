@@ -25,13 +25,16 @@ import {
 	createSession,
 	deleteSession,
 	rawApiFetch,
+	registerProject,
 	seedTeamLeadHeader,
+	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { MAX_GOAL_TITLE_LENGTH } from "../../src/server/agent/goal-candidate-validator.js";
+import { MAX_GOAL_SPEC_LENGTH, MAX_GOAL_TITLE_LENGTH } from "../../src/server/agent/goal-candidate-validator.js";
 import { getProposalTypePlugin } from "../../src/server/proposals/proposal-types.js";
+import { copyGitTemplate } from "../harness/git-template.js";
 
 let sessionId: string;
 
@@ -318,7 +321,8 @@ test.describe("editable proposals — REST API", () => {
 		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
 		const cases: Array<{ name: string; overrides: Record<string, unknown>; code: string }> = [
 			{ name: "title bound", overrides: { title: "x".repeat(MAX_GOAL_TITLE_LENGTH + 1) }, code: "TITLE_TOO_LONG" },
-			{ name: "spec bound", overrides: { spec: "x".repeat(20_001) }, code: "SPEC_TOO_LONG" },
+			{ name: "spec type", overrides: { spec: 42 }, code: "SPEC_INVALID" },
+			{ name: "spec bound", overrides: { spec: "x".repeat(MAX_GOAL_SPEC_LENGTH + 1) }, code: "SPEC_TOO_LONG" },
 			{ name: "project selection type", overrides: { projectId: 42 }, code: "PROJECT_ID_REQUIRED" },
 			{ name: "workflow selection type", overrides: { workflow: 42 }, code: "WORKFLOW_INVALID" },
 			{ name: "workflow id selection type", overrides: { workflowId: 42 }, code: "WORKFLOW_INVALID" },
@@ -638,6 +642,111 @@ test.describe("editable proposals — REST API", () => {
 		} finally {
 			await deleteSession(sid);
 		}
+	});
+
+	test("empty goal specs survive seed, serialization, replay, and agree with direct creation", async ({ gateway, scope }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `empty-goal-spec-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const workflowId = "empty-spec-flow";
+		const project = await registerProject({
+			name: `empty-goal-spec-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [{ name: "app", repo: "." }],
+			workflows: {
+				[workflowId]: {
+					name: "Empty spec flow",
+					description: "Compatibility fixture for empty goal specifications.",
+					gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+				},
+			},
+		});
+		const sid = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(sid, "idle", 30_000);
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		const variants: Array<{ label: string; args: Record<string, unknown> }> = [
+			{ label: "null", args: { spec: null } },
+			{ label: "omitted", args: {} },
+			{ label: "explicit empty string", args: { spec: "" } },
+		];
+
+		for (const [index, variant] of variants.entries()) {
+			const title = `Empty spec ${variant.label}`;
+			const seeded = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({
+					args: {
+						title,
+						workflow: workflowId,
+						projectId: project.id,
+						...variant.args,
+					},
+				}),
+			});
+			const seedText = await seeded.text();
+			expect(seeded.status, `${variant.label} seed must not fall through to a generic 500: ${seedText}`).toBe(200);
+			const seedBody = JSON.parse(seedText) as { ok: boolean; rev: number };
+			expect(seedBody).toMatchObject({ ok: true, rev: index + 1 });
+
+			const raw = fs.readFileSync(fp, "utf8");
+			const closingDelimiter = raw.indexOf("\n---\n", 4);
+			expect(closingDelimiter, `${variant.label} draft must retain valid frontmatter`).toBeGreaterThan(3);
+			expect(raw.slice(closingDelimiter + "\n---\n".length), `${variant.label} draft body`).toBe("");
+			const parsed = getProposalTypePlugin("goal").parse(raw);
+			expect(parsed.ok, `${variant.label} persisted draft must rehydrate`).toBe(true);
+			if (parsed.ok) {
+				expect(parsed.value.fields).toMatchObject({ title, projectId: project.id, workflow: workflowId, spec: "" });
+			}
+
+			const live = await apiFetch(`/api/sessions/${sid}/proposal/goal`);
+			expect(live.status).toBe(200);
+			expect(await live.text(), `${variant.label} GET must preserve exact serialized bytes`).toBe(raw);
+			const replay = await apiFetch(`/api/sessions/${sid}/proposal/goal/snapshot?rev=${seedBody.rev}`);
+			expect(replay.status, `${variant.label} snapshot replay: ${await replay.clone().text()}`).toBe(200);
+			expect(await replay.json()).toMatchObject({
+				ok: true,
+				rev: seedBody.rev,
+				fields: { title, projectId: project.id, workflow: workflowId, spec: "" },
+			});
+		}
+
+		const selected = await apiFetch(`/api/sessions/${sid}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "current-session" }),
+		});
+		expect(selected.status, `empty-spec worktree selection: ${await selected.clone().text()}`).toBe(200);
+		const selectedRaw = await (await apiFetch(`/api/sessions/${sid}/proposal/goal`)).text();
+		const selectedParsed = getProposalTypePlugin("goal").parse(selectedRaw);
+		expect(selectedParsed.ok).toBe(true);
+		if (selectedParsed.ok) expect(selectedParsed.value.fields.spec).toBe("");
+
+		const accepted = await apiFetch(`/api/sessions/${sid}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({}),
+		});
+		const acceptedText = await accepted.text();
+		expect(accepted.status, `empty-spec acceptance must not return a generic 500: ${acceptedText}`).toBe(201);
+		const acceptedGoal = JSON.parse(acceptedText) as { id: string; spec?: string };
+		scope.trackGoal(acceptedGoal.id);
+
+		const directCwd = path.join(projectRoot, "direct-empty-spec");
+		fs.mkdirSync(directCwd, { recursive: true });
+		const direct = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "Direct empty spec",
+				spec: "",
+				projectId: project.id,
+				cwd: directCwd,
+				workflowId,
+				worktree: false,
+				autoStartTeam: false,
+			}),
+		});
+		const directText = await direct.text();
+		expect(direct.status, `direct empty-spec creation must not return a generic 500: ${directText}`).toBe(201);
+		const directGoal = JSON.parse(directText) as { id: string; spec?: string };
+		scope.trackGoal(directGoal.id);
+		expect({ accepted: acceptedGoal.spec, direct: directGoal.spec }).toEqual({ accepted: "", direct: "" });
 	});
 
 	test("seed writes a goal draft on disk; GET returns markdown body", async ({ gateway }) => {
