@@ -47,6 +47,12 @@ registerLazyToolRenderer("__compaction_summary", async () => {
 	const { CompactionSummaryRenderer } = await import("./renderers/CompactionSummaryRenderer.js");
 	return new CompactionSummaryRenderer();
 });
+// Synthetic UI-only clear boundary. Like compaction summaries, this is an
+// outward transcript renderer only and is never registered with the model.
+registerLazyToolRenderer("__context_cleared", async () => {
+	const { ContextClearedRenderer } = await import("./renderers/ContextClearedRenderer.js");
+	return new ContextClearedRenderer();
+});
 
 // ── Lazy renderers — share one chunk per source file via dynamic import.
 // Each tool slot resolves through `import(...)` so all `team_*` slots land
