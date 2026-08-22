@@ -170,6 +170,76 @@ describe("RemoteAgent model switch reconciliation", () => {
 	});
 });
 
+describe("RemoteAgent context-capacity lifecycle", () => {
+	it("keeps model capacity on the authoritative client model tuple", async () => {
+		const ra = makeAgent(OPEN);
+		const model = {
+			provider: "openai-codex",
+			id: "gpt-5.6-sol",
+			contextWindow: 272_000,
+			modelCapacity: 1_050_000,
+		};
+
+		await ra.handleServerMessage({ type: "state", data: { model } });
+
+		expect(ra.state.model).toBe(model);
+		expect(ra.state.model.modelCapacity).toBe(1_050_000);
+	});
+
+	it.each([
+		{
+			name: "distinct larger capacity",
+			model: { contextWindow: 272_000, modelCapacity: 1_050_000 },
+			usage: 272_000,
+			expected: 26,
+		},
+		{
+			name: "target-only fallback",
+			model: { contextWindow: 272_000 },
+			usage: 136_000,
+			expected: 50,
+		},
+		{
+			name: "equal-limit fallback",
+			model: { contextWindow: 272_000, modelCapacity: 272_000 },
+			usage: 136_000,
+			expected: 50,
+		},
+		{
+			name: "capacity-below-target fallback",
+			model: { contextWindow: 272_000, modelCapacity: 128_000 },
+			usage: 136_000,
+			expected: 50,
+		},
+		{
+			name: "capacity-only fallback",
+			model: { contextWindow: 0, modelCapacity: 400_000 },
+			usage: 100_000,
+			expected: 25,
+		},
+		{
+			name: "unknown-limit fallback",
+			model: { contextWindow: 0, modelCapacity: Number.NaN },
+			usage: 100_000,
+			expected: null,
+		},
+	])("scales the visual compaction sample against $name without changing stale state", ({ model, usage, expected }) => {
+		const ra = makeAgent(OPEN);
+		ra._state.model = model;
+		ra._state.messages = [{
+			role: "assistant",
+			stopReason: "stop",
+			usage: { totalTokens: usage },
+		}];
+
+		ra.handleAgentEvent({ type: "compaction_start" });
+
+		expect(ra._compactionStartPct).toBe(expected);
+		expect(ra._usageStaleAfterCompaction).toBe(true);
+		expect(ra._isCompacting).toBe(true);
+	});
+});
+
 describe("RemoteAgent provider auth recovery", () => {
 	it("stores a redacted provider_auth_required event and clears it on retry, new prompt, model switch, and agent_start", async () => {
 		const makeEvent = () => ({
