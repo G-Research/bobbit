@@ -1,3 +1,5 @@
+/// <reference lib="dom" />
+
 // src/shared/extension-host/host-api.ts
 //
 // The FROZEN Bobbit Extension Host API — durable v1 contract
@@ -42,7 +44,8 @@ export const HOST_API_VERSION = 1 as const;
 // fall back to host-derived singleton/allowlisted param identity. See PanelTarget.
 // v4 (additive): added generic host.channels data contracts.
 // v5 (additive): added canonical scoped session/project notification contracts.
-export const HOST_CONTRACT_VERSION = 5 as const;
+// v6 (additive): added host.ui.createBobbitSprite and its presentation contracts.
+export const HOST_CONTRACT_VERSION = 6 as const;
 
 import type {
 	HostNotification,
@@ -223,14 +226,32 @@ export interface HostProjectApi {
 	readonly notifications: HostNotificationSubscriptionApi<ProjectNotificationName>;
 }
 
-/** PHASE 2 — frozen, not implemented. Drive non-chat UI surfaces. Targets are STRUCTURED
- *  typed objects, never hash strings — so the contract never bakes in today's router. */
+export type HostBobbitState = "active" | "idle" | "paused";
+
+export type HostBobbitSubject =
+	| { kind: "session"; id: string }
+	| { kind: "staff"; id: string };
+
+export interface HostBobbitSpriteOptions {
+	subject: HostBobbitSubject;
+	state: HostBobbitState;
+	label: string;
+	size?: number;
+	animated?: boolean;
+}
+
+/** PHASE 2 — drive non-chat UI surfaces. Targets are STRUCTURED typed objects, never
+ *  hash strings — so the contract never bakes in today's router. */
 export interface HostUiApi {
 	/** Open (or focus) a contributed panel, handing it typed params. */
 	openPanel(target: PanelTarget): void;
 	/** Navigate the SPA to a contributed route, by structured target. The host maps the
 	 *  target onto whatever URL scheme the router uses; packs never construct URLs. */
 	navigate(target: RouteTarget): void;
+	/** Create the canonical Bobbit avatar for a project-bound session or staff identity.
+	 *  This required browser capability is always present; callers do not feature-detect it.
+	 *  Invalid option shapes, labels, sizes, states, or animation flags throw TypeError. */
+	createBobbitSprite(options: HostBobbitSpriteOptions): HTMLElement;
 }
 
 /** PHASE 2 — frozen, not implemented. Ownership-scoped server persistence.
