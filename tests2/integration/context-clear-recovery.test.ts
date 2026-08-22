@@ -26,7 +26,7 @@ const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
-const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
+const { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { initCompactionSidecarDir } = await import("../../src/server/agent/compaction-sidecar.ts");
 const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
@@ -46,6 +46,21 @@ const OLD_HISTORY_MARKERS = [
 	"__context_cleared",
 ];
 const managers: any[] = [];
+const rpcBridgeFactoryRestoreStack: Array<ReturnType<typeof getRegisteredRpcBridgeFactory>> = [];
+
+function registerRecoveryRpcBridgeFactory(factory: ReturnType<typeof getRegisteredRpcBridgeFactory>): void {
+	rpcBridgeFactoryRestoreStack.push(getRegisteredRpcBridgeFactory());
+	registerRpcBridgeFactory(factory);
+}
+
+function restoreRecoveryRpcBridgeFactories(): void {
+	if (rpcBridgeFactoryRestoreStack.length === 0) return;
+	const inheritedFactory = rpcBridgeFactoryRestoreStack[0];
+	while (rpcBridgeFactoryRestoreStack.length > 0) {
+		registerRpcBridgeFactory(rpcBridgeFactoryRestoreStack.pop() ?? null);
+	}
+	expect(getRegisteredRpcBridgeFactory()).toBe(inheritedFactory);
+}
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -264,7 +279,7 @@ preferencesStore.set("default.sessionModel", MODEL);
 
 function makeManager(store: RecoveryStore, bridgeFactory: (options: any) => any): any {
 	invalidateModelCache();
-	registerRpcBridgeFactory(bridgeFactory);
+	registerRecoveryRpcBridgeFactory(bridgeFactory);
 	const manager: any = new SessionManager({
 		projectContextManager: {} as any,
 		preferencesStore,
@@ -350,18 +365,41 @@ beforeAll(() => {
 });
 
 afterEach(() => {
-	registerRpcBridgeFactory(null);
-	while (managers.length > 0) {
-		const manager = managers.pop();
-		manager.sessionsWithConnectedClients?.clear?.();
-		manager.sessions?.clear?.();
-		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
+	try {
+		while (managers.length > 0) {
+			const manager = managers.pop();
+			manager.sessionsWithConnectedClients?.clear?.();
+			manager.sessions?.clear?.();
+			if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
+		}
+	} finally {
+		restoreRecoveryRpcBridgeFactories();
+		vi.restoreAllMocks();
 	}
-	vi.restoreAllMocks();
 });
 
 afterAll(() => {
 	fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+describe("RPC bridge fixture isolation", () => {
+	test("restores the exact inherited factory identity after an override", () => {
+		const inheritedFactory = getRegisteredRpcBridgeFactory();
+		const sentinelFactory = vi.fn(() => null);
+		registerRpcBridgeFactory(sentinelFactory);
+		try {
+			const recoveryFactory = vi.fn(() => null);
+			registerRecoveryRpcBridgeFactory(recoveryFactory);
+			expect(getRegisteredRpcBridgeFactory()).toBe(recoveryFactory);
+
+			restoreRecoveryRpcBridgeFactories();
+			expect(getRegisteredRpcBridgeFactory()).toBe(sentinelFactory);
+		} finally {
+			restoreRecoveryRpcBridgeFactories();
+			registerRpcBridgeFactory(inheritedFactory);
+		}
+		expect(getRegisteredRpcBridgeFactory()).toBe(inheritedFactory);
+	});
 });
 
 describe("unmaterialized clear generation cold recovery", () => {
