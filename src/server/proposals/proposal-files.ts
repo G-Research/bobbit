@@ -68,9 +68,38 @@ export interface SnapshotNotFoundError {
 	message: string;
 }
 
-export type RestoreResult = RestoreSuccess | SnapshotNotFoundError | ParseError;
+/** Dynamic, state-aware validation run after parse and before any draft mutation. */
+export interface ProposalPreCommitError {
+	ok: false;
+	status: number;
+	code: string;
+	message: string;
+	details?: Record<string, unknown>;
+}
 
-export type EditResult = EditSuccess | ParseError | EditError;
+export type ProposalPreCommitValidator = (
+	fields: Record<string, unknown>,
+) => void | ProposalPreCommitError | Promise<void | ProposalPreCommitError>;
+
+export class ProposalPreCommitValidationError extends Error {
+	constructor(readonly validation: ProposalPreCommitError) {
+		super(validation.message);
+		this.name = "ProposalPreCommitValidationError";
+	}
+}
+
+export type RestoreResult = RestoreSuccess | SnapshotNotFoundError | ParseError | ProposalPreCommitError;
+
+export type EditResult = EditSuccess | ParseError | EditError | ProposalPreCommitError;
+
+async function runPreCommitValidator(
+	validator: ProposalPreCommitValidator | undefined,
+	fields: Record<string, unknown>,
+): Promise<void | ProposalPreCommitError> {
+	if (!validator) return;
+	const result = await validator(fields);
+	return result && !result.ok ? result : undefined;
+}
 
 export const PROPOSAL_TYPES: readonly ProposalType[] = [
 	"goal",
@@ -198,6 +227,7 @@ export async function restoreSnapshot(
 	sessionId: string,
 	type: ProposalType,
 	rev: number,
+	preCommitValidator?: ProposalPreCommitValidator,
 ): Promise<RestoreResult> {
 	assertSafeSessionId(sessionId);
 	assertSafeType(type);
@@ -210,8 +240,10 @@ export async function restoreSnapshot(
 			message: `No snapshot rev ${rev} for ${type} proposal`,
 		};
 	}
-	const parsed = plugin.parse(content);
+	const parsed = plugin.parse(content, type === "goal" && preCommitValidator ? "precommit" : "strict");
 	if (!parsed.ok) return parsed;
+	const rejected = await runPreCommitValidator(preCommitValidator, parsed.value.fields);
+	if (rejected) return rejected;
 
 	// Write to live draft atomically.
 	const dir = dirFor(stateDir, sessionId);
@@ -243,6 +275,7 @@ export async function writeProposalFile(
 	sessionId: string,
 	type: ProposalType,
 	fields: Record<string, unknown>,
+	preCommitValidator?: ProposalPreCommitValidator,
 ): Promise<{ rev: number }> {
 	assertSafeSessionId(sessionId);
 	assertSafeType(type);
@@ -250,16 +283,18 @@ export async function writeProposalFile(
 	const dir = dirFor(stateDir, sessionId);
 	const filePath = path.join(dir, plugin.filename);
 	const content = plugin.serialize(fields);
-	await fsp.mkdir(dir, { recursive: true });
-	const tmpPath = filePath + ".tmp";
-	await fsp.writeFile(tmpPath, content, "utf8");
-	// Validate the serialized form before commit.
+	// Validate the serialized form and current dynamic state before writing even a
+	// temporary file. A rejected candidate cannot alter the live draft or revision.
 	const parsed = plugin.parse(content);
 	if (!parsed.ok) {
-		await fsp.unlink(tmpPath).catch(() => {});
 		const e = parsed as ParseError;
 		throw new Error(`writeProposalFile validation failed [${e.code}]: ${e.message}`);
 	}
+	const rejected = await runPreCommitValidator(preCommitValidator, parsed.value.fields);
+	if (rejected) throw new ProposalPreCommitValidationError(rejected);
+	await fsp.mkdir(dir, { recursive: true });
+	const tmpPath = filePath + ".tmp";
+	await fsp.writeFile(tmpPath, content, "utf8");
 	await fsp.rename(tmpPath, filePath);
 	// Snapshot — non-fatal on failure.
 	let rev = 0;
@@ -303,6 +338,7 @@ export async function editProposalFile(
 	type: ProposalType,
 	oldText: string,
 	newText: string,
+	preCommitValidator?: ProposalPreCommitValidator,
 ): Promise<EditResult> {
 	assertSafeSessionId(sessionId);
 	assertSafeType(type);
@@ -337,14 +373,15 @@ export async function editProposalFile(
 
 	const next = current.slice(0, firstIdx) + newText + current.slice(firstIdx + oldText.length);
 
-	// Atomic write with rollback: parse next; only rename .tmp on success.
+	// Goal mutation preflight parses YAML and presentation state only, then lets
+	// the canonical candidate validator own every creation field and error.
+	// Other proposal types and read consumers retain strict structural parsing.
+	const parsed = plugin.parse(next, type === "goal" && preCommitValidator ? "precommit" : "strict");
+	if (!parsed.ok) return parsed;
+	const rejected = await runPreCommitValidator(preCommitValidator, parsed.value.fields);
+	if (rejected) return rejected;
 	const tmpPath = filePath + ".tmp";
 	await fsp.writeFile(tmpPath, next, "utf8");
-	const parsed = plugin.parse(next);
-	if (!parsed.ok) {
-		await fsp.unlink(tmpPath).catch(() => {});
-		return parsed;
-	}
 	await fsp.rename(tmpPath, filePath);
 	// Snapshot the new content — non-fatal on failure.
 	let rev = 0;

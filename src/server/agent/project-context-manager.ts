@@ -1,10 +1,13 @@
+import path from "node:path";
 import { ProjectContext } from "./project-context.js";
-import { ProjectRegistry } from "./project-registry.js";
+import { HEADQUARTERS_PROJECT_ID, ProjectRegistry } from "./project-registry.js";
 import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
-import type { ProjectConfigStore } from "./project-config-store.js";
+import { ProjectConfigStore, type Component } from "./project-config-store.js";
+import { WorkflowStore, type Workflow } from "./workflow-store.js";
+import { bobbitConfigDir, normalProjectBobbitDir } from "../bobbit-dir.js";
 import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
 import { bootLog, SLOW_PHASE_MS } from "../boot-profile.js";
@@ -94,6 +97,40 @@ export class ProjectContextManager {
       if (dt >= SLOW_PHASE_MS) bootLog(`[boot] context open: project=${project.id} in ${dt}ms`);
     }
     bootLog(`[boot] initAll opened ${projects.length} project context(s) in ${Date.now() - t0}ms`);
+  }
+
+  /** Return an already-open context without creating stores or changing topology. */
+  getExisting(projectId: string): ProjectContext | undefined {
+    return this.contexts.get(projectId);
+  }
+
+  /**
+   * Read the current project workflow/component configuration without opening a
+   * ProjectContext. Existing contexts supply their live in-memory snapshot;
+   * unopened projects are read into a detached config facade that is never
+   * retained, opened, or allowed to mutate project state.
+   */
+  readConfigSnapshot(projectId: string): { components: Component[]; workflows: Workflow[] } | null {
+    const existing = this.contexts.get(projectId);
+    if (existing) {
+      return {
+        components: existing.projectConfigStore.getComponents(),
+        workflows: existing.workflowStore.getAllIncludingHidden(),
+      };
+    }
+    const project = this.registry.get(projectId);
+    if (!project) return null;
+    const store = projectId === HEADQUARTERS_PROJECT_ID && this.options.headquartersProjectConfigStore
+      ? this.options.headquartersProjectConfigStore
+      : new ProjectConfigStore(
+        projectId === HEADQUARTERS_PROJECT_ID ? bobbitConfigDir() : path.join(normalProjectBobbitDir(project.rootPath), "config"),
+        this.options.fsImpl,
+      );
+    const workflows = new WorkflowStore(store).getAllIncludingHidden();
+    return {
+      components: store.getComponents(),
+      workflows,
+    };
   }
 
   /** Get or lazily create a ProjectContext. */

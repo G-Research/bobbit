@@ -39,6 +39,14 @@ function assertTextInOrder(text: string, needles: string[], message: string): vo
 	}
 }
 
+function sourceSection(text: string, start: string, end: string): string {
+	const from = text.indexOf(start);
+	const to = text.indexOf(end, from + start.length);
+	assert.notEqual(from, -1, `Missing source section start: ${start}`);
+	assert.notEqual(to, -1, `Missing source section end: ${end}`);
+	return text.slice(from, to);
+}
+
 describe("Source pin — merge-loss invariants", () => {
 	it("server.ts dispatches tryHandleNestedGoalRoute (restored by ea921d7b)", () => {
 		const text = read("src/server/server.ts");
@@ -115,6 +123,38 @@ describe("Source pin — merge-loss invariants", () => {
 			"Without it operators cannot tighten the per-goal nesting cap at\n" +
 			"creation time. DO NOT delete this pin.",
 		);
+	});
+
+	it("both goal proposal acceptance handlers preserve candidate identity and allow omitted generated-default workflows", () => {
+		const text = read("src/app/proposal-panels.ts");
+		const preview = sourceSection(text, "function goalPreviewPanel() {", "// ROLE PREVIEW PANEL");
+		const normal = sourceSection(text, "function goalProposalPanel() {", "// LAZY ENTRY POINT");
+		const workflowProjection = sourceSection(text, "function isWorkflowSelectionInvalid(", "function hasValidInlineWorkflowDraft(");
+
+		assert.ok(
+			workflowProjection.includes("if (!id || hasValidInlineWorkflowDraft(inlineWorkflow)) return false;"),
+			"an omitted workflow must remain eligible while the server resolves and persists a generated default after successful creation",
+		);
+		for (const [surface, section] of [["preview", preview], ["normal", normal]] as const) {
+			assert.ok(
+				section.includes("const parentGoalIdField = _proposalParentGoalId || undefined;"),
+				`${surface} acceptance must retain a seeded parent when subgoal controls become hidden`,
+			);
+			assert.ok(
+				section.includes("parentGoalId: parentGoalIdField"),
+				`${surface} acceptance must forward the retained parent to canonical POST /api/goals validation`,
+			);
+			assert.ok(
+				!section.includes("parentGoalId: subgoalsEnabled ?"),
+				`${surface} acceptance must not reproject a child proposal into a root from feature visibility`,
+			);
+			assert.ok(
+				!section.includes("_cachedWorkflows.length === 0"),
+				`${surface} acceptance must not hard-stop a canonically valid omitted workflow merely because the client cache is empty`,
+			);
+		}
+		assert.ok(preview.includes("const workflowId = inlineWorkflowField ? undefined : (assistantWorkflowId || undefined);"));
+		assert.ok(normal.includes("const workflowId = _proposalWorkflowId || undefined;"));
 	});
 
 	// ----------------------------------------------------------------------

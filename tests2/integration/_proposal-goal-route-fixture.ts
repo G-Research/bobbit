@@ -1,6 +1,6 @@
 import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
 import type { Workflow } from "../../src/server/agent/workflow-store.js";
-import { prepareGoalProposalSeed } from "../../src/server/proposals/goal-proposal-seed.js";
+import { prepareGoalProposalSeed, validateGoalProposalWorkflow } from "../../src/server/proposals/goal-proposal-seed.js";
 
 export const VALIDATION_PROJECT_WORKFLOWS: readonly Workflow[] = [
 	{
@@ -167,11 +167,14 @@ export class GoalProposalRouteFixture {
 
 		const prepared = prepareGoalProposalSeed({ ...args, projectId: targetProjectId }, {
 			session,
-			workflows: target.workflowStore.getAll(),
 			getGoal: id => this.getGoal(id),
 			getPreference: key => this.preferences.get(key),
 		});
 		if (!prepared.ok) return json(prepared.body, prepared.status);
+		// The production route delegates this decision to validateGoalCandidate.
+		// This narrow fixture preserves the shared focused workflow primitive.
+		const workflowError = validateGoalProposalWorkflow(prepared.args, target.workflowStore.getAll());
+		if (workflowError) return json(workflowError, 400);
 
 		this.drafts.set(sessionId, structuredClone(prepared.args));
 		return json({ ok: true }, prepared.status);

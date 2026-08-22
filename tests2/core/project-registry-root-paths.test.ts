@@ -246,7 +246,39 @@ test("ProjectRegistry leaves sampled evidence conservative without a stable dire
   assert.equal(cache.size, 0);
 });
 
-test("ProjectRegistry rejects zero or replaced directory fingerprints for sampled evidence", () => {
+test("ProjectRegistry keeps Windows identity stable across sibling fingerprint churn without caching", () => {
+  const parent = "C:\\Temp\\churning-case-evidence";
+  const knownEntry = path.win32.join(parent, "KnownEntry");
+  const cache = new Map();
+  let fingerprintReads = 0;
+  const isParent = (candidate: string) => path.win32.resolve(candidate).toLowerCase() === parent.toLowerCase();
+  const identity = createProjectPathIdentity({
+    isNativePathApi: dialect => dialect === "win32",
+    isCaseInsensitiveAt: directory => isParent(directory) ? undefined : false,
+    realpathSync: candidate => {
+      const resolved = path.win32.resolve(candidate);
+      if (isParent(resolved)) return parent;
+      if (resolved.toLowerCase() === knownEntry.toLowerCase()) return resolved;
+      throw missing(candidate);
+    },
+    lstatSync: candidate => isParent(candidate)
+      ? { dev: 7, ino: 11, isDirectory: () => true }
+      : { dev: 7, ino: 12, isDirectory: () => true },
+    readDirectoryEntries: () => ["KnownEntry"],
+    createCaseProbe: () => { throw new Error("sample should not need a probe"); },
+    caseSemanticsCache: cache,
+    caseSemanticsFingerprint: () => `metadata-revision-${++fingerprintReads}`,
+  });
+
+  const mixedCase = identity(`${parent}\\FutureProject`);
+  const alternateCase = identity("c:/TEMP/churning-case-evidence/FUTUREPROJECT");
+  assert.equal(mixedCase, "c:/Temp/churning-case-evidence/futureproject");
+  assert.equal(alternateCase, mixedCase, "fingerprint-only churn must not change the physical cwd identity");
+  assert.equal(fingerprintReads, 4, "each lookup must observe its changing before/after fingerprint");
+  assert.equal(cache.size, 0, "changing full fingerprints must never populate the case-semantics cache");
+});
+
+test("ProjectRegistry rejects zero or replaced directory identities for sampled evidence", () => {
   const parent = "/unstable-case-evidence";
   const knownEntry = path.posix.join(parent, "KnownEntry");
   const createIdentity = (parentStat: () => { dev: number; ino: number }, fingerprint: () => string) => {
@@ -280,10 +312,10 @@ test("ProjectRegistry rejects zero or replaced directory fingerprints for sample
   assert.equal(zeroDevice.identity(`${parent}/FutureProject`), `${parent}/FutureProject`);
   assert.equal(zeroDevice.cache.size, 0);
 
-  let fingerprintReads = 0;
+  let identityReads = 0;
   const replaced = createIdentity(
-    () => ({ dev: 1, ino: 1 }),
-    () => (++fingerprintReads === 1 ? "before" : "after"),
+    () => ({ dev: 1, ino: ++identityReads === 1 ? 1 : 2 }),
+    () => "stable",
   );
   assert.equal(replaced.identity(`${parent}/FutureProject`), `${parent}/FutureProject`);
   assert.equal(replaced.cache.size, 0);

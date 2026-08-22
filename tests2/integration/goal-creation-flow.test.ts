@@ -1,5 +1,12 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base, apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { GoalPreflightStaleError, GOAL_PREFLIGHT_STALE_MESSAGE } from "../../src/server/agent/goal-manager.js";
+
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>(done => { resolve = done; });
+	return { promise, resolve };
+}
 
 /**
  * End-to-end tests for the goal creation flow — verifying:
@@ -48,6 +55,86 @@ test.describe("Goal creation flow", () => {
 		const sessions = Array.isArray(data) ? data : data.sessions ?? [];
 		const found = sessions.find((s: any) => s.id === sessionId);
 		expect(found).toBeUndefined();
+	});
+
+	test("revalidates workflow state changed while repository preflight is held", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId)!;
+		const workflowId = `held-preflight-${Date.now()}`;
+		context.workflowStore.put({
+			id: workflowId,
+			name: "Held preflight",
+			description: "Removed while repository support probing is held.",
+			gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }],
+			createdAt: 0,
+			updatedAt: 0,
+		});
+		const goalIdsBefore = new Set(context.goalStore.getAll().map((goal: { id: string }) => goal.id));
+		const workflowCountBefore = context.workflowStore.getAll().length;
+		const entered = deferred();
+		const release = deferred();
+		const manager = context.goalManager as any;
+		const originalPreflight = manager.preflightGoalCreation.bind(manager);
+		manager.preflightGoalCreation = async (...args: unknown[]) => {
+			const result = await originalPreflight(...args);
+			entered.resolve();
+			await release.promise;
+			return result;
+		};
+		try {
+			const pending = apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Held preflight stale workflow",
+					spec: "The selected workflow disappears before the final commit boundary.",
+					projectId: gateway.defaultProjectId,
+					cwd: nonGitCwd(),
+					workflowId,
+					autoStartTeam: false,
+				}),
+			});
+			await entered.promise;
+			context.workflowStore.remove(workflowId);
+			release.resolve();
+			const response = await pending;
+			expect(response.status, await response.clone().text()).toBe(400);
+			expect(await response.json()).toMatchObject({ code: "UNKNOWN_WORKFLOW" });
+			expect(context.goalStore.getAll().filter((goal: { id: string }) => !goalIdsBefore.has(goal.id))).toEqual([]);
+			expect(context.workflowStore.getAll()).toHaveLength(workflowCountBefore - 1);
+		} finally {
+			manager.preflightGoalCreation = originalPreflight;
+			release.resolve();
+			context.workflowStore.remove(workflowId);
+		}
+	});
+
+	test("returns the structured stale family without ordinary goal mutation", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId)!;
+		const goalIdsBefore = new Set(context.goalStore.getAll().map((goal: { id: string }) => goal.id));
+		const manager = context.goalManager as any;
+		const originalPreflight = manager.preflightGoalCreation.bind(manager);
+		manager.preflightGoalCreation = async () => { throw new GoalPreflightStaleError(); };
+		try {
+			const response = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Stale repository preflight",
+					spec: "Repository configuration keeps changing before creation.",
+					projectId: gateway.defaultProjectId,
+					cwd: nonGitCwd(),
+					autoStartTeam: false,
+				}),
+			});
+
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				code: "GOAL_PREFLIGHT_STALE",
+				message: GOAL_PREFLIGHT_STALE_MESSAGE,
+				details: { retryable: true },
+			});
+			expect(context.goalStore.getAll().filter((goal: { id: string }) => !goalIdsBefore.has(goal.id))).toEqual([]);
+		} finally {
+			manager.preflightGoalCreation = originalPreflight;
+		}
 	});
 
 	test("createGoal returns goal object with id for dashboard navigation", async () => {

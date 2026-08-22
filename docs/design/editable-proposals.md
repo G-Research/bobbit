@@ -239,10 +239,10 @@ Internal mechanics:
 
 - **Atomic write with rollback:** `editProposalFile` reads current content,
   applies exact-string replacement (first-and-only-occurrence rule, identical
-  semantics to the builtin `edit` tool), writes to a `<file>.tmp`, parses the
-  new content, validates per-type via `proposal-types.ts`. On parse/validate
-  failure: unlink `.tmp`, return the ParseError, file on disk untouched. On
-  success: `fs.rename` `.tmp` → final path.
+  semantics to the builtin `edit` tool), parses the candidate, and runs the
+  per-type validation before creating `<file>.tmp`. Only a valid candidate is
+  written and renamed over the live file. A parse or validation failure returns
+  the structured error with the file and revision history untouched.
 - **Per-session directory:** created lazily on first write. Cleaned by
   `deleteProposalFile` and by session archive (`session-manager.ts::terminateSession`
   fire-and-forgets `rm -rf .bobbit/state/proposal-drafts/<sessionId>`).
@@ -433,18 +433,30 @@ async execute(args) {
 }
 ```
 
-Adding a single new endpoint `POST /api/sessions/:id/proposal/:type/seed` that
-takes the args, runs the per-type `serialize()`, calls
-`writeProposalFile()`, parses, broadcasts `proposal_update { source: "seed" }`.
-This is on top of the existing live `_checkToolProposals` path — both paths
-fire the same callback shape, so the UI receives the streaming partials AND
-the final canonical file-derived projection.
+The endpoint `POST /api/sessions/:id/proposal/:type/seed` retains the ordinary
+per-type serialize, parse, write, and `proposal_update { source: "seed" }`
+broadcast flow. Goal seeds add a stronger boundary first: the server stamps the
+authenticated default project when omitted, applies permitted host-derived
+enrichment such as an eligible implicit parent, and runs canonical candidate
+validation **before serialization or any write**. `writeProposalFile()` then
+revalidates the parsed goal projection through the same pre-commit owner. Other
+proposal types keep their existing seed behavior.
 
-> **Update (post-ship):** the goal seed handler now validates the proposed
-> `workflow` and `options` against the project's workflows before writing, and
-> `propose_goal` surfaces a rejection as an `isError` result instead of a false
-> ack. See [goals-workflows-tasks.md — Validating a proposed workflow at
-> proposal time](../goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time).
+The goal validator covers title/spec bounds; visible project and `cwd` authority;
+workflow selection, optional steps, and inline workflow/role contracts;
+parent/nesting rules; metadata; sub-goal settings; and root/child policy
+combinations. An omitted, `null`, or empty input serializes as the valid empty
+Markdown body and round-trips through seed, edit, rehydration, and acceptance.
+Blank titles, malformed frontmatter, other non-string raw specs, and oversized
+specs remain invalid.
+Rejection preserves the creation-equivalent structured status,
+code, and message family, including `CWD_OUTSIDE_PROJECT`. It writes no draft or
+history snapshot, does not advance the revision, and opens no proposal tab or
+emits a proposal-update event. `propose_goal` returns an `isError` tool result,
+so the transcript renders the original input plus actionable correction guidance
+instead of a false acknowledgement. See [goals-workflows-tasks.md — Canonical
+goal-candidate validation](../goals-workflows-tasks.md#canonical-goal-candidate-validation)
+and [Default workflow resolution](../goals-workflows-tasks.md#default-workflow-resolution).
 
 ## 7. Client refactor
 

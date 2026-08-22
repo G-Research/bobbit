@@ -20,11 +20,13 @@ import type {
 	TypedProposal,
 } from "./proposal-files.js";
 
+export type ProposalParseMode = "strict" | "precommit";
+
 export interface ProposalTypePlugin {
 	type: ProposalType;
 	filename: string;
 	serialize(fields: Record<string, unknown>): string;
-	parse(content: string): ParseResult;
+	parse(content: string, mode?: ProposalParseMode): ParseResult;
 	requiredFields: readonly string[];
 }
 
@@ -144,7 +146,29 @@ export function validateGoalInlineWorkflow(iw: unknown): ParseError | null {
 	return null;
 }
 
+function validateGoalPresentationFields(fields: Record<string, unknown>): ParseError | null {
+	const worktreeMode = fields.worktreeMode;
+	if (worktreeMode !== undefined && worktreeMode !== "new-worktree" && worktreeMode !== "current-session") {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "worktreeMode must be one of: new-worktree, current-session" };
+	}
+	return null;
+}
+
 function validateGoalInlineFields(fields: Record<string, unknown>): ParseError | null {
+	// Defense in depth for persisted/manual frontmatter read consumers. Mutation
+	// preflight deliberately defers these goal-candidate fields to the canonical
+	// validateGoalCandidate owner instead.
+	for (const key of ["projectId", "cwd", "options", "parentGoalId", "workflowId"] as const) {
+		const value = fields[key];
+		if (Object.prototype.hasOwnProperty.call(fields, key) && value !== undefined && typeof value !== "string") {
+			return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: `${key} must be a string` };
+		}
+	}
+	const workflowSelection = fields.workflow;
+	if (Object.prototype.hasOwnProperty.call(fields, "workflow") && workflowSelection !== undefined
+		&& typeof workflowSelection !== "string" && !isPlainObject(workflowSelection)) {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "workflow must be a workflow ID string or inline workflow object" };
+	}
 	const inlineWorkflowErr = validateGoalInlineWorkflow(fields.inlineWorkflow);
 	if (inlineWorkflowErr) return inlineWorkflowErr;
 	const ir = fields.inlineRoles;
@@ -203,11 +227,7 @@ function validateGoalInlineFields(fields: Record<string, unknown>): ParseError |
 	if (md !== undefined && md !== null && !isPlainObject(md)) {
 		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "metadata must be a plain object of namespaced key/value pairs" };
 	}
-	const worktreeMode = fields.worktreeMode;
-	if (worktreeMode !== undefined && worktreeMode !== "new-worktree" && worktreeMode !== "current-session") {
-		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "worktreeMode must be one of: new-worktree, current-session" };
-	}
-	return null;
+	return validateGoalPresentationFields(fields);
 }
 
 const goalPlugin: ProposalTypePlugin = {
@@ -233,7 +253,7 @@ const goalPlugin: ProposalTypePlugin = {
 		const body = spec.endsWith("\n") || spec === "" ? spec : spec + "\n";
 		return `---\n${fmYaml}${fmYaml ? "\n" : ""}---\n${body}`;
 	},
-	parse(content) {
+	parse(content, mode = "strict") {
 		const m = FRONTMATTER_RE.exec(content);
 		if (!m) {
 			return {
@@ -261,24 +281,21 @@ const goalPlugin: ProposalTypePlugin = {
 			};
 		}
 		const fields: Record<string, unknown> = { ...fm, spec: body };
-		if (typeof fields.title !== "string" || fields.title.trim() === "") {
-			return {
-				ok: false,
-				code: "MISSING_REQUIRED_FIELD",
-				field: "title",
-				message: "goal proposal frontmatter must include a non-empty `title`",
-			};
+		if (mode === "strict") {
+			if (typeof fields.title !== "string" || fields.title.trim() === "") {
+				return {
+					ok: false,
+					code: "MISSING_REQUIRED_FIELD",
+					field: "title",
+					message: "goal proposal frontmatter must include a non-empty `title`",
+				};
+			}
+			const inlineErr = validateGoalInlineFields(fields);
+			if (inlineErr) return inlineErr;
+		} else {
+			const presentationErr = validateGoalPresentationFields(fields);
+			if (presentationErr) return presentationErr;
 		}
-		if (typeof fields.spec !== "string" || fields.spec.trim() === "") {
-			return {
-				ok: false,
-				code: "MISSING_REQUIRED_FIELD",
-				field: "spec",
-				message: "goal proposal must have a non-empty body (spec)",
-			};
-		}
-		const inlineErr = validateGoalInlineFields(fields);
-		if (inlineErr) return inlineErr;
 		return { ok: true, value: { type: "goal", fields } };
 	},
 };

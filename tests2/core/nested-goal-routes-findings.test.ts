@@ -20,6 +20,8 @@
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 
@@ -33,13 +35,18 @@ import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/se
 import type { CookieStore } from "../../src/server/auth/cookie.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SessionSecretStore } from "../../src/server/auth/session-secret.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
 
 interface Harness {
 	tmpRoot: string;
 	goalStore: GoalStore;
 	goalManager: GoalManager;
+	gateStore: GateStore;
 	parent: PersistedGoal;
+	gateInitCalls: string[];
 	resizeCalls: Array<{ rootGoalId: string; newMax: number }>;
+	childStartRequests: string[];
+	worktreeSetupCalls: string[];
 	teamLeadByGoal: Record<string, string | null>;
 	teardownCalls: string[];
 	reconciledGoals: string[];
@@ -60,9 +67,9 @@ interface Harness {
 	): Promise<{ status: number; payload: any }>;
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(rootPath = path.resolve("/memfs/nested-findings/work")): Promise<Harness> {
 	const memfs = createMemFs();
-	const tmpRoot = path.resolve("/memfs/nested-findings/work");
+	const tmpRoot = rootPath;
 	const stateDir = path.resolve("/memfs/nested-findings/state");
 	const configDir = path.resolve("/memfs/nested-findings/config");
 	memfs.mkdirSync(stateDir);
@@ -96,16 +103,27 @@ async function makeHarness(): Promise<Harness> {
 	]);
 	const goalManager = new GoalManager(goalStore, wf);
 	const gateStore = new GateStore(stateDir, memfs, { persistence: "json" });
+	const gateInitCalls: string[] = [];
+	const initGatesForGoal = gateStore.initGatesForGoal.bind(gateStore);
+	gateStore.initGatesForGoal = (goalId, gateIds) => {
+		gateInitCalls.push(goalId);
+		initGatesForGoal(goalId, gateIds);
+	};
 	const planMutationStore = new PlanMutationStore(stateDir, { startSweep: false }, memfs);
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
+	goalStore.update(parent.id, { projectId: "p" });
 
-	// No-op heavy side effects.
+	// No-op heavy side effects, with calls recorded so validation tests can
+	// prove rejection happens before any worktree/setup mutation.
+	const worktreeSetupCalls: string[] = [];
 	(goalManager as any).setupWorktreeAndStartTeam = async (gid: string) => {
+		worktreeSetupCalls.push(gid);
 		await goalManager.updateGoal(gid, { setupStatus: "ready" } as any);
 	};
 
 	const resizeCalls: Array<{ rootGoalId: string; newMax: number }> = [];
+	const childStartRequests: string[] = [];
 	const teamLeadByGoal: Record<string, string | null> = {};
 	const teardownCalls: string[] = [];
 	const reconciledGoals: string[] = [];
@@ -148,10 +166,28 @@ async function makeHarness(): Promise<Harness> {
 			resizeCalls.push({ rootGoalId, newMax });
 			return true;
 		},
-		requestChildStart: () => "started",
+		requestChildStart: (goalId: string) => {
+			childStartRequests.push(goalId);
+			return "started";
+		},
 		notifyChildTerminal: () => {},
 	};
 
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: {
+			get: (projectId: string) => projectId === "p" ? {
+				id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0,
+				colorLight: "", colorDark: "",
+			} : undefined,
+		} as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 	const deps: NestedGoalRouteDeps = {
 		projectContextManager,
 		verificationHarness,
@@ -166,6 +202,7 @@ async function makeHarness(): Promise<Harness> {
 		jsonError: () => {},
 		broadcastToAll: () => {},
 		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+		goalCandidateDeps,
 	};
 
 	async function call(
@@ -189,8 +226,8 @@ async function makeHarness(): Promise<Harness> {
 	}
 
 	return {
-		tmpRoot, goalStore, goalManager, parent, resizeCalls, teamLeadByGoal, teardownCalls, reconciledGoals,
-		humanCookieHeader,
+		tmpRoot, goalStore, goalManager, gateStore, parent, gateInitCalls, resizeCalls, childStartRequests, worktreeSetupCalls,
+		teamLeadByGoal, teardownCalls, reconciledGoals, humanCookieHeader,
 		authAs(sessionId: string) {
 			return {
 				"x-bobbit-spawning-session": sessionId,
@@ -241,6 +278,216 @@ describe("G2/C1 — spawn-child workflow override", () => {
 		assert.equal(r.status, 201);
 		const child = h.goalStore.get(r.payload.id)!;
 		assert.equal(child.workflowId, "parent", "child inherits the parent workflow id by default");
+	});
+
+	it("keeps a valid inline workflow ahead of a simultaneous workflowId", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "p-inline-precedence",
+			title: "Inline workflow child",
+			spec: "Child spec: an explicit inline workflow remains authoritative over the simultaneous registered workflow identifier.",
+			workflowId: "parent",
+			workflow: {
+				id: "inline-child",
+				name: "Inline child",
+				gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }],
+			},
+		}, h.authAs(TL));
+		assert.equal(r.status, 201, JSON.stringify(r.payload));
+		const child = h.goalStore.get(r.payload.id)!;
+		assert.equal(child.workflowId, "inline-child");
+		assert.equal(child.workflow?.id, "inline-child");
+	});
+});
+
+describe("spawn-child — canonical goal-candidate validation before mutation", () => {
+	const validSpec = "Implement and verify the requested child-goal behavior with focused regression coverage and no unrelated production changes.";
+
+	async function expectCanonicalRejection(
+		body: Record<string, unknown>,
+		expected: { code: string; error: string },
+	): Promise<void> {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const goalsBefore = structuredClone(h.goalStore.getAll());
+		const gateInitCountBefore = h.gateInitCalls.length;
+		const startCountBefore = h.childStartRequests.length;
+		const setupCountBefore = h.worktreeSetupCalls.length;
+
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, body, h.authAs(TL));
+
+		assert.equal(r.status, 400, JSON.stringify(r.payload));
+		assert.equal(r.payload.code, expected.code, JSON.stringify(r.payload));
+		assert.equal(r.payload.error, expected.error, JSON.stringify(r.payload));
+		assert.deepEqual(h.goalStore.getAll(), goalsBefore,
+			"candidate rejection must not persist a child or alter parent/plan state");
+		assert.equal(h.gateInitCalls.length, gateInitCountBefore,
+			"candidate rejection must not initialize child gates");
+		assert.equal(h.childStartRequests.length, startCountBefore,
+			"candidate rejection must not touch the child scheduler");
+		assert.equal(h.worktreeSetupCalls.length, setupCountBefore,
+			"candidate rejection must not start worktree setup");
+	}
+
+	it("rejects a 257-character title with canonical TITLE_TOO_LONG before mutation", async () => {
+		await expectCanonicalRejection({
+			planId: "too-long-title",
+			title: "x".repeat(257),
+			spec: validSpec,
+		}, {
+			code: "TITLE_TOO_LONG",
+			error: "title exceeds the maximum length of 256 characters",
+		});
+	});
+
+	it("rejects an unknown explicit workflowId with canonical UNKNOWN_WORKFLOW before mutation", async () => {
+		await expectCanonicalRejection({
+			planId: "unknown-workflow",
+			title: "Unknown workflow child",
+			spec: validSpec,
+			workflowId: "does-not-exist",
+		}, {
+			code: "UNKNOWN_WORKFLOW",
+			error: 'Unknown workflow "does-not-exist". Available workflows for this project: feature, parent. Re-call propose_goal with one of these IDs.',
+		});
+	});
+
+	it("rejects a present non-string workflowId instead of hiding it through inheritance", async () => {
+		await expectCanonicalRejection({
+			planId: "malformed-workflow-id",
+			title: "Malformed workflow ID child",
+			spec: validSpec,
+			workflowId: { forged: "feature" },
+		}, {
+			code: "WORKFLOW_INVALID",
+			error: "workflowId must be a workflow ID string",
+		});
+	});
+
+	it("rejects a structurally malformed inline workflow before mutation", async () => {
+		await expectCanonicalRejection({
+			planId: "malformed-inline-workflow",
+			title: "Malformed workflow child",
+			spec: validSpec,
+			workflow: {
+				id: "malformed",
+				name: "Malformed",
+				gates: [{ id: "only", name: "Only", dependsOn: ["missing"] }],
+			},
+		}, {
+			code: "WORKFLOW_INVALID",
+			error: 'Gate "only" depends on unknown "missing"',
+		});
+	});
+
+	it("rejects a mismatched inline-role map key and role name before mutation", async () => {
+		await expectCanonicalRejection({
+			planId: "mismatched-inline-role",
+			title: "Malformed role child",
+			spec: validSpec,
+			inlineRoles: {
+				reviewer: { name: "other", label: "Reviewer", promptTemplate: "Review the child." },
+			},
+		}, {
+			code: "INLINE_ROLES_INVALID",
+			error: 'Inline role "reviewer" must have a matching name',
+		});
+	});
+
+	it("accepts a valid inline role and persists its frozen child snapshot", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "valid-inline-role",
+			title: "Valid role child",
+			spec: validSpec,
+			inlineRoles: {
+				reviewer: { name: "reviewer", label: "Reviewer", promptTemplate: "Review the child." },
+			},
+		}, h.authAs(TL));
+
+		assert.equal(r.status, 201, JSON.stringify(r.payload));
+		const reviewer = h.goalStore.get(r.payload.id)?.inlineRoles?.reviewer;
+		assert.equal(reviewer?.name, "reviewer");
+		assert.equal(reviewer?.label, "Reviewer");
+		assert.equal(reviewer?.promptTemplate, "Review the child.");
+	});
+
+	it("accepts a realpath-equivalent alias with a nonexistent suffix", async (context) => {
+		const hostRoot = fs.mkdtempSync(path.join(os.tmpdir(), "nested-goal-cwd-alias-"));
+		const target = path.join(hostRoot, "target");
+		const alias = path.join(hostRoot, "alias");
+		fs.mkdirSync(target);
+		try {
+			try {
+				fs.symlinkSync(target, alias, process.platform === "win32" ? "junction" : "dir");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "EPERM") {
+					context.skip();
+					return;
+				}
+				throw error;
+			}
+			const local = await makeHarness(hostRoot);
+			local.teamLeadByGoal[local.parent.id] = TL;
+			local.goalStore.update(local.parent.id, { cwd: path.join(alias, "future") });
+
+			const result = await local.call("POST", `/api/goals/${local.parent.id}/spawn-child`, {
+				planId: "aliased-child-cwd",
+				title: "Aliased cwd child",
+				spec: validSpec,
+			}, local.authAs(TL));
+
+			assert.equal(result.status, 201, JSON.stringify(result.payload));
+			assert.equal(local.goalStore.get(result.payload.id)?.cwd, path.join(target, "future"));
+		} finally {
+			fs.rmSync(hostRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a materially changed cwd after preflight without child mutation", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const originalPreflight = h.goalManager.preflightGoalCreation.bind(h.goalManager);
+		(h.goalManager as any).preflightGoalCreation = async (...args: unknown[]) => {
+			const preflight = await originalPreflight(...args as [string, any]);
+			h.goalStore.update(h.parent.id, { cwd: path.join(h.tmpRoot, "materially-different") });
+			return preflight;
+		};
+		const goalsBefore = h.goalStore.getAll().length;
+		const gatesBefore = h.gateInitCalls.length;
+		const setupsBefore = h.worktreeSetupCalls.length;
+
+		const result = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, {
+			planId: "stale-cwd-child",
+			title: "Stale cwd child",
+			spec: validSpec,
+		}, h.authAs(TL));
+
+		assert.equal(result.status, 409, JSON.stringify(result.payload));
+		assert.equal(result.payload.code, "GOAL_PREFLIGHT_STALE");
+		assert.equal(h.goalStore.getAll().length, goalsBefore);
+		assert.equal(h.gateInitCalls.length, gatesBefore);
+		assert.equal(h.worktreeSetupCalls.length, setupsBefore);
+	});
+
+	it("replays an already-created valid planId without another mutation", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		const body = {
+			planId: "idempotent-valid-child",
+			title: "Idempotent child",
+			spec: validSpec,
+		};
+		const first = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, body, h.authAs(TL));
+		assert.equal(first.status, 201, JSON.stringify(first.payload));
+		const goalsAfterFirst = h.goalStore.getAll().map(goal => goal.id);
+		const startsAfterFirst = h.childStartRequests.length;
+		const setupsAfterFirst = h.worktreeSetupCalls.length;
+
+		const replay = await h.call("POST", `/api/goals/${h.parent.id}/spawn-child`, body, h.authAs(TL));
+
+		assert.equal(replay.status, 200, JSON.stringify(replay.payload));
+		assert.deepEqual(replay.payload, { id: first.payload.id, alreadyExists: true });
+		assert.deepEqual(h.goalStore.getAll().map(goal => goal.id), goalsAfterFirst);
+		assert.equal(h.childStartRequests.length, startsAfterFirst);
+		assert.equal(h.worktreeSetupCalls.length, setupsAfterFirst);
 	});
 });
 

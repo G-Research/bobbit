@@ -47,10 +47,12 @@ async function callGateway(
 ): Promise<{ status: number; bodyText: string; bodyJson: unknown }> {
 	const baseUrl = getGatewayUrl();
 	const token = getGatewayToken();
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET?.trim();
 	const init: RequestInit = {
 		method,
 		headers: {
 			"Authorization": `Bearer ${token}`,
+			...(sessionSecret ? { "X-Bobbit-Session-Secret": sessionSecret } : {}),
 			...(body !== undefined ? { "Content-Type": "application/json" } : {}),
 		},
 		...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -90,7 +92,9 @@ async function currentSessionProjectId(): Promise<string | undefined> {
 async function argsWithProjectId(type: ProposalType, args: unknown): Promise<unknown> {
 	if (type === "project" || !args || typeof args !== "object" || Array.isArray(args)) return args;
 	const record = args as Record<string, unknown>;
-	if (typeof record.projectId === "string" && record.projectId.trim()) return args;
+	// Session scope is a default for omission, never a coercion boundary. Keep a
+	// supplied malformed or empty projectId intact for canonical server validation.
+	if (Object.prototype.hasOwnProperty.call(record, "projectId")) return args;
 	const scoped = scopeProposalProjectId(await currentSessionProjectId());
 	return scoped ? { ...record, projectId: scoped } : args;
 }
@@ -104,6 +108,7 @@ async function argsWithProjectId(type: ProposalType, args: unknown): Promise<unk
 export interface SeedProposalResult {
 	rev?: number;
 	errorMessage?: string;
+	errorDetails?: Record<string, unknown>;
 }
 
 /**
@@ -130,7 +135,12 @@ export async function seedProposal(type: ProposalType, args: unknown): Promise<S
 				? String((bodyJson as { message?: unknown }).message)
 				: `seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`;
 			console.error(`[proposal-tools] seed ${type} failed: HTTP ${status} ${bodyText.slice(0, 500)}`);
-			return { errorMessage: msg };
+			return {
+				errorMessage: msg,
+				...(bodyJson && typeof bodyJson === "object" && !Array.isArray(bodyJson)
+					? { errorDetails: bodyJson as Record<string, unknown> }
+					: {}),
+			};
 		}
 		if (bodyJson && typeof bodyJson === "object" && typeof (bodyJson as any).rev === "number") {
 			return { rev: (bodyJson as any).rev as number };
@@ -210,7 +220,11 @@ export default function (pi: ExtensionAPI) {
 			// one into the other corrupts the type contract.
 			const r = await seedProposal("goal", args);
 			if (r.errorMessage) {
-				return { content: [{ type: "text" as const, text: r.errorMessage }], isError: true } as any;
+				return {
+					content: [{ type: "text" as const, text: r.errorMessage }],
+					isError: true,
+					...(r.errorDetails ?? {}),
+				} as any;
 			}
 			return ack(r.rev);
 		},

@@ -29,6 +29,10 @@ import { GateStore } from "../../src/server/agent/gate-store.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
+import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+
+export type OwnedSubgoalRunResult = Awaited<ReturnType<VerificationHarness["runSubgoalStep"]>>;
 
 export type CallRecord =
 	| { kind: "createGoal"; title: string; opts: any }
@@ -52,6 +56,19 @@ export interface Fixture {
 	parent: PersistedGoal;
 	tmpRoot: string;
 	cleanup: () => void;
+	/**
+	 * Launch and immediately observe a run owned by this fixture. Consumers still
+	 * receive the original promise, while settleRuns retains rejection visibility.
+	 */
+	launchRun: (
+		step: any,
+		run: ReturnType<typeof buildActive>,
+		afterSettled?: () => void,
+	) => Promise<OwnedSubgoalRunResult>;
+	/** Mark every active fixture-owned run cancelled. */
+	cancelRuns: () => void;
+	/** Join every fixture-owned run without turning a rejection into an unhandled promise. */
+	settleRuns: () => Promise<PromiseSettledResult<OwnedSubgoalRunResult>[]>;
 	/** Override the default ready-to-merge hook (returns "passed" by default). */
 	setReadyToMergeHook: (
 		fn: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout">,
@@ -94,7 +111,12 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 			createdAt: 0, updatedAt: 0,
 		},
 	]);
-	const realGm = new GoalManager(goalStore, wf);
+	// The fixture root is deliberately not a repository. Avoid spawning a real
+	// git probe so this unit fixture behaves identically under load and on every OS.
+	const nonGitCommandRunner: CommandRunner = {
+		execFile: async () => { throw Object.assign(new Error("fixture path is not a git repository"), { code: 128 }); },
+	};
+	const realGm = new GoalManager(goalStore, wf, undefined, { commandRunner: nonGitCommandRunner });
 
 	const calls: CallRecord[] = [];
 	let mergeOutcome: { merged?: boolean; alreadyMerged?: boolean; conflict?: boolean; output?: string } = { merged: true, alreadyMerged: false, conflict: false, output: "" };
@@ -103,6 +125,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 	// goal is created so its createGoal call doesn't pollute the recorded
 	// call sequence. The wrappers route through the realGm.
 	const realCreate = realGm.createGoal.bind(realGm);
+	const realCreateFromPreflight = realGm.createGoalFromPreflight.bind(realGm);
 	const realUpdate = realGm.updateGoal.bind(realGm);
 	const realArchiveAfterMerge = realGm.archiveGoalAfterMerge.bind(realGm);
 	const installWrappers = () => {
@@ -110,6 +133,10 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		wrappedGm.createGoal = async (title: string, cwd: string, options?: any) => {
 			calls.push({ kind: "createGoal", title, opts: options });
 			return realCreate(title, cwd, options);
+		};
+		wrappedGm.createGoalFromPreflight = (title: string, cwd: string, options: any) => {
+			calls.push({ kind: "createGoal", title, opts: options });
+			return realCreateFromPreflight(title, cwd, options);
 		};
 		wrappedGm.updateGoal = async (id: string, updates: any) => {
 			calls.push({ kind: "updateGoal", id, updates });
@@ -139,6 +166,21 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		getContextForGoal: (_id: string) => ctx,
 		all: () => [ctx],
 	};
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: {
+			get: (projectId: string) => projectId === "p" ? {
+				id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0,
+				colorLight: "", colorDark: "",
+			} : undefined,
+		} as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 
 	const mockTeamManager = {
 		teardownTeam: async (goalId: string) => { calls.push({ kind: "teardownTeam", goalId }); },
@@ -160,6 +202,7 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		undefined,
 		projectContextManager,
 		undefined,
+		{ goalCandidateDeps },
 	);
 	// Default: ready-to-merge passes immediately.
 	let readyHook: (childGoalId: string, signal: { aborted: boolean }) => Promise<"passed" | "archived-complete" | "archived-other" | "cancelled" | "timeout"> =
@@ -191,6 +234,11 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 	// parent's createGoal would pollute the call sequence used by stamp-immediately invariant.
 	installWrappers();
 
+	const ownedRuns: Array<{
+		active: ReturnType<typeof buildActive>["active"];
+		settlement: Promise<PromiseSettledResult<OwnedSubgoalRunResult>>;
+	}> = [];
+
 	return {
 		harness,
 		goalManager: realGm,
@@ -201,7 +249,31 @@ export async function buildFixture(opts: FixtureOptions = {}): Promise<Fixture> 
 		parent,
 		tmpRoot,
 		cleanup() {
+			goalStore.dispose();
+			gateStore.dispose();
 			try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+		},
+		launchRun(step, run, afterSettled) {
+			const launched = harness.runSubgoalStep(step, run.signal, run.active, run.stepIndex);
+			// Preserve the caller's direct-settlement callback ordering (some tests
+			// use it to delimit semaphore occupancy) while observing both branches.
+			const promise = afterSettled
+				? launched.then(
+					value => { afterSettled(); return value; },
+					reason => { afterSettled(); throw reason; },
+				)
+				: launched;
+			// Attach rejection observation in the launch turn. A later assertion or
+			// retry must not abandon a rejection until suite cleanup eventually joins it.
+			const settlement = Promise.allSettled([promise]).then(([result]) => result);
+			ownedRuns.push({ active: run.active, settlement });
+			return promise;
+		},
+		cancelRuns() {
+			for (const run of ownedRuns) run.active.cancelled = true;
+		},
+		settleRuns() {
+			return Promise.all(ownedRuns.map(run => run.settlement));
 		},
 		setReadyToMergeHook(fn) { readyHook = fn; },
 		setSetupHook(fn) { setupHook = fn; },

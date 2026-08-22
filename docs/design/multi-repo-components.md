@@ -364,13 +364,7 @@ Workflow "general", gate "implementation", step 3:
   component "apii" not found in components[]. Did you mean "api"?
 ```
 
-**Empty/missing workflow block** at goal creation → `POST /api/goals` returns 400:
-
-```
-This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.
-```
-
-No silent fallback to a built-in workflow.
+**Empty/missing persisted workflow block** is valid at the canonical public goal-creation boundary when the caller supplies neither an inline workflow nor an explicit workflow id. Bobbit derives project defaults in memory, freezes the selected snapshot onto the candidate, and persists the generated set only after the goal commits successfully and only while the store remains empty. An explicitly selected invalid workflow still fails. This is deferred canonical resolution—not eager registration seeding or a system/builtin fallback. It does not describe low-level `GoalManager` callers that bypass canonical validation. See [Default workflow resolution](../goals-workflows-tasks.md#default-workflow-resolution).
 
 ### 3.5 Feature-parity audit (acceptance criterion 7)
 
@@ -874,7 +868,7 @@ Sections 9.1–9.4 preserve the original feature acceptance plan. The current Te
 | 3 | `repo-scan.spec.ts` — fixture dirs (single repo, multi-repo, monorepo, data-only), assert detected components and detected commands. |
 | 6 | `workflow-validator.spec.ts` — positive cases (all three step shapes); negatives (missing component, wrong command, both `command`+`run`, neither). Asserts error messages include "Did you mean…". |
 | 7 (audit) | One spec per row in §3.5 table — file-fixture workflows, parse + validate + (where applicable) execute under the harness. |
-| 8 | `inline-workflow-load.spec.ts` — load a project with empty `workflows: {}`, attempt `POST /api/goals` → 400 with the documented error. |
+| 8 | `tests2/integration/goal-candidate-validation.test.ts` — with an empty persisted workflow store, omitted selection selects and freezes the first generated default, while an explicit unknown selection returns the structured workflow error. `tests2/integration/projects-no-default-workflows.test.ts` — generated defaults are not eagerly registered and persist only after successful public goal creation. |
 | 17 | `task-handoff-multi-repo.spec.ts` — task store accepts and retrieves `gitHandoff` per repo; legacy flat fields continue to work. |
 | 19 | `worktree-setup-multi.spec.ts` — fake `exec`, three components, declared order asserted; one fails non-fatally; data-only skipped. |
 

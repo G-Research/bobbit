@@ -8,6 +8,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
+import { MockAgentCore } from "../../../tests/e2e/mock-agent-core.mjs";
 import { openApp, createSessionViaUI, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const GOAL_TAB = "[data-testid='goal-proposal-tab-goal']";
@@ -21,6 +22,25 @@ const ROLES_TAB = "[data-testid='goal-proposal-tab-roles']";
 const ROLES_PANEL = "[data-testid='goal-proposal-panel-roles']";
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_PROPOSAL_TAB_TITLE_RE = /^Goal Proposal$/i;
+
+function installAuthenticatedMockProposalCalls(): void {
+	// The in-process mock's canned proposal path bypasses the real extension,
+	// whose gateway client already sends BOBBIT_SESSION_SECRET. Keep these browser
+	// fixtures on the same owner-auth contract without weakening the tool-card and
+	// revision assertions.
+	const prototype = MockAgentCore.prototype as any;
+	const original = prototype._gatewayPost;
+	if (original.__proposalOwnerAuthInstalled) return;
+	const authenticatedPost = function(this: any, pathname: string, body: unknown, extraHeaders: Record<string, string> = {}) {
+		return original.call(this, pathname, body, {
+			"X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "",
+			...extraHeaders,
+		});
+	};
+	authenticatedPost.__proposalOwnerAuthInstalled = true;
+	prototype._gatewayPost = authenticatedPost;
+}
+installAuthenticatedMockProposalCalls();
 
 async function sendChatMessage(page: Page, text: string) {
 	const textarea = page.locator("message-editor textarea").first();

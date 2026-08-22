@@ -390,13 +390,16 @@ function hasCaseInsensitiveEntries(
       && semantics === "insensitive";
   }
 
-  // Read-only evidence is trustworthy only when both the caller's directory
-  // fingerprint and the directory's nonzero dev/ino identity are unchanged.
-  // Do not retry a mixed observation: a replacement must remain conservative.
+  // A stable nonzero dev/ino keeps conclusive read-only evidence valid for this
+  // lookup even when sibling churn changes directory metadata. Publishing that
+  // evidence to the cache remains stricter: it requires the full fingerprint
+  // to be present and unchanged. A replacement or failed stat stays conservative.
   const after = fingerprintFor(parent);
   const afterIdentity = directoryIdentity(parent, lstatSync);
-  if (before && before === after && beforeIdentity && beforeIdentity === afterIdentity) {
-    cache?.set(cacheKey, { fingerprint: before, directoryIdentity: beforeIdentity, semantics: known });
+  if (before && after && beforeIdentity && beforeIdentity === afterIdentity) {
+    if (before === after) {
+      cache?.set(cacheKey, { fingerprint: before, directoryIdentity: beforeIdentity, semantics: known });
+    }
     return known === "insensitive";
   }
   return false;

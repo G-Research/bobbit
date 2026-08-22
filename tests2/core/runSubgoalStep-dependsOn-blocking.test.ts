@@ -20,8 +20,15 @@
  *   - When all of a step's deps are already merged, it spawns immediately
  *     (never blocked).
  */
-import { describe, it, afterAll, beforeAll } from "vitest";
+import fs from "node:fs";
+import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
+import type { Fixture, OwnedSubgoalRunResult as OwnedRunResult } from "../../tests/helpers/run-subgoal-step-fixture.ts";
+import {
+	GOAL_PREFLIGHT_STALE_CODE,
+	GOAL_PREFLIGHT_STALE_MESSAGE,
+	GoalPreflightStaleError,
+} from "../../src/server/agent/goal-manager.ts";
 
 type RunSubgoalFixtureModule = typeof import("../../tests/helpers/run-subgoal-step-fixture.ts");
 let buildFixture: RunSubgoalFixtureModule["buildFixture"];
@@ -34,73 +41,110 @@ beforeAll(async () => {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolvePromise!: () => void;
+	let resolved = false;
+	const promise = new Promise<void>(resolve => { resolvePromise = resolve; });
+	return {
+		promise,
+		resolve() {
+			if (resolved) return;
+			resolved = true;
+			resolvePromise();
+		},
+	};
+}
+
+function assertFulfilled<T>(
+	settlement: PromiseSettledResult<T>,
+	label: string,
+): asserts settlement is PromiseFulfilledResult<T> {
+	assert.equal(
+		settlement.status,
+		"fulfilled",
+		`${label} rejected: ${settlement.status === "rejected" ? String(settlement.reason) : "unknown error"}`,
+	);
+}
+
+async function cleanupFixture(fx: Fixture, releaseHeld: () => void = () => {}): Promise<void> {
+	fx.cancelRuns();
+	releaseHeld();
+	await fx.settleRuns();
+	fx.cleanup();
+}
+
 describe("runSubgoalStep — dependsOn scheduling enforcement", () => {
 	it("B dependsOn A (same phase): A runs, B is blocked until A merges, then auto-unblocks", async () => {
 		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
+		const aHeld = deferred();
+		try {
+			const teamStarted: string[] = [];
+			fx.setSetupHook(async (childGoalId) => { teamStarted.push(childGoalId); });
 
-		const teamStarted: string[] = [];
-		fx.setSetupHook(async (childGoalId) => { teamStarted.push(childGoalId); });
+			// Hold A's ready-to-merge until we have observed that B is blocked.
+			fx.setReadyToMergeHook(async (childGoalId) => {
+				const g = fx.goalStore.get(childGoalId);
+				if (g?.spawnedFromPlanId === "A") await aHeld.promise;
+				return "passed";
+			});
 
-		// Hold A's ready-to-merge until we have observed that B is blocked.
-		let releaseA!: () => void;
-		const aHeld = new Promise<void>(res => { releaseA = res; });
-		fx.setReadyToMergeHook(async (childGoalId) => {
-			const g = fx.goalStore.get(childGoalId);
-			if (g?.spawnedFromPlanId === "A") await aHeld;
-			return "passed";
-		});
+			const stepA = buildSubgoalStep({ planId: "A", title: "Alpha" });
+			const stepB = buildSubgoalStep({ planId: "B", title: "Beta", dependsOn: ["A"] });
+			const aA = buildActive(fx.parent.id);
+			const aB = buildActive(fx.parent.id);
 
-		const stepA = buildSubgoalStep({ planId: "A", title: "Alpha" });
-		const stepB = buildSubgoalStep({ planId: "B", title: "Beta", dependsOn: ["A"] });
-		const aA = buildActive(fx.parent.id);
-		const aB = buildActive(fx.parent.id);
+			void fx.launchRun(stepA, aA);
+			void fx.launchRun(stepB, aB);
 
-		const runA = fx.harness.runSubgoalStep(stepA, aA.signal, aA.active, 0);
-		const runB = fx.harness.runSubgoalStep(stepB, aB.signal, aB.active, 0);
+			const findChild = (planId: string) =>
+				fx.goalStore.getAll().find(g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === planId);
 
-		const findChild = (planId: string) =>
-			fx.goalStore.getAll().find(g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === planId);
+			// Wait until B is created AND stamped blocked.
+			let bChild = findChild("B");
+			for (let i = 0; i < 400 && !(bChild && bChild.state === "blocked"); i++) {
+				await sleep(5);
+				bChild = findChild("B");
+			}
+			assert.ok(bChild, "B child should be created");
+			assert.equal(bChild.state, "blocked", "B must be created blocked while A is unmerged");
 
-		// Wait until B is created AND stamped blocked.
-		let bChild = findChild("B");
-		for (let i = 0; i < 400 && !(bChild && bChild.state === "blocked"); i++) {
-			await sleep(5);
-			bChild = findChild("B");
+			// A (no deps) should start its team; B (blocked) must NOT. A and B are
+			// spawned concurrently, so under heavy parallel load (full suite, many
+			// node:test files at once) A's child-creation can lag past the moment B
+			// is observed blocked — poll for it rather than asserting on first read.
+			let aChild = findChild("A");
+			for (let i = 0; i < 400 && !aChild; i++) { await sleep(5); aChild = findChild("A"); }
+			assert.ok(aChild, "A child should be created");
+			for (let i = 0; i < 200 && !teamStarted.includes(aChild.id); i++) await sleep(5);
+			assert.equal(teamStarted.includes(aChild.id), true, "A's team should start (no deps)");
+			assert.equal(teamStarted.includes(bChild.id), false, "B's team must NOT start while blocked");
+
+			// The atomic spawn stamp for B carries state='blocked'.
+			const bStamp = fx.calls.find(c => c.kind === "updateGoal" && c.updates.spawnedFromPlanId === "B");
+			assert.ok(bStamp && bStamp.kind === "updateGoal");
+			assert.equal(bStamp.updates.state, "blocked", "B's spawn stamp must set state='blocked'");
+			assert.deepEqual(bStamp.updates.dependsOnPlanIds, ["A"]);
+
+			// Release A → A merges + archives → auto-unblock scan flips B → todo and
+			// starts B's team → B proceeds to merge.
+			aHeld.resolve();
+			const settlements = await fx.settleRuns();
+			assert.equal(settlements.length, 2);
+			assertFulfilled(settlements[0], "A run");
+			assertFulfilled(settlements[1], "B run");
+			const [rA, rB] = settlements.map(result => (result as PromiseFulfilledResult<OwnedRunResult>).value);
+			assert.equal(rA.passed, true, rA.output);
+			assert.equal(rB.passed, true, rB.output);
+			assert.equal(teamStarted.includes(bChild.id), true, "B's team must start after A merges (auto-unblock)");
+
+			// Both children end complete + archived.
+			assert.equal(fx.goalStore.get(aChild.id)?.state, "complete");
+			assert.equal(fx.goalStore.get(aChild.id)?.archived, true);
+			assert.equal(fx.goalStore.get(bChild.id)?.state, "complete");
+			assert.equal(fx.goalStore.get(bChild.id)?.archived, true);
+		} finally {
+			await cleanupFixture(fx, aHeld.resolve);
 		}
-		assert.ok(bChild, "B child should be created");
-		assert.equal(bChild.state, "blocked", "B must be created blocked while A is unmerged");
-
-		// A (no deps) should start its team; B (blocked) must NOT. A and B are
-		// spawned concurrently, so under heavy parallel load (full suite, many
-		// node:test files at once) A's child-creation can lag past the moment B
-		// is observed blocked — poll for it rather than asserting on first read.
-		let aChild = findChild("A");
-		for (let i = 0; i < 400 && !aChild; i++) { await sleep(5); aChild = findChild("A"); }
-		assert.ok(aChild, "A child should be created");
-		for (let i = 0; i < 200 && !teamStarted.includes(aChild.id); i++) await sleep(5);
-		assert.equal(teamStarted.includes(aChild.id), true, "A's team should start (no deps)");
-		assert.equal(teamStarted.includes(bChild.id), false, "B's team must NOT start while blocked");
-
-		// The atomic spawn stamp for B carries state='blocked'.
-		const bStamp = fx.calls.find(c => c.kind === "updateGoal" && c.updates.spawnedFromPlanId === "B");
-		assert.ok(bStamp && bStamp.kind === "updateGoal");
-		assert.equal(bStamp.updates.state, "blocked", "B's spawn stamp must set state='blocked'");
-		assert.deepEqual(bStamp.updates.dependsOnPlanIds, ["A"]);
-
-		// Release A → A merges + archives → auto-unblock scan flips B → todo and
-		// starts B's team → B proceeds to merge.
-		releaseA();
-		const [rA, rB] = await Promise.all([runA, runB]);
-		assert.equal(rA.passed, true, rA.output);
-		assert.equal(rB.passed, true, rB.output);
-		assert.equal(teamStarted.includes(bChild.id), true, "B's team must start after A merges (auto-unblock)");
-
-		// Both children end complete + archived.
-		assert.equal(fx.goalStore.get(aChild.id)?.state, "complete");
-		assert.equal(fx.goalStore.get(aChild.id)?.archived, true);
-		assert.equal(fx.goalStore.get(bChild.id)?.state, "complete");
-		assert.equal(fx.goalStore.get(bChild.id)?.archived, true);
 	});
 
 	it("cap=1: auto-unblock does NOT start the dependent's team outside the semaphore (start waits for its own permit)", async () => {
@@ -113,131 +157,298 @@ describe("runSubgoalStep — dependsOn scheduling enforcement", () => {
 		// path makes each dependent re-acquire the single permit, serialising the
 		// team starts (peak occupancy 1).
 		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
+		const aHeld = deferred();
+		try {
+			fx.goalStore.update(fx.parent.id, { maxConcurrentChildren: 1 });
+			assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 1);
 
-		fx.goalStore.update(fx.parent.id, { maxConcurrentChildren: 1 });
-		assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 1);
+			const findChild = (planId: string) =>
+				fx.goalStore.getAll().find(g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === planId);
 
-		const findChild = (planId: string) =>
-			fx.goalStore.getAll().find(g => g.parentGoalId === fx.parent.id && g.spawnedFromPlanId === planId);
+			// Occupancy = window from a child's team-start (setup hook) until its
+			// runSubgoalStep fully resolves (≈ permit release). Peak must never
+			// exceed the cap of 1: a team may only be started while its step holds a
+			// permit.
+			const occupying = new Set<string>();
+			let occ = 0;
+			let maxOcc = 0;
+			const teamStarted: string[] = [];
+			fx.setSetupHook(async (childGoalId) => {
+				teamStarted.push(childGoalId);
+				occupying.add(childGoalId);
+				occ++;
+				maxOcc = Math.max(maxOcc, occ);
+			});
+			const endOcc = (childGoalId: string | undefined) => {
+				if (childGoalId && occupying.delete(childGoalId)) occ--;
+			};
 
-		// Occupancy = window from a child's team-start (setup hook) until its
-		// runSubgoalStep fully resolves (≈ permit release). Peak must never
-		// exceed the cap of 1: a team may only be started while its step holds a
-		// permit.
-		const occupying = new Set<string>();
-		let occ = 0;
-		let maxOcc = 0;
-		const teamStarted: string[] = [];
-		fx.setSetupHook(async (childGoalId) => {
-			teamStarted.push(childGoalId);
-			occupying.add(childGoalId);
-			occ++;
-			maxOcc = Math.max(maxOcc, occ);
-		});
-		const endOcc = (childGoalId: string | undefined) => {
-			if (childGoalId && occupying.delete(childGoalId)) occ--;
-		};
+			// Hold A's ready-to-merge until B and C are both observed blocked.
+			fx.setReadyToMergeHook(async (childGoalId) => {
+				if (fx.goalStore.get(childGoalId)?.spawnedFromPlanId === "A") await aHeld.promise;
+				return "passed";
+			});
 
-		// Hold A's ready-to-merge until B and C are both observed blocked.
-		let releaseA!: () => void;
-		const aHeld = new Promise<void>(res => { releaseA = res; });
-		fx.setReadyToMergeHook(async (childGoalId) => {
-			if (fx.goalStore.get(childGoalId)?.spawnedFromPlanId === "A") await aHeld;
-			return "passed";
-		});
+			const stepA = buildSubgoalStep({ planId: "A", title: "Alpha" });
+			const stepB = buildSubgoalStep({ planId: "B", title: "Beta", dependsOn: ["A"] });
+			const stepC = buildSubgoalStep({ planId: "C", title: "Gamma", dependsOn: ["A"] });
+			const aB = buildActive(fx.parent.id);
+			const aC = buildActive(fx.parent.id);
+			const aA = buildActive(fx.parent.id);
 
-		const stepA = buildSubgoalStep({ planId: "A", title: "Alpha" });
-		const stepB = buildSubgoalStep({ planId: "B", title: "Beta", dependsOn: ["A"] });
-		const stepC = buildSubgoalStep({ planId: "C", title: "Gamma", dependsOn: ["A"] });
-		const aB = buildActive(fx.parent.id);
-		const aC = buildActive(fx.parent.id);
-		const aA = buildActive(fx.parent.id);
+			// Start B and C FIRST so each acquires the single permit, creates itself
+			// blocked (A not yet complete), releases the permit, and parks in
+			// _waitForChildUnblock. Occupancy ends when each owned run settles.
+			void fx.launchRun(stepB, aB, () => endOcc(findChild("B")?.id));
+			void fx.launchRun(stepC, aC, () => endOcc(findChild("C")?.id));
 
-		// Start B and C FIRST so each acquires the single permit, creates itself
-		// blocked (A not yet complete), releases the permit, and parks in
-		// _waitForChildUnblock. endOcc on resolution (≈ permit release).
-		const runB = fx.harness.runSubgoalStep(stepB, aB.signal, aB.active, 0)
-			.then(r => { endOcc(findChild("B")?.id); return r; });
-		const runC = fx.harness.runSubgoalStep(stepC, aC.signal, aC.active, 0)
-			.then(r => { endOcc(findChild("C")?.id); return r; });
+			// Wait until B and C are both created AND stamped blocked.
+			const bothBlocked = () => {
+				const b = findChild("B");
+				const c = findChild("C");
+				return b?.state === "blocked" && c?.state === "blocked";
+			};
+			for (let i = 0; i < 600 && !bothBlocked(); i++) await sleep(5);
+			assert.ok(bothBlocked(), "B and C must be created blocked before A merges");
 
-		// Wait until B and C are both created AND stamped blocked.
-		const bothBlocked = () => {
-			const b = findChild("B");
-			const c = findChild("C");
-			return b?.state === "blocked" && c?.state === "blocked";
-		};
-		for (let i = 0; i < 600 && !bothBlocked(); i++) await sleep(5);
-		assert.ok(bothBlocked(), "B and C must be created blocked before A merges");
+			// Neither dependent's team may have started while blocked.
+			assert.equal(teamStarted.length, 0, "no dependent team may start while blocked");
 
-		// Neither dependent's team may have started while blocked.
-		assert.equal(teamStarted.length, 0, "no dependent team may start while blocked");
+			// Now run A; it holds the single permit through its merge + auto-unblock
+			// scan.
+			void fx.launchRun(stepA, aA, () => endOcc(findChild("A")?.id));
 
-		// Now run A; it holds the single permit through its merge + auto-unblock
-		// scan.
-		const runA = fx.harness.runSubgoalStep(stepA, aA.signal, aA.active, 0)
-			.then(r => { endOcc(findChild("A")?.id); return r; });
+			// Let A reach (and park at) its held ready-to-merge.
+			const aStarted = () => { const a = findChild("A"); return !!a && teamStarted.includes(a.id); };
+			for (let i = 0; i < 400 && !aStarted(); i++) await sleep(5);
+			assert.equal(aStarted(), true, "A's team should start (no deps)");
 
-		// Let A reach (and park at) its held ready-to-merge.
-		const aStarted = () => { const a = findChild("A"); return !!a && teamStarted.includes(a.id); };
-		for (let i = 0; i < 400 && !aStarted(); i++) await sleep(5);
-		assert.equal(aStarted(), true, "A's team should start (no deps)");
+			// Release A → merge + archive → auto-unblock scan flips B,C → todo. The
+			// scan must NOT start B/C teams; each re-acquires the single permit.
+			aHeld.resolve();
+			const settlements = await fx.settleRuns();
+			assert.equal(settlements.length, 3);
+			assertFulfilled(settlements[0], "B run");
+			assertFulfilled(settlements[1], "C run");
+			assertFulfilled(settlements[2], "A run");
+			const [rB, rC, rA] = settlements.map(result => (result as PromiseFulfilledResult<OwnedRunResult>).value);
+			assert.equal(rA.passed, true, rA.output);
+			assert.equal(rB.passed, true, rB.output);
+			assert.equal(rC.passed, true, rC.output);
 
-		// Release A → merge + archive → auto-unblock scan flips B,C → todo. The
-		// scan must NOT start B/C teams; each re-acquires the single permit.
-		releaseA();
-		const [rA, rB, rC] = await Promise.all([runA, runB, runC]);
-		assert.equal(rA.passed, true, rA.output);
-		assert.equal(rB.passed, true, rB.output);
-		assert.equal(rC.passed, true, rC.output);
+			// No deadlock: both dependents eventually started.
+			assert.equal(teamStarted.includes(findChild("B")!.id), true, "B must start after A merges + B acquires its permit");
+			assert.equal(teamStarted.includes(findChild("C")!.id), true, "C must start after A merges + C acquires its permit");
 
-		// No deadlock: both dependents eventually started.
-		assert.equal(teamStarted.includes(findChild("B")!.id), true, "B must start after A merges + B acquires its permit");
-		assert.equal(teamStarted.includes(findChild("C")!.id), true, "C must start after A merges + C acquires its permit");
+			// The semaphore stays authoritative: at no point did more than one child
+			// occupy a permit-protected window. The buggy in-scan start would peak at
+			// 2–3 here.
+			assert.equal(maxOcc, 1, `team starts must respect cap=1; observed peak occupancy ${maxOcc}`);
 
-		// The semaphore stays authoritative: at no point did more than one child
-		// occupy a permit-protected window. The buggy in-scan start would peak at
-		// 2–3 here.
-		assert.equal(maxOcc, 1, `team starts must respect cap=1; observed peak occupancy ${maxOcc}`);
+			// All three end complete + archived.
+			for (const pid of ["A", "B", "C"]) {
+				const g = findChild(pid);
+				assert.equal(g?.state, "complete", `${pid} should be complete`);
+				assert.equal(g?.archived, true, `${pid} should be archived`);
+			}
+		} finally {
+			await cleanupFixture(fx, aHeld.resolve);
+		}
+	});
 
-		// All three end complete + archived.
-		for (const pid of ["A", "B", "C"]) {
-			const g = findChild(pid);
-			assert.equal(g?.state, "complete", `${pid} should be complete`);
-			assert.equal(g?.archived, true, `${pid} should be archived`);
+	it("cap=1: stale harness preflight releases its permit and starts one queued REST child", async () => {
+		const fx = await buildFixture();
+		const preflightEntered = deferred();
+		const releasePreflight = deferred();
+		const scheduledStartObserved = deferred();
+		const manager = fx.goalManager as any;
+		const originalPreflight = manager.preflightGoalCreation.bind(manager);
+		let restChildId: string | undefined;
+		try {
+			fx.goalStore.update(fx.parent.id, { maxConcurrentChildren: 1 });
+			assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 1);
+
+			const restChild = await fx.goalManager.createGoal("Queued REST child", fx.tmpRoot, {
+				workflowId: "feature",
+				projectId: "p",
+				parentGoalId: fx.parent.id,
+			});
+			restChildId = restChild.id;
+			const createdBeforeRejectedCandidate = fx.calls.filter(call => call.kind === "createGoal").length;
+			const childIdsBeforeRejectedCandidate = fx.goalStore.getAll()
+				.filter(goal => goal.parentGoalId === fx.parent.id)
+				.map(goal => goal.id);
+
+			const scheduledStarts: string[] = [];
+			(fx.mockTeamManager as any).getTeamState = () => undefined;
+			(fx.mockTeamManager as any).startTeam = async (childGoalId: string) => {
+				scheduledStarts.push(childGoalId);
+				scheduledStartObserved.resolve();
+			};
+			manager.preflightGoalCreation = async () => {
+				preflightEntered.resolve();
+				await releasePreflight.promise;
+				throw new GoalPreflightStaleError();
+			};
+
+			// launchRun observes both settlement branches immediately. Reaching the
+			// preflight proves this harness run owns the root's sole permit.
+			void fx.launchRun(
+				buildSubgoalStep({ planId: "stale-harness-candidate", title: "Rejected harness candidate" }),
+				buildActive(fx.parent.id),
+			);
+			await preflightEntered.promise;
+
+			// Model the REST route: request the scheduler start, then durably stamp
+			// the capacity-blocked result. No polling or timer is involved.
+			assert.equal(fx.harness.requestChildStart(restChild.id), "capacity-blocked");
+			await fx.goalManager.updateGoal(restChild.id, { state: "blocked" });
+			assert.equal(fx.harness.childTeamScheduler.pendingCount(fx.parent.id), 1);
+			assert.deepEqual(scheduledStarts, []);
+
+			releasePreflight.resolve();
+			const settlements = await fx.settleRuns();
+			assert.equal(settlements.length, 1);
+			assertFulfilled(settlements[0], "stale harness run");
+			assert.deepEqual(settlements[0].value, {
+				passed: false,
+				output: `runSubgoalStep: candidate validation failed (${GOAL_PREFLIGHT_STALE_CODE}): ${GOAL_PREFLIGHT_STALE_MESSAGE}`,
+			});
+
+			// Releasing the harness-owned permit must synchronously drain the queued
+			// scheduler request. Observe its async team-start completion only after
+			// proving the queue was drained, so a regression fails instead of hanging.
+			assert.equal(fx.harness.childTeamScheduler.pendingCount(fx.parent.id), 0,
+				"a failed pre-create harness run must release capacity to queued REST children");
+			await scheduledStartObserved.promise;
+			assert.deepEqual(scheduledStarts, [restChild.id], "the queued REST child must start exactly once");
+
+			assert.equal(
+				fx.calls.filter(call => call.kind === "createGoal").length,
+				createdBeforeRejectedCandidate,
+				"the rejected harness candidate must not call createGoal",
+			);
+			assert.deepEqual(
+				fx.goalStore.getAll().filter(goal => goal.parentGoalId === fx.parent.id).map(goal => goal.id),
+				childIdsBeforeRejectedCandidate,
+				"the rejected harness candidate must not persist a child",
+			);
+		} finally {
+			manager.preflightGoalCreation = originalPreflight;
+			fx.cancelRuns();
+			releasePreflight.resolve();
+			if (restChildId) fx.harness.notifyChildTerminal(restChildId);
+			await fx.settleRuns();
+			fx.cleanup();
 		}
 	});
 
 	it("spawns immediately (not blocked) when every dep is already merged", async () => {
 		const fx = await buildFixture();
-		afterAll(() => fx.cleanup());
+		try {
+			const teamStarted: string[] = [];
+			fx.setSetupHook(async (childGoalId) => { teamStarted.push(childGoalId); });
 
-		const teamStarted: string[] = [];
-		fx.setSetupHook(async (childGoalId) => { teamStarted.push(childGoalId); });
+			// Run A to completion first so it is merged + archived (state=complete).
+			const stepA = buildSubgoalStep({ planId: "A", title: "Alpha" });
+			const aA = buildActive(fx.parent.id);
+			void fx.launchRun(stepA, aA);
+			let settlements = await fx.settleRuns();
+			assert.equal(settlements.length, 1);
+			assertFulfilled(settlements[0], "A run");
+			const rA = settlements[0].value;
+			assert.equal(rA.passed, true, rA.output);
 
-		// Run A to completion first so it is merged + archived (state=complete).
-		const stepA = buildSubgoalStep({ planId: "A", title: "Alpha" });
-		const aA = buildActive(fx.parent.id);
-		const rA = await fx.harness.runSubgoalStep(stepA, aA.signal, aA.active, 0);
-		assert.equal(rA.passed, true, rA.output);
+			const aChild = fx.goalStore.getAll().find(g => g.spawnedFromPlanId === "A");
+			assert.ok(aChild && aChild.state === "complete", "A should be complete after its run");
 
-		const aChild = fx.goalStore.getAll().find(g => g.spawnedFromPlanId === "A");
-		assert.ok(aChild && aChild.state === "complete", "A should be complete after its run");
+			// B dependsOn A — but A is already merged, so B must spawn immediately.
+			const stepB = buildSubgoalStep({ planId: "B", title: "Beta", dependsOn: ["A"] });
+			const aB = buildActive(fx.parent.id);
+			void fx.launchRun(stepB, aB);
+			settlements = await fx.settleRuns();
+			assert.equal(settlements.length, 2);
+			assertFulfilled(settlements[1], "B run");
+			const rB = settlements[1].value;
+			assert.equal(rB.passed, true, rB.output);
 
-		// B dependsOn A — but A is already merged, so B must spawn immediately.
-		const stepB = buildSubgoalStep({ planId: "B", title: "Beta", dependsOn: ["A"] });
-		const aB = buildActive(fx.parent.id);
-		const rB = await fx.harness.runSubgoalStep(stepB, aB.signal, aB.active, 0);
-		assert.equal(rB.passed, true, rB.output);
+			const bChild = fx.goalStore.getAll().find(g => g.spawnedFromPlanId === "B");
+			assert.ok(bChild, "B child should be created");
+			assert.equal(teamStarted.includes(bChild.id), true, "B's team should start immediately when deps satisfied");
 
-		const bChild = fx.goalStore.getAll().find(g => g.spawnedFromPlanId === "B");
-		assert.ok(bChild, "B child should be created");
-		assert.equal(teamStarted.includes(bChild.id), true, "B's team should start immediately when deps satisfied");
+			// The spawn stamp for B must NOT carry state='blocked'.
+			const bStamp = fx.calls.find(c => c.kind === "updateGoal" && c.updates.spawnedFromPlanId === "B");
+			assert.ok(bStamp && bStamp.kind === "updateGoal");
+			assert.equal(bStamp.updates.state, undefined, "B must not be stamped blocked when deps are satisfied");
+		} finally {
+			await cleanupFixture(fx);
+		}
+	});
 
-		// The spawn stamp for B must NOT carry state='blocked'.
-		const bStamp = fx.calls.find(c => c.kind === "updateGoal" && c.updates.spawnedFromPlanId === "B");
-		assert.ok(bStamp && bStamp.kind === "updateGoal");
-		assert.equal(bStamp.updates.state, undefined, "B must not be stamped blocked when deps are satisfied");
+	it("settles delayed preflight rejections before fixture removal and preserves the triggering assertion", async () => {
+		const fx = await buildFixture();
+		const firstPreflightEntered = deferred();
+		const secondPreflightEntered = deferred();
+		const releaseObservedPreflight = deferred();
+		const releaseCleanupPreflight = deferred();
+		let preflightCalls = 0;
+		let settlements: PromiseSettledResult<OwnedRunResult>[] = [];
+		let rootExistedBeforeRemoval = false;
+		let rootWasRemoved = false;
+		try {
+			(fx.goalManager as any).preflightGoalCreation = async () => {
+				preflightCalls++;
+				if (preflightCalls === 1) {
+					firstPreflightEntered.resolve();
+					await releaseObservedPreflight.promise;
+					throw new Error("fixture observed preflight rejection");
+				}
+				secondPreflightEntered.resolve();
+				await releaseCleanupPreflight.promise;
+				throw new Error("fixture cleanup preflight rejection");
+			};
+
+			void fx.launchRun(
+				buildSubgoalStep({ planId: "preflight-observed", title: "Observed rejection" }),
+				buildActive(fx.parent.id),
+			);
+			void fx.launchRun(
+				buildSubgoalStep({ planId: "preflight-cleanup", title: "Cleanup rejection" }),
+				buildActive(fx.parent.id),
+			);
+			await Promise.all([firstPreflightEntered.promise, secondPreflightEntered.promise]);
+
+			const assertionFailureWithCleanup = async () => {
+				try {
+					releaseObservedPreflight.resolve();
+					// Cross an event-loop boundary after one rejection while the other run
+					// remains pending. launchRun must already be observing the rejection.
+					await new Promise<void>(resolve => setImmediate(resolve));
+					assert.fail("synthetic assertion failure before fixture join");
+				} finally {
+					fx.cancelRuns();
+					releaseObservedPreflight.resolve();
+					releaseCleanupPreflight.resolve();
+					settlements = await fx.settleRuns();
+					rootExistedBeforeRemoval = fs.existsSync(fx.tmpRoot);
+					fx.cleanup();
+					rootWasRemoved = !fs.existsSync(fx.tmpRoot);
+				}
+			};
+
+			await assert.rejects(assertionFailureWithCleanup(), /synthetic assertion failure before fixture join/);
+			assert.equal(rootExistedBeforeRemoval, true, "fixture root must exist until every owned run settles");
+			assert.equal(rootWasRemoved, true, "fixture root should be removed after the join boundary");
+			assert.equal(settlements.length, 2);
+			assert.deepEqual(settlements.map(result => result.status), ["rejected", "rejected"]);
+			assert.match(String((settlements[0] as PromiseRejectedResult).reason), /fixture observed preflight rejection/);
+			assert.match(String((settlements[1] as PromiseRejectedResult).reason), /fixture cleanup preflight rejection/);
+		} finally {
+			fx.cancelRuns();
+			releaseObservedPreflight.resolve();
+			releaseCleanupPreflight.resolve();
+			await fx.settleRuns();
+			fx.cleanup();
+		}
 	});
 });

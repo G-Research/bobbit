@@ -986,6 +986,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "staged", count: 2 },
 			{ expression: "untracked", count: 2 },
+			{ expression: "draftPath", count: 4 },
 		]),
 	},
 	{
@@ -1026,10 +1027,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/proposal-edit-api.test.ts",
-		allowReason: "isolated integration gateway, project, or harness-owned output",
+		allowReason: "isolated integration gateway proposal drafts and revision snapshots read to prove failed validation preserves harness-owned transactional state",
 		reads: frozen([
 			{ expression: "p", count: 1 },
-			{ expression: "fp", count: 1 },
+			{ expression: "fp", count: 14 },
+			{ expression: "proposalPath(gateway.bobbitDir, sid, \"goal\")", count: 1 },
+			{ expression: "historyPath", count: 1 },
+			{ expression: "victimDraft", count: 2 },
 		]),
 	},
 	{
@@ -1984,7 +1988,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "`${liveFile}.sqlite-retired`", count: 1 },
 			{ expression: "`${liveFile}.pre-migration-recovered`", count: 1 },
-			{ expression: "`${legacyFile}.sqlite-retired`", count: 1 },
+			{ expression: "`${legacyFile}.sqlite-retired`", count: 2 },
 			{ expression: "tombstoneFile", count: 1 },
 			{ expression: "preferred", count: 1 },
 			{ expression: "`${preferred}.1`", count: 1 },

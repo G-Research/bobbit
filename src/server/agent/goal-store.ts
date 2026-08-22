@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { readDeletionTombstones, recordDeletionTombstone } from "./deletion-tombstones.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
+import { validatePersistedInlineRoles } from "./inline-role-validator.js";
 import type { HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
@@ -383,21 +384,9 @@ function validateWorkflow(value: unknown, label: string): void {
 	}
 }
 
-function validateInlineRoles(value: unknown, label: string): void {
-	if (!isRecord(value)) invalidGoal(label, "must be an object");
-	for (const [name, role] of Object.entries(value)) {
-		if (!isRecord(role) || typeof role.name !== "string" || role.name !== name
-			|| typeof role.label !== "string" || typeof role.promptTemplate !== "string") {
-			invalidGoal(`${label} role ${name}`, "must have matching name, label, and promptTemplate");
-		}
-		for (const field of ["accessory", "model", "thinkingLevel"] as const) {
-			if (role[field] !== undefined && typeof role[field] !== "string") invalidGoal(`${label} role ${name}`, `${field} must be a string`);
-		}
-		for (const field of ["createdAt", "updatedAt"] as const) {
-			if (role[field] !== undefined && !Number.isFinite(role[field])) invalidGoal(`${label} role ${name}`, `${field} must be finite`);
-		}
-		if (role.toolPolicies !== undefined) validateStringRecord(role.toolPolicies, `${label} role ${name} toolPolicies`);
-	}
+function validatePersistedGoalInlineRoles(value: unknown, label: string): void {
+	const result = validatePersistedInlineRoles(value);
+	if (!result.ok) invalidGoal(label, result.message);
 }
 
 function validateGoal(
@@ -431,7 +420,7 @@ function validateGoal(
 	if (value.divergencePolicy !== undefined && (typeof value.divergencePolicy !== "string" || !DIVERGENCE_POLICIES.has(value.divergencePolicy))) invalidGoal(label, "divergencePolicy is unsupported");
 	if (value.metadata !== undefined && !isRecord(value.metadata)) invalidGoal(label, "metadata must be an object");
 	if (value.repoWorktrees !== undefined) validateStringRecord(value.repoWorktrees, `${label} repoWorktrees`);
-	if (value.inlineRoles !== undefined) validateInlineRoles(value.inlineRoles, `${label} inlineRoles`);
+	if (value.inlineRoles !== undefined) validatePersistedGoalInlineRoles(value.inlineRoles, `${label} inlineRoles`);
 	if (value.workflow !== undefined && value.workflow !== null) validateWorkflow(value.workflow, `${label} workflow`);
 	if (validateSerialization) {
 		try {

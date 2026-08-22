@@ -16,8 +16,8 @@
  * Companion E2E: `tests/e2e/ui/proposal-spec-survives-navigate.spec.ts`
  * exercises the CLIENT-side rehydrate path end-to-end. This unit suite
  * proves the server layer is NOT to blame: the spec field survives every
- * shape the goal-proposal frontmatter / body can take, and an empty spec
- * is loudly rejected at parse time rather than silently rehydrated as "".
+ * shape the goal-proposal frontmatter / body can take, including an empty
+ * spec rehydrated as the canonical empty string.
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
@@ -120,29 +120,18 @@ describe("goal proposal rehydrate — spec round-trip", () => {
 		assert.equal(parsed.value.fields.spec, spec);
 	});
 
-	it("rejects empty / whitespace-only spec with MISSING_REQUIRED_FIELD (no silent rehydrate of spec=\"\")", async () => {
+	it("rehydrates an empty goal spec as the canonical empty string", async () => {
 		const sid = "sess-rehydrate-empty";
 		const fp = proposalFilePath(stateDir, sid, "goal");
 		fs.mkdirSync(path.dirname(fp), { recursive: true });
+		fs.writeFileSync(fp, "---\ntitle: T\n---\n", "utf8");
 
-		// Hand-craft three flavours of empty body — serialize() would refuse
-		// to produce any of them via writeProposalFile (it parses before
-		// committing), so we write the raw file directly to assert the
-		// READ-side guard.
-		const flavours = [
-			"---\ntitle: T\n---\n",
-			"---\ntitle: T\n---\n\n",
-			"---\ntitle: T\n---\n   \n\t\n",
-		];
-
-		for (const raw of flavours) {
-			fs.writeFileSync(fp, raw, "utf8");
-			const parsed = await parseProposalFile(stateDir, sid, "goal");
-			assert.equal(parsed.ok, false, `expected parse failure for ${JSON.stringify(raw)}`);
-			if (parsed.ok) continue;
-			assert.equal(parsed.code, "MISSING_REQUIRED_FIELD");
-			assert.equal(parsed.field, "spec");
-		}
+		const parsed = await parseProposalFile(stateDir, sid, "goal");
+		assert.equal(parsed.ok, true, `empty goal spec must parse: ${JSON.stringify(parsed)}`);
+		if (!parsed.ok) return;
+		assert.equal(parsed.value.type, "goal");
+		assert.equal(parsed.value.fields.title, "T");
+		assert.equal(parsed.value.fields.spec, "");
 	});
 
 	it("round-trips title + cwd + workflow + options + spec — every field the rehydrate broadcast carries", async () => {

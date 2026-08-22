@@ -8,6 +8,7 @@ import type { PersistedStaff } from "./staff-store.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	SYSTEM_PROJECT_ID,
+	createProjectPathIdentity,
 	isHeadquartersProject,
 	isSystemProject,
 	type ProjectRegistry,
@@ -85,14 +86,29 @@ export type CwdOwnershipSource =
 	| { kind: "verification"; goalId: string };
 
 export type CwdValidationResult =
-	| { ok: true }
+	| { ok: true; cwd?: string }
 	| { ok: false; status: 422; code: "CWD_OUTSIDE_PROJECT"; error: string };
 
-function realOrResolved(input: string): string {
+// Execution-cwd validation and goal-creation preflight must bind the same
+// host path identity. Disable ProjectRegistry's owned case probe here: request
+// validation/preflight is strictly read-only, so inconclusive filesystems keep
+// their case-preserving spelling rather than creating a temporary directory.
+const executionPathIdentityOwner = createProjectPathIdentity({
+	createCaseProbe: () => { throw new Error("read-only execution path identity"); },
+});
+
+/**
+ * Realpath-aware, separator-normalized identity for execution coordinates.
+ * Resolves the longest existing prefix and preserves case unless the host
+ * filesystem supplies bounded read-only evidence that aliases are equivalent.
+ */
+export function executionPathIdentity(input: string): string {
+	return executionPathIdentityOwner(input);
+}
+
+/** Preserve the established canonical cwd spelling while resolving aliases. */
+export function canonicalExecutionCwd(input: string): string {
 	const resolved = path.resolve(input);
-	// A cwd can legitimately be not-yet-created. Canonicalize its longest
-	// existing prefix so /var and /private/var aliases compare consistently
-	// without resolving an attacker-controlled nonexistent suffix.
 	let existing = resolved;
 	const suffix: string[] = [];
 	while (true) {
@@ -108,15 +124,13 @@ function realOrResolved(input: string): string {
 	}
 }
 
-function comparablePath(input: string): string {
-	const normalized = realOrResolved(input);
-	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
-
 function isSameOrDescendant(parent: string | undefined, candidate: string): boolean {
 	if (!parent || !candidate) return false;
-	const relative = path.relative(comparablePath(parent), comparablePath(candidate));
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+	const canonicalParent = executionPathIdentity(parent);
+	const canonicalCandidate = executionPathIdentity(candidate);
+	if (canonicalParent === canonicalCandidate) return true;
+	const prefix = canonicalParent.endsWith("/") ? canonicalParent : `${canonicalParent}/`;
+	return canonicalCandidate.startsWith(prefix);
 }
 
 function repoWorktreeRoots(repoWorktrees: Record<string, string> | undefined): string[] {
@@ -132,17 +146,24 @@ function projectOwnsGoal(project: RegisteredProject, pcm: ProjectContextManager,
 	return goal;
 }
 
+function existingProjectContext(project: RegisteredProject, pcm: ProjectContextManager) {
+	for (const ctx of pcm.all()) {
+		if (ctx.project.id === project.id) return ctx;
+	}
+	return undefined;
+}
+
 function projectOwnsSession(project: RegisteredProject, pcm: ProjectContextManager, sessionId: string): PersistedSession | undefined {
-	const ctx = pcm.getOrCreate(project.id);
-	const session = ctx?.sessionStore.get(sessionId);
+	// Ownership validation is read-only: a lookup must never lazily provision a
+	// project context or open its stores.
+	const session = existingProjectContext(project, pcm)?.sessionStore.get(sessionId);
 	if (!session) return undefined;
 	if (session.projectId && session.projectId !== project.id) return undefined;
 	return session;
 }
 
 function projectOwnsStaff(project: RegisteredProject, pcm: ProjectContextManager, staffId: string): PersistedStaff | undefined {
-	const ctx = pcm.getOrCreate(project.id);
-	const staff = ctx?.staffStore.get(staffId);
+	const staff = existingProjectContext(project, pcm)?.staffStore.get(staffId);
 	if (!staff) return undefined;
 	if (staff.projectId && staff.projectId !== project.id) return undefined;
 	return staff;
@@ -192,13 +213,14 @@ export function validateExecutionCwd(
 	source: CwdOwnershipSource,
 ): CwdValidationResult {
 	if (!cwd) return { ok: true };
+	const canonicalCwd = canonicalExecutionCwd(cwd);
 	const project = registry.get(projectId);
 	if (!project) {
 		return { ok: false, status: 422, code: "CWD_OUTSIDE_PROJECT", error: `cwd cannot be validated for unknown project: ${projectId}` };
 	}
 
 	if (isHeadquartersProject(project)) {
-		if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
 		return {
 			ok: false,
 			status: 422,
@@ -208,7 +230,7 @@ export function validateExecutionCwd(
 	}
 
 	if (project.id === SYSTEM_PROJECT_ID) {
-		if (isSameOrDescendant(bobbitDir(), cwd) || isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		if (isSameOrDescendant(bobbitDir(), canonicalCwd) || isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
 		return {
 			ok: false,
 			status: 422,
@@ -218,7 +240,7 @@ export function validateExecutionCwd(
 	}
 
 	if (project.id === HEADQUARTERS_PROJECT_ID) {
-		if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
 		return {
 			ok: false,
 			status: 422,
@@ -227,13 +249,20 @@ export function validateExecutionCwd(
 		};
 	}
 
-	if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
-	if (sourceAllowsOwnedCwd(project, projectContextManager, cwd, source)) return { ok: true };
+	if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
+	// Ownership roots and the requested coordinate live in the same server-owned
+	// realm. Keep their original path dialect for containment: on a Windows host,
+	// sandbox POSIX paths such as /workspace-wt/... must not be rewritten into a
+	// host drive path before comparing them. Native paths remain realpath-aware
+	// through isSameOrDescendant(), and user input never reaches this allowance.
+	if (sourceAllowsOwnedCwd(project, projectContextManager, cwd, source)) return { ok: true, cwd: canonicalCwd };
 
 	return {
 		ok: false,
 		status: 422,
 		code: "CWD_OUTSIDE_PROJECT",
-		error: "cwd must be inside the selected project or an owned Bobbit worktree",
+		error: source.kind === "user-input"
+			? "cwd must be inside the selected project"
+			: "cwd must be inside the selected project or the server-owned Bobbit worktree",
 	};
 }

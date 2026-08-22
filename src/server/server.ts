@@ -689,12 +689,30 @@ import { archiveProjectBobbitDir, ArchiveError, GATEWAY_OWNED_FILES } from "./ag
 import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
 import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./agent/resolve-project.js";
-import { GoalManager } from "./agent/goal-manager.js";
+import {
+	validateGoalCandidate,
+	type GoalCandidateContext,
+	type GoalCandidateDeps,
+	type GoalCandidateError,
+	type GoalCandidateSource,
+	type RawGoalCandidate,
+	type ValidatedGoalCandidate,
+} from "./agent/goal-candidate-validator.js";
+
+class GoalCandidateValidationResponseError extends Error {
+	constructor(readonly validation: GoalCandidateError) {
+		super(validation.message);
+		this.name = "GoalCandidateValidationResponseError";
+	}
+}
+
+import { GoalManager, GoalPreflightStaleError, isGoalPreflightStaleError } from "./agent/goal-manager.js";
 import {
 	evaluateSessionGoalPromotion,
 	isSessionGoalWorktreeMode,
 	lookupSessionGoalPromotion,
 	resolveSessionGoalWorktreeMode,
+	type SessionGoalPromotionCoordinates,
 	type SessionGoalPromotionEligibility,
 	type SessionGoalPromotionWorkspaceClaim,
 } from "./agent/session-goal-promotion.js";
@@ -734,6 +752,8 @@ import {
 	restoreSnapshot,
 	writeProposalFile,
 	getProposalTypePlugin,
+	ProposalPreCommitValidationError,
+	type ProposalPreCommitValidator,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
 import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
@@ -4079,7 +4099,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
 				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
 				: undefined;
-			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, canonicalGoalCandidateDeps, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
 			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
 			else await routeOperation();
 			if (_timingEnabled) {
@@ -4830,8 +4850,37 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	}
 
+	const buildGoalCandidateDefaultWorkflows = (projectId: string): Workflow[] => {
+		const project = projectRegistry.get(projectId);
+		const projectName = project?.name || "project";
+		const components = projectContextManager.readConfigSnapshot(projectId)?.components ?? [];
+		const targetComponent = components.find(component =>
+			component.name === projectName && Object.keys(component.commands ?? {}).length > 0
+		) ?? components.find(component => Object.keys(component.commands ?? {}).length > 0)
+			?? components.find(component => component.name === projectName)
+			?? components.find(component => component.name.length > 0);
+		const seeds = buildDefaultWorkflows(
+			targetComponent?.name || projectName,
+			targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
+		);
+		seeds.parent = buildParentWorkflow();
+		return Object.values(seeds) as unknown as Workflow[];
+	};
+	const canonicalGoalCandidateDeps: GoalCandidateDeps = {
+		registry: projectRegistry,
+		projectContextManager,
+		workflows: (projectId) => configCascade.resolveWorkflowsReadOnly(projectId).map(entry => entry.item),
+		workflow: (projectId, workflowId) => configCascade
+			.resolveWorkflowsReadOnly(projectId, { includeHidden: true })
+			.find(entry => entry.item.id === workflowId)?.item,
+		defaultWorkflows: buildGoalCandidateDefaultWorkflows,
+		components: (projectId) => projectContextManager.readConfigSnapshot(projectId)?.components ?? [],
+		getGoal: (goalId) => projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId),
+		nestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+	};
+
 	ck("pre-VerificationHarness");
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview, goalCandidateDeps: canonicalGoalCandidateDeps });
 	ck("new VerificationHarness");
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
@@ -5684,6 +5733,7 @@ async function handleApiRoute(
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	configCascade: ConfigCascade,
+	goalCandidateDeps: GoalCandidateDeps,
 	sandboxScope?: SandboxScope,
 	sandboxTokenStore?: SandboxTokenStore,
 	reviewAnnotationStore?: ReviewAnnotationStore,
@@ -5950,6 +6000,114 @@ async function handleApiRoute(
 	};
 	const writeCwdValidationError = (validation: Extract<ReturnType<typeof validateExecutionCwd>, { ok: false }>): void => {
 		json({ error: validation.error, code: validation.code }, validation.status);
+	};
+	const existingProjectContext = (projectId: string): ProjectContext | undefined => {
+		for (const ctx of projectContextManager.all()) {
+			if (ctx.project.id === projectId) return ctx;
+		}
+		return undefined;
+	};
+	const persistCurrentDefaultGoalWorkflows = (projectId: string, targetCtx: ProjectContext): Workflow[] => {
+		const defaults = goalCandidateDeps.defaultWorkflows(projectId);
+		for (const workflow of defaults) targetCtx.workflowStore.put(workflow);
+		return defaults;
+	};
+	type AuthenticatedProposalOwner = {
+		ownerSessionId: string;
+		authenticatedBy: "session-capability" | "operator-cookie";
+	};
+	const authenticCallerSessionId = (): string | undefined => {
+		const headers = req.headers as Record<string, string | string[] | undefined>;
+		const rawSecret = headers["x-bobbit-session-secret"];
+		const sessionSecret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		return sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof sessionSecret === "string" && sessionSecret.trim() ? sessionSecret.trim() : undefined,
+		);
+	};
+	const authenticateProposalOwner = (ownerSessionId: string): AuthenticatedProposalOwner | undefined => {
+		const callerSessionId = authenticCallerSessionId();
+		if (callerSessionId === ownerSessionId) {
+			return { ownerSessionId, authenticatedBy: "session-capability" };
+		}
+		if (cookieTryAuth(req, cookieStore!)) {
+			return { ownerSessionId, authenticatedBy: "operator-cookie" };
+		}
+		json({
+			ok: false,
+			code: "PROPOSAL_OWNER_MISMATCH",
+			message: "Proposal mutation is not authorized for this session owner",
+			error: "Proposal mutation is not authorized for this session owner",
+		}, 403);
+		return undefined;
+	};
+	const authorizeGoalCandidateParent = (parent: PersistedGoal): true | GoalCandidateError => {
+		const rootGoalId = parent.rootGoalId ?? parent.id;
+		const authz = authorizeChildrenMutation({
+			mutationClass: "operator",
+			isHumanOperator: cookieTryAuth(req, cookieStore!),
+			authenticCallerSessionId: authenticCallerSessionId(),
+			teamLeadSessionId: teamManager.getTeamState(rootGoalId)?.teamLeadSessionId,
+		});
+		return authz.ok ? true : {
+			ok: false,
+			status: 403,
+			code: "NOT_TEAM_LEAD",
+			message: "Caller session is not the team-lead for this goal",
+			details: { goalId: parent.id },
+		};
+	};
+	const validateCurrentGoalCandidate = (
+		raw: RawGoalCandidate,
+		source: Exclude<GoalCandidateSource, { kind: "server-child" }> = { kind: "user-input" },
+		authenticatedProposalOwner?: AuthenticatedProposalOwner,
+		trustedSnapshots?: GoalCandidateContext["trustedSnapshots"],
+	) => {
+		const contextBase = trustedSnapshots ? { trustedSnapshots } : {};
+		const authorizeParent = (parent: PersistedGoal | undefined): true | GoalCandidateError => {
+			// Authenticated request sources explicitly authorize root creation.
+			if (!parent) return true;
+			// Session-owned parent authority is available only after the exact
+			// owner capability was authenticated. The URL session id alone is
+			// never caller identity; signed operators use the normal cookie path.
+			const owner = authenticatedProposalOwner?.authenticatedBy === "session-capability"
+				? sessionManager.getSession(authenticatedProposalOwner.ownerSessionId)
+				: undefined;
+			if (owner?.role === "team-lead" && owner.teamGoalId === parent.id) return true;
+			return authorizeGoalCandidateParent(parent);
+		};
+		const context: GoalCandidateContext = source.kind === "user-input"
+			? { ...contextBase, source, authorizeParent }
+			: { ...contextBase, source };
+		return validateGoalCandidate(raw, context, goalCandidateDeps);
+	};
+	const goalCandidateErrorBody = (validation: GoalCandidateError) => ({
+		ok: false,
+		code: validation.code,
+		message: validation.message,
+		error: validation.message,
+		...(validation.details ?? {}),
+		...(validation.details ? { details: validation.details } : {}),
+	});
+	const writeGoalCandidateError = (validation: GoalCandidateError): void => {
+		json(goalCandidateErrorBody(validation), validation.status);
+	};
+	const goalProposalPreCommitValidator = (
+		owner: AuthenticatedProposalOwner,
+		persistedFields?: Record<string, unknown>,
+	): ProposalPreCommitValidator => fields => {
+		const trustedSnapshots: GoalCandidateContext["trustedSnapshots"] | undefined = persistedFields ? {
+			kind: "persisted-proposal",
+			...(persistedFields.inlineWorkflow !== undefined
+				&& isDeepStrictEqual(fields.inlineWorkflow, persistedFields.inlineWorkflow)
+				? { inlineWorkflow: persistedFields.inlineWorkflow }
+				: {}),
+			...(persistedFields.inlineRoles !== undefined
+				&& isDeepStrictEqual(fields.inlineRoles, persistedFields.inlineRoles)
+				? { inlineRoles: persistedFields.inlineRoles }
+				: {}),
+		} : undefined;
+		const validation = validateCurrentGoalCandidate(fields, { kind: "user-input" }, owner, trustedSnapshots);
+		return validation.ok ? undefined : validation;
 	};
 	const writeSpecialProjectMutationError = (err: unknown): boolean => {
 		if (!(err instanceof SpecialProjectMutationError)) return false;
@@ -8883,6 +9041,7 @@ async function handleApiRoute(
 		jsonError,
 		broadcastToAll,
 		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
+		goalCandidateDeps,
 	})) return;
 
 	// GET /api/goals/:goalId/descendants — live + archived descendants for the Plan tab.
@@ -9073,45 +9232,36 @@ async function handleApiRoute(
 	// POST /api/goals
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
-		const title = body?.title;
-		const explicitCwd = typeof body?.cwd === "string" && body.cwd.trim().length > 0
-			? body.cwd.trim()
-			: undefined;
-		let cwd = explicitCwd || config.defaultCwd;
-		const spec = body?.spec || "";
-		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
-		if (!title || typeof title !== "string") {
-			json({ error: "Missing title" }, 400);
-			return;
-		}
 		try {
-			const sandboxed = body.sandboxed === true;
-			const autoStartTeam = body.autoStartTeam !== false; // default true
-			// Per-goal metadata (optional, arbitrary namespaced key/value bag, e.g.
-			// `bobbit.disabledTools`, `hindsight.memory.enabled`). Accepted only as a
-			// NON-EMPTY plain object; passed verbatim to createGoal where it is
-			// persisted and resolved hierarchically down the goal tree. Supersedes the
-			// removed per-goal worktree-setup hook (PR #816); legacy
-			// `worktreeSetupCommand`/`worktreeSetupTimeoutMs` body fields are now
-			// ignored (no parse, no persistence). Component-level
-			// `worktree_setup_command` is unaffected.
-			let metadata: Record<string, unknown> | undefined;
-			{
-				const raw = body.metadata;
-				if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw as object).length > 0) {
-					metadata = raw as Record<string, unknown>;
-				}
-			}
-			let enabledOptionalSteps: string[] | undefined;
-			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
-				enabledOptionalSteps = body.enabledOptionalSteps;
-			}
-			const resolved = resolveProjectForRequest(projectRegistry, { projectId: body.projectId });
-			if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-			const targetProjectId = resolved.projectId;
-			if (!explicitCwd) cwd = resolved.project.rootPath;
-			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, targetProjectId, cwd, { kind: "user-input" });
-			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
+			const validateRequestCandidate = () => {
+				const explicitWorkflowId = typeof body?.workflowId === "string" && body.workflowId.trim()
+					? body.workflowId.trim()
+					: typeof body?.workflow === "string" && body.workflow.trim()
+						? body.workflow.trim()
+						: undefined;
+				const workflowSelectionSupplied = Object.prototype.hasOwnProperty.call(body ?? {}, "workflowId")
+					|| Object.prototype.hasOwnProperty.call(body ?? {}, "workflow");
+				const bodyHasInlineWorkflow = !!body?.workflow && typeof body.workflow === "object";
+				const targetWorkflows = !workflowSelectionSupplied && !explicitWorkflowId && !bodyHasInlineWorkflow && typeof body?.projectId === "string"
+					? goalCandidateDeps.workflows(body.projectId)
+					: [];
+				const requestedWorkflowId = explicitWorkflowId ?? targetWorkflows[0]?.id;
+				return {
+					requestedWorkflowId,
+					validation: validateCurrentGoalCandidate({
+						...(body ?? {}),
+						...(requestedWorkflowId ? { workflowId: requestedWorkflowId } : {}),
+					}),
+				};
+			};
+			// Validate before sandbox provisioning so an invalid request cannot
+			// bootstrap project infrastructure or resolve sandbox credentials.
+			let requestValidation = validateRequestCandidate();
+			if (!requestValidation.validation.ok) { writeGoalCandidateError(requestValidation.validation); return; }
+			const initialCandidate = requestValidation.validation.candidate;
+			const targetProjectId = initialCandidate.projectId;
+			const sandboxed = body?.sandboxed === true;
+			const autoStartTeam = body?.autoStartTeam !== false; // default true
 			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
 			if (!targetCtx) {
 				json({ error: "Invalid project" }, 400);
@@ -9127,9 +9277,35 @@ async function handleApiRoute(
 				}
 			}
 			const targetGoalManager = targetCtx.goalManager;
+			// Repository support probing may await git. Complete it before the final
+			// state validation so workflow/parent/nesting changes during the probe are
+			// rejected before any goal or default-workflow mutation.
+			const creationPreflight = await targetGoalManager.preflightGoalCreation(initialCandidate.cwd, {
+				projectId: targetProjectId,
+			});
+			// Sandbox/preflight work is awaited and project state can change while it
+			// is in flight. Rebuild and re-run the same canonical candidate now, at
+			// the actual mutation boundary, and consume only this refreshed snapshot.
+			requestValidation = validateRequestCandidate();
+			if (!requestValidation.validation.ok) { writeGoalCandidateError(requestValidation.validation); return; }
+			const candidate = requestValidation.validation.candidate;
+			if (candidate.projectId !== creationPreflight.projectId) {
+				throw new GoalPreflightStaleError();
+			}
+			targetGoalManager.assertGoalCreationPreflightCurrent(creationPreflight, candidate.cwd, {
+				projectId: candidate.projectId,
+			});
+			const requestedWorkflowId = requestValidation.requestedWorkflowId;
+			const title = candidate.title;
+			const cwd = candidate.cwd;
+			const spec = candidate.spec;
+			const workflowId = candidate.workflowId ?? requestedWorkflowId;
+			const metadata = candidate.metadata && Object.keys(candidate.metadata).length > 0 ? candidate.metadata : undefined;
+			const enabledOptionalSteps = candidate.enabledOptionalSteps;
+			const resolved = { project: candidate.project };
 			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child).
-			const parentGoalId = (body?.parentGoalId && typeof body.parentGoalId === "string") ? body.parentGoalId.trim() : undefined;
-			let resolvedParentGoal: PersistedGoal | undefined;
+			const parentGoalId = candidate.parentGoalId;
+			let resolvedParentGoal: PersistedGoal | undefined = candidate.parent;
 			if (parentGoalId) {
 				// Parent MUST be in the same project context — cross-project hierarchy
 				// would corrupt the parentGoalId chain because createGoal only walks
@@ -9233,65 +9409,10 @@ async function handleApiRoute(
 					}
 				}
 			}
-			// Cascade: body.workflow (inline snapshot) → workflowId lookup → auto-seed → first match.
-			let resolvedWorkflow: Workflow | undefined;
-			let resolvedWorkflowId = workflowId;
-			const inlineWorkflow = body?.workflow;
-			if (inlineWorkflow && typeof inlineWorkflow === "object") {
-				resolvedWorkflow = inlineWorkflow as Workflow;
-				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
-			} else {
-				// Layer 1: cascade lookup (only when workflowId given).
-				if (workflowId) {
-					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-					// Layer 1b: cascade miss — fall through to project store directly.
-					if (!resolvedWorkflow) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					}
-				}
-				// Layer 2: store is empty → auto-seed defaults.
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-					const projName = resolved.project.name || "project";
-					// Structural command steps resolve through components[name].commands at
-					// verification time. Prefer an executable project-named component,
-					// then any executable component. Only if none exist, retain the prior
-					// project-name/first-valid fallbacks, which seed no command references.
-					const components = targetCtx.projectConfigStore.getComponents();
-					const targetComponent = components.find((component) =>
-						component.name === projName && Object.keys(component.commands ?? {}).length > 0,
-					) ?? components.find((component) => Object.keys(component.commands ?? {}).length > 0)
-						?? components.find((component) => component.name === projName)
-						?? components.find((component) => component.name.length > 0);
-					const componentName = targetComponent?.name || projName;
-					const seeds = buildDefaultWorkflows(
-						componentName,
-						targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
-					);
-					seeds.parent = buildParentWorkflow();
-					for (const wf of Object.values(seeds)) {
-						targetCtx.workflowStore.put(wf as unknown as Workflow);
-					}
-					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					if (workflowId) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					} else {
-						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-						resolvedWorkflowId = resolvedWorkflow?.id || "general";
-					}
-				}
-				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
-				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
-					const available = targetCtx.workflowStore.getAll().map(w => w.id);
-					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
-						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
-						code: "WORKFLOW_NOT_FOUND",
-						workflowId,
-						available,
-					});
-					return;
-				}
-			}
+			// The refreshed canonical snapshot is authoritative. No second resolver
+			// may reinterpret its workflow/options between validation and mutation.
+			let resolvedWorkflow: Workflow | undefined = candidate.workflow;
+			let resolvedWorkflowId = candidate.workflowId ?? workflowId;
 			// Resolve per-goal subgoal-nesting overrides.
 			//
 			// Two inputs: the parent's effective inherited ceiling (if any) and the
@@ -9317,32 +9438,25 @@ async function handleApiRoute(
 				: nestingPrefs.maxNestingDepth;
 			const bodySubgoalsAllowedRaw = body?.subgoalsAllowed;
 			const bodyMaxNestingDepthRaw = body?.maxNestingDepth;
-			let effSubgoalsAllowed: boolean | undefined = inheritedNesting?.subgoalsAllowed;
+			let effSubgoalsAllowed: boolean | undefined = candidate.subgoalsAllowed;
 			if (typeof bodySubgoalsAllowedRaw === "boolean") {
 				// body=false always wins (disable always allowed); body=true only if
 				// the ceiling permits it. System/parent OFF blocks the explicit true.
 				effSubgoalsAllowed = bodySubgoalsAllowedRaw && ceilSubgoalsAllowed;
 			}
-			let effMaxNestingDepth: number | undefined = inheritedNesting?.maxNestingDepth;
+			let effMaxNestingDepth: number | undefined = candidate.maxNestingDepth;
 			if (typeof bodyMaxNestingDepthRaw === "number" && Number.isFinite(bodyMaxNestingDepthRaw)) {
 				effMaxNestingDepth = Math.min(clampMaxDepth(bodyMaxNestingDepthRaw), ceilMaxNestingDepth);
 			}
-			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
-				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
-				: undefined;
+			const bodyInlineRoles = candidate.inlineRoles;
 			// Root-only orchestration policy. Only honoured for top-level goals
 			// (no parentGoalId); children inherit the root's values. Mirrors the
 			// validation in PATCH /api/goals/:id/policy.
 			const isRootGoalCreate = parentGoalId === undefined;
-			let effDivergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
-			if (isRootGoalCreate && (body?.divergencePolicy === "strict" || body?.divergencePolicy === "balanced" || body?.divergencePolicy === "autonomous")) {
-				effDivergencePolicy = body.divergencePolicy;
-			}
-			let effMaxConcurrentChildren: number | undefined;
-			if (isRootGoalCreate && typeof body?.maxConcurrentChildren === "number" && Number.isFinite(body.maxConcurrentChildren)) {
-				const n = Math.floor(body.maxConcurrentChildren);
-				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
-			}
+			let effDivergencePolicy: "strict" | "balanced" | "autonomous" | undefined = candidate.divergencePolicy;
+			if (!isRootGoalCreate) effDivergencePolicy = undefined;
+			let effMaxConcurrentChildren: number | undefined = candidate.maxConcurrentChildren;
+			if (!isRootGoalCreate) effMaxConcurrentChildren = undefined;
 			const explicitWorktree = typeof body?.worktree === "boolean" ? body.worktree : undefined;
 			// Validate the raw definition before normalization can discard malformed
 			// aliases/metadata, then snapshot the same canonical deep clone used by
@@ -9358,7 +9472,7 @@ async function handleApiRoute(
 					{ validateComponentReferences: false },
 				);
 			}
-			const goal = await targetGoalManager.createGoal(title, cwd, {
+			const goal = await targetGoalManager.createGoalFromPreflight(title, cwd, {
 				spec,
 				workflowId: resolvedWorkflowId,
 				workflowStore: targetCtx.workflowStore,
@@ -9374,23 +9488,37 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
+				preflight: creationPreflight,
 				// `team: false` historically means "standalone until manually
 				// started". Give createGoal the final shape so goalCreated is the only
 				// fact for this create and no existing record is silently rewritten.
 				team: body?.team !== false,
 			});
+			// Persist generated defaults only after the validated goal snapshot exists;
+			// the goal itself already carries the canonical frozen workflow.
+			if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
+				try {
+					const defaults = persistCurrentDefaultGoalWorkflows(targetProjectId, targetCtx);
+					console.log(`[api] Auto-seeded ${defaults.length} default workflows for project "${resolved.project.name || "project"}" on first goal creation`);
+				} catch (error) {
+					// The goal already owns the validated frozen snapshot. A secondary
+					// convenience-store write cannot turn successful creation into a
+					// partial-failure response.
+					console.warn(`[api] Goal created but generated workflow defaults could not be persisted for project ${targetProjectId}:`, error);
+				}
+			}
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
-				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
+				await targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
 				goal.projectId = targetProjectId;
 			}
 			// Set reattemptOf if provided
 			if (body.reattemptOf && typeof body.reattemptOf === "string") {
-				targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
+				await targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
 				goal.reattemptOf = body.reattemptOf;
 			}
 			// Persist autoStartTeam flag
-			targetGoalManager.updateGoal(goal.id, { autoStartTeam });
+			await targetGoalManager.updateGoal(goal.id, { autoStartTeam });
 			goal.autoStartTeam = autoStartTeam;
 			// Initialize gate states for the workflow
 			if (goal.workflow) {
@@ -9451,6 +9579,10 @@ async function handleApiRoute(
 				}
 			}
 		} catch (err) {
+			if (isGoalPreflightStaleError(err)) {
+				json({ error: err.message, message: err.message, code: err.code, details: err.details }, err.status);
+				return;
+			}
 			jsonError(400, err);
 		}
 		return;
@@ -16266,6 +16398,10 @@ async function handleApiRoute(
 			json({ error: "Invalid sessionId" }, 400);
 			return;
 		}
+		const proposalOwner = (req.method === "PUT" || (action === "accept" && req.method === "POST"))
+			? authenticateProposalOwner(ownerSessionId)
+			: undefined;
+		if ((req.method === "PUT" || (action === "accept" && req.method === "POST")) && !proposalOwner) return;
 		const proposalStateDir = bobbitStateDir();
 
 		const readPromotionDraft = async () => {
@@ -16412,7 +16548,20 @@ async function handleApiRoute(
 			const nextFields = { ...draft.fields };
 			if (body.mode === "current-session") nextFields.worktreeMode = body.mode;
 			else delete nextFields.worktreeMode;
-			const writeResult = await writeProposalFile(proposalStateDir, ownerSessionId, "goal", nextFields);
+			let writeResult: { rev: number };
+			try {
+				writeResult = await writeProposalFile(
+					proposalStateDir,
+					ownerSessionId,
+					"goal",
+					nextFields,
+					goalProposalPreCommitValidator(proposalOwner!),
+				);
+			} catch (error) {
+				if (error instanceof ProposalPreCommitValidationError) writeGoalCandidateError(error.validation);
+				else json({ error: String((error as Error)?.message ?? error) }, 500);
+				return;
+			}
 			const parsed = await parseProposalFile(proposalStateDir, ownerSessionId, "goal");
 			if (!parsed.ok) { json(parsed, 400); return; }
 			if (_broadcastToSession) {
@@ -16453,14 +16602,62 @@ async function handleApiRoute(
 				json({ error: `Unknown acceptance field(s): ${unknownFields.join(", ")}`, code: "INVALID_BODY" }, 400);
 				return;
 			}
-			if (typeof body.title !== "string" || !body.title.trim()) {
-				json({ error: "Missing title" }, 400);
-				return;
-			}
 
 			const runPromotion = async (): Promise<PersistedGoal> => {
 				const existing = lookupSessionGoalPromotion(projectContextManager.getAllGoals(), ownerSessionId);
 				if (existing.status === "conflict") throw Object.assign(new Error("Current session has conflicting goal promotion records."), { statusCode: 409, code: "PROMOTION_CONFLICT" });
+
+				// A retained, already-created attempt owns its exact retry graph and follows
+				// the existing repair path below. A fresh attempt must re-read and validate
+				// current state before even reserving promotion ownership.
+				let fresh: {
+					candidate: ValidatedGoalCandidate;
+					coordinates: SessionGoalPromotionCoordinates;
+					targetCtx: ProjectContext;
+				} | undefined;
+				if (existing.status === "none") {
+					const draft = await readPromotionDraft();
+					if (!draft.ok) throw Object.assign(new Error(draft.message), { statusCode: draft.code === "FILE_NOT_FOUND" ? 404 : 400, code: draft.code });
+					if (resolveSessionGoalWorktreeMode(draft.fields.worktreeMode) !== "current-session") {
+						throw Object.assign(new Error("Select Current session before accepting this proposal."), { statusCode: 409, code: "WORKTREE_MODE_MISMATCH" });
+					}
+					const eligibility = await evaluateOwner(draft.fields);
+					if (!eligibility.eligible) throw Object.assign(new Error(eligibility.reason), { statusCode: 409, code: eligibility.code });
+					const coordinates = eligibility.coordinates;
+					const rawCandidate = {
+						...draft.fields,
+						...body,
+						projectId: coordinates.projectId,
+						cwd: coordinates.cwd,
+					};
+					// A fresh acceptance-time library selection overrides the draft's
+					// inline snapshot. Without clearing it, canonical inline precedence
+					// would silently ignore an explicit workflow/workflowId override.
+					if (Object.prototype.hasOwnProperty.call(body, "workflow") || Object.prototype.hasOwnProperty.call(body, "workflowId")) {
+						delete rawCandidate.inlineWorkflow;
+					}
+					// Drafts serialize optional-step selections as `options`, while this
+					// acceptance boundary receives `enabledOptionalSteps`. An explicit
+					// body selection (including []) owns the final value; omission keeps
+					// the persisted draft selection.
+					if (Object.prototype.hasOwnProperty.call(body, "enabledOptionalSteps")) {
+						delete rawCandidate.options;
+					}
+					if (rawCandidate.parentGoalId) {
+						throw Object.assign(new Error("Current-session promotion creates a top-level goal."), { statusCode: 422, code: "PROMOTION_PARENT_UNSUPPORTED" });
+					}
+					const validation = validateCurrentGoalCandidate(rawCandidate, {
+						kind: "current-session-promotion",
+						sessionId: ownerSessionId,
+						serverDerivedProjectId: coordinates.projectId,
+						serverDerivedCwd: coordinates.cwd,
+					}, proposalOwner);
+					if (!validation.ok) throw new GoalCandidateValidationResponseError(validation);
+					const targetCtx = existingProjectContext(coordinates.projectId);
+					if (!targetCtx) throw Object.assign(new Error("Proposal project is unavailable."), { statusCode: 404, code: "PROJECT_NOT_FOUND" });
+					fresh = { candidate: validation.candidate, coordinates, targetCtx };
+				}
+
 				const promotionReservation = sessionManager.reserveSessionGoalPromotion(
 					ownerSessionId,
 					existing.status === "found" ? existing.goal.id : undefined,
@@ -16483,74 +16680,26 @@ async function handleApiRoute(
 						return existing.goal as PersistedGoal;
 					}
 
-				const draft = await readPromotionDraft();
-				if (!draft.ok) throw Object.assign(new Error(draft.message), { statusCode: draft.code === "FILE_NOT_FOUND" ? 404 : 400, code: draft.code });
-				if (resolveSessionGoalWorktreeMode(draft.fields.worktreeMode) !== "current-session") {
-					throw Object.assign(new Error("Select Current session before accepting this proposal."), { statusCode: 409, code: "WORKTREE_MODE_MISMATCH" });
-				}
-				const eligibility = await evaluateOwner(draft.fields);
-				if (!eligibility.eligible) throw Object.assign(new Error(eligibility.reason), { statusCode: 409, code: eligibility.code });
-				const coordinates = eligibility.coordinates;
-				const targetCtx = projectContextManager.getOrCreate(coordinates.projectId);
-				if (!targetCtx) throw Object.assign(new Error("Proposal project is unavailable."), { statusCode: 404, code: "PROJECT_NOT_FOUND" });
-				if (body.parentGoalId) throw Object.assign(new Error("Current-session promotion creates a top-level goal."), { statusCode: 422, code: "PROMOTION_PARENT_UNSUPPORTED" });
-
-				let resolvedWorkflow: Workflow | undefined;
-				let resolvedWorkflowId = typeof body.workflowId === "string" && body.workflowId.trim()
-					? body.workflowId.trim()
-					: typeof draft.fields.workflow === "string" ? draft.fields.workflow : undefined;
-				if (body.workflow && typeof body.workflow === "object" && !Array.isArray(body.workflow)) {
-					resolvedWorkflow = body.workflow as Workflow;
-					resolvedWorkflowId = (body.workflow as { id?: string }).id || resolvedWorkflowId;
-				} else if (resolvedWorkflowId) {
-					resolvedWorkflow = configCascade.resolveWorkflows(coordinates.projectId).find(entry => entry.item.id === resolvedWorkflowId)?.item
-						?? targetCtx.workflowStore.get(resolvedWorkflowId);
-				}
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-					const components = targetCtx.projectConfigStore.getComponents();
-					const component = components.find(item => Object.keys(item.commands ?? {}).length > 0) ?? components[0];
-					const seeds = buildDefaultWorkflows(component?.name || "project", component ? Object.keys(component.commands ?? {}) : []);
-					seeds.parent = buildParentWorkflow();
-					for (const workflow of Object.values(seeds)) targetCtx.workflowStore.put(workflow as unknown as Workflow);
-					resolvedWorkflow = resolvedWorkflowId ? targetCtx.workflowStore.get(resolvedWorkflowId) : targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-					resolvedWorkflowId = resolvedWorkflow?.id ?? resolvedWorkflowId;
-				}
-				if (resolvedWorkflowId && !resolvedWorkflow) {
-					throw Object.assign(new Error(`Workflow "${resolvedWorkflowId}" not found`), { statusCode: 400, code: "WORKFLOW_NOT_FOUND" });
-				}
-				if (resolvedWorkflow) {
-					resolvedWorkflow = freezeWorkflowDefinition(resolvedWorkflow, targetCtx.projectConfigStore.getComponents(), resolvedWorkflowId, { validateComponentReferences: false });
-				}
-				const nestingPrefs = readSubgoalNestingPrefs(key => preferencesStore.get(key));
-				const requestedSubgoals = typeof body.subgoalsAllowed === "boolean" ? body.subgoalsAllowed : undefined;
-				const requestedDepth = typeof body.maxNestingDepth === "number" && Number.isFinite(body.maxNestingDepth)
-					? Math.min(clampMaxDepth(body.maxNestingDepth), nestingPrefs.maxNestingDepth)
-					: undefined;
-				const metadata = body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
-					? body.metadata as Record<string, unknown>
-					: undefined;
-				const inlineRoles = body.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles)
-					? body.inlineRoles as Record<string, Role>
-					: undefined;
-				const enabledOptionalSteps = Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((step: unknown) => typeof step === "string")
-					? body.enabledOptionalSteps as string[]
-					: undefined;
+					const { candidate, coordinates, targetCtx } = fresh!;
+					if (candidate.workflowId && !candidate.workflow) {
+						throw Object.assign(new Error(`Workflow "${candidate.workflowId}" not found`), { statusCode: 400, code: "WORKFLOW_NOT_FOUND" });
+					}
 				let goal: PersistedGoal | undefined;
 				let committed = false;
 				try {
-					goal = await targetCtx.goalManager.createGoal(body.title.trim(), coordinates.cwd, {
-						spec: typeof body.spec === "string" ? body.spec : "",
-						workflowId: resolvedWorkflowId,
+					goal = await targetCtx.goalManager.createGoal(candidate.title, coordinates.cwd, {
+						spec: candidate.spec,
+						workflowId: candidate.workflowId,
 						workflowStore: targetCtx.workflowStore,
-						resolvedWorkflow,
-						enabledOptionalSteps,
+						resolvedWorkflow: candidate.workflow,
+						enabledOptionalSteps: candidate.enabledOptionalSteps,
 						projectId: coordinates.projectId,
-						inlineRoles,
-						subgoalsAllowed: requestedSubgoals === undefined ? undefined : requestedSubgoals && nestingPrefs.subgoalsEnabled,
-						maxNestingDepth: requestedDepth,
-						divergencePolicy: body.divergencePolicy === "strict" || body.divergencePolicy === "balanced" || body.divergencePolicy === "autonomous" ? body.divergencePolicy : undefined,
-						maxConcurrentChildren: typeof body.maxConcurrentChildren === "number" && Number.isInteger(body.maxConcurrentChildren) && body.maxConcurrentChildren >= 1 && body.maxConcurrentChildren <= 8 ? body.maxConcurrentChildren : undefined,
-						metadata,
+						inlineRoles: candidate.inlineRoles,
+						subgoalsAllowed: candidate.subgoalsAllowed,
+						maxNestingDepth: candidate.maxNestingDepth,
+						divergencePolicy: candidate.divergencePolicy,
+						maxConcurrentChildren: candidate.maxConcurrentChildren,
+						metadata: candidate.metadata,
 						adoptedWorkspace: {
 							ownerSessionId,
 							cwd: coordinates.cwd,
@@ -16574,6 +16723,18 @@ async function handleApiRoute(
 					// Runtime replacement is the commit point. Finalization is idempotent
 					// post-commit repair: failures retain the exact graph/session for retry.
 					committed = true;
+					// Generated defaults are convenience configuration, not promotion input:
+					// the goal already owns the validator's frozen snapshot. Persist only
+					// after commit and only while the live store is still empty, so a failed
+					// promotion cannot leak config and concurrent workflow edits win.
+					if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAllIncludingHidden().length === 0) {
+						try {
+							const defaults = persistCurrentDefaultGoalWorkflows(coordinates.projectId, targetCtx);
+							console.log(`[promotion] Auto-seeded ${defaults.length} default workflows for project "${candidate.project.name || "project"}" after goal ${goal.id} committed`);
+						} catch (error) {
+							console.warn(`[promotion] Goal ${goal.id} committed but generated workflow defaults could not be persisted for project ${coordinates.projectId}:`, error);
+						}
+					}
 					await teamManager.finalizeAdoptedLead(goal.id);
 					retainPromotionReservation = false;
 					try {
@@ -16619,8 +16780,17 @@ async function handleApiRoute(
 				const goal = await flight;
 				json(goal, 201);
 			} catch (error) {
-				const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : 400;
-				jsonError(status, error, (error as any)?.code ? { code: (error as any).code } : undefined);
+				if (error instanceof GoalCandidateValidationResponseError) {
+					writeGoalCandidateError(error.validation);
+				} else {
+					const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : 400;
+					const details = (error as any)?.details;
+					jsonError(status, error, (error as any)?.code ? {
+						code: (error as any).code,
+						...(details ?? {}),
+						...(details ? { details } : {}),
+					} : undefined);
+				}
 			}
 			return;
 		}
@@ -16642,6 +16812,10 @@ async function handleApiRoute(
 			return;
 		}
 		const proposalType = typeStr as ProposalType;
+		const isProposalMutation = (suffix === "" && req.method === "DELETE")
+			|| ((suffix === "/edit" || suffix === "/seed" || suffix === "/restore") && req.method === "POST");
+		const proposalOwner = isProposalMutation ? authenticateProposalOwner(sessionId) : undefined;
+		if (isProposalMutation && !proposalOwner) return;
 		const proposalStateDir = bobbitStateDir();
 
 		// GET /api/sessions/:id/proposal/:type — read raw file
@@ -16715,10 +16889,22 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
+				const persistedDraft = proposalType === "goal"
+					? await parseProposalFile(proposalStateDir, sessionId, proposalType)
+					: undefined;
+				const result = await editProposalFile(
+					proposalStateDir,
+					sessionId,
+					proposalType,
+					old_text,
+					new_text,
+					proposalType === "goal"
+						? goalProposalPreCommitValidator(proposalOwner!, persistedDraft?.ok ? persistedDraft.value.fields : undefined)
+						: undefined,
+				);
 				if (!result.ok) {
-					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
-					json(result, status);
+					const status = "status" in result ? result.status : result.code === "FILE_NOT_FOUND" ? 404 : 400;
+					json({ ...result, error: result.message }, status);
 					return;
 				}
 				if (_broadcastToSession) {
@@ -16772,59 +16958,70 @@ async function handleApiRoute(
 			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
 				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 				const sessionProjectId = proposalSession?.projectId;
+				// Goal candidates reject malformed supplied selection centrally. Other
+				// proposal types retain their legacy default-enrichment behavior.
+				const projectSelectionSupplied = proposalType === "goal"
+					&& Object.prototype.hasOwnProperty.call(enrichedArgs, "projectId");
 				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
 					? enrichedArgs.projectId.trim()
 					: undefined;
 				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
-				const targetProjectId = explicitProjectId ?? defaultProjectId;
-				if (!targetProjectId) {
+				// Defaults apply only to true omission. Preserve supplied malformed or
+				// empty values so the canonical goal validator rejects them.
+				const targetProjectId = explicitProjectId ?? (projectSelectionSupplied ? undefined : defaultProjectId);
+				// Stamp the authenticated session default, but leave existence and
+				// visibility to the canonical goal validator below. Non-goal proposal
+				// types retain their existing project error contract.
+				if (!targetProjectId && proposalType !== "goal") {
 					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
 					return;
 				}
-				const targetRecord = projectRegistry.get(targetProjectId);
-				if (!targetRecord) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
-					return;
-				}
-				// A hidden/synthetic project (e.g. the `system` anchor) is never a
-				// valid user-facing cross-project target. The system→headquarters
-				// mapping above applies to the OMITTED default only; an EXPLICIT
-				// projectId naming a hidden project must be rejected. Guarded on
-				// `explicitProjectId` so a hidden target arriving via the session
-				// default is unaffected (byte-for-byte default path preserved).
-				if (explicitProjectId && targetRecord.hidden) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
-					return;
-				}
-				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
-			}
-			// Resolve workflow membership from the stamped TARGET project, then run
-			// parent injection and validation through the state-independent core.
-			if (proposalType === "goal") {
-				const liveSession = sessionManager.getSession(sessionId);
-				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined)
-					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
-				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
-				if (projectId) {
-					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
-					if (workflows.length === 0) {
-						const ctx = projectContextManager.getOrCreate(projectId);
-						if (ctx) workflows = ctx.workflowStore.getAll();
+				if (proposalType !== "goal" && targetProjectId) {
+					const targetRecord = projectRegistry.get(targetProjectId);
+					if (!targetRecord) {
+						json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
+						return;
+					}
+					if (explicitProjectId && targetRecord.hidden) {
+						json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
+						return;
 					}
 				}
+				enrichedArgs = {
+					...enrichedArgs,
+					...(explicitProjectId
+						? { projectId: explicitProjectId }
+						: !projectSelectionSupplied && targetProjectId
+							? { projectId: targetProjectId }
+							: {}),
+				};
+			}
+			// Enrich the serialization candidate first, then let the canonical
+			// validator exclusively own workflow/options and every other creation
+			// contract decision before draft persistence.
+			if (proposalType === "goal") {
+				const liveSession = sessionManager.getSession(sessionId);
 				const prepared = prepareGoalProposalSeed(enrichedArgs, {
 					session: liveSession,
-					workflows,
 					getGoal: (id) => getGoalAcrossProjects(id),
 					getPreference: (key) => preferencesStore.get(key),
 				});
-				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
+				if (!prepared.ok) {
+					json({ ...prepared.body, error: prepared.body.message }, prepared.status);
+					return;
+				}
 				enrichedArgs = prepared.args;
+				const validation = validateCurrentGoalCandidate(enrichedArgs, { kind: "user-input" }, proposalOwner);
+				if (!validation.ok) { writeGoalCandidateError(validation); return; }
 			}
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
+				const writeRes = await writeProposalFile(
+					proposalStateDir,
+					sessionId,
+					proposalType,
+					enrichedArgs,
+					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!) : undefined,
+				);
 				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
 				if (!parsed.ok) {
 					json(parsed, 400);
@@ -16859,7 +17056,8 @@ async function handleApiRoute(
 				}
 				json({ ok: true, rev: writeRes.rev });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof ProposalPreCommitValidationError) writeGoalCandidateError(err.validation);
+				else json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
@@ -16877,10 +17075,24 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				let persistedSnapshotFields: Record<string, unknown> | undefined;
+				if (proposalType === "goal") {
+					const snapshot = await readSnapshot(proposalStateDir, sessionId, proposalType, rev);
+					if (snapshot !== undefined) {
+						const parsedSnapshot = getProposalTypePlugin(proposalType).parse(snapshot);
+						if (parsedSnapshot.ok) persistedSnapshotFields = parsedSnapshot.value.fields;
+					}
+				}
+				const result = await restoreSnapshot(
+					proposalStateDir,
+					sessionId,
+					proposalType,
+					rev,
+					proposalType === "goal" ? goalProposalPreCommitValidator(proposalOwner!, persistedSnapshotFields) : undefined,
+				);
 				if (!result.ok) {
-					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
-					json(result, status);
+					const status = "status" in result ? result.status : result.code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
+					json({ ...result, error: result.message }, status);
 					return;
 				}
 				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);

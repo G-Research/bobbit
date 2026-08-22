@@ -35,6 +35,7 @@ import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
 import { CookieStore } from "../../src/server/auth/cookie.ts";
+import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
 
 interface Harness {
 	tmpRoot: string;
@@ -92,11 +93,12 @@ async function makeHarness(): Promise<Harness> {
 
 	const parent = await goalManager.createGoal("Parent", tmpRoot, { workflowId: "parent" });
 	goalStore.update(parent.id, {
+		projectId: "p",
 		branch: `goal/${parent.id}`,
 		worktreePath: tmpRoot,
 	} as any);
-	const realCreateGoal = goalManager.createGoal.bind(goalManager);
-	(goalManager as any).createGoal = async (title: string, cwd: string, opts?: any) => {
+	const realCreateGoal = goalManager.createGoalFromPreflight.bind(goalManager);
+	(goalManager as any).createGoalFromPreflight = async (title: string, cwd: string, opts: any) => {
 		const goal = await realCreateGoal(title, cwd, opts);
 		if (opts?.parentGoalId) {
 			goalStore.update(goal.id, {
@@ -184,6 +186,18 @@ async function makeHarness(): Promise<Harness> {
 		notifyChildTerminal: (cid: string) => scheduler.notifyTerminal(cid),
 	};
 
+	const goalCandidateDeps: GoalCandidateDeps = {
+		registry: { get: (projectId: string) => projectId === "p" ? {
+			id: "p", name: "Project", rootPath: tmpRoot, createdAt: 0, colorLight: "", colorDark: "",
+		} : undefined } as any,
+		projectContextManager,
+		workflows: () => wf.getAll(),
+		workflow: (_projectId, workflowId) => wf.get(workflowId),
+		defaultWorkflows: () => wf.getAll(),
+		components: () => cfg.getComponents(),
+		getGoal: (goalId) => goalStore.get(goalId),
+		nestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	};
 	const deps: NestedGoalRouteDeps = {
 		projectContextManager,
 		verificationHarness,
@@ -198,6 +212,7 @@ async function makeHarness(): Promise<Harness> {
 		jsonError: () => {},
 		broadcastToAll: (ev) => { broadcasts.push(ev); },
 		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+		goalCandidateDeps,
 	};
 
 	async function callRoute(method: string, pathname: string, body?: any): Promise<{ status: number; payload: any }> {
@@ -278,6 +293,63 @@ describe("spawn-child dependsOn enforcement — direct cases", () => {
 		const child = h.goalStore.get(r2.payload.id)!;
 		assert.notEqual(child.state, "blocked", "child must NOT be blocked when deps already resolved");
 		assert.notEqual(child.paused, true, "child must NOT be paused when deps already resolved");
+	});
+});
+
+describe("spawn-child trusted legacy snapshot inheritance", () => {
+	it("inherits exact persisted role/workflow values while rejecting a new invalid override", async () => {
+		const legacyRole = {
+			name: "legacy-reviewer",
+			label: "Legacy reviewer",
+			promptTemplate: "Keep exact legacy values.",
+			accessory: "vintage",
+			model: "retired-bare-model",
+			thinkingLevel: "legacy-depth",
+			toolPolicies: { bash: "retired-policy" },
+			createdAt: 7,
+			updatedAt: 8,
+		};
+		const legacyWorkflow = {
+			id: "legacy-inline",
+			name: "Legacy inline",
+			description: "Retired verification step fixture.",
+			createdAt: 3,
+			updatedAt: 4,
+			gates: [{
+				id: "ready-to-merge",
+				name: "Ready",
+				dependsOn: [],
+				verify: [{ name: "Retired remote state", type: "remote-state" }],
+			}],
+		};
+		h.goalStore.update(h.parent.id, {
+			workflowId: legacyWorkflow.id,
+			workflow: legacyWorkflow,
+			inlineRoles: { "legacy-reviewer": legacyRole },
+		} as any);
+
+		const accepted = await h.spawnChild({
+			planId: "legacy-child",
+			title: "Legacy child",
+			spec: "Inherit trusted snapshots without applying today's new-input allow-lists.",
+		});
+		assert.equal(accepted.status, 201, JSON.stringify(accepted.payload));
+		const child = h.goalStore.get(accepted.payload.id)!;
+		assert.deepEqual(child.inlineRoles, { "legacy-reviewer": legacyRole });
+		assert.deepEqual(child.workflow, legacyWorkflow);
+		assert.notEqual(child.inlineRoles, h.goalStore.get(h.parent.id)!.inlineRoles);
+		assert.notEqual(child.workflow, h.goalStore.get(h.parent.id)!.workflow);
+
+		const beforeCount = h.goalStore.getAll().length;
+		const rejected = await h.spawnChild({
+			planId: "invalid-new-role",
+			title: "Invalid override",
+			spec: "A newly supplied malformed role must be rejected before child creation.",
+			inlineRoles: { modern: { name: "modern", label: "Modern", promptTemplate: "New", model: "malformed" } },
+		});
+		assert.equal(rejected.status, 400);
+		assert.equal(rejected.payload.code, "INLINE_ROLES_INVALID");
+		assert.equal(h.goalStore.getAll().length, beforeCount);
 	});
 });
 

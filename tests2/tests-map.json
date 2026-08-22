@@ -8,7 +8,7 @@
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 204
   },
   "methods": {
     "adapter": 276,
@@ -20,6 +20,24 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/goal-candidate-validator.test.ts",
+      "reason": "Core coverage for reusable canonical inline-role validation, normalization, and malformed contract rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/goal-candidate-validation.test.ts",
+      "reason": "Integration contract coverage for canonical goal candidate bounds, workflow and role structure, parent policy, metadata, cwd realpath containment, and server-owned promotion provenance.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
     {
       "path": "tests2/core/pack-local-data.test.ts",
       "reason": "Core coverage for schema-2 localData validation, canonical project-root materialization, worktree/polyrepo independence, link and non-directory rejection, stable sandbox projection, and no-declaration compatibility.",
@@ -94,7 +112,25 @@
     },
     {
       "path": "tests2/integration/session-goal-promotion.test.ts",
-      "reason": "Integration coverage for owner-scoped worktree-mode routes, authority rejection, in-place acceptance, idempotency, coordinate continuity, and proposal cleanup.",
+      "reason": "Integration coverage for exact rollback, concurrent lifecycle exclusion, and exact checkout continuity.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/session-goal-promotion-recovery.test.ts",
+      "reason": "Integration coverage for recoverable reservations, retry finalization, multi-repo cleanup, and sandbox ownership continuity.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/session-goal-promotion-validation.test.ts",
+      "reason": "Integration coverage for owner authentication, current-state workflow revalidation, optional-step precedence, and generated-default transactionality.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
