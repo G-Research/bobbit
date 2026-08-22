@@ -307,6 +307,37 @@ describe("InboxNudger — contextPolicy", () => {
 		h.nudger.stop();
 	});
 
+	it("admits a Clear wake digest before a microtask scheduled by the lastWakeAt write", async () => {
+		const h = makeHarness({ contextPolicy: "clear" });
+		enqueueDirect(h.inboxStore, h.staff.id);
+
+		const order: string[] = [];
+		let releaseDelivery!: () => void;
+		const deliveryFinished = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+		h.clearContext.mockImplementation(async () => { order.push("clear-complete"); });
+		h.staffManager.updateStaff.mockImplementation((id: string, patch: Record<string, unknown>) => {
+			if (id === h.staff.id) Object.assign(h.staff, patch);
+			order.push("last-wake-updated");
+			queueMicrotask(() => { order.push("competitor"); });
+			return h.staff;
+		});
+		h.enqueuePrompt.mockImplementation(() => {
+			order.push("digest-admitted");
+			return deliveryFinished;
+		});
+
+		h.nudger.poke(h.staff.id);
+		await flushMicrotasks();
+
+		assert.deepEqual(order, ["clear-complete", "last-wake-updated", "digest-admitted", "competitor"]);
+		assert.equal(h.clearContext.mock.calls.length, 1);
+		assert.equal(h.session.rpcClient.compact.mock.calls.length, 0);
+		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
+
+		releaseDelivery();
+		await flushMicrotasks();
+	});
+
 	it("a rejected clear delivers no digest, keeps inbox pending, and releases nudgePending for retry", async () => {
 		const h = makeHarness({ contextPolicy: "clear" });
 		enqueueDirect(h.inboxStore, h.staff.id);
