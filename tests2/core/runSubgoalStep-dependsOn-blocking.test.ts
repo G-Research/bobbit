@@ -24,6 +24,11 @@ import fs from "node:fs";
 import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 import type { Fixture, OwnedSubgoalRunResult as OwnedRunResult } from "../../tests/helpers/run-subgoal-step-fixture.ts";
+import {
+	GOAL_PREFLIGHT_STALE_CODE,
+	GOAL_PREFLIGHT_STALE_MESSAGE,
+	GoalPreflightStaleError,
+} from "../../src/server/agent/goal-manager.ts";
 
 type RunSubgoalFixtureModule = typeof import("../../tests/helpers/run-subgoal-step-fixture.ts");
 let buildFixture: RunSubgoalFixtureModule["buildFixture"];
@@ -248,6 +253,93 @@ describe("runSubgoalStep — dependsOn scheduling enforcement", () => {
 			}
 		} finally {
 			await cleanupFixture(fx, aHeld.resolve);
+		}
+	});
+
+	it("cap=1: stale harness preflight releases its permit and starts one queued REST child", async () => {
+		const fx = await buildFixture();
+		const preflightEntered = deferred();
+		const releasePreflight = deferred();
+		const scheduledStartObserved = deferred();
+		const manager = fx.goalManager as any;
+		const originalPreflight = manager.preflightGoalCreation.bind(manager);
+		let restChildId: string | undefined;
+		try {
+			fx.goalStore.update(fx.parent.id, { maxConcurrentChildren: 1 });
+			assert.equal(fx.goalManager.resolveRootMaxConcurrentChildren(fx.parent.id), 1);
+
+			const restChild = await fx.goalManager.createGoal("Queued REST child", fx.tmpRoot, {
+				workflowId: "feature",
+				projectId: "p",
+				parentGoalId: fx.parent.id,
+			});
+			restChildId = restChild.id;
+			const createdBeforeRejectedCandidate = fx.calls.filter(call => call.kind === "createGoal").length;
+			const childIdsBeforeRejectedCandidate = fx.goalStore.getAll()
+				.filter(goal => goal.parentGoalId === fx.parent.id)
+				.map(goal => goal.id);
+
+			const scheduledStarts: string[] = [];
+			(fx.mockTeamManager as any).getTeamState = () => undefined;
+			(fx.mockTeamManager as any).startTeam = async (childGoalId: string) => {
+				scheduledStarts.push(childGoalId);
+				scheduledStartObserved.resolve();
+			};
+			manager.preflightGoalCreation = async () => {
+				preflightEntered.resolve();
+				await releasePreflight.promise;
+				throw new GoalPreflightStaleError();
+			};
+
+			// launchRun observes both settlement branches immediately. Reaching the
+			// preflight proves this harness run owns the root's sole permit.
+			void fx.launchRun(
+				buildSubgoalStep({ planId: "stale-harness-candidate", title: "Rejected harness candidate" }),
+				buildActive(fx.parent.id),
+			);
+			await preflightEntered.promise;
+
+			// Model the REST route: request the scheduler start, then durably stamp
+			// the capacity-blocked result. No polling or timer is involved.
+			assert.equal(fx.harness.requestChildStart(restChild.id), "capacity-blocked");
+			await fx.goalManager.updateGoal(restChild.id, { state: "blocked" });
+			assert.equal(fx.harness.childTeamScheduler.pendingCount(fx.parent.id), 1);
+			assert.deepEqual(scheduledStarts, []);
+
+			releasePreflight.resolve();
+			const settlements = await fx.settleRuns();
+			assert.equal(settlements.length, 1);
+			assertFulfilled(settlements[0], "stale harness run");
+			assert.deepEqual(settlements[0].value, {
+				passed: false,
+				output: `runSubgoalStep: candidate validation failed (${GOAL_PREFLIGHT_STALE_CODE}): ${GOAL_PREFLIGHT_STALE_MESSAGE}`,
+			});
+
+			// Releasing the harness-owned permit must synchronously drain the queued
+			// scheduler request. Observe its async team-start completion only after
+			// proving the queue was drained, so a regression fails instead of hanging.
+			assert.equal(fx.harness.childTeamScheduler.pendingCount(fx.parent.id), 0,
+				"a failed pre-create harness run must release capacity to queued REST children");
+			await scheduledStartObserved.promise;
+			assert.deepEqual(scheduledStarts, [restChild.id], "the queued REST child must start exactly once");
+
+			assert.equal(
+				fx.calls.filter(call => call.kind === "createGoal").length,
+				createdBeforeRejectedCandidate,
+				"the rejected harness candidate must not call createGoal",
+			);
+			assert.deepEqual(
+				fx.goalStore.getAll().filter(goal => goal.parentGoalId === fx.parent.id).map(goal => goal.id),
+				childIdsBeforeRejectedCandidate,
+				"the rejected harness candidate must not persist a child",
+			);
+		} finally {
+			manager.preflightGoalCreation = originalPreflight;
+			fx.cancelRuns();
+			releasePreflight.resolve();
+			if (restChildId) fx.harness.notifyChildTerminal(restChildId);
+			await fx.settleRuns();
+			fx.cleanup();
 		}
 	});
 
