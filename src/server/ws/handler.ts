@@ -611,6 +611,18 @@ type SessionWorkMessage = Extract<ReliableIntentClientMessage, {
 
 const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ReliableIntentClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
 
+// `readOnly` describes the delegate's tool capability, not whether its session
+// can be interacted with. Only permission-widening and model-control commands
+// remain transport-blocked; ordinary prompt and orchestration frames are valid.
+const READ_ONLY_RESTRICTED_CONTROL_TYPES = [
+	"set_model",
+	"set_image_model",
+	"set_thinking_level",
+	"grant_tool_permission",
+] as const satisfies readonly SessionWorkMessage["type"][];
+
+const READ_ONLY_RESTRICTED_CONTROL_TYPE_SET: ReadonlySet<SessionWorkMessage["type"]> = new Set(READ_ONLY_RESTRICTED_CONTROL_TYPES);
+
 function isSessionWorkMessage(msg: ReliableIntentClientMessage): msg is SessionWorkMessage {
 	return SESSION_WORK_MESSAGE_TYPE_SET.has(msg.type);
 }
@@ -643,12 +655,13 @@ function sendSessionWorkPolicyError(
 }
 
 /**
- * Enforce persisted session interaction policy at the authenticated transport
- * boundary. UI flags are presentation only: a crafted frame must not enqueue,
- * redirect, retry, restart, compact, grant-and-resume, or extension-post work
- * in a restricted session. Stop/deny controls remain available because they
- * only halt active work. Persisted `true` wins over a stale live field; the live
- * field closes the inverse window while a metadata update is being flushed.
+ * Enforce persisted session policy at the authenticated transport boundary.
+ * A capability-restricted delegate remains interactive, but crafted frames may
+ * not widen its tool access or alter capability-bearing model configuration.
+ * Non-interactive sessions continue to reject agent work independently. Stop
+ * and deny controls remain available because they only halt active work.
+ * Persisted `true` wins over a stale live field; the live field closes the
+ * inverse window while a metadata update is being flushed.
  */
 function rejectRestrictedSessionWork(
 	ws: WebSocket,
@@ -656,12 +669,13 @@ function rejectRestrictedSessionWork(
 	session: { status: string; readOnly?: boolean; nonInteractive?: boolean },
 	persisted?: { readOnly?: boolean; nonInteractive?: boolean },
 ): boolean {
-	if (session.readOnly === true || persisted?.readOnly === true) {
+	const capabilityRestricted = session.readOnly === true || persisted?.readOnly === true;
+	if (capabilityRestricted && READ_ONLY_RESTRICTED_CONTROL_TYPE_SET.has(msg.type)) {
 		sendSessionWorkPolicyError(
 			ws,
 			msg,
 			"SESSION_READ_ONLY",
-			"This session is read-only and does not accept agent work commands.",
+			"This session's read-only capability does not allow tool or model changes.",
 		);
 		return true;
 	}
