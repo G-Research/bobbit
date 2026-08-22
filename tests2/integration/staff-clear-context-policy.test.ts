@@ -338,7 +338,18 @@ describe("staff Clear context policy", () => {
 			memory: "PINNED_STAFF_MEMORY",
 			roleId: "tester",
 		});
-		expect(inboxStore.get("clear-wake-entry")?.state).toBe("pending");
+		expect(inboxStore.listPending(STAFF_ID)).toEqual([
+			expect.objectContaining({ id: "clear-wake-entry", state: "pending" }),
+		]);
+		expect(manager.projectDeliveryOutbox(SESSION_ID)).toEqual([
+			expect.objectContaining({
+				text: DIGEST,
+				kind: "steer",
+				targetTurn: "next-turn",
+				deliveryState: "dispatching",
+				source: "system",
+			}),
+		]);
 
 		const persisted = sessionStore.get(SESSION_ID)!;
 		expect(persisted.agentSessionFile).toBe(newPath);
@@ -357,9 +368,15 @@ describe("staff Clear context policy", () => {
 		const retainedDisplayOnlyHistory = fs.readFileSync(oldPath, "utf8");
 		for (const marker of OLD_MARKERS) expect(retainedDisplayOnlyHistory).toContain(marker);
 
-		// A gateway restart reconstructs both stores from their durable files.
+		// A gateway restart reconstructs both stores from their durable files. Flush
+		// the sole SessionStore writer, then inspect its published payload read-only;
+		// constructing a second live writer would not model a real gateway restart.
+		await sessionStore.flushAsync();
 		const reloadedStaffStore = new StaffStore(stateDir);
-		const reloadedSessionStore = new SessionStore(sessionStateDir);
+		const durableSessions = JSON.parse(
+			fs.readFileSync(path.join(sessionStateDir, "sessions.json"), "utf8"),
+		) as { sessions: any[] };
+		const reloadedSession = durableSessions.sessions.find((session) => session.id === SESSION_ID);
 		expect(reloadedStaffStore.get(STAFF_ID)).toMatchObject({
 			id: STAFF_ID,
 			currentSessionId: SESSION_ID,
@@ -367,7 +384,7 @@ describe("staff Clear context policy", () => {
 			systemPrompt: SYSTEM_PROMPT,
 			memory: "PINNED_STAFF_MEMORY",
 		});
-		expect(reloadedSessionStore.get(SESSION_ID)).toMatchObject({
+		expect(reloadedSession).toMatchObject({
 			id: SESSION_ID,
 			staffId: STAFF_ID,
 			agentSessionFile: newPath,
