@@ -12,6 +12,7 @@ import {
 } from "../../src/server/extension-host/host-notification-dispatcher.js";
 import type { HostNotification } from "../../src/shared/extension-host/host-hooks.js";
 import { wireProjectHostNotificationBoundaries } from "../../src/server/server.js";
+import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.js";
 import { createMemFs } from "../harness/mem-fs.js";
 import { getGateway, type EntityCounts, type GatewayFixture } from "../harness/gateway.js";
 import { assertNoLeaks, snapshotEntities } from "../harness/leak-detector.js";
@@ -345,6 +346,9 @@ describe("real gateway notification authority", () => {
 	let tempRoots: string[];
 
 	beforeAll(async () => {
+		// The integration gateway runs from the TypeScript source bundle. ModuleHost
+		// workers need the supported .js-to-.ts resolver before their first spawn.
+		enableTsWorkerResolver();
 		gw = await getGateway();
 		baseline = snapshotEntities(gw);
 	});
@@ -533,6 +537,9 @@ describe("real gateway notification authority", () => {
 		try {
 			await refreshServerPackIndex(gw);
 			const sourceSession = gw.sessionManager.getSession(source.id);
+			const persistedBeforeMove = gw.sessionManager.getPersistedSession(source.id);
+			expect(persistedBeforeMove?.agentSessionFile).toEqual(expect.any(String));
+			const agentSessionFile = persistedBeforeMove!.agentSessionFile!;
 			const beforeChildren = gw.orchestrationCore.list(source.id).map((row: any) => row.sessionId);
 			broadcastStatus(sourceSession, "streaming");
 			await poll(() => existsSync(fixture.startedPath) ? true : undefined, "paused notification handler");
@@ -542,10 +549,9 @@ describe("real gateway notification authority", () => {
 				body: JSON.stringify({ projectId: destination.id }),
 			});
 			expect(moved.status, await moved.clone().text()).toBe(200);
-			const persisted = gw.sessionManager.getPersistedSession(source.id);
-			expect(persisted?.projectId).toBe(destination.id);
-			expect(persisted?.agentSessionFile).toEqual(expect.any(String));
-			appendFileSync(persisted.agentSessionFile, `${JSON.stringify({
+			expect(gw.sessionManager.getSession(source.id)?.projectId).toBe(destination.id);
+			expect(gw.sessionManager.getSessionStore(gw.defaultProjectId).get(source.id)?.projectId).toBe(destination.id);
+			appendFileSync(agentSessionFile, `${JSON.stringify({
 				type: "message",
 				message: { role: "assistant", content: "destination-project-transcript-sentinel" },
 			})}\n`);
@@ -560,6 +566,9 @@ describe("real gateway notification authority", () => {
 			expect(JSON.stringify(result)).not.toContain("destination-project-transcript-sentinel");
 			expect(gw.orchestrationCore.list(source.id).map((row: any) => row.sessionId)).toEqual(beforeChildren);
 		} finally {
+			// Unblock a worker even when an assertion fails so its ordered module lane
+			// cannot bleed into a retry or a later boundary case in this shared gateway.
+			writeFileSync(fixture.releasePath, "release");
 			const live = gw.sessionManager.getSession(source.id);
 			if (live) {
 				broadcastStatus(live, "idle");
