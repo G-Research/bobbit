@@ -687,7 +687,7 @@ export const state = {
 	goalDashboardId: null as string | null,
 
 	/** Staff agents list */
-	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[]; projectId?: string }>,
+	staffList: [] as Array<{ id: string; name: string; description: string; state: string; lastWakeAt?: number; currentSessionId?: string; triggers: any[]; projectId?: string; accessory?: string }>,
 
 	/** Orphaned staff records — projectId missing or set to the system project. Surfaced in the sidebar banner. */
 	orphanedStaff: [] as Array<{ id: string; name: string; description: string; state: string; projectId?: string }>,
@@ -1110,6 +1110,7 @@ function staffSidebarCacheKey(): string {
 		projectId: s.projectId,
 		currentSessionId: s.currentSessionId,
 		lastWakeAt: s.lastWakeAt,
+		accessory: s.accessory,
 		triggers: s.triggers ?? [],
 	})).join("|");
 }
