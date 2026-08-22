@@ -54,6 +54,7 @@ import { copyTextToClipboard } from "../../app/api.js";
 import { showHeaderToast } from "../../app/header-toast.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
+import { resolveContextMeter } from "../../shared/context-meter.js";
 import { selectProposalWorkspaceTab } from "../../app/preview-panel.js";
 import { setHashRoute } from "../../app/routing.js";
 import { canContinueArchivedSession, canForkSession, continueArchivedSession } from "../../app/session-actions.js";
@@ -534,6 +535,12 @@ export class AgentInterface extends LitElement {
 	private _handleGlobalEscape = (e: KeyboardEvent) => {
 		if (e.key !== "Escape") return;
 		if (e.defaultPrevented) return;
+		if (this._contextPopoverOpen) {
+			e.preventDefault();
+			this._contextPopoverOpen = false;
+			this.requestUpdate();
+			return;
+		}
 		const session = this.session;
 		const isCompacting = !!(session as any)?._isCompacting;
 		if (!session || (!session.state?.isStreaming && !isCompacting) || (session as any).isAborting) return;
@@ -2314,62 +2321,81 @@ export class AgentInterface extends LitElement {
 			: undefined;
 		const costText = serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "";
 
-		// Compute context usage from the last assistant message's usage
-		let contextHtml = html``;
-		const model = state.model;
-		// After compaction the last assistant `usage` still reflects the
-		// pre-compaction context size and pi-coding-agent doesn't expose a
-		// post-compaction count anywhere. While the stale flag is set we
-		// render a subtle shimmering placeholder bar so the user knows the
-		// real number is pending without misleading them with stale data.
+		// Compute current context from the last successful assistant turn. This is
+		// deliberately not cumulative session usage: compacted-away turns must not
+		// inflate the current request context.
+		const model = state.model as any;
 		const usageStale = (this.session as any)?._usageStaleAfterCompaction === true;
-		if (model?.contextWindow) {
-			if (usageStale) {
-				// Deflation animation: bar starts at the pre-compaction fill
-				// percentage (captured on `compaction_start`) and CSS-eases
-				// down to the shimmer resting width (25%). Falls back to a
-				// static 25% bar when we couldn't sample the original fill.
-				const startPct = (this.session as any)?._compactionStartPct as number | null | undefined;
-				const hasStart = typeof startPct === "number" && startPct > 25;
-				const innerStyle = hasStart
-					? `--from-pct:${startPct}%;height:100%;background:var(--primary,#3b82f6);border-radius:3px;opacity:0.4;`
-					: `width:25%;height:100%;background:var(--primary,#3b82f6);border-radius:3px;opacity:0.4;`;
-				const innerClass = hasStart ? "context-bar-deflate" : "";
-				contextHtml = html`
-					<span class="flex items-center gap-1.5" title="Context usage refreshing after compaction…">
-						<span class="context-bar-shimmer" style="display:inline-flex;align-items:center;width:48px;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden;">
-							<span class=${innerClass} style=${innerStyle}></span>
-						</span>
-						<span style="opacity:0.6">-%</span>
-					</span>
-				`;
-			} else {
-				// Find last assistant message with usage (skip aborted/error)
-				let lastUsage: Usage | undefined;
-				for (let i = state.messages.length - 1; i >= 0; i--) {
-					const msg = state.messages[i] as any;
-					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
-						lastUsage = msg.usage;
-						break;
-					}
-				}
-
-				if (lastUsage) {
-					const contextTokens = lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite);
-					const contextWindow = model.contextWindow;
-					const pct = Math.min(100, Math.round((contextTokens / contextWindow) * 100));
-					const barColor = pct >= 90 ? "var(--destructive, #ef4444)" : pct >= 75 ? "var(--warning, #f59e0b)" : "var(--primary, #3b82f6)";
-					contextHtml = html`
-						<span class="flex items-center gap-1.5" title="Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens (${pct}%)">
-							<span style="display:inline-flex;align-items:center;width:48px;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden">
-								<span style="width:${pct}%;height:100%;background:${barColor};border-radius:3px;transition:width 0.3s"></span>
-							</span>
-							<span>${pct}%</span>
-						</span>
-					`;
+		let lastUsage: Usage | undefined;
+		if (!usageStale) {
+			for (let i = state.messages.length - 1; i >= 0; i--) {
+				const msg = state.messages[i] as any;
+				if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
+					lastUsage = msg.usage;
+					break;
 				}
 			}
 		}
+		const contextTokens = lastUsage
+			? (lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite))
+			: 0;
+		const contextMeter = resolveContextMeter({
+			usage: contextTokens,
+			contextWindow: model?.contextWindow,
+			modelCapacity: model?.modelCapacity,
+		});
+		const contextPct = contextMeter.percentage === undefined ? undefined : Math.round(contextMeter.percentage);
+		const hasContextScale = contextMeter.scale !== undefined;
+		const hasDistinctCapacity = contextMeter.markerPct !== undefined
+			&& contextMeter.target !== undefined
+			&& contextMeter.capacity !== undefined;
+		const showContext = hasContextScale && (usageStale || lastUsage !== undefined);
+		const contextAccessibleText = usageStale
+			? hasDistinctCapacity
+				? `Context usage refreshing after compaction; model capacity ${formatTokenCount(contextMeter.capacity!)} tokens; target ${formatTokenCount(contextMeter.target!)} tokens`
+				: `Context usage refreshing after compaction${contextMeter.scale ? `; limit ${formatTokenCount(contextMeter.scale)} tokens` : ""}`
+			: hasDistinctCapacity
+				? `Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.capacity!)} tokens (${contextPct}% of model capacity); target ${formatTokenCount(contextMeter.target!)} tokens`
+				: contextMeter.scale
+					? `Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.scale)} tokens (${contextPct}%${contextMeter.target ? " of context target" : " of model capacity"})`
+					: "Context usage unavailable";
+		const renderContextMeter = (variant: "footer" | "popover", stale = false) => {
+			const startPct = (this.session as any)?._compactionStartPct as number | null | undefined;
+			const hasStart = stale && typeof startPct === "number" && startPct > 25;
+			return html`
+				<span
+					class="context-meter context-meter--${variant} ${stale ? "context-bar-shimmer" : ""}"
+					data-testid="context-meter-track"
+					data-context-meter-variant=${variant}
+					role="progressbar"
+					aria-label=${contextAccessibleText}
+					aria-valuemin="0"
+					aria-valuemax=${contextMeter.scale ?? nothing}
+					aria-valuenow=${!stale && lastUsage ? contextTokens : nothing}
+					aria-valuetext=${contextAccessibleText}
+					aria-busy=${stale ? "true" : "false"}
+				>
+					${stale ? html`
+						<span
+							class="context-meter-segment context-meter-primary ${hasStart ? "context-bar-deflate" : ""}"
+							data-testid="context-meter-primary"
+							style=${hasStart ? `left:0;--from-pct:${startPct}%` : "left:0;width:25%"}
+						></span>
+					` : html`
+						<span class="context-meter-segment context-meter-primary" data-testid="context-meter-primary" style="left:0;width:${contextMeter.primaryPct}%"></span>
+						<span class="context-meter-segment context-meter-warning" data-testid="context-meter-warning" style="left:${contextMeter.primaryPct}%;width:${contextMeter.warningPct}%"></span>
+						<span class="context-meter-segment context-meter-negative" data-testid="context-meter-negative" style="left:${contextMeter.primaryPct + contextMeter.warningPct}%;width:${contextMeter.negativePct}%"></span>
+					`}
+					${hasDistinctCapacity ? html`<span class="context-meter-target" data-testid="context-meter-target-marker" style="left:${contextMeter.markerPct}%" aria-hidden="true"></span>` : nothing}
+				</span>
+			`;
+		};
+		const contextHtml = showContext ? html`
+			<span class="flex items-center gap-1.5">
+				${renderContextMeter("footer", usageStale)}
+				<span data-testid="context-meter-percentage" style="opacity:${usageStale ? "0.6" : "1"}">${usageStale ? "-%" : `${contextPct}%`}</span>
+			</span>
+		` : nothing;
 
 		const session = this.session!;
 		const modelSelectionRequired = (state as any).condition?.code === "MODEL_SELECTION_REQUIRED";
@@ -2473,20 +2499,6 @@ export class AgentInterface extends LitElement {
 		// Build context popover content
 		const popoverContent = this._contextPopoverOpen ? (() => {
 			const m = model as any;
-			// Find last assistant usage (same logic as above)
-			let lastUsage: Usage | undefined;
-			if (!usageStale) {
-				for (let i = state.messages.length - 1; i >= 0; i--) {
-					const msg = state.messages[i] as any;
-					if (msg.role === "assistant" && msg.usage && msg.stopReason !== "aborted" && msg.stopReason !== "error") {
-						lastUsage = msg.usage;
-						break;
-					}
-				}
-			}
-			const contextTokens = lastUsage ? (lastUsage.totalTokens || (lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite)) : 0;
-			const contextWindow = m?.contextWindow || 0;
-			const pct = contextWindow ? Math.min(100, Math.round((contextTokens / contextWindow) * 100)) : 0;
 			const msgCount = state.messages.length;
 			const turnCount = state.messages.filter((msg: any) => msg.role === "assistant").length;
 
@@ -2497,11 +2509,11 @@ export class AgentInterface extends LitElement {
 				</div>`;
 
 			return html`
-				<div class="context-popover" style="
+				<div id="context-usage-popover" role="dialog" aria-label="Context details" class="context-popover" style="
 					position:absolute;bottom:100%;right:0;margin-bottom:6px;z-index:50;
 					background:var(--popover);color:var(--popover-foreground);
 					border:1px solid var(--border);border-radius:8px;
-					padding:12px 14px;min-width:260px;max-width:320px;
+					padding:12px 14px;min-width:260px;max-width:min(320px, calc(100vw - 16px));
 					box-shadow:0 4px 12px rgba(0,0,0,0.15);font-size:12px;
 				">
 					${m ? html`
@@ -2510,7 +2522,10 @@ export class AgentInterface extends LitElement {
 						</div>
 						<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
 							${row("Provider", m.provider)}
-							${row("Context window", contextWindow ? formatTokenCount(contextWindow) + " tokens" : "—")}
+							${hasDistinctCapacity ? html`
+								${row("Context target", formatTokenCount(contextMeter.target!) + " tokens")}
+								${row("Model capacity", formatTokenCount(contextMeter.capacity!) + " tokens")}
+							` : row("Context window", contextMeter.scale ? formatTokenCount(contextMeter.scale) + " tokens" : "—")}
 							${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
 							${row("Cost", m.cost ? formatModelCost(m.cost) + "/M tokens" : "—")}
 						</div>
@@ -2519,13 +2534,17 @@ export class AgentInterface extends LitElement {
 					<div style="font-weight:600;margin-bottom:6px;">Context Usage</div>
 					<div style="margin-bottom:8px;">
 						<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-							<span style="flex:1;height:6px;background:var(--muted,#27272a);border-radius:3px;overflow:hidden;">
-								<span style="display:block;width:${usageStale ? 0 : pct}%;height:100%;background:${pct >= 90 ? "var(--destructive, #ef4444)" : pct >= 75 ? "var(--warning, #f59e0b)" : "var(--primary, #3b82f6)"};border-radius:3px;transition:width 0.3s"></span>
-							</span>
-							<span style="font-weight:500;min-width:36px;text-align:right">${usageStale ? "—" : pct + "%"}</span>
+							${renderContextMeter("popover", usageStale)}
+							<span data-testid="context-meter-percentage" style="font-weight:500;min-width:36px;text-align:right">${usageStale || !lastUsage ? "—" : contextPct + "%"}</span>
 						</div>
-						${!usageStale && lastUsage ? html`
-							<div style="color:var(--muted-foreground)">${formatTokenCount(contextTokens)} / ${formatTokenCount(contextWindow)} tokens</div>
+						${hasDistinctCapacity ? html`
+							<div class="context-meter-scale" data-testid="context-meter-scale" aria-hidden="true">
+								<span>Target ${formatTokenCount(contextMeter.target!)}</span>
+								<span>Capacity ${formatTokenCount(contextMeter.capacity!)}</span>
+							</div>
+						` : nothing}
+						${!usageStale && lastUsage && contextMeter.scale ? html`
+							<div style="color:var(--muted-foreground)">${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.scale)} tokens</div>
 						` : usageStale ? html`<div style="color:var(--muted-foreground)">Updating after compaction…</div>` : nothing}
 					</div>
 
@@ -2578,10 +2597,20 @@ export class AgentInterface extends LitElement {
 				${this.cwd && !this._isNarrow ? html`<div class="flex min-w-0 flex-1 items-center gap-1 pl-4 pr-3">${cwdHtml}</div>` : ""}
 				<div class="flex shrink-0 ml-auto items-center gap-3 relative" style="position:relative">
 					${popoverContent}
-					<span class="cursor-pointer hover:text-foreground transition-colors"
-						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
-						${contextHtml}
-					</span>
+					${showContext ? html`
+						<button
+							type="button"
+							class="context-meter-trigger hover:text-foreground transition-colors"
+							data-testid="context-meter-trigger"
+							title=${contextAccessibleText}
+							aria-label=${contextAccessibleText}
+							aria-expanded=${this._contextPopoverOpen ? "true" : "false"}
+							aria-controls="context-usage-popover"
+							@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}
+						>
+							${contextHtml}
+						</button>
+					` : nothing}
 					${costText ? html`
 						<span style="position:relative;">
 							<span class="cursor-pointer hover:text-foreground transition-colors"
