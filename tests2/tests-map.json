@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-setup-event-fence.test.ts",
+      "reason": "Core coverage proving the ordinary session-setup event subscription rejects old-generation message, terminal, and compaction events while lifecycle-fenced, then resumes exact-once publication after unfencing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/context-clear-boundary.test.ts",
       "reason": "Core coverage for durable context-clear boundary normalization, segment ownership, repeated clears, and clear-history projection.",
       "execution": {

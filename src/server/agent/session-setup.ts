@@ -1187,6 +1187,10 @@ export function subscribeToEvents(
 	});
 	ctx.bindHostLifecycle?.(session);
 	return session.rpcClient.onEvent((event: any) => {
+		// A replacement transaction owns the bridge while this flag is set. Its
+		// temporary listener captures the terminal evidence it needs; the ordinary
+		// subscription must not publish any old-generation side effects.
+		if (session.lifecycleFenced) return;
 		const preparedEvent = ctx.prepareVisibleAgentEvent
 			? ctx.prepareVisibleAgentEvent(session, event)
 			: prepareVisibleAgentEvent(session, event);
