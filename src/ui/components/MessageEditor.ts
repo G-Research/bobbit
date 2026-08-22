@@ -35,12 +35,25 @@ interface SlashSkillInfo {
 }
 
 // The PR-walkthrough launcher is now provided by the first-party pack's
-// composer-slash entrypoint (not a built-in slash command).
-const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [];
+// composer-slash entrypoint (not a built-in slash command). Built-ins are
+// reserved: discovered skills and pack launchers cannot shadow them.
+const BUILT_IN_SLASH_COMMANDS: SlashSkillInfo[] = [
+	{
+		name: "clear",
+		description: "Start fresh with no prior conversation context",
+		source: "built-in",
+	},
+];
+
+const BUILT_IN_SLASH_COMMAND_NAMES = new Set(
+	BUILT_IN_SLASH_COMMANDS.map((skill) => skill.name.toLowerCase()),
+);
 
 function mergeBuiltInSlashCommands(skills: SlashSkillInfo[]): SlashSkillInfo[] {
-	const names = new Set(skills.map((skill) => skill.name.toLowerCase()));
-	return [...BUILT_IN_SLASH_COMMANDS.filter((skill) => !names.has(skill.name.toLowerCase())), ...skills];
+	return [
+		...BUILT_IN_SLASH_COMMANDS,
+		...skills.filter((skill) => !BUILT_IN_SLASH_COMMAND_NAMES.has(skill.name.toLowerCase())),
+	];
 }
 
 /** Server-authoritative queued message (mirrors server QueuedMessage from protocol.ts) */
@@ -390,6 +403,7 @@ export class MessageEditor extends LitElement {
 		if (!match) return undefined;
 
 		const name = match[1];
+		if (BUILT_IN_SLASH_COMMAND_NAMES.has(name.toLowerCase())) return undefined;
 		const launcher = listLauncherEntrypoints("composer-slash").find((l) => l.id === name);
 		if (!launcher) return undefined;
 
