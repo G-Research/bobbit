@@ -1025,7 +1025,7 @@ import { applyRuntimeSessionThinkingSelection } from "../ws/runtime-model-select
 import { sanitizeModelErrorForLog } from "./model-error-sanitizer.js";
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { validateGoalCandidate, type GoalCandidateDeps } from "./goal-candidate-validator.js";
-import { executionPathIdentity } from "./resolve-project.js";
+import { isGoalPreflightStaleError } from "./goal-manager.js";
 import {
 	appendRetainedLogChunk,
 	finalizeGateStepDiagnostics,
@@ -8612,9 +8612,9 @@ export class VerificationHarness {
 				if (!freshParent) {
 					return { passed: false, output: `runSubgoalStep: parent goal ${parentGoalId} not found` };
 				}
-				if (executionPathIdentity(freshParent.cwd) !== creationPreflight.cwdIdentity) {
-					return { passed: false, output: "runSubgoalStep: creation preflight became stale — retry the verification step" };
-				}
+				goalManager.assertGoalCreationPreflightCurrent(creationPreflight, freshParent.cwd, {
+					projectId: ctx.project.id,
+				});
 				// Enforce nesting limit using the post-preflight parent snapshot.
 				const freshNestingPrefs = readSubgoalNestingPrefs((k) => this.preferencesStore?.get(k));
 				const _check = checkCanSpawnChild(freshParent, freshNestingPrefs, (gid) => ctx.goalStore.get(gid));
@@ -8860,6 +8860,11 @@ export class VerificationHarness {
 				};
 			}
 			return { passed: false, output: `Unexpected merge outcome (no merged/alreadyMerged/conflict flag): ${truncateForOutput(outcome.output)}` };
+		} catch (error) {
+			if (isGoalPreflightStaleError(error)) {
+				return { passed: false, output: `runSubgoalStep: candidate validation failed (${error.code}): ${error.message}` };
+			}
+			throw error;
 		} finally {
 			if (permitHeld) {
 				sem.release();

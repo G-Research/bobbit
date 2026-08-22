@@ -1,5 +1,6 @@
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, base, apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { GoalPreflightStaleError, GOAL_PREFLIGHT_STALE_MESSAGE } from "../../src/server/agent/goal-manager.js";
 
 function deferred() {
 	let resolve!: () => void;
@@ -103,6 +104,36 @@ test.describe("Goal creation flow", () => {
 			manager.preflightGoalCreation = originalPreflight;
 			release.resolve();
 			context.workflowStore.remove(workflowId);
+		}
+	});
+
+	test("returns the structured stale family without ordinary goal mutation", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId)!;
+		const goalIdsBefore = new Set(context.goalStore.getAll().map((goal: { id: string }) => goal.id));
+		const manager = context.goalManager as any;
+		const originalPreflight = manager.preflightGoalCreation.bind(manager);
+		manager.preflightGoalCreation = async () => { throw new GoalPreflightStaleError(); };
+		try {
+			const response = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Stale repository preflight",
+					spec: "Repository configuration keeps changing before creation.",
+					projectId: gateway.defaultProjectId,
+					cwd: nonGitCwd(),
+					autoStartTeam: false,
+				}),
+			});
+
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				code: "GOAL_PREFLIGHT_STALE",
+				message: GOAL_PREFLIGHT_STALE_MESSAGE,
+				details: { retryable: true },
+			});
+			expect(context.goalStore.getAll().filter((goal: { id: string }) => !goalIdsBefore.has(goal.id))).toEqual([]);
+		} finally {
+			manager.preflightGoalCreation = originalPreflight;
 		}
 	});
 
