@@ -412,11 +412,15 @@ Consequences:
 - No standalone system-scope `WorkflowStore` or `WorkflowManager` is instantiated at server boot. The Headquarters `ProjectContext` owns the server-workspace workflow store and reads `bobbitConfigDir()/project.yaml::workflows` only when callers use `projectId=headquarters`.
 - All `/api/workflows*` mutations require a `projectId` (400 otherwise - no `?scope=server` parameter). Use `projectId=headquarters` for Headquarters workflows.
 - `GET /api/workflows` (no `projectId`) returns `{ workflows: [] }`; `GET /api/workflows/:id` (no `projectId`) returns 404. Reads are intentionally lenient (don't 400) to keep the Workflows page from crashing during scope transitions.
-- New projects do **not** receive any default seed at `POST /api/projects` time - a `propose_project` call that omits `workflows` results in a project with zero workflows. The project assistant is solely responsible for designing the workflow set from the discovered components and commands. See [No default workflow scaffold](#no-default-workflow-scaffold). Legacy `<project>/.bobbit/config/workflows/*.yaml` files are still folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
+- New projects do **not** receive an eager default seed at `POST /api/projects` time: a `propose_project` call that omits `workflows` registers a project with zero persisted workflows. The project assistant remains the recommended way to author a project-specific set from discovered components and commands, but registration does not block on that work. See [No eager workflow scaffold at registration](#no-default-workflow-scaffold). Legacy `<project>/.bobbit/config/workflows/*.yaml` files are still folded into the inline block on first boot by `migrate-project-yaml.ts` and the directory is removed.
 
-#### No default workflow scaffold
+<a id="no-default-workflow-scaffold"></a>
 
-Workflows must be a deliberate, project-specific design done by the project assistant. The server has **no fallback** - there is no path that silently seeds a canonical workflow set into a project. The previous fallback produced generic gates targeting a synthetic default component - gates that didn't match the project's real commands and which the assistant would have to redesign anyway, so the fallback hid rather than helped the design step. A project may legitimately persist with zero workflows; goal creation against such a project surfaces whatever existing flow shows for missing workflows (no silent backfill, no error banner from this layer).
+#### No eager workflow scaffold at registration
+
+Project registration and migration do not eagerly seed workflows. This keeps project setup from writing generic gates before Bobbit knows whether they fit the project's commands, and a project may legitimately remain registered with an empty workflow store.
+
+Goal creation has a separate deferred-default contract. When the caller supplies neither an inline snapshot nor a workflow id and the live store is empty, canonical candidate validation builds project-derived defaults in memory and freezes the selected workflow onto the candidate. Ordinary creation persists the generated set only after the goal snapshot exists; current-session promotion waits until its goal/session commit succeeds. Both paths persist only if the live store is still empty, so failed validation or acceptance leaves configuration untouched and a concurrent workflow edit wins. See [Default workflow resolution](goals-workflows-tasks.md#default-workflow-resolution) and [Canonical goal-candidate validation](goals-workflows-tasks.md#canonical-goal-candidate-validation).
 
 **Removed seed sites** (all three previously seeded `general` / `feature` / `bug-fix` / `quick-fix` targeting a synthetic default component):
 
@@ -424,11 +428,11 @@ Workflows must be a deliberate, project-specific design done by the project assi
 - `src/server/state-migration/migrate-project-yaml.ts::migrateProjectYaml` during the v1→v2 migration.
 - `src/server/state-migration/migrate-project-yaml.ts::maybeSeedWorkflowsOnly` secondary pass; now a no-op for v2 projects with no workflows dir and no inline workflows. (The function still inlines a legacy `workflows/` dir on first boot - that path is unaffected.)
 
-**`buildDefaultWorkflows`** (in `src/server/state-migration/seed-default-workflows.ts`) was kept but is **internal-only**. The only caller is `per-component-workflows.ts::buildPerComponentWorkflow`, which clones the `feature` shape and rewrites step refs to point at a specific component. No callsite invokes `buildDefaultWorkflows` as a fallback.
+**`buildDefaultWorkflows`** (in `src/server/state-migration/seed-default-workflows.ts`) remains internal. Goal-candidate validation uses it to derive the exact in-memory defaults that a successful empty-store creation may later persist. Workflow authoring helpers also reuse its shapes for per-component suggestions. It is not an eager project-registration or migration seed.
 
 **Project assistant prompt** (`src/server/agent/project-assistant.ts`) carries a "Workflows are your responsibility" statement in both `PROJECT_ASSISTANT_PROMPT` and `PROJECT_ASSISTANT_SCAFFOLDING_PROMPT`. The G2 workflow-suggestion checklist no longer pre-checks generic options by component count - the assistant must justify every workflow it proposes against the project's actual components and commands. Per-component / all-components scaffolds (`buildPerComponentWorkflow`, `buildAllComponentsWorkflow`) remain available as adaptable starting points the assistant chooses explicitly.
 
-**Tests:** `tests/e2e/projects-no-default-workflows.spec.ts` covers (a) `POST /api/projects` without `workflows` persists with no `workflows:` block, (b) supplied `workflows` is kept verbatim with no defaults merged in, (c) zero-workflows projects don't gain workflows from downstream side-effects. The migration test suite (`tests/migrate-project-yaml.test.ts`) asserts no seeding occurs in either migration path.
+**Tests:** project-registration coverage verifies that `POST /api/projects` without `workflows` persists no `workflows:` block and that supplied workflows are kept verbatim without eager defaults. Migration coverage likewise pins the absence of migration-time seeding. Goal-candidate tests separately cover in-memory default validation and deferred post-commit persistence.
 
 #### Server stores decoupling
 
@@ -436,7 +440,7 @@ Workflows must be a deliberate, project-specific design done by the project assi
 
 #### Builtin seeding
 
-On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope at all, and (since the **No default workflow scaffold** change) they're no longer seeded at project-create time either - the project assistant designs them. See [No default workflow scaffold](#no-default-workflow-scaffold).
+On server startup, standalone stores (`roleStore`) are seeded with builtins that aren't already present. This ensures that code paths reading from standalone stores work even when scaffolding no longer copies these files. Tools are excluded from seeding because they're still copied by scaffolding. Workflows are not seeded at server scope or project-registration time. Empty-store goal creation may derive them in memory and persist them only after a successful commit; see [No eager workflow scaffold at registration](#no-default-workflow-scaffold).
 
 #### Scaffolding
 
@@ -745,13 +749,13 @@ It does **not** reject template tokens in free-form `run:` or `prompt:` strings.
 
 **Inline workflow store** (`InlineWorkflowStore` in `workflow-store.ts`): a thin facade over `ProjectConfigStore` that exposes the same `get / getAll / put / remove / update` API the legacy disk-backed `WorkflowStore` did, but reads from `project.yaml::workflows`. Builtins are layered in-memory underneath. The class is exported under both names (`WorkflowStore` and `InlineWorkflowStore`) for back-compat with existing imports.
 
-If the `workflows:` block is empty or missing, goal creation surfaces a clear error rather than silently falling back - "This project has no workflows configured - run project setup or generate workflows from Settings."
+An empty or missing `workflows:` block is valid persisted project state. At canonical goal-creation boundaries, an omitted workflow selection derives project defaults in memory, freezes the selected snapshot, and defers any store write until the goal or promotion commits. An explicit invalid workflow id is still rejected; see [Default workflow resolution](goals-workflows-tasks.md#default-workflow-resolution).
 
 **Project assistant context.** The assistant generates the inline `workflows:` block from a single Markdown reference, [defaults/workflow-authoring-guide.md](../defaults/workflow-authoring-guide.md). The MD guide is the source of truth for the project model, component schema, gate semantics (depends_on, optional, manual, content/signal contracts, phases, runtime context tokens), the full step grammar, and worked examples. The runtime never reads the MD guide; it is pure assistant context.
 
 **Removed runtime concepts:**
 
-- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant generates a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` does **not** seed defaults when `workflows` is omitted (a project may persist with zero workflows - see [No default workflow scaffold](#no-default-workflow-scaffold)). `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime - there is no system-scope or builtin workflow layer.
+- **`defaults/workflows/*.yaml`** is no longer the source of truth for shipped workflows. The project assistant can generate a bespoke inline `workflows:` block per project from the MD authoring guide; `POST /api/projects` does **not** seed defaults when `workflows` is omitted (a project may persist with zero workflows — see [No eager workflow scaffold at registration](#no-default-workflow-scaffold)). `BuiltinConfigProvider.getWorkflows()` returns `[]` at runtime — there is no system-scope or builtin workflow layer. Deferred empty-store defaults belong to the goal-creation boundary, not this runtime layer.
 - **`.bobbit/config/workflows/`** is no longer a runtime concept. `InlineWorkflowStore` reads only from `project.yaml::workflows`. The `migrate-project-yaml.ts` step folds any pre-existing per-project workflow files into the inline block on first boot and removes the directory.
 
 ### Session worktrees
@@ -1172,9 +1176,9 @@ Full spec: [docs/design/editable-proposals.md](design/editable-proposals.md).
 
 ### Goal-candidate commit boundary
 
-Goal drafts have a stronger contract than syntax-valid proposal files. Seed, validated frontmatter edit, worktree-mode change, and restore run the canonical side-effect-free goal-candidate validator as a pre-commit callback. Ordinary creation, both proposal acceptance modes, direct child creation, and verification-harness child creation consume the same validator. This keeps proposal validity and creation validity from drifting as project, workflow, parent, role, path-ownership, nesting, or policy state changes.
+Goal drafts have a stronger contract than syntax-valid proposal files. The goal seed route first stamps the authenticated default project when omitted and performs only permitted host-derived enrichment, such as an eligible team lead's implicit parent. It then runs the canonical side-effect-free goal-candidate validator **before serialization or any write**. The parsed-form pre-commit callback repeats that contract for seed, validated frontmatter edit, worktree-mode change, and restore. Ordinary creation, both proposal acceptance modes, direct child creation, and verification-harness child creation consume the same validator. Non-goal proposal seed behavior is unchanged.
 
-The pre-commit callback runs before the proposal file, revision history, workspace tab, or WebSocket event changes. Acceptance validates again against current state immediately before goal mutation; repository/worktree support preflight is completed before that final validation. A validation failure therefore retains the editable draft and produces no goal, task, gate, worktree, team reservation, or generated-workflow persistence. See [Goals, Workflows, Tasks & Gates — Canonical goal-candidate validation](goals-workflows-tasks.md#canonical-goal-candidate-validation) for path authority, ownership, trusted legacy snapshots, and workflow precedence.
+These checks run before the proposal file, revision history, workspace tab, success marker, or WebSocket event changes. Acceptance validates again against current state immediately before goal mutation; repository/worktree support preflight is completed before that final validation. A validation failure therefore retains the editable draft and produces no goal, task, gate, worktree, team reservation, or generated-workflow persistence. See [Goals, Workflows, Tasks & Gates — Canonical goal-candidate validation](goals-workflows-tasks.md#canonical-goal-candidate-validation) for path authority, ownership, trusted legacy snapshots, and [workflow precedence](goals-workflows-tasks.md#default-workflow-resolution).
 
 ### On-disk layout
 
@@ -1281,7 +1285,9 @@ Server-side tab opening was already type-agnostic: the `/seed` endpoint writes t
 agent calls propose_<type>(args)
   └─> defaults/tools/proposals/extension.ts execute()
         └─> POST /api/sessions/:id/proposal/:type/seed { args }
-              ├─> writeProposalFile (serialize + write)
+              ├─> goal only: stamp project + permitted parent enrichment
+              ├─> goal only: canonical candidate validation
+              ├─> writeProposalFile (serialize + parse + pre-commit validation + write)
               ├─> parseProposalFile
               ├─> open/focus side-panel workspace tab `proposal:<type>`
               └─> _broadcastToSession({ type: "proposal_update",
@@ -1294,11 +1300,11 @@ agent calls propose_<type>(args)
 
 `seed` opens the workspace tab on the server before broadcasting the content update, so all clients converge on the same server-backed tab state. `restore` has the same explicit open/focus side effect after copying a historical snapshot back to the live draft. `edit_proposal` follows the content-write/broadcast flow via `POST /api/sessions/:id/proposal/:type/edit` with `source: "edit"`, but it is content-only: it must not open or focus `proposal:<type>`. `view_proposal` is a pure `GET` that returns the raw file body for the agent to read.
 
-### Failed goal workflow seeds
+### Failed goal candidate seeds
 
-Goal seeds validate against the linked project's workflows before writing a draft. When workflows exist and `propose_goal` omits `workflow`, uses an unknown workflow id, or names an invalid optional step, the seed endpoint returns a structured `400` and does not write a proposal file, snapshot, workspace tab, or `__proposal_rev_v1__` success marker. The tool result is still persisted and broadcast as `isError: true`, with the original tool input preserved in the transcript so the title and spec remain inspectable.
+Goal seeds validate the complete creation candidate before writing: title/spec bounds; visible project and execution-directory containment; workflow selection, optional steps, inline workflow and roles; parent/nesting authority; metadata; and root/child policy combinations. A rejection preserves the creation-equivalent structured status, code, and message family, including `422 CWD_OUTSIDE_PROJECT`. It writes no proposal file or history snapshot, does not advance the revision, and opens no workspace tab, emits no proposal update, and appends no `__proposal_rev_v1__` success marker. A previously valid draft therefore remains unchanged after an invalid second attempt.
 
-The failed-card UX is intentionally transcript-derived. `ProposalRenderer` reads title/spec from the tool call input and workflow details from the errored result text/JSON, then opens a goal proposal panel with `workflowValidationError`, an empty or invalid workflow selection, and a disabled Create Goal button. Replay/reload follows the same path from persisted messages. A later successful `propose_goal` carries its own server rev and replaces the live draft normally; no-rev failed metadata is not attached to a different rev-backed proposal.
+The failed-card UX is intentionally transcript-derived. The `propose_goal` result is persisted and broadcast as `isError: true` with the original input, stable code, and actionable message, so `ProposalRenderer` shows a failed proposal rather than a valid draft. Workflow-family errors can also reopen the correction form with its invalid selection preserved. Replay/reload follows the same transcript path. A later corrected `propose_goal` carries its own server revision and replaces the live draft normally; failed no-revision metadata is never attached to another revision-backed proposal.
 
 ### Dual-fire: legacy streaming path coexists
 
@@ -1347,7 +1353,7 @@ Every successful `propose_*` (`seed`) and `edit_proposal` (`edit`) write also wr
 - **Tool-result marker.** `propose_*` and `edit_proposal` tool extensions append `__proposal_rev_v1__:<n>` to the tool-result text on success. Renderers parse the marker via `proposal-rev-marker.ts::parseRevFromResult`. Latest/current cards select the live proposal tab; older cards call `GET /api/sessions/:id/proposal/:type/snapshot?rev=<n>` and populate a read-only `proposal:<type>:rev:<n>` tab. Legacy archived sessions without the marker fall back to the original `{type, fields}` round-trip via the per-type callbacks (graceful degradation).
 - **Restore semantics.** `restoreSnapshot` remains the explicit mutating rollback API: it reads snapshot N, validates via the per-type plugin, atomically writes it back to the live draft, AND writes a new snapshot at `currentRev + 1` whose contents equal snapshot N. The normal UI history-browsing path does not call it.
 - **Non-fatal snapshot failures.** Snapshot-write failures (disk full, permission denied) leave the live draft committed and broadcast `rev: 0`. Clients treat `rev: 0` as "snapshot system unavailable" - the panel still renders, but the rev badge and "Open proposal" snapshot path are disabled. Mid-restore crash between live rename and snapshot write is benign: the next write recomputes `latestRev` from the dir and picks the same number, overwriting consistently.
-- **Failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot. Failed `propose_goal` workflow-validation seeds happen before the first write, so they also have no snapshot and no `__proposal_rev_v1__` marker. The rev counter only advances on successful disk writes.
+- **Failures don't bump rev.** Failed `edit_proposal` calls (any structured error code) leave the file byte-for-byte unchanged and write no snapshot. Failed `propose_goal` candidate seeds happen before the first write, so they also have no snapshot and no `__proposal_rev_v1__` marker. The rev counter only advances on successful disk writes.
 - **Streaming partials don't bump rev.** The dual-fire `_checkToolProposals` streaming path emits in-memory `proposal_update` events from in-flight tool calls; only the gateway-side `seed` POST writes the file. Rev advances exactly once per completed tool call.
 
 Full design (file format, error codes, restore-handler edge cases, test plan): [docs/design/proposal-revision-snapshots.md](design/proposal-revision-snapshots.md).
@@ -3454,7 +3460,7 @@ See [goals-workflows-tasks.md](goals-workflows-tasks.md) for the full architectu
 | `system-prompt.md` | `cli.ts`, `system-prompt.ts::resolveSystemPromptPath` | Global system prompt template (read directly from `defaults/`; only copied to `.bobbit/config/` when the user opts in via `POST /api/system-prompt/customise`) |
 | `roles/*.yaml` | `RoleStore` | Built-in role definitions + tool access |
 | `roles/assistant/*.yaml` | `assistant-registry.ts` | Built-in assistant prompts |
-| `workflows/*.yaml` | (legacy) | Historical default workflow seeds. No longer copied into new projects - the server seeds nothing; the project assistant designs workflows. Not read by `BuiltinConfigProvider` at runtime. See [No default workflow scaffold](#no-default-workflow-scaffold). |
+| `workflows/*.yaml` | (legacy) | Historical default workflow seeds. They are not copied or eagerly seeded during project registration and are not read by `BuiltinConfigProvider` at runtime. Empty-store goal creation instead derives project defaults in memory and may persist them after commit. See [No eager workflow scaffold at registration](#no-default-workflow-scaffold). |
 | `tools/<group>/*.yaml` | `ToolManager` | Built-in tool definitions + extensions |
 | `tool-group-policies.yaml` | `ToolGroupPolicyStore` | Built-in group grant policies |
 
