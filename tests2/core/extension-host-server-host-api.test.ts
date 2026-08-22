@@ -261,6 +261,85 @@ describe("createServerHostApi — capabilityMask (least-privilege provider hosts
 	});
 });
 
+describe("createServerHostApi — live project authority fences", () => {
+	const fencedCore = {
+		assertCanSpawn: () => {},
+		spawn: async () => ({ sessionId: "child-1" }),
+		list: () => [{ sessionId: "child-1", childKind: "host-agents" }],
+		ownedChildKind: () => "host-agents",
+		prompt: async () => ({ status: "dispatched" }),
+		dismiss: async () => ({ ok: true, status: "dismissed", sessionId: "child-1", message: "dismissed", retryable: false }),
+		read: async () => ({ output: "private" }),
+	};
+
+	it("fails closed before every session and agents operation when ownership is missing or mismatched", async () => {
+		let transcriptReads = 0;
+		const host = createServerHostApi({
+			sessionId: "session-a", packId: "pack-a", contributionId: "hooks/a",
+			readOwnTranscript: async () => { transcriptReads++; return ""; },
+			orchestrationCore: fencedCore,
+			isSessionAuthorized: () => false,
+			capabilityMask: { session: true, agents: true },
+		});
+
+		assert.equal(host.capabilities.session, true, "the live fence must not remove a declared capability");
+		assert.equal(host.capabilities.agents, true, "the live fence must not remove a declared capability");
+		await assert.rejects(() => host.session.readTranscript(), /session authority is no longer valid/);
+		await assert.rejects(() => host.session.readToolCall("tool-1"), /session authority is no longer valid/);
+		await assert.rejects(() => host.agents.spawn({ instructions: "no" }), /session authority is no longer valid/);
+		await assert.rejects(() => host.agents.prompt("child-1", "no"), /session authority is no longer valid/);
+		await assert.rejects(() => host.agents.dismiss("child-1"), /session authority is no longer valid/);
+		await assert.rejects(() => host.agents.list(), /session authority is no longer valid/);
+		await assert.rejects(() => host.agents.read("child-1"), /session authority is no longer valid/);
+		await assert.rejects(() => host.agents.status("child-1"), /session authority is no longer valid/);
+		assert.equal(transcriptReads, 0, "an unauthorized read must not reach the transcript source");
+	});
+
+	it("rechecks authority after an in-flight transcript read and withholds the settled projection", async () => {
+		let authorized = true;
+		let release!: (value: string) => void;
+		const source = new Promise<string>(resolve => { release = resolve; });
+		const host = createServerHostApi({
+			sessionId: "session-a", packId: "pack-a", contributionId: "hooks/a",
+			readOwnTranscript: () => source,
+			isSessionAuthorized: () => authorized,
+			capabilityMask: { session: true },
+		});
+
+		const read = host.session.readTranscript();
+		authorized = false;
+		release(JSON.stringify({ type: "message", message: { role: "assistant", content: "project-b-sentinel" } }));
+		await assert.rejects(() => read, /session authority is no longer valid/);
+	});
+
+	it("contains a spawn whose authority is lost while the core is in flight", async () => {
+		let authorized = true;
+		let release!: () => void;
+		const spawnGate = new Promise<void>(resolve => { release = resolve; });
+		const dismissed: string[] = [];
+		const core = {
+			...fencedCore,
+			spawn: async () => { await spawnGate; return { sessionId: "stale-child" }; },
+			dismiss: async (_owner: string, child: string) => {
+				dismissed.push(child);
+				return { ok: true, status: "dismissed", sessionId: child, message: "dismissed", retryable: false };
+			},
+		};
+		const host = createServerHostApi({
+			sessionId: "session-a", packId: "pack-a", contributionId: "hooks/a",
+			orchestrationCore: core,
+			isSessionAuthorized: () => authorized,
+			capabilityMask: { agents: true },
+		});
+
+		const spawn = host.agents.spawn({ instructions: "private" });
+		authorized = false;
+		release();
+		await assert.rejects(() => spawn, /session authority is no longer valid/);
+		assert.deepEqual(dismissed, ["stale-child"]);
+	});
+});
+
 describe("createServerHostApi — Slice B2 own-session reads (contract adapter)", () => {
 	const jsonl = [
 		JSON.stringify({ type: "message", id: "e1", message: { role: "assistant", content: [

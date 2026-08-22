@@ -12,7 +12,12 @@
 import fs from "node:fs";
 import { request as httpRequest } from "node:http";
 import path from "node:path";
+import { vi } from "vitest";
+import { EventBuffer } from "../../src/server/agent/event-buffer.js";
 import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
+import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
+import { emitSessionEvent } from "../../src/server/agent/session-manager.js";
+import { broadcastStatus } from "../../src/server/agent/session-status.js";
 import type { PersistedTask } from "../../src/server/agent/task-store.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, nonGitCwd } from "./_e2e/e2e-setup.js";
@@ -69,13 +74,20 @@ function installSyntheticSession(gateway: any, id: string): () => void {
 		createdAt: now,
 		lastActivity: now,
 		clients: new Set(),
+		eventBuffer: new EventBuffer(),
+		promptQueue: new PromptQueue(),
 		isCompacting: false,
+		setupComplete: true,
+		lifecycleGeneration: sessionManager._currentRespawnGeneration(id),
 		projectId: gateway.defaultProjectId,
 		sandboxed: false,
 	};
 	const persisted = { ...live, agentSessionFile: "" };
 	delete (persisted as any).clients;
+	delete (persisted as any).eventBuffer;
+	delete (persisted as any).promptQueue;
 	delete (persisted as any).isCompacting;
+	delete (persisted as any).setupComplete;
 
 	const ctx = sessionManager.getProjectContextManager().getOrCreate(gateway.defaultProjectId);
 	const originalStoreGet = ctx.sessionStore.get;
@@ -105,6 +117,21 @@ function installSyntheticSession(gateway: any, id: string): () => void {
 	};
 }
 
+async function waitForToolCallbackWaiter(gateway: any, sessionId: string, toolCallId: string): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		if (gateway.sessionManager.getSession(sessionId)?.hostToolCallBeforeWaiters?.has(toolCallId)) return;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	throw new Error(`tool callback waiter was not installed for ${toolCallId}`);
+}
+
+function acceptToolStart(gateway: any, sessionId: string, toolCallId: string, toolName: string): void {
+	const session = gateway.sessionManager.getSession(sessionId);
+	const event = { type: "tool_execution_start", toolCallId, toolName };
+	gateway.sessionManager.handleAgentLifecycle(session, event);
+	emitSessionEvent(session, event);
+}
+
 function installSyntheticContext(
 	gateway: any,
 	projectId: string,
@@ -120,6 +147,9 @@ function installSyntheticContext(
 		taskStore: {
 			get: (id: string) => taskRecords.get(id),
 			put: (task: PersistedTask) => taskRecords.set(task.id, task),
+			putCommitted: async (task: PersistedTask, _facts: unknown) => {
+				taskRecords.set(task.id, task);
+			},
 			getAll: () => [...taskRecords.values()],
 			getByGoalId: (goalId: string) => [...taskRecords.values()].filter(task => task.goalId === goalId),
 			getBySessionId: (ownerId: string) => [...taskRecords.values()].filter(task => task.assignedSessionId === ownerId),
@@ -207,6 +237,172 @@ test.describe("Sandbox Security Boundaries", () => {
 	});
 
 	// ── ALLOWED endpoints ──────────────────────────────────────────────
+
+	test("valid-secret tool callbacks still require exact current Pi lifecycle provenance", async ({ gateway }) => {
+		const manager = gateway.sessionManager as any;
+		const secret = manager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const originalHostInterceptors = manager.hostInterceptors;
+		const dispatcher = manager.hostNotificationPublisher;
+		const publishSpy = vi.spyOn(dispatcher, "publish");
+		const dispatches: Array<{ name: string; input: any }> = [];
+		manager.setHostInterceptorPort({
+			async dispatch(name: string, input: any) {
+				dispatches.push({ name, input });
+				return { value: input };
+			},
+		});
+		const headers = { "X-Bobbit-Session-Secret": secret };
+		const beforeBody = { toolCallId: "forged-call", toolName: "fixture", args: { secret: "PRIVATE_ARGS" } };
+		const afterBody = { toolCallId: "forged-call", toolName: "fixture", result: { content: [{ type: "text", text: "PRIVATE_RESULT" }] } };
+		const toolFacts = () => publishSpy.mock.calls.filter(([name]) => name === "toolCallStarted" || name === "toolCallCompleted");
+
+		try {
+			for (const candidateHeaders of [undefined, { "X-Bobbit-Session-Secret": "not-the-current-secret" }]) {
+				const unauthorized = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, {
+					method: "POST",
+					headers: candidateHeaders,
+					body: JSON.stringify(beforeBody),
+				});
+				expect(unauthorized.status).toBe(403);
+			}
+
+			const forgedBeforeRequest = sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(beforeBody),
+			});
+			await waitForToolCallbackWaiter(gateway, sessionId, beforeBody.toolCallId);
+			gateway.clock.advance(101);
+			const forgedBefore = await forgedBeforeRequest;
+			expect(forgedBefore.status).toBe(409);
+			expect(await forgedBefore.json()).toEqual({ error: "Tool callback provenance unavailable" });
+
+			const forgedAfter = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/after-tool-result`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(afterBody),
+			});
+			expect(forgedAfter.status).toBe(409);
+			expect(dispatches).toHaveLength(0);
+			expect(toolFacts()).toHaveLength(0);
+			expect(manager.getSession(sessionId).hostToolCallLifecycle?.has(beforeBody.toolCallId) ?? false).toBe(false);
+			// Staff delivery is downstream of canonical publication, so zero tool facts
+			// also proves the forged callbacks cannot enqueue or wake a staff subscriber.
+
+			acceptToolStart(gateway, sessionId, "mismatch-call", "fixture");
+			const mismatch = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "mismatch-call", toolName: "other-tool", args: {} }),
+			});
+			expect(mismatch.status).toBe(409);
+			expect(dispatches).toHaveLength(0);
+			expect(toolFacts()).toHaveLength(0);
+
+			acceptToolStart(gateway, sessionId, "real-call", "fixture");
+			const realBeforeOptions = {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "real-call", toolName: "fixture", args: { secret: "PRIVATE_ARGS" } }),
+			};
+			const realBefore = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, realBeforeOptions);
+			expect(realBefore.status).toBe(200);
+			expect((await realBefore.json()).action).toBe("replaceArgs");
+			expect(dispatches.map(({ name }) => name)).toEqual(["beforeToolCall"]);
+			expect(toolFacts().map(([name]) => name)).toEqual(["toolCallStarted"]);
+
+			const duplicateBefore = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, realBeforeOptions);
+			expect(duplicateBefore.status).toBe(409);
+			expect(dispatches.map(({ name }) => name)).toEqual(["beforeToolCall"]);
+
+			const realAfterOptions = {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "real-call", toolName: "fixture", result: { content: [{ type: "text", text: "PRIVATE_RESULT" }] } }),
+			};
+			const realAfter = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/after-tool-result`, scopedToken, realAfterOptions);
+			expect(realAfter.status).toBe(200);
+			expect(dispatches.map(({ name }) => name)).toEqual(["beforeToolCall", "afterToolResult"]);
+			const duplicateAfter = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/after-tool-result`, scopedToken, realAfterOptions);
+			expect(duplicateAfter.status).toBe(409);
+			expect(dispatches.map(({ name }) => name)).toEqual(["beforeToolCall", "afterToolResult"]);
+
+			const session = manager.getSession(sessionId);
+			const end = {
+				type: "tool_execution_end",
+				toolCallId: "real-call",
+				toolName: "fixture",
+				isError: false,
+				result: { content: [{ type: "text", text: "PRIVATE_RESULT" }] },
+			};
+			manager.handleAgentLifecycle(session, end);
+			emitSessionEvent(session, end);
+			const persisted = {
+				type: "message_end",
+				message: {
+					role: "toolResult",
+					toolCallId: "real-call",
+					toolName: "fixture",
+					content: [{ type: "text", text: "PRIVATE_RESULT" }],
+				},
+			};
+			emitSessionEvent(session, persisted);
+			emitSessionEvent(session, persisted);
+			expect(toolFacts().map(([name]) => name)).toEqual(["toolCallStarted", "toolCallCompleted"]);
+			expect(JSON.stringify(toolFacts())).not.toContain("PRIVATE_ARGS");
+			expect(JSON.stringify(toolFacts())).not.toContain("PRIVATE_RESULT");
+			expect(session.hostToolCallLifecycle.has("real-call")).toBe(false);
+
+			const preArrivalRequest = sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "pre-arrival-call", toolName: "fixture", args: {} }),
+			});
+			await waitForToolCallbackWaiter(gateway, sessionId, "pre-arrival-call");
+			acceptToolStart(gateway, sessionId, "pre-arrival-call", "fixture");
+			expect((await preArrivalRequest).status).toBe(200);
+			expect(dispatches.map(({ name }) => name)).toEqual(["beforeToolCall", "afterToolResult", "beforeToolCall"]);
+
+			acceptToolStart(gateway, sessionId, "generation-call", "fixture");
+			const generationBefore = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/before-tool-call`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "generation-call", toolName: "fixture", args: {} }),
+			});
+			expect(generationBefore.status).toBe(200);
+			const currentGeneration = manager._currentRespawnGeneration(sessionId);
+			manager._sessionRespawnGenerations.set(sessionId, currentGeneration + 1);
+			const staleAfter = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/after-tool-result`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "generation-call", toolName: "fixture", result: {} }),
+			});
+			expect(staleAfter.status).toBe(409);
+			expect(dispatches.map(({ name }) => name)).toEqual(["beforeToolCall", "afterToolResult", "beforeToolCall", "beforeToolCall"]);
+
+			manager._sessionRespawnGenerations.set(sessionId, currentGeneration);
+			session.lifecycleGeneration = currentGeneration;
+			broadcastStatus(session, "terminated");
+			expect(session.hostToolCallLifecycle.size).toBe(0);
+			const afterCleanup = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}/host-hooks/after-tool-result`, scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ toolCallId: "pre-arrival-call", toolName: "fixture", result: {} }),
+			});
+			expect(afterCleanup.status).toBe(409);
+
+			const crossSession = await sandboxFetch(gateway.baseURL, "/api/sessions/not-owned/host-hooks/before-tool-call", scopedToken, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(beforeBody),
+			});
+			expect(crossSession.status).toBe(403);
+		} finally {
+			manager._sessionRespawnGenerations.delete(sessionId);
+			manager.setHostInterceptorPort(originalHostInterceptors);
+			publishSpy.mockRestore();
+		}
+	});
 
 	test("can access own session", async ({ gateway }) => {
 		const res = await sandboxFetch(gateway.baseURL, `/api/sessions/${sessionId}`, scopedToken);

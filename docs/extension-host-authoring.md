@@ -3,8 +3,9 @@
 This guide walks through making a **marketplace pack** that contributes Extension Host
 surfaces — a chat-block **renderer**, an interactive **server action handler**, side
 **panels**, long-lived **channels**, pack-owned **routes**, non-chat **entrypoints**, implicit
-pack-scoped **stores**, optional project-scoped **local data**, and **session** access. By the end you will understand every
-contribution point, *where each one is declared on disk*, and the one mediated **Host API**
+pack-scoped **stores**, optional project-scoped **local data**, **session** access, and lifecycle
+**hooks**. By the end you will understand every contribution point, *where each one is declared
+on disk*, and the one mediated **Host API**
 they all flow through — with no privileged escape hatch.
 
 The schema is laid out so that **each contribution lives where its runtime scope already is**:
@@ -29,7 +30,7 @@ This guide is the practical how-to.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
-**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`. Base capabilities report `true` on a current host; the additive `localData` capability is present only for a winning pack that declares it.
+**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session access, unified lifecycle hooks, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `5`. Base capabilities report `true` on a current host; feature-detect additive capabilities through `host.capabilities`. `sessionNotifications` and `projectNotifications` are available on the current host, while `localData` is present only for a winning pack that declares it.
 
 The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), `market-packs/terminal/` (the first-party xterm terminal over `host.channels`), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
@@ -46,7 +47,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Project local data** *(schema 2)* | top-level `pack.yaml` `localData:` | Browser, Gateway, and agent runtime | `host.localData.directory()` or the pack-keyed agent binding |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-| **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
+| **Lifecycle hooks** *(schema 2)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Gateway worker tier | Explicit `kind: interceptor` participates before authority; `kind: notification` observes canonical committed facts. Kindless legacy declarations remain inert. See [Unified Host hooks](host-hooks.md). |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -99,7 +100,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-  hooks/<name>.yaml               # schema-2 inert hook metadata (listed in contents.hooks)
+  hooks/<name>.yaml               # schema-2 runtime hooks with explicit kind; kindless legacy metadata is inert
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
   lib/                            # shared implementation modules, NOT entities
@@ -124,12 +125,13 @@ auto-discovered from `panels/*.yaml`).
 name: artifacts
 description: "Search tool + artifact viewer."
 version: 1.0.0
+schema: 2                                # required for channels and lifecycle hooks
 contents:
   roles:       []
   tools:       [artifact_demo]          # tools/<group> dir names
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
-  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2, metadata only
+  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; explicit kind makes it runtime-eligible
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -144,10 +146,10 @@ Rules:
 - **`contents.channels: string[]`** — schema-2 channel contribution basenames under
   `channels/<name>.yaml`. A channel file not listed here is not loaded, and duplicate
   channel names within a pack are rejected.
-- **`contents.hooks: string[]`** — schema-2 hook metadata basenames under
+- **`contents.hooks: string[]`** — schema-2 lifecycle-hook basenames under
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
-  read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-inert) for the strict
-  declaration contract and its intentionally non-runtime boundary.
+  read. See [Unified Extension Host hooks](host-hooks.md#authoring-runtime-hook-contributions)
+  for the declaration contract and explicit runtime opt-in.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -631,9 +633,10 @@ if (host.capabilities.channels) { /* safe to use host.channels */ }
 ```
 
 A current host reports the base client flags `true` — `{ invokeAction, requestRender, callRoute,
-session, ui, store, channels }`. A declared winning pack additionally receives `localData: true`;
-otherwise that flag and namespace are absent. The **server-side** base capabilities are `{ session,
-store, agents }`, with `localData: true` added only for a bound declared directory. `host.version`
+session, ui, store, channels, sessionNotifications, projectNotifications }`. A declared winning pack
+additionally receives `localData: true`; otherwise that flag and namespace are absent. The
+**server-side** base capabilities are `{ session, store, agents }`, with `localData: true` added only
+for a bound declared directory. `host.version`
 (`HOST_API_VERSION`, `1`) and `host.contractVersion`
 (`HOST_CONTRACT_VERSION`) identify the contract revision. All capabilities are purely additive
 (no signature churn), so code written against `capabilities` stays forward/backward-compatible.
@@ -1624,87 +1627,45 @@ Author-facing rules:
 
 Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
 
-### Hook metadata (`hooks/<name>.yaml`) — schema 2; inert
+### Lifecycle hooks (`hooks/<name>.yaml`) — schema 2
 
-**Status:** a `schema: 2` pack can declare hook **metadata** in the same pack-contribution
-registry used by panels, entrypoints, providers, and channels. This is an indexing seam for a
-future runtime contract, not a hook runtime: it lets tooling inspect a stable declaration without
-making the declaration operational. Schema-1 packs, and schema-2 packs with no `contents.hooks`,
-produce an empty hook list and otherwise keep their existing behavior.
+A hook declaration becomes runtime-eligible only with an explicit `kind`:
 
-Declare each file by basename in `pack.yaml`; only listed files are considered:
+- `kind: interceptor` participates before Bobbit commits an operation and returns a typed proposal;
+- `kind: notification` observes a canonical fact after Bobbit commits it.
 
-```yaml
-# pack.yaml
-schema: 2
-contents:
-  roles: []
-  tools: []
-  skills: []
-  hooks: [turn-audit]
-```
+A kind does not invoke the hook by itself. The declaration executes only when it is listed in
+`contents.hooks`, currently active, selected for the canonical boundary, and authorized by live
+grant checks. Installation and indexing alone never call a handler.
 
-```yaml
-# hooks/turn-audit.yaml
-id: audit.turn
-module: ../lib/audit-turn.mjs
-# One or more distinct events from the supported set.
-events: [beforePrompt, afterTurn]
-mode: observe
-# Required; an empty list is also valid.
-capabilities: [store, session]
-budget:
-  maxTokens: 1200
-  timeoutMs: 1000
-# Opaque declaration metadata, retained verbatim when it is a mapping.
-config:
-  label: Turn audit
-activation:
-  requiresConfig: [auditEndpoint]
-```
+Copyable YAML and module examples, the canonical catalogues, failure policies, delivery guarantees,
+and privacy rules live in [Unified Extension Host hooks](host-hooks.md). Keep that page open while
+authoring; `src/shared/extension-host/host-hooks.ts` is the final runtime/type source of truth.
 
-The declaration fields are strict:
+Only basenames listed in `contents.hooks` load. Hook IDs are stable and pack-local. Modules resolve
+relative to the hook YAML and must remain inside the pack root. Declared names and notification
+scope/name pairs must be canonical and duplicate-free. Optional `capabilities`, `budget`, `config`,
+and `activation.requiresConfig` use the same strict loader and registry activation path as other
+pack contributions.
 
-- **`id`** is a stable pack-local identifier matching
-  `^[a-z0-9][a-z0-9_.-]*$` case-insensitively. It must be unique within the pack. The same
-  id in separate packs is valid because hook identity is `(packId, hook.id)`.
-- **`module`** is a non-empty relative path from the hook YAML. It must resolve within the
-  pack root after realpath-aware containment checks; absolute, syntactically unsafe, and
-  pack-escaping paths reject the pack.
-- **`events`** is required, non-empty, and duplicate-free. Supported values are
-  `sessionSetup`, `beforePrompt`, `afterTurn`, `beforeCompact`, `sessionShutdown`, and
-  `goalProvisioned`.
-- **`mode`** is required and is exactly `observe` or `decide`.
-- **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
-  and `agents`; `[]` is valid. These are descriptive metadata only and do not confer access.
-- **`budget`** is optional. An omitted or non-mapping `budget`, and each missing, non-numeric,
-  or non-finite field, falls back independently to `maxTokens: 1600` and `timeoutMs: 1500`.
-  Finite numeric values are then clamped: `maxTokens` to `64..8192` and `timeoutMs` to
-  `100..10000`.
-- **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
-  when present, must be a mapping containing no keys other than optional `requiresConfig`.
-  That value, when present, is a non-empty, duplicate-free array of non-empty strings.
+Runtime ordering follows winning packs from low to high precedence and then declaration/name order.
+The host checks current activation and grants before invocation and again before applying an
+interceptor result. Registry invalidation removes a disabled hook from future selection. It also
+aborts an in-flight interceptor dispatch, whose result cannot apply. An observational notification
+handler that already started is not aborted by registry invalidation: it remains bounded by its
+deadline, its return value is ignored, and the host detects revocation at settlement. Its settlement
+cannot affect other handlers or roll back the already-published source fact.
 
-Basenames must be safe pack-local names. The loader resolves `hooks/<basename>.yaml`, then
-`hooks/<basename>.yml`, and never scans the directory. A malformed YAML file or invalid field
-emits a warning and drops only that declaration, so valid siblings and unrelated packs remain
-available. Repeating a manifest basename, repeating a valid hook id within one pack, or using an
-unsafe/escaping module path is an ambiguous or unsafe hard conflict: that winning pack is rejected.
+For a session-scoped notification handler, declared `ctx.host.session` and `ctx.host.agents`
+capabilities remain feature-detectable but are live-authorized against the source session and the
+project captured for the handler. Each operation checks before work and after asynchronous
+settlement. Moving the session to another project therefore makes later operations fail, withholds
+an in-flight read/result, and best-effort dismisses a child whose spawn raced the move. The handler
+may finish its own bounded computation, but it cannot carry old-project session authority forward.
 
-`PackContributionRegistry.listHooks(projectId)` returns the normalized metadata in stable order:
-winning packs from low to high precedence, then each pack's manifest order. When multiple installed
-packs have the same structural `packId`, only the highest-precedence pack is loaded; lower-precedence
-copies are shadowed before their hook files are read.
-
-The existing `pack_activation.hooks` disabled-reference array uses the manifest basename
-(`listName`). After registry invalidation, a disabled reference removes that declaration from both
-the pack contribution and `listHooks`; clearing the reference restores it. This filtering does not
-inspect `config` or `activation`.
-
-**Non-runtime boundary.** Loading or listing hook metadata does not import the `module`, execute
-code, dispatch an event, establish authorization, evaluate `config` or `activation`, start timers,
-mutate state, or register a UI surface. It creates no executable hook registration. Authors must
-not rely on a hook file for any runtime behavior in this release.
+A kindless legacy declaration using `events` plus `mode: observe | decide` remains listable metadata
+but is deliberately inert. Bobbit does not silently activate old files during upgrade. Existing
+`providers/*.yaml` remain the compatibility runtime for Lifecycle Hub context hooks.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
@@ -1801,7 +1762,7 @@ providers. Accepted blocks are wrapped in a `<context-block id=… source=… au
 reason=…>` envelope (attribute values are newline-stripped and `"`-escaped). Full algorithm and
 trace details: [docs/lifecycle-hub.md](lifecycle-hub.md).
 
-### `host.session.*` — transcript reads, posts, and live events
+### `host.session.*` and `host.project.notifications` — reads, posts, and live facts
 
 Reads are **own-session-scoped**; writes require a **genuine user gesture + a server-minted
 permit**.
@@ -1813,8 +1774,15 @@ const env = await host.session.readTranscript({ offset: 0, limit: 50, pattern: "
 const call = await host.session.readToolCall(toolUseId);
 //   → ToolCallRecord | null
 
-// LIVE EVENTS (typed; returns an unsubscribe fn):
+// LEGACY LIVE EVENTS (typed; returns an unsubscribe fn):
 const off = host.session.subscribe("tool_result", ({ record }) => { /* … */ });
+
+// CANONICAL COMMITTED FACTS (Host contract v5):
+const offStatus = host.session.notifications.subscribe("statusChanged", (event) => {
+  console.log(event.payload.status, event.aggregate.revision);
+});
+const offGoal = host.project.notifications.subscribe("goalUpdated", () => refreshGoals());
+const offGap = host.project.notifications.onRefreshRequired(() => refreshGoals());
 
 // WRITE — drives the agent. MUST be called from a real user gesture:
 await host.session.postMessage({ role: "user", text: "re-run the tests", resumeTurn: true });
@@ -1829,6 +1797,13 @@ await host.session.postMessage({ role: "user", text: "re-run the tests", resumeT
   session WebSocket path and carries a one-time, content-bound, server-minted permit —
   captured/replayed/forged/tampered posts are rejected server-side.
 - **Cross-session posting is impossible** — the target is the WS connection's own session.
+- **Canonical notifications are snapshot invalidations, not replay.** Session facts are bound to
+  this session; project facts are bound to its server-resolved project with no client-supplied ID.
+  Mount, a server-observed session project move, reconnect, stream gaps, and pressure call
+  `onRefreshRequired`; re-read the authoritative snapshot instead of reconstructing state from
+  event history. On a move, the server rebinds the live socket and suppresses project deltas until
+  that refresh, so the next read must use the destination project's authoritative state.
+  Subscription cleanup functions are idempotent. See [Unified Host hooks](host-hooks.md#browser-host-api).
 
 ### `host.agents` — launch and orchestrate child agents
 
@@ -2248,6 +2223,8 @@ sandbox/read-only enforcement. As an author, your obligations are:
 - [ ] **Never build a URL or hash string** — `host.ui.openPanel` / `host.ui.navigate` take structured `{ panelId | route, params }` targets.
 - [ ] **No post / navigate / action / surprising process start on mount** — `host.session.postMessage` requires a real user gesture; actions/navigations/process-like channel opens should be user-driven UX, even though channel authorization is scoped declaration + one-shot permit rather than launcher activation.
 - [ ] **Never supply a pack id, `tool`, token, or transport to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
+- [ ] **Choose hook authority correctly** — use an interceptor only to participate before commit; use a notification to observe an immutable committed fact. Never treat a notification return value as an applied mutation.
+- [ ] **Refresh rather than replay notifications** — subscribe to `onRefreshRequired`, read the authoritative snapshot on mount/reconnect/gap, and use idempotent teardown functions.
 - [ ] **Declare channels in `contents.channels` + `channels/<name>.yaml`** — `host.channels.open` succeeds only for the calling pack's declared channels; do not use routes as streaming transports.
 - [ ] **Treat `openGrant` as protocol integrity, not user authority** — Bobbit-owned code mints/consumes it from a validated surface token + declared channel; missing/expired/replayed/mismatched permits fail closed.
 - [ ] **Handle channel backpressure and close events** — every `open`/`attach`/`send`/`close` promise can reject, and `onClose` is the lifecycle source of truth.

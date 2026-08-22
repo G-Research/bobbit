@@ -38,6 +38,7 @@ export function loadBobbitTools(): Map<string, CapturedTool> {
 export interface FetchCall {
 	url: string;
 	method: string;
+	headers: Record<string, string>;
 	body: any;
 }
 
@@ -57,8 +58,9 @@ export function stubFetch(impl?: (url: string, init: any) => StubResponse): Fetc
 	const calls: FetchCall[] = [];
 	globalThis.fetch = (async (url: any, init: any) => {
 		const method = init?.method ?? "GET";
+		const headers = { ...(init?.headers ?? {}) } as Record<string, string>;
 		const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body;
-		calls.push({ url: String(url), method, body });
+		calls.push({ url: String(url), method, headers, body });
 		const r = impl ? impl(String(url), init) : {};
 		const status = r.status ?? 200;
 		const text = r.text !== undefined ? r.text : r.body !== undefined ? JSON.stringify(r.body) : JSON.stringify({ ok: true });

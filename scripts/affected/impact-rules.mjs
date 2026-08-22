@@ -649,6 +649,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/host-tool-interceptor-order.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned generated host tool interceptor bridge"),
+		]),
+	},
+	{
 		consumer: "tests2/core/hung-test-reporter.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "reporterUrl", ["indirect:hung-test-reporter-module"]),
@@ -1097,6 +1103,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "seeded.transcriptFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/host-hooks-server-boundaries.test.ts",
+		allowReason: "isolated ModuleHost security fixture result written inside the integration gateway",
+		reads: frozen([
+			{ expression: "fixture.resultPath", count: 1 },
 		]),
 	},
 	{

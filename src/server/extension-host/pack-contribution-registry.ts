@@ -38,7 +38,7 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
-	/** List active inert hook metadata across all active packs. */
+	/** List active hook declarations; legacy rows remain inert to runtime consumers. */
 	listHooks(projectId: string | undefined): HookContribution[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
@@ -96,6 +96,10 @@ const DEFAULT_KEY = "\u0000default";
 
 export class PackContributionRegistry implements PackContributionResolver {
 	private cache = new Map<string, IndexedScope>();
+	/** Monotonic process-local activation generation. Runtime hook settlement is
+	 * accepted only while it still matches this generation. */
+	private activationEpoch = 0;
+	private readonly invalidationListeners = new Set<() => void>();
 
 	/**
 	 * @param enumerate  Returns the installed market-pack entries for a project
@@ -111,9 +115,49 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledHooks?: DisabledEntrypointsLookup,
 	) {}
 
-	/** Drop the per-project index cache (rebuilt lazily on next read). */
+	/** Drop the per-project index cache and fence every in-flight runtime hook. */
 	invalidate(): void {
 		this.cache = new Map();
+		this.activationEpoch++;
+		for (const listener of [...this.invalidationListeners]) listener();
+	}
+
+	onInvalidate(listener: () => void): () => void {
+		this.invalidationListeners.add(listener);
+		return () => { this.invalidationListeners.delete(listener); };
+	}
+
+	getActivationEpoch(): number {
+		return this.activationEpoch;
+	}
+
+	/** Live authority check used immediately before invocation and result apply. */
+	isProviderAuthorized(
+		projectId: string | undefined,
+		packId: string,
+		providerId: string,
+		listName: string,
+		epoch: number,
+	): boolean {
+		if (epoch !== this.activationEpoch) return false;
+		return !!this.getPack(projectId, packId)?.providers.some(
+			(provider) => provider.id === providerId && provider.listName === listName,
+		);
+	}
+
+	isHookAuthorized(
+		projectId: string | undefined,
+		packId: string,
+		contributionId: string,
+		listName: string,
+		epoch: number,
+		requiredCapabilities: readonly string[] = [],
+	): boolean {
+		if (epoch !== this.activationEpoch) return false;
+		const hook = this.getPack(projectId, packId)?.hooks.find(
+			(candidate) => candidate.id === contributionId && candidate.listName === listName && candidate.kind !== undefined,
+		);
+		return !!hook && requiredCapabilities.every((capability) => hook.capabilities.some((declared) => declared === capability));
 	}
 
 	list(projectId: string | undefined): PackContributions[] {
@@ -225,14 +269,17 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
 			}
-			// Hook declarations remain inert metadata. Activation only filters their
-			// manifest listName; it never evaluates config or confers capabilities.
+			// Legacy rows retain their metadata-only compatibility behavior. Explicit
+			// runtime rows additionally honor declaration config activation; none of
+			// these checks imports pack code or authorizes undeclared capabilities.
 			const disabledHooks = this.disabledHooks
 				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
 				: undefined;
-			if (disabledHooks && disabledHooks.size > 0) {
-				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
-			}
+			const activeHooks = contrib.hooks.filter((hook) => {
+				if (disabledHooks?.has(hook.listName)) return false;
+				return hook.kind === undefined || hookActivationSatisfied(hook);
+			});
+			if (activeHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: activeHooks };
 			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
 			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };
 			loaded.push(contrib);
@@ -327,6 +374,17 @@ function safeDiagnosticCode(diagnostic: unknown): string {
 	return typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code)
 		? code
 		: "STORE_READ_UNAVAILABLE";
+}
+
+function hookActivationSatisfied(hook: HookContribution): boolean {
+	const required = hook.activation?.requiresConfig;
+	if (!required || required.length === 0) return true;
+	const config = hook.config ?? {};
+	return required.every((key) => {
+		const value = config[key];
+		if (value === undefined || value === null) return false;
+		return typeof value !== "string" || value.trim().length > 0;
+	});
 }
 
 function providerActivationSatisfied(provider: ProviderContribution): boolean {

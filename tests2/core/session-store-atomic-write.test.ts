@@ -217,6 +217,62 @@ describe("SessionStore atomic write", () => {
 		assert.equal(memfs.existsSync(TMP), false, "serialized writers must leave no shared tmp artifact");
 	});
 
+	it("keeps a failed archive hidden and retryable until one durable acknowledgement", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("archive-once"));
+		await store.flushAsync();
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		(memfs.promises as any).rename = async () => { throw new Error("injected archive rename failure"); };
+		try {
+			await assert.rejects(store.archiveAsync("archive-once"), /injected archive rename failure/);
+			assert.equal(store.get("archive-once")?.archived, true, "failed publication still suppresses restore/getLive");
+			assert.equal(store.getLive().some(session => session.id === "archive-once"), false);
+		} finally {
+			(memfs.promises as any).rename = originalRename;
+		}
+
+		const revision = store.get("archive-once")?.archivedAt;
+		store.put(makeSession("unrelated-write"));
+		await store.flushAsync();
+		const epochAfterUnrelatedWrite = store.getWrittenEpoch();
+		assert.equal(await store.archiveAsync("archive-once"), true, "the pending archive remains explicitly acknowledgeable");
+		assert.equal(store.getWrittenEpoch(), epochAfterUnrelatedWrite, "an unrelated write may already carry the pending archive across its fence");
+		assert.equal(store.get("archive-once")?.archivedAt, revision, "retry keeps the original stable archive revision");
+		assert.equal(await store.archiveAsync("archive-once"), false, "a repeated archive is not a transition");
+
+		const restored = new SessionStore(stateDir, memfs);
+		assert.equal(await restored.archiveAsync("archive-once"), false, "a durably archived row is not pending after restart");
+	});
+
+	it("gives only one concurrent archive caller the durable transition", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("archive-concurrent"));
+		await store.flushAsync();
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let releaseRename!: () => void;
+		let enterRename!: () => void;
+		const renameEntered = new Promise<void>((resolve) => { enterRename = resolve; });
+		const renameReleased = new Promise<void>((resolve) => { releaseRename = resolve; });
+		(memfs.promises as any).rename = async (from: PathLike, to: PathLike) => {
+			if (path.resolve(String(to)) === path.resolve(STORE_FILE)) {
+				enterRename();
+				await renameReleased;
+			}
+			return originalRename(from, to);
+		};
+		try {
+			const first = store.archiveAsync("archive-concurrent");
+			await renameEntered;
+			const second = store.archiveAsync("archive-concurrent");
+			releaseRename();
+			assert.deepEqual(await Promise.all([first, second]), [true, false]);
+			assert.equal(await store.archiveAsync("archive-concurrent"), false);
+		} finally {
+			releaseRename?.();
+			(memfs.promises as any).rename = originalRename;
+		}
+	});
+
 	it("does not leave a .tmp file behind after a successful save", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));

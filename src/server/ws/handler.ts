@@ -57,6 +57,15 @@ import {
 	SessionCommandSerialiser,
 } from "./session-command-serialiser.js";
 import { isSocketSendable } from "./socket-sendability.js";
+import {
+	hasUiWebSocketPrincipal,
+	type PrincipalTaggedWebSocket,
+	type WebSocketAuthPrincipal,
+} from "./ui-principal.js";
+import { bindHostNotificationSocket, unbindHostNotificationSocket } from "../extension-host/host-notification-socket-router.js";
+
+export { hasUiWebSocketPrincipal } from "./ui-principal.js";
+export type { WebSocketAuthPrincipal } from "./ui-principal.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -734,24 +743,6 @@ function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
 		|| (f.kind === "json" && Object.prototype.hasOwnProperty.call(f, "data") && f.data !== undefined);
 }
 
-export type WebSocketAuthPrincipal = Readonly<{
-	kind: "admin" | "sandbox" | "localhost";
-}>;
-
-type PrincipalTaggedWebSocket = WebSocket & {
-	authPrincipal?: WebSocketAuthPrincipal;
-};
-
-/**
- * Sidebar/global UI payloads are restricted to server-authenticated user
- * principals. Product metadata such as clientKind is intentionally ignored:
- * sandbox bearer tokens must never acquire global UI broadcast authority.
- */
-export function hasUiWebSocketPrincipal(ws: WebSocket): boolean {
-	const kind = (ws as PrincipalTaggedWebSocket).authPrincipal?.kind;
-	return kind === "admin" || kind === "localhost";
-}
-
 export function handleWebSocketConnection(
 	ws: WebSocket,
 	sessionId: string,
@@ -989,6 +980,15 @@ export function handleWebSocketConnection(
 				if (archived) {
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
+					const persistedArchivedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+					const archivedProjectId = persistedArchivedProjectId && archived.projectId && persistedArchivedProjectId !== archived.projectId
+						? undefined
+						: persistedArchivedProjectId ?? archived.projectId;
+					if (authMsg.clientKind === "app" && archivedProjectId && hasUiWebSocketPrincipal(ws)) {
+						bindHostNotificationSocket(ws, { sessionId, projectId: archivedProjectId });
+					} else {
+						unbindHostNotificationSocket(ws);
+					}
 					send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
@@ -1011,6 +1011,19 @@ export function handleWebSocketConnection(
 			// dashboard events.
 			(ws as any).sessionId = sessionId;
 			sessionManager.addClient(sessionId, ws);
+
+			// Canonical Host notifications use a separate exact server-owned binding.
+			// Fail closed if live and persisted project ownership disagree; product
+			// metadata selects the UI transport but never supplies either authority ID.
+			const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+			const exactProjectId = persistedProjectId && session.projectId && persistedProjectId !== session.projectId
+				? undefined
+				: persistedProjectId ?? session.projectId;
+			if (authMsg.clientKind === "app" && exactProjectId && hasUiWebSocketPrincipal(ws)) {
+				bindHostNotificationSocket(ws, { sessionId, projectId: exactProjectId });
+			} else {
+				unbindHostNotificationSocket(ws);
+			}
 
 			// Pack-bound surface-token minting uses an app-connection protocol key so
 			// sanctioned Host API calls bind to this authenticated session and an active
@@ -2490,6 +2503,7 @@ export function handleWebSocketConnection(
 
 	ws.on("close", () => {
 		clearTimeout(authTimeout);
+		unbindHostNotificationSocket(ws);
 		if (channelRegistry && attachedExtChannels.size > 0) {
 			for (const [channelId, attached] of attachedExtChannels) {
 				void Promise.resolve(channelRegistry.detach({ sessionId: attached.sessionId, packId: attached.packId, channelId, clientId })).catch((err) => {

@@ -12,7 +12,7 @@
 //   - `channels/<name>.yaml`    → ChannelContribution[] (filtered by
 //                                  manifest.contents.channels[])
 //   - `hooks/<name>.yaml`       → HookContribution[] (filtered by
-//                                  manifest.contents.hooks[]; metadata only)
+//                                  manifest.contents.hooks[]; explicit kind opts in)
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -39,6 +39,7 @@ import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
+import { HOST_INTERCEPTOR_CATALOGUE, HOST_NOTIFICATION_CATALOGUE } from "../../shared/extension-host/host-hooks.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -62,7 +63,9 @@ const PROVIDER_HOOKS = new Set([
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
-const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
+const LEGACY_HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
+const INTERCEPTOR_HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "kind", "interceptors", "failurePolicy", "capabilities", "budget", "config", "activation"]);
+const NOTIFICATION_HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "kind", "notifications", "capabilities", "budget", "config", "activation"]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -235,22 +238,56 @@ export interface ProviderContribution {
 export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
 export type HookMode = "observe" | "decide";
 export type HookCapability = "store" | "session" | "agents";
+export type HookFailurePolicy = "failOpen" | "failClosed";
 
-/** A manifest-listed, inert hook metadata declaration. This is never imported,
- * authorized, config-gated, or registered for dispatch by the contribution loader. */
-export interface HookContribution {
+interface HookContributionBase {
 	id: string;
 	module: string;
-	events: HookEvent[];
-	mode: HookMode;
 	capabilities: HookCapability[];
-	budget: { maxTokens: number; timeoutMs: number };
+	budget: { maxTokens: number; timeoutMs: number; declaredTimeoutMs?: number };
 	config?: Record<string, unknown>;
 	activation?: { requiresConfig: string[] };
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
 }
+
+/** The pre-host-hooks declaration remains listable metadata and is deliberately inert. */
+export interface LegacyInertHookContribution extends HookContributionBase {
+	kind?: undefined;
+	events: HookEvent[];
+	mode: HookMode;
+	interceptors?: undefined;
+	notifications?: undefined;
+	failurePolicy?: undefined;
+}
+
+/** An explicit, executable pre-authority interceptor declaration. */
+export interface InterceptorHookContribution extends HookContributionBase {
+	kind: "interceptor";
+	interceptors: Array<keyof typeof HOST_INTERCEPTOR_CATALOGUE>;
+	failurePolicy?: HookFailurePolicy;
+	events?: undefined;
+	mode?: undefined;
+	notifications?: undefined;
+}
+
+export interface HookNotificationSelector {
+	scope: "session" | "project";
+	name: keyof typeof HOST_NOTIFICATION_CATALOGUE;
+}
+
+/** An explicit, observational post-authority notification declaration. */
+export interface NotificationHookContribution extends HookContributionBase {
+	kind: "notification";
+	notifications: HookNotificationSelector[];
+	events?: undefined;
+	mode?: undefined;
+	interceptors?: undefined;
+	failurePolicy?: undefined;
+}
+
+export type HookContribution = LegacyInertHookContribution | InterceptorHookContribution | NotificationHookContribution;
 
 /** Pack-store key under which a provider's persisted flat config overrides live
  *  (server-derived packId scopes the store; this names the per-provider record).
@@ -304,7 +341,7 @@ export interface PackContributions {
 	providers: ProviderContribution[];
 	/** Channel handler files listed by contents.channels[]. */
 	channels: ChannelContribution[];
-	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
+	/** Schema-2 hook files. Kindless legacy rows are inert; explicit kinds are runtime contributions. */
 	hooks: HookContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
@@ -636,8 +673,8 @@ function parseHookActivation(raw: unknown): ParsedHookActivation {
 	return { activation: { requiresConfig } };
 }
 
-/** Load `hooks/<name>.yaml` ONLY for schema-2 names listed in contents.hooks.
- * These are inert declarations: loading only validates and indexes metadata. */
+/** Load manifest-listed hook declarations. Legacy `{events,mode}` rows stay inert;
+ * only an explicit `kind` opts a declaration into runtime execution. */
 export function loadHooks(packRoot: string, manifest: PackManifest): HookContribution[] {
 	if ((manifest.schema ?? 1) < 2) return [];
 	const listNames = manifest.contents.hooks ?? [];
@@ -651,12 +688,8 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			console.warn(`[pack-contributions] hook listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
 			continue;
 		}
-		// Check duplicate refs before reading so malformed files cannot hide this
-		// ambiguous activation identity.
 		if (seenListName.has(listName)) {
-			throw new PackContributionError(
-				`pack "${packIdFromRoot(packRoot)}" declares hook listName "${listName}" more than once; hook listNames must be unique within a pack`,
-			);
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares hook listName "${listName}" more than once; hook listNames must be unique within a pack`);
 		}
 		seenListName.add(listName);
 		const sourceFile = resolveContributionFile(dir, listName);
@@ -665,9 +698,8 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			continue;
 		}
 		let data: unknown;
-		try {
-			data = readYaml(sourceFile);
-		} catch (err) {
+		try { data = readYaml(sourceFile); }
+		catch (err) {
 			console.warn(`[pack-contributions] skipping missing/malformed hook '${listName}' (${sourceFile}): ${String(err)}`);
 			continue;
 		}
@@ -675,7 +707,13 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			console.warn(`[pack-contributions] hook '${listName}' (${sourceFile}) is not a mapping; dropping`);
 			continue;
 		}
-		const unknownKey = Object.keys(data).find((key) => !HOOK_TOP_LEVEL_KEYS.has(key));
+		const kind = data.kind;
+		const allowedKeys = kind === "interceptor"
+			? INTERCEPTOR_HOOK_TOP_LEVEL_KEYS
+			: kind === "notification"
+				? NOTIFICATION_HOOK_TOP_LEVEL_KEYS
+				: LEGACY_HOOK_TOP_LEVEL_KEYS;
+		const unknownKey = Object.keys(data).find((key) => !allowedKeys.has(key));
 		if (unknownKey !== undefined) {
 			console.warn(`[pack-contributions] hook '${listName}' (${sourceFile}) has unknown top-level key ${JSON.stringify(unknownKey)}; dropping`);
 			continue;
@@ -690,62 +728,12 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has missing module; dropping`);
 			continue;
 		}
-		if (!isSafeRelativePath(mod)) {
-			throw new PackContributionError(
-				`pack "${packIdFromRoot(packRoot)}" hook "${id}" has unsafe module path`,
-			);
+		if (!isSafeRelativePath(mod)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" hook "${id}" has unsafe module path`);
+		if (!isPackPathWithinRoot(packRoot, path.resolve(path.dirname(sourceFile), mod))) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" hook "${id}" module resolves outside the pack root`);
 		}
-		const resolvedModule = path.resolve(path.dirname(sourceFile), mod);
-		if (!isPackPathWithinRoot(packRoot, resolvedModule)) {
-			throw new PackContributionError(
-				`pack "${packIdFromRoot(packRoot)}" hook "${id}" module resolves outside the pack root`,
-			);
-		}
-		const events = data.events;
-		if (!Array.isArray(events) || events.length === 0) {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid events; dropping`);
-			continue;
-		}
-		const normalizedEvents: HookEvent[] = [];
-		const seenEvents = new Set<string>();
-		let invalidEvents = false;
-		for (const event of events) {
-			if (typeof event !== "string" || !HOOK_EVENTS.has(event as HookEvent) || seenEvents.has(event)) {
-				invalidEvents = true;
-				break;
-			}
-			seenEvents.add(event);
-			normalizedEvents.push(event as HookEvent);
-		}
-		if (invalidEvents) {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) events must be supported and duplicate-free; dropping`);
-			continue;
-		}
-		const mode = data.mode;
-		if (mode !== "observe" && mode !== "decide") {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid mode; dropping`);
-			continue;
-		}
-		const capabilities = data.capabilities;
-		if (!Array.isArray(capabilities)) {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid capabilities; dropping`);
-			continue;
-		}
-		const normalizedCapabilities: HookCapability[] = [];
-		const seenCapabilities = new Set<string>();
-		let invalidCapabilities = false;
-		for (const capability of capabilities) {
-			if (typeof capability !== "string" || !HOOK_CAPABILITIES.has(capability as HookCapability) || seenCapabilities.has(capability)) {
-				invalidCapabilities = true;
-				break;
-			}
-			seenCapabilities.add(capability);
-			normalizedCapabilities.push(capability as HookCapability);
-		}
-		if (invalidCapabilities) {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) capabilities must be supported and duplicate-free; dropping`);
-			continue;
-		}
+		const capabilities = parseHookCapabilities(data.capabilities, id, sourceFile);
+		if (!capabilities) continue;
 		let config: Record<string, unknown> | undefined;
 		if (data.config !== undefined) {
 			if (!isPlainObject(data.config)) {
@@ -759,30 +747,112 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;
 		}
-		if (seenId.has(id)) {
-			throw new PackContributionError(
-				`pack "${packIdFromRoot(packRoot)}" declares hook id "${id}" more than once; hook ids must be unique within a pack`,
-			);
-		}
-		seenId.add(id);
+		if (seenId.has(id)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares hook id "${id}" more than once; hook ids must be unique within a pack`);
 		const budgetRaw = isPlainObject(data.budget) ? data.budget : {};
-		const hook: HookContribution = {
-			id,
-			module: mod,
-			events: normalizedEvents,
-			mode,
-			capabilities: normalizedCapabilities,
+		const base = {
+			id, module: mod, capabilities,
 			budget: {
 				maxTokens: clampNumber(budgetRaw.maxTokens, 1600, 64, 8192),
 				timeoutMs: clampNumber(budgetRaw.timeoutMs, 1500, 100, 10000),
+				...(kind !== undefined && typeof budgetRaw.timeoutMs === "number" && Number.isFinite(budgetRaw.timeoutMs)
+					? { declaredTimeoutMs: clampNumber(budgetRaw.timeoutMs, 1500, 100, 10000) }
+					: {}),
 			},
-			listName,
-			sourceFile,
-			packRoot,
+			listName, sourceFile, packRoot,
+			...(config === undefined ? {} : { config }),
+			...(parsedActivation.activation ? { activation: parsedActivation.activation } : {}),
 		};
-		if (config !== undefined) hook.config = config;
-		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
+		let hook: HookContribution | undefined;
+		if (kind === "interceptor") {
+			const interceptors = parseHookNames(data.interceptors, HOST_INTERCEPTOR_CATALOGUE);
+			if (!interceptors) {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) interceptors must be canonical and duplicate-free; dropping`);
+				continue;
+			}
+			const failurePolicy = data.failurePolicy;
+			if (failurePolicy !== undefined && failurePolicy !== "failOpen" && failurePolicy !== "failClosed") {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid failurePolicy; dropping`);
+				continue;
+			}
+			if (failurePolicy && interceptors.some((name) => !HOST_INTERCEPTOR_CATALOGUE[name].allowedFailurePolicies.has(failurePolicy))) {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) failurePolicy is not allowed by every declared interceptor; dropping`);
+				continue;
+			}
+			hook = { ...base, kind, interceptors, ...(failurePolicy ? { failurePolicy } : {}) } as InterceptorHookContribution;
+		} else if (kind === "notification") {
+			const notifications = parseNotificationSelectors(data.notifications);
+			if (!notifications) {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) notifications must contain canonical scope/name selectors and be duplicate-free; dropping`);
+				continue;
+			}
+			hook = { ...base, kind, notifications } as NotificationHookContribution;
+		} else {
+			if (kind !== undefined) {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid kind; dropping`);
+				continue;
+			}
+			const events = parseHookNames(data.events, Object.fromEntries([...HOOK_EVENTS].map((name) => [name, true])));
+			if (!events) {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) events must be supported and duplicate-free; dropping`);
+				continue;
+			}
+			if (data.mode !== "observe" && data.mode !== "decide") {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid mode; dropping`);
+				continue;
+			}
+			hook = { ...base, events: events as HookEvent[], mode: data.mode } as LegacyInertHookContribution;
+		}
+		seenId.add(id);
 		out.push(hook);
+	}
+	return out;
+}
+
+function parseHookCapabilities(raw: unknown, id: string, sourceFile: string): HookCapability[] | undefined {
+	if (!Array.isArray(raw)) {
+		console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid capabilities; dropping`);
+		return undefined;
+	}
+	const out: HookCapability[] = [];
+	const seen = new Set<string>();
+	for (const value of raw) {
+		if (typeof value !== "string" || !HOOK_CAPABILITIES.has(value as HookCapability) || seen.has(value)) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) capabilities must be supported and duplicate-free; dropping`);
+			return undefined;
+		}
+		seen.add(value);
+		out.push(value as HookCapability);
+	}
+	return out;
+}
+
+function parseHookNames<T extends Record<string, unknown>>(raw: unknown, catalogue: T): Array<keyof T> | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: Array<keyof T> = [];
+	const seen = new Set<string>();
+	for (const value of raw) {
+		if (typeof value !== "string" || !Object.prototype.hasOwnProperty.call(catalogue, value) || seen.has(value)) return undefined;
+		seen.add(value);
+		out.push(value as keyof T);
+	}
+	return out;
+}
+
+function parseNotificationSelectors(raw: unknown): HookNotificationSelector[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: HookNotificationSelector[] = [];
+	const seen = new Set<string>();
+	for (const value of raw) {
+		if (!isPlainObject(value) || Object.keys(value).some((key) => key !== "scope" && key !== "name")) return undefined;
+		const { scope, name } = value;
+		if ((scope !== "session" && scope !== "project") || typeof name !== "string") return undefined;
+		if (!Object.prototype.hasOwnProperty.call(HOST_NOTIFICATION_CATALOGUE, name)) return undefined;
+		const definition = HOST_NOTIFICATION_CATALOGUE[name as keyof typeof HOST_NOTIFICATION_CATALOGUE];
+		if (definition.scope !== scope) return undefined;
+		const key = `${scope}:${name}`;
+		if (seen.has(key)) return undefined;
+		seen.add(key);
+		out.push({ scope, name: name as keyof typeof HOST_NOTIFICATION_CATALOGUE });
 	}
 	return out;
 }

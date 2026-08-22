@@ -628,6 +628,10 @@ export default function (pi: ExtensionAPI) {
 	let baseUrl: string;
 	const envToken = process.env.BOBBIT_TOKEN;
 	const envUrl = process.env.BOBBIT_GATEWAY_URL;
+	// Bind gateway requests to this exact host-issued session when available.
+	// Causation controls remain server-owned and are derived from this identity;
+	// no caller-provided root, depth, or correlation headers are forwarded.
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
 	if (envToken && envUrl) {
 		token = envToken;
 		baseUrl = envUrl.replace(/\/+$/, "");
@@ -650,7 +654,11 @@ export default function (pi: ExtensionAPI) {
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
 		const resp = await fetch(`${baseUrl}${urlPath}`, {
 			method,
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+				...(sessionSecret ? { "X-Bobbit-Session-Secret": sessionSecret } : {}),
+			},
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 		});
 		const text = await resp.text();

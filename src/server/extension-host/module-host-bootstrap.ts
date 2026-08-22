@@ -101,7 +101,7 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers";
+	exportKind: "actions" | "routes" | "providers" | "hooks";
 	member: string;
 	/** Serializable handler context (identity + capability flags; NO live host). */
 	ctx: SerializableCtx;
@@ -672,7 +672,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
 		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
-		const group = msg.exportKind === "providers"
+		const group = msg.exportKind === "providers" || msg.exportKind === "hooks"
 			? ((mod.default as Record<string, unknown> | undefined) ?? mod)
 			: (mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind]);
 		// Export-map validation now lives HERE (moved off the parent so the parent never
@@ -690,7 +690,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
-		const ctx = msg.exportKind === "providers"
+		const ctx = msg.exportKind === "providers" || msg.exportKind === "hooks"
 			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
 			: {
 				host: buildHostProxy(msg.ctx),

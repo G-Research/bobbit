@@ -11,7 +11,7 @@ guardProcessEnv();
  *
  * Covers:
  *   1. Codegen string shape — delimiters, gateway URL/token reads with
- *      state-file fallback, AbortController + 2500/5000 timeout paths,
+ *      state-file fallback, AbortController + bounded callback timeout paths,
  *      `before_agent_start` + `context` + `session_before_compact`
  *      subscriptions, hidden custom-message dynamic context path (never
  *      event.prompt), and future-context filtering of stale hidden dynamic context.
@@ -34,6 +34,7 @@ import {
 	stripDelimitedTail,
 	providersDeclareTurnHooks,
 	generateProviderBridgeExtension,
+	BEFORE_COMPACT_TIMEOUT_MS,
 } from "../../src/server/agent/provider-bridge-extension.ts";
 import type { ProviderContribution } from "../../src/server/agent/pack-contributions.ts";
 
@@ -97,10 +98,13 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(source.includes('"token"'), "expected token state file fallback");
 	});
 
-	it("uses AbortController with 2500ms and 5000ms timeouts", () => {
+	it("uses AbortController with bounded before-prompt and compact client-margin timeouts", () => {
 		assert.ok(source.includes("AbortController"), "expected AbortController");
 		assert.ok(source.includes("2500"), "expected before-prompt 2500ms timeout");
-		assert.ok(source.includes("5000"), "expected before-compact 5000ms timeout");
+		assert.ok(
+			source.includes(String(BEFORE_COMPACT_TIMEOUT_MS)),
+			`expected before-compact ${BEFORE_COMPACT_TIMEOUT_MS}ms client-margin timeout`,
+		);
 	});
 
 	it("does NOT downgrade TLS verification process-wide", () => {

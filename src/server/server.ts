@@ -16,7 +16,8 @@ import path from "node:path";
 
 import os from "node:os";
 import { parse as parseYaml } from "yaml";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { Value } from "@sinclair/typebox/value";
 import {
 	bobbitStateDir,
 	serverSecretsDir,
@@ -80,7 +81,7 @@ import { RoleManager } from "./agent/role-manager.js";
 import { ToolManager, copyToolGroupWithSharedDependencies, __resetToolScanCache, type MarketToolRoot, type PiExtensionExternalTool, type ScopedToolContext } from "./agent/tool-manager.js";
 import { ActionDispatcher, ActionError, resolveActionToolManager } from "./extension-host/action-dispatcher.js";
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
-import { ModuleHost } from "./extension-host/module-host-worker.js";
+import { ModuleHost, type InvokeRequest } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
@@ -90,12 +91,24 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
+import { HostInterceptorRouter } from "./extension-host/host-interceptor-router.js";
+import { hostInterceptorAuditSink } from "./extension-host/host-interceptor-audit.js";
+import {
+	HostNotificationDispatcher,
+	HostNotificationModuleAdapter,
+	type HostNotificationModuleHandler,
+} from "./extension-host/host-notification-dispatcher.js";
+import { HostNotificationSocketRouter } from "./extension-host/host-notification-socket-router.js";
+import {
+	normalizeHookContributions,
+	type NormalizedNotificationContribution,
+} from "./extension-host/host-hook-contributions.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
-import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { LifecycleHub } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
-import { fenceBlock } from "./agent/context-blocks.js";
+import { estimateTokens, fenceBlock, type ContextBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
@@ -621,8 +634,10 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { GoalTriggerDispatcher } from "./agent/goal-trigger-dispatcher.js";
-import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
+import { InboxManager, toInboxLiveEntry, type InboxEntry, type InboxLiveAddress, type InboxLiveEvent } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
+import { NotificationStaffDispatcher } from "./agent/notification-staff-dispatcher.js";
+import { runWithStaffNotificationTurnContext } from "./agent/staff-notification-causation.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
@@ -2146,6 +2161,95 @@ export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "
 	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
 }
 
+type SettingsChangedIdentifier = "baseRef" | "commands" | "components" | "configDirectories" | "models" | "packActivation" | "packOrder" | "providers" | "sandbox" | "sandboxTokens" | "workflows" | "worktrees";
+
+/**
+ * Allowlist of public ProjectConfigStore families. Unknown flat keys are
+ * deliberately omitted: that namespace is extensible and may contain secrets.
+ */
+const SETTINGS_CHANGED_IDENTIFIERS = new Map<string, SettingsChangedIdentifier>([
+	["base_ref", "baseRef"],
+	["build_command", "commands"],
+	["components", "components"],
+	["config_directories", "configDirectories"],
+	["pack_activation", "packActivation"],
+	["pack_order", "packOrder"],
+	["sandbox", "sandbox"],
+	["sandbox_credentials", "sandbox"],
+	["sandbox_github_token", "sandbox"],
+	["sandbox_host_token_overrides", "sandbox"],
+	["sandbox_image", "sandbox"],
+	["sandbox_mounts", "sandbox"],
+	["sandbox_tokens", "sandboxTokens"],
+	["test_command", "commands"],
+	["test_e2e_command", "commands"],
+	["test_unit_command", "commands"],
+	["typecheck_command", "commands"],
+	["workflows", "workflows"],
+	["worktree_pool_size", "worktrees"],
+	["worktree_root", "worktrees"],
+	["worktree_setup_command", "commands"],
+	["worktree_setup_timeout_ms", "worktrees"],
+]);
+
+function settingsChangedIdentifiers(keys: readonly string[]): SettingsChangedIdentifier[] {
+	return [...new Set(keys.flatMap(key => {
+		const identifier = SETTINGS_CHANGED_IDENTIFIERS.get(key);
+		return identifier === undefined ? [] : [identifier];
+	}))].sort();
+}
+
+/**
+ * Bind project-owned post-commit callbacks to the canonical dispatcher seam.
+ * Legacy index, broadcast, and trigger callbacks remain independently owned.
+ */
+export function wireProjectHostNotificationBoundaries(ctx: ProjectContext): void {
+	ctx.goalStore.onHostNotification = (fact) => {
+		switch (fact.name) {
+			case "goalCreated": ctx.publishHostNotification("goalCreated", { aggregateId: fact.payload.goalId, aggregateRevision: fact.revision, payload: fact.payload }); break;
+			case "goalUpdated": ctx.publishHostNotification("goalUpdated", { aggregateId: fact.payload.goalId, aggregateRevision: fact.revision, payload: { ...fact.payload, changedFields: [...fact.payload.changedFields] } }); break;
+			case "goalCompleted": ctx.publishHostNotification("goalCompleted", { aggregateId: fact.payload.goalId, aggregateRevision: fact.revision, payload: fact.payload }); break;
+			case "goalArchived": ctx.publishHostNotification("goalArchived", { aggregateId: fact.payload.goalId, aggregateRevision: fact.revision, payload: fact.payload }); break;
+		}
+	};
+	ctx.taskStore.onCommittedFact = (fact) => {
+		switch (fact.kind) {
+			case "taskCreated":
+				ctx.publishHostNotification("taskCreated", { aggregateId: fact.taskId, aggregateRevision: fact.revision, payload: {
+					taskId: fact.taskId, goalId: fact.goalId, type: fact.type, state: fact.state,
+					...(fact.parentTaskId ? { parentTaskId: fact.parentTaskId } : {}),
+				} });
+				break;
+			case "taskUpdated":
+				ctx.publishHostNotification("taskUpdated", { aggregateId: fact.taskId, aggregateRevision: fact.revision, payload: {
+					taskId: fact.taskId, goalId: fact.goalId, state: fact.state, changedFields: fact.changedFields,
+				} });
+				break;
+			case "taskStateChanged":
+				ctx.publishHostNotification("taskStateChanged", { aggregateId: fact.taskId, aggregateRevision: fact.revision, payload: {
+					taskId: fact.taskId, goalId: fact.goalId, previousState: fact.previousState, state: fact.state,
+				} });
+				break;
+		}
+	};
+	ctx.gateStore.onStatusCommitted = (fact) => {
+		ctx.publishHostNotification("gateStatusChanged", {
+			aggregateId: `${fact.goalId}:${fact.gateId}`,
+			aggregateRevision: fact.revision,
+			payload: { gateId: fact.gateId, goalId: fact.goalId, previousStatus: fact.previousStatus, status: fact.status },
+		});
+	};
+	ctx.projectConfigStore.onSettingsChanged = (fact) => {
+		const changedKeys = settingsChangedIdentifiers(fact.payload.changedKeys);
+		if (changedKeys.length === 0) return;
+		ctx.publishHostNotification("settingsChanged", {
+			aggregateId: ctx.project.id,
+			aggregateRevision: fact.revision,
+			payload: { target: fact.payload.target, changedKeys },
+		});
+	};
+}
+
 interface ShutdownWorktreePool {
 	stop(): Promise<void>;
 	drain(): Promise<void>;
@@ -2794,6 +2898,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 			});
 		}
+		wireProjectHostNotificationBoundaries(ctx);
 	});
 
 	// pack-schema-v1 §6.7: resolve the pack_activation store for a scope+project.
@@ -3112,7 +3217,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	//   - Wiring order: construct InboxManager → construct InboxNudger →
 	//     inboxManager.setNudger(inboxNudger) → staffManager.setInboxManager(
 	//     inboxManager) → sessionManager.setInboxNudger(inboxNudger) → start.
-	const inboxManager = new InboxManager(projectContextManager, staffManager, (event) => broadcastToAll(event));
+	const inboxManager = new InboxManager(projectContextManager, staffManager, broadcastInboxLive);
 	const crossProjectInboxStore: InboxStore = {
 		listPending: (staffId: string): InboxEntry[] => {
 			for (const ctx of projectContextManager.all()) {
@@ -3137,6 +3242,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	inboxManager.setNudger(inboxNudger);
 	staffManager.setInboxManager(inboxManager);
 	sessionManager.setInboxNudger(inboxNudger);
+	const notificationStaffDispatcher = new NotificationStaffDispatcher(
+		projectContextManager,
+		staffManager,
+		inboxManager,
+		{
+			clock: gatewayDeps.clock,
+			isTurnContextCurrent: (context) => !!context
+				&& sessionManager.getStaffNotificationTurnContext(context.sessionId) === context,
+		},
+	);
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -3641,6 +3756,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		invalidatePrSnapshot,
 	};
 	inboxNudger.start();
+	notificationStaffDispatcher.start();
 
 	// Push-based dispatcher for `goal_created` / `goal_archived` staff triggers.
 	// Distinct from `TriggerEngine` (which polls schedule/git) — fired
@@ -3956,7 +4072,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			const rawSessionSecret = req.headers["x-bobbit-session-secret"];
+			const sessionSecret = Array.isArray(rawSessionSecret) ? rawSessionSecret[0] : rawSessionSecret;
+			const authenticSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(sessionSecret);
+			const causalTurn = authenticSessionId
+				&& (!sandboxScope || (sandboxScope.sessionIds.has(authenticSessionId) && sandboxScope.projectId === sessionManager.getSession(authenticSessionId)?.projectId))
+				? sessionManager.getStaffNotificationTurnContext(authenticSessionId)
+				: undefined;
+			const routeOperation = () => handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, packLocalDataResolver, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hostInterceptorRouter);
+			if (causalTurn) await runWithStaffNotificationTurnContext(causalTurn, routeOperation);
+			else await routeOperation();
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4030,6 +4155,204 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// during high-volume mock-agent event bursts. Loopback never benefits
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
+
+	const resolveHostNotificationSessionProject = (sessionId: string): string | undefined => {
+		const liveProjectId = sessionManager.getSession(sessionId)?.projectId;
+		const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+		// Both are host-owned authorities. Refuse an ambiguous transition rather than
+		// choosing a partition; a completed live reassignment may temporarily have no
+		// row in the destination store, in which case the live owner is authoritative.
+		if (liveProjectId && persistedProjectId && liveProjectId !== persistedProjectId) return undefined;
+		return liveProjectId ?? persistedProjectId;
+	};
+
+	const createHookHostApi = (
+		context: { projectId?: string; sessionId?: string; cwd: string },
+		packId: string,
+		contributionId: string,
+		capabilities: readonly string[],
+	) => {
+		const localDataDirectory = resolveDeclaredPackLocalData(context.projectId, packId);
+		const isSessionAuthorized = context.sessionId
+			? () => typeof context.projectId === "string"
+				&& resolveHostNotificationSessionProject(context.sessionId!) === context.projectId
+			: undefined;
+		return createServerHostApi({
+			sessionId: context.sessionId ?? `project:${context.projectId ?? "unbound"}`,
+			packId,
+			contributionId,
+			packStore: getPackStore(),
+			...(localDataDirectory ? { localDataDirectory } : {}),
+			...(isSessionAuthorized ? { isSessionAuthorized } : {}),
+			capabilityMask: {
+				store: capabilities.includes("store"),
+				session: capabilities.includes("session") && context.sessionId !== undefined,
+				agents: capabilities.includes("agents") && context.sessionId !== undefined,
+				...(localDataDirectory ? { localData: true } : {}),
+			},
+			...(context.sessionId ? {
+				readOwnTranscript: async () => {
+					if (isSessionAuthorized && !isSessionAuthorized()) throw new Error("host.session authority is no longer valid");
+					const persisted = sessionManager.getPersistedSession(context.sessionId!);
+					if (!persisted?.agentSessionFile) return null;
+					const fsContext = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
+					const jsonl = await sessionFileRead(fsContext, persisted.agentSessionFile, sandboxManager);
+					if (isSessionAuthorized && !isSessionAuthorized()) throw new Error("host.session authority is no longer valid");
+					return projectOwnTranscriptJsonl(context.sessionId!, jsonl);
+				},
+				orchestrationCore,
+				readChildStatus: (sessionId: string) => sessionManager.getSession(sessionId)?.status,
+			} : {}),
+		});
+	};
+
+	const validateBoundedToolResult = (toolName: string, result: unknown): boolean => {
+		const knownTool = toolManager.resolveScopedPiExtensionTools().some(tool =>
+			(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
+		) || toolManager.getToolByName(toolName) !== undefined;
+		if (!knownTool) return false;
+		let nodes = 0;
+		const visit = (value: unknown, depth: number): boolean => {
+			if (++nodes > 1_024 || depth > 8) return false;
+			if (value === null || typeof value === "boolean" || typeof value === "string") return typeof value !== "string" || value.length <= 8_192;
+			if (typeof value === "number") return Number.isFinite(value);
+			if (Array.isArray(value)) return value.length <= 64 && value.every(item => visit(item, depth + 1));
+			if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+			const entries = Object.entries(value as Record<string, unknown>);
+			return entries.length <= 64 && entries.every(([key, item]) => /^[A-Za-z][A-Za-z0-9._-]*$/.test(key) && key.length <= 128 && visit(item, depth + 1));
+		};
+		if (!visit(result, 0)) return false;
+		try { return Buffer.byteLength(JSON.stringify(result), "utf8") <= 128 * 1_024; } catch { return false; }
+	};
+
+	const hostInterceptorRouter = new HostInterceptorRouter({
+		registry: packContributionRegistry,
+		audit: hostInterceptorAuditSink,
+		moduleHost,
+		lifecycleHub: sessionManager.lifecycleHub,
+		createHostApi: ({ context, packId, contributionId, capabilities }) =>
+			createHookHostApi(context, packId, contributionId, capabilities),
+		validateToolArgs: (toolName, args) => {
+			try {
+				if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+				const piTool = toolManager.resolveScopedPiExtensionTools().find(tool =>
+					(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
+				);
+				if (piTool?.inputSchema) return Value.Check(piTool.inputSchema as never, args);
+				const params = toolManager.getToolByName(toolName)?.params;
+				if (!params) return Object.keys(args).length === 0;
+				const allowed = new Set(params.map(param => param.replace(/\?$/, "")));
+				const required = params.filter(param => !param.endsWith("?")).map(param => param.replace(/\?$/, ""));
+				return Object.keys(args).every(key => allowed.has(key))
+					&& required.every(key => Object.prototype.hasOwnProperty.call(args, key));
+			} catch { return false; }
+		},
+		validateToolResult: validateBoundedToolResult,
+	});
+
+	type RuntimeNotificationHandler = HostNotificationModuleHandler & {
+		readonly contribution: NormalizedNotificationContribution;
+	};
+	const notificationModuleAdapter = new HostNotificationModuleAdapter({
+		resolve: (notification) => normalizeHookContributions(packContributionRegistry, notification.projectId)
+			.filter((row): row is NormalizedNotificationContribution => row.kind === "notification")
+			.filter((row) => row.selector.scope === notification.scope && row.selector.name === notification.name)
+			.map((contribution): RuntimeNotificationHandler => ({
+				projectId: notification.projectId,
+				packId: contribution.packId,
+				contributionId: contribution.contributionId,
+				scope: contribution.selector.scope,
+				name: contribution.selector.name,
+				timeoutMs: contribution.budget.declaredTimeoutMs ?? contribution.budget.timeoutMs,
+				contribution,
+			})),
+		isAuthorized: (handler, notification) => {
+			const contribution = (handler as RuntimeNotificationHandler).contribution;
+			return handler.projectId === notification.projectId
+				&& (!notification.sessionId
+					|| resolveHostNotificationSessionProject(notification.sessionId) === notification.projectId)
+				&& packContributionRegistry.isHookAuthorized(
+					notification.projectId,
+					contribution.packId,
+					contribution.contributionId,
+					contribution.listName,
+					contribution.activationEpoch,
+					contribution.capabilities,
+				);
+		},
+		invoke: (handler, notification, signal) => {
+			const contribution = (handler as RuntimeNotificationHandler).contribution;
+			if (notification.sessionId
+				&& resolveHostNotificationSessionProject(notification.sessionId) !== notification.projectId) {
+				throw new Error("notification session authority is no longer valid");
+			}
+			const persisted = notification.sessionId
+				? sessionManager.getPersistedSession(notification.sessionId)
+				: undefined;
+			const cwd = persisted?.cwd ?? projectRegistry.get(notification.projectId)?.rootPath;
+			if (!cwd) throw new Error("notification project is no longer registered");
+			const host = createHookHostApi({
+				projectId: notification.projectId,
+				...(notification.sessionId ? { sessionId: notification.sessionId } : {}),
+				cwd,
+			}, contribution.packId, contribution.contributionId, contribution.capabilities);
+			const url = `${pathToFileURL(path.resolve(path.dirname(contribution.sourceFile), contribution.module)).href}?e=${contribution.activationEpoch}`;
+			return moduleHost.invoke({
+				url,
+				packRoot: contribution.packRoot,
+				epoch: contribution.activationEpoch,
+				exportKind: "hooks",
+				member: notification.name,
+				ctx: {
+					host,
+					sessionId: notification.sessionId ?? `project:${notification.projectId}`,
+					projectId: notification.projectId,
+					tool: `host-notification:${notification.name}`,
+					workingDir: cwd,
+					config: contribution.config,
+					correlationId: notification.correlationId,
+				} as unknown as InvokeRequest["ctx"],
+				arg: notification,
+				workingDir: cwd,
+				signal,
+			}, handler.timeoutMs, signal);
+		},
+	});
+	const hostNotificationDispatcher = new HostNotificationDispatcher({
+		adapters: [
+			new HostNotificationSocketRouter(() => wss.clients, {
+				resolveSessionProject: resolveHostNotificationSessionProject,
+			}),
+			notificationModuleAdapter,
+			notificationStaffDispatcher,
+		],
+		resolveSessionProject: resolveHostNotificationSessionProject,
+	});
+	projectContextManager.setHostNotificationDispatcher(hostNotificationDispatcher);
+	sessionManager.setHostNotificationPublisher(hostNotificationDispatcher as any);
+	sessionManager.setHostInterceptorPort({
+		dispatch: (name, input, context) => hostInterceptorRouter.dispatch(name as any, input as any, context as any),
+		requiresFailClosed: (name, projectId) => hostInterceptorRouter.requiresFailClosed(name as any, projectId),
+		hasAny: (names, projectId, goalId) => {
+			const explicit = normalizeHookContributions(packContributionRegistry, projectId)
+				.some(row => row.kind === "interceptor" && names.includes(row.name));
+			if (explicit) return true;
+			const legacy = names.filter((name): name is "sessionSetup" | "beforePrompt" | "beforeCompact" | "sessionShutdown" =>
+				name === "sessionSetup" || name === "beforePrompt" || name === "beforeCompact" || name === "sessionShutdown",
+			);
+			return legacy.length > 0 && sessionManager.lifecycleHub?.hasProvidersForHooks(projectId, legacy, goalId) === true;
+		},
+	});
+	staffManager.setStaffNotificationPublisher(hostNotificationDispatcher);
+	prStatusStore.onPullRequestStatusChanged = (fact) => {
+		const ctx = projectContextManager.getContextForGoal(fact.goalId);
+		ctx?.publishHostNotification("pullRequestStatusChanged", {
+			aggregateId: fact.goalId,
+			aggregateRevision: fact.revision,
+			payload: fact.payload,
+		});
+	};
+
 	const rejectUnavailableWebSocket = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer, code: "SERVER_STARTING" | "SERVER_SATURATED", retryAfterMs: number) => {
 		// The rejected socket is briefly live while its retry frame drains. Keep
 		// no-op listeners until it closes so a reset/malformed peer cannot turn
@@ -4168,6 +4491,34 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			stringifyMs,
 			sendMs: performance.now() - sendStart,
 		});
+	}
+
+	/** Publish a bounded inbox invalidation only to the exact owning staff UI
+	 * session. Project, staff, live/persisted session, viewer, unbound, and sandbox
+	 * authority are all checked server-side; clients never filter for isolation. */
+	function broadcastInboxLive(event: InboxLiveEvent, address?: InboxLiveAddress): void {
+		if (!address) return;
+		const staff = staffManager.getStaff(address.staffId);
+		if (!staff
+			|| staff.projectId !== address.projectId
+			|| staff.currentSessionId !== address.staffSessionId) return;
+		const session = sessionManager.getSession(address.staffSessionId);
+		const persisted = sessionManager.getPersistedSession(address.staffSessionId);
+		if (!session
+			|| !persisted
+			|| session.staffId !== address.staffId
+			|| persisted.staffId !== address.staffId
+			|| session.projectId !== address.projectId
+			|| persisted.projectId !== address.projectId) return;
+		const data = JSON.stringify(event);
+		for (const ws of session.clients) {
+			if ((ws as any).authenticated !== true
+				|| (ws as any).isViewer === true
+				|| (ws as any).sessionId !== address.staffSessionId
+				|| !hasUiWebSocketPrincipal(ws)
+				|| !isSocketSendable(ws)) continue;
+			ws.send(data);
+		}
 	}
 
 	/** Broadcast to ALL authenticated WebSocket clients (regardless of session/goal). */
@@ -4345,10 +4696,32 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	teamManager.setBroadcastToGoal(broadcastToGoal);
+	const sessionKind = (session: SessionInfo): "general" | "assistant" | "goal" | "team" | "delegate" | "staff" | "child" => {
+		if (session.staffId) return "staff";
+		if (session.delegateOf) return "delegate";
+		if (session.childKind || session.parentSessionId) return "child";
+		if (session.teamGoalId || session.teamLeadSessionId) return "team";
+		if (session.goalId) return "goal";
+		if (session.assistantType) return "assistant";
+		return "general";
+	};
 	// Push session creation to ALL clients so session navigation refreshes promptly
 	// for visible sessions created through REST, UI, or host.agents full-lifecycle paths.
 	sessionManager.addCreationListener((session) => {
 		try {
+			const persisted = sessionManager.getPersistedSession(session.id);
+			if (session.projectId && persisted?.projectId === session.projectId) {
+				hostNotificationDispatcher.publish("sessionCreated", {
+					projectId: session.projectId,
+					aggregateId: session.id,
+					aggregateRevision: Math.max(persisted.createdAt, persisted.lastActivity),
+					payload: {
+						sessionId: session.id,
+						kind: sessionKind(session),
+						...(session.goalId ? { goalId: session.goalId } : {}),
+					},
+				});
+			}
 			broadcastToAll({ type: "session_created", sessionId: session.id, projectId: session.projectId });
 		} catch (err) {
 			console.error(`[broadcast] session_created failed for ${session.id}:`, err);
@@ -4360,6 +4733,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// after another tab archived the session).
 	sessionManager.addTerminationListener(async (sessionId, info) => {
 		try {
+			const persisted = sessionManager.getPersistedSession(sessionId);
+			if (info.reason !== "purged" && info.projectId && persisted?.projectId === info.projectId && persisted.archivedAt !== undefined) {
+				const goalId = persisted.goalId ?? persisted.teamGoalId;
+				const goalArchived = goalId
+					? projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId)?.archived === true
+					: false;
+				const staffRetired = persisted.staffId ? staffManager.getStaff(persisted.staffId)?.state === "retired" : false;
+				const reason = !projectRegistry.get(info.projectId)
+					? "project_deleted" as const
+					: goalArchived ? "goal_archived" as const
+						: staffRetired ? "retired" as const
+							: "user" as const;
+				hostNotificationDispatcher.publish("sessionArchived", {
+					projectId: info.projectId,
+					aggregateId: sessionId,
+					aggregateRevision: persisted.archivedAt,
+					payload: { sessionId, reason },
+				});
+			}
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
 			console.error(`[broadcast] session_removed failed for ${sessionId}:`, err);
@@ -4548,6 +4940,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		orchestrationCore,
 		bgProcessManager,
 		projectContextManager,
+		/** @internal Exposed for integration coverage of production hook wiring. */
+		hostInterceptorRouter,
 		get extensionChannels() { return extensionChannelServices; },
 		async start(): Promise<number> {
 			// Phase timer for the pre-listen critical path: everything awaited here
@@ -5040,6 +5434,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				gatewayDeps.clock.clearInterval(cleanupInterval);
 				triggerEngine.stop();
 				inboxNudger.stop();
+				notificationStaffDispatcher.stop();
 				wss.close();
 				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
 				// and await them before tearing down stores or allowing restart.
@@ -5312,6 +5707,7 @@ async function handleApiRoute(
 	reviewPayloadOperations: ReviewPayloadSessionCoordinator = createReviewPayloadSessionCoordinator(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
+	hostInterceptorRouter?: HostInterceptorRouter,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -6751,6 +7147,26 @@ async function handleApiRoute(
 			if (newCtx) {
 				wireGoalManagerResolvers(newCtx, { sessionManager, projectContextManager, projectRegistry });
 			}
+			// Await the post-commit initialization boundary, but never compensate or
+			// hide the already-registered project when an extension fails.
+			if (newCtx && hostInterceptorRouter) {
+				try {
+					await hostInterceptorRouter.dispatch("projectImported", {
+						projectId: project.id,
+						components: newCtx.projectConfigStore.getComponents().map(component => ({
+							name: component.name,
+							repo: component.repo,
+							...(component.relativePath ? { relativePath: component.relativePath } : {}),
+						})),
+					}, {
+						projectId: project.id,
+						cwd: project.rootPath,
+						signal: new AbortController().signal,
+					});
+				} catch {
+					console.warn(`[host-hooks] projectImported failed for ${project.id} (non-fatal)`);
+				}
+			}
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -7627,95 +8043,59 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── Provider per-turn lifecycle hooks (EP G1.4) ──
-	// These endpoints are called only by the Bobbit-generated provider-bridge pi
-	// extension (before-prompt / before-compact) and the context-trace inspector.
-	// They inherit the admin-bearer gate enforced before handleApiRoute, exactly
-	// like POST /api/sessions/:id/tool-grant-request above. afterTurn /
-	// sessionShutdown are gateway-internal dispatches and intentionally have NO
-	// public endpoint.
-	//
-	// Resolve a session's lifecycle dispatch context from live or persisted state.
-	// Returns undefined when the session is unknown (→ 404 for the hook endpoints).
-	const resolveHookCtx = (id: string): {
-		base: Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
-		scopeInput: {
-			projectId?: string;
-			goalId?: string;
-			roleName?: string;
-			cwd: string;
-			worktreePath?: string;
-			repoPath?: string;
-			repoWorktrees?: Readonly<Record<string, string>>;
-		};
-	} | undefined => {
-		const live = sessionManager.getSession(id);
-		const persisted = sessionManager.getPersistedSession(id);
-		const source = live ?? persisted;
-		if (!source) return undefined;
-		const projectId = source.projectId;
-		const goalId = source.goalId ?? source.teamGoalId;
-		const repoWorktrees = Array.isArray(source.repoWorktrees)
-			? Object.fromEntries(source.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
-			: source.repoWorktrees;
-		const base = {
-			sessionId: id,
-			projectId,
-			scope: projectId ? "project" as const : "global" as const,
-			cwd: source.cwd ?? process.cwd(),
-			// Effective goal: team members, delegates, and reviewers carry the goal
-			// only in teamGoalId, so fall back to it before persisted state. Without
-			// this, disabled-provider filtering would not apply at the provider hook
-			// endpoints (beforePrompt / beforeCompact) for non-lead sessions.
-			goalId,
-			roleName: source.role,
-		};
-		return {
-			base,
-			scopeInput: {
-				projectId,
-				goalId,
-				roleName: source.role,
-				cwd: source.cwd ?? process.cwd(),
-				worktreePath: source.worktreePath,
-				repoPath: source.repoPath,
-				repoWorktrees,
-			},
-		};
+	// ── Pi-owned interceptor lifecycle routes ──
+	// The global bearer gate authenticates the process; the per-session secret
+	// below binds authority to the exact URL session before any body is accepted.
+	const resolveAuthenticatedHookSession = (rawSessionId: string): string | undefined => {
+		let sessionId: string;
+		try { sessionId = decodeURIComponent(rawSessionId); } catch { return undefined; }
+		const rawSecret = req.headers["x-bobbit-session-secret"];
+		const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		const authenticatedSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+			typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
+		);
+		return authenticatedSessionId === sessionId ? sessionId : undefined;
 	};
+	const isStrictHookBody = (body: unknown, keys: readonly string[]): body is Record<string, unknown> => {
+		if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+		return Object.keys(body).every(key => keys.includes(key));
+	};
+	const hookTurnIndex = (sessionId: string): number =>
+		Math.max(0, (sessionManager.getSession(sessionId)?.completedTurnCount ?? 0) + 1);
 
-	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
+	// The generated Pi bridges call these four exact-session routes. The router is
+	// the sole lifecycle dispatcher; its legacy adapter already normalizes providers.
 	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
 	if (beforePromptMatch && req.method === "POST") {
-		const sessionId = beforePromptMatch[1];
-		const body = await readBody(req).catch(() => ({} as any));
-		if (body && body.prompt !== undefined && typeof body.prompt !== "string") {
-			json({ error: "prompt must be a string" }, 400);
+		const sessionId = resolveAuthenticatedHookSession(beforePromptMatch[1]);
+		if (!sessionId) { json({ error: "Exact session authentication required" }, 403); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!isStrictHookBody(body, ["prompt"]) || typeof body.prompt !== "string" || body.prompt.length > 16_384) {
+			json({ error: "Invalid bounded beforePrompt body" }, 400);
 			return;
 		}
-		const hookContext = resolveHookCtx(sessionId);
-		if (!hookContext) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		const hub = sessionManager.lifecycleHub;
-		if (!hub) {
-			json({ content: "", tail: "", blocks: [] });
-			return;
-		}
+		const session = sessionManager.getSession(sessionId);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
 		try {
-			const turnIndex = body?.turn?.index;
-			const { blocks } = await hub.dispatch("beforePrompt", {
-				...hookContext.base,
-				prompt: typeof body?.prompt === "string" ? body.prompt : undefined,
-				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
-			}, hookContext.scopeInput);
+			const routed = await sessionManager.dispatchHostInterceptor(sessionId, "beforePrompt", {
+				sessionId,
+				turnIndex: hookTurnIndex(sessionId),
+				source: session.lastPromptSource ?? "user",
+				userText: body.prompt,
+			});
+			const contributions = Array.isArray((routed?.value as any)?.context) ? (routed.value as any).context : [];
+			const blocks: ContextBlock[] = contributions.map((block: any) => ({
+				id: block.id,
+				title: block.title,
+				providerId: "host-hooks",
+				authority: block.authority,
+				content: block.content,
+				reason: block.reason,
+				priority: block.priority,
+				tokenEstimate: estimateTokens(block.content),
+			}));
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
-			// Temporary back-compat for generated bridges from the system-prompt-tail era.
-			// New bridges consume `content` only and must never return systemPrompt.
 			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";
-			// Best-effort: refresh the persisted prompt-sections snapshot so the
-			// inspector reflects this turn's dynamic-context blocks. Non-fatal.
 			try {
 				const parts = sessionManager.getPromptParts(sessionId);
 				if (parts) {
@@ -7725,52 +8105,104 @@ async function handleApiRoute(
 			} catch (err) {
 				console.debug(`[provider-hooks] prompt-sections refresh skipped for ${sessionId}:`, err);
 			}
-			json({
-				content,
-				tail,
-				blocks: blocks.map((b) => ({ id: b.id, providerId: b.providerId, title: b.title, tokenEstimate: b.tokenEstimate })),
-			});
+			json({ content, tail, blocks: blocks.map(({ id, providerId, title, tokenEstimate }) => ({ id, providerId, title, tokenEstimate })) });
 		} catch (err: any) {
-			jsonError(500, err);
+			jsonError(err instanceof TypeError ? 400 : 500, err);
 		}
 		return;
 	}
 
-	// POST /api/sessions/:id/provider-hooks/before-compact — notify providers before compaction.
 	const beforeCompactMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-compact$/);
 	if (beforeCompactMatch && req.method === "POST") {
-		const sessionId = beforeCompactMatch[1];
-		// The bridge forwards the about-to-be-lost span (and optionally a precomputed
-		// summary) from the pi session_before_compact payload. Validate both as strings
-		// so a malformed body is rejected rather than silently dispatched empty.
-		const body = await readBody(req).catch(() => ({} as any));
-		if (body && body.span !== undefined && typeof body.span !== "string") {
-			json({ error: "span must be a string" }, 400);
+		const sessionId = resolveAuthenticatedHookSession(beforeCompactMatch[1]);
+		if (!sessionId) { json({ error: "Exact session authentication required" }, 403); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!isStrictHookBody(body, ["span", "summary"])
+			|| (body.span !== undefined && typeof body.span !== "string")
+			|| (body.summary !== undefined && typeof body.summary !== "string")
+			|| (typeof body.span === "string" && body.span.length > 16_384)
+			|| (typeof body.summary === "string" && body.summary.length > 16_384)) {
+			json({ error: "Invalid bounded beforeCompact body" }, 400);
 			return;
 		}
-		if (body && body.summary !== undefined && typeof body.summary !== "string") {
-			json({ error: "summary must be a string" }, 400);
-			return;
-		}
-		const hookContext = resolveHookCtx(sessionId);
-		if (!hookContext) {
-			json({ error: "Session not found" }, 404);
-			return;
-		}
-		const hub = sessionManager.lifecycleHub;
-		if (!hub) {
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		try {
+			await sessionManager.dispatchHostInterceptor(sessionId, "beforeCompact", {
+				sessionId,
+				turnIndex: hookTurnIndex(sessionId),
+				span: typeof body.span === "string" ? body.span : "",
+				...(typeof body.summary === "string" ? { summary: body.summary } : {}),
+			});
 			json({});
+		} catch (err: any) {
+			jsonError(err instanceof TypeError ? 400 : 500, err);
+		}
+		return;
+	}
+
+	const toolHookMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/host-hooks\/(before-tool-call|after-tool-result)$/);
+	if (toolHookMatch && req.method === "POST") {
+		const sessionId = resolveAuthenticatedHookSession(toolHookMatch[1]);
+		if (!sessionId) { json({ error: "Exact session authentication required" }, 403); return; }
+		const body = await readBody(req).catch(() => undefined);
+		const isBefore = toolHookMatch[2] === "before-tool-call";
+		const keys = isBefore ? ["toolCallId", "toolName", "args"] : ["toolCallId", "toolName", "result"];
+		if (!isStrictHookBody(body, keys)
+			|| typeof body.toolCallId !== "string"
+			|| typeof body.toolName !== "string") {
+			json({ error: "Invalid bounded tool hook body" }, 400);
+			return;
+		}
+		const claim = isBefore
+			? await sessionManager.claimToolCallBefore(sessionId, body.toolCallId, body.toolName)
+			: sessionManager.claimToolCallAfter(sessionId, body.toolCallId, body.toolName);
+		if (!claim) {
+			json({ error: "Tool callback provenance unavailable" }, 409);
 			return;
 		}
 		try {
-			await hub.dispatch("beforeCompact", {
-				...hookContext.base,
-				span: typeof body?.span === "string" ? body.span : undefined,
-				summary: typeof body?.summary === "string" ? body.summary : undefined,
-			}, hookContext.scopeInput);
-			json({});
+			if (isBefore) {
+				const routed = await sessionManager.dispatchClaimedToolInterceptor(claim, {
+					args: body.args as Record<string, any>,
+				});
+				const terminal = routed?.terminal as any;
+				if (terminal?.action === "block") {
+					if (!sessionManager.settleToolCallBefore(claim, false)) {
+						json({ error: "Tool callback provenance unavailable" }, 409);
+						return;
+					}
+					json(terminal);
+					return;
+				}
+				const args = (routed?.value as any)?.args;
+				if (!sessionManager.settleToolCallBefore(claim, true)) {
+					json({ error: "Tool callback provenance unavailable" }, 409);
+					return;
+				}
+				json({ action: "replaceArgs", args });
+			} else {
+				const routed = await sessionManager.dispatchClaimedToolInterceptor(claim, {
+					result: body.result as any,
+				});
+				const terminal = routed?.terminal as any;
+				if (!sessionManager.settleToolCallAfter(claim)) {
+					json({ error: "Tool callback provenance unavailable" }, 409);
+					return;
+				}
+				if (terminal?.action === "syntheticError") { json(terminal); return; }
+				json({ action: "replaceResult", result: (routed?.value as any)?.result });
+			}
 		} catch (err: any) {
-			jsonError(500, err);
+			if (!isBefore) {
+				if (!sessionManager.settleToolCallAfter(claim)) {
+					json({ error: "Tool callback provenance unavailable" }, 409);
+					return;
+				}
+				json({ action: "syntheticError", code: "handler_error" });
+			} else {
+				sessionManager.cancelToolCallInterceptorClaim(claim);
+				jsonError(err instanceof TypeError ? 400 : 500, err);
+			}
 		}
 		return;
 	}
@@ -8942,17 +9374,11 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
-				...(body?.team !== false ? { team: true } : {}),
+				// `team: false` historically means "standalone until manually
+				// started". Give createGoal the final shape so goalCreated is the only
+				// fact for this create and no existing record is silently rewritten.
+				team: body?.team !== false,
 			});
-			// `team: false` historically meant "do not auto-enable yet", not a
-			// durable prohibition on a later manual start. GoalManager defaults new
-			// goals to team mode, so remove that default from this explicit legacy
-			// shape while retaining `team: true` as archive-retry evidence for goals
-			// that were actually enabled at creation.
-			if (body?.team === false) {
-				delete goal.team;
-				targetCtx.goalStore.put(goal);
-			}
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
@@ -13704,10 +14130,9 @@ async function handleApiRoute(
 			// preserve team worktree/branch evidence after TeamStore is reconciled.
 			if (startGoal.team === undefined) {
 				const startContext = projectContextManager.getContextForGoal(goalId);
-				if (!startContext?.goalStore.update(goalId, { team: true })) {
+				if (!startContext || !(await startContext.goalStore.updateStrict(goalId, { team: true }))) {
 					throw new Error(`Unable to enable team mode for goal ${goalId}`);
 				}
-				await startContext.goalStore.flush();
 			}
 			// REST retries are idempotent even after the first paused request has
 			// resumed the goal. Resume authority remains limited to the paused
@@ -14977,6 +15402,19 @@ async function handleApiRoute(
 					)
 					: await launchFork();
 				if (ps.staffId) (launched.fork as SessionInfo).staffId = ps.staffId;
+				const persistedFork = sessionManager.getPersistedSession(launched.fork.id);
+				if (persistedFork?.projectId === launched.projectId) {
+					projectContextManager.getOrCreate(launched.projectId)?.publishHostNotification("sessionForked", {
+						aggregateId: launched.fork.id,
+						aggregateRevision: Math.max(persistedFork.createdAt, persistedFork.lastActivity),
+						payload: {
+							sourceSessionId: sourceId,
+							sessionId: launched.fork.id,
+							...(hasEntryId ? { cutEntryId: entryId as string } : {}),
+							forkMode: hasEntryId ? "history" : "whole",
+						},
+					});
+				}
 				json({
 					id: launched.fork.id,
 					cwd: launched.fork.cwd,
@@ -19059,6 +19497,27 @@ async function handleApiRoute(
 	// (see docs/design/staff-inbox.md §7.2). UI/external integrations now hit
 	// `POST /api/staff/:id/inbox` with `source.type = "manual_ui" | "manual_api"`.
 
+	/** Resolve the one live staff session that owns this inbox from its host-issued
+	 * capability secret. Public session ids, request bodies, bearer/cookie auth,
+	 * and client project claims never establish notification-inbox authority. */
+	const resolveExactInboxOwner = (staff: { id: string; projectId?: string; currentSessionId?: string }): SessionInfo | undefined => {
+		if (!staff.projectId || !staff.currentSessionId) return undefined;
+		const rawSecret = req.headers["x-bobbit-session-secret"];
+		const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		const callerSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secret);
+		if (!callerSessionId || callerSessionId !== staff.currentSessionId) return undefined;
+		const live = sessionManager.getSession(callerSessionId);
+		const persisted = sessionManager.getPersistedSession(callerSessionId);
+		if (!live || live.dormant === true || live.status === "terminated" || !persisted) return undefined;
+		if (live.id !== callerSessionId
+			|| persisted.id !== callerSessionId
+			|| live.staffId !== staff.id
+			|| persisted.staffId !== staff.id
+			|| live.projectId !== staff.projectId
+			|| persisted.projectId !== staff.projectId) return undefined;
+		return live;
+	};
+
 	// GET /api/staff/:id/inbox?state=pending&limit=50
 	const staffInboxListMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox$/);
 	if (staffInboxListMatch && req.method === "GET") {
@@ -19073,7 +19532,10 @@ async function handleApiRoute(
 			: undefined;
 		const limitRaw = url.searchParams.get("limit");
 		const limit = limitRaw != null ? Math.max(0, parseInt(limitRaw, 10) || 0) : undefined;
-		const entries = inboxManager.listForStaff(id, state, limit);
+		const storedEntries = inboxManager.listForStaff(id, state, limit);
+		const entries = resolveExactInboxOwner(staff)
+			? storedEntries
+			: storedEntries.map(toInboxLiveEntry);
 		json({ entries });
 		return;
 	}
@@ -19118,24 +19580,31 @@ async function handleApiRoute(
 		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session || session.staffId !== id) {
-			json({ error: "Forbidden: session does not belong to this staff" }, 403);
-			return;
-		}
 		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
 		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		const body = await readBody(req);
+		if (existing.source.type === "notification") {
+			if (!resolveExactInboxOwner(staff)) {
+				json({ error: "Forbidden: exact owning staff session required" }, 403);
+				return;
+			}
+		} else {
+			if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+				json({ error: "Missing sessionId" }, 400);
+				return;
+			}
+			const session = sessionManager.getSession(body.sessionId);
+			if (!session || session.staffId !== id) {
+				json({ error: "Forbidden: session does not belong to this staff" }, 403);
+				return;
+			}
+		}
 		if (existing.state !== "pending") {
 			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
 			return;
 		}
 		try {
-			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body.summary === "string" ? body.summary : undefined);
+			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body?.summary === "string" ? body.summary : undefined);
 			json({ entry });
 		} catch (err) {
 			jsonError(400, err);
@@ -19150,17 +19619,26 @@ async function handleApiRoute(
 		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
 		const body = await readBody(req);
-		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
+		if (existing.source.type === "notification") {
+			if (!resolveExactInboxOwner(staff)) {
+				json({ error: "Forbidden: exact owning staff session required" }, 403);
+				return;
+			}
+		} else {
+			if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+				json({ error: "Missing sessionId" }, 400);
+				return;
+			}
+			const session = sessionManager.getSession(body.sessionId);
+			if (!session || session.staffId !== id) {
+				json({ error: "Forbidden: session does not belong to this staff" }, 403);
+				return;
+			}
 		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session || session.staffId !== id) {
-			json({ error: "Forbidden: session does not belong to this staff" }, 403);
-			return;
-		}
-		if (body.outcome !== "failed" && body.outcome !== "cancelled") {
+		if (body?.outcome !== "failed" && body?.outcome !== "cancelled") {
 			json({ error: "outcome must be 'failed' or 'cancelled'" }, 400);
 			return;
 		}
@@ -19168,8 +19646,6 @@ async function handleApiRoute(
 			json({ error: "Missing reason" }, 400);
 			return;
 		}
-		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
-		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
 		if (existing.state !== "pending") {
 			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
 			return;
@@ -19190,6 +19666,12 @@ async function handleApiRoute(
 		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		if (existing.source.type === "notification" && !resolveExactInboxOwner(staff)) {
+			json({ error: "Forbidden: exact owning staff session required" }, 403);
+			return;
+		}
 		const ok = inboxManager.remove(id, entryId);
 		if (!ok) { json({ error: "Inbox entry not found" }, 404); return; }
 		json({ ok: true });

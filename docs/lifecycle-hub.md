@@ -9,8 +9,14 @@
 > [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14). Built-in production
 > providers include the [Hindsight memory pack](hindsight-memory.md) and PR Walkthrough durable
 > progress provider; both are scoped so an out-of-the-box normal session receives no unrelated
-> Dynamic Context. This page documents the Hub core and its
-> session wiring.
+> Dynamic Context. This page documents the Hub core and its session wiring.
+
+The Hub is now the compatibility adapter for legacy `providers/*.yaml` context hooks. New
+operation participation uses explicit Extension Host **interceptors**, while observation of
+committed facts uses **notifications**. Do not generalize provider `afterTurn` into a new event
+contract; use canonical `turnCompleted`. See [Unified Extension Host hooks](host-hooks.md) for the
+taxonomy, runtime declarations, and shared catalogue.
+
 ## What it is, and why
 
 The Lifecycle Hub is the server-side seam that lets **pack-contributed providers** inject
@@ -470,9 +476,18 @@ and the non-negotiable injection invariant.
 ### The REST surface
 
 Three endpoints back the per-turn hooks and diagnostics. They live in one contiguous block in
-`server.ts`, modeled on `POST /api/sessions/:id/tool-grant-request`, and **inherit the
-admin-bearer auth gate enforced before `handleApiRoute`** — no extra auth code. All are keyed by
-session id and `404` when the session is unknown (neither live nor persisted).
+`server.ts`. Pi-owned mutation callbacks require both the normal bearer gate and the owning
+session's gateway-issued secret: the process receives `BOBBIT_SESSION_SECRET`, sends it as
+`X-Bobbit-Session-Secret`, and the server resolves it to the exact URL session before reading the
+body. A public session ID or bearer token alone cannot invoke another session's interceptor.
+Diagnostic trace reads retain their normal authenticated inspector policy.
+
+The secret authenticates callback **transport identity**; it is not proof that a particular Pi
+lifecycle boundary occurred. Provider callbacks originate from their named Pi bridge events. Tool
+callbacks use the stronger unified-hook rule: the current session writer must first emit a matching
+execution event that Bobbit accepts at an event-buffer cursor, and the callback can consume that
+exact `{ generation, toolCallId, toolName, phase }` provenance only once. A valid secret therefore
+cannot fabricate or replay tool lifecycle work. See [Unified Host hooks](host-hooks.md#publication-and-delivery-guarantees).
 
 | Method + path | Caller | Behaviour |
 |---|---|---|
@@ -526,10 +541,13 @@ The generated extension subscribes to three pi events:
   not retain stale recall. The result is ignored (compaction output is not amended here); all
   failures are swallowed. This `beforeCompact` behavior is unchanged.
 
-Transport and auth are identical to the tool-guard: read `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN`
-from the environment, falling back to `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`, and
-`fetch` the gateway with a bearer token. A missing gateway URL short-circuits to "proceed
-unchanged".
+Transport reads `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN` from the environment, falling back to
+`<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`, and sends the host-issued
+`BOBBIT_SESSION_SECRET` as `X-Bobbit-Session-Secret`. The secret is injected only into the owning
+local or sandbox process, held in gateway memory, and regenerated when gateway restart respawns
+the process. A missing gateway URL short-circuits to "proceed unchanged"; a missing or mismatched
+session secret fails exact-session transport authentication. It does not replace the separate
+current-writer/cursor provenance required by unified tool hooks.
 
 ### The injection invariant (non-negotiable)
 
@@ -640,7 +658,8 @@ ambient context a session received and why blocks were dropped.
 
 - [Hindsight memory pack](hindsight-memory.md) — the first production provider, a built-in
   (dormant-by-default) memory provider that recalls/retains across sessions.
-- [Extension Host authoring guide](extension-host-authoring.md) — how to write a provider pack.
+- [Unified Extension Host hooks](host-hooks.md) — interceptors, canonical notifications, scoped browser subscriptions, and notification-based staff triggers.
+- [Extension Host authoring guide](extension-host-authoring.md) — how to write provider and runtime-hook packs.
 - [Marketplace → Provider contributions](marketplace.md#provider-contributions-providersidyaml) —
   the provider YAML schema, defaults, and clamps.
 - [Extension Host internals](extension-host-authoring.md) and `module-host-worker.ts` —

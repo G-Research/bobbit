@@ -81,14 +81,14 @@ describe("stateless browser-cookie issuance regression", () => {
 				method: "POST",
 				path: "/api/sessions/stateless-cookie-missing/provider-hooks/before-prompt",
 				body: JSON.stringify({ prompt: "regression probe" }),
-				expectedStatus: 404,
+				expectedStatus: 403,
 			},
 			{
 				label: "provider before-compact callback",
 				method: "POST",
 				path: "/api/sessions/stateless-cookie-missing/provider-hooks/before-compact",
 				body: JSON.stringify({ span: "regression probe" }),
-				expectedStatus: 404,
+				expectedStatus: 403,
 			},
 			{
 				label: "Google Code Assist token callback",
@@ -116,7 +116,7 @@ describe("stateless browser-cookie issuance regression", () => {
 			const response = await requestWithBearerOnly(gateway.baseURL, gateway.token, testCase);
 			expect.soft(
 				response.status,
-				`${REGRESSION}: ${testCase.label} must reach its real gateway handler; body=${response.body}`,
+				`${REGRESSION}: ${testCase.label} must preserve its expected route or authentication boundary; body=${response.body}`,
 			).toBe(testCase.expectedStatus);
 			expect.soft(
 				response.setCookies,

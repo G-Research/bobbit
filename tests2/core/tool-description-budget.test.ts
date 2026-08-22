@@ -97,6 +97,9 @@ beforeAll(() => {
 	if (!process.env.BOBBIT_SESSION_ID) {
 		process.env.BOBBIT_SESSION_ID = "00000000-0000-0000-0000-000000000000";
 	}
+	if (!process.env.BOBBIT_SESSION_SECRET) {
+		process.env.BOBBIT_SESSION_SECRET = "test-host-issued-session-secret";
+	}
 	if (!process.env.BOBBIT_GOAL_ID) {
 		process.env.BOBBIT_GOAL_ID = "00000000-0000-0000-0000-000000000000";
 	}

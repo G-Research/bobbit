@@ -186,6 +186,12 @@ export interface CreateServerHostApiOptions {
 	 *  Own-session by construction — there is no parameter for another session. When
 	 *  absent (non-gateway context), the session reads throw a clear error. */
 	readOwnTranscript?: () => Promise<string | null>;
+	/** Optional live authority fence for a project-bound session host. The gateway
+	 *  derives this predicate from the expected project and current live + persisted
+	 *  session ownership. When supplied, every session/agents operation checks it
+	 *  before work and again after asynchronous settlement. Ordinary action/route
+	 *  hosts omit it and retain their existing authenticated-session semantics. */
+	isSessionAuthorized?: () => boolean;
 	/** SUB-GOAL A SEAM (orchestration-core §8.3): the gateway injects the shared
 	 *  OrchestrationCore so sub-goal C can implement the ambient `host.agents`
 	 *  capability (spawn/prompt/dismiss/list/read/status) over the SAME core that
@@ -227,6 +233,12 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// Slice B2: own-session transcript reader (header-bound session, supplied by the
 	// gateway). The reads below map its rows through the single contract adapter.
 	const readOwnTranscript = opts.readOwnTranscript;
+	const assertSessionAuthorized = (member: string): void => {
+		if (!opts.isSessionAuthorized) return;
+		let authorized = false;
+		try { authorized = opts.isSessionAuthorized(); } catch { /* fail closed */ }
+		if (!authorized) throw new Error(`host.${member} session authority is no longer valid`);
+	};
 	const requireReader = (member: string): (() => Promise<string | null>) => {
 		if (!readOwnTranscript) {
 			throw new Error(`host.session.${member} requires a gateway transcript reader`);
@@ -291,11 +303,15 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// lands the read bodies early purely to decouple the work.
 	const session: ServerHostSessionApi = {
 		readTranscript: async (sessionOpts) => {
+			assertSessionAuthorized("session.readTranscript");
 			const jsonl = await requireReader("readTranscript")();
+			assertSessionAuthorized("session.readTranscript");
 			return buildTranscriptEnvelope(transcriptToHostMessages(jsonl), sessionOpts);
 		},
 		readToolCall: async (toolUseId) => {
+			assertSessionAuthorized("session.readToolCall");
 			const jsonl = await requireReader("readToolCall")();
+			assertSessionAuthorized("session.readToolCall");
 			return transcriptToToolCall(jsonl, toolUseId);
 		},
 		// `postMessage` is intentionally NOT implemented on the server host (Fix B):
@@ -346,6 +362,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	};
 	const agents: ServerHostAgentsApi = {
 		spawn: async (spawnOpts) => {
+			assertSessionAuthorized("agents.spawn");
 			const c = requireCore();
 			// Recursion denial reuses A's shared guard (no grandchildren), surfaced as a
 			// capability-specific message.
@@ -368,30 +385,56 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 				toolEnv: spawnOpts.toolEnv,
 				childKind: HOST_AGENTS_KIND,
 			});
+			try {
+				assertSessionAuthorized("agents.spawn");
+			} catch (error) {
+				// The core captures owner scope synchronously before its first await, so a
+				// concurrent move cannot mint in the destination project. Remove the now
+				// stale old-project child before denying settlement to the old handler.
+				try { await c.dismiss(ownerSessionId, handle.sessionId); } catch { /* best-effort containment */ }
+				throw error;
+			}
 			return { childSessionId: handle.sessionId };
 		},
 		prompt: async (childSessionId, message) => {
+			assertSessionAuthorized("agents.prompt");
 			requireOwnAgentsChild(childSessionId);
-			return requireCore().prompt(ownerSessionId, childSessionId, message);
+			const result = await requireCore().prompt(ownerSessionId, childSessionId, message);
+			assertSessionAuthorized("agents.prompt");
+			return result;
 		},
 		dismiss: async (childSessionId) => {
+			assertSessionAuthorized("agents.dismiss");
 			const c = requireCore();
 			const ownedKind = c.ownedChildKind(ownerSessionId, childSessionId);
 			if (ownedKind && ownedKind !== HOST_AGENTS_KIND) return hostAgentsNotOwned(childSessionId);
-			return c.dismiss(ownerSessionId, childSessionId);
+			const result = await c.dismiss(ownerSessionId, childSessionId);
+			assertSessionAuthorized("agents.dismiss");
+			return result;
 		},
-		list: async () => ownHostAgentsChildren().map((h) => ({
-			childSessionId: h.sessionId,
-			status: mapStatus(readChildStatus?.(h.sessionId)),
-			childKind: h.childKind,
-		})),
+		list: async () => {
+			assertSessionAuthorized("agents.list");
+			const result = ownHostAgentsChildren().map((h) => ({
+				childSessionId: h.sessionId,
+				status: mapStatus(readChildStatus?.(h.sessionId)),
+				childKind: h.childKind,
+			}));
+			assertSessionAuthorized("agents.list");
+			return result;
+		},
 		read: async (childSessionId, readOpts) => {
+			assertSessionAuthorized("agents.read");
 			requireOwnAgentsChild(childSessionId);
-			return requireCore().read(ownerSessionId, childSessionId, readOpts);
+			const result = await requireCore().read(ownerSessionId, childSessionId, readOpts);
+			assertSessionAuthorized("agents.read");
+			return result;
 		},
 		status: async (childSessionId) => {
+			assertSessionAuthorized("agents.status");
 			requireOwnAgentsChild(childSessionId);
-			return { status: mapStatus(readChildStatus?.(childSessionId)) };
+			const result = { status: mapStatus(readChildStatus?.(childSessionId)) };
+			assertSessionAuthorized("agents.status");
+			return result;
 		},
 	};
 

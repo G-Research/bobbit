@@ -54,6 +54,11 @@ import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListR
 import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
+import {
+	publishHostNotificationFrame,
+	publishHostNotificationRefreshRequired,
+	resetHostNotificationStreams,
+} from "./host-notification-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
 import { registerSurfaceTokenMinter, unregisterSurfaceTokenMinter, type PackSurfaceRef } from "./surface-token-minter-registry.js";
 import { handleMutationPendingEvent, handleMutationDecidedEvent } from "./mutation-approval-events.js";
@@ -1127,6 +1132,10 @@ export class RemoteAgent {
 						this._reconnectAttempt = 0;
 						this._connectionEpoch++;
 						this._setConnectionStatus("connected");
+						// Canonical notification sequence state is ephemeral per authenticated
+						// connection. Reset it on initial auth and reconnect, and coalesce an
+						// authoritative session/project snapshot refresh for mounted panels.
+						resetHostNotificationStreams(this._sessionId);
 						resolve();
 						// Initial hydration is owned by connectToSession after ChatPanel
 						// binding. Reconnects still refresh the server workspace here and
@@ -2304,6 +2313,24 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "host_notification": {
+				// This RemoteAgent's authenticated session is the client authority key.
+				// The server has already routed the canonical frame to the exact session /
+				// project socket; extension code never supplies either binding.
+				publishHostNotificationFrame(this._sessionId, {
+					notification: msg.notification,
+					stream: msg.stream,
+				});
+				break;
+			}
+			case "host_notifications_refresh_required": {
+				publishHostNotificationRefreshRequired(this._sessionId, {
+					scope: msg.scope,
+					epoch: msg.epoch,
+					sequence: msg.sequence,
+				});
+				break;
+			}
 			case "ext_surface_token_result": {
 				const pending = this._pendingExtSurfaceTokens.get(msg.requestId);
 				if (pending) {

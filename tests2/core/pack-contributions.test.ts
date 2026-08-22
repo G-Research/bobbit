@@ -62,7 +62,7 @@ afterAll(() => {
 describe("Extension Host channel contract", () => {
 	it("keeps HOST_API_VERSION stable and bumps HOST_CONTRACT_VERSION for channel contracts", () => {
 		assert.equal(HOST_API_VERSION, 1);
-		assert.equal(HOST_CONTRACT_VERSION, 4);
+		assert.equal(HOST_CONTRACT_VERSION, 5);
 		const textFrame: HostChannelFrame = { kind: "text", data: "hello" };
 		const jsonFrame: HostChannelFrame = { kind: "json", data: { ok: true } };
 		assert.deepEqual([textFrame.kind, jsonFrame.kind], ["text", "json"]);

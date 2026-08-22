@@ -7,6 +7,13 @@ import {
 	isPiTranscriptEntryId,
 } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
+import type {
+	HostInterceptorName,
+	HostInterceptorRequest,
+	HostNotificationName,
+	HostNotificationPayload,
+	SessionNotificationName,
+} from "../../shared/extension-host/host-hooks.js";
 export type { PromptSource } from "../../shared/prompt-source.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -164,6 +171,12 @@ import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
+import {
+	freezeStaffNotificationTurnContext,
+	MAX_STAFF_NOTIFICATION_TURN_DEPTH,
+	runWithStaffNotificationTurnContext,
+	type StaffNotificationTurnContext,
+} from "./staff-notification-causation.js";
 import {
 	type SessionSetupPlan,
 	type PipelineContext,
@@ -885,6 +898,76 @@ function sandboxWorktreeOwnerCoordinates(
 	return name ? { root, name } : undefined;
 }
 
+export type HostSessionNotificationName = SessionNotificationName | Extract<HostNotificationName, "sessionStatusChanged">;
+
+export interface HostSessionNotificationPublication<N extends HostSessionNotificationName> {
+	projectId: string;
+	sessionId: string;
+	aggregateId: string;
+	aggregateRevision?: string | number;
+	payload: Readonly<HostNotificationPayload<N>>;
+}
+
+/** Narrow post-authority port; the Extension Host dispatcher owns validation and fanout. */
+export interface HostSessionNotificationPublisher {
+	publish<N extends HostSessionNotificationName>(name: N, publication: HostSessionNotificationPublication<N>): unknown;
+}
+
+export interface SessionHostInterceptorPort {
+	dispatch(name: string, input: Record<string, unknown>, context: Record<string, unknown>): Promise<any>;
+	hasAny?(names: readonly string[], projectId?: string, goalId?: string): boolean;
+	requiresFailClosed?(name: string, projectId?: string, goalId?: string): boolean;
+}
+
+type ToolCallLifecyclePhase =
+	| "observed"
+	| "before-running"
+	| "admitted"
+	| "after-running"
+	| "after-applied"
+	| "ended";
+
+interface ToolCallLifecycleEntry {
+	toolCallId: string;
+	toolName: string;
+	generation: number;
+	turnIndex: number;
+	startedAt: number;
+	startCursor?: number;
+	phase: ToolCallLifecyclePhase;
+	lease: number;
+	controller: AbortController;
+	status?: "succeeded" | "errored";
+	errorStatus?: "handler_error";
+}
+
+interface ToolCallBeforeWaiter {
+	toolCallId: string;
+	toolName: string;
+	generation: number;
+	timer: ReturnType<typeof setTimeout>;
+	resolve: (claim: ToolCallInterceptorClaim | undefined) => void;
+}
+
+declare const toolCallInterceptorClaimBrand: unique symbol;
+/** Opaque, process-local authority for one exact host-observed Pi tool boundary. */
+export type ToolCallInterceptorClaim = {
+	readonly [toolCallInterceptorClaimBrand]: true;
+};
+
+interface OwnedToolCallInterceptorClaim {
+	kind: "before" | "after";
+	session: SessionInfo;
+	entry: ToolCallLifecycleEntry;
+	generation: number;
+	lease: number;
+	settled: boolean;
+}
+
+const MAX_TRACKED_HOST_TOOL_CALLS = 128;
+const TOOL_CALL_START_ARRIVAL_GRACE_MS = 100;
+const MAX_HOST_TOOL_IDENTITY_LENGTH = 512;
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -1006,6 +1089,18 @@ export interface SessionInfo {
 	lastAssistantTerminalIdentity?: string;
 	/** Deduplicates repeated/late final agent_end frames within one turn. */
 	turnTerminalHandled?: boolean;
+	/** Host-only causal binding for one exact notification-triggered staff turn. */
+	staffNotificationTurnContext?: StaffNotificationTurnContext;
+	/** Last turn index whose canonical agent_start notification was published. */
+	hostTurnStartedIndex?: number;
+	/** Bounded, metadata-only tool provenance created only by accepted Pi lifecycle events. */
+	hostToolCallLifecycle?: Map<string, ToolCallLifecycleEntry>;
+	/** Bounded pre-arrival reservations for HTTP callbacks that race Pi stdout. */
+	hostToolCallBeforeWaiters?: Map<string, ToolCallBeforeWaiter>;
+	/** Post-authority status observer installed by SessionManager. */
+	onStatusChanged?: import("./session-status.js").BroadcastableSession["onStatusChanged"];
+	/** Called only after a live event entered EventBuffer and its legacy frame was queued. */
+	onEventAccepted?: (event: unknown, cursor: number) => void;
 	/** A non-retryable terminal failure left durable work parked for manual Retry. */
 	manualRetryRequired?: boolean;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
@@ -2822,7 +2917,7 @@ export function isRetryableAgentEnd(event: unknown): boolean {
  *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
  *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: PendingSkillSidecarEnvelope[]; previousAssistantStreamMessage?: any }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: PendingSkillSidecarEnvelope[]; previousAssistantStreamMessage?: any; onEventAccepted?: (event: unknown, cursor: number) => void }, truncated: unknown): import("./event-buffer.js").BufferedEvent {
 	const normalizeStartedAt = performance.now();
 	const normalized = normalizeToolResultErrorEvent(truncated);
 	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
@@ -2834,6 +2929,11 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 	const retainStartedAt = performance.now();
 	const entry = session.eventBuffer.push(spliced);
 	const retainMs = performance.now() - retainStartedAt;
+	// EventBuffer acceptance is the authoritative live-message fence. Fanout is
+	// isolated here so a later socket failure cannot suppress the committed fact.
+	if (session.onEventAccepted) {
+		try { session.onEventAccepted(spliced, entry.seq); } catch { /* observational fanout is isolated */ }
+	}
 	const baseFrame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
 	const assistantStreamUpdate = isAssistantStreamMessageUpdate(spliced);
 	let scanned = 0;
@@ -2963,6 +3063,7 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 			sendMs,
 		});
 	}
+	return entry;
 }
 
 /**
@@ -3133,6 +3234,8 @@ export interface SessionManagerOptions {
 	previewPurgeOperation?: SessionPreviewPurgeOperation;
 	/** Late-bound graph guard supplied by goal/team ownership. A reason blocks direct destruction. */
 	promotedSessionLifecycleGuard?: PromotedSessionLifecycleGuard;
+	/** Narrow canonical notification publication seam. */
+	hostNotificationPublisher?: HostSessionNotificationPublisher;
 }
 
 type SessionReplacementToken = {
@@ -3216,6 +3319,8 @@ type PendingVerifierPromptReceipt = {
 
 export class SessionManager {
 	private sessions = new Map<string, SessionInfo>();
+	/** Opaque claims keep lifecycle authority out of route-visible values. */
+	private readonly _toolCallInterceptorClaims = new WeakMap<object, OwnedToolCallInterceptorClaim>();
 	/** Exact verifier rows waiting for provider acceptance, keyed by session/row. */
 	private _verifierPromptReceipts?: Map<string, Map<string, PendingVerifierPromptReceipt>>;
 	/** Sessions with at least one attached WS client. Keeps heartbeat work proportional to active viewers. */
@@ -3268,6 +3373,8 @@ export class SessionManager {
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	lifecycleHub?: LifecycleHub;
+	private hostInterceptors?: SessionHostInterceptorPort;
+	private hostNotificationPublisher?: HostSessionNotificationPublisher;
 	/**
 	 * S1 — per-session capability secret store. Injected into the owning
 	 * session's env as `BOBBIT_SESSION_SECRET` and used by the orchestration
@@ -3542,6 +3649,16 @@ export class SessionManager {
 		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
 	}
 
+	private clearToolCallProvenance(session: SessionInfo): void {
+		for (const entry of session.hostToolCallLifecycle?.values() ?? []) entry.controller.abort("tool-lifecycle-cleared");
+		session.hostToolCallLifecycle?.clear();
+		for (const waiter of session.hostToolCallBeforeWaiters?.values() ?? []) {
+			this.clock.clearTimeout(waiter.timer);
+			waiter.resolve(undefined);
+		}
+		session.hostToolCallBeforeWaiters?.clear();
+	}
+
 	/** Read-only admission view over the existing replacement coordinator. */
 	getModelSelectionRecoveryAdmission(sessionId: string): {
 		condition?: ModelSelectionRequiredCondition;
@@ -3572,6 +3689,8 @@ export class SessionManager {
 		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
+		session.staffNotificationTurnContext = undefined;
+		this.clearToolCallProvenance(session);
 		session.dormant = true;
 		session.status = "terminated";
 		session.clients.clear();
@@ -3673,6 +3792,11 @@ export class SessionManager {
 				generation: this._nextRespawnGeneration(sessionId),
 				kind,
 			};
+			// Advancing the canonical generation invalidates every outstanding tool
+			// callback claim, including in-place bridge replacements that retain the
+			// same SessionInfo object and session secret.
+			const priorWriter = this.sessions.get(sessionId);
+			if (priorWriter) this.clearToolCallProvenance(priorWriter);
 			owned.active = token;
 			try {
 				const result = await operation(token);
@@ -3777,7 +3901,373 @@ export class SessionManager {
 		this._creationListeners.push(fn);
 	}
 
-	private notifySessionCreated(session: SessionInfo): void {
+	/** Late-bind the interceptor router while preserving LifecycleHub as fallback. */
+	setHostInterceptorPort(port: SessionHostInterceptorPort | undefined): void {
+		this.hostInterceptors = port;
+	}
+
+	/** Server route seam for prompt/compact/tool boundaries owned inside Pi. */
+	dispatchHostInterceptor<N extends HostInterceptorName>(
+		sessionId: string,
+		name: N,
+		input: HostInterceptorRequest<N>,
+	): Promise<any> | undefined {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this.hostInterceptors) return undefined;
+		const controller = new AbortController();
+		return this.hostInterceptors.dispatch(name, input as Record<string, unknown>, {
+			projectId: session.projectId,
+			sessionId,
+			goalId: session.goalId ?? session.teamGoalId,
+			cwd: session.cwd,
+			signal: controller.signal,
+		});
+	}
+
+	/** Late-bind the canonical Extension Host dispatcher without giving sessions fanout ownership. */
+	setHostNotificationPublisher(publisher: HostSessionNotificationPublisher | undefined): void {
+		this.hostNotificationPublisher = publisher;
+		for (const session of this.sessions.values()) this.attachHostLifecycleObservers(session);
+	}
+
+	private publishSessionNotification<N extends HostSessionNotificationName>(
+		session: SessionInfo,
+		name: N,
+		aggregateId: string,
+		aggregateRevision: string | number | undefined,
+		payload: Readonly<HostNotificationPayload<N>>,
+	): void {
+		if (!this.hostNotificationPublisher || !session.projectId) return;
+		try {
+			const publish = () => this.hostNotificationPublisher!.publish(name, {
+				projectId: session.projectId!,
+				sessionId: session.id,
+				aggregateId,
+				aggregateRevision,
+				payload,
+			});
+			const causalTurn = this.getStaffNotificationTurnContext(session.id);
+			if (causalTurn) runWithStaffNotificationTurnContext(causalTurn, publish);
+			else publish();
+		} catch {
+			console.warn(`[session-manager] host notification publication failed code=publisher_error name=${name} session=${session.id}`);
+		}
+	}
+
+	private attachHostLifecycleObservers(session: SessionInfo): void {
+		session.onStatusChanged = (change) => {
+			if (change.status === "terminated") {
+				session.staffNotificationTurnContext = undefined;
+				this.clearToolCallProvenance(session);
+			}
+			this.publishSessionNotification(session, "statusChanged", session.id, change.statusVersion, {
+				previousStatus: change.previousStatus,
+				status: change.status,
+				statusVersion: change.statusVersion,
+			});
+			this.publishSessionNotification(session, "sessionStatusChanged", session.id, change.statusVersion, {
+				sessionId: session.id,
+				previousStatus: change.previousStatus,
+				status: change.status,
+				statusVersion: change.statusVersion,
+			});
+		};
+		session.onEventAccepted = (event, cursor) => this.publishAcceptedSessionEvent(session, event, cursor);
+	}
+
+	private isBoundedToolIdentity(value: unknown): value is string {
+		return typeof value === "string" && value.length > 0 && value.length <= MAX_HOST_TOOL_IDENTITY_LENGTH;
+	}
+
+	private deleteToolCallEntry(session: SessionInfo, entry: ToolCallLifecycleEntry, reason: string): void {
+		if (session.hostToolCallLifecycle?.get(entry.toolCallId) === entry) {
+			session.hostToolCallLifecycle.delete(entry.toolCallId);
+		}
+		entry.controller.abort(reason);
+	}
+
+	private createToolCallClaim(
+		session: SessionInfo,
+		entry: ToolCallLifecycleEntry,
+		kind: "before" | "after",
+	): ToolCallInterceptorClaim | undefined {
+		const expectedPhase = kind === "before" ? "observed" : "admitted";
+		if (!this._sessionWriterIsCurrent(session)
+			|| entry.generation !== (session.lifecycleGeneration ?? 0)
+			|| session.hostToolCallLifecycle?.get(entry.toolCallId) !== entry
+			|| entry.phase !== expectedPhase
+			|| (kind === "before" && entry.startCursor === undefined)) return undefined;
+		entry.phase = kind === "before" ? "before-running" : "after-running";
+		entry.lease += 1;
+		const claim = Object.freeze({}) as ToolCallInterceptorClaim;
+		this._toolCallInterceptorClaims.set(claim, {
+			kind,
+			session,
+			entry,
+			generation: entry.generation,
+			lease: entry.lease,
+			settled: false,
+		});
+		return claim;
+	}
+
+	private toolCallClaimIsCurrent(owned: OwnedToolCallInterceptorClaim): boolean {
+		return !owned.settled
+			&& this._sessionWriterIsCurrent(owned.session)
+			&& owned.generation === (owned.session.lifecycleGeneration ?? 0)
+			&& owned.session.hostToolCallLifecycle?.get(owned.entry.toolCallId) === owned.entry
+			&& owned.entry.lease === owned.lease
+			&& owned.entry.phase === (owned.kind === "before" ? "before-running" : "after-running")
+			&& !owned.entry.controller.signal.aborted;
+	}
+
+	private resolveToolCallBeforeWaiter(session: SessionInfo, toolCallId: string, claim: ToolCallInterceptorClaim | undefined): void {
+		const waiter = session.hostToolCallBeforeWaiters?.get(toolCallId);
+		if (!waiter) return;
+		session.hostToolCallBeforeWaiters!.delete(toolCallId);
+		this.clock.clearTimeout(waiter.timer);
+		waiter.resolve(claim);
+	}
+
+	private observeToolCallStart(session: SessionInfo, event: any): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
+		const toolCallId = event?.toolCallId;
+		const toolName = event?.toolName;
+		if (!this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return;
+		const generation = session.lifecycleGeneration ?? 0;
+		const tracker = session.hostToolCallLifecycle ??= new Map<string, ToolCallLifecycleEntry>();
+		const existing = tracker.get(toolCallId);
+		if (existing) {
+			if (existing.generation === generation && existing.toolName === toolName) return;
+			this.deleteToolCallEntry(session, existing, "tool-start-conflict");
+			this.resolveToolCallBeforeWaiter(session, toolCallId, undefined);
+			return;
+		}
+		if (tracker.size >= MAX_TRACKED_HOST_TOOL_CALLS) {
+			const evictable = Array.from(tracker.values()).find(entry => entry.phase === "observed");
+			if (!evictable) {
+				this.resolveToolCallBeforeWaiter(session, toolCallId, undefined);
+				return;
+			}
+			this.deleteToolCallEntry(session, evictable, "tool-provenance-capacity");
+			this.resolveToolCallBeforeWaiter(session, evictable.toolCallId, undefined);
+		}
+		tracker.set(toolCallId, {
+			toolCallId,
+			toolName,
+			generation,
+			turnIndex: (session.completedTurnCount ?? 0) + 1,
+			startedAt: this.clock.now(),
+			phase: "observed",
+			lease: 0,
+			controller: new AbortController(),
+		});
+	}
+
+	private acceptToolCallStartCursor(session: SessionInfo, event: any, cursor: number): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
+		const toolCallId = event?.toolCallId;
+		const toolName = event?.toolName;
+		if (!this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return;
+		const entry = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!entry || entry.phase !== "observed" || entry.toolName !== toolName
+			|| entry.generation !== (session.lifecycleGeneration ?? 0)) return;
+		entry.startCursor = cursor;
+		const waiter = session.hostToolCallBeforeWaiters?.get(toolCallId);
+		if (!waiter) return;
+		if (waiter.toolName !== toolName || waiter.generation !== entry.generation) {
+			this.resolveToolCallBeforeWaiter(session, toolCallId, undefined);
+			return;
+		}
+		this.resolveToolCallBeforeWaiter(session, toolCallId, this.createToolCallClaim(session, entry, "before"));
+	}
+
+	/** Claim one exact accepted Pi start. Waiting covers only stdout/HTTP transport reordering. */
+	claimToolCallBefore(sessionId: string, toolCallId: string, toolName: string): Promise<ToolCallInterceptorClaim | undefined> {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this._sessionWriterIsCurrent(session)
+			|| !this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) {
+			return Promise.resolve(undefined);
+		}
+		const entry = session.hostToolCallLifecycle?.get(toolCallId);
+		if (entry) {
+			if (entry.toolName !== toolName || entry.generation !== (session.lifecycleGeneration ?? 0) || entry.phase !== "observed") {
+				return Promise.resolve(undefined);
+			}
+			if (entry.startCursor !== undefined) return Promise.resolve(this.createToolCallClaim(session, entry, "before"));
+		}
+		const waiters = session.hostToolCallBeforeWaiters ??= new Map<string, ToolCallBeforeWaiter>();
+		if (waiters.has(toolCallId) || waiters.size >= MAX_TRACKED_HOST_TOOL_CALLS) return Promise.resolve(undefined);
+		return new Promise(resolve => {
+			const generation = session.lifecycleGeneration ?? 0;
+			const waiter: ToolCallBeforeWaiter = {
+				toolCallId,
+				toolName,
+				generation,
+				resolve,
+				timer: this.clock.setTimeout(() => {
+					if (session.hostToolCallBeforeWaiters?.get(toolCallId) !== waiter) return;
+					session.hostToolCallBeforeWaiters.delete(toolCallId);
+					resolve(undefined);
+				}, TOOL_CALL_START_ARRIVAL_GRACE_MS),
+			};
+			waiters.set(toolCallId, waiter);
+		});
+	}
+
+	/** Claim the single post-handler callback for an admitted current-generation call. */
+	claimToolCallAfter(sessionId: string, toolCallId: string, toolName: string): ToolCallInterceptorClaim | undefined {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this._sessionWriterIsCurrent(session)
+			|| !this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return undefined;
+		const entry = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!entry || entry.toolName !== toolName || entry.generation !== (session.lifecycleGeneration ?? 0)) return undefined;
+		return this.createToolCallClaim(session, entry, "after");
+	}
+
+	/** Dispatch through a claim-derived context; routes never receive lifecycle state or generation. */
+	dispatchClaimedToolInterceptor(
+		claim: ToolCallInterceptorClaim,
+		input: { args?: Record<string, unknown>; result?: unknown },
+	): Promise<any> | undefined {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || !this.toolCallClaimIsCurrent(owned) || !this.hostInterceptors) return undefined;
+		const request = owned.kind === "before"
+			? { toolCallId: owned.entry.toolCallId, toolName: owned.entry.toolName, args: input.args ?? {} }
+			: { toolCallId: owned.entry.toolCallId, toolName: owned.entry.toolName, result: input.result };
+		return this.hostInterceptors.dispatch(owned.kind === "before" ? "beforeToolCall" : "afterToolResult", request, {
+			projectId: owned.session.projectId,
+			sessionId: owned.session.id,
+			goalId: owned.session.goalId ?? owned.session.teamGoalId,
+			cwd: owned.session.cwd,
+			signal: owned.entry.controller.signal,
+		});
+	}
+
+	/** Apply one before decision. A block consumes provenance without publishing a start fact. */
+	settleToolCallBefore(claim: ToolCallInterceptorClaim, admitted: boolean): boolean {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || owned.kind !== "before" || !this.toolCallClaimIsCurrent(owned)) return false;
+		owned.settled = true;
+		if (!admitted) {
+			this.deleteToolCallEntry(owned.session, owned.entry, "tool-call-blocked");
+			return true;
+		}
+		owned.entry.phase = "admitted";
+		this.publishSessionNotification(owned.session, "toolCallStarted", owned.entry.toolCallId, owned.entry.startCursor, {
+			toolCallId: owned.entry.toolCallId,
+			toolName: owned.entry.toolName,
+			turnIndex: owned.entry.turnIndex,
+		});
+		return true;
+	}
+
+	/** Apply one approved/synthetic post-policy result before Pi can persist it. */
+	settleToolCallAfter(claim: ToolCallInterceptorClaim): boolean {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || owned.kind !== "after" || !this.toolCallClaimIsCurrent(owned)) return false;
+		owned.settled = true;
+		owned.entry.phase = "after-applied";
+		return true;
+	}
+
+	cancelToolCallInterceptorClaim(claim: ToolCallInterceptorClaim): void {
+		const owned = this._toolCallInterceptorClaims.get(claim);
+		if (!owned || owned.settled) return;
+		owned.settled = true;
+		this.deleteToolCallEntry(owned.session, owned.entry, "tool-callback-cancelled");
+	}
+
+	private recordToolCallTerminal(session: SessionInfo, event: any): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
+		const toolCallId = event?.toolCallId;
+		const toolName = event?.toolName;
+		if (!this.isBoundedToolIdentity(toolCallId) || !this.isBoundedToolIdentity(toolName)) return;
+		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!tracked) return;
+		if (tracked.toolName !== toolName || tracked.generation !== (session.lifecycleGeneration ?? 0)) {
+			this.deleteToolCallEntry(session, tracked, "tool-end-mismatch");
+			return;
+		}
+		if (tracked.phase === "ended") return;
+		if (tracked.phase !== "admitted" && tracked.phase !== "after-applied") {
+			this.deleteToolCallEntry(session, tracked, "tool-end-before-policy-settlement");
+			return;
+		}
+		tracked.phase = "ended";
+		tracked.status = event.isError === true ? "errored" : "succeeded";
+		tracked.errorStatus = event.isError === true ? "handler_error" : undefined;
+		tracked.controller.abort("tool-execution-ended");
+	}
+
+	private publishAcceptedSessionEvent(session: SessionInfo, accepted: unknown, cursor: number): void {
+		if (!this._sessionWriterIsCurrent(session) || !accepted || typeof accepted !== "object") return;
+		const event = accepted as { type?: unknown; toolCallId?: unknown; toolName?: unknown; message?: any };
+		if (event.type === "tool_execution_start") {
+			this.acceptToolCallStartCursor(session, event, cursor);
+			return;
+		}
+		if (event.type !== "message_end" || !event.message || typeof event.message !== "object") return;
+		const message = event.message;
+		const rawRole = typeof message.role === "string" ? message.role : "";
+		const role: "user" | "assistant" | "system" = rawRole === "user"
+			? "user"
+			: rawRole === "assistant" ? "assistant" : "system";
+		const content = Array.isArray(message.content) ? message.content : [];
+		const blockKinds = Array.from(new Set<"text" | "tool_use" | "tool_result">(
+			content.flatMap((block: unknown): Array<"text" | "tool_use" | "tool_result"> => {
+				const kind = block && typeof block === "object" ? (block as { type?: unknown }).type : undefined;
+				if (kind === "text") return ["text"];
+				if (kind === "toolCall" || kind === "tool_use") return ["tool_use"];
+				if (kind === "toolResult" || kind === "tool_result") return ["tool_result"];
+				return [];
+			}),
+		)).slice(0, 8);
+		const explicitMessageId = typeof message.id === "string" && message.id.length > 0 ? message.id : undefined;
+		const messageId = explicitMessageId ?? `${session.id}:${cursor}`;
+		this.publishSessionNotification(session, "messageAppended", messageId, cursor, {
+			messageId,
+			cursor,
+			role,
+			blockKinds,
+		});
+
+		if (rawRole !== "toolResult" && rawRole !== "tool_result" && rawRole !== "tool") return;
+		const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
+		if (!toolCallId) return;
+		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!tracked || tracked.phase !== "ended" || tracked.generation !== (session.lifecycleGeneration ?? 0)) return;
+		if (typeof message.toolName === "string" && message.toolName !== tracked.toolName) {
+			this.deleteToolCallEntry(session, tracked, "tool-result-mismatch");
+			return;
+		}
+		session.hostToolCallLifecycle!.delete(toolCallId);
+		const failed = tracked.status === "errored" || message.isError === true;
+		this.publishSessionNotification(session, "toolCallCompleted", toolCallId, cursor, {
+			toolCallId,
+			toolName: tracked.toolName,
+			status: failed ? "errored" : "succeeded",
+			durationMs: Math.max(0, Math.round(this.clock.now() - tracked.startedAt)),
+			...(failed ? { errorStatus: tracked.errorStatus ?? "handler_error" } : {}),
+		});
+	}
+
+	/**
+	 * Publish the legacy/canonical creation seam only after the structural row is
+	 * atomically durable. The store barrier is intentionally owned here so every
+	 * creation listener shares the same authority boundary.
+	 */
+	private async notifySessionCreated(session: SessionInfo, store: SessionStore): Promise<void> {
+		if (store instanceof SessionStore) {
+			// Production stores must cross the atomic publication fence. Do not make
+			// this optional: a failed initial write must suppress the committed fact.
+			await store.flushAsync();
+		} else {
+			// Historical in-process harnesses inject small synchronous recording
+			// stores through the SessionStore seam. Their put/update calls are the
+			// committed boundary; richer doubles may still expose an async barrier.
+			await (store as unknown as { flushAsync?: () => void | Promise<void> }).flushAsync?.();
+		}
 		for (const fn of this._creationListeners) {
 			try { fn(session); } catch (err) {
 				console.error(`[session-manager] session creation listener failed for ${session.id}:`, err);
@@ -3858,6 +4348,82 @@ export class SessionManager {
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
 		this._inboxNudger = nudger;
+	}
+
+	/** Return causal controls only while every exact staff/session/lifecycle fence
+	 * remains authoritative. Invalid bindings are erased on observation. */
+	getStaffNotificationTurnContext(sessionId: string): StaffNotificationTurnContext | undefined {
+		const session = this.sessions.get(sessionId);
+		const context = session?.staffNotificationTurnContext;
+		if (!session || !context) return undefined;
+		const staff = this.staffRecordSource?.getStaff(context.staffId);
+		if (session.lifecycleFenced === true
+			|| !this._sessionWriterIsCurrent(session)
+			|| session.id !== context.sessionId
+			|| session.projectId !== context.projectId
+			|| session.staffId !== context.staffId
+			|| (session.lifecycleGeneration ?? 0) !== context.lifecycleGeneration
+			|| !staff
+			|| staff.state !== "active"
+			|| staff.currentSessionId !== session.id
+			|| staff.projectId !== context.projectId) {
+			session.staffNotificationTurnContext = undefined;
+			return undefined;
+		}
+		return context;
+	}
+
+	clearStaffNotificationTurnContext(sessionId: string, notificationId?: string): void {
+		const session = this.sessions.get(sessionId);
+		if (!session?.staffNotificationTurnContext) return;
+		if (notificationId && session.staffNotificationTurnContext.notificationId !== notificationId) return;
+		session.staffNotificationTurnContext = undefined;
+	}
+
+	/** Atomically reserve an otherwise-empty idle staff turn for one notification
+	 * root, then dispatch the host-owned wake prompt. Batching roots is forbidden. */
+	async enqueueStaffNotificationPrompt(
+		sessionId: string,
+		text: string,
+		input: Omit<StaffNotificationTurnContext, "sessionId" | "lifecycleGeneration">,
+	): Promise<{ status: "dispatched" | "queued" }> {
+		const session = this.sessions.get(sessionId);
+		const staff = this.staffRecordSource?.getStaff(input.staffId);
+		const validString = (value: string) => value.length > 0 && value.length <= 256;
+		if (!session
+			|| session.status !== "idle"
+			|| !session.promptQueue.isEmpty
+			|| session.lifecycleFenced === true
+			|| !this._sessionWriterIsCurrent(session)
+			|| session.projectId !== input.projectId
+			|| session.staffId !== input.staffId
+			|| !staff
+			|| staff.state !== "active"
+			|| staff.currentSessionId !== sessionId
+			|| staff.projectId !== input.projectId
+			|| !validString(input.staffId)
+			|| !validString(input.triggerId)
+			|| !validString(input.notificationId)
+			|| !validString(input.rootCorrelationId)
+			|| !Number.isSafeInteger(input.causationDepth)
+			|| input.causationDepth < 0
+			|| input.causationDepth > MAX_STAFF_NOTIFICATION_TURN_DEPTH) {
+			return { status: "queued" };
+		}
+		const context = freezeStaffNotificationTurnContext({
+			...input,
+			sessionId,
+			lifecycleGeneration: session.lifecycleGeneration ?? 0,
+		});
+		session.staffNotificationTurnContext = context;
+		try {
+			const result = await this.enqueuePrompt(sessionId, text, { isSteered: true, source: "system" });
+			if (result.status !== "dispatched") this.clearStaffNotificationTurnContext(sessionId, context.notificationId);
+			return result;
+		} catch (error) {
+			this.clearStaffNotificationTurnContext(sessionId, context.notificationId);
+			throw error;
+		}
 	}
 
 	setStaffManager(sm: { getStaff(id: string): import("./staff-store.js").PersistedStaff | undefined }): void {
@@ -4066,6 +4632,7 @@ export class SessionManager {
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
 		this.previewPurgeOperation = options?.previewPurgeOperation ?? (async (_sessionId, operation) => operation());
 		this.promotedSessionLifecycleGuard = options?.promotedSessionLifecycleGuard;
+		this.hostNotificationPublisher = options?.hostNotificationPublisher;
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -4550,6 +5117,7 @@ export class SessionManager {
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			hostInterceptors: this.hostInterceptors,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -4561,6 +5129,7 @@ export class SessionManager {
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
+			bindHostLifecycle: (session) => this.attachHostLifecycleObservers(session),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
 			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
@@ -5641,7 +6210,10 @@ export class SessionManager {
 		// so a goal that disabled a provider stays bridge-free after respawn too.
 		// Zero overhead when no enabled provider declares those hooks — the bridge
 		// is neither written nor pushed onto the spawn args.
-		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) {
+		const turnHooksNeeded = this.hostInterceptors?.hasAny?.(
+			["beforePrompt", "beforeCompact"], projectId, effectiveGoalId,
+		) ?? (!!this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId));
+		if (turnHooksNeeded) {
 			const bridgePath = writeProviderBridgeExtension(sessionId);
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
@@ -5668,9 +6240,24 @@ export class SessionManager {
 			projectId,
 			sandboxed,
 		);
+		const beforeToolCallFailClosed = this.hostInterceptors?.requiresFailClosed?.(
+			"beforeToolCall", projectId, effectiveGoalId,
+		) === true;
+		const afterToolResultFailClosed = this.hostInterceptors?.requiresFailClosed?.(
+			"afterToolResult", projectId, effectiveGoalId,
+		) === true;
 		return {
 			args,
-			env: { ...activation.env, ...packLocalDataEnv },
+			env: {
+				...activation.env,
+				...packLocalDataEnv,
+				// The same exact-auth bridge owns canonical tool lifecycle metadata even
+				// when no interceptor contributes a decision. Failure policy remains
+				// contribution-derived through the two flags below.
+				BOBBIT_HOST_HOOKS_ENABLED: "1",
+				BOBBIT_HOST_BEFORE_TOOL_CALL_FAIL_CLOSED: beforeToolCallFailClosed ? "1" : "0",
+				BOBBIT_HOST_AFTER_TOOL_RESULT_FAIL_CLOSED: afterToolResultFailClosed ? "1" : "0",
+			},
 			runtimeExtensions: piExtensionActivation.runtimeExtensions,
 		};
 	}
@@ -8537,6 +9124,7 @@ export class SessionManager {
 			abortAttemptOutcome?: "ambiguous" | "proven-no-start";
 		},
 	): void {
+		if (!session.onStatusChanged || !session.onEventAccepted) this.attachHostLifecycleObservers(session);
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
 		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
@@ -8584,8 +9172,11 @@ export class SessionManager {
 			session.latestMessageUpdate = undefined;
 		}
 
-		// Track tool execution during this turn
+		// Track tool execution during this turn. Provenance is created only from a
+		// current Pi writer; the later EventBuffer acceptance attaches its cursor
+		// before any waiting HTTP callback can claim it.
 		if (event.type === "tool_execution_start") {
+			if (writerIsCurrent) this.observeToolCallStart(session, event);
 			session.turnHadToolCalls = true;
 
 			// Enforce allowedTools — log when a disallowed tool slips past the guard
@@ -8610,6 +9201,7 @@ export class SessionManager {
 		// (for example, recovered/pre-existing rows). Fresh live steers and
 		// steer_queued promotions dispatch immediately through _dispatchSteer.
 		if (event.type === "tool_execution_end") {
+			this.recordToolCallTerminal(session, event);
 			// Compaction and Stop are active turns. Neither tool completion nor a
 			// stale boundary may bypass their sole release owner.
 			if (session.status === "aborting" || session.isCompacting) return;
@@ -8702,6 +9294,14 @@ export class SessionManager {
 				manualRetryRequired: false,
 			});
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+			const turnIndex = (session.completedTurnCount ?? 0) + 1;
+			if (session.hostTurnStartedIndex !== turnIndex) {
+				session.hostTurnStartedIndex = turnIndex;
+				this.publishSessionNotification(session, "turnStarted", `${session.id}:${turnIndex}`, turnIndex, {
+					turnIndex,
+					source: session.lastPromptSource ?? "user",
+				});
+			}
 			// Pi has durably appended the user prompt by agent_start. Refresh the
 			// authoritative cursor plane now so prompt actions appear during the turn.
 			this.schedulePromptCursorRefresh(session);
@@ -8755,6 +9355,13 @@ export class SessionManager {
 
 			const wasAborting = session.status === "aborting";
 			const abortShapedTerminal = session.abortShapedTerminal === true;
+			const terminalOutcome: "succeeded" | "errored" | "aborted" = wasAborting || abortShapedTerminal
+				? "aborted"
+				: session.lastTurnErrored || event.error === true || event.success === false
+					? "errored"
+					: "succeeded";
+			const terminalStartedAt = session.streamingStartedAt;
+			const terminalHadToolCalls = session.turnHadToolCalls === true;
 			// Consume this turn's classification at the sole final boundary. A late
 			// duplicate agent_end cannot reinterpret the next turn as cancelled.
 			session.abortShapedTerminal = undefined;
@@ -8825,6 +9432,21 @@ export class SessionManager {
 				manualRetryRequired: session.manualRetryRequired === true,
 			});
 			broadcastStatus(session, "idle");
+			const completedTurnIndex = session.completedTurnCount;
+			this.publishSessionNotification(session, "turnCompleted", `${session.id}:${completedTurnIndex}`, completedTurnIndex, {
+				turnIndex: completedTurnIndex,
+				outcome: terminalOutcome,
+				durationMs: terminalStartedAt === undefined ? 0 : Math.max(0, this.clock.now() - terminalStartedAt),
+				hadToolCalls: terminalHadToolCalls,
+			});
+			// turnCompleted is the last fact allowed to inherit this root. The
+			// dispatcher admits durable subscribers in its already-queued microtask;
+			// clear immediately after that admission seam, fenced by notification id.
+			const completedNotificationId = session.staffNotificationTurnContext?.notificationId;
+			if (completedNotificationId) {
+				queueMicrotask(() => this.clearStaffNotificationTurnContext(session.id, completedNotificationId));
+			}
+			this.clearToolCallProvenance(session);
 			this.resolveIdleWaiters(session.id);
 			this.schedulePromptCursorRefresh(session, { settleBindings: true });
 			// Don't drain the queue if the turn ended with a model error —
@@ -12133,14 +12755,22 @@ export class SessionManager {
 				bridgeOptions: { cwd },
 			};
 
-			// Persist immediately with all known structural fields
+			// Persist immediately with all known structural fields. Creation listeners
+			// remain silent until the final structural generation crosses the store's
+			// atomic publication fence.
 			persistOnce(session, plan, ctx.store);
 			if (session.repoWorktrees && session.repoWorktrees.length > 0) {
 				ctx.store.update(session.id, {
 					repoWorktrees: Object.fromEntries(session.repoWorktrees.map(w => [w.repo, w.worktreePath])),
 				});
 			}
-			this.notifySessionCreated(session);
+			try {
+				await this.notifySessionCreated(session, ctx.store);
+			} catch (err) {
+				const persistenceError = err instanceof Error ? err : new Error(String(err));
+				handleSetupFailure(session, plan, persistenceError, ctx);
+				throw persistenceError;
+			}
 
 			// Finish the pipeline. Most callers keep the historical preparing-session UX
 			// and let setup complete in the background. Continue-Archived opts in to
@@ -12247,7 +12877,13 @@ export class SessionManager {
 			if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
 				await this.tryAutoSelectModel(session);
 			}
-			this.notifySessionCreated(session);
+			try {
+				await this.notifySessionCreated(session, ctx.store);
+			} catch (err) {
+				const persistenceError = err instanceof Error ? err : new Error(String(err));
+				handleSetupFailure(session, plan, persistenceError, ctx);
+				throw persistenceError;
+			}
 
 			// Persist session metadata (fire-and-forget, but tracked for terminate).
 			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
@@ -15065,6 +15701,48 @@ export class SessionManager {
 		return parseImageModelPref(pref);
 	}
 
+	/** Notify existing termination listeners from the one durable archive boundary. */
+	private async notifySessionArchived(
+		id: string,
+		source: SessionInfo | PersistedSession,
+	): Promise<void> {
+		const repoWorktrees = Array.isArray(source.repoWorktrees)
+			? source.repoWorktrees.map(worktree => ({ worktreePath: worktree.worktreePath }))
+			: source.repoWorktrees
+				? Object.values(source.repoWorktrees).map(worktreePath => ({ worktreePath }))
+				: undefined;
+		const info: SessionTerminationInfo = {
+			projectId: source.projectId,
+			reason: "archived",
+			cwd: source.cwd,
+			worktreePath: source.worktreePath,
+			repoWorktrees,
+		};
+		for (const listener of this._terminationListeners) {
+			try {
+				await listener(id, info);
+			} catch (err) {
+				console.error(`[session ${id}] termination listener failed:`, err);
+			}
+		}
+	}
+
+	/**
+	 * Archive one row and notify observers exactly once, after successful atomic
+	 * publication. Consumer failure remains observational and cannot roll back the
+	 * durable transition.
+	 */
+	private async archivePersistedSession(
+		id: string,
+		store: SessionStore,
+		source: SessionInfo | PersistedSession,
+	): Promise<boolean> {
+		const archived = await store.archiveAsync(id);
+		if (!archived) return false;
+		await this.notifySessionArchived(id, source);
+		return true;
+	}
+
 	/**
 	 * Cascade-reap an owner's child agents (OrchestrationCore §6).
 	 *
@@ -15097,12 +15775,50 @@ export class SessionManager {
 		for (const ps of allLiveForTerminate) {
 			const isChild = ps.delegateOf === id || (!!ps.childKind && ps.parentSessionId === id);
 			if (isChild && (!options.cascadeSessionIds || options.cascadeSessionIds.has(ps.id)) && !this.sessions.has(ps.id)) {
-				try { await this.getSessionStore(ps.projectId).archiveAsync(ps.id); } catch { /* project gone */ }
+				try {
+					await this.dispatchSessionShutdownInterceptor(ps, "archived");
+					await this.archivePersistedSession(ps.id, this.getSessionStore(ps.projectId), ps);
+				} catch { /* project gone or archive publication failed */ }
 			}
 		}
 		// Keep the OrchestrationCore in-memory index consistent.
 		if (!options.cascadeSessionIds) {
 			try { this.orchestrationCore?.forgetOwner(id); } catch { /* best-effort */ }
+		}
+	}
+
+	private async dispatchSessionShutdownInterceptor(
+		src: Pick<SessionInfo, "id" | "projectId" | "cwd" | "goalId" | "teamGoalId" | "role">,
+		reason: "archived" | "quiesced" | "terminated",
+	): Promise<void> {
+		try {
+			if (this.hostInterceptors) {
+				const controller = new AbortController();
+				await this.hostInterceptors.dispatch("sessionShutdown", {
+					sessionId: src.id,
+					projectId: src.projectId,
+					reason,
+				}, {
+					projectId: src.projectId,
+					sessionId: src.id,
+					goalId: src.goalId ?? src.teamGoalId,
+					cwd: src.cwd,
+					signal: controller.signal,
+				});
+				return;
+			}
+			if (this.lifecycleHub) {
+				await this.lifecycleHub.dispatch("sessionShutdown", {
+					sessionId: src.id,
+					projectId: src.projectId,
+					scope: src.projectId ? "project" : "global",
+					cwd: src.cwd,
+					goalId: src.goalId ?? src.teamGoalId,
+					roleName: src.role,
+				}, lifecycleScopeInput(src));
+			}
+		} catch {
+			console.warn(`[session-manager] sessionShutdown interceptor failed code=dispatch_error session=${src.id}`);
 		}
 	}
 
@@ -15124,36 +15840,18 @@ export class SessionManager {
 		// Defense in depth for internal recovery and maintenance callers. Ordered
 		// goal archival has already made the canonical guard return undefined here.
 		this.assertPromotedSessionRecoveryAllowed(id, "archive its session record");
-		await this.cascadeReapOwner(id, options);
-		// Extension Platform G1.4: notify lifecycle providers the session is
-		// shutting down. Best-effort and bounded by the hub's per-provider
-		// timeouts; wrapped in try/catch so archival always completes even if a
-		// provider hangs or throws. Resolve context from the live session when
-		// present, else the persisted record (dormant sessions still archive).
-		if (this.lifecycleHub) {
-			const live = this.sessions.get(id);
-			const persisted = live ? undefined : this.getPersistedSession(id);
-			const src = live ?? persisted;
-			if (src) {
-				try {
-					await this.lifecycleHub.dispatch("sessionShutdown", {
-						sessionId: id,
-						projectId: src.projectId,
-						scope: src.projectId ? "project" : "global",
-						cwd: src.cwd,
-						// Effective goal (goalId ?? teamGoalId) so disabled-provider
-						// filtering applies to members/delegates/reviewers too.
-						goalId: src.goalId ?? src.teamGoalId,
-						roleName: src.role,
-					}, lifecycleScopeInput(src));
-				} catch (err) {
-					console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
-				}
-			}
-		}
 		const target = store ?? this.resolveStoreForId(id);
-		if (!target) return false;
-		try { return await target.archiveAsync(id); } catch { return false; }
+		const initial = target?.get(id);
+		if (!target || !initial || initial.archived) return false;
+		await this.cascadeReapOwner(id, options);
+		// A concurrent archive may have completed while the child cascade settled.
+		if (target.get(id)?.archived) return false;
+		const live = this.sessions.get(id);
+		const persisted = live ? undefined : target.get(id);
+		const shutdownSource = live ?? persisted;
+		if (!shutdownSource) return false;
+		await this.dispatchSessionShutdownInterceptor(shutdownSource, "archived");
+		try { return await this.archivePersistedSession(id, target, shutdownSource); } catch { return false; }
 	}
 
 	/**
@@ -15188,6 +15886,8 @@ export class SessionManager {
 		// mutated by this seam.
 		session.lifecycleFenced = true;
 		session.dormant = true;
+		session.staffNotificationTurnContext = undefined;
+		this.clearToolCallProvenance(session);
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
 		if (session.pendingMetadataPersist) {
@@ -15236,20 +15936,7 @@ export class SessionManager {
 		this.sessions.delete(id);
 		this._taskIdCache.delete(id);
 		try { await this.cleanupScopedMcpManagersForSessionScope(scope); } catch { /* runtime authority is already removed */ }
-		if (this.lifecycleHub) {
-			try {
-				await this.lifecycleHub.dispatch("sessionShutdown", {
-					sessionId: id,
-					projectId: session.projectId,
-					scope: session.projectId ? "project" : "global",
-					cwd: session.cwd,
-					goalId: session.goalId ?? session.teamGoalId,
-					roleName: session.role,
-				}, lifecycleScopeInput(session));
-			} catch (err) {
-				console.warn(`[session-manager] sessionShutdown dispatch failed for quiesced ${id}:`, err);
-			}
-		}
+		await this.dispatchSessionShutdownInterceptor(session, "quiesced");
 		if (bridgeStopError) {
 			throw new Error(`Session ${id} runtime was detached after its bridge stop failed: ${bridgeStopError instanceof Error ? bridgeStopError.message : String(bridgeStopError)}`, { cause: bridgeStopError });
 		}
@@ -15429,32 +16116,12 @@ export class SessionManager {
 		this.sessions.delete(id);
 		this._taskIdCache.delete(id);
 		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
-		// Extension Platform G1.4: notify lifecycle providers the session is
-		// shutting down on the live DELETE/stop path too. terminateSession
-		// archives directly (bypassing archiveWithCascade), so the dispatch
-		// must also fire here. Best-effort and bounded by the hub's per-provider
-		// timeouts; wrapped in try/catch so termination always completes. Uses
-		// the live `session` context captured at the top of this method.
-		if (this.lifecycleHub) {
-			try {
-				await this.lifecycleHub.dispatch("sessionShutdown", {
-					sessionId: id,
-					projectId: session.projectId,
-					scope: session.projectId ? "project" : "global",
-					cwd: session.cwd,
-					// Effective goal (goalId ?? teamGoalId) so disabled-provider
-					// filtering applies to members/delegates/reviewers too.
-					goalId: session.goalId ?? session.teamGoalId,
-					roleName: session.role,
-				}, lifecycleScopeInput(session));
-			} catch (err) {
-				console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
-			}
-		}
+		await this.dispatchSessionShutdownInterceptor(session, "terminated");
 		// Always archive — even without an agentSessionFile the metadata
 		// (title, goal association, timestamps) is valuable and the search
-		// index may reference this session.  Purge will clean it up later.
-		await terminateStore.archiveAsync(id);
+		// index may reference this session. Purge will clean it up later. Existing
+		// listeners observe the same post-success boundary as dormant/cascade paths.
+		await this.archivePersistedSession(id, terminateStore, session);
 
 		// Bug 2 (docs/design/orphan-remote-branch-cleanup.md): eagerly push-delete
 		// the remote branch for non-delegate `session/*` sessions whose branch is
@@ -15483,22 +16150,6 @@ export class SessionManager {
 			}).catch(err => {
 				console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
 			});
-		}
-
-		// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
-		// Pass cwd/worktreePath/repoWorktrees in the info so listeners
-		// can't be defeated by the `sessions.delete(id)` above —
-		// `getSession(id)` would return undefined here and refcounts would leak.
-		const projectIdForListeners = session.projectId;
-		const sessionCwd = session.cwd;
-		const sessionWorktreePath = session.worktreePath;
-		const sessionRepoWorktrees = session.repoWorktrees;
-		for (const listener of this._terminationListeners) {
-			try {
-				await listener(id, { projectId: projectIdForListeners, reason: "archived", cwd: sessionCwd, worktreePath: sessionWorktreePath, repoWorktrees: sessionRepoWorktrees });
-			} catch (err) {
-				console.error(`[session ${id}] termination listener failed:`, err);
-			}
 		}
 
 		// Don't remove color or session prompt — they're needed for archived view
@@ -17067,6 +17718,7 @@ export class SessionManager {
 	async abortSessionTurn(id: string): Promise<void> {
 		const session = this.sessions.get(id);
 		if (!session || session.status !== "streaming") return;
+		session.staffNotificationTurnContext = undefined;
 		broadcastStatus(session, "aborting");
 		try { await session.rpcClient.abort(); } catch { /* best-effort */ }
 	}
@@ -17144,6 +17796,8 @@ export class SessionManager {
 		if (!this._replacementTokenIsCurrent(id, token)) {
 			throw new Error(`Session ${id} force-abort was superseded before start`);
 		}
+		// Abort permanently severs any notification-turn causal authority.
+		session.staffNotificationTurnContext = undefined;
 		// Broadcast aborting status so UI shows feedback during grace period
 		broadcastStatus(session, "aborting");
 
@@ -17574,6 +18228,7 @@ export class SessionManager {
 			const session = this.sessions.get(id);
 			if (!session) continue;
 
+			this.clearToolCallProvenance(session);
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
 			// Snapshot the current active state before we kill the process.

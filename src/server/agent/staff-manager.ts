@@ -14,6 +14,22 @@ import { execShellCommand } from "./shell-util.js";
 import { shouldCreateWorktree } from "./worktree-decision.js";
 import { resolveWorktreeSupport } from "./worktree-support.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import { validateNotificationFilter, type HostNotificationName, type HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
+
+type StaffFactName = "staffCreated" | "staffConfigChanged" | "staffRetired" | "staffSessionChanged";
+type StaffFactPublisher = {
+	publish<N extends StaffFactName>(name: N, publication: {
+		projectId: string;
+		aggregateId: string;
+		aggregateRevision?: string | number;
+		payload: HostNotificationPayload<N>;
+	}): unknown;
+};
+
+type StaffConfigChangedField = Extract<HostNotificationPayload<"staffConfigChanged">["changedFields"][number], string>;
+const STAFF_PUBLIC_CONFIG_FIELDS: ReadonlySet<StaffConfigChangedField> = new Set([
+	"name", "description", "systemPrompt", "state", "triggers", "roleId", "accessory", "contextPolicy",
+]);
 
 function sanitiseBranchName(name: string): string {
 	return name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
@@ -39,6 +55,8 @@ interface StaffWorktreePlan {
 export class StaffManager {
 	private pcm: ProjectContextManager;
 	private inboxManager: InboxManager | null = null;
+	private staffFactPublisher: StaffFactPublisher | null = null;
+	private notificationDeliveryReconciler: ((projectId: string, staffId: string) => void) | null = null;
 	private readonly remotePolicy: RemoteGitPolicy;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
 	private readonly commandRunner: CommandRunner;
@@ -59,6 +77,33 @@ export class StaffManager {
 	 */
 	setInboxManager(inboxManager: InboxManager): void {
 		this.inboxManager = inboxManager;
+	}
+
+	setStaffNotificationPublisher(publisher: StaffFactPublisher | null): void {
+		this.staffFactPublisher = publisher;
+	}
+
+	setNotificationDeliveryReconciler(reconciler: ((projectId: string, staffId: string) => void) | null): void {
+		this.notificationDeliveryReconciler = reconciler;
+	}
+
+	private publishStaffFact<N extends StaffFactName>(name: N, staff: PersistedStaff, payload: HostNotificationPayload<N>): void {
+		if (!staff.projectId) return;
+		try {
+			this.staffFactPublisher?.publish(name, {
+				projectId: staff.projectId,
+				aggregateId: staff.id,
+				aggregateRevision: staff.updatedAt,
+				payload,
+			});
+		} catch (err) {
+			console.warn(`[staff-manager] ${name} publication failed for ${staff.id}:`, err);
+		}
+	}
+
+	private reconcileNotificationDelivery(projectId: string, staffId: string): void {
+		try { this.notificationDeliveryReconciler?.(projectId, staffId); }
+		catch (err) { console.warn(`[staff-manager] notification delivery reconciliation failed for ${staffId}:`, err); }
 	}
 
 	/**
@@ -85,6 +130,13 @@ export class StaffManager {
 				if (typeof t.prompt !== "string" || t.prompt.trim().length === 0) {
 					throw new Error(`Trigger of type ${t.type} requires a non-empty prompt`);
 				}
+			}
+			if (t?.type === "notification") {
+				if (!t.notification || (t.notification.scope !== "session" && t.notification.scope !== "project") || typeof t.notification.name !== "string") {
+					throw new Error("Notification trigger requires a canonical scope and name");
+				}
+				const checked = validateNotificationFilter(t.notification.scope, t.notification.name as HostNotificationName, t.filter);
+				if (!checked.ok) throw new Error(`Invalid notification trigger: ${checked.code}`);
 			}
 		}
 	}
@@ -333,11 +385,13 @@ export class StaffManager {
 			throw new Error("Cannot create staff: projectId is required");
 		}
 
-		// Auto-assign UUIDs to triggers missing IDs
+		// Auto-assign UUIDs to triggers missing IDs, then validate the exact
+		// persisted selector/filter configuration.
 		const triggers = (opts?.triggers ?? []).map((t) => ({
 			...t,
 			id: t.id || randomUUID(),
 		}));
+		this.validateTriggers(triggers);
 
 		// When the caller didn't supply a usable accessory (absent/empty/"none")
 		// but selected a role, default the persisted accessory to the role's
@@ -381,7 +435,7 @@ export class StaffManager {
 		}
 
 		const store = this.getStore(projectId);
-		store.put(staff);
+		store.putStrict(staff);
 
 		const searchIndex = this.pcm.getOrCreate(projectId)?.searchIndex;
 		searchIndex?.indexStaff(staff, projectId);
@@ -431,8 +485,7 @@ export class StaffManager {
 			const worktreeMeta = this.staffSessionWorktreeMeta(staff, projectId);
 			if (worktreeMeta) sessionManager.updateSessionMeta(session.id, worktreeMeta);
 			await sessionManager.persistSessionMetadata(session);
-			store.update(id, { currentSessionId: session.id });
-			staff.currentSessionId = session.id;
+			this.commitCurrentSession(id, session.id);
 		} catch (err) {
 			// Clean up the orphaned worktree on failure
 			try {
@@ -446,7 +499,14 @@ export class StaffManager {
 			throw err;
 		}
 
-		return staff;
+		const committed = store.get(id)!;
+		this.publishStaffFact("staffCreated", committed, {
+			staffId: committed.id,
+			state: committed.state,
+			...(committed.currentSessionId ? { sessionId: committed.currentSessionId } : {}),
+		});
+		this.reconcileNotificationDelivery(projectId, id);
+		return committed;
 	}
 
 	getStaff(id: string): PersistedStaff | undefined {
@@ -463,6 +523,23 @@ export class StaffManager {
 			all.push(...ctx.staffStore.getAll());
 		}
 		return all;
+	}
+
+	/** Commit every permanent-session replacement/clear through one fact boundary. */
+	commitCurrentSession(staffId: string, sessionId: string | undefined): boolean {
+		const found = this.findStoreForStaff(staffId);
+		if (!found) return false;
+		const previousSessionId = found.staff.currentSessionId;
+		if (previousSessionId === sessionId) return true;
+		const ok = found.store.updateStrict(staffId, { currentSessionId: (sessionId ?? null) as unknown as string });
+		if (!ok) return false;
+		const staff = found.store.get(staffId)!;
+		this.publishStaffFact("staffSessionChanged", staff, {
+			staffId,
+			...(previousSessionId ? { previousSessionId } : {}),
+			...(sessionId ? { sessionId } : {}),
+		});
+		return true;
 	}
 
 	updateStaff(
@@ -483,24 +560,40 @@ export class StaffManager {
 			lastWakeAt?: number;
 		},
 	): boolean {
-		// Auto-assign UUIDs to triggers missing IDs
 		if (updates.triggers) {
-			updates.triggers = updates.triggers.map((t) => ({
-				...t,
-				id: t.id || randomUUID(),
-			}));
+			updates.triggers = updates.triggers.map((t) => ({ ...t, id: t.id || randomUUID() }));
+			this.validateTriggers(updates.triggers);
 		}
 		const found = this.findStoreForStaff(id);
 		if (!found) return false;
-		const ok = found.store.update(id, updates);
-		if (ok) {
-			const staff = found.store.get(id);
-			if (staff) {
-				const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
-				searchIndex?.indexStaff(staff, found.projectId);
-			}
+		const before = structuredClone(found.staff);
+		const ok = found.store.updateStrict(id, updates);
+		if (!ok) return false;
+		const staff = found.store.get(id)!;
+		const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
+		searchIndex?.indexStaff(staff, found.projectId);
+
+		const changedFields = Object.keys(updates)
+			.filter((field): field is StaffConfigChangedField => STAFF_PUBLIC_CONFIG_FIELDS.has(field as StaffConfigChangedField)
+				&& JSON.stringify(before[field as keyof PersistedStaff]) !== JSON.stringify(staff[field as keyof PersistedStaff]))
+			.sort();
+		if (changedFields.length > 0) {
+			this.publishStaffFact("staffConfigChanged", staff, { staffId: id, changedFields });
 		}
-		return ok;
+		if (before.state !== "retired" && staff.state === "retired") {
+			this.publishStaffFact("staffRetired", staff, { staffId: id });
+		}
+		if (before.currentSessionId !== staff.currentSessionId) {
+			this.publishStaffFact("staffSessionChanged", staff, {
+				staffId: id,
+				...(before.currentSessionId ? { previousSessionId: before.currentSessionId } : {}),
+				...(staff.currentSessionId ? { sessionId: staff.currentSessionId } : {}),
+			});
+		}
+		if (before.state !== staff.state || JSON.stringify(before.triggers) !== JSON.stringify(staff.triggers)) {
+			this.reconcileNotificationDelivery(found.projectId, id);
+		}
+		return true;
 	}
 
 	async deleteStaff(id: string, sessionManager: SessionManager): Promise<boolean> {
@@ -537,6 +630,7 @@ export class StaffManager {
 		} catch (err) {
 			console.error(`[staff-manager] inbox removeAll failed for staff ${id}:`, err);
 		}
+		this.reconcileNotificationDelivery(found.projectId, id);
 		return true;
 	}
 
@@ -556,7 +650,7 @@ export class StaffManager {
 		if (!trigger) return false;
 
 		if (updates.lastFired !== undefined) trigger.lastFired = updates.lastFired;
-		if (updates.lastSeenSha !== undefined) trigger.lastSeenSha = updates.lastSeenSha;
+		if (updates.lastSeenSha !== undefined && trigger.type !== "notification") trigger.lastSeenSha = updates.lastSeenSha;
 
 		store.update(staffId, { triggers: staff.triggers });
 		return true;
@@ -655,7 +749,7 @@ export class StaffManager {
 	async ensureSessionForStaff(staffId: string, sessionManager: SessionManager): Promise<string> {
 		const found = this.findStoreForStaff(staffId);
 		if (!found) throw new Error("Staff agent not found");
-		const { store, staff } = found;
+		const { staff } = found;
 		if (staff.state !== "active") throw new Error(`Staff agent is ${staff.state}, cannot ensure session`);
 
 		// Branch 1: legacy migration — no permanent session yet, create one
@@ -680,8 +774,7 @@ export class StaffManager {
 			const worktreeMeta = this.staffSessionWorktreeMeta(staff, found.projectId);
 			if (worktreeMeta) sessionManager.updateSessionMeta(session.id, worktreeMeta);
 			await sessionManager.persistSessionMetadata(session);
-			store.update(staffId, { currentSessionId: session.id });
-			staff.currentSessionId = session.id;
+			this.commitCurrentSession(staffId, session.id);
 			console.log(`[staff-manager] Created permanent session for staff "${staff.name}" (${staffId}) → ${session.id} (legacy migration)`);
 			return session.id;
 		}
@@ -693,8 +786,7 @@ export class StaffManager {
 				await sessionManager.ensureSessionAlive(staff.currentSessionId);
 			} catch {
 				console.log(`[staff-manager] Session ${staff.currentSessionId} unrecoverable, creating new one for "${staff.name}"`);
-				store.update(staffId, { currentSessionId: undefined as any });
-				staff.currentSessionId = undefined as any;
+				this.commitCurrentSession(staffId, undefined);
 				return this.ensureSessionForStaff(staffId, sessionManager);
 			}
 		}

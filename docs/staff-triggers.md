@@ -2,9 +2,10 @@
 
 Triggers attached to a [staff agent](staff-agents.md) decide when work lands
 in the staff's [inbox](staff-inbox.md). A staff record holds an array of
-`StaffTrigger` entries; each entry has a `type`, a `config` blob, an
-`enabled` flag, and (for some types) a `prompt` that becomes the wake
-message delivered to the agent.
+`StaffTrigger` entries. Legacy triggers use a `config` blob and may provide a
+wake `prompt`. Notification triggers instead select a canonical committed fact
+and an allowlisted exact-match filter; notification data is delivered as
+host-owned metadata, never prompt text.
 
 Triggers themselves never wake the agent directly — they `enqueue` an
 inbox entry, and the [inbox nudger](staff-inbox.md#lifecycle) decides when
@@ -13,16 +14,15 @@ whole point of the inbox; trigger plumbing only has to land the entry.
 
 ## Trigger types
 
-There are two dispatch families:
+There are three dispatch families:
 
 - **Polled** triggers (`schedule`, `git`) are evaluated by
-  `staff-trigger-engine.ts` on a 60 s tick. The engine re-reads cron and
-  git state, decides whether each trigger should fire, and enqueues an
-  inbox entry per fire.
-- **Push-based** triggers (`goal_created`, `goal_archived`) are dispatched
-  synchronously from the relevant store mutation — there is no polling
-  loop. The `manual` type is enqueue-only (the UI button) and is not
-  evaluated by either path.
+  `staff-trigger-engine.ts` on a 60 s tick.
+- **Legacy push-based** triggers (`goal_created`, `goal_archived`) enqueue from
+  their store callbacks. The `manual` type is enqueue-only.
+- **Canonical notification** triggers consume a post-authority Host notification
+  through a per-project durable subscriber outbox. They do not share state with
+  the legacy trigger engine or goal dispatcher.
 
 | Type | Dispatcher | `config` | `prompt` | Fires on |
 |---|---|---|---|---|
@@ -31,10 +31,83 @@ There are two dispatch families:
 | `manual` | (no dispatcher) | `{}` | optional | User clicks "Wake Now" / "+ Add to inbox", or an integration `POST`s to `/api/staff/:id/inbox`. |
 | `goal_created` | `goal-trigger-dispatcher.ts` (push, from `GoalStore.put`) | `{}` | **required** | A new goal id appears in any project's `GoalStore`. |
 | `goal_archived` | `goal-trigger-dispatcher.ts` (push, from `GoalStore.archive`) | `{}` | **required** | A goal transitions from `archived: false` to `archived: true`. |
+| `notification` | canonical Host notification dispatcher | `notification: { scope, name }`, `filter` | ignored for notification input | A committed catalogue fact matches the selector and every filter field. |
 
 `manual` exists primarily so the UI can render a row with a "Wake Now"
 affordance and so a `prompt` can be attached for ad-hoc one-clicks; the
 trigger record itself is never matched against an event.
+
+## Notification triggers
+
+Use notification triggers when staff should react to a committed Bobbit fact rather than a
+legacy poll or goal callback:
+
+```json
+{
+  "id": "successful-example-tool",
+  "type": "notification",
+  "notification": {
+    "scope": "session",
+    "name": "toolCallCompleted"
+  },
+  "filter": {
+    "toolName": "example_tool",
+    "status": "succeeded"
+  },
+  "enabled": true
+}
+```
+
+`id` may be omitted on create/update; the server generates one before validation. The selector
+must use a canonical scope/name pair. `toolCallCompleted` is session-scoped, including when
+project staff consumes it. Filters are an exact-AND comparison over catalogue-owned scalar
+fields. Unknown names, scope mismatches, unfilterable fields, invalid values, or oversized filters
+are rejected. The full catalogue and filter list live in
+[Unified Host hooks](host-hooks.md#notification-catalogue).
+
+### Project isolation and privacy
+
+The dispatcher considers only active staff in `notification.projectId`. It verifies the staff,
+trigger, delivery row, and inbox all belong to that exact project. A session-scoped notification
+also carries its exact authoritative `sessionId`; project membership does not change its scope.
+There is no cross-project fallback or client-provided project binding.
+
+The persisted input is the complete original validated and frozen canonical envelope. That
+envelope is already privacy-bounded: no raw prompt, message content, tool arguments/results,
+setting values, secrets, provider error text, stacks, or mutable store object can pass its schema.
+The wake prompt is generic and never interpolates event data.
+
+Browser/operator inbox reads and inbox WebSocket events are redacted: they omit
+`notificationInput`, root correlation, and causation depth. Only the exact live owning staff
+session receives the full metadata, using its gateway-issued `BOBBIT_SESSION_SECRET` as
+`X-Bobbit-Session-Secret`. The gateway resolves the secret to the staff's current live session and
+verifies staff and project ownership. A bearer token, cookie, public session ID, request body, or
+client project claim is not enough. See [Staff inbox](staff-inbox.md#notification-entry-security).
+
+For tool notifications, the session secret on the Pi callback authenticates only the exact callback
+transport. Bobbit separately requires matching current-writer execution provenance and an accepted
+host cursor before it invokes `beforeToolCall` or `afterToolResult` or publishes a tool fact. Forged,
+duplicate, mismatched, terminal, and stale-generation callbacks therefore match no notification
+trigger: they invoke no hook, create no durable delivery intent or inbox entry, and wake no staff.
+
+### Durable acceptance and retries
+
+Bobbit persists one matching delivery intent per deterministic
+`staffId + triggerId + notification.id` identity before inbox delivery. The row retains the exact
+event across retry and restart; it never reprojects a later aggregate. A successful row means the
+inbox write was durably accepted, not that the staff ran or completed the work.
+
+Delivery attempts are **at least once**. Inbox insertion is idempotent/effectively once for the
+stable identity, including a crash after inbox commit but before outbox acknowledgement. Startup
+reconciliation reclaims pending and expired leased rows. Transient storage/unavailable failures
+retry with bounded backoff, attempt count, and final deadline; invalid schema/version/project data
+fails closed. This is not exactly-once execution and there is no global notification journal or
+replay API.
+
+Pausing/retiring staff or disabling/deleting the trigger cancels pending work and aborts a leased
+attempt. Subscriber-version checks prevent late application after configuration changes.
+Host-owned root/depth tracking suppresses causal loops without rewriting the event's correlation
+fields. Successfully accepted inbox work is not rolled back by later retirement.
 
 ## Goal lifecycle triggers (`goal_created`, `goal_archived`)
 
@@ -86,11 +159,10 @@ at the API/store boundary:
   and disables the Save / Propose button until every goal trigger has
   a non-empty prompt.
 
-Other trigger types keep their existing optional-prompt semantics
-because the polled engine synthesises a placeholder if `prompt` is
-blank. Goal triggers do not have that escape hatch by design — a
-silently-fired wake with no instructions is worse than a save-time
-error.
+The other legacy trigger types keep optional prompts because the polled engine can synthesise a
+placeholder. Notification triggers do not use their prompt as event input; the canonical envelope
+is protected inbox metadata and the wake text is host-owned. Goal triggers have neither fallback,
+so a missing prompt is rejected rather than creating a useless wake.
 
 ### Fire-all semantics (no filtering yet)
 
@@ -172,8 +244,8 @@ so one bad staff does not poison the dispatch for the rest.
 
 | Route | Validation |
 |---|---|
-| `POST /api/staff` | Rejects `400` if any element of `triggers[]` has `type === "goal_created"` or `type === "goal_archived"` and a missing / empty / whitespace-only `prompt`. |
-| `PUT /api/staff/:id` | Same validation on the updated `triggers` array. |
+| `POST /api/staff` | Rejects goal lifecycle triggers with an empty prompt; rejects notification triggers with an unknown/mismatched selector or invalid catalogue filter. |
+| `PUT /api/staff/:id` | Applies the same validation to the complete updated `triggers` array. |
 
 The validation lives in `StaffManager.validateTriggers` so both routes
 share one source of truth.
@@ -183,8 +255,8 @@ share one source of truth.
 The user-facing model above is what matters; the file paths below are an
 orientation aid only.
 
-- **Trigger types.** `src/server/agent/staff-store.ts` — `TriggerType`
-  union and the `StaffTrigger` shape.
+- **Trigger types.** `src/server/agent/staff-store.ts` — `TriggerType`, legacy triggers, and the notification selector/filter shape.
+- **Notification delivery.** `notification-staff-dispatcher.ts` and `notification-delivery-store.ts` — project matching, durable subscriber rows, leases, retry/restart reconciliation, and inbox acceptance.
 - **Validation.** `src/server/agent/staff-manager.ts` —
   `validateTriggers()` called from the staff REST routes.
 - **Polled dispatch** (`schedule`, `git`). `src/server/agent/staff-trigger-engine.ts`.
@@ -202,30 +274,21 @@ orientation aid only.
   `src/app/staff-page.ts`. Save buttons consult
   `hasInvalidGoalTriggers*` to block save on empty goal-trigger
   prompts.
-- **Staff-assistant prompt.** `src/server/agent/staff-assistant.ts`
-  documents all five trigger types so creation sessions suggest the
-  goal lifecycle ones with a non-empty prompt.
+- **Staff-assistant prompt.** `src/server/agent/staff-assistant.ts` documents legacy and notification trigger forms, including the required goal prompt and canonical selector/filter rules.
 
 ## Tests
 
-- `tests/goal-trigger-dispatcher.test.ts` — unit: dispatcher fires
-  `goal_created` once per new id; `goal_archived` once per transition;
-  skips disabled triggers and non-active staff; per-trigger error
-  isolation.
-- `tests/e2e/staff-goal-triggers.spec.ts` — API E2E: create goal
-  → assert inbox entry; `POST /archive` → assert entry; re-archive →
-  no new entry; `POST/PUT` with empty prompt → 400.
-- `tests/e2e/ui/staff-triggers.spec.ts` — browser E2E: trigger
-  type dropdown shows the new options; empty prompt blocks save with
-  an inline error; saving with a prompt persists and round-trips on
-  reload.
+Registered Test Suite v2 coverage includes the notification dispatcher, selector/filter
+validation, project isolation, exact canonical-envelope persistence, idempotent inbox acceptance,
+retry/cancellation/loop protection, restart reconciliation, and exact-owner inbox authorization.
+Legacy goal-trigger and UI suites remain compatibility coverage.
 
 ## See also
 
 - [docs/staff-agents.md](staff-agents.md) — staff agent lifecycle,
   sandbox mode, edit page conventions.
-- [docs/staff-inbox.md](staff-inbox.md) — the inbox queue that every
-  trigger enqueues into, plus the nudger that delivers digests.
+- [Unified Extension Host hooks](host-hooks.md) — canonical notification contract, catalogue, and all consumer delivery semantics.
+- [docs/staff-inbox.md](staff-inbox.md) — the inbox queue, notification metadata security, and nudger delivery.
 - [docs/rest-api.md](rest-api.md) — staff REST surface, including the
   trigger validation `400` on `POST` / `PUT /api/staff`.
 - [docs/goals-workflows-tasks.md](goals-workflows-tasks.md) — goal

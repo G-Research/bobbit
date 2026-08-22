@@ -38,7 +38,7 @@ enableTsWorkerResolver();
  * Fixtures are `.mjs` ESM modules under a temp dir (the worker dynamic-imports
  * them by file:// URL, exactly as the dispatcher builds it).
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, expect } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -92,10 +92,11 @@ function trySymlink(target: string, linkPath: string): boolean {
 }
 
 beforeAll(() => {
-	// v2-core reuses forks with isolate:false; another file's env restoration can
-	// run after collection, so restore the worker resolver at this file boundary.
-	enableTsWorkerResolver();
 	tmp = makeTmpDir("ext-host-iso-");
+	// v2-core reuses forks with isolate:false. Re-assert the supported worker
+	// resolver immediately before this file spawns real ModuleHost workers, after
+	// any sibling env guard may have restored NODE_OPTIONS following collection.
+	enableTsWorkerResolver();
 });
 afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -660,6 +661,40 @@ describe.concurrent("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 			assert.equal(result, "caught:host.agents.spawn is not permitted for a child session");
 		} finally {
 			mh.dispose();
+		}
+	});
+});
+
+describe("ModuleHost — hooks execution", () => {
+	it("resolves canonical members from the default hooks export", async () => {
+		const url = writeModule("export default { beforePrompt: async (_ctx, request) => ({ context: [{ id: request.sessionId, title: 't', authority: 'memory', content: 'c', reason: 'r', priority: 1 }] }) };\n");
+		const host = new ModuleHost({ timeoutMs: 30_000 });
+		try {
+			const value = await host.invoke({
+				url, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",
+				ctx: { sessionId: "session-1", tool: "hook", host: {} } as any,
+				arg: { sessionId: "session-1" }, workingDir: tmp,
+			});
+			expect(value).toMatchObject({ context: [{ id: "session-1" }] });
+		} finally {
+			host.dispose();
+		}
+	});
+
+	it("terminates a worker when the host cancellation signal aborts", async () => {
+		const url = writeModule("export default { beforePrompt: async () => new Promise(() => {}) };\n");
+		const host = new ModuleHost({ timeoutMs: 10_000 });
+		const controller = new AbortController();
+		try {
+			const invocation = host.invoke({
+				url, packRoot: tmp, epoch: 0, exportKind: "hooks", member: "beforePrompt",
+				ctx: { sessionId: "session-1", tool: "hook", host: {} } as any,
+				arg: {}, workingDir: tmp, signal: controller.signal,
+			});
+			setTimeout(() => controller.abort(), 25);
+			await expect(invocation).rejects.toMatchObject({ status: 499 });
+		} finally {
+			host.dispose();
 		}
 	});
 });

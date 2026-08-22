@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { readDeletionTombstones, recordDeletionTombstone } from "./deletion-tombstones.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
+import type { HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
@@ -182,6 +183,60 @@ export interface PersistedGoal {
 	maxNestingDepth?: number;
 }
 
+/**
+ * Bounded post-commit goal fact submitted to the canonical host notification
+ * dispatcher by ProjectContext. The store owns the authoritative transition
+ * and revision; consumers never receive the mutable PersistedGoal record.
+ */
+type CatalogueGoalUpdatedChangedField = HostNotificationPayload<"goalUpdated">["changedFields"][number];
+
+/** Map only catalogue-approved public mutation identifiers. Internal lifecycle,
+ * checkout, scheduler, and diagnostic fields intentionally produce an empty
+ * changedFields projection rather than leaking their names. */
+const GOAL_NOTIFICATION_CHANGED_FIELD_MAP = {
+	title: "title",
+	spec: "spec",
+	state: "state",
+	workflow: "workflow",
+	metadata: "metadata",
+	team: "team",
+	paused: "paused",
+	divergencePolicy: "divergencePolicy",
+	maxConcurrentChildren: "maxConcurrentChildren",
+} as const satisfies Partial<Record<keyof PersistedGoal, CatalogueGoalUpdatedChangedField>>;
+
+type GoalUpdatedChangedField = (typeof GOAL_NOTIFICATION_CHANGED_FIELD_MAP)[keyof typeof GOAL_NOTIFICATION_CHANGED_FIELD_MAP];
+
+function isGoalNotificationChangedField(key: string): key is keyof typeof GOAL_NOTIFICATION_CHANGED_FIELD_MAP {
+	return Object.prototype.hasOwnProperty.call(GOAL_NOTIFICATION_CHANGED_FIELD_MAP, key);
+}
+
+type FrozenGoalUpdatedPayload = Readonly<Omit<HostNotificationPayload<"goalUpdated">, "changedFields">> & Readonly<{
+	changedFields: readonly GoalUpdatedChangedField[];
+}>;
+
+export type GoalStoreNotification =
+	| Readonly<{
+		name: "goalCreated";
+		revision: number;
+		payload: Readonly<HostNotificationPayload<"goalCreated">>;
+	}>
+	| Readonly<{
+		name: "goalUpdated";
+		revision: number;
+		payload: FrozenGoalUpdatedPayload;
+	}>
+	| Readonly<{
+		name: "goalCompleted";
+		revision: number;
+		payload: Readonly<HostNotificationPayload<"goalCompleted">>;
+	}>
+	| Readonly<{
+		name: "goalArchived";
+		revision: number;
+		payload: Readonly<HostNotificationPayload<"goalArchived">>;
+	}>;
+
 interface GoalWriteMetrics {
 	bytes: number;
 	durationMs: number;
@@ -253,6 +308,10 @@ const NUMBER_FIELDS = ["archivedAt", "maxConcurrentChildren", "replanCount", "ma
 const STRING_ARRAY_FIELDS = [
 	"skipGateRequirements", "enabledOptionalSteps", "acceptanceCriteria", "dependsOnPlanIds",
 ] as const;
+
+function nextGoalRevision(previous: number): number {
+	return Math.max(Date.now(), previous + 1);
+}
 
 function invalidGoal(label: string, detail: string): never {
 	throw new Error(`[goal-store] Invalid ${label}: ${detail}`);
@@ -820,6 +879,13 @@ export class GoalStore {
 	onIndexUpdate?: (goal: PersistedGoal) => void;
 
 	/**
+	 * Canonical host notification seam. Invoked only after strict persistence
+	 * succeeds. Synchronous throws and rejected promises are isolated because a
+	 * consumer cannot roll back an already-authoritative goal transition.
+	 */
+	onHostNotification?: (notification: GoalStoreNotification) => void | Promise<void>;
+
+	/**
 	 * Called once when a goal id appears in the store for the first time.
 	 * Wired by `ProjectContext.setGoalTriggerDispatcher` from `server.ts`.
 	 * MUST be assigned independently of `onIndexUpdate` — the search index
@@ -853,6 +919,38 @@ export class GoalStore {
 		if (isNew) this.onGoalCreated?.(goal);
 	}
 
+	/** Strict whole-record publication used by the authoritative create path. */
+	async putStrict(goal: PersistedGoal): Promise<void> {
+		this.assertAcceptingMutations();
+		if (goal.setupStatus !== "error") delete goal.setupError;
+		const previous = this.goals.get(goal.id);
+		const isNew = previous === undefined;
+		const mutationRevision = this.recordMutation(goal.id);
+		const mutationGeneration = this.generation;
+		this.goals.set(goal.id, goal);
+		try {
+			await this.saveStrict([goal.id]);
+		} catch (error) {
+			if (this.goalMutationRevisions.get(goal.id) === mutationRevision && this.goals.get(goal.id) === goal) {
+				if (previous) this.goals.set(goal.id, previous);
+				else this.goals.delete(goal.id);
+				if (this.generation === mutationGeneration) this.generation--;
+				else this.generation++;
+				this.goalMutationRevisions.set(goal.id, mutationRevision + 1);
+			}
+			throw error;
+		}
+		if (isNew) {
+			this.dispatchHostNotification({
+				name: "goalCreated",
+				revision: goal.updatedAt,
+				payload: Object.freeze({ goalId: goal.id, ...(goal.parentGoalId ? { parentGoalId: goal.parentGoalId } : {}), state: goal.state }),
+			});
+		}
+		this.onIndexUpdate?.(goal);
+		if (isNew) this.onGoalCreated?.(goal);
+	}
+
 	get(id: string): PersistedGoal | undefined {
 		return this.goals.get(id);
 	}
@@ -877,16 +975,16 @@ export class GoalStore {
 		this.assertAcceptingMutations();
 		const existing = this.goals.get(id);
 		if (!existing) return false;
-		// Capture the transition BEFORE mutating so onGoalArchived fires only
-		// once. Idempotent: re-archiving an already-archived goal still returns
-		// true (back-compat with existing callers) but does NOT re-fire.
-		const wasAlreadyArchived = existing.archived === true;
+		// Re-archive is a genuine no-op: preserve the durable archive revision.
+		if (existing.archived === true) return true;
 		this.recordMutation(id);
+		const revision = nextGoalRevision(existing.updatedAt);
 		existing.archived = true;
-		existing.archivedAt = Date.now();
+		existing.archivedAt = revision;
+		existing.updatedAt = revision;
 		this.save([id]);
 		this.onIndexUpdate?.(existing);
-		if (!wasAlreadyArchived) this.onGoalArchived?.(existing);
+		this.onGoalArchived?.(existing);
 		return true;
 	}
 
@@ -933,10 +1031,13 @@ export class GoalStore {
 			present: Object.prototype.hasOwnProperty.call(existing, "archivedAt"),
 			value: existing.archivedAt,
 		};
+		const previousUpdatedAt = existing.updatedAt;
 		const mutationRevision = this.recordMutation(id);
 		const mutationGeneration = this.generation;
+		const revision = nextGoalRevision(existing.updatedAt);
 		existing.archived = true;
-		existing.archivedAt = Date.now();
+		existing.archivedAt = revision;
+		existing.updatedAt = revision;
 		const appliedArchivedAt = existing.archivedAt;
 		try {
 			await this.saveStrict([id]);
@@ -959,6 +1060,7 @@ export class GoalStore {
 					const record = current as unknown as Record<string, unknown>;
 					if (record.archived === true) this.restoreProperty(record, "archived", previousArchived);
 					if (record.archivedAt === appliedArchivedAt) this.restoreProperty(record, "archivedAt", previousArchivedAt);
+					if (record.updatedAt === revision) record.updatedAt = previousUpdatedAt;
 					this.recordMutation(id);
 				}
 				await this.saveStrict([id]);
@@ -966,6 +1068,11 @@ export class GoalStore {
 			}
 			throw err;
 		}
+		this.dispatchHostNotification({
+			name: "goalArchived",
+			revision,
+			payload: Object.freeze({ goalId: existing.id }),
+		});
 		this.onIndexUpdate?.(existing);
 		this.onGoalArchived?.(existing);
 		return true;
@@ -989,7 +1096,7 @@ export class GoalStore {
 		if (!existing || existing.schedulerRecovery === undefined) return false;
 		this.recordMutation(id);
 		delete existing.schedulerRecovery;
-		existing.updatedAt = Date.now();
+		existing.updatedAt = nextGoalRevision(existing.updatedAt);
 		this.save([id]);
 		this.onIndexUpdate?.(existing);
 		return true;
@@ -1020,8 +1127,34 @@ export class GoalStore {
 	}
 
 	private applyUpdate(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean): void {
-		Object.assign(existing, cleaned, { updatedAt: Date.now() });
+		Object.assign(existing, cleaned, { updatedAt: nextGoalRevision(existing.updatedAt) });
 		if (clearSetupError) delete existing.setupError;
+	}
+
+	private changedNotificationFields(
+		existing: PersistedGoal,
+		cleaned: Record<string, unknown>,
+	): GoalUpdatedChangedField[] {
+		const record = existing as unknown as Record<string, unknown>;
+		const changed = Object.keys(cleaned).flatMap((key): GoalUpdatedChangedField[] => {
+			if (record[key] === cleaned[key] || !isGoalNotificationChangedField(key)) return [];
+			return [GOAL_NOTIFICATION_CHANGED_FIELD_MAP[key]];
+		});
+		return [...new Set(changed)].sort();
+	}
+
+	private dispatchHostNotification(notification: GoalStoreNotification): void {
+		if (!this.onHostNotification) return;
+		try {
+			const result = this.onHostNotification(Object.freeze(notification));
+			if (result && typeof result.then === "function") {
+				void result.catch(() => {
+					console.warn(`[goal-store] Host notification consumer rejected ${notification.name} (non-fatal)`);
+				});
+			}
+		} catch {
+			console.warn(`[goal-store] Host notification consumer threw for ${notification.name} (non-fatal)`);
+		}
 	}
 
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
@@ -1113,6 +1246,7 @@ export class GoalStore {
 			return true;
 		}
 
+		const changedFields = this.changedNotificationFields(existing, cleaned);
 		const previous = { ...existing };
 		const ownedKeys = new Set(Object.keys(cleaned));
 		if (clearSetupError) ownedKeys.add("setupError");
@@ -1123,6 +1257,19 @@ export class GoalStore {
 		const mutationRevision = this.recordMutation(id);
 		const mutationGeneration = this.generation;
 		this.applyUpdate(existing, cleaned, clearSetupError);
+		const notificationRevision = existing.updatedAt;
+		const updatedNotification: GoalStoreNotification = {
+			name: "goalUpdated",
+			revision: notificationRevision,
+			payload: Object.freeze({ goalId: existing.id, state: existing.state, changedFields: Object.freeze(changedFields) }),
+		};
+		const completedNotification: GoalStoreNotification | undefined = previous.state !== "complete" && existing.state === "complete"
+			? {
+				name: "goalCompleted",
+				revision: notificationRevision,
+				payload: Object.freeze({ goalId: existing.id, ...(existing.parentGoalId ? { parentGoalId: existing.parentGoalId } : {}) }),
+			}
+			: undefined;
 		const appliedOwned = new Map([...ownedKeys].map((key) => [key, {
 			present: Object.prototype.hasOwnProperty.call(existing, key),
 			value: (existing as unknown as Record<string, unknown>)[key],
@@ -1155,6 +1302,8 @@ export class GoalStore {
 			}
 			throw err;
 		}
+		this.dispatchHostNotification(updatedNotification);
+		if (completedNotification) this.dispatchHostNotification(completedNotification);
 		this.onIndexUpdate?.(existing);
 		return true;
 	}

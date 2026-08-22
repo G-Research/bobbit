@@ -1,0 +1,6 @@
+id: host-notifications.route
+kind: route
+routeId: host-notifications-fixture
+target:
+  panelId: host-notifications.panel
+paramKeys: []

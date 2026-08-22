@@ -409,6 +409,8 @@ semantics and the shared clamp order.
 | Type | Key Fields | Description |
 |---|---|---|
 | `auth_ok` | `capabilities?` | Authentication succeeded. Accepted optional capabilities are echoed with their negotiated version. |
+| `host_notification` | `notification`, `stream: { epoch, sequence }` | One bounded canonical committed fact for an authenticated app socket's exact session/project binding. See [Canonical Host notification stream](#canonical-host-notification-stream). |
+| `host_notifications_refresh_required` | `scope`, `epoch`, `sequence` | The live stream cannot prove a contiguous delta; consumers must re-read the authoritative snapshot. |
 | `auth_failed` | — | Authentication failed |
 | `state` | `data` | Current agent state snapshot. `data.condition` may be `{ code: "MODEL_SELECTION_REQUIRED", provider: string, modelId: string }`; partial snapshots that omit it do not clear it, and the server sends explicit `condition: null` only after verified recovery. |
 | `messages` | `data` | Full message history array |
@@ -458,9 +460,43 @@ semantics and the shared clamp order.
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
 | `index:error` | `projectId`, `message`, `recoverable` | Search worker/indexing error. `recoverable` indicates whether retry or an authoritative rebuild can recover; the current pure-JS engine has no model-download or native-binary failure mode. |
-| `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
-| `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
+| `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for the exact owning staff session. Canonical notification input and loop controls are redacted. See [staff-inbox.md](staff-inbox.md). |
+| `inbox.entry.updated` | `staffId`, `entry` | The owning staff session transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`; notification metadata remains redacted. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Canonical Host notification stream
+
+`host_notification` is the transport for `host.session.notifications` and
+`host.project.notifications`. It is deliberately separate from rich legacy session `event` frames.
+The envelope schema, payload catalogue, privacy limits, and browser examples are documented in
+[Unified Extension Host hooks](host-hooks.md).
+
+The server initially binds each authenticated **app** session socket to its host-resolved session
+and project. Before every notification delta and refresh frame, it revalidates that
+authentication-time binding against current live and persisted session authority. Session facts route only to the
+exact session binding; project facts route only to app sockets whose current binding is in that
+project. Extension code supplies neither binding, and sandbox principals, unbound sockets, and
+viewer sockets cannot subscribe to this stream. Project isolation is a server routing property,
+not client filtering.
+
+If a session moves projects, the frame that discovers the move is suppressed. The router rebinds
+the socket, fences both the old-project fact and racing destination-project deltas, and emits one
+project-scoped `host_notifications_refresh_required` before later destination deltas resume. The
+panel must replace its project state from the destination's authoritative snapshot; it must not
+merge pre-move and post-move deltas. If live and persisted ownership conflict, or neither resolves,
+the router unbinds the socket and sends no Host notification rather than guessing a partition.
+
+`stream.epoch` and `stream.sequence` provide ephemeral per-connection ordering for each scope.
+They are not durable event cursors. Initial authentication, a session project move, reconnect, epoch
+change, sequence gap, queue overflow, or persistent socket pressure schedules/coalesces
+`host_notifications_refresh_required`. The browser drops discontinuous facts instead of applying
+a plausible partial delta. Panels then read their authoritative REST or Host API snapshot; Bobbit
+does not replay canonical Host notifications and does not expose a global notification journal.
+
+Live browser and observational-module delivery is best-effort and cannot affect the already
+committed source operation. A separate per-project subscriber outbox durably admits only facts that
+match staff notification triggers; its restart semantics do not turn this WebSocket stream into
+replay. See [Staff triggers](staff-triggers.md#durable-acceptance-and-retries).
 
 ### Gate reset lifecycle payload
 

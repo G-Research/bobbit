@@ -17,7 +17,8 @@
  *
  * Transport/auth mirrors `tool-guard-extension.ts`: read
  * `BOBBIT_GATEWAY_URL` / `BOBBIT_TOKEN`, falling back to
- * `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`. All failures are
+ * `<BOBBIT_DIR || ~/.bobbit>/state/{gateway-url,token}`. The per-session secret
+ * binds the callback to this exact server-derived session. All failures are
  * swallowed so a turn always proceeds even when the gateway or a provider is
  * down (the non-fatal invariant).
  */
@@ -39,7 +40,7 @@ export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = ["beforePrompt", "bef
 /** Timeout (ms) for the before-prompt callback — blocking-with-timeout. */
 export const BEFORE_PROMPT_TIMEOUT_MS = 2500;
 /** Timeout (ms) for the before-compact callback. */
-export const BEFORE_COMPACT_TIMEOUT_MS = 5000;
+export const BEFORE_COMPACT_TIMEOUT_MS = 5500;
 
 /**
  * Idempotently remove a prior Bobbit dynamic-context region from a system
@@ -198,6 +199,7 @@ export default function(pi) {
   const gwUrl = readState("gateway-url", "BOBBIT_GATEWAY_URL");
   const token = readState("token", "BOBBIT_TOKEN");
   const fetchImpl = globalThis.fetch.bind(globalThis);
+  const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
 
   // TLS for the local gateway is handled entirely by the spawner's inherited
   // env (the CA cert is pinned via NODE_EXTRA_CA_CERTS when present, with the
@@ -210,10 +212,11 @@ export default function(pi) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetchImpl(gwUrl + "/api/sessions/" + sessionId + route, {
+      const res = await fetchImpl(gwUrl + "/api/sessions/" + encodeURIComponent(sessionId) + route, {
         method: "POST",
         headers: {
           "Authorization": "Bearer " + token,
+          ...(sessionSecret ? { "X-Bobbit-Session-Secret": sessionSecret } : {}),
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
