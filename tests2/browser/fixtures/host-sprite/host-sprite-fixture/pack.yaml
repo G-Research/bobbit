@@ -1,0 +1,9 @@
+name: host-sprite-fixture
+schema: 2
+description: Browser journey fixture for the canonical Host Bobbit sprite API.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: [host-sprite-route]
