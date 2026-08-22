@@ -389,6 +389,7 @@ function installChatPanelHarness(): void {
 		let agentInterface: any;
 		const composer = {
 			onSend: async (input: string) => agent.prompt(input),
+			onSteerSend: async (input: string) => agent.steer(input),
 		};
 		agentInterface = {
 			session: agent,
@@ -402,8 +403,8 @@ function installChatPanelHarness(): void {
 			removeEventListener: vi.fn(),
 			querySelector: vi.fn((selector: string) => {
 				if (selector !== "message-editor") return null;
-				const composerHidden = agentInterface.readOnly
-					&& !(agentInterface.nonInteractive && agent.state.isStreaming);
+				const composerHidden = agentInterface.archived
+					|| (agentInterface.nonInteractive && !agent.state.isStreaming);
 				return composerHidden ? null : composer;
 			}),
 		};
@@ -1101,13 +1102,13 @@ describe("cold session transcript/workspace ordering", () => {
 		}
 	});
 
-	it("applies readOnly and nonInteractive restrictions before held hydration and blocks composer submission", async () => {
+	it("projects capability readOnly as interactive and nonInteractive as idle-hidden before held hydration", async () => {
 		state.gatewaySessions = state.gatewaySessions.map((session) => {
 			if (session.id === SESSION_A) return { ...session, readOnly: true };
 			if (session.id === SESSION_B) return { ...session, nonInteractive: true };
 			return session;
 		});
-		const connectReadOnly = connectToSession(SESSION_A, true, { readOnly: true });
+		const connectReadOnly = connectToSession(SESSION_A, true);
 		let connectNonInteractive: Promise<void> | undefined;
 
 		try {
@@ -1130,28 +1131,40 @@ describe("cold session transcript/workspace ordering", () => {
 
 			const readOnlyComposer = readOnlyInterface.querySelector("message-editor") as { onSend: (input: string) => Promise<void> } | null;
 			const nonInteractiveComposer = nonInteractiveInterface.querySelector("message-editor") as { onSend: (input: string) => Promise<void> } | null;
-			await readOnlyComposer?.onSend("read-only composer must not submit");
-			await nonInteractiveComposer?.onSend("non-interactive composer must not submit");
+			const readOnlyPrompt = vi.spyOn(readOnlyInterface.session, "prompt").mockResolvedValue(undefined);
+			await readOnlyComposer?.onSend("read-only capability remains interactive");
 
 			expect.soft(
-				readOnlyInterface.readOnly,
-				"SESSION_RESTRICTION_HYDRATION_REGRESSION: readOnly was deferred until workspace hydration settled",
-			).toBe(true);
-			expect.soft(readOnlyComposer).toBeNull();
-			expect.soft(
-				nonInteractiveInterface.readOnly,
-				"SESSION_RESTRICTION_HYDRATION_REGRESSION: nonInteractive readOnly was deferred until workspace hydration settled",
-			).toBe(true);
+				readOnlyInterface.archived === true,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: capability readOnly was projected as archived",
+			).toBe(false);
+			expect.soft(readOnlyComposer).not.toBeNull();
+			expect.soft(nonInteractiveInterface.archived === true).toBe(false);
 			expect.soft(nonInteractiveInterface.nonInteractive).toBe(true);
 			expect.soft(nonInteractiveComposer).toBeNull();
-			for (const sessionId of [SESSION_A, SESSION_B]) {
-				const promptFrames = timeline.filter((entry) =>
-					entry.kind === "ws" && entry.sessionId === sessionId && entry.frame.type === "prompt");
-				expect.soft(
-					promptFrames,
-					`SESSION_RESTRICTION_HYDRATION_REGRESSION: ${sessionId} submitted through a restricted composer`,
-				).toHaveLength(0);
-			}
+
+			expect.soft(
+				readOnlyPrompt,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: active read-only delegate composer did not submit its follow-up",
+			).toHaveBeenCalledWith("read-only capability remains interactive");
+			const nonInteractivePromptFrames = timeline.filter((entry) =>
+				entry.kind === "ws" && entry.sessionId === SESSION_B && entry.frame.type === "prompt");
+			expect.soft(nonInteractivePromptFrames).toHaveLength(0);
+
+			await nonInteractiveInterface.session.handleServerMessage({
+				type: "state",
+				data: { status: "streaming" },
+			});
+			const streamingSteerComposer = nonInteractiveInterface.querySelector("message-editor") as {
+				onSteerSend: (input: string) => Promise<void>;
+			} | null;
+			expect.soft(
+				streamingSteerComposer,
+				"SESSION_RESTRICTION_HYDRATION_REGRESSION: streaming nonInteractive session lost its steer editor",
+			).not.toBeNull();
+			const nonInteractiveSteer = vi.spyOn(nonInteractiveInterface.session, "steer").mockReturnValue(undefined);
+			await streamingSteerComposer?.onSteerSend("streaming follow-up stays steer-only");
+			expect.soft(nonInteractiveSteer).toHaveBeenCalledWith("streaming follow-up stays steer-only");
 		} finally {
 			gateFor(SESSION_A).release();
 			gateFor(SESSION_B).release();

@@ -102,11 +102,11 @@ function sessionRecord(extra: Record<string, unknown> = {}) {
 
 async function interactionModeFor(
 	record: Record<string, unknown>,
-	options?: { readOnly?: boolean },
-): Promise<{ readOnly: boolean; nonInteractive: boolean }> {
+	options?: { archived?: boolean },
+): Promise<{ archived: boolean; nonInteractive: boolean }> {
 	uncacheSession(SESSION_ID);
 	const agentInterface = {
-		readOnly: false,
+		archived: false,
 		nonInteractive: false,
 		session: null as any,
 	};
@@ -135,7 +135,7 @@ async function interactionModeFor(
 	selectSession("parking-session");
 	const pending = connectToSession(SESSION_ID, true, options);
 	const result = {
-		readOnly: agentInterface.readOnly,
+		archived: agentInterface.archived,
 		nonInteractive: agentInterface.nonInteractive,
 	};
 	state.switchGeneration++;
@@ -147,28 +147,42 @@ async function interactionModeFor(
 }
 
 describe("retired-model session interaction mode", () => {
-	it("keeps a conditioned terminated dormant session interactive while preserving explicit restrictions", async () => {
+	it("keeps conditioned termination recoverable and capability readOnly interactive", async () => {
 		expect(await interactionModeFor(sessionRecord())).toEqual({
-			readOnly: false,
+			archived: false,
 			nonInteractive: false,
 		});
 		expect(await interactionModeFor(sessionRecord({ readOnly: true }))).toEqual({
-			readOnly: true,
-			nonInteractive: false,
-		});
-		expect(await interactionModeFor(sessionRecord({ nonInteractive: true }))).toEqual({
-			readOnly: true,
-			nonInteractive: true,
-		});
-		expect(await interactionModeFor(sessionRecord(), { readOnly: true })).toEqual({
-			readOnly: true,
+			archived: false,
 			nonInteractive: false,
 		});
 	});
 
-	it("leaves ordinary terminated sessions read-only", async () => {
+	it("projects nonInteractive independently from archive lifecycle", async () => {
+		expect(await interactionModeFor(sessionRecord({ nonInteractive: true }))).toEqual({
+			archived: false,
+			nonInteractive: true,
+		});
+		expect(await interactionModeFor(sessionRecord({ archived: true, nonInteractive: true }))).toEqual({
+			archived: true,
+			nonInteractive: true,
+		});
+	});
+
+	it("closes explicit archive navigation and genuine archived lifecycle", async () => {
+		expect(await interactionModeFor(sessionRecord(), { archived: true })).toEqual({
+			archived: true,
+			nonInteractive: false,
+		});
+		expect(await interactionModeFor(sessionRecord({ status: "archived" }))).toEqual({
+			archived: true,
+			nonInteractive: false,
+		});
+	});
+
+	it("closes ordinary termination", async () => {
 		expect(await interactionModeFor(sessionRecord({ condition: undefined }))).toEqual({
-			readOnly: true,
+			archived: true,
 			nonInteractive: false,
 		});
 	});
