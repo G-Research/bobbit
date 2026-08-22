@@ -107,6 +107,12 @@ const MODEL_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "set_image_model", provider: "openai", modelId: "gpt-image-2" },
 ];
 
+const MODEL_SELECTION_CONDITION = {
+	code: "MODEL_SELECTION_REQUIRED",
+	provider: "retired-provider",
+	modelId: "retired-model",
+} as const;
+
 const TITLE_CONTROL_FRAMES: ReadonlyArray<Record<string, unknown>> = [
 	{ type: "generate_title" },
 	{ type: "summarize_goal_title", goalTitle: "Attacker controlled goal title" },
@@ -362,6 +368,95 @@ test.describe("authenticated WebSocket session write policy", () => {
 			restoreModelControlSpies(modelControlSpies);
 			restoreTitleControlSpies(titleControlSpies);
 			restoreTaskControlSpies(taskControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("read-only capability admits set_model only through active model-selection recovery", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		persistPolicy(gateway, sessionId, { readOnly: true });
+		live.condition = MODEL_SELECTION_CONDITION;
+
+		const conn = await connectWs(sessionId);
+		const recoverModelSelection = vi.spyOn(gateway.sessionManager, "recoverModelSelectionRequired")
+			.mockResolvedValue(undefined);
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			conn.send({
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-20250514",
+				thinkingLevel: "high",
+			});
+			await vi.waitFor(() => expect(recoverModelSelection).toHaveBeenCalledWith(
+				sessionId,
+				"anthropic",
+				"claude-sonnet-4-20250514",
+				"high",
+			), { timeout: 2_000 });
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			live.condition = undefined;
+			recoverModelSelection.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("read-only capability still blocks ordinary set_model without a recovery condition", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		persistPolicy(gateway, sessionId, { readOnly: true });
+
+		const conn = await connectWs(sessionId);
+		const recoverModelSelection = vi.spyOn(gateway.sessionManager, "recoverModelSelectionRequired");
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			await expectPolicyError(conn, {
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-20250514",
+			}, "SESSION_READ_ONLY");
+			expect(recoverModelSelection).not.toHaveBeenCalled();
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			recoverModelSelection.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
+			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("non-interactive policy blocks read-only model-selection recovery", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		persistPolicy(gateway, sessionId, { readOnly: true, nonInteractive: true });
+		live.condition = MODEL_SELECTION_CONDITION;
+
+		const conn = await connectWs(sessionId);
+		const recoverModelSelection = vi.spyOn(gateway.sessionManager, "recoverModelSelectionRequired");
+		const modelControlSpies = spyOnModelControlMutations(gateway, live);
+		try {
+			await expectPolicyError(conn, {
+				type: "set_model",
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-20250514",
+			}, "NON_INTERACTIVE_WORK_CONTROL");
+			expect(recoverModelSelection).not.toHaveBeenCalled();
+			expectNoModelControlMutations(modelControlSpies);
+		} finally {
+			live.condition = undefined;
+			recoverModelSelection.mockRestore();
+			restoreModelControlSpies(modelControlSpies);
 			conn.close();
 			await deleteSession(sessionId);
 		}

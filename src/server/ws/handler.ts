@@ -204,11 +204,16 @@ function sessionModelSelectionRequired(
 	return isModelSelectionRequiredCondition(condition) ? condition : undefined;
 }
 
+type ModelSelectionRecoveryAdmission = {
+	condition?: ModelSelectionRequiredCondition;
+	activationInProgress: boolean;
+};
+
 function modelSelectionRecoveryAdmission(
 	sessionManager: SessionManager,
 	sessionId: string,
 	session: unknown,
-): { condition?: ModelSelectionRequiredCondition; activationInProgress: boolean } {
+): ModelSelectionRecoveryAdmission {
 	const query = (sessionManager as ModelSelectionRecoveryManager).getModelSelectionRecoveryAdmission;
 	if (typeof query === "function") return query.call(sessionManager, sessionId);
 	return { condition: sessionModelSelectionRequired(session), activationInProgress: false };
@@ -612,7 +617,7 @@ type SessionWorkMessage = Extract<ReliableIntentClientMessage, {
 const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ReliableIntentClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
 
 // `readOnly` describes the delegate's tool capability, not whether its session
-// can be interacted with. Only permission-widening and model-control commands
+// can be interacted with. Permission-widening and ordinary model-control commands
 // remain transport-blocked; ordinary prompt and orchestration frames are valid.
 const READ_ONLY_RESTRICTED_CONTROL_TYPES = [
 	"set_model",
@@ -657,9 +662,11 @@ function sendSessionWorkPolicyError(
 /**
  * Enforce persisted session policy at the authenticated transport boundary.
  * A capability-restricted delegate remains interactive, but crafted frames may
- * not widen its tool access or alter capability-bearing model configuration.
- * Non-interactive sessions continue to reject agent work independently. Stop
- * and deny controls remain available because they only halt active work.
+ * not widen its tool access or ordinarily alter capability-bearing model
+ * configuration. A validated MODEL_SELECTION_REQUIRED admission may pass only
+ * set_model to the existing recovery route. Non-interactive sessions continue
+ * to reject agent work independently. Stop and deny controls remain available
+ * because they only halt active work.
  * Persisted `true` wins over a stale live field; the live field closes the
  * inverse window while a metadata update is being flushed.
  */
@@ -668,9 +675,15 @@ function rejectRestrictedSessionWork(
 	msg: SessionWorkMessage,
 	session: { status: string; readOnly?: boolean; nonInteractive?: boolean },
 	persisted?: { readOnly?: boolean; nonInteractive?: boolean },
+	recoveryAdmission?: ModelSelectionRecoveryAdmission,
 ): boolean {
 	const capabilityRestricted = session.readOnly === true || persisted?.readOnly === true;
-	if (capabilityRestricted && READ_ONLY_RESTRICTED_CONTROL_TYPE_SET.has(msg.type)) {
+	const isRequiredModelRecovery = msg.type === "set_model" && recoveryAdmission?.condition !== undefined;
+	if (
+		capabilityRestricted
+		&& READ_ONLY_RESTRICTED_CONTROL_TYPE_SET.has(msg.type)
+		&& !isRequiredModelRecovery
+	) {
 		sendSessionWorkPolicyError(
 			ws,
 			msg,
@@ -1202,6 +1215,9 @@ export function handleWebSocketConnection(
 				msg,
 				session,
 				sessionManager.getPersistedSession(sessionId),
+				msg.type === "set_model"
+					? modelSelectionRecoveryAdmission(sessionManager, sessionId, session)
+					: undefined,
 			)
 		) return;
 
