@@ -195,7 +195,7 @@
     },
     {
       "path": "tests2/integration/session-goal-promotion.test.ts",
-      "reason": "Integration coverage for exact rollback, concurrent lifecycle exclusion, and exact checkout continuity.",
+      "reason": "Integration coverage for exact rollback, concurrent lifecycle exclusion, exact checkout continuity, and one title-bearing promotion kickoff across acceptance retry.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -204,7 +204,7 @@
     },
     {
       "path": "tests2/integration/session-goal-promotion-recovery.test.ts",
-      "reason": "Integration coverage for recoverable reservations, retry finalization, multi-repo cleanup, and sandbox ownership continuity.",
+      "reason": "Integration coverage for recoverable reservations, failure-safe kickoff finalization retry, multi-repo cleanup, and sandbox ownership continuity.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -222,7 +222,7 @@
     },
     {
       "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
-      "reason": "Browser journey for selecting Current session, accepting in place with the original session, reload continuity, unavailable reasons, safe archive, and unchanged new-worktree creation.",
+      "reason": "Browser journey for selecting Current session, accepting in place with transcript-prefix continuity and one restart-stable kickoff, unavailable reasons, safe archive, and unchanged new-worktree creation.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2599,7 +2599,7 @@
     },
     {
       "path": "tests2/core/team-manager-async-recovery.test.ts",
-      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries, durable forensic-scan suppression, and targeted damage invalidation using deterministic in-memory asynchronous I/O.",
+      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries, durable promotion kickoff occurrence semantics, durable forensic-scan suppression, and targeted damage invalidation using deterministic in-memory asynchronous I/O.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
