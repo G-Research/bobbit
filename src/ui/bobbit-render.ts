@@ -740,6 +740,7 @@ export function renderHostBobbitSprite(opts: HostedBobbitOptions): TemplateResul
 		"bobbit-blob",
 		"bobbit-blob--inline",
 		"bobbit-blob--hosted",
+		accessory.addsHeight ? "bobbit-blob--hosted-tall" : "",
 		`bobbit-blob--hosted-${state}`,
 		isIdle ? "bobbit-blob--idle" : "",
 		animated ? "" : "bobbit-blob--hosted-static",

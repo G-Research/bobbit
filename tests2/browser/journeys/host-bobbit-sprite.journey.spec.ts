@@ -15,9 +15,7 @@ import {
 const SOURCE_DIR = fileURLToPath(new URL("../fixtures/host-sprite", import.meta.url));
 const PACK_NAME = "host-sprite-fixture";
 const SESSION_COLOR_INDEX = 8;
-const SESSION_HUE = 40;
 const STAFF_COLOR_INDEX = 12;
-const STAFF_HUE = 100;
 
 type StaffRecord = { id: string; currentSessionId?: string };
 type MainSprite = { filter: string; imageCount: number; accessorySrc: string };
@@ -25,9 +23,11 @@ type PanelSprite = {
 	filter: string;
 	hueVariable: string;
 	blobClasses: string;
+	paddingTop: string;
 	canvasAnimationName: string;
 	runningAnimationNames: string[];
 	accessoryVisible: boolean;
+	conflictingAccessoryPresent: boolean;
 	canvasFrame: string;
 };
 
@@ -92,6 +92,7 @@ async function capturePanelSprite(sprite: Locator, accessoryClass: string): Prom
 			filter: getComputedStyle(blob).filter,
 			hueVariable,
 			blobClasses: blob.className,
+			paddingTop: getComputedStyle(blob).paddingTop,
 			canvasAnimationName: getComputedStyle(canvas).animationName,
 			runningAnimationNames: root.getAnimations({ subtree: true })
 				.filter(animation => animation.playState === "running" || animation.pending)
@@ -101,6 +102,7 @@ async function capturePanelSprite(sprite: Locator, accessoryClass: string): Prom
 				&& accessoryStyle.display !== "none"
 				&& accessoryStyle.visibility !== "hidden"
 				&& Number(accessoryStyle.opacity) > 0,
+			conflictingAccessoryPresent: !!root.querySelector(".bobbit-blob__wizard-hat"),
 			canvasFrame: canvas.toDataURL(),
 		};
 	}, accessoryClass);
@@ -134,6 +136,12 @@ async function captureMainSprite(row: Locator): Promise<MainSprite> {
 	});
 }
 
+function hueDegrees(filter: string): number {
+	const match = filter.match(/hue-rotate\((-?\d+(?:\.\d+)?)deg\)/);
+	if (!match) throw new Error(`missing canonical hue rotation in ${filter}`);
+	return Number(match[1]);
+}
+
 function expectHue(sprite: PanelSprite, degrees: number): void {
 	const evidence = `${sprite.hueVariable} ${sprite.filter}`;
 	expect(evidence).toContain(`${degrees}deg`);
@@ -159,14 +167,18 @@ async function expectSpriteParity(
 		captureMainSprite(await ensureSidebarRow(page, sessionId)),
 		captureMainSprite(await ensureSidebarRow(page, staffSessionId, true)),
 	]);
-	expect(sessionMain.filter).toContain(`hue-rotate(${SESSION_HUE}deg)`);
-	expect(staffMain.filter).toContain(`hue-rotate(${STAFF_HUE}deg)`);
+	const sessionHue = hueDegrees(sessionMain.filter);
+	const staffHue = hueDegrees(staffMain.filter);
+	expect(sessionHue, "session should use a persisted non-default colour").not.toBe(0);
+	expect(staffHue, "staff should use its current session's persisted non-default colour").not.toBe(0);
 	expect(sessionMain.imageCount).toBeGreaterThan(1);
 	expect(staffMain.imageCount).toBeGreaterThan(1);
 	expect(sessionMain.accessorySrc).toBeTruthy();
 	expect(staffMain.accessorySrc).toBeTruthy();
 	expect(sessionMain.accessorySrc, "crown and ponytail must remain distinct main-app identities").not.toBe(staffMain.accessorySrc);
 	if (priorMain) {
+		expect(sessionMain.filter, "session colour should survive reload").toBe(priorMain.session.filter);
+		expect(staffMain.filter, "staff colour should survive reload").toBe(priorMain.staff.filter);
 		expect(sessionMain.accessorySrc, "session accessory should survive reload").toBe(priorMain.session.accessorySrc);
 		expect(staffMain.accessorySrc, "staff accessory should survive reload").toBe(priorMain.staff.accessorySrc);
 	}
@@ -179,10 +191,19 @@ async function expectSpriteParity(
 			const sprite = panelSprite(page, key);
 			await expect(sprite).toBeVisible();
 			const capture = await capturePanelSprite(sprite, accessoryClass);
-			expectHue(capture, subject === "session" ? SESSION_HUE : STAFF_HUE);
+			expectHue(capture, subject === "session" ? sessionHue : staffHue);
 			expect(capture.accessoryVisible, `${key} should render its persisted accessory`).toBe(true);
 			captures.set(key, capture);
 		}
+	}
+
+	for (const presentation of ["active", "idle", "paused", "active-static"] as const) {
+		const session = captures.get(`session-${presentation}`)!;
+		const staff = captures.get(`staff-${presentation}`)!;
+		expect(session.paddingTop, "crown must retain canonical tall-accessory accommodation").toBe("6px");
+		expect(session.conflictingAccessoryPresent, "document accessory class must not inject a hosted layer").toBe(false);
+		expect(staff.paddingTop, "normal accessories must ignore document tall-accessory layout").toBe("0px");
+		expect(staff.conflictingAccessoryPresent).toBe(false);
 	}
 
 	for (const subject of ["session", "staff"] as const) {
@@ -252,12 +273,14 @@ test.describe("Journey: Host Bobbit sprite fixture panel", () => {
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await navigateToHash(page, `#/ext/host-sprite-fixture?staffId=${encodeURIComponent(staff.id)}`);
+			await page.evaluate(() => document.documentElement.classList.add("bobbit-wizard-hat"));
 			const firstMain = await expectSpriteParity(page, sessionId, staff.currentSessionId!);
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await navigateToHash(page, `#/ext/host-sprite-fixture?staffId=${encodeURIComponent(staff.id)}`);
+			await page.evaluate(() => document.documentElement.classList.add("bobbit-wizard-hat"));
 			await expectSpriteParity(page, sessionId, staff.currentSessionId!, firstMain);
 		} finally {
 			if (staff?.id) await apiFetch(`/api/staff/${encodeURIComponent(staff.id)}`, { method: "DELETE" }).catch(() => {});

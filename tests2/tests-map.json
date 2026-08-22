@@ -3644,7 +3644,7 @@
     },
     {
       "path": "tests2/dom/host-bobbit-sprite.test.ts",
-      "reason": "DOM coverage for Host Bobbit sprite validation, privacy-bounded session and staff appearance resolution, non-allocating persisted colours, and detached rendering behavior.",
+      "reason": "DOM coverage for Host Bobbit sprite validation, privacy-bounded session and staff appearance resolution, canonical states and sizing, reduced-motion changes, tall-accessory layout, and disconnect/reconnect cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

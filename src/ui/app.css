@@ -5608,6 +5608,9 @@ canvas.bobbit-blob__sprite {
 	padding-top: 0;
 	margin-left: 0;
 }
+.bobbit-blob.bobbit-blob--hosted.bobbit-blob--hosted-tall {
+	padding-top: 6px;
+}
 
 /* Static/reduced-motion presentation has no CSS, transition, or pseudo-element
  * animation. Rest transforms are the matching canonical 0% poses. */
