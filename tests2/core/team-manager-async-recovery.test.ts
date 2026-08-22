@@ -354,12 +354,18 @@ async function makeAdoptedAdmissionFixture(options: { durablePromptIntents?: Set
 			return goals.get(goalId);
 		},
 	};
+	const gateStore = {
+		initGatesForGoal: () => {},
+		removeGoalGates: () => {},
+		flush: async () => {},
+	};
 	const context = {
 		project: { id: projectId },
 		goalStore: goals,
 		goalManager,
 		teamStore: teams,
 		sessionStore: sessions,
+		gateStore,
 	};
 	const projectContextManager = {
 		all: () => [context],
@@ -745,13 +751,12 @@ describe("TeamManager adopted-lead finalization", () => {
 		}
 	});
 
-	it("does not admit a second kickoff occurrence after manager restart and recovery", async () => {
+	it("admits one kickoff occurrence through manager restart recovery", async () => {
 		const fixture = await makeAdoptedAdmissionFixture();
 		let restored: TeamManager | undefined;
 		try {
 			committedAttachment(fixture);
-			await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
-			assertPromotionKickoff(fixture);
+			assert.equal(fixture.promptOccurrences.length, 0, "the process crashes before kickoff admission");
 			fixture.manager.dispose();
 
 			restored = new TeamManager(
@@ -761,10 +766,7 @@ describe("TeamManager adopted-lead finalization", () => {
 				noTimerClock as any,
 			);
 			await restored.waitForRestore();
-			await Promise.all([
-				restored.finalizeAdoptedLead(fixture.goal.id),
-				restored.finalizeAdoptedLead(fixture.goal.id),
-			]);
+			await restored.resubscribeTeamEvents();
 			assertPromotionKickoff(fixture);
 			assert.equal(new Set(fixture.promptCalls.map(call => call.opts?.intentId)).size, 1);
 		} finally {
