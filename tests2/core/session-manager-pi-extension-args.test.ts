@@ -8,7 +8,9 @@ import path from "node:path";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { resolveMarketplacePiExtensionActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
+import { resolveMarketplacePiExtensionActivation, resolveToolActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
+import { BOBBIT_PACK_LOCAL_DATA_ENV } from "../../src/server/agent/pack-local-data-runtime.ts";
+import { packLocalDataDockerExecArgs } from "../../src/server/agent/rpc-bridge.ts";
 import type { ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 import { installMemoryFs } from "./helpers/memory-fs-spies.js";
@@ -85,6 +87,82 @@ describe("marketplace pi extension activation args", () => {
 		assert.deepEqual(extensionPaths(result.args), [a, b]);
 		assert.deepEqual(result.tools.map((t) => t.name), ["enabled_tool", "discovery_failed_tool"]);
 		assert.equal(result.diagnostics.length, 4);
+	});
+
+	it("binds exact multi-pack local-data directories in initial agent/Pi activation", () => {
+		const tmp = fixtureRoot("local-data-initial");
+		const calls: unknown[] = [];
+		const plan: any = {
+			id: "session-local-data",
+			mode: "normal",
+			cwd: tmp,
+			projectId: "project-1",
+			sandboxed: false,
+			bridgeOptions: { args: [], env: {} },
+		};
+		resolveToolActivation(plan, {
+			toolManager: null,
+			mcpManager: null,
+			groupPolicyStore: null,
+			lifecycleHub: undefined,
+			marketplacePiExtensionResolver: null,
+			packLocalDataBindingsResolver: (scope: { projectId: string; realm: "host" | "sandbox" }) => {
+				calls.push(scope);
+				return {
+					"z-pack": path.join(tmp, ".z-data"),
+					"pack:with:exact-id": path.join(tmp, ".exact-data"),
+				};
+			},
+		} as any);
+
+		assert.deepEqual(calls, [{ projectId: "project-1", realm: "host" }]);
+		assert.deepEqual(JSON.parse(plan.bridgeOptions.env[BOBBIT_PACK_LOCAL_DATA_ENV]), {
+			"pack:with:exact-id": path.join(tmp, ".exact-data"),
+			"z-pack": path.join(tmp, ".z-data"),
+		});
+	});
+
+	it("recomputes host/sandbox bindings through the restore, respawn, and staff activation helper", () => {
+		const tmp = fixtureRoot("local-data-restore");
+		const calls: unknown[] = [];
+		const manager: any = new SessionManager();
+		manager.setPackLocalDataBindingsResolver((scope: { projectId: string; realm: "host" | "sandbox" }) => {
+			calls.push(scope);
+			return scope.realm === "sandbox"
+				? { perf: "/bobbit/local-data/perf" }
+				: { perf: path.join(tmp, ".performance-optimisation") };
+		});
+
+		// buildToolActivationArgs is the shared restore/role-respawn/force-abort
+		// funnel. Staff restore uses it unchanged; identity comes from projectId,
+		// never staff cwd or a worktree path.
+		const host = manager.buildToolActivationArgs("staff-session", undefined, undefined, path.join(tmp, "staff-wt"), "project-1");
+		const sandbox = manager.buildToolActivationArgs("team-session", undefined, undefined, "/workspace-wt/team", "project-1", undefined, undefined, true);
+
+		assert.deepEqual(calls, [
+			{ projectId: "project-1", realm: "host" },
+			{ projectId: "project-1", realm: "sandbox" },
+		]);
+		assert.deepEqual(JSON.parse(host.env[BOBBIT_PACK_LOCAL_DATA_ENV]), {
+			perf: path.join(tmp, ".performance-optimisation"),
+		});
+		assert.deepEqual(JSON.parse(sandbox.env[BOBBIT_PACK_LOCAL_DATA_ENV]), {
+			perf: "/bobbit/local-data/perf",
+		});
+	});
+
+	it("omits empty bindings and forwards populated JSON through docker exec", () => {
+		const manager: any = new SessionManager();
+		manager.setPackLocalDataBindingsResolver(() => ({}));
+		const empty = manager.buildToolActivationArgs("session-empty", undefined, undefined, "/workspace", "project-1", undefined, undefined, true);
+		assert.equal(empty.env[BOBBIT_PACK_LOCAL_DATA_ENV], undefined);
+		assert.deepEqual(packLocalDataDockerExecArgs(empty.env), []);
+
+		const json = JSON.stringify({ perf: "/bobbit/local-data/perf" });
+		assert.deepEqual(packLocalDataDockerExecArgs({ [BOBBIT_PACK_LOCAL_DATA_ENV]: json }), [
+			"-e",
+			`${BOBBIT_PACK_LOCAL_DATA_ENV}=${json}`,
+		]);
 	});
 
 	it("threads marketplace pi extension args through SessionManager restore/respawn helper after Bobbit activation args", () => {

@@ -74,6 +74,8 @@ export interface ChannelPanelLaunchTarget {
 export interface LauncherEntrypoint {
 	id: string;
 	packId: string;
+	/** Present only when the winning contributing pack declares project local data. */
+	hasLocalData?: true;
 	kind: LauncherKind;
 	label: string;
 	icon?: EntrypointIconId;
@@ -86,6 +88,8 @@ export interface LauncherEntrypoint {
 export interface RouteEntrypoint {
 	id: string;
 	packId: string;
+	/** Present only when the winning contributing pack declares project local data. */
+	hasLocalData?: true;
 	kind: "route";
 	routeId: string;
 	target: PanelTarget;
@@ -119,6 +123,7 @@ export interface RegisteredLauncher {
 	icon?: EntrypointIconId;
 	target: PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget;
 	projectId?: string;
+	hasLocalData: boolean;
 }
 
 /** Compound launcher key — entrypoint ids are only pack-unique, so a launcher is
@@ -233,6 +238,7 @@ export function registerPackEntrypoints(eps: ReadonlyArray<EntrypointInfo>, proj
 				...(ep.icon ? { icon: ep.icon } : {}),
 				target: ep.target,
 				projectId,
+				hasLocalData: ep.hasLocalData === true,
 			});
 		}
 	}
@@ -348,7 +354,7 @@ async function runChannelPanelLauncher(
 	onResult?: (r: LauncherDispatchResult) => void,
 	options?: LauncherDispatchOptions,
 ): Promise<void> {
-	const host = getLauncherHost(l.packId, l.id, options?.sessionId);
+	const host = getLauncherHost(l.packId, l.id, options?.sessionId, l.hasLocalData);
 	const launchId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 	const launchParams = {
 		...(target.params ?? {}),
@@ -389,7 +395,7 @@ async function runSpawnLauncher(
 	if (inFlightSpawnLaunch.has(l.key)) return;      // ignore re-entrant click
 	inFlightSpawnLaunch.add(l.key);
 	try {
-		const host = getLauncherHost(l.packId, l.id, options?.sessionId);
+		const host = getLauncherHost(l.packId, l.id, options?.sessionId, l.hasLocalData);
 		if (!host?.capabilities?.callRoute) { onResult?.({ ok: false, error: `${l.label} is unavailable.` }); return; }
 		let res: SpawnRouteOutcome | undefined;
 		try {
@@ -488,7 +494,7 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 				const paramKeys = Array.isArray(e.paramKeys)
 					? (e.paramKeys.filter((k): k is string => typeof k === "string"))
 					: [];
-				out.push({ id, packId, kind: "route", routeId, target: { panelId, params: target?.params }, paramKeys });
+				out.push({ id, packId, kind: "route", routeId, target: { panelId, params: target?.params }, paramKeys, ...(p.hasLocalData === true ? { hasLocalData: true } : {}) });
 			} else if (kind === "composer-slash" || kind === "session-menu") {
 				const label = typeof e.label === "string" ? e.label : undefined;
 				// Pass the launcher target through UNCHANGED — a PanelTarget, a RouteTarget,
@@ -498,7 +504,7 @@ export function entrypointInfosFromContributions(packs: ReadonlyArray<PackContri
 				const target = e.target as PanelTarget | RouteTarget | SpawnLaunchTarget | ChannelPanelLaunchTarget | undefined;
 				if (!label || !target) continue;
 				const icon = isSupportedEntrypointIconId(e.icon) ? e.icon : undefined;
-				out.push({ id, packId, kind, label, ...(icon ? { icon } : {}), target });
+				out.push({ id, packId, kind, label, ...(icon ? { icon } : {}), target, ...(p.hasLocalData === true ? { hasLocalData: true } : {}) });
 			}
 		}
 	}

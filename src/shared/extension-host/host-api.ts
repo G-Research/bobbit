@@ -117,6 +117,9 @@ export interface HostApi {
 	/** UI surface capabilities. PHASE 2 (frozen, not implemented). */
 	readonly ui: HostUiApi;
 
+	/** Stable project-scoped directory, present only when the contributing pack declares it. */
+	readonly localData?: HostLocalDataApi;
+
 	/** Ownership-scoped persistence. PHASE 2 (frozen, not implemented). */
 	readonly store: HostStoreApi;
 
@@ -144,6 +147,8 @@ export interface HostCapabilities {
 	readonly ui: boolean;
 	/** Phase-2 — ownership-scoped persistence. False on a Phase-1 host. */
 	readonly store: boolean;
+	/** Project-scoped pack local data. False/absent until the host wires the binding. */
+	readonly localData?: boolean;
 	/** Long-lived pack-scoped framed channels. False/absent until the host wires the bridge. */
 	readonly channels?: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
@@ -160,6 +165,12 @@ export interface HostRouteInit {
 	body?: unknown;
 	/** Typed query params appended to the route. */
 	query?: Record<string, string | number | boolean>;
+}
+
+/** Project-scoped directory bound to the current pack surface by the host. */
+export interface HostLocalDataApi {
+	/** Return the host-realm absolute path without accepting caller-supplied identity or path input. */
+	directory(): Promise<string>;
 }
 
 /** PHASE 2 — frozen, not implemented. Read/post the current session's transcript.

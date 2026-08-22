@@ -37,6 +37,8 @@ export interface PackRendererToolInfo {
 	 *  into the renderer's host so `host.ui.openPanel({panelId})` resolves the panel
 	 *  within the renderer's OWN pack (pack schema V1 — panel ids are pack-local). */
 	packId?: string;
+	/** Present only when the winning contributing pack declares project local data. */
+	hasLocalData?: true;
 }
 
 /** Names currently registered as pack renderers by {@link registerPackRenderers}.
@@ -50,12 +52,19 @@ let packRegistered = new Set<string>();
  *  must resolve within its OWN pack; {@link packIdForTool} supplies that packId to
  *  the surface ref the tool renderer binds (see Messages.ts / ToolGroup.ts). */
 let toolPackIds = new Map<string, string>();
+/** Tool names whose current winning pack declares project local data. */
+let localDataTools = new Set<string>();
 
 /** The structural `packId` that contributed `toolName` (a pack renderer tool), or
  *  `undefined` for a built-in / unknown tool. Used to bind the tool renderer's
  *  Host API to its own pack so `openPanel({panelId})` is pack-scoped. */
 export function packIdForTool(toolName: string): string | undefined {
 	return toolPackIds.get(toolName);
+}
+
+/** Whether the current winning pack renderer tool declares project local data. */
+export function packHasLocalDataForTool(toolName: string): boolean {
+	return localDataTools.has(toolName);
 }
 
 /**
@@ -77,10 +86,12 @@ export function registerPackRenderers(
 ): void {
 	const next = new Set<string>();
 	const nextPackIds = new Map<string, string>();
+	const nextLocalDataTools = new Set<string>();
 	for (const t of tools) {
 		if (t.rendererKind !== "pack") continue;
 		next.add(t.name);
 		if (typeof t.packId === "string" && t.packId) nextPackIds.set(t.name, t.packId);
+		if (t.hasLocalData === true) nextLocalDataTools.add(t.name);
 		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 		registerLazyToolRenderer(
 			t.name,
@@ -108,6 +119,7 @@ export function registerPackRenderers(
 	// Rebuild the tool→packId map from the fresh metadata (drops uninstalled tools'
 	// entries) so `packIdForTool` always reflects the current winning providers.
 	toolPackIds = nextPackIds;
+	localDataTools = nextLocalDataTools;
 }
 
 /** Sentinel: no reconcile has run yet. Distinct from `undefined` (reconciled

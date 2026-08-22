@@ -30,6 +30,11 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
 import type { DismissResult, OrchestrationCore } from "../agent/orchestration-core.js";
 
+export interface ServerHostLocalDataApi {
+	/** Return the pre-resolved project-scoped directory bound to this pack. */
+	directory(): string;
+}
+
 export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
@@ -124,6 +129,8 @@ export interface ServerHostCapabilities {
 	/** Ambient child-agent orchestration (sub-goal C). True once `host.agents` is
 	 *  wired to the injected OrchestrationCore. */
 	readonly agents: boolean;
+	/** Project-scoped pack local data. Absent unless a directory is bound. */
+	readonly localData?: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -146,6 +153,8 @@ export interface ServerHostApi {
 	readonly session: ServerHostSessionApi;
 	/** Ambient child-agent orchestration (sub-goal C) — own host.agents children only. */
 	readonly agents: ServerHostAgentsApi;
+	/** Project-scoped pack data, present only for packs that declare the capability. */
+	readonly localData?: ServerHostLocalDataApi;
 }
 
 export interface CreateServerHostApiOptions {
@@ -163,6 +172,9 @@ export interface CreateServerHostApiOptions {
 	/** Slice B1 — the process-singleton pack store. When present, `ctx.host.store`
 	 *  delegates to it scoped to the closure `packId`. */
 	packStore?: PackStore;
+	/** Pre-resolved project-scoped directory for this pack. The caller derives this
+	 *  from the bound project + winning pack; extension code never supplies a path. */
+	localDataDirectory?: string;
 	/** Host-owned notification fired AFTER a successful `host.store.put`, with the
 	 *  written key. The gateway uses it to drop activation-derived caches when a
 	 *  pack persists provider config (key `provider-config:*`), so a dormant
@@ -193,8 +205,9 @@ export interface CreateServerHostApiOptions {
 	 *  silently delegating. A provider host is built with `{ store: true }` so the
 	 *  worker tier gets `capabilities.store === true` while `session`/`agents` stay
 	 *  false AND unavailable. Omitted ⇒ the full implemented capability set
-	 *  (store/session/agents all true) — the existing route/action host behaviour. */
-	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean };
+	 *  (store/session/agents all true, plus localData when bound) — the existing
+	 *  route/action host behaviour. */
+	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean; localData?: boolean };
 }
 
 /**
@@ -234,9 +247,16 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// namespaces are additionally replaced with throwing stubs below so a denied
 	// capability is unavailable, not merely flagged false.
 	const mask = opts.capabilityMask;
-	const flags = mask
-		? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true }
-		: { session: true, store: true, agents: true };
+	const localDataDirectory = typeof opts.localDataDirectory === "string" && opts.localDataDirectory.length > 0
+		? opts.localDataDirectory
+		: undefined;
+	const localDataEnabled = localDataDirectory !== undefined && (!mask || mask.localData === true);
+	const flags = {
+		...(mask
+			? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true }
+			: { session: true, store: true, agents: true }),
+		...(localDataEnabled ? { localData: true as const } : {}),
+	};
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -382,6 +402,9 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		store: flags.store ? store : denyNamespace("store", store),
 		session: flags.session ? session : denyNamespace("session", session),
 		agents: flags.agents ? agents : denyNamespace("agents", agents),
+		...(localDataEnabled
+			? { localData: { directory: (): string => localDataDirectory } }
+			: {}),
 	};
 }
 

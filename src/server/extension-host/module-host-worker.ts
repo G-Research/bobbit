@@ -186,6 +186,18 @@ export class ModuleHost {
 		const limit = timeoutMs ?? this.defaultTimeoutMs;
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
 		const capSrc = (host as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
+		// Pack local data is already resolved and identity-bound by the parent host.
+		// Read it synchronously here so only one plain string crosses the worker
+		// boundary; no resolver, caller path, or function is serialized.
+		const localDataDirectory = capSrc?.localData === true
+			? (host as { localData?: { directory?: () => unknown } } | undefined)?.localData?.directory?.()
+			: undefined;
+		const serializedLocalData = typeof localDataDirectory === "string" && localDataDirectory.length > 0
+			? { localDataDirectory }
+			: {};
+		const serializedLocalDataCapability = typeof localDataDirectory === "string" && localDataDirectory.length > 0
+			? { localData: true as const }
+			: {};
 		const providerCtx = req.ctx as unknown as Record<string, unknown>;
 		// The LIVE host stays in the PARENT (it services proxied store calls); it is a
 		// function-bearing object that cannot cross the MessagePort, so strip it from
@@ -205,7 +217,9 @@ export class ModuleHost {
 					session: capSrc?.session === true,
 					store: capSrc?.store === true,
 					agents: capSrc?.agents === true,
+					...serializedLocalDataCapability,
 				},
+				...serializedLocalData,
 			}
 			: {
 				sessionId: req.ctx?.sessionId,
@@ -223,7 +237,9 @@ export class ModuleHost {
 					session: capSrc?.session === true,
 					store: capSrc?.store === true,
 					agents: capSrc?.agents === true,
+					...serializedLocalDataCapability,
 				},
+				...serializedLocalData,
 			};
 
 		const worker = new Worker(this.bootstrapUrl(), {
