@@ -1106,6 +1106,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/host-hooks-server-boundaries.test.ts",
+		allowReason: "isolated ModuleHost security fixture result written inside the integration gateway",
+		reads: frozen([
+			{ expression: "fixture.resultPath", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/history-fork-api.test.ts",
 		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
 		reads: frozen([
