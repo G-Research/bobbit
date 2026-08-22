@@ -135,26 +135,45 @@ test.describe("active read-only delegate interaction", () => {
 			}, reconnectEpoch), { timeout: 15_000, message: "delegate WebSocket should reconnect in place" }).toBe(true);
 			await expectActiveReadOnlyDelegate(page, delegateId, "WebSocket reconnect");
 
-			// Mutate server list metadata from outside the page. The pushed list
-			// refresh is authoritative; unlike navigation/reconnect, no session panel
-			// is recreated. Observing the new tag proves that refresh reconciled.
-			const generationBefore = await page.evaluate(() => (window as any).bobbitState?.sessionsGeneration ?? -1);
+			// Force a full authoritative list fetch without recreating the mounted
+			// panel. Pinning broadcasts sessions_changed; resetting only the conditional
+			// cursor makes the resulting push refresh return and reconcile a full list.
+			await page.evaluate(() => {
+				const app = (window as any).bobbitState;
+				(window as any).__readOnlyDelegateInterfaceBeforeRefresh = app?.chatPanel?.agentInterface;
+				if (app?.sessionPollTimer) {
+					clearInterval(app.sessionPollTimer);
+					app.sessionPollTimer = null;
+				}
+				app.sessionsGeneration = -1;
+			});
+			const listFetch = page.waitForResponse((response) => {
+				const url = new URL(response.url());
+				return response.request().method() === "GET"
+					&& url.pathname.endsWith("/api/sessions")
+					&& !url.searchParams.has("since")
+					&& !url.searchParams.has("include");
+			}, { timeout: 15_000 });
 			const pinResponse = await apiFetch(`/api/sessions/${delegateId}/pin`, {
 				method: "PUT",
 				body: JSON.stringify({ pinned: true }),
 			});
 			expect(pinResponse.status).toBe(200);
+			const refreshResponse = await listFetch;
+			expect(refreshResponse.ok(), "authoritative session-list fetch should succeed").toBe(true);
+			const refreshBody = await refreshResponse.json() as { changed?: boolean; sessions?: Array<{ id?: string; readOnly?: boolean; user_tags?: string[] }> };
+			expect(refreshBody.changed, "forced full list fetch must return an authoritative snapshot").not.toBe(false);
+			expect(refreshBody.sessions?.find((candidate) => candidate.id === delegateId)).toMatchObject({
+				readOnly: true,
+				user_tags: expect.arrayContaining(["pinned=true"]),
+			});
 			await expect.poll(() => page.evaluate((id) => {
 				const app = (window as any).bobbitState;
 				const record = app?.gatewaySessions?.find((candidate: { id?: string }) => candidate.id === id);
-				return {
-					generation: app?.sessionsGeneration ?? -1,
-					pinned: record?.user_tags?.includes("pinned=true") === true,
-				};
-			}, delegateId), { timeout: 15_000, message: "authoritative session-list refresh should apply the server mutation" })
-				.toEqual({ generation: expect.any(Number), pinned: true });
-			const generationAfter = await page.evaluate(() => (window as any).bobbitState?.sessionsGeneration ?? -1);
-			expect(generationAfter, "authoritative refresh should advance the session generation").toBeGreaterThan(generationBefore);
+				return record?.user_tags?.includes("pinned=true") === true
+					&& app?.chatPanel?.agentInterface === (window as any).__readOnlyDelegateInterfaceBeforeRefresh
+					&& document.contains(app.chatPanel.agentInterface);
+			}, delegateId), { timeout: 15_000, message: "authoritative list snapshot should reconcile in the mounted delegate panel" }).toBe(true);
 			await expectActiveReadOnlyDelegate(page, delegateId, "authoritative session refresh");
 			expectMutatingToolsWithheld(gateway, delegateId, "authoritative session refresh");
 		} finally {
