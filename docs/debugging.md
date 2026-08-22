@@ -1476,7 +1476,11 @@ The session-header toast (e.g. "Link copied" from the Copy-link button) uses `sh
 
 ## Transcript access errors
 
-Cross-project reads are allowed for `read_session`, `GET /api/sessions/:id/transcript`, and `GET /api/sessions/:id/transcript/before-compaction` when the authenticated caller can reach the target session on the same gateway; the `x-bobbit-session-id` header no longer gates transcript access by matching `projectId`. Structured transcript-reader errors are `session_not_found`, `transcript_unavailable`, `invalid_regex`, and `invalid_params`; before-compaction history also has `compaction_not_found` and may surface `internal_error`. Files: `src/server/agent/transcript-reader.ts`, `defaults/tools/agent/read_session.yaml` + `extension.ts`.
+Cross-project reads are allowed for `read_session`, `GET /api/sessions/:id/transcript`, `GET /api/sessions/:id/transcript/before-compaction`, and `GET /api/sessions/:id/transcript/before-clear` when the authenticated caller can reach the target session on the same gateway; the `x-bobbit-session-id` header no longer gates transcript access by matching `projectId`.
+
+Ordinary transcript reads use the structured errors `session_not_found`, `transcript_unavailable`, `invalid_regex`, and `invalid_params`; before-compaction history also has `compaction_not_found` and may surface `internal_error`. Before-clear history does not accept a regex. Its route errors are `invalid_params`, `session_not_found`, `clear_not_found`, `transcript_unavailable`, and `internal_error`. `clear_not_found` means the supplied `clearId` is not one of the target session's current durable boundaries: refresh the session transcript and retry with the boundary ID from its **Context Cleared** row. An empty successful envelope is valid when the preceding generation was intentionally unmaterialized; it is not `clear_not_found`.
+
+Before-clear history is display-only. Do not use its response to rebuild the active transcript or model context. See [Session context controls](features.md#session-context-controls) for the behavioral contract and [Before-clear history](rest-api.md#before-clear-history) for query and error shapes. Implementation entry points are `readClearHistory` in the transcript reader and the `beforeClearMatch` server route; `read_session` remains defined by `defaults/tools/agent/read_session.yaml` and its extension.
 
 ## Mobile annotation popover doesn't open after tapping "Add comment"
 

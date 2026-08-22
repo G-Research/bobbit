@@ -159,8 +159,9 @@ If both restrictions apply, `readOnly` takes precedence.
 
 The guarded work classifier contains these frames:
 
-- Agent and queue work: `prompt`, `steer`, `steer_queued`, `remove_queued`,
-  `reorder_queue`, `retry`, `restart_agent`, `compact`.
+- Agent and queue work: `prompt`, `steer`, `retry_intent`, `steer_queued`,
+  `remove_queued`, `reorder_queue`, `retry`, `restart_agent`, `compact`,
+  `clear`.
 - Metadata and model writes: `set_title`, `generate_title`,
   `summarize_goal_title`, `set_model`, `set_image_model`,
   `set_thinking_level`.
@@ -246,6 +247,7 @@ lifecycle, validation, size, or replay rules.
 | `set_thinking_level` | `level` | Change only the current model's thinking level. The server clamps and verifies the resulting complete tuple; this remains separate from a model-picker request. |
 | `set_image_model` | `provider`, `modelId` | Switch the per-session image generation model. Server validates `(provider, modelId)` against `getAvailableImageModels()`; on unknown the server replies with `{ type: "error", message: "unknown image model", code: "UNKNOWN_IMAGE_MODEL" }` and does **not** mutate session state. On valid, persists `imageModelProvider`/`imageModelId` to the session row and broadcasts the updated state to all attached clients. |
 | `compact` | — | Trigger context compaction |
+| `clear` | — | Clear conversation context for this socket's authenticated session. The frame carries no target session ID and is rejected by the authenticated session-work policy when interaction is restricted. See [Session context controls](features.md#session-context-controls). |
 | `get_state` | — | Request current agent state |
 | `get_messages` | — | Request full message history |
 | `set_title` | `title` | Set session title |
@@ -333,8 +335,9 @@ administrator to inspect server logs and restore the transcript before
 continuing; clients must not reinterpret this same-code message as the ordinary
 retryable case.
 
-While the condition remains, `prompt`, `steer`, `retry`, `restart_agent`, and
-`set_thinking_level` return `MODEL_SELECTION_REQUIRED`. Before activation and
+While the condition remains, `prompt`, `steer`, `retry`, `retry_intent`,
+`restart_agent`, `set_thinking_level`, and `clear` return
+`MODEL_SELECTION_REQUIRED`. Before activation and
 after an ordinary retryable failure, `get_state` and `get_messages` remain
 available so the session stays navigable and readable. See
 [Restored session requires a model](debugging.md#restored-session-requires-a-model).
@@ -414,7 +417,7 @@ semantics and the shared clamp order.
 | `auth_failed` | — | Authentication failed |
 | `state` | `data` | Current agent state snapshot. `data.condition` may be `{ code: "MODEL_SELECTION_REQUIRED", provider: string, modelId: string }`; partial snapshots that omit it do not clear it, and the server sends explicit `condition: null` only after verified recovery. |
 | `messages` | `data` | Full message history array |
-| `event` | `data`, `seq?`, `ts?` | Ordered agent event. Correlated user events carry delivery identity; `assistant_stream_invalidated` removes a provisional recoverable-length tail by `assistantStreamId`. `seq` is monotonic per session and `ts` is wall-clock ms; both remain optional for legacy interoperability. |
+| `event` | `data`, `seq?`, `ts?` | Ordered agent event. Correlated user events carry delivery identity; `assistant_stream_invalidated` removes a provisional recoverable-length tail by `assistantStreamId`. `context_cleared` carries the complete outward message snapshot described below. `seq` is monotonic per session and `ts` is wall-clock ms; both remain optional for legacy interoperability. |
 | `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
@@ -463,6 +466,37 @@ semantics and the shared clamp order.
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for the exact owning staff session. Canonical notification input and loop controls are redacted. See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | The owning staff session transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`; notification metadata remains redacted. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Context-cleared event
+
+A successful clear is delivered as a `context_cleared` subtype inside the
+ordinary sequenced `event` envelope:
+
+```ts
+{
+  type: "event";
+  data: {
+    type: "context_cleared";
+    clearId: string;
+    clearedAt: string;
+    messages: unknown[];
+  };
+  seq?: number;
+  ts?: number;
+}
+```
+
+`clearId` is the durable boundary identity, `clearedAt` is its ISO timestamp,
+and `messages` is the complete outward transcript snapshot after the clear. A
+client must **replace** its local message collection with `data.messages`; it
+must not append or merge this snapshot with pre-clear rows. The replacement
+also clears provisional stream and tool state. Delivery-outbox projections are
+separate and remain intact.
+
+If `data.messages` is missing or is not an array, the client must not perform a
+destructive replacement. It requests an authoritative `get_messages` snapshot
+instead. See [Session context controls](features.md#session-context-controls)
+for user-visible boundary and history behavior.
 
 ### Canonical Host notification stream
 
