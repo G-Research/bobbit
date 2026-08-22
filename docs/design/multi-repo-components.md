@@ -868,7 +868,7 @@ Sections 9.1–9.4 preserve the original feature acceptance plan. The current Te
 | 3 | `repo-scan.spec.ts` — fixture dirs (single repo, multi-repo, monorepo, data-only), assert detected components and detected commands. |
 | 6 | `workflow-validator.spec.ts` — positive cases (all three step shapes); negatives (missing component, wrong command, both `command`+`run`, neither). Asserts error messages include "Did you mean…". |
 | 7 (audit) | One spec per row in §3.5 table — file-fixture workflows, parse + validate + (where applicable) execute under the harness. |
-| 8 | `inline-workflow-load.spec.ts` — load a project with empty `workflows: {}`, attempt `POST /api/goals` → 400 with the documented error. |
+| 8 | `tests2/integration/goal-candidate-validation.test.ts` — with an empty persisted workflow store, omitted selection selects and freezes the first generated default, while an explicit unknown selection returns the structured workflow error. `tests2/integration/projects-no-default-workflows.test.ts` — generated defaults are not eagerly registered and persist only after successful public goal creation. |
 | 17 | `task-handoff-multi-repo.spec.ts` — task store accepts and retrieves `gitHandoff` per repo; legacy flat fields continue to work. |
 | 19 | `worktree-setup-multi.spec.ts` — fake `exec`, three components, declared order asserted; one fails non-fatally; data-only skipped. |
 
