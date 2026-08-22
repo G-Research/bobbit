@@ -4295,13 +4295,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}, handler.timeoutMs, signal);
 		},
 	});
+	const resolveHostNotificationSessionProject = (sessionId: string): string | undefined => {
+		const liveProjectId = sessionManager.getSession(sessionId)?.projectId;
+		const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+		// Both are host-owned authorities. Refuse an ambiguous transition rather than
+		// choosing a partition; a completed live reassignment may temporarily have no
+		// row in the destination store, in which case the live owner is authoritative.
+		if (liveProjectId && persistedProjectId && liveProjectId !== persistedProjectId) return undefined;
+		return liveProjectId ?? persistedProjectId;
+	};
 	const hostNotificationDispatcher = new HostNotificationDispatcher({
 		adapters: [
-			new HostNotificationSocketRouter(() => wss.clients),
+			new HostNotificationSocketRouter(() => wss.clients, {
+				resolveSessionProject: resolveHostNotificationSessionProject,
+			}),
 			notificationModuleAdapter,
 			notificationStaffDispatcher,
 		],
-		resolveSessionProject: (sessionId) => sessionManager.getPersistedSession(sessionId)?.projectId,
+		resolveSessionProject: resolveHostNotificationSessionProject,
 	});
 	projectContextManager.setHostNotificationDispatcher(hostNotificationDispatcher);
 	sessionManager.setHostNotificationPublisher(hostNotificationDispatcher as any);

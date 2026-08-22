@@ -397,6 +397,86 @@ describe("real gateway notification authority", () => {
 		});
 	}
 
+	it("rebinds an authenticated app socket after the session PATCH route moves projects", async () => {
+		const defaultProject = gw.projectContextManager.getRegistry().get(gw.defaultProjectId);
+		const foreignRoot = path.join(path.dirname(gw.bobbitDir), `host-hooks-moved-${Date.now()}`);
+		tempRoots.push(foreignRoot);
+		mkdirSync(foreignRoot, { recursive: true });
+		const destination = await gw.apiJson("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `host-hooks-moved-${Date.now()}`, rootPath: foreignRoot }),
+		});
+		scope.trackProject(destination.id);
+		const session = await scope.createSession({ cwd: defaultProject.rootPath });
+		const oldGoal = await scope.createGoal({
+			title: "Moved socket old project",
+			spec: "Old-project notification fixture with enough detail for validation.",
+			cwd: defaultProject.rootPath,
+			worktree: false,
+		});
+		const newGoal = await scope.createGoal({
+			title: "Moved socket new project",
+			spec: "New-project notification fixture with enough detail for validation.",
+			cwd: foreignRoot,
+			projectId: destination.id,
+			worktree: false,
+		});
+		await waitForIdle(gw, session.id);
+		const captured = await connectCaptured(gw.wsBase, session.id, gw.token, "app");
+		const cursor = captured.cursor();
+		try {
+			const moved = await gw.api(`/api/sessions/${encodeURIComponent(session.id)}`, {
+				method: "PATCH",
+				body: JSON.stringify({ projectId: destination.id }),
+			});
+			expect(moved.status, await moved.clone().text()).toBe(200);
+
+			const oldUpdate = await gw.api(`/api/goals/${encodeURIComponent(oldGoal.id)}`, {
+				method: "PUT",
+				body: JSON.stringify({ title: "Old project must stay silent" }),
+			});
+			expect(oldUpdate.status, await oldUpdate.clone().text()).toBe(200);
+			const refresh = await captured.waitFor(
+				frame => frame.type === "host_notifications_refresh_required" && frame.scope === "project",
+				cursor,
+			);
+			expect(refresh).toMatchObject({ type: "host_notifications_refresh_required", scope: "project" });
+			await captured.barrier(cursor);
+			expect(captured.frames.slice(cursor).filter(frame =>
+				frame.type === "host_notification" && frame.notification?.aggregate?.id === oldGoal.id,
+			)).toHaveLength(0);
+
+			const newUpdate = await gw.api(`/api/goals/${encodeURIComponent(newGoal.id)}`, {
+				method: "PUT",
+				body: JSON.stringify({ title: "New project is authoritative" }),
+			});
+			expect(newUpdate.status, await newUpdate.clone().text()).toBe(200);
+			const newFact = await captured.waitFor(
+				frame => frame.type === "host_notification" && frame.notification?.aggregate?.id === newGoal.id,
+				cursor,
+			);
+			expect(newFact.notification).toMatchObject({
+				name: "goalUpdated",
+				projectId: destination.id,
+				aggregate: { id: newGoal.id },
+			});
+			const scopedFrames = captured.frames.slice(cursor).filter(frame =>
+				frame.type === "host_notifications_refresh_required"
+				|| (frame.type === "host_notification" && frame.notification?.aggregate?.id === newGoal.id),
+			);
+			expect(scopedFrames.map(frame => frame.type)).toEqual([
+				"host_notifications_refresh_required",
+				"host_notification",
+			]);
+		} finally {
+			await gw.api(`/api/sessions/${encodeURIComponent(session.id)}`, {
+				method: "PATCH",
+				body: JSON.stringify({ projectId: gw.defaultProjectId }),
+			});
+			captured.ws.close();
+		}
+	});
+
 	it("sends enqueueWithId invalidations only to the current staff UI principal and keeps canonical input off the wire", async () => {
 		const { task, staff } = await createTaskAndObserver("socket-routing");
 		const foreignRoot = path.join(path.dirname(gw.bobbitDir), `host-hooks-foreign-${Date.now()}`);

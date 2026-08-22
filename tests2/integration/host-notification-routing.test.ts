@@ -100,6 +100,12 @@ function names(ws: FakeSocket): string[] {
 	return ws.frames.flatMap(frame => frame.type === "host_notification" ? [frame.notification.name] : []);
 }
 
+function resolveTestSessionProject(sessionId: string): string | undefined {
+	if (sessionId === "session-a" || sessionId === "session-b") return "project-a";
+	if (sessionId === "session-c") return "project-b";
+	return undefined;
+}
+
 describe("canonical host notification socket routing", () => {
 	it("routes session facts to the exact server binding and project facts only to same-project app sockets", async () => {
 		const exact = socket();
@@ -110,11 +116,14 @@ describe("canonical host notification socket routing", () => {
 		const unauthenticated = socket({ authenticated: false });
 		bind(exact, "session-a", "project-a");
 		bind(siblingSession, "session-b", "project-a");
-		bind(foreignProject, "session-a", "project-b");
+		bind(foreignProject, "session-c", "project-b");
 		bind(viewer, "session-a", "project-a");
 		bind(unauthenticated, "session-a", "project-a");
 		const all = [exact, siblingSession, foreignProject, unbound, viewer, unauthenticated];
-		const router = new HostNotificationSocketRouter(all as unknown as WebSocket[], { epochGenerator: () => "epoch" });
+		const router = new HostNotificationSocketRouter(all as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
+			epochGenerator: () => "epoch",
+		});
 		const dispatcher = new HostNotificationDispatcher({
 			adapters: [router],
 			resolveSessionProject: sessionId => sessionId === "session-a" || sessionId === "session-b" ? "project-a" : undefined,
@@ -136,6 +145,93 @@ describe("canonical host notification socket routing", () => {
 		expect(exactNotifications.map(frame => frame.notification.projectId)).toEqual(["project-a", "project-a"]);
 	});
 
+	it("rebinds a moved session from host authority and refreshes before new-project deltas", async () => {
+		const exact = socket();
+		bind(exact, "session-a", "project-a");
+		let authoritativeProject: string | undefined = "project-a";
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: sessionId => sessionId === "session-a" ? authoritativeProject : undefined,
+			epochGenerator: () => "project-epoch",
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			idGenerator: (() => { let id = 0; return () => `moved-${++id}`; })(),
+			now: () => 12,
+		});
+
+		authoritativeProject = "project-b";
+		dispatcher.publish("goalUpdated", projectPublication());
+		// A new-project delta racing the coalesced refresh must also be suppressed.
+		dispatcher.publish("goalUpdated", { ...projectPublication(), projectId: "project-b", aggregateRevision: 3 });
+		await settleRouting();
+
+		expect(exact.frames).toEqual([
+			expect.objectContaining({
+				type: "host_notifications_refresh_required",
+				scope: "project",
+				epoch: "project-epoch",
+				sequence: 1,
+			}),
+		]);
+
+		dispatcher.publish("goalUpdated", { ...projectPublication(), projectId: "project-b", aggregateRevision: 4 });
+		dispatcher.publish("goalUpdated", { ...projectPublication(), projectId: "project-c", aggregateRevision: 5 });
+		await settleRouting();
+
+		expect(exact.frames.slice(1)).toEqual([
+			expect.objectContaining({
+				type: "host_notification",
+				notification: expect.objectContaining({ projectId: "project-b" }),
+				stream: { epoch: "project-epoch", sequence: 2 },
+			}),
+		]);
+	});
+
+	it("unbinds and fails closed when live session authority disappears", async () => {
+		const exact = socket();
+		bind(exact, "session-a", "project-a");
+		let authoritativeProject: string | undefined;
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: () => authoritativeProject,
+		});
+		const dispatcher = new HostNotificationDispatcher({ adapters: [router] });
+
+		dispatcher.publish("goalUpdated", projectPublication());
+		await settleRouting();
+		authoritativeProject = "project-a";
+		dispatcher.publish("goalUpdated", { ...projectPublication(), aggregateRevision: 3 });
+		await settleRouting();
+
+		expect(exact.frames).toEqual([]);
+	});
+
+	it("revalidates a pressured refresh and replaces a stale session refresh with a project refresh", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const exact = socket({ bufferedAmount: 100 });
+		bind(exact, "session-a", "project-a");
+		let authoritativeProject = "project-a";
+		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: () => authoritativeProject,
+			maxBufferedBytes: 10,
+			refreshRetryDelayMs: 5,
+		});
+		const dispatcher = new HostNotificationDispatcher({
+			adapters: [router],
+			resolveSessionProject: () => authoritativeProject,
+		});
+
+		dispatcher.publish("statusChanged", sessionPublication());
+		await settleRouting();
+		authoritativeProject = "project-b";
+		exact.bufferedAmount = 0;
+		await vi.advanceTimersByTimeAsync(5);
+		await settleRouting();
+
+		expect(exact.frames).toEqual([
+			expect.objectContaining({ type: "host_notifications_refresh_required", scope: "project", sequence: 1 }),
+		]);
+	});
+
 	it("refuses sandbox-principal bindings and rechecks principal authority for deltas and refreshes", async () => {
 		const sandbox = socket({ authPrincipal: { kind: "sandbox" } });
 		const revoked = socket();
@@ -143,6 +239,7 @@ describe("canonical host notification socket routing", () => {
 		bind(revoked, "session-a", "project-a");
 		revoked.authPrincipal = { kind: "sandbox" };
 		const router = new HostNotificationSocketRouter([sandbox, revoked] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			epochGenerator: () => "epoch",
 		});
 		const dispatcher = new HostNotificationDispatcher({
@@ -166,6 +263,7 @@ describe("canonical host notification socket routing", () => {
 		const exact = socket({ bufferedAmount: 100 });
 		bind(exact, "session-a", "project-a");
 		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			maxBufferedBytes: 10,
 			refreshRetryDelayMs: 5,
 			maxRefreshRetries: 3,
@@ -195,6 +293,7 @@ describe("canonical host notification socket routing", () => {
 		let epoch = 0;
 		let notificationId = 0;
 		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			epochGenerator: () => `epoch-${++epoch}`,
 		});
 		const dispatcher = new HostNotificationDispatcher({
@@ -237,6 +336,7 @@ describe("canonical host notification socket routing", () => {
 		bind(pressured, "session-a", "project-a");
 		bind(healthy, "session-a", "project-a");
 		const router = new HostNotificationSocketRouter([pressured, healthy] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			epochGenerator: (() => { let epoch = 0; return () => `epoch-${++epoch}`; })(),
 			maxBufferedBytes: 10,
 			refreshRetryDelayMs: 5,
@@ -280,6 +380,7 @@ describe("canonical host notification socket routing", () => {
 		const exact = socket({ sendErrors: [new Error("delta failed"), new Error("refresh failed"), undefined] });
 		bind(exact, "session-a", "project-a");
 		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			epochGenerator: () => "epoch",
 			refreshRetryDelayMs: 7,
 			maxRefreshRetries: 4,
@@ -313,6 +414,7 @@ describe("canonical host notification socket routing", () => {
 		const exact = socket({ bufferedAmount: 100 });
 		bind(exact, "session-a", "project-a");
 		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			maxBufferedBytes: 10,
 			refreshRetryDelayMs: 5,
 			maxRefreshRetries: 3,
@@ -339,6 +441,7 @@ describe("canonical host notification socket routing", () => {
 		const exact = socket({ bufferedAmount: 100 });
 		bind(exact, "session-a", "project-a");
 		const router = new HostNotificationSocketRouter([exact] as unknown as WebSocket[], {
+			resolveSessionProject: resolveTestSessionProject,
 			maxBufferedBytes: 10,
 			refreshRetryDelayMs: 5,
 			maxRefreshRetries: 3,

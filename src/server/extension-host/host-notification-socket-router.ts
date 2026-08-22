@@ -41,6 +41,8 @@ interface StreamState {
 }
 
 export interface HostNotificationSocketRouterOptions {
+	/** Current host-owned session partition. Undefined removes all routing authority. */
+	readonly resolveSessionProject: (sessionId: string) => string | undefined;
 	readonly epochGenerator?: () => string;
 	/** If a socket already has this many unsent bytes, drop the delta and require
 	 * an authoritative refresh rather than growing transport memory unbounded. */
@@ -83,6 +85,7 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 	readonly consumer = "browser" as const;
 	private readonly states = new WeakMap<WebSocket, Map<HostHookScope, StreamState>>();
 	private readonly closeListeners = new WeakSet<WebSocket>();
+	private readonly resolveSessionProject: (sessionId: string) => string | undefined;
 	private readonly epochGenerator: () => string;
 	private readonly maxBufferedBytes: number;
 	private readonly refreshRetryDelayMs: number;
@@ -90,8 +93,9 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 
 	constructor(
 		private readonly sockets: Iterable<WebSocket> | (() => Iterable<WebSocket>),
-		options: HostNotificationSocketRouterOptions = {},
+		options: HostNotificationSocketRouterOptions,
 	) {
+		this.resolveSessionProject = options.resolveSessionProject;
 		this.epochGenerator = options.epochGenerator ?? randomUUID;
 		this.maxBufferedBytes = Math.max(1, options.maxBufferedBytes ?? 512 * 1024);
 		this.refreshRetryDelayMs = Math.max(1, Math.min(options.refreshRetryDelayMs ?? 25, 1_000));
@@ -140,11 +144,38 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 	private *recipients(notification: HostNotification): IterableIterator<WebSocket> {
 		const sockets = typeof this.sockets === "function" ? this.sockets() : this.sockets;
 		for (const ws of sockets) {
-			const binding = eligibleBinding(ws);
-			if (!binding || binding.projectId !== notification.projectId) continue;
-			if (notification.scope === "session" && binding.sessionId !== notification.sessionId) continue;
+			const authority = this.authoritativeBinding(ws);
+			if (!authority || authority.moved) continue;
+			if (authority.binding.projectId !== notification.projectId) continue;
+			if (notification.scope === "session" && authority.binding.sessionId !== notification.sessionId) continue;
 			yield ws;
 		}
+	}
+
+	/** Revalidate auth-time metadata against current host state. A project move
+	 * suppresses the frame that discovered it and fences later project deltas
+	 * behind one authoritative snapshot refresh. */
+	private authoritativeBinding(ws: WebSocket): { binding: HostNotificationSocketBinding; moved: boolean } | undefined {
+		const binding = eligibleBinding(ws);
+		if (!binding) {
+			unbindHostNotificationSocket(ws);
+			this.cleanupSocket(ws);
+			return undefined;
+		}
+		const projectId = this.resolveSessionProject(binding.sessionId);
+		if (!projectId) {
+			unbindHostNotificationSocket(ws);
+			this.cleanupSocket(ws);
+			return undefined;
+		}
+		if (projectId === binding.projectId) return { binding, moved: false };
+
+		const rebound = Object.freeze({ sessionId: binding.sessionId, projectId });
+		SOCKET_BINDINGS.set(ws, rebound);
+		const projectState = this.state(ws, "project");
+		projectState.refreshRequired = true;
+		this.scheduleRefresh(ws, "project", projectState);
+		return { binding: rebound, moved: true };
 	}
 
 	private state(ws: WebSocket, scope: HostHookScope): StreamState {
@@ -185,11 +216,8 @@ export class HostNotificationSocketRouter implements HostNotificationDeliveryAda
 
 	private tryRefresh(ws: WebSocket, scope: HostHookScope, state: StreamState): void {
 		if (!state.active) return;
-		if (!eligibleBinding(ws)) {
-			unbindHostNotificationSocket(ws);
-			this.cleanupSocket(ws);
-			return;
-		}
+		const authority = this.authoritativeBinding(ws);
+		if (!authority || authority.moved) return;
 		if (!state.refreshRequired) {
 			state.refreshAttempts = 0;
 			return;
