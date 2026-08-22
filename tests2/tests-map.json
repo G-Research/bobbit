@@ -48,6 +48,15 @@
       }
     },
     {
+      "path": "tests2/core/mock-agent-new-session.test.ts",
+      "reason": "Core mock-runtime fidelity coverage for Pi new_session transcript rotation, active-turn settlement, empty context, durable old history, and runtime tuple preservation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/context-clear-session-store.test.ts",
       "reason": "Core persistence coverage for context-clear boundary validation, atomic session pointer publication, and restart durability.",
       "execution": {

@@ -183,8 +183,13 @@ test.describe("Journey: Clear Session Context", () => {
 			await expect(segmentAHistory).toContainText("Done. Used Bash tool.");
 			const historicalTool = segmentAHistory.locator('[data-tool-name="Bash"]');
 			await expect(historicalTool).toHaveCount(1);
-			await historicalTool.locator("button").first().click();
-			await expect(historicalTool.getByText(TOOL_OUTPUT, { exact: false })).toBeVisible();
+			const historicalOutput = historicalTool.locator("code").getByText(TOOL_OUTPUT, { exact: true });
+			await historicalOutput.waitFor({ state: "attached" });
+			await historicalTool.evaluate(() => new Promise<void>((resolve) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+			}));
+			await historicalTool.getByRole("button", { name: /Output text payload/ }).click();
+			await expect(historicalOutput).toBeVisible();
 			await toggles(page).nth(0).click();
 			await expectCollapsedHistory(page, 0, 5);
 

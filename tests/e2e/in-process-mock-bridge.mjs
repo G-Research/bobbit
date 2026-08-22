@@ -340,6 +340,10 @@ export class InProcessMockBridge {
 		return this.sendCommand({ type: "compact" });
 	}
 
+	newSession(timeoutMs = 120_000) {
+		return this.sendCommand({ type: "new_session" }, timeoutMs);
+	}
+
 	getMessages() {
 		return this.sendCommand({ type: "get_messages" });
 	}
