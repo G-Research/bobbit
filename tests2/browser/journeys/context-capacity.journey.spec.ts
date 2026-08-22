@@ -97,7 +97,7 @@ async function closeContextPopover(page: Page): Promise<void> {
 	}
 }
 
-async function expectTrackUsesInputSurface(page: Page, track: Locator, dark: boolean): Promise<void> {
+async function expectTrackUsesInputSurface(track: Locator, dark: boolean): Promise<void> {
 	const colors = await track.evaluate((element, darkMode) => {
 		document.documentElement.classList.toggle("dark", darkMode);
 		const probe = document.createElement("span");
@@ -160,10 +160,10 @@ test.describe("Journey: Context target and model capacity", () => {
 			await expect(popover(page)).toContainText("50k / 400k tokens");
 			await expect(popover(page).getByTestId("context-meter-scale")).toContainText("Target 100k");
 			await expect(popover(page).getByTestId("context-meter-scale")).toContainText("Capacity 400k");
-			await expectTrackUsesInputSurface(page, footerTrack(page), false);
-			await expectTrackUsesInputSurface(page, popover(page).getByTestId("context-meter-track"), false);
-			await expectTrackUsesInputSurface(page, footerTrack(page), true);
-			await expectTrackUsesInputSurface(page, popover(page).getByTestId("context-meter-track"), true);
+			await expectTrackUsesInputSurface(footerTrack(page), false);
+			await expectTrackUsesInputSurface(popover(page).getByTestId("context-meter-track"), false);
+			await expectTrackUsesInputSurface(footerTrack(page), true);
+			await expectTrackUsesInputSurface(popover(page).getByTestId("context-meter-track"), true);
 			await closeContextPopover(page);
 
 			// Within the final 25% of target, exactly at target, beyond target, and near capacity.
