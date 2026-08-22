@@ -158,6 +158,23 @@ type ClearContextManager = SessionManager & {
 	clearContext(sessionId: string): Promise<unknown> | unknown;
 };
 
+type SessionReplacementAdmissionManager = SessionManager & {
+	getSessionReplacementAdmission?(sessionId: string): { active: boolean; generation: number };
+};
+
+function sessionReplacementAdmission(
+	sessionManager: SessionManager,
+	sessionId: string,
+): { active: boolean; generation: number } {
+	const query = (sessionManager as SessionReplacementAdmissionManager).getSessionReplacementAdmission;
+	if (typeof query === "function") return query.call(sessionManager, sessionId);
+	const session = sessionManager.getSession(sessionId);
+	return {
+		active: session?.lifecycleFenced === true,
+		generation: session?.lifecycleGeneration ?? 0,
+	};
+}
+
 type ModelSelectionRecoveryManager = SessionManager & {
 	recoverModelSelectionRequired(
 		sessionId: string,
@@ -581,6 +598,49 @@ const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
 /** Generic authenticated text ceiling for prompts, steers, and pack posts. */
 export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
 const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
+/**
+ * Pi-mutating controls serialize independently from prompt transport. Prompt and
+ * steer admission must reach SessionManager immediately so its replacement
+ * coordinator remains the sole durable queue owner around /clear.
+ */
+const SESSION_MUTATOR_SERIALISER = new SessionCommandSerialiser();
+
+/**
+ * Model/thinking frames own positions in both FIFOs at frame admission. The
+ * handshake preserves their established ordering with prompts while also
+ * reserving their order against clear/compact without deadlocking either queue.
+ */
+function serialiseOrderedRuntimeMutation(
+	key: string,
+	dispatch: (signal?: AbortSignal) => Promise<void>,
+	frameBytes: number,
+): Promise<void> {
+	let releaseCommandTurn!: (signal: AbortSignal) => void;
+	let rejectCommandTurn!: (error: unknown) => void;
+	const commandTurn = new Promise<AbortSignal>((resolve, reject) => {
+		releaseCommandTurn = resolve;
+		rejectCommandTurn = reject;
+	});
+	const mutatorResult = SESSION_MUTATOR_SERIALISER.serialise(
+		key,
+		async () => dispatch(await commandTurn),
+		frameBytes,
+	);
+	// The command FIFO may not reach this frame immediately; retain an observer so
+	// an independently rejected mutator admission never becomes unhandled.
+	void mutatorResult.catch(() => {});
+	const commandResult = SESSION_COMMAND_SERIALISER.serialise(
+		key,
+		(signal) => {
+			releaseCommandTurn(signal);
+			return mutatorResult;
+		},
+		frameBytes,
+	);
+	void commandResult.catch(rejectCommandTurn);
+	return commandResult;
+}
+
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
 // Restricted-session work includes agent work, metadata writes, and durable task
@@ -1714,11 +1774,18 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "compact": {
+					// Defence in depth for callers that bypass the WS mutator FIFO. The
+					// SessionManager coordinator closes synchronously, before clear awaits Pi.
+					if (sessionReplacementAdmission(sessionManager, sessionId).active) {
+						send(ws, { type: "error", message: "Context replacement is active; retry compaction after it finishes", code: "COMPACTION_ACTIVE" });
+						break;
+					}
 					if (session.isCompacting || session.status === "aborting") {
 						send(ws, { type: "error", message: "Compaction is already active or the turn is stopping", code: "COMPACTION_ACTIVE" });
 						break;
 					}
-					// Fire-and-forget: don't block the WS message loop.
+					// Hold only the independent mutator reservation through RPC finalization.
+					// Prompt/steer transport uses a different FIFO and remains non-blocking.
 					//
 					// pi-coding-agent 0.74.0+ emits its OWN `compaction_start` and
 					// `compaction_end` events from inside the compact() RPC, with
@@ -1758,7 +1825,7 @@ export function handleWebSocketConnection(
 							.then((response: any) => response?.success ? response.data : undefined)
 							.catch(() => undefined)
 						: Promise.resolve(undefined);
-					(async () => {
+					await (async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
 							const compactResult = await compactionRpcClient.compact(120_000);
@@ -2503,17 +2570,46 @@ export function handleWebSocketConnection(
 			});
 			return;
 		}
-		const serialisedSessionCommand = msg.type === "prompt" ||
+		// A queued clear cannot install SessionManager's durable prompt fence until
+		// the older mutator finishes. Reject it instead of accepting a boundary that
+		// would let a later prompt reach the old context. Preserve restricted-session
+		// policy precedence before this lifecycle-specific admission response.
+		if (authenticated
+			&& msg.type === "clear"
+			&& liveSession
+			&& SESSION_MUTATOR_SERIALISER.has(commandSerialisationKey)) {
+			if (isSessionWorkMessage(msg) && rejectRestrictedSessionWork(
+				ws,
+				msg,
+				liveSession,
+				sessionManager.getPersistedSession(sessionId),
+			)) return;
+			send(ws, {
+				type: "error",
+				message: "Another context or runtime setting change is active. Try /clear again after it finishes.",
+				code: "CLEAR_ACTIVE",
+			});
+			return;
+		}
+		const orderedSessionCommand = msg.type === "prompt" ||
 			msg.type === "retry" ||
 			msg.type === "retry_intent" ||
-			msg.type === "set_model" ||
-			msg.type === "set_thinking_level" ||
 			(msg.type === "steer" && !liveStreamingSteer);
+		const orderedRuntimeMutation = msg.type === "set_model" || msg.type === "set_thinking_level";
+		const standaloneRuntimeMutation = msg.type === "clear" || msg.type === "compact";
 		let result: Promise<void>;
 		try {
-			result = authenticated && serialisedSessionCommand
-				? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes)
-				: dispatch();
+			if (authenticated && orderedRuntimeMutation) {
+				result = serialiseOrderedRuntimeMutation(commandSerialisationKey, dispatch, frameBytes);
+			} else if (authenticated && standaloneRuntimeMutation) {
+				// This reservation intentionally excludes prompt/steer transport. Those
+				// frames must reach SessionManager's durable replacement queue immediately.
+				result = SESSION_MUTATOR_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes);
+			} else {
+				result = authenticated && orderedSessionCommand
+					? SESSION_COMMAND_SERIALISER.serialise(commandSerialisationKey, dispatch, frameBytes)
+					: dispatch();
+			}
 		} catch (err) {
 			// Admission is synchronous and atomic: a rejected parsed frame is never
 			// attached to the FIFO tail, so its closure becomes collectible now.

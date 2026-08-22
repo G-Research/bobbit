@@ -3691,6 +3691,20 @@ export class SessionManager {
 		session.hostToolCallBeforeWaiters?.clear();
 	}
 
+	/**
+	 * Narrow read-only ownership view for runtime controls that must not cross a
+	 * SessionManager-owned bridge/transcript replacement. The coordinator's
+	 * presence closes admission synchronously, before its async operation receives
+	 * an active token; the generation then fences work that started earlier.
+	 */
+	getSessionReplacementAdmission(sessionId: string): { active: boolean; generation: number } {
+		const coordinator = this._sessionReplacementCoordinators?.get(sessionId);
+		return {
+			active: coordinator !== undefined,
+			generation: coordinator?.active?.generation ?? this._currentRespawnGeneration(sessionId),
+		};
+	}
+
 	/** Read-only admission view over the existing replacement coordinator. */
 	getModelSelectionRecoveryAdmission(sessionId: string): {
 		condition?: ModelSelectionRequiredCondition;
@@ -4260,6 +4274,16 @@ export class SessionManager {
 					"CLEAR_UNSUPPORTED",
 					"The active agent runtime does not support context clearing. Restart or update the agent runtime and try again.",
 				);
+			}
+			// Preflight capture crosses several RPC/persistence awaits. Manual compaction
+			// may only win before this clear's first context-mutating RPC; recheck at the
+			// exact new_session boundary so the operations can never overlap even when a
+			// non-WS caller bypasses transport serialization.
+			if (session.isCompacting) {
+				throw new ContextClearError("CLEAR_ACTIVE", "The session began compacting before context replacement");
+			}
+			if (!this._replacementTokenIsCurrent(id, token)) {
+				throw new ContextClearError("CLEAR_CANCELLED", "The session changed before context replacement");
 			}
 			replacementAttempted = true;
 			const replacement = await newSession(120_000);

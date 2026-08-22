@@ -83,6 +83,11 @@ export class SessionCommandSerialiser {
 		return this.tails.size;
 	}
 
+	/** Synchronous per-key admission view for lifecycle controls that reject busy. */
+	has(key: string): boolean {
+		return this.tails.has(key);
+	}
+
 	/** Aggregate pending usage across session keys; exposed for diagnostics/tests. */
 	get pendingCount(): number {
 		let count = 0;

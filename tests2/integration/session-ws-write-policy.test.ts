@@ -9,6 +9,17 @@ import {
 	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
 
+type Deferred<T> = {
+	promise: Promise<T>;
+	resolve(value: T): void;
+};
+
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>(onResolve => { resolve = onResolve; });
+	return { promise, resolve };
+}
+
 async function expectPolicyError(
 	conn: WsConnection,
 	frame: Record<string, unknown>,
@@ -385,6 +396,137 @@ test.describe("authenticated WebSocket session write policy", () => {
 			restoreTitleControlSpies(titleControlSpies);
 			restoreTaskControlSpies(taskControlSpies);
 			conn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("clear admitted first holds model/thinking mutation until release and commits one consistent tuple", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		const persistedBefore = gateway.sessionManager.getPersistedSession(sessionId);
+		expect(live).toBeTruthy();
+		expect(persistedBefore?.effectiveThinkingLevel).toEqual(expect.any(String));
+		const clearGate = deferred<void>();
+		const clearContext = vi.spyOn(gateway.sessionManager, "clearContext").mockImplementation(async () => clearGate.promise);
+		const setThinkingLevel = vi.spyOn(live.rpcClient, "setThinkingLevel");
+		const compact = vi.spyOn(live.rpcClient, "compact").mockResolvedValue({ success: true, data: {} });
+		const persistSessionModel = vi.spyOn(gateway.sessionManager, "persistSessionModel");
+		const clearConn = await connectWs(sessionId);
+		const settingsConn = await connectWs(sessionId);
+		try {
+			clearConn.send({ type: "clear" });
+			await vi.waitFor(() => expect(clearContext).toHaveBeenCalledTimes(1));
+			settingsConn.send({ type: "set_thinking_level", level: persistedBefore!.effectiveThinkingLevel });
+			settingsConn.send({ type: "compact" });
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(setThinkingLevel).not.toHaveBeenCalled();
+			expect(compact).not.toHaveBeenCalled();
+			expect(persistSessionModel).not.toHaveBeenCalled();
+
+			clearGate.resolve(undefined);
+			await vi.waitFor(() => expect(persistSessionModel).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+			await vi.waitFor(() => expect(compact).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+			const persistedAfter = gateway.sessionManager.getPersistedSession(sessionId);
+			const runtimeState = await live.rpcClient.getState();
+			expect(runtimeState.success).toBe(true);
+			expect({
+				provider: runtimeState.data?.model?.provider,
+				modelId: runtimeState.data?.model?.id,
+				thinkingLevel: runtimeState.data?.thinkingLevel,
+			}).toEqual({
+				provider: persistedAfter?.modelProvider,
+				modelId: persistedAfter?.modelId,
+				thinkingLevel: persistedAfter?.effectiveThinkingLevel,
+			});
+		} finally {
+			clearGate.resolve(undefined);
+			clearContext.mockRestore();
+			setThinkingLevel.mockRestore();
+			compact.mockRestore();
+			persistSessionModel.mockRestore();
+			clearConn.close();
+			settingsConn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("thinking mutation admitted first rejects clear until its complete tuple commits", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+		expect(live).toBeTruthy();
+		expect(persisted?.effectiveThinkingLevel).toEqual(expect.any(String));
+		const thinkingGate = deferred<void>();
+		const originalSetThinking = live.rpcClient.setThinkingLevel.bind(live.rpcClient);
+		const setThinkingLevel = vi.spyOn(live.rpcClient, "setThinkingLevel").mockImplementation(async (...args: any[]) => {
+			await thinkingGate.promise;
+			return originalSetThinking(...args);
+		});
+		const persistSessionModel = vi.spyOn(gateway.sessionManager, "persistSessionModel");
+		const clearContext = vi.spyOn(gateway.sessionManager, "clearContext").mockResolvedValue(undefined);
+		const settingsConn = await connectWs(sessionId);
+		const clearConn = await connectWs(sessionId);
+		try {
+			settingsConn.send({ type: "set_thinking_level", level: persisted!.effectiveThinkingLevel });
+			await vi.waitFor(() => expect(setThinkingLevel).toHaveBeenCalledTimes(1));
+			await expectPolicyError(clearConn, { type: "clear" }, "CLEAR_ACTIVE");
+			expect(clearContext).not.toHaveBeenCalled();
+
+			thinkingGate.resolve(undefined);
+			await vi.waitFor(() => expect(persistSessionModel).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+			clearConn.send({ type: "clear" });
+			await vi.waitFor(() => expect(clearContext).toHaveBeenCalledTimes(1));
+		} finally {
+			thinkingGate.resolve(undefined);
+			setThinkingLevel.mockRestore();
+			persistSessionModel.mockRestore();
+			clearContext.mockRestore();
+			settingsConn.close();
+			clearConn.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("manual compact admitted first rejects clear through finalization, then releases admission", async ({ gateway }) => {
+		const sessionId = await createSession();
+		await waitForSessionStatus(sessionId, "idle");
+		const live = gateway.sessionManager.getSession(sessionId);
+		expect(live).toBeTruthy();
+		const compactGate = deferred<any>();
+		const finalizationGate = deferred<void>();
+		const compact = vi.spyOn(live.rpcClient, "compact").mockImplementation(async () => compactGate.promise);
+		const originalFinish = gateway.sessionManager.finishCompactionAndRelease.bind(gateway.sessionManager);
+		const finish = vi.spyOn(gateway.sessionManager, "finishCompactionAndRelease").mockImplementation(async (...args: any[]) => {
+			await finalizationGate.promise;
+			return originalFinish(...args);
+		});
+		const clearContext = vi.spyOn(gateway.sessionManager, "clearContext").mockResolvedValue(undefined);
+		const compactConn = await connectWs(sessionId);
+		const clearConn = await connectWs(sessionId);
+		try {
+			compactConn.send({ type: "compact" });
+			await vi.waitFor(() => expect(compact).toHaveBeenCalledTimes(1));
+			await expectPolicyError(clearConn, { type: "clear" }, "CLEAR_ACTIVE");
+			expect(clearContext).not.toHaveBeenCalled();
+
+			compactGate.resolve({ success: true, data: {} });
+			await vi.waitFor(() => expect(finish).toHaveBeenCalledTimes(1));
+			await expectPolicyError(clearConn, { type: "clear" }, "CLEAR_ACTIVE");
+			expect(clearContext).not.toHaveBeenCalled();
+			finalizationGate.resolve(undefined);
+			await vi.waitFor(() => expect(live.isCompacting).toBe(false));
+			clearConn.send({ type: "clear" });
+			await vi.waitFor(() => expect(clearContext).toHaveBeenCalledTimes(1));
+		} finally {
+			compactGate.resolve({ success: true, data: {} });
+			finalizationGate.resolve(undefined);
+			compact.mockRestore();
+			finish.mockRestore();
+			clearContext.mockRestore();
+			compactConn.close();
+			clearConn.close();
 			await deleteSession(sessionId);
 		}
 	});

@@ -1744,7 +1744,7 @@
     },
     {
       "path": "tests2/integration/session-ws-write-policy.test.ts",
-      "reason": "Authenticated WebSocket integration coverage proving persisted read-only and non-interactive session policy is enforced before prompt or queue mutation, while snapshot/ping reads and intentional streaming-only reviewer steer remain available.",
+      "reason": "Authenticated WebSocket integration coverage proving persisted read-only and non-interactive session policy is enforced before mutation, and clear/model/thinking/manual-compaction admission remains serialized across sockets through compaction finalization without splitting runtime and durable tuples.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

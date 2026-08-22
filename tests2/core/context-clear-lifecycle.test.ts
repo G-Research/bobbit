@@ -398,6 +398,10 @@ describe("SessionManager context clear transaction", () => {
 		fx.session.status = "streaming";
 		const clear = fx.manager.clearContext(fx.session.id);
 		await vi.waitFor(() => expect(fx.bridge.newSession).toHaveBeenCalledTimes(1));
+		expect(fx.manager.getSessionReplacementAdmission(fx.session.id)).toEqual({
+			active: true,
+			generation: expect.any(Number),
+		});
 
 		const promptAdmission = fx.manager.enqueuePrompt(fx.session.id, "PROMPT_AFTER_CLEAR", { intentId: "intent-clear-prompt" });
 		const steerAdmission = fx.manager.deliverLiveSteer(fx.session.id, "STEER_AFTER_CLEAR", { intentId: "intent-clear-steer" });
@@ -434,6 +438,29 @@ describe("SessionManager context clear transaction", () => {
 		expect(fx.bridge.prompt.mock.calls[1]?.[0]).toContain("STEER_AFTER_CLEAR");
 		expect(fx.bridge.steer).not.toHaveBeenCalled();
 		expect(fx.session.promptQueue.toArray()).toEqual([]);
+		expect(fx.manager.getSessionReplacementAdmission(fx.session.id)).toEqual({
+			active: false,
+			generation: fx.session.lifecycleGeneration,
+		});
+	});
+
+	it("rechecks compaction immediately before new_session and retains the old generation", async () => {
+		const metadataGate = deferred<void>();
+		const fx = makeFixture({ id: "compact-wins-preflight" });
+		fx.session.pendingMetadataPersist = metadataGate.promise;
+
+		const clear = fx.manager.clearContext(fx.session.id);
+		await vi.waitFor(() => expect(fx.manager.getSessionReplacementAdmission(fx.session.id).active).toBe(true));
+		fx.session.isCompacting = true;
+		metadataGate.resolve(undefined);
+
+		await expect(clear).rejects.toMatchObject({ code: "CLEAR_ACTIVE" });
+		expect(fx.bridge.newSession).not.toHaveBeenCalled();
+		expect(fx.bridge.sendCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: "switch_session" }));
+		expect(fx.store.record.agentSessionFile).toBe(fx.oldPath);
+		expect(fx.store.record.contextClearBoundaries).toBeUndefined();
+		expect(fx.session.lifecycleFenced).not.toBe(true);
+		expect(fx.manager.getSessionReplacementAdmission(fx.session.id).active).toBe(false);
 	});
 
 	it("retries a snapshot started before admission so stale A rows cannot publish after B commits", async () => {
