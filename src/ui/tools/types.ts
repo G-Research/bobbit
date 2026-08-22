@@ -7,8 +7,17 @@ export interface ToolRenderResult {
 	isCustom: boolean; // true = no card wrapper, false = wrap in card
 }
 
-/** Extra context available to renderers that need to call back to the server. */
+/** Render-time authority. History keeps disclosure/copy UI but owns no live capabilities. */
+export type ToolCapabilityMode = "active" | "history";
+
+/**
+ * Extra context available to renderers. History is a distinct capability mode:
+ * its producer omits every current-session callback and host authority instead
+ * of passing disabled facsimiles.
+ */
 export interface ToolRenderContext {
+	/** Explicit authority mode; historical transcript segments always set `history`. */
+	capabilityMode?: ToolCapabilityMode;
 	/** The tool_use ID from the assistant message block. */
 	toolUseId?: string;
 	/** Raw `input` payload from tool_use/toolCall blocks, when present. */

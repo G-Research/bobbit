@@ -17,6 +17,7 @@ import { isSkippedToolResult, TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_
 import { state as appState } from "../../app/state.js";
 import { getHostApi } from "../../app/host-api.js";
 import { packHasLocalDataForTool, packIdForTool } from "../../app/pack-renderers.js";
+import type { ToolCapabilityMode, ToolRenderContext } from "../tools/types.js";
 
 /** Icon lookup by tool name — mirrors individual renderers */
 const TOOL_ICONS: Record<string, any> = {
@@ -79,6 +80,7 @@ export class ToolGroup extends LitElement {
 	@property({ type: Array }) toolCalls: ToolCall[] = [];
 	@property({ type: Array }) tools: AgentTool[] = [];
 	@property({ type: Object }) toolResultsById?: Map<string, ToolResultMessage>;
+	@property({ attribute: false }) capabilityMode: ToolCapabilityMode = "active";
 
 	@state() private _expanded = false;
 
@@ -173,19 +175,24 @@ export class ToolGroup extends LitElement {
 						<div class="mt-3 flex flex-col gap-3">
 							${this.toolCalls.map((tc) => {
 								const result = this.toolResultsById?.get(tc.id);
-								const sessionIdCtx = appState.remoteAgent?.gatewaySessionId;
-								const renderResult = renderTool(tc.name, tc.arguments, result, false, {
+								const isHistory = this.capabilityMode === "history";
+								const sessionIdCtx = isHistory ? undefined : appState.remoteAgent?.gatewaySessionId;
+								const renderContext: ToolRenderContext = {
+									capabilityMode: this.capabilityMode,
 									toolUseId: tc.id,
 									toolCallInput: (tc as any).input,
-									sessionId: sessionIdCtx,
 									packTool: tc.name,
-									host: getHostApi(sessionIdCtx, tc.id, {
-										kind: "tool",
-										tool: tc.name,
-										packId: packIdForTool(tc.name),
-										...(packHasLocalDataForTool(tc.name) ? { hasLocalData: true } : {}),
-									}),
-								});
+									...(!isHistory ? {
+										sessionId: sessionIdCtx,
+										host: getHostApi(sessionIdCtx, tc.id, {
+											kind: "tool" as const,
+											tool: tc.name,
+											packId: packIdForTool(tc.name),
+											...(packHasLocalDataForTool(tc.name) ? { hasLocalData: true as const } : {}),
+										}),
+									} : {}),
+								};
+								const renderResult = renderTool(tc.name, tc.arguments, result, false, renderContext);
 								if (renderResult.isCustom) {
 									return renderResult.content;
 								}

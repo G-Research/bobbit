@@ -396,7 +396,10 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 		// Decide button behavior
 		let disabled: boolean;
 		let tooltip: string;
-		if (isStreaming && !result) {
+		if (ctx?.capabilityMode === "history") {
+			disabled = true;
+			tooltip = "Preview actions are unavailable in read-only history";
+		} else if (isStreaming && !result) {
 			disabled = true;
 			tooltip = "Waiting for preview_open to complete…";
 		} else if (isResultError) {

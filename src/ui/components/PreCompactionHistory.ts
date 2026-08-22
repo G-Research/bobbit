@@ -401,6 +401,7 @@ export class PreCompactionHistory extends LitElement {
 							.isStreaming=${false}
 							.hasStreamMessage=${false}
 							.hideActionablePermissionRows=${true}
+							.capabilityMode=${"history"}
 							.promptAuthorDisplayMode=${this.promptAuthorDisplayMode}
 							.resolvePromptAuthorAppearance=${this.resolvePromptAuthorAppearance}
 						></message-list>

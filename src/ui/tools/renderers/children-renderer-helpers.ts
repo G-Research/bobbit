@@ -75,6 +75,7 @@ export function classificationBadge(classification: string | undefined): Templat
 
 /** Resolve the current session's goalId from ctx (preferred) or DOM fallback. */
 export function resolveGoalId(ctx: any): string | undefined {
+	if (ctx?.capabilityMode === "history") return undefined;
 	if (ctx?.goalId) return ctx.goalId as string;
 	if (typeof document !== "undefined") {
 		const attr = document.documentElement?.dataset?.currentGoalId;

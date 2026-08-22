@@ -2159,6 +2159,7 @@ export class AgentInterface extends LitElement {
 				<message-list
 					.messages=${visibleMessages}
 					.sessionId=${this.session?.sessionId ?? ""}
+					.capabilityMode=${"active"}
 					.canForkSource=${canForkSource}
 					.promptActionsBusy=${this._historyForkPending || appState.creatingSession}
 					.tools=${state.tools}
