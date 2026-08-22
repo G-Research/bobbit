@@ -14147,6 +14147,11 @@ export class SessionManager {
 	 * sidecar merges, truncation, ordering stamps, and serialization.
 	 */
 	async getMessagesSnapshotBase(session: SessionInfo): Promise<MessageSnapshotBaseResponse> {
+		// Lightweight unit seams may instantiate the prototype without field
+		// initializers. Real managers always own this map and retain both clear fences.
+		if (!this._sessionReplacementCoordinators) {
+			return this._getMessagesSnapshotBaseUnfenced(session);
+		}
 		let candidate = session;
 		for (;;) {
 			const before = this._sessionReplacementCoordinators.get(candidate.id);
