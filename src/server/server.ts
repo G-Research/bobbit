@@ -691,7 +691,7 @@ class GoalCandidateValidationResponseError extends Error {
 	}
 }
 
-import { GoalManager } from "./agent/goal-manager.js";
+import { GoalManager, GoalPreflightStaleError, isGoalPreflightStaleError } from "./agent/goal-manager.js";
 import {
 	evaluateSessionGoalPromotion,
 	isSessionGoalWorktreeMode,
@@ -8855,10 +8855,12 @@ async function handleApiRoute(
 			requestValidation = validateRequestCandidate();
 			if (!requestValidation.validation.ok) { writeGoalCandidateError(requestValidation.validation); return; }
 			const candidate = requestValidation.validation.candidate;
-			if (candidate.cwd !== creationPreflight.cwd || candidate.projectId !== creationPreflight.projectId) {
-				json({ error: "Goal creation preflight became stale; retry the request", message: "Goal creation preflight became stale; retry the request", code: "GOAL_PREFLIGHT_STALE" }, 409);
-				return;
+			if (candidate.projectId !== creationPreflight.projectId) {
+				throw new GoalPreflightStaleError();
 			}
+			targetGoalManager.assertGoalCreationPreflightCurrent(creationPreflight, candidate.cwd, {
+				projectId: candidate.projectId,
+			});
 			const requestedWorkflowId = requestValidation.requestedWorkflowId;
 			const title = candidate.title;
 			const cwd = candidate.cwd;
@@ -9149,6 +9151,10 @@ async function handleApiRoute(
 				}
 			}
 		} catch (err) {
+			if (isGoalPreflightStaleError(err)) {
+				json({ error: err.message, message: err.message, code: err.code, details: err.details }, err.status);
+				return;
+			}
 			jsonError(400, err);
 		}
 		return;

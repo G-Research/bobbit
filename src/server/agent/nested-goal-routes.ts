@@ -16,7 +16,7 @@ import type http from "node:http";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { GoalManager } from "./goal-manager.js";
+import { isGoalPreflightStaleError, type GoalManager } from "./goal-manager.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { SessionManager } from "./session-manager.js";
@@ -46,7 +46,6 @@ import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS } from "../strict-body.js";
 import { validateGoalCandidate, type GoalCandidateDeps } from "./goal-candidate-validator.js";
-import { executionPathIdentity } from "./resolve-project.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -673,10 +672,9 @@ export async function tryHandleNestedGoalRoute(
 				return true;
 			}
 			childCwd = resolveChildCwd(freshParent);
-			if (executionPathIdentity(childCwd) !== creationPreflight.cwdIdentity) {
-				json({ error: "Goal creation preflight became stale; retry the child creation", message: "Goal creation preflight became stale; retry the child creation", code: "GOAL_PREFLIGHT_STALE" }, 409);
-				return true;
-			}
+			goalManager.assertGoalCreationPreflightCurrent(creationPreflight, childCwd, {
+				projectId: ctx.project.id,
+			});
 			const duplicate = ctx.goalStore.getAll().find(g => g.parentGoalId === parentId && g.spawnedFromPlanId === planId);
 			if (duplicate) {
 				json({ id: duplicate.id, alreadyExists: true });
@@ -855,6 +853,10 @@ export async function tryHandleNestedGoalRoute(
 				...(capacityBlocked ? { capacityBlocked: true } : {}),
 			}, 201);
 		} catch (err) {
+			if (isGoalPreflightStaleError(err)) {
+				json({ error: err.message, message: err.message, code: err.code, details: err.details }, err.status);
+				return true;
+			}
 			// createGoal throws on cycle violations and missing parent.
 			jsonError(400, err);
 		}

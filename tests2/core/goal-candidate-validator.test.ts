@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { validateInlineRoles } from "../../src/server/agent/inline-role-validator.js";
-import { GoalManager } from "../../src/server/agent/goal-manager.js";
+import {
+	GoalManager,
+	GoalPreflightStaleError,
+	GOAL_PREFLIGHT_STALE_CODE,
+	GOAL_PREFLIGHT_STALE_MESSAGE,
+} from "../../src/server/agent/goal-manager.js";
 import { GoalStore } from "../../src/server/agent/goal-store.js";
 import { executionPathIdentity } from "../../src/server/agent/resolve-project.js";
 import { buildActive, buildFixture, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.js";
@@ -16,6 +21,28 @@ function deferred() {
 
 function role(overrides: Record<string, unknown> = {}) {
 	return { name: "reviewer", label: "Reviewer", promptTemplate: "Review {{GOAL_BRANCH}}", ...overrides };
+}
+
+function fakeGitRunner(onFirstProbe?: () => Promise<void>) {
+	let probes = 0;
+	const probeCwds: string[] = [];
+	return {
+		get probes() { return probes; },
+		probeCwds,
+		runner: {
+			async execFile(_file: string, args: readonly string[], options?: { cwd?: string | URL }) {
+				if (args.join(" ") === "rev-parse --show-toplevel") {
+					probes++;
+					const cwd = String(options?.cwd ?? "");
+					probeCwds.push(cwd);
+					if (probes === 1) await onFirstProbe?.();
+					return { stdout: `${cwd}\n`, stderr: "" };
+				}
+				if (args.join(" ") === "rev-parse --verify HEAD") return { stdout: "head\n", stderr: "" };
+				throw new Error(`unexpected git call: ${args.join(" ")}`);
+			},
+		},
+	};
 }
 
 describe("canonical goal candidate primitives", () => {
@@ -93,7 +120,90 @@ describe("canonical goal commit boundary", () => {
 			expect(() => manager.createGoalFromPreflight("Stale cwd", second, {
 				preflight,
 				worktree: false,
-			})).toThrow(/preflight no longer matches/i);
+			})).toThrow(GoalPreflightStaleError);
+			expect(store.getAll()).toEqual([]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it.each(["components", "projectRoot", "baseRef"] as const)(
+		"retries the whole repository probe when %s changes and commits the retained tuple",
+		async (changedField) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "goal-preflight-config-"));
+			const rootA = path.join(root, "project-a");
+			const rootB = path.join(root, "project-b");
+			for (const dir of [path.join(rootA, "repo-a"), path.join(rootA, "repo-b"), path.join(rootB, "repo-a")]) {
+				fs.mkdirSync(dir, { recursive: true });
+			}
+			const entered = deferred();
+			const release = deferred();
+			const fakeGit = fakeGitRunner(async () => {
+				entered.resolve();
+				await release.promise;
+			});
+			let components = [{ name: "repo-a", repo: "repo-a" }];
+			let projectRoot = rootA;
+			let baseRef = "origin/main";
+			const store = new GoalStore(path.join(root, "state"), undefined, { persistence: "json" });
+			const manager = new GoalManager(store, undefined, undefined, { commandRunner: fakeGit.runner });
+			manager.setComponentsResolver(() => components);
+			manager.setProjectRootResolver(() => projectRoot);
+			manager.setBaseRefResolver(() => baseRef);
+			try {
+				const pending = manager.preflightGoalCreation(rootA, { projectId: "project" });
+				await entered.promise;
+				if (changedField === "components") components = [{ name: "repo-b", repo: "repo-b" }];
+				if (changedField === "projectRoot") projectRoot = rootB;
+				if (changedField === "baseRef") baseRef = "origin/release";
+				release.resolve();
+
+				const preflight = await pending;
+				expect(fakeGit.probes).toBe(2);
+				expect(preflight.componentsFingerprint).toBe(JSON.stringify(components));
+				expect(preflight.projectRoot).toBe(projectRoot);
+				expect(preflight.configuredBaseRef).toBe(baseRef);
+				expect(preflight.repoPath).toBe(projectRoot);
+				expect(fakeGit.probeCwds.at(-1)).toBe(path.join(projectRoot, components[0].repo));
+
+				const goal = manager.createGoalFromPreflight("Retained tuple", rootA, {
+					projectId: "project",
+					preflight,
+					worktree: false,
+				});
+				expect(goal.repoPath).toBe(projectRoot);
+				expect(store.getAll()).toHaveLength(1);
+			} finally {
+				release.resolve();
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("returns a bounded structured stale error after continuous repository config churn", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "goal-preflight-churn-"));
+		fs.mkdirSync(path.join(root, "repo-a"), { recursive: true });
+		fs.mkdirSync(path.join(root, "repo-b"), { recursive: true });
+		const fakeGit = fakeGitRunner();
+		const store = new GoalStore(path.join(root, "state"), undefined, { persistence: "json" });
+		const manager = new GoalManager(store, undefined, undefined, { commandRunner: fakeGit.runner });
+		let reads = 0;
+		manager.setComponentsResolver(() => {
+			const repo = reads++ % 2 === 0 ? "repo-a" : "repo-b";
+			return [{ name: repo, repo }];
+		});
+		manager.setProjectRootResolver(() => root);
+		manager.setBaseRefResolver(() => "origin/main");
+		try {
+			const error = await manager.preflightGoalCreation(root, { projectId: "project" }).catch(value => value);
+			expect(error).toBeInstanceOf(GoalPreflightStaleError);
+			expect(error).toMatchObject({
+				status: 409,
+				code: GOAL_PREFLIGHT_STALE_CODE,
+				message: GOAL_PREFLIGHT_STALE_MESSAGE,
+				details: { retryable: true },
+			});
+			expect(fakeGit.probes).toBe(2);
 			expect(store.getAll()).toEqual([]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
@@ -135,6 +245,28 @@ describe("canonical goal commit boundary", () => {
 			const child = fixture.goalStore.getAll().find(goal => goal.parentGoalId === fixture.parent.id);
 			expect(child?.cwd).toBe(path.join(target, "future"));
 		} finally {
+			fixture.cleanup();
+		}
+	});
+
+	it("maps a stale verification preflight to a normal structured failed result", async () => {
+		const fixture = await buildFixture();
+		const manager = fixture.goalManager as any;
+		const originalPreflight = manager.preflightGoalCreation.bind(manager);
+		manager.preflightGoalCreation = async () => { throw new GoalPreflightStaleError(); };
+		try {
+			const step = buildSubgoalStep({ planId: "stale-preflight-child" });
+			const { signal, active, stepIndex } = buildActive(fixture.parent.id);
+			const result = await fixture.harness.runSubgoalStep(step, signal, active, stepIndex);
+
+			expect(result).toEqual({
+				passed: false,
+				output: `runSubgoalStep: candidate validation failed (${GOAL_PREFLIGHT_STALE_CODE}): ${GOAL_PREFLIGHT_STALE_MESSAGE}`,
+			});
+			expect(fixture.goalStore.getAll().filter(goal => goal.parentGoalId === fixture.parent.id)).toEqual([]);
+			expect(fixture.calls.filter(call => call.kind === "createGoal")).toEqual([]);
+		} finally {
+			manager.preflightGoalCreation = originalPreflight;
 			fixture.cleanup();
 		}
 	});
