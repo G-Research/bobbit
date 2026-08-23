@@ -965,8 +965,9 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/staff-fork-reproducer.test.ts",
-		allowReason: "test-owned host and sandbox transcript fixtures in the isolated integration gateway used to prove whole/history cloning and source-byte preservation",
+		allowReason: "test-owned host and sandbox transcript fixtures plus the durable staff store in the isolated integration gateway used to prove whole/history cloning, source-byte preservation, and crash-safe publication",
 		reads: frozen([
+			{ expression: "staffFile", count: 1 },
 			{ expression: "seededHostPath", count: 1 },
 			{ expression: "sandboxFixture.filesystem.hostPath(sourcePath)", count: 2 },
 			{ expression: "sourcePath", count: 2 },
