@@ -259,10 +259,11 @@ describe("SessionManager current-session runtime promotion", () => {
 		const fx = fixture("promotion-success");
 		const replacement = bridge();
 		let options: any;
-		registerRpcBridgeFactory((nextOptions: any) => {
+		const replacementFactory = vi.fn((nextOptions: any) => {
 			options = nextOptions;
 			return replacement;
 		});
+		registerRpcBridgeFactory(replacementFactory);
 		const oldUnsubscribe = fx.live.unsubscribe;
 		const before = {
 			id: fx.live.id,
@@ -327,7 +328,9 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(oldUnsubscribe).toHaveBeenCalledTimes(1);
 		expect(fx.live.unsubscribe).not.toBe(oldUnsubscribe);
 
+		promoted.status = "streaming";
 		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-promoted", reservation)).resolves.toBe(fx.live);
+		expect(replacementFactory).toHaveBeenCalledTimes(1);
 		expect(replacement.start).toHaveBeenCalledTimes(1);
 	});
 

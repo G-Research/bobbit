@@ -15850,9 +15850,6 @@ export class SessionManager {
 		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
 		if (!session && !coordinator) throw new Error(`Session ${id} not found`);
-		if (!coordinator && session?.status === "streaming") {
-			throw new Error("Cannot promote a session while its agent is streaming");
-		}
 		const goal = this.resolveGoal(goalId);
 		if (!goal) throw new Error(`Cannot promote session: goal ${goalId} was not found`);
 		if (session?.projectId && goal.projectId && session.projectId !== goal.projectId) {
@@ -15884,6 +15881,9 @@ export class SessionManager {
 				}
 			}
 			return session;
+		}
+		if (!coordinator && session?.status === "streaming") {
+			throw new Error("Cannot promote a session while its agent is streaming");
 		}
 		if (session && (
 			session.goalId
