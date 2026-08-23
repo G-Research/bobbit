@@ -14,6 +14,7 @@ import {
 	deleteSession,
 	rawApiFetch,
 	teardownTeam,
+	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
 
 type Goal = { id: string; state: string; paused?: boolean; archived?: boolean };
@@ -85,6 +86,66 @@ test.describe("paused team-start API lifecycle", () => {
 			observer.close();
 			await teardownTeam(goal.id);
 			await deleteSession(observerId);
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("POST /team/start resume releases one guarded prompt on the existing lead without duplicate activity", async ({ gateway }) => {
+		const goal = await createManualTeamGoal("guarded resume");
+		let leadId: string | undefined;
+		let prompt: any;
+		try {
+			const initial = await start(goal.id);
+			expect(initial.response.status, JSON.stringify(initial.body)).toBe(201);
+			leadId = initial.body.sessionId;
+			expect(leadId).toEqual(expect.any(String));
+			await waitForSessionStatus(leadId!, "idle", 30_000);
+
+			const context = gateway.projectContextManager.getContextForGoal(goal.id);
+			await context.goalStore.updateStrict(goal.id, {
+				setupStatus: "ready",
+				worktreeOwnerSessionId: leadId,
+			});
+			const live = gateway.sessionManager.getSession(leadId!);
+			prompt = vi.spyOn(live.rpcClient, "prompt");
+			const text = `team-start resume guarded prompt ${goal.id}`;
+			const intentId = `team-start-resume:${goal.id}`;
+
+			const pause = await apiFetch(`/api/goals/${goal.id}/pause`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			expect(pause.status).toBe(200);
+			await gateway.sessionManager.enqueuePrompt(leadId!, text, {
+				source: "system",
+				suppressTitleGen: true,
+				intentId,
+				goalDispatchGuardId: goal.id,
+			});
+			gateway.sessionManager.drainGoalGuardedPrompts(goal.id);
+			await new Promise(resolve => setImmediate(resolve));
+			expect(prompt).not.toHaveBeenCalled();
+			expect(live.promptQueue.toArray()).toEqual([
+				expect.objectContaining({ id: intentId, text, goalDispatchGuardId: goal.id }),
+			]);
+
+			const resumed = await start(goal.id, humanHeaders());
+			expect(resumed.response.status, JSON.stringify(resumed.body)).toBe(201);
+			expect(resumed.body.sessionId).toBe(leadId);
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+			expect(prompt.mock.calls[0]?.[0]).toMatch(new RegExp(`${text}$`));
+			expect(live.promptQueue.toArray()).toEqual([]);
+
+			const repeated = await start(goal.id);
+			expect(repeated.response.status, JSON.stringify(repeated.body)).toBe(201);
+			expect(repeated.body.sessionId).toBe(leadId);
+			expect(prompt).toHaveBeenCalledTimes(1);
+		} finally {
+			prompt?.mockRestore();
+			const context = gateway.projectContextManager.getContextForGoal(goal.id);
+			const cleanupGoal = context?.goalStore.get(goal.id);
+			if (cleanupGoal) delete cleanupGoal.worktreeOwnerSessionId;
+			await teardownTeam(goal.id);
 			await deleteGoal(goal.id);
 		}
 	});

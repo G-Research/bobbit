@@ -5,6 +5,7 @@
  *   Bug 0: pause/resume endpoints must not return 403 SUBGOALS_DISABLED
  *   Gap 1: team/prompt to paused goal must return 409 GOAL_PAUSED
  */
+import { vi } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -13,6 +14,7 @@ import {
 	deleteGoal,
 	createSession,
 	deleteSession,
+	waitForSessionStatus,
 } from "./_e2e/e2e-setup.js";
 
 async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
@@ -112,6 +114,65 @@ test.describe("Pause UX reproducing tests", () => {
 			expect(body.code, "resume should not return SUBGOALS_DISABLED code").not.toBe("SUBGOALS_DISABLED");
 		} finally {
 			await setSubgoalsEnabled(true);
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("explicit resume re-drains one deferred goal-guarded prompt, including idempotent recovery", async ({ gateway }) => {
+		const goal = await createTestGoal();
+		const sessionId = await createSession({ goalId: goal.id });
+		await waitForSessionStatus(sessionId, "idle", 30_000);
+		const context = gateway.projectContextManager.getContextForGoal(goal.id);
+		await context.goalStore.updateStrict(goal.id, {
+			state: "in-progress",
+			setupStatus: "ready",
+			worktreeOwnerSessionId: sessionId,
+		});
+		const live = gateway.sessionManager.getSession(sessionId);
+		const prompt = vi.spyOn(live.rpcClient, "prompt");
+		const redrain = vi.spyOn(gateway.sessionManager, "drainGoalGuardedPrompts");
+		const text = `nested resume guarded prompt ${goal.id}`;
+		const intentId = `nested-resume:${goal.id}`;
+		try {
+			await pauseGoal(goal.id);
+			await gateway.sessionManager.enqueuePrompt(sessionId, text, {
+				source: "system",
+				suppressTitleGen: true,
+				intentId,
+				goalDispatchGuardId: goal.id,
+			});
+			gateway.sessionManager.drainGoalGuardedPrompts(goal.id);
+			await new Promise(resolve => setImmediate(resolve));
+			expect(prompt).not.toHaveBeenCalled();
+			expect(live.promptQueue.toArray()).toEqual([
+				expect.objectContaining({ id: intentId, text, goalDispatchGuardId: goal.id }),
+			]);
+
+			const resume = async () => apiFetch(`/api/goals/${goal.id}/resume`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			const first = await resume();
+			expect(first.status, await first.clone().text()).toBe(200);
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+			expect(prompt.mock.calls[0]?.[0]).toMatch(new RegExp(`${text}$`));
+			expect(live.promptQueue.toArray()).toEqual([]);
+			expect(redrain).toHaveBeenCalledWith(goal.id);
+
+			// A retry after the pause bit was already cleared still invokes the
+			// crash-healing release hook, but the consumed row cannot dispatch twice.
+			const callsAfterFirst = redrain.mock.calls.length;
+			const retry = await resume();
+			expect(retry.status, await retry.clone().text()).toBe(200);
+			expect(redrain.mock.calls.length).toBe(callsAfterFirst + 1);
+			expect(redrain).toHaveBeenLastCalledWith(goal.id);
+			expect(prompt).toHaveBeenCalledTimes(1);
+		} finally {
+			redrain.mockRestore();
+			prompt.mockRestore();
+			const cleanupGoal = context.goalStore.get(goal.id);
+			if (cleanupGoal) delete cleanupGoal.worktreeOwnerSessionId;
+			await deleteSession(sessionId).catch(() => {});
 			await deleteGoal(goal.id);
 		}
 	});

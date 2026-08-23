@@ -255,6 +255,139 @@ function reservePromotion(fx: ReturnType<typeof fixture>, goalId: string): any {
 }
 
 describe("SessionManager current-session runtime promotion", () => {
+	it("parks one guarded kickoff through pause and active-turn settlement, then dispatches it once on resume", async () => {
+		const fx = fixture("promotion-pause-guard");
+		const replacement = bridge();
+		registerRpcBridgeFactory(() => replacement);
+		const goal = {
+			id: "goal-pause-guard",
+			title: "Promoted pause guard",
+			state: "in-progress",
+			setupStatus: "ready",
+			paused: false,
+			projectId: fx.persisted.projectId,
+			repoPath: fx.persisted.repoPath,
+			branch: fx.persisted.branch,
+			worktreePath: fx.persisted.worktreePath,
+			repoWorktrees: fx.persisted.repoWorktrees,
+			worktreeOwnerSessionId: fx.live.id,
+		};
+		fx.manager.resolveGoal = vi.fn((goalId: string) => goalId === goal.id ? goal : undefined);
+
+		const reservation = reservePromotion(fx, goal.id);
+		await fx.manager.promoteToGoalLead(fx.live.id, goal.id, reservation);
+		expect(fx.live).toMatchObject({
+			goalId: goal.id,
+			teamGoalId: goal.id,
+			role: "team-lead",
+		});
+
+		// Finalization races an already-running turn on the canonical promoted
+		// runtime. The kickoff must enter the durable reliable lane, not Pi.
+		fx.live.titleGenerated = false;
+		fx.live.clients.clear();
+		fx.manager.handleAgentLifecycle(fx.live, { type: "agent_start" });
+		const kickoff = `You have been promoted to the team lead for the goal "${goal.title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`;
+		const intentId = `promotion-kickoff:${goal.id}`;
+		const transcriptBefore = fs.readFileSync(fx.persisted.agentSessionFile, "utf8");
+		await expect(fx.manager.enqueuePrompt(fx.live.id, kickoff, {
+			source: "system",
+			suppressTitleGen: true,
+			intentId,
+			goalDispatchGuardId: goal.id,
+		})).resolves.toEqual({ status: "queued" });
+
+		const guardedRows = () => fx.live.promptQueue.toArray()
+			.filter((row: any) => row.id === intentId);
+		expect(guardedRows()).toEqual([expect.objectContaining({
+			id: intentId,
+			text: kickoff,
+			kind: "prompt",
+			targetTurn: "next-turn",
+			deliveryState: "queued",
+			source: "system",
+			author: expect.objectContaining({ kind: "system" }),
+			suppressTitleGen: true,
+			goalDispatchGuardId: goal.id,
+		})]);
+		expect(replacement.prompt).not.toHaveBeenCalled();
+
+		// Operator pause commits before its soft abort settles. Both the natural
+		// settlement drain and an extra recovery drain must retain the exact row.
+		goal.paused = true;
+		await fx.manager.abortSessionTurn(fx.live.id);
+		expect(replacement.abort).toHaveBeenCalledTimes(1);
+		fx.manager.handleAgentLifecycle(fx.live, { type: "agent_end", willRetry: false, messages: [] });
+		fx.manager.handleAgentLifecycle(fx.live, { type: "agent_settled" });
+		fx.manager.drainGoalGuardedPrompts(goal.id);
+		await new Promise(resolve => setImmediate(resolve));
+
+		expect(fx.live.status).toBe("idle");
+		expect(replacement.prompt).not.toHaveBeenCalled();
+		expect(guardedRows()).toHaveLength(1);
+		expect(fs.readFileSync(fx.persisted.agentSessionFile, "utf8")).toBe(transcriptBefore);
+		expect(JSON.stringify(fx.live.eventBuffer.getAll())).not.toContain(kickoff);
+		expect(fx.live.pendingPromptAuthors ?? []).toEqual([]);
+
+		// The explicit resume hook re-drains only after the durable pause bit is
+		// cleared. Further drain/retry calls cannot dispatch the occurrence twice.
+		goal.paused = false;
+		fx.manager.drainGoalGuardedPrompts(goal.id);
+		await vi.waitFor(() => expect(replacement.prompt).toHaveBeenCalledTimes(1));
+		expect(replacement.prompt).toHaveBeenCalledWith(kickoff, undefined);
+		expect(guardedRows()).toEqual([]);
+		expect(fx.live.pendingPromptAuthors).toEqual([
+			expect.objectContaining({
+				intentId,
+				source: "system",
+				author: expect.objectContaining({ kind: "system" }),
+			}),
+		]);
+		expect(fx.live.titleGenerated).toBe(false);
+		expect(fx.live.title).toBe("Existing regular session");
+
+		fx.manager.drainGoalGuardedPrompts(goal.id);
+		(fx.manager as any).drainQueue(fx.live);
+		await new Promise(resolve => setImmediate(resolve));
+		expect(replacement.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("continues to drain a legacy unguarded row while its adopted goal is paused", async () => {
+		const fx = fixture("promotion-legacy-unguarded", {
+			goalId: "goal-legacy-unguarded",
+			teamGoalId: "goal-legacy-unguarded",
+			role: "team-lead",
+		});
+		Object.assign(fx.live, {
+			goalId: "goal-legacy-unguarded",
+			teamGoalId: "goal-legacy-unguarded",
+			role: "team-lead",
+			status: "idle",
+			_piAgentRunSettled: true,
+		});
+		fx.live.clients.clear();
+		fx.manager.resolveGoal = vi.fn(() => ({
+			id: "goal-legacy-unguarded",
+			state: "in-progress",
+			setupStatus: "ready",
+			paused: true,
+			projectId: fx.persisted.projectId,
+			worktreeOwnerSessionId: fx.live.id,
+		}));
+
+		const legacy = fx.live.promptQueue.enqueue("legacy unguarded prompt", {
+			source: "system",
+			suppressTitleGen: true,
+		});
+		expect(legacy).not.toHaveProperty("kind");
+		expect(legacy).not.toHaveProperty("goalDispatchGuardId");
+
+		(fx.manager as any).drainQueue(fx.live);
+		await vi.waitFor(() => expect(fx.oldBridge.prompt).toHaveBeenCalledTimes(1));
+		expect(fx.oldBridge.prompt).toHaveBeenCalledWith("legacy unguarded prompt", undefined);
+		expect(fx.live.promptQueue.toArray()).toEqual([]);
+	});
+
 	it("commits goal/team runtime context while preserving the exact session capsule", async () => {
 		const fx = fixture("promotion-success");
 		const replacement = bridge();
