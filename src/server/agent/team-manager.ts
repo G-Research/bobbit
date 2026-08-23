@@ -1417,9 +1417,10 @@ export class TeamManager {
 
 	/**
 	 * Re-subscribe to team-lead and worker agent events. Must run AFTER
-	 * restoreSessions() — needs live session objects.
+	 * restoreSessions() — needs live session objects. Adopted leads are finalized
+	 * serially first so their deterministic kickoff is admitted before boot nudges.
 	 */
-	resubscribeTeamEvents(): void {
+	async resubscribeTeamEvents(): Promise<void> {
 		// Defense-in-depth: a retained TeamStore row is passive retry evidence,
 		// never authority to reactivate an archived goal's runtime.
 		for (const [goalId, entry] of [...this.teams]) {
@@ -1469,9 +1470,38 @@ export class TeamManager {
 			}
 		}
 
+		// A crash can land after promoteToGoalLead's canonical commit but before
+		// finalizeAdoptedLead. restoreTeams repairs the durable graph before session
+		// restoration; now that the canonical runtime is live, complete that same
+		// finalization seam. Keep boot deterministic and isolate a broken relation so
+		// other teams still resume. Finalization owns the subscription only once it
+		// has actually installed one; a pre-subscription failure must fall through to
+		// ordinary recovery, while an installed subscription must not be duplicated if
+		// a later finalization step fails.
+		const adoptedFinalizationAttempts = new Set<string>();
+		const adoptedFinalizationSubscriptions = new Set<string>();
 		for (const [goalId, entry] of this.teams) {
-			// Re-subscribe to team lead events and restart idle timer if needed
-			if (entry.teamLeadSessionId) {
+			if (!this.isRestoredAdoptedLeadFinalizationCandidate(goalId, entry)) continue;
+			adoptedFinalizationAttempts.add(goalId);
+			try {
+				await this.finalizeAdoptedLead(goalId, { coldStart: true });
+			} catch (err) {
+				console.error(`[team-manager] Adopted team-lead finalization failed for goal=${goalId}:`, err);
+			}
+			if (entry.unsubscribeTeamLeadEvents) adoptedFinalizationSubscriptions.add(goalId);
+		}
+
+		for (const [goalId, entry] of this.teams) {
+			// Re-subscribe to team lead events and restart idle timer if needed.
+			// A failed adopted finalization falls back only while it remains an
+			// authoritative runnable candidate; paused/inactive transitions stay closed.
+			const adoptedFallbackEligible = adoptedFinalizationAttempts.has(goalId)
+				&& !adoptedFinalizationSubscriptions.has(goalId)
+				&& this.isRestoredAdoptedLeadFinalizationCandidate(goalId, entry);
+			if (
+				entry.teamLeadSessionId
+				&& (!adoptedFinalizationAttempts.has(goalId) || adoptedFallbackEligible)
+			) {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 				if (tlSession && tlSession.status !== "terminated") {
 					this.subscribeTeamLeadEvents(goalId);
@@ -2261,6 +2291,34 @@ export class TeamManager {
 			&& hasExactAdoptedLeadAttachment(persistedSource, goal.id);
 	}
 
+	private isRestoredAdoptedLeadFinalizationCandidate(goalId: string, entry: TeamEntry): boolean {
+		const goal = this.resolveGoal(goalId);
+		const pcm = this.config.projectContextManager;
+		if (!pcm || !goal?.worktreeOwnerSessionId || goal.team !== true || goal.archived || goal.paused) return false;
+		if (goal.state !== "todo" && goal.state !== "in-progress") return false;
+		if (goal.setupStatus !== undefined && goal.setupStatus !== "ready") return false;
+		if (!this.hasExactAdoptedLeadAttachment(goal, entry)) return false;
+
+		// A reverse-map winner is not sufficient authority when another restored
+		// team row or adopted goal claims the same source. Boot reconciliation
+		// deliberately fails closed on that ambiguity; finalization must do the same.
+		let leadClaims = 0;
+		for (const candidate of this.teams.values()) {
+			if (candidate.teamLeadSessionId === goal.worktreeOwnerSessionId) leadClaims++;
+			if (leadClaims > 1) return false;
+		}
+		if (leadClaims !== 1) return false;
+
+		let adoptedGoalClaims = 0;
+		for (const context of pcm.all()) {
+			for (const candidate of context.goalStore.getAll()) {
+				if (!candidate.archived && candidate.worktreeOwnerSessionId === goal.worktreeOwnerSessionId) adoptedGoalClaims++;
+				if (adoptedGoalClaims > 1) return false;
+			}
+		}
+		return adoptedGoalClaims === 1;
+	}
+
 	private async runAdoptedGoalLifecycleLocked<T>(goalId: string, action: () => Promise<T>): Promise<T> {
 		for (;;) {
 			const previous = this.adoptedGoalLifecycleLocks.get(goalId);
@@ -2280,12 +2338,30 @@ export class TeamManager {
 		}
 	}
 
+	/** Finalization may activate only a canonical, runnable adopted goal. */
+	private assertAdoptedLeadFinalizationEligible(goal: PersistedGoal): void {
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot finalize its adopted lead");
+		}
+		if (goal.paused) throw new GoalPausedError(goal.id);
+		if (goal.state === "complete") {
+			throw new TeamStartError("GOAL_COMPLETE", "Goal is complete and cannot finalize its adopted lead");
+		}
+		if (goal.state === "shelved") {
+			throw new TeamStartError("GOAL_SHELVED", "Goal is shelved and cannot finalize its adopted lead");
+		}
+		if (goal.state === "blocked") {
+			throw new TeamStartError("GOAL_BLOCKED", "Goal is waiting for its dependencies before its adopted lead can be finalized");
+		}
+		this.assertGoalSetupReady(goal);
+	}
+
 	/**
 	 * Complete the normal active-team lifecycle after SessionManager has committed
-	 * an in-place lead promotion. This installs the ordinary lead subscription and
-	 * activates a todo goal, but deliberately creates no runtime and sends no kickoff.
+	 * an in-place lead promotion. This activates a todo goal, installs the ordinary
+	 * lead subscription, then reliably kicks off the canonical promoted runtime.
 	 */
-	async finalizeAdoptedLead(goalId: string): Promise<TeamState> {
+	async finalizeAdoptedLead(goalId: string, options: { coldStart?: boolean } = {}): Promise<TeamState> {
 		if (!this.restoreCompleted) await this.restorePromise;
 		return this.runAdoptedGoalLifecycleLocked(goalId, async () => {
 			const goal = this.resolveGoal(goalId);
@@ -2293,9 +2369,7 @@ export class TeamManager {
 			if (!goal.worktreeOwnerSessionId) {
 				throw new TeamStartError("GOAL_NOT_ADOPTED", "Goal does not adopt an existing session");
 			}
-			if (goal.archived) {
-				throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot finalize its adopted lead");
-			}
+			this.assertAdoptedLeadFinalizationEligible(goal);
 			const entry = this.teams.get(goalId);
 			if (!this.hasExactAdoptedLeadAttachment(goal, entry)) {
 				throw new TeamStartError(
@@ -2303,17 +2377,33 @@ export class TeamManager {
 					"The adopted team lead is still attaching to this goal; wait for promotion to finish",
 				);
 			}
+			if (goal.state === "todo") {
+				await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
+			}
+			// The activation update above is an await boundary. Re-read and revalidate
+			// so an operator pause or concurrent lifecycle transition wins admission.
+			const canonicalGoal = this.resolveGoal(goalId);
+			if (!canonicalGoal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+			this.assertAdoptedLeadFinalizationEligible(canonicalGoal);
 			if (!this.subscribeTeamLeadEvents(goalId)) {
 				throw new TeamStartError(
 					"ADOPTED_LEAD_SUBSCRIPTION_FAILED",
 					"The adopted team lead lifecycle could not be activated; retry finalization",
 				);
 			}
-			const lead = this.sessionManager.getSession(goal.worktreeOwnerSessionId);
+			const lead = this.sessionManager.getSession(canonicalGoal.worktreeOwnerSessionId!);
 			if (lead?.status === "idle") this.startIdleNudgeTimer(goalId);
-			if (goal.state === "todo") {
-				await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
-			}
+			await this.sessionManager.enqueuePrompt(
+				canonicalGoal.worktreeOwnerSessionId!,
+				`You have been promoted to the team lead for the goal "${canonicalGoal.title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`,
+				{
+					source: "system",
+					suppressTitleGen: true,
+					intentId: `promotion-kickoff:${canonicalGoal.id}`,
+					goalDispatchGuardId: canonicalGoal.id,
+					coldStart: options.coldStart,
+				},
+			);
 			return this.getTeamState(goalId)!;
 		});
 	}

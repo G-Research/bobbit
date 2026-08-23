@@ -11,6 +11,14 @@ A goal proposal may choose one of two worktree modes:
 
 Promotion changes graph metadata and the agent's canonical goal/team context only. It does not copy, move, rename, reset, checkout, commit, provision, run setup, or create/transfer a sandbox worktree. The source session remains the checkout and sandbox lifecycle owner. `PersistedGoal.worktreeOwnerSessionId` records provenance and links retries/recovery; it does **not** transfer ownership from the session to the goal.
 
+After the replacement runtime is canonical, the existing-lead reservation is finalized, and the ready goal is `in-progress`, promotion starts the lead with one system-authored prompt in the same session and transcript. The accepted goal title is substituted exactly:
+
+```text
+You have been promoted to the team lead for the goal "<goal title>".  Proceed to complete the goal, following the instructions in your system prompt carefully.
+```
+
+The prompt suppresses first-user-message title generation. Its admission is durably idempotent per goal so concurrent acceptance, exact retries, and restart recovery cannot enqueue or dispatch it twice. This is a current-session post-commit step; the ordinary new-worktree `startTeam` path and its kickoff remain unchanged.
+
 The accepted scope is limited to the proposal owner in the same registered project. Arbitrary session IDs, branches, worktree paths, repository coordinates, cross-project adoption, busy-session promotion, demotion, and a second team lead are out of scope.
 
 ```ts
@@ -88,10 +96,11 @@ Reasons are stable, concise UI text (for example, `Current session must be idle.
 5. Initialize gates with the existing `GateStore.initGatesForGoal`, then flush the goal and gate stores at the same external creation boundary used by ordinary goal creation.
 6. `TeamManager.adoptExistingLead(goalId, ownerId)` installs the empty existing `PersistedTeamEntry` (`agents: []`) and `sessionToGoal` mapping before awaited runtime work. Exact repeats return the reservation; a different goal/lead claim conflicts. `startTeam` sees this reservation and cannot spawn a second lead.
 7. Resolve the canonical `team-lead` role from the new goal, then call `SessionManager.promoteToGoalLead`. It uses `_coordinateSessionReplacement` and a generalized `_assignRoleStaged` target projection. Every prompt/tool/extension/env/model decision reads the **prospective** `goalId`, `teamGoalId`, role, project, sandbox, and coordinates, not the old session fields.
-8. The candidate uses the same Bobbit ID, transcript/JSONL, `cwd`, worktree/repository coordinates, sandbox realm, clients, event frame, queued intents/background-process owner, model tuple, and title. It adds goal/team-lead prompt context, `BOBBIT_GOAL_ID`, goal and team extensions/tools, and the canonical role/accessory. It sends no duplicate kickoff prompt.
+8. The candidate uses the same Bobbit ID, transcript/JSONL, `cwd`, worktree/repository coordinates, sandbox realm, clients, event frame, queued intents/background-process owner, model tuple, and title. It adds goal/team-lead prompt context, `BOBBIT_GOAL_ID`, goal and team extensions/tools, and the canonical role/accessory. Candidate staging sends no kickoff because the promotion is not committed yet.
 9. Start, switch the existing transcript, and validate the exact model/thinking tuple and sandbox realm. Write all attachment fields (`goalId`, `teamGoalId`, role/accessory and unchanged coordinates) in one **tentative** store update immediately before stopping the old bridge, matching the existing staged-replacement ordering. If old stop rejects, restore the exact prior presence/value of every field and retain the old listener/runtime.
 10. Once old stop succeeds, synchronously install the already-verified candidate on the existing `SessionInfo`; this canonical bridge installation is the commit point. There is no fallible/awaited operation between successful old stop and the swap. The Bobbit session ID and clients do not change.
-11. Subscribe team-lead events, transition a `todo` goal to `in-progress`, clear the proposal, and return the goal. Failures after canonical installation are repaired idempotently and do not roll back a working graph; a retry returns the committed relation.
+11. Subscribe team-lead events, finalize the existing-lead reservation, and transition a `todo` goal to `in-progress`. The goal must be setup-ready, and all three post-commit conditions must hold before kickoff admission.
+12. Admit the exact title-bearing kickoff through the same session's reliable prompt and transcript path as a Bobbit-system-authored message with title generation suppressed. Durable per-goal idempotency makes repeated finalization a no-op after the first accepted occurrence. Clear the proposal and return the goal. Failures after canonical installation are repaired idempotently and do not roll back a working graph; a retry returns the committed relation.
 
 ### Commit and compensation boundary
 
@@ -103,9 +112,9 @@ Until the verified candidate becomes canonical after successful old-bridge stop,
 4. call the narrow `GoalManager.deleteAdoptedGoalAttempt(goalId, ownerId)` only if provenance still matches, the goal remains unarchived and `todo`, and the source was not committed;
 5. flush affected stores.
 
-Compensation never calls Git, sandbox removal, worktree cleanup, session archive, or transcript cleanup. It does not remove a team entry that gained agents or changed lead, and does not remove an unrelated/reconciled goal. Fault injection must cover failure after goal creation, gate initialization, lead reservation, candidate start, transcript switch, tuple verification, durable session update, and old-bridge stop.
+Compensation never calls Git, sandbox removal, worktree cleanup, session archive, transcript cleanup, or kickoff admission. It does not remove a team entry that gained agents or changed lead, and does not remove an unrelated/reconciled goal. Fault injection must cover failure after goal creation, gate initialization, lead reservation, candidate start, transcript switch, tuple verification, durable session update, and old-bridge stop.
 
-The relation is committed only after the tentative attachment remains durable, old-bridge stop succeeds, and the verified candidate is synchronously installed as canonical. A process crash after the tentative update but before canonical installation is recognized from the provenance/reservation/session tuple at boot and is completed or compensated before session restore. Failures after canonical installation are recovered idempotently rather than compensated.
+The relation is committed only after the tentative attachment remains durable, old-bridge stop succeeds, and the verified candidate is synchronously installed as canonical. A process crash after the tentative update but before canonical installation is recognized from the provenance/reservation/session tuple at boot and is completed or compensated before session restore. Failures after canonical installation are recovered idempotently rather than compensated. Kickoff admission occurs only after subsequent team and goal finalization; its durable per-goal identity lets recovery complete a missing admission without duplicating an already accepted or dispatched occurrence.
 
 ## Restart and lifecycle
 
@@ -119,7 +128,7 @@ The relation is committed only after the tentative attachment remains durable, o
 - initialize any missing workflow gates caused by a crash before the normal creation flush;
 - remove only an uncommitted attempt-owned goal/gates/reservation when repair cannot safely complete.
 
-This pass runs inside the existing `restore-teams` boot phase. Then `SessionManager.restoreSessions` reconstructs the runtime from canonical goal/team metadata, and `resubscribeTeamEvents` restores subscriptions. It never invokes `startTeam`, creates a session, provisions a checkout, or creates a sandbox realm. Conflicting/multiple provenance claims fail closed and remain diagnostic rather than guessing.
+This pass runs inside the existing `restore-teams` boot phase. Then `SessionManager.restoreSessions` reconstructs the runtime from canonical goal/team metadata, and `resubscribeTeamEvents` restores subscriptions. Only after runtime restoration and team/goal finalization may recovery admit a missing promotion kickoff. It uses the same durable per-goal kickoff identity as fresh acceptance, so replay cannot duplicate an enqueued, transcript-admitted, or dispatched occurrence. Recovery never invokes `startTeam`, creates a session, provisions a checkout, or creates a sandbox realm. Conflicting/multiple provenance claims fail closed and remain diagnostic rather than guessing.
 
 ### Archive, teardown, purge, and cleanup
 
@@ -156,19 +165,19 @@ Acceptance branches only at the API call: new mode uses existing `createGoal`; c
 |---|---|---|
 | `src/server/proposals/proposal-types.ts` | `GOAL_FRONTMATTER_KEYS`, `validateGoalInlineFields` | Preserve/validate optional `worktreeMode`; skip absent mode so old serialized bytes do not change. |
 | `src/server/agent/session-goal-promotion.ts` **(new)** | `SessionGoalWorktreeMode`, `evaluateSessionGoalPromotion`, `lookupSessionGoalPromotion` | Pure eligibility/reason projection and exact provenance lookup shared by GET and final recheck. No paths from a request are inputs. |
-| `src/server/server.ts` | `handleApiRoute()` editable-proposal route block and goal archive/team teardown blocks | Add owner-scoped GET/PUT/accept operations, per-owner single flight, normal goal+gate composition, conditional compensation, and promoted lifecycle conflicts/order. Keep general `POST /api/goals` unchanged. |
+| `src/server/server.ts` | `handleApiRoute()` editable-proposal route block and goal archive/team teardown blocks | Add owner-scoped GET/PUT/accept operations, per-owner single flight, normal goal+gate composition, conditional compensation, finalized post-commit kickoff admission, and promoted lifecycle conflicts/order. Keep general `POST /api/goals` and new-worktree `startTeam` kickoff unchanged. |
 | `src/server/agent/goal-store.ts` | `PersistedGoal`, canonical validation (`STRING_FIELDS`) | Persist/validate optional `worktreeOwnerSessionId`; absence remains the legacy shape. |
 | `src/server/agent/goal-manager.ts` | `GoalManager.createGoal`, `GoalManager.archiveGoal`, `deleteAdoptedGoalAttempt`, internal `AdoptedGoalWorkspace` | Add internal adoption branch that copies exact canonical coordinates and starts ready without provisioning/setup/hook; guard archive cleanup by live source ownership; expose narrow conditional attempt deletion. |
 | `src/server/agent/team-manager.ts` | `TeamManager.adoptExistingLead` **(new)**, `releaseAdoptedLead` **(new)**, `restoreTeams`, `startTeam`, `teardownTeam` | Persist one existing-lead reservation, maintain `sessionToGoal`, make repeat/conflict behavior explicit, reconcile before orphan cleanup, prevent second lead and direct teardown. |
-| `src/server/agent/session-manager.ts` | `SessionManager.promoteToGoalLead` **(new)**, `_coordinateSessionReplacement`, generalized `_assignRoleStaged`, `terminateSession`, `storeArchive`, `purgeOneSession`, `buildArchivedWorktreeScanContext` | Stage/verify/rollback prospective goal-lead context on the same runtime identity and realm; block source destruction while live references remain; keep all component paths protected. |
+| `src/server/agent/session-manager.ts` | `SessionManager.promoteToGoalLead` **(new)**, `_coordinateSessionReplacement`, generalized `_assignRoleStaged`, reliable prompt admission, `terminateSession`, `storeArchive`, `purgeOneSession`, `buildArchivedWorktreeScanContext` | Stage/verify/rollback prospective goal-lead context on the same runtime identity and realm; admit the post-finalization kickoff as a title-suppressed Bobbit-system prompt to that identity and transcript; block source destruction while live references remain; keep all component paths protected. |
 | `src/app/state.ts` | `GatewaySession`, `Goal` | Carry the existing authoritative eligibility inputs and new goal provenance projection needed by UI/reload diagnostics. No independent durable client state. |
 | `src/app/api.ts` | `fetchGoalWorktreeMode` **(new)**, `updateGoalWorktreeMode` **(new)**, `acceptGoalProposalInCurrentSession` **(new)**, existing `createGoal` | Add owner-scoped calls; reject/omit coordinate authority client-side; leave existing new-worktree request construction byte-compatible. |
 | `src/app/proposal-panels.ts` | `GoalFormConfig`, `renderGoalForm`, `GoalProposalFormSnapshot`, `goalProposalFormIdentityKey`, `syncProposalFormState`, goal accept handler | Render/persist the radio choice and exact projection, bind to proposal owner, block invalid restored mode, and choose only the acceptance API path. |
 | `tests2/core/session-goal-promotion-proposal.test.ts` **(new)** | Cases below | Proposal default/bytes, enum, edit/snapshot/reopen persistence, and owner-scoped route authority. |
 | `tests2/core/session-goal-promotion-eligibility.test.ts` **(new)** | Cases below | Pure single/multi-repo/sandbox eligibility matrix and stable reasons. |
-| `tests2/core/session-goal-promotion-session-runtime.test.ts` **(new)** | Cases below | Staged same-session continuity/rollback, sandbox identity, restart preservation, and cleanup ownership guards. |
-| `tests2/integration/session-goal-promotion.test.ts` **(new)** | Cases below | Real API/Git/runtime retry, dirty checkout, multi-repo, sandbox preservation, restart, and cleanup behavior. |
-| `tests2/browser/journeys/session-goal-promotion.journey.spec.ts` **(new)** | `Journey: Current-session goal promotion` | Registered visible selection/acceptance/continuity/reload/archive journey plus disabled and new-worktree controls. |
+| `tests2/core/session-goal-promotion-session-runtime.test.ts` **(new)** | Cases below | Staged same-session continuity/rollback, exact once-only system kickoff admission, sandbox identity, restart preservation, and cleanup ownership guards. |
+| `tests2/integration/session-goal-promotion.test.ts` **(new)** | Cases below | Real API/Git/runtime retry, dirty checkout and transcript-prefix continuity, kickoff idempotency, multi-repo, sandbox preservation, restart, and cleanup behavior. |
+| `tests2/browser/journeys/session-goal-promotion.journey.spec.ts` **(new)** | `Journey: Current-session goal promotion` | Registered visible selection/acceptance, transcript-prefix and single-kickoff continuity, reload/archive journey, plus disabled and new-worktree controls. |
 | `tests2/tests-map.json` | browser/unit registration rows | Register every new v2 test, including the browser file as `smoke-journey`. |
 
 No change is expected in `src/server/agent/team-store.ts`: `PersistedTeamEntry.teamLeadSessionId` already persists an empty lead reservation. No new session ownership field is expected in `session-store.ts`: `goalId`, `teamGoalId`, role, coordinates, sandbox flags, and transcript identity already have the required durable owners.
@@ -242,8 +251,10 @@ Every reused contract below has an existing exact `tests2` anchor. These tests r
 - `it("reuses the exact sandbox container and never creates or transfers a sandbox worktree")`
 - `it("restores every prior field and the old usable bridge for failures through a rejected old stop")`
 - `it("treats canonical bridge installation as commit and repairs later failures idempotently")`
-- `it("serializes concurrent retries and commits only one promoted bridge")`
-- `it("restores the promoted association and tools from durable state after restart")`
+- `it("admits the exact title-bearing system kickoff only after runtime, team, and goal finalization and suppresses title generation")`
+- `it("serializes concurrent retries and admits only one kickoff for the promoted goal")`
+- `it("sends no kickoff when a pre-commit promotion attempt is compensated")`
+- `it("restores the promoted association and tools from durable state after restart without duplicating the kickoff")`
 
 `describe("promoted source lifecycle guards")`
 
@@ -256,18 +267,18 @@ Every reused contract below has an existing exact `tests2` anchor. These tests r
 
 `test.describe("current-session goal promotion API")`
 
-- `test("promotes the proposal owner with the same id, transcript, branch, worktree, dirty index, unstaged and untracked files")`
-- `test("creates normal workflow gates and enables goal, gate, task, and team tools on the original session")`
-- `test("concurrent accepts and retries produce one goal, one lead, and no new worktree or session")`
-- `test("faults after goal, gates, reservation, candidate start, switch, verification, tentative durable update, and rejected old stop compensate only attempt-owned state")`
-- `test("a failure after canonical bridge installation keeps the committed relation and retry returns it")`
-- `test("restart restores one provenance relation, lead reservation, original transcript, and runtime context")`
+- `test("promotes the proposal owner with the same id, transcript prefix, branch, worktree, dirty index, unstaged and untracked files")`
+- `test("creates normal workflow gates, enables goal, gate, task, and team tools, and admits the exact system kickoff once on the original session")`
+- `test("concurrent accepts and retries produce one goal, one lead, one kickoff, and no new worktree or session")`
+- `test("faults after goal, gates, reservation, candidate start, switch, verification, tentative durable update, and rejected old stop compensate only attempt-owned state and send no kickoff")`
+- `test("a failure after canonical bridge installation keeps the committed relation and retry returns it with one kickoff")`
+- `test("restart restores one provenance relation, lead reservation, transcript with one kickoff, and runtime context")`
 - `test("adopts exact multi-repo coordinates without changing git worktree list or component status")`
 - `test("sandbox promotion retains the same container and worktree owner and makes zero create/remove calls")`
 - `test("cleanup refuses every live endpoint and removes the adopted checkout only after ordered goal archive")`
 - `test("absent and explicit new-worktree proposals retain the existing goal creation behavior")`
 
-The first integration case snapshots before/after: session ID, transcript path and content hash, `git rev-parse HEAD`, branch, `git worktree list --porcelain`, staged diff, unstaged diff, untracked file list/content, worktree/repository coordinates, and session count. Every value except goal/team/runtime metadata must remain equal.
+The first integration case snapshots before/after: session ID, transcript path and content, `git rev-parse HEAD`, branch, `git worktree list --porcelain`, staged diff, unstaged diff, untracked file list/content, worktree/repository coordinates, and session count. Session and checkout values remain equal. The pre-promotion transcript must remain an exact prefix rather than an equal content hash: the suffix contains the single title-bearing system kickoff and subsequent lead activity.
 
 ### Registered browser journey
 
@@ -280,9 +291,9 @@ Add `tests2/browser/journeys/session-goal-promotion.journey.spec.ts` to `tests2/
    - open its goal proposal and assert **New worktree** is initially selected;
    - select **Current session** and assert the exact authoritative branch/path/component count are shown;
    - reload before acceptance and assert Current session remains selected;
-   - accept and assert the goal shows the original session ID as lead, the transcript sentinel remains visible, and no second lead/session appears;
+   - accept and assert the goal shows the original session ID as lead, the transcript recorded before promotion remains an exact prefix, the title-bearing system kickoff appears once, and no second lead/session appears;
    - exercise visible workflow gate, task, and team controls from the promoted session;
-   - reload the gateway/page and assert the same session remains the sole lead with the same transcript;
+   - reload the gateway/page and assert the same session remains the sole lead and the kickoff still appears exactly once;
    - assert worktree cleanup is blocked while the live goal/session references it, archive through the goal UI, then assert ordered cleanup completes without a dangling goal/team row.
 2. `test("shows the authoritative reason when Current session is unavailable")`
    - open a proposal owned by an ineligible regular-session fixture (missing/borrowed worktree);
@@ -294,4 +305,4 @@ These are real-app journeys, not fixture-only rendering tests: they cover naviga
 
 ## Acceptance proof
 
-A successful `current-session` acceptance has exactly one goal, one existing-lead reservation, and the original session. The goal and session expose identical pre-promotion branch/worktree/repository coordinates; Git status/content, HEAD, transcript, Bobbit ID, sandbox/container, and lifecycle ownership are unchanged. The refreshed runtime has canonical goal/team context and tools. Restart reconstructs the same graph. Cleanup cannot remove the checkout while the live source, goal, or team relation references it. An absent or `new-worktree` mode never enters this flow.
+A successful `current-session` acceptance has exactly one goal, one existing-lead reservation, and the original session. The goal and session expose identical pre-promotion branch/worktree/repository coordinates; Git status/content, HEAD, Bobbit ID, sandbox/container, and lifecycle ownership are unchanged. The original transcript remains an exact prefix of the same transcript, which gains one system-authored, title-suppressed promotion kickoff only after the refreshed runtime has canonical goal/team context and tools, the reservation is finalized, and the ready goal is `in-progress`. Durable per-goal admission state keeps that kickoff single across concurrent acceptance, retries, and restart; pre-commit compensation admits none. Cleanup cannot remove the checkout while the live source, goal, or team relation references it. An absent or `new-worktree` mode never enters this flow, so ordinary `startTeam` kickoff behavior is unchanged.

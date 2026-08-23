@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { copyGitTemplate } from "../harness/git-template.js";
+import { readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
 import { apiFetch as harnessApiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
 
 let operatorCookie: string | undefined;
@@ -44,9 +45,48 @@ async function sessionRecord(id: string): Promise<any> {
 	return record;
 }
 
+function promotionKickoff(title: string): string {
+	return `You have been promoted to the team lead for the goal "${title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`;
+}
+
+function transcriptTextOccurrences(transcriptPath: string, text: string): number {
+	const escapedText = JSON.stringify(text).slice(1, -1);
+	return fs.readFileSync(transcriptPath, "utf8").split(escapedText).length - 1;
+}
+
 async function expectPromotionLifecycleConflict(response: Response): Promise<void> {
 	expect(response.status).toBe(409);
 	expect((await jsonResponse(response)).code).toBe("PROMOTED_SESSION_LIFECYCLE_CONFLICT");
+}
+
+async function acceptPromotionWithHeldKickoff(
+	gateway: any,
+	ownerId: string,
+	body: Record<string, unknown>,
+): Promise<{ response: Response; core: any }> {
+	const teamManager = gateway.teamManager as any;
+	const originalFinalize = teamManager.finalizeAdoptedLead;
+	let core: any;
+	teamManager.finalizeAdoptedLead = async function (...args: any[]) {
+		core = gateway.sessionManager.getSession(ownerId)?.rpcClient?._agent;
+		if (!core) throw new Error("promoted mock runtime was not established before finalization");
+		core.armBarrier("turn:before-agent-end");
+		return originalFinalize.apply(teamManager, args);
+	};
+	try {
+		const response = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+		if (!core) throw new Error("promotion finalization did not reach the promoted mock runtime");
+		await core.waitForBarrier("turn:before-agent-end");
+		return { response, core };
+	} catch (error) {
+		core?.releaseAllBarriers();
+		throw error;
+	} finally {
+		teamManager.finalizeAdoptedLead = originalFinalize;
+	}
 }
 
 async function createPromotionCandidate(gateway: any, label: string): Promise<{
@@ -99,6 +139,8 @@ test.describe("current-session goal promotion transaction and lifecycle safety",
 		const sessionManager = gateway.sessionManager as any;
 		const originalCreateGoal = goalManager.createGoal;
 		const originalPromote = sessionManager.promoteToGoalLead;
+		const transcriptPath = sessionManager.getPersistedSession(ownerId)?.agentSessionFile as string;
+		expect(transcriptPath).toBeTruthy();
 		const draftPath = path.join(gateway.bobbitDir, "state", "proposal-drafts", ownerId, "goal.md");
 		const draftBefore = fs.readFileSync(draftPath, "utf8");
 		let attemptedGoalId: string | undefined;
@@ -127,6 +169,7 @@ test.describe("current-session goal promotion transaction and lifecycle safety",
 		expect(context.gateStore.getGatesForGoal(attemptedGoalId!)).toEqual([]);
 		expect(gateway.teamManager.getTeamState(attemptedGoalId!)).toBeUndefined();
 		expect(fs.readFileSync(draftPath, "utf8")).toBe(draftBefore);
+		expect(fs.readFileSync(transcriptPath, "utf8"), "pre-commit compensation must not leak a kickoff").not.toContain("You have been promoted to the team lead for the goal");
 
 		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
@@ -141,6 +184,10 @@ test.describe("current-session goal promotion transaction and lifecycle safety",
 			teamGoalId: retriedGoal.id,
 			role: "team-lead",
 		});
+		await expect.poll(
+			() => transcriptTextOccurrences(transcriptPath, promotionKickoff(retriedGoal.title)),
+			{ timeout: 10_000, interval: 100, message: "successful retry must durably append one promotion kickoff" },
+		).toBe(1);
 	});
 
 	test("rejects a concurrent role PATCH and preserves the baseline after failed promotion compensation", async ({ gateway }) => {
@@ -340,43 +387,56 @@ test.describe("current-session goal promotion transaction and lifecycle safety",
 		await runner.execFile("git", ["add", path.basename(staged)], { cwd: worktree });
 		const statusBefore = String((await runner.execFile("git", ["status", "--porcelain"], { cwd: worktree })).stdout);
 
-		const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
-			method: "POST",
-			body: JSON.stringify({ title: "Promote API owner", spec: "Keep the exact session checkout." }),
+		const heldAcceptance = await acceptPromotionWithHeldKickoff(gateway, ownerId, {
+			title: "Promote API owner",
+			spec: "Keep the exact session checkout.",
 		});
-		expect(accepted.status, await accepted.clone().text()).toBe(201);
-		const goal = await jsonResponse(accepted);
-		scope.trackGoal(goal.id);
-		expect(goal.worktreeOwnerSessionId).toBe(ownerId);
-		expect(goal.worktreePath).toBe(before.worktreePath);
-		expect(goal.branch).toBe(before.branch);
-		expect(goal.setupStatus).toBe("ready");
-		expect(goal.state).toBe("in-progress");
+		let goal: any;
+		let after: any;
+		let transcriptPath = "";
+		try {
+			const accepted = heldAcceptance.response;
+			expect(accepted.status, await accepted.clone().text()).toBe(201);
+			goal = await jsonResponse(accepted);
+			scope.trackGoal(goal.id);
+			expect(goal.worktreeOwnerSessionId).toBe(ownerId);
+			expect(goal.worktreePath).toBe(before.worktreePath);
+			expect(goal.branch).toBe(before.branch);
+			expect(goal.setupStatus).toBe("ready");
+			expect(goal.state).toBe("in-progress");
 
-		const after = await sessionRecord(ownerId);
-		expect(after.id).toBe(ownerId);
-		expect(after.goalId).toBe(goal.id);
-		expect(after.teamGoalId).toBe(goal.id);
-		expect(after.role).toBe("team-lead");
-		expect(after.worktreePath).toBe(before.worktreePath);
-		expect(after.branch).toBe(before.branch);
-		expect(fs.readFileSync(staged, "utf8")).toBe("staged before promotion\n");
-		expect(fs.readFileSync(untracked, "utf8")).toBe("untracked before promotion\n");
-		expect(String((await runner.execFile("git", ["status", "--porcelain"], { cwd: worktree })).stdout)).toBe(statusBefore);
+			after = await sessionRecord(ownerId);
+			expect(after.id).toBe(ownerId);
+			expect(after.goalId).toBe(goal.id);
+			expect(after.teamGoalId).toBe(goal.id);
+			expect(after.role).toBe("team-lead");
+			expect(after.worktreePath).toBe(before.worktreePath);
+			expect(after.branch).toBe(before.branch);
+			expect(gateway.sessionManager.getSession(ownerId)?.status).toBe("streaming");
+			expect(fs.readFileSync(staged, "utf8")).toBe("staged before promotion\n");
+			expect(fs.readFileSync(untracked, "utf8")).toBe("untracked before promotion\n");
+			expect(String((await runner.execFile("git", ["status", "--porcelain"], { cwd: worktree })).stdout)).toBe(statusBefore);
 
-		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
-			method: "POST",
-			body: JSON.stringify({ title: "Promote API owner", spec: "retry" }),
-		});
-		expect(retry.status).toBe(201);
-		expect((await jsonResponse(retry)).id).toBe(goal.id);
-		const goalsBody = await jsonResponse(await apiFetch("/api/goals"));
-		const goals = Array.isArray(goalsBody) ? goalsBody : goalsBody.goals;
-		expect(goals.filter((candidate: any) => candidate.worktreeOwnerSessionId === ownerId)).toHaveLength(1);
-		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(404);
+			transcriptPath = gateway.sessionManager.getPersistedSession(ownerId)?.agentSessionFile as string;
+			expect(transcriptPath).toBeTruthy();
+			expect(transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title))).toBe(1);
 
-		const transcriptPath = gateway.sessionManager.getPersistedSession(ownerId)?.agentSessionFile;
-		expect(transcriptPath).toBeTruthy();
+			const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Promote API owner", spec: "retry" }),
+			});
+			expect(retry.status, await retry.clone().text()).toBe(201);
+			expect((await jsonResponse(retry)).id).toBe(goal.id);
+			expect(transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title)), "streaming exact acceptance retry must not duplicate the kickoff").toBe(1);
+			expect(readAuthorSidecar(ownerId).filter(binding => binding.intentId === `promotion-kickoff:${goal.id}`)).toHaveLength(1);
+			const goalsBody = await jsonResponse(await apiFetch("/api/goals"));
+			const goals = Array.isArray(goalsBody) ? goalsBody : goalsBody.goals;
+			expect(goals.filter((candidate: any) => candidate.worktreeOwnerSessionId === ownerId)).toHaveLength(1);
+			expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(404);
+		} finally {
+			heldAcceptance.core.releaseAllBarriers();
+		}
+
 		expect(fs.existsSync(transcriptPath)).toBe(true);
 		const teamBeforeConflict = await jsonResponse(await apiFetch(`/api/goals/${goal.id}/team`));
 		expect(teamBeforeConflict.teamLeadSessionId).toBe(ownerId);

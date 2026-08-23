@@ -57,6 +57,8 @@ export interface InFlightSteerRecord {
 	images?: Array<{ type: "image"; data: string; mimeType: string }>;
 	attachments?: unknown[];
 	suppressTitleGen?: boolean;
+	/** Optional canonical goal lifecycle fence inherited from the queued occurrence. */
+	goalDispatchGuardId?: string;
 }
 
 /** The persisted boundary accepts legacy string-only steer ledgers. */
@@ -167,6 +169,7 @@ export function normalizePersistedInFlightSteers(
 		if (Array.isArray(entry.images)) record.images = entry.images;
 		if (Array.isArray(entry.attachments)) record.attachments = entry.attachments;
 		if (entry.suppressTitleGen === true) record.suppressTitleGen = true;
+		if (validLedgerKey(entry.goalDispatchGuardId)) record.goalDispatchGuardId = entry.goalDispatchGuardId;
 		records.push(record);
 	}
 	return records.length > 0 ? records : undefined;

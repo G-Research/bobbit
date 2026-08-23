@@ -18,6 +18,7 @@ interface PromptQueueEnqueueOptions {
 	author?: MessageAuthor;
 	streamingBehavior?: QueuedMessage["streamingBehavior"];
 	coldStart?: boolean;
+	goalDispatchGuardId?: string;
 	/** Stable occurrence identity supplied by an admission boundary. */
 	intentId?: string;
 	kind?: DeliveryIntentKind;
@@ -75,6 +76,7 @@ function normalizeQueuedMessage(
 	if (normalized.source !== undefined && !isPromptSource(normalized.source)) {
 		delete normalized.source;
 	}
+	if (!validKey(normalized.goalDispatchGuardId)) delete normalized.goalDispatchGuardId;
 	// Only explicit true grants verifier lifecycle ownership. This keeps old
 	// source:"verification" persisted rows as ordinary durable work.
 	if (normalized.verifierOwned !== true) delete normalized.verifierOwned;
@@ -182,6 +184,7 @@ export class PromptQueue {
 		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
 		if (opts?.streamingBehavior) msg.streamingBehavior = opts.streamingBehavior;
 		if (opts?.coldStart) msg.coldStart = true;
+		if (validKey(opts?.goalDispatchGuardId)) msg.goalDispatchGuardId = opts.goalDispatchGuardId;
 		const deliveryReason = boundedDiagnostic(opts?.deliveryReason);
 		const deliveryError = boundedDiagnostic(opts?.deliveryError);
 		if (deliveryReason) msg.deliveryReason = deliveryReason;

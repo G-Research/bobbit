@@ -1014,11 +1014,19 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/session-goal-promotion.test.ts",
-		allowReason: "isolated integration session worktree files created to prove staged and untracked content survives promotion and restart",
+		allowReason: "isolated integration session worktree files and promotion transcripts used to prove staged and untracked content survives promotion/restart and assert transcript continuity and kickoff delivery",
 		reads: frozen([
 			{ expression: "staged", count: 2 },
 			{ expression: "untracked", count: 2 },
 			{ expression: "draftPath", count: 4 },
+			{ expression: "transcriptPath", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/session-goal-promotion-recovery.test.ts",
+		allowReason: "test-owned isolated promotion transcript used to assert restart recovery dispatches the pending kickoff exactly once",
+		reads: frozen([
+			{ expression: "transcriptPath", count: 3 },
 		]),
 	},
 	{
@@ -1499,6 +1507,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "proposalFilePath(stateDir, continuedId, \"goal\")", count: 1 },
 			{ expression: "proposalFilePath(stateDir, sourceId, \"goal\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-goal-promotion-session-runtime.test.ts",
+		allowReason: "test-owned temporary promotion transcript used to prove durable queued content remains byte-stable while paused",
+		reads: frozen([
+			{ expression: "fx.persisted.agentSessionFile", count: 2 },
 		]),
 	},
 	{
