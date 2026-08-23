@@ -475,6 +475,7 @@ async function makeAdoptedAdmissionFixture(options: { durablePromptIntents?: Set
 		get subscriptionCount() { return subscriptionCount; },
 		get unsubscribeCount() { return unsubscribeCount; },
 		get activeSubscriptions() { return activeSubscriptions; },
+		simulateProcessRestart: () => { activeSubscriptions = 0; },
 		promptCalls,
 		promptOccurrences,
 		durablePromptIntents,
@@ -669,7 +670,10 @@ describe("TeamManager adopted-lead finalization", () => {
 		Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
 		fixture.sessions.update(fixture.source.id, attachment);
 	};
-	const assertPromotionKickoff = (fixture: Awaited<ReturnType<typeof makeAdoptedAdmissionFixture>>) => {
+	const assertPromotionKickoff = (
+		fixture: Awaited<ReturnType<typeof makeAdoptedAdmissionFixture>>,
+		expectedColdStart: true | undefined,
+	) => {
 		assert.equal(fixture.promptOccurrences.length, 1, "promotion must admit one durable kickoff occurrence");
 		assert.deepEqual(fixture.promptOccurrences[0], {
 			sessionId: fixture.source.id,
@@ -682,6 +686,13 @@ describe("TeamManager adopted-lead finalization", () => {
 			assert.equal(call.text, expectedKickoff);
 			assert.equal(call.opts?.source, "system");
 			assert.equal(call.opts?.suppressTitleGen, true);
+			assert.equal(
+				call.opts?.coldStart,
+				expectedColdStart,
+				expectedColdStart
+					? "boot recovery must wait for the restored agent before delivering the kickoff"
+					: "fresh promotion must keep the ordinary warm-session kickoff path",
+			);
 			assert.equal(call.opts?.intentId, fixture.promptOccurrences[0]?.intentId, "retries must reuse the kickoff occurrence id");
 			assert.equal(call.goalState, "in-progress", "kickoff dispatch must follow the goal transition");
 			assert.equal(call.liveRole, "team-lead", "kickoff dispatch must see the canonical promoted runtime");
@@ -701,7 +712,7 @@ describe("TeamManager adopted-lead finalization", () => {
 			assert.equal(fixture.subscriptionCount, 1);
 			assert.equal(fixture.activeSubscriptions, 1);
 			assert.equal(fixture.workerCount, 0);
-			assertPromotionKickoff(fixture);
+			assertPromotionKickoff(fixture, undefined);
 		} finally {
 			fixture.manager.dispose();
 		}
@@ -720,7 +731,7 @@ describe("TeamManager adopted-lead finalization", () => {
 			assert.ok(results.every(result => result.teamLeadSessionId === fixture.source.id));
 			assert.equal(fixture.goals.updates.length, 1, "in-progress transition is idempotent");
 			assert.equal(fixture.activeSubscriptions, 1, "retry replaces rather than duplicates the lead listener");
-			assertPromotionKickoff(fixture);
+			assertPromotionKickoff(fixture, undefined);
 		} finally {
 			fixture.manager.dispose();
 		}
@@ -745,18 +756,20 @@ describe("TeamManager adopted-lead finalization", () => {
 			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
 			assert.equal(fixture.activeSubscriptions, 1);
 			assert.equal(fixture.workerCount, 0);
-			assertPromotionKickoff(fixture);
+			assertPromotionKickoff(fixture, undefined);
 		} finally {
 			fixture.manager.dispose();
 		}
 	});
 
-	it("admits one kickoff occurrence through manager restart recovery", async () => {
+	it("cold-delivers one kickoff occurrence through manager restart recovery", async () => {
 		const fixture = await makeAdoptedAdmissionFixture();
 		let restored: TeamManager | undefined;
+		let retry: TeamManager | undefined;
 		try {
 			committedAttachment(fixture);
-			assert.equal(fixture.promptOccurrences.length, 0, "the process crashes before kickoff admission");
+			assert.equal(fixture.promptOccurrences.length, 0, "the process crashes after canonical commit but before kickoff admission");
+			assert.equal(fixture.activeSubscriptions, 0, "the crashed process must not leave a synthetic subscription behind");
 			fixture.manager.dispose();
 
 			restored = new TeamManager(
@@ -766,11 +779,39 @@ describe("TeamManager adopted-lead finalization", () => {
 				noTimerClock as any,
 			);
 			await restored.waitForRestore();
+			assert.equal(fixture.promptCalls.length, 0, "team restore alone must not bypass session restoration and admit the kickoff");
 			await restored.resubscribeTeamEvents();
-			assertPromotionKickoff(fixture);
+
+			assertPromotionKickoff(fixture, true);
+			assert.equal(fixture.promptCalls.length, 1, "boot recovery must send only the promotion kickoff, not a boot-resume nudge");
+			assert.equal(fixture.activeSubscriptions, 1, "the recovered lead must keep exactly one active event subscription");
+			assert.equal(fixture.subscriptionCount, 1);
+			const durableIntentId = fixture.promptOccurrences[0]?.intentId;
+
+			restored.dispose();
+			restored = undefined;
+			fixture.simulateProcessRestart();
+			assert.equal(fixture.activeSubscriptions, 0, "a process restart must discard its runtime-only subscription");
+
+			retry = new TeamManager(
+				fixture.sessionManager as any,
+				fixture.managerConfig as any,
+				undefined,
+				noTimerClock as any,
+			);
+			await retry.waitForRestore();
+			await retry.resubscribeTeamEvents();
+
+			assertPromotionKickoff(fixture, true);
+			assert.equal(fixture.promptOccurrences.length, 1, "a durable occurrence must suppress admission and dispatch on the next boot");
+			assert.equal(fixture.promptOccurrences[0]?.intentId, durableIntentId, "the retry must retain the stable occurrence identity");
+			assert.equal(fixture.promptCalls.length, 2, "each boot may retry the same admission, but neither may add a boot-resume nudge");
 			assert.equal(new Set(fixture.promptCalls.map(call => call.opts?.intentId)).size, 1);
+			assert.equal(fixture.activeSubscriptions, 1, "the retry boot must still own only one active event subscription");
+			assert.equal(fixture.subscriptionCount, 2, "each disposed boot installs one replacement subscription");
 		} finally {
 			restored?.dispose();
+			retry?.dispose();
 			fixture.manager.dispose();
 		}
 	});
