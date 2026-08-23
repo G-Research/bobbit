@@ -147,6 +147,11 @@ export interface QueuedMessage {
 	/** Wait for a restored agent to accept commands before delivery. */
 	coldStart?: boolean;
 	/**
+	 * Canonical goal whose runnable lifecycle must still permit dispatch. Absent
+	 * on legacy and ordinary rows; currently used only by promotion kickoff.
+	 */
+	goalDispatchGuardId?: string;
+	/**
 	 * When true, this prompt must NOT trigger first-message auto-title
 	 * generation (used for assistant auto-kickoff prompts so naming fires on
 	 * the first genuine user message instead of the kickoff text).

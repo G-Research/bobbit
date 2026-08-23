@@ -1901,6 +1901,7 @@ export function reconcilePersistedIntentRestore(
 				images: recovered.images,
 				attachments: recovered.attachments,
 				suppressTitleGen: recovered.suppressTitleGen,
+				goalDispatchGuardId: recovered.goalDispatchGuardId,
 			});
 		}
 		unsettledIntentIds.add(latest.intentId);
@@ -1982,6 +1983,7 @@ function projectReliableDeliveryOutbox(
 			images: record.images,
 			attachments: record.attachments,
 			suppressTitleGen: record.suppressTitleGen,
+			goalDispatchGuardId: record.goalDispatchGuardId,
 		}));
 
 	const projection: ReliableQueuedMessage[] = [];
@@ -5673,6 +5675,35 @@ export class SessionManager {
 		return this._testGoalManager?.getGoalStore().get(goalId);
 	}
 
+	/**
+	 * Fail closed when a durable occurrence is fenced by a goal that is no longer
+	 * the canonical, runnable adopted goal for this session. This check is
+	 * synchronous so no pause/archive write can interleave between it and the Pi
+	 * dispatch transition.
+	 */
+	private goalDispatchGuardAllows(session: SessionInfo, row: Pick<QueuedMessage, "goalDispatchGuardId">): boolean {
+		const goalId = row.goalDispatchGuardId;
+		if (!goalId) return true;
+		const goal = this.resolveGoal(goalId);
+		if (!goal) return false;
+		if (goal.projectId && session.projectId !== goal.projectId) return false;
+		if (goal.worktreeOwnerSessionId !== session.id) return false;
+		return !goal.archived
+			&& !goal.paused
+			&& goal.state === "in-progress"
+			&& (goal.setupStatus === undefined || goal.setupStatus === "ready");
+	}
+
+	/** Release queued guarded work after operator resume commits, without awaiting Pi. */
+	drainGoalGuardedPrompts(goalId: string): void {
+		for (const session of this.sessions.values()) {
+			if (session.status !== "idle") continue;
+			const hasGuardedRow = session.promptQueue.toArray()
+				.some((row) => row.goalDispatchGuardId === goalId);
+			if (hasGuardedRow) this.drainQueue(session);
+		}
+	}
+
 	/** Resolve adoption authority from the session's canonical project store, including archived goals. */
 	private resolveSessionGoal(ps: Pick<PersistedSession, "projectId" | "goalId" | "teamGoalId">): PersistedGoal | undefined {
 		const goalId = ps.teamGoalId ?? ps.goalId;
@@ -7424,6 +7455,7 @@ export class SessionManager {
 			suppressTitleGen?: boolean;
 			streamingBehavior?: PromptStreamingBehavior;
 			coldStart?: boolean;
+			goalDispatchGuardId?: string;
 			source: PromptSource;
 			author: MessageAuthor;
 		},
@@ -7442,6 +7474,7 @@ export class SessionManager {
 			...(opts.suppressTitleGen ? { suppressTitleGen: true } : {}),
 			...(opts.streamingBehavior ? { streamingBehavior: opts.streamingBehavior } : {}),
 			...(opts.coldStart ? { coldStart: true } : {}),
+			...(opts.goalDispatchGuardId ? { goalDispatchGuardId: opts.goalDispatchGuardId } : {}),
 			source: opts.source,
 			author: opts.author,
 		};
@@ -7512,6 +7545,7 @@ export class SessionManager {
 		coldStart?: boolean;
 		suppressTitleGen?: boolean;
 		intentId?: string;
+		goalDispatchGuardId?: string;
 	}): { status: "queued" | "dispatched" } | undefined {
 		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
 		if (!coordinator) return undefined;
@@ -7577,6 +7611,7 @@ export class SessionManager {
 					suppressTitleGen: opts?.suppressTitleGen,
 					streamingBehavior: opts?.streamingBehavior,
 					coldStart: opts?.coldStart,
+					goalDispatchGuardId: opts?.goalDispatchGuardId,
 					source,
 					author,
 				},
@@ -7721,6 +7756,8 @@ export class SessionManager {
 		suppressTitleGen?: boolean;
 		/** Browser-created stable occurrence identity. Legacy/server callers may omit it. */
 		intentId?: string;
+		/** Keep this reliable occurrence queued unless the canonical goal is runnable. */
+		goalDispatchGuardId?: string;
 	}): Promise<{ status: "dispatched" | "queued" }> {
 		// This guard is deliberately before replacement queue admission: a conditioned
 		// session must not create queue/transcript/sidecar/persistence/RPC state. During
@@ -7793,6 +7830,7 @@ export class SessionManager {
 							suppressTitleGen: opts.suppressTitleGen,
 							streamingBehavior: opts.streamingBehavior,
 							coldStart: opts.coldStart,
+							goalDispatchGuardId: opts.goalDispatchGuardId,
 							source,
 							author,
 						},
@@ -7972,6 +8010,7 @@ export class SessionManager {
 				suppressTitleGen: opts?.suppressTitleGen,
 				streamingBehavior: opts?.streamingBehavior,
 				coldStart: opts?.coldStart,
+				goalDispatchGuardId: opts?.goalDispatchGuardId,
 				source,
 				author,
 			});
@@ -8589,6 +8628,10 @@ export class SessionManager {
 					return;
 				}
 				const row = rawRow as ReliableQueuedMessage;
+				if (!this.goalDispatchGuardAllows(session, row)) {
+					retainRows();
+					return;
+				}
 				const active = (session.inFlightSteerTexts as ReliableInFlightRecord[] | undefined)
 					?.find((record) => record.intentId === row.id);
 				if (active) continue;
@@ -8612,6 +8655,7 @@ export class SessionManager {
 					images: row.images,
 					attachments: row.attachments,
 					suppressTitleGen: row.suppressTitleGen,
+					goalDispatchGuardId: row.goalDispatchGuardId,
 				};
 				(session.inFlightSteerTexts ??= []).push(ledgerRecord);
 				session.promptQueue.remove(row.id);
@@ -8822,6 +8866,7 @@ export class SessionManager {
 				images: record.images,
 				attachments: record.attachments,
 				suppressTitleGen: record.suppressTitleGen,
+				goalDispatchGuardId: record.goalDispatchGuardId,
 			};
 		});
 		if (opts?.retargetContinuation === true) {
@@ -8882,6 +8927,7 @@ export class SessionManager {
 				images: record.images,
 				attachments: record.attachments,
 				suppressTitleGen: record.suppressTitleGen,
+				goalDispatchGuardId: record.goalDispatchGuardId,
 			};
 			if (typeof queue.enqueueExisting === "function") queue.enqueueExisting(row);
 			else {
@@ -9111,6 +9157,7 @@ export class SessionManager {
 		streamingBehavior?: PromptStreamingBehavior;
 		coldStart?: boolean;
 		suppressTitleGen?: boolean;
+		goalDispatchGuardId?: string;
 	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
@@ -9157,6 +9204,7 @@ export class SessionManager {
 					streamingBehavior: r.streamingBehavior,
 					coldStart: r.coldStart,
 					suppressTitleGen: r.suppressTitleGen,
+					goalDispatchGuardId: r.goalDispatchGuardId,
 				})
 				: session.promptQueue.enqueueAtFront(r.text, {
 					images: r.images,
@@ -9168,6 +9216,7 @@ export class SessionManager {
 					streamingBehavior: r.streamingBehavior,
 					coldStart: r.coldStart,
 					suppressTitleGen: r.suppressTitleGen,
+					goalDispatchGuardId: r.goalDispatchGuardId,
 				});
 			recoveredIds.push(recovered.id);
 			if (durableId && poisonOwnedIds.has(durableId)) {
@@ -9282,6 +9331,9 @@ export class SessionManager {
 		// replacement coordinator. All unrelated dispatch remains fenced until the
 		// coordinator releases.
 		if (session.isCompacting || session.status === "aborting" || (replacementKind !== undefined && replacementKind !== "poison-redrive")) return;
+		const reliableRow = durableQueueRowId
+			? (session.promptQueue.toArray() as ReliableQueuedMessage[]).find((row) => row.id === durableQueueRowId && row.kind !== undefined)
+			: undefined;
 		if (session._piAgentRunSettled === false && replacementKind !== "poison-redrive") {
 			// An accepted stable occurrence already owns its durable queue row. Legacy
 			// and automatic-retry callers have no such row, so create one before
@@ -9304,6 +9356,7 @@ export class SessionManager {
 					streamingBehavior,
 					coldStart,
 					suppressTitleGen,
+					goalDispatchGuardId: reliableRow?.goalDispatchGuardId,
 				});
 			} else {
 				const deferred = {
@@ -9319,6 +9372,7 @@ export class SessionManager {
 					streamingBehavior,
 					coldStart,
 					suppressTitleGen,
+					goalDispatchGuardId: reliableRow?.goalDispatchGuardId,
 				};
 				session.promptQueue.restoreAtFront(deferred);
 			}
@@ -9328,10 +9382,10 @@ export class SessionManager {
 			this.broadcastQueue(session);
 			return;
 		}
-		const reliableRow = durableQueueRowId
-			? (session.promptQueue.toArray() as ReliableQueuedMessage[]).find((row) => row.id === durableQueueRowId && row.kind !== undefined)
-			: undefined;
 		if (reliableRow) {
+			// Re-resolve canonical goal lifecycle at the last synchronous boundary
+			// before status, author-sidecar, queue ownership, or Pi can change.
+			if (!this.goalDispatchGuardAllows(session, reliableRow)) return;
 			session.lastPromptText = text;
 			session.lastPromptImages = images;
 			session.lastPromptSource = source;
@@ -9362,6 +9416,7 @@ export class SessionManager {
 				images: reliableRow.images,
 				attachments: reliableRow.attachments,
 				suppressTitleGen: reliableRow.suppressTitleGen,
+				goalDispatchGuardId: reliableRow.goalDispatchGuardId,
 			};
 			(session.inFlightSteerTexts ??= []).push(attempt);
 			session.promptQueue.remove(reliableRow.id);
@@ -9457,6 +9512,7 @@ export class SessionManager {
 								streamingBehavior: reliableRow.streamingBehavior,
 								coldStart: reliableRow.coldStart,
 								suppressTitleGen: reliableRow.suppressTitleGen,
+								goalDispatchGuardId: reliableRow.goalDispatchGuardId,
 							}],
 							error instanceof Error ? error.message : String(error),
 							reliableRow.verifierOwned === true ? "reliable verifier prompt" : "reliable automatic prompt",
@@ -9595,6 +9651,7 @@ export class SessionManager {
 					: selected;
 			}, undefined);
 		if (reliableNext) {
+			if (!this.goalDispatchGuardAllows(session, reliableNext)) return;
 			if (!reliableNext.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, reliableNext.text);
 			const promptSource = reliableNext.source ?? "user";
 			const promptAuthor = resolveAcceptedPromptAuthor(promptSource, reliableNext.author);

@@ -1398,6 +1398,9 @@ export async function tryHandleNestedGoalRoute(
 		// scheduler restart; dependency-blocked children remain owned by
 		// integrate-child until their final dependency merges.
 		for (const { goalId, result } of resumeResult.processed) {
+			// Rechecking an already-resumed goal also heals a crash between its prior
+			// durable resume write and queue release. Dispatch stays asynchronous.
+			sessionManager.drainGoalGuardedPrompts?.(goalId);
 			if (!result) continue;
 			const resumed = getGoalAcrossProjects(goalId);
 			if (!resumed?.parentGoalId || resumed.autoStartTeam === false || resumed.archived || resumed.state === "complete" || resumed.state === "shelved") continue;

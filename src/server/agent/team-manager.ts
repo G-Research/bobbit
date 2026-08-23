@@ -2400,6 +2400,7 @@ export class TeamManager {
 					source: "system",
 					suppressTitleGen: true,
 					intentId: `promotion-kickoff:${canonicalGoal.id}`,
+					goalDispatchGuardId: canonicalGoal.id,
 					coldStart: options.coldStart,
 				},
 			);
