@@ -153,12 +153,12 @@ test.describe("Journey: Context target and model capacity", () => {
 			await page.keyboard.press("Enter");
 			await expect(popover(page)).toBeVisible();
 			await expect(trigger).toHaveAttribute("aria-expanded", "true");
-			await expect(popover(page)).toContainText("Context target");
+			await expect(popover(page)).toContainText("Soft limit");
 			await expect(popover(page)).toContainText("100k tokens");
 			await expect(popover(page)).toContainText("Model capacity");
 			await expect(popover(page)).toContainText("400k tokens");
 			await expect(popover(page)).toContainText("50k / 400k tokens");
-			await expect(popover(page).getByTestId("context-meter-scale")).toContainText("Target 100k");
+			await expect(popover(page).getByTestId("context-meter-scale")).toContainText("Soft limit 100k");
 			await expect(popover(page).getByTestId("context-meter-scale")).toContainText("Capacity 400k");
 			await expectTrackUsesInputSurface(footerTrack(page), false);
 			await expectTrackUsesInputSurface(popover(page).getByTestId("context-meter-track"), false);
@@ -188,7 +188,7 @@ test.describe("Journey: Context target and model capacity", () => {
 			await expect(footerTrack(page).getByTestId("context-meter-target-marker")).toHaveCount(0);
 			await contextTrigger(page).click();
 			await expect(popover(page)).toContainText("Context window");
-			await expect(popover(page)).not.toContainText("Context target");
+			await expect(popover(page)).not.toContainText("Soft limit");
 			await expect(popover(page)).not.toContainText("Model capacity");
 			await expect(popover(page).getByTestId("context-meter-scale")).toHaveCount(0);
 			await closeContextPopover(page);

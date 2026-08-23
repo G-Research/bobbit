@@ -2523,7 +2523,7 @@ export class AgentInterface extends LitElement {
 						<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
 							${row("Provider", m.provider)}
 							${hasDistinctCapacity ? html`
-								${row("Context target", formatTokenCount(contextMeter.target!) + " tokens")}
+								${row("Soft limit", formatTokenCount(contextMeter.target!) + " tokens")}
 								${row("Model capacity", formatTokenCount(contextMeter.capacity!) + " tokens")}
 							` : row("Context window", contextMeter.scale ? formatTokenCount(contextMeter.scale) + " tokens" : "—")}
 							${row("Max output", m.maxTokens ? formatTokenCount(m.maxTokens) + " tokens" : "—")}
@@ -2539,7 +2539,7 @@ export class AgentInterface extends LitElement {
 						</div>
 						${hasDistinctCapacity ? html`
 							<div class="context-meter-scale" data-testid="context-meter-scale" aria-hidden="true">
-								<span>Target ${formatTokenCount(contextMeter.target!)}</span>
+								<span>Soft limit ${formatTokenCount(contextMeter.target!)}</span>
 								<span>Capacity ${formatTokenCount(contextMeter.capacity!)}</span>
 							</div>
 						` : nothing}
