@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -50,6 +51,41 @@ function parseBoundedInteger(value, flag, minimum, maximum) {
 	return number;
 }
 
+function isWithin(parent, candidate) {
+	const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function projectedCanonicalPath(candidate) {
+	const missing = [];
+	let existing = path.resolve(candidate);
+	while (!existsSync(existing)) {
+		const parent = path.dirname(existing);
+		if (parent === existing) throw new Error(`No existing ancestor for ${candidate}`);
+		missing.unshift(path.basename(existing));
+		existing = parent;
+	}
+	return path.join(realpathSync(existing), ...missing);
+}
+
+function rejectExistingOutputLinks(root, destination) {
+	let current = path.resolve(root);
+	if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+		throw new Error("Benchmark output root must not be a symbolic link or junction");
+	}
+	const relative = path.relative(current, path.dirname(destination));
+	for (const segment of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, segment);
+		if (!existsSync(current)) break;
+		if (lstatSync(current).isSymbolicLink()) {
+			throw new Error("--output must not traverse a symbolic link or junction");
+		}
+	}
+	if (existsSync(destination) && lstatSync(destination).isSymbolicLink()) {
+		throw new Error("--output must not replace a symbolic link or junction");
+	}
+}
+
 export function resolveBenchmarkOutputPath(value, outputRoot = DEFAULT_OUTPUT_ROOT) {
 	if (typeof value !== "string" || !value.trim()) throw new Error("--output requires a relative JSON filename");
 	if (path.isAbsolute(value)) throw new Error("--output must stay beneath the benchmark output root");
@@ -60,6 +96,10 @@ export function resolveBenchmarkOutputPath(value, outputRoot = DEFAULT_OUTPUT_RO
 		throw new Error("--output must stay beneath the benchmark output root");
 	}
 	if (path.extname(destination).toLowerCase() !== ".json") throw new Error("--output must name a .json file");
+	rejectExistingOutputLinks(root, destination);
+	if (!isWithin(projectedCanonicalPath(root), projectedCanonicalPath(path.dirname(destination)))) {
+		throw new Error("--output resolved outside the benchmark output root");
+	}
 	return destination;
 }
 
@@ -151,11 +191,8 @@ function normalizeCorrectness(correctness) {
 function makeBaseReport({ benchmark, options, journeyResult, schedule, cleanup, repoRoot }) {
 	const environmentOverrides = journeyResult?.environment ?? {};
 	const correctness = normalizeCorrectness(journeyResult?.correctness);
-	const samples = Array.isArray(journeyResult?.samples) ? journeyResult.samples : [];
-	const summaryByCase = journeyResult?.summaryByCase
-		?? (journeyResult?.metricDefinitions
-			? summarizeSamplesByCase(samples, journeyResult.metricDefinitions)
-			: {});
+	const samples = journeyResult.samples;
+	const summaryByCase = summarizeSamplesByCase(samples, journeyResult.metricDefinitions);
 	return {
 		schemaVersion: BENCHMARK_SCHEMA_VERSION,
 		benchmark,
@@ -167,7 +204,7 @@ function makeBaseReport({ benchmark, options, journeyResult, schedule, cleanup, 
 		protocol: {
 			warmups: options.warmups,
 			repetitions: options.repetitions,
-			schedule: journeyResult?.schedule ?? schedule,
+			schedule,
 		},
 		samples,
 		summaryByCase,
@@ -178,6 +215,70 @@ function makeBaseReport({ benchmark, options, journeyResult, schedule, cleanup, 
 		cleanup,
 		correctness,
 	};
+}
+
+function validateMetricDefinitions(metricDefinitions) {
+	if (!metricDefinitions || typeof metricDefinitions !== "object" || Array.isArray(metricDefinitions)) {
+		throw new TypeError("runJourney() must return a non-empty metricDefinitions object");
+	}
+	const entries = Object.entries(metricDefinitions);
+	if (entries.length === 0) throw new Error("runJourney() must define at least one numeric metric");
+	for (const [metric, definition] of entries) {
+		if (!metric || !definition || typeof definition !== "object" || Array.isArray(definition)) {
+			throw new TypeError(`Metric ${metric || "<empty>"} must have a definition object`);
+		}
+		if (typeof definition.unit !== "string" || !definition.unit) {
+			throw new TypeError(`Metric ${metric} must define a non-empty unit`);
+		}
+		if (definition.direction !== "lower" && definition.direction !== "higher") {
+			throw new TypeError(`Metric ${metric} direction must be lower or higher`);
+		}
+	}
+	return entries.map(([metric]) => metric);
+}
+
+function validateScheduledSamples(journeyResult, schedule) {
+	if (!Array.isArray(journeyResult.samples)) throw new TypeError("runJourney() must return a samples array");
+	if (journeyResult.samples.length !== schedule.length) {
+		throw new Error(`runJourney() returned ${journeyResult.samples.length} samples for ${schedule.length} scheduled entries`);
+	}
+	const metrics = validateMetricDefinitions(journeyResult.metricDefinitions);
+	const identityFields = ["phase", "cycle", "case", "caseOrder", "order"];
+	let measuredSamples = 0;
+	for (let index = 0; index < schedule.length; index += 1) {
+		const expected = schedule[index];
+		const sample = journeyResult.samples[index];
+		if (!sample || typeof sample !== "object" || Array.isArray(sample)) {
+			throw new TypeError(`Sample ${index} must be an object`);
+		}
+		for (const field of identityFields) {
+			if (sample[field] !== expected[field]) {
+				throw new Error(`Sample ${index} ${field} must be ${JSON.stringify(expected[field])}, got ${JSON.stringify(sample[field])}`);
+			}
+		}
+		if (!sample.metrics || typeof sample.metrics !== "object" || Array.isArray(sample.metrics)) {
+			throw new TypeError(`Sample ${index} must contain a metrics object`);
+		}
+		let numericMetrics = 0;
+		for (const metric of metrics) {
+			const value = sample.metrics[metric];
+			if (value !== null && value !== undefined && !Number.isFinite(value)) {
+				throw new TypeError(`Sample ${index} metric ${metric} must be a finite number or null`);
+			}
+			if (Number.isFinite(value)) numericMetrics += 1;
+		}
+		if (sample.phase === "measured") {
+			measuredSamples += 1;
+			if (numericMetrics === 0) throw new Error(`Measured sample ${index} contains no numeric metrics`);
+		}
+	}
+	if (measuredSamples === 0) throw new Error("runJourney() returned no measured samples");
+}
+
+function aggregateErrors(label, errors) {
+	if (errors.length === 0) return undefined;
+	if (errors.length === 1) return errors[0];
+	return new AggregateError(errors, `${label}: ${errors.map(error => error?.message ?? String(error)).join("; ")}`);
 }
 
 function makeFailureReport({ benchmark, options, error, cleanup, repoRoot }) {
@@ -221,7 +322,8 @@ export async function runBenchmark(options, {
 	let journeyResult;
 	let runError;
 	let cleanupError;
-	let usedSchedule = [];
+	let usedSchedule = null;
+	let scheduleCalls = 0;
 	const deferredCleanup = [];
 	try {
 		paths = await runRootFactory({ repoRoot });
@@ -244,6 +346,8 @@ export async function runBenchmark(options, {
 				keepTemp: options.keepTemp,
 			}),
 			scheduleFor(cases) {
+				scheduleCalls += 1;
+				if (scheduleCalls !== 1) throw new Error("scheduleFor(cases) must be called exactly once per journey");
 				usedSchedule = buildAlternatingSchedule(cases, options.warmups, options.repetitions);
 				return usedSchedule.map(entry => ({ ...entry }));
 			},
@@ -262,18 +366,24 @@ export async function runBenchmark(options, {
 		if (normalizeCorrectness(journeyResult.correctness).status !== "passed") {
 			throw new Error(`${options.journey} correctness validation failed`);
 		}
+		if (scheduleCalls !== 1 || !usedSchedule) {
+			throw new Error(`${options.journey} must call scheduleFor(cases) exactly once`);
+		}
+		validateScheduledSamples(journeyResult, usedSchedule);
 	} catch (error) {
 		runError = error;
 	} finally {
+		const cleanupErrors = [];
 		for (const callback of deferredCleanup.reverse()) {
-			try { await callback(); } catch (error) { cleanupError ??= error; }
+			try { await callback(); } catch (error) { cleanupErrors.push(error); }
 		}
 		if (paths && !options.keepTemp) {
-			try { await cleanupBenchmarkRunRoot(paths); } catch (error) { cleanupError ??= error; }
+			try { await cleanupBenchmarkRunRoot(paths); } catch (error) { cleanupErrors.push(error); }
 		}
+		cleanupError = aggregateErrors("Benchmark cleanup failed", cleanupErrors);
 	}
 
-	let finalError = runError ?? cleanupError;
+	let finalError = aggregateErrors("Benchmark run and cleanup failed", [runError, cleanupError].filter(Boolean));
 	const retainedRoot = options.keepTemp ? paths?.root ?? null : null;
 	const cleanup = {
 		status: cleanupError ? "failed" : retainedRoot ? "retained" : "completed",
@@ -306,14 +416,14 @@ export async function runBenchmark(options, {
 	let writtenPath = null;
 	if (requestedOutputPath) {
 		try {
-			writtenPath = await atomicWriteReport(finalError ? failedReportPath(requestedOutputPath) : requestedOutputPath, boundedReport);
+			writtenPath = await atomicWriteReport(finalError ? failedReportPath(requestedOutputPath) : requestedOutputPath, boundedReport, { allowedRoot: outputRoot });
 		} catch (error) {
 			finalError ??= error;
 			boundedReport = failureReport(finalError);
 			// A result-write failure still produces bounded JSON on stdout. Make one
 			// best-effort failed artifact without ever replacing the requested baseline.
 			try {
-				writtenPath = await atomicWriteReport(failedReportPath(requestedOutputPath), boundedReport);
+				writtenPath = await atomicWriteReport(failedReportPath(requestedOutputPath), boundedReport, { allowedRoot: outputRoot });
 			} catch { writtenPath = null; }
 		}
 	}
