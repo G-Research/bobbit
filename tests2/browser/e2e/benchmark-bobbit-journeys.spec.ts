@@ -32,6 +32,12 @@ const SESSION_RAW_IDS = [
 	"browser-benchmark-assistant-last",
 ] as const;
 const SESSION_TOOL_IDS = ["browser-benchmark-tool-success", "browser-benchmark-tool-error"] as const;
+const SESSION_BATCH_IDS = Array.from({ length: 10 }, (_, index) => `browser-benchmark-batch-${String(index + 1).padStart(2, "0")}`);
+const SESSION_EXPECTED_RAW_IDS = [
+	...SESSION_RAW_IDS.slice(0, -1),
+	...SESSION_BATCH_IDS,
+	SESSION_RAW_IDS.at(-1)!,
+];
 const MESSAGE_SELECTOR = "user-message, assistant-message, tool-message";
 
 type MetricSupport = "reliable" | "browser-api" | "estimated" | "unsupported";
@@ -175,6 +181,12 @@ function reducedSessionTranscript(): string {
 			is_error: true,
 			content: [{ type: "text", text: "legacy deterministic error" }],
 		},
+		...SESSION_BATCH_IDS.map((id, index) => ({
+			id,
+			role: "assistant",
+			content: [{ type: "text", text: `Deterministic deferred parity batch ${String(index + 1).padStart(2, "0")}.` }],
+			stopReason: "stop",
+		})),
 		{
 			id: SESSION_RAW_IDS[6],
 			role: "assistant",
@@ -195,6 +207,7 @@ function reducedSessionTranscript(): string {
 }
 
 function installSessionOpenObserver(): void {
+	localStorage.setItem("bobbit-perf-instrumentation", "1");
 	const memory = (performance as ChromiumPerformance).memory;
 	const state = {
 		requestAt: null as number | null,
@@ -325,6 +338,42 @@ async function settle(page: Page): Promise<void> {
 	});
 }
 
+async function settleDeferredBatches(page: Page, batchSize = 2): Promise<{ initialUnresolved: number; batchCount: number }> {
+	return page.evaluate(async size => {
+		const componentSelector = "message-list, user-message, assistant-message, markdown-block, tool-message, code-block";
+		const settleComponents = async (roots: Element[]) => {
+			const components = new Set<any>(document.querySelectorAll(componentSelector));
+			for (const root of roots) {
+				for (const component of root.querySelectorAll(componentSelector)) components.add(component);
+			}
+			await Promise.all([...components].map(component => component.updateComplete ?? Promise.resolve()));
+		};
+		const initialUnresolved = [...document.querySelectorAll<any>("deferred-block")].filter(wrapper => wrapper.eager !== true).length;
+		let batchCount = 0;
+		let stablePasses = 0;
+		let previousWrapperCount = -1;
+		while (stablePasses < 2) {
+			const wrappers = [...document.querySelectorAll<any>("deferred-block")];
+			const unresolved = wrappers.filter(wrapper => wrapper.eager !== true);
+			if (unresolved.length > 0) {
+				const batch = unresolved.slice(0, size);
+				for (const wrapper of batch) wrapper.eager = true;
+				await Promise.all(batch.map(wrapper => wrapper.updateComplete ?? Promise.resolve()));
+				await settleComponents(batch);
+				batchCount += 1;
+				stablePasses = 0;
+			} else {
+				await settleComponents(wrappers);
+				stablePasses = wrappers.length === previousWrapperCount ? stablePasses + 1 : 0;
+				previousWrapperCount = wrappers.length;
+			}
+			await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+		}
+		await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+		return { initialUnresolved, batchCount };
+	}, batchSize);
+}
+
 async function transcriptFingerprint(page: Page, ignoredText: string[] = []): Promise<TranscriptFingerprint> {
 	return page.evaluate<TranscriptFingerprint, { selector: string; ignoredText: string[] }>(({ selector, ignoredText }) => {
 		const normalize = (value: unknown) => ignoredText
@@ -433,29 +482,33 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.getByText(SESSION_LAST, { exact: true })).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator("[data-testid='compaction-summary-card']")).toHaveCount(1, { timeout: 20_000 });
-			await settle(page);
+			const firstSettlement = await settleDeferredBatches(page, 2);
+			expect(firstSettlement.initialUnresolved, "fixture must cross several bounded parity batches").toBeGreaterThan(4);
+			expect(firstSettlement.batchCount, "live parity must settle in multiple bounded batches").toBeGreaterThan(2);
 
 			const first = await transcriptFingerprint(page);
-			const rawOrder = first.clientMessages.map(message => message.id).filter(id => SESSION_RAW_IDS.includes(id as any));
-			expect(rawOrder, "snapshot must preserve every raw fixture id in order").toEqual(SESSION_RAW_IDS);
-			expect(new Set(rawOrder).size, "snapshot must not duplicate fixture ids").toBe(SESSION_RAW_IDS.length);
+			const rawOrder = first.clientMessages.map(message => message.id).filter(id => SESSION_EXPECTED_RAW_IDS.includes(id as string));
+			expect(rawOrder, "snapshot must preserve every raw fixture id in order").toEqual(SESSION_EXPECTED_RAW_IDS);
+			expect(new Set(rawOrder).size, "snapshot must not duplicate fixture ids").toBe(SESSION_EXPECTED_RAW_IDS.length);
 			expect(first.clientMessages.filter(message => message.id === SESSION_COMPACTION_ID)).toHaveLength(1);
 			expect(first.clientMessages.find(message => message.id === SESSION_RAW_IDS[5])).toMatchObject({
 				role: "toolResult",
 				toolCallId: SESSION_TOOL_IDS[1],
 				isError: true,
 			});
-			const renderedFixtureOrder = first.messages
-				.filter(message => message.tag !== "tool-message")
-				.map(message => message.id)
-				.filter(id => SESSION_RAW_IDS.includes(id as any));
-			expect(renderedFixtureOrder).toEqual([
+			const expectedRenderedFixtureOrder = [
 				SESSION_RAW_IDS[0],
 				SESSION_RAW_IDS[1],
 				SESSION_RAW_IDS[3],
 				SESSION_RAW_IDS[4],
+				...SESSION_BATCH_IDS,
 				SESSION_RAW_IDS[6],
-			]);
+			];
+			const renderedFixtureOrder = first.messages
+				.filter(message => message.tag !== "tool-message")
+				.map(message => message.id)
+				.filter(id => expectedRenderedFixtureOrder.includes(id as string));
+			expect(renderedFixtureOrder).toEqual(expectedRenderedFixtureOrder);
 
 			const metrics = await page.evaluate(async () => {
 				const state = (window as any).__browserBenchmarkSessionOpen;
@@ -487,9 +540,12 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.getByText(SESSION_LAST, { exact: true })).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator("[data-testid='compaction-summary-card']")).toHaveCount(1, { timeout: 20_000 });
-			await settle(page);
+			const reloadSettlement = await settleDeferredBatches(page, 2);
+			expect(reloadSettlement.initialUnresolved, "reload must exercise bounded deferred settlement again").toBeGreaterThan(4);
+			expect(reloadSettlement.batchCount, "reload parity must settle in multiple bounded batches").toBeGreaterThan(2);
 			const refreshed = await transcriptFingerprint(page);
-			expect(sha256(refreshed), "session-open DOM/client projection must be identical after reload").toBe(sha256(first));
+			expect(refreshed.clientMessages.map(message => message.id).filter(id => SESSION_EXPECTED_RAW_IDS.includes(id as string))).toEqual(SESSION_EXPECTED_RAW_IDS);
+			expect(sha256(refreshed), "session-open DOM/client projection must be identical after multi-batch reload").toBe(sha256(first));
 		} finally {
 			try {
 				await deleteSession(sessionId);

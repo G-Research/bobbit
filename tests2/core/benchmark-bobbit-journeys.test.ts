@@ -48,9 +48,15 @@ import {
 	createBenchmarkRunRoot,
 } from "../../scripts/benchmarks/runtime.mjs";
 import {
+	createSessionOpenSampleWatchdog,
 	generateSessionOpenFixture,
+	measureLongTasksInWindow,
 	projectSessionOpenMessages,
+	projectSessionOpenRenderedText,
+	runSessionOpenSample,
+	SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES,
 	SESSION_OPEN_CASES,
+	SESSION_OPEN_FIXTURE_VERSION,
 	sessionOpenLongTaskMetricFields,
 } from "../../scripts/benchmarks/session-open.mjs";
 import * as eventStreamBenchmark from "../../scripts/benchmarks/event-stream.mjs";
@@ -220,26 +226,108 @@ describe("benchmark statistics and bounded report contract", () => {
 });
 
 describe("deterministic benchmark fixtures and independent oracles", () => {
-	it("pins exact session transcript dimensions, hashes, and semantic counts", async () => {
+	it("pins the exact session fixture-v2 dimensions, hashes, and bounded ballast", async () => {
 		const root = await temporaryRoot();
 		const expected: Record<string, any> = {
-			"1mb": [1_000_000, "af879373eb70bbe53d64f9bf33b16fda84af7aa17d31aa317c15835ddda36370", "f72abc837e0a43c243010c60c435e89cf7a7c4d2f7c660a678adcecbc2aebcb2", 115, 119, 38, 28],
-			"10mb": [10_000_000, "bbdd6ca819ccb9cf118fbb1d61e4f181493b8d75a1b8f92b5a45c0b1fa92a462", "60fc873aa5b1518e0858fbe923643ef74039c895f2ac5b29c08c1fa02403a4d6", 1168, 1172, 389, 291],
-			"25mb": [25_000_000, "42700048481b9485cac9a83ddb0295253e54afe0741d016534955b26e01d7fd6", "857e9bcc0881322e8badb79f0ea0531170e8a730be07b9031179b7992a1d7dc1", 2920, 2924, 973, 729],
+			"1mb": {
+				bytes: 1_000_000,
+				transcriptHash: "6bcdb8fdb70a4269f766e4b25438ba7d4208f259727a9ce25654c6c5c4f1b07f",
+				semanticHash: "ea6a90805b65257871f16adf7747e632f4ce594ed9706f824e6db4ec8f129aae",
+				renderIdsHash: "e04cc8840c5f3039790854b651756a2ceda56301b097188da5677d12da0e39f2",
+				renderedTextHash: "014847f3af651b9bf4ae0490a075bd12d364adf674279bf87958655a3bc50b42",
+				ballastLengthsHash: "ebe99a403beb356c27ce2c1dc4832e5bb803f90c7182015bf4a7b87ab00e2d43",
+				rawCount: 26, visibleCount: 30, renderCount: 20, renderedTextCount: 49, ballastCount: 33,
+			},
+			"10mb": {
+				bytes: 10_000_000,
+				transcriptHash: "23502ed46911c654d2cc392debc33c8c8ddc75b3764092baf78a33ecd212df82",
+				semanticHash: "5bfb8972a2b1ee088f9aab7e8dbb297c82e1219a766b9a01c46debda798bdac9",
+				renderIdsHash: "326ae2b3ef411e9a056074b59c9a0185cbab637a99b9378c4a98290c4c5d324f",
+				renderedTextHash: "e1ab5931d427189e91a8a34daa4aaaae252904f46fe08c1d81acd938cece2dcf",
+				ballastLengthsHash: "d125cbca055e06a2cc6203eff5280bec9bf0f8f088cfe7b648c57a88a29acc19",
+				rawCount: 35, visibleCount: 39, renderCount: 29, renderedTextCount: 341, ballastCount: 325,
+			},
+			"25mb": {
+				bytes: 25_000_000,
+				transcriptHash: "f44bb5a748fd1979601b95830400f3ed1d64e94040a3009d208d22a359fba68a",
+				semanticHash: "5dc288a94ccd48663be21326fbe66a48c48519716b4039b525be36690347ab66",
+				renderIdsHash: "29b18700f566e63ece1d5c7c1e5519a76558a70835ec73bec6779c3082f99cfd",
+				renderedTextHash: "7a935b420aac57637b9d47d28dcd716e54fb9a2b47cfcfc05e0a117ea6e9f9af",
+				ballastLengthsHash: "0593292d7be1f0da84ccb5eb17ac30386d42543e352797c7da190fdad74d86d3",
+				rawCount: 50, visibleCount: 54, renderCount: 44, renderedTextCount: 829, ballastCount: 813,
+			},
 		};
 		for (const fixtureCase of SESSION_OPEN_CASES) {
 			const fixture = await generateSessionOpenFixture(root, fixtureCase);
-			const [bytes, transcriptHash, semanticHash, rawCount, visibleCount, tools, errors] = expected[fixtureCase.name];
-			assert.equal((await stat(path.join(fixture.directory, "transcript.jsonl"))).size, bytes);
-			assert.equal(fixture.manifest.transcriptSha256, transcriptHash);
-			assert.equal(fixture.manifest.expectedSemanticSha256, semanticHash);
-			assert.equal(fixture.manifest.rawMessageCount, rawCount);
-			assert.equal(fixture.manifest.expectedVisibleMessageCount, visibleCount);
-			assert.equal(fixture.manifest.expectedToolCallIds.length, tools);
-			assert.equal(fixture.manifest.expectedErrorIds.length, errors);
+			const pin = expected[fixtureCase.name];
+			const transcriptPath = path.join(fixture.directory, "transcript.jsonl");
+			const transcript = await readFile(transcriptPath, "utf8");
+			const entries = transcript.trimEnd().split("\n").slice(1).map(line => JSON.parse(line));
+			const rawMessages = entries.map(entry => entry.message);
+			const ballastBlocks = rawMessages.flatMap(message => message.content ?? [])
+				.filter((block: any) => block?.type === "text" && block.text.startsWith("Bobbit session open ballast block "));
+
+			assert.equal(SESSION_OPEN_FIXTURE_VERSION, 2);
+			assert.equal(fixture.manifest.schemaVersion, 2);
+			assert.equal((await stat(transcriptPath)).size, pin.bytes);
+			assert.equal(fixture.manifest.targetBytes, pin.bytes);
+			assert.equal(fixture.manifest.transcriptBytes, pin.bytes);
+			assert.equal(fixture.manifest.transcriptSha256, pin.transcriptHash);
+			assert.equal(fixture.manifest.expectedSemanticSha256, pin.semanticHash);
+			assert.equal(fixture.manifest.expectedRenderIdsSha256, pin.renderIdsHash);
+			assert.equal(fixture.manifest.expectedRenderedTextSha256, pin.renderedTextHash);
+			assert.equal(fixture.manifest.ballastBlockLengthsSha256, pin.ballastLengthsHash);
+			assert.equal(fixture.manifest.rawMessageCount, pin.rawCount);
+			assert.equal(fixture.manifest.expectedVisibleMessageCount, pin.visibleCount);
+			assert.equal(fixture.manifest.expectedRenderIds.length, pin.renderCount);
+			assert.equal(fixture.manifest.expectedRenderedTextCount, pin.renderedTextCount);
+			assert.equal(fixture.manifest.realisticCycleCount, 8);
+			assert.equal(fixture.manifest.expectedToolCallIds.length, 8);
+			assert.deepEqual([
+				fixture.manifest.expectedModernErrorIds.length,
+				fixture.manifest.expectedLegacyErrorIds.length,
+				fixture.manifest.expectedSerializedErrorIds.length,
+			], [2, 2, 2]);
+			assert.equal(fixture.manifest.expectedErrorIds.length, 6);
 			assert.equal(fixture.manifest.expectedCompactionIds.length, 2);
+			assert.equal(ballastBlocks.length, pin.ballastCount);
+			assert.equal(fixture.manifest.ballastBlockCount, pin.ballastCount);
+			assert.equal(fixture.manifest.ballastBlockMaxBytes, SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES);
+			assert.ok(ballastBlocks.every((block: any) => Buffer.byteLength(block.text) <= SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES));
+			assert.deepEqual(fixture.manifest.rawEntryIds, entries.map(entry => entry.id));
+			assert.deepEqual(fixture.manifest.rawMessageIds, rawMessages.map(message => message.id));
+			assert.equal(new Set(fixture.manifest.rawEntryIds).size, entries.length);
+			assert.ok(entries.every((entry, index) => entry.parentId === (index === 0 ? null : entries[index - 1].id)));
+			assert.equal(transcript.split(fixture.manifest.firstMarker).length - 1, 1);
+			assert.equal(transcript.split(fixture.manifest.lastMarker).length - 1, 1);
 		}
-	}, 20_000);
+	}, 30_000);
+
+	it("makes session semantic and rendered-text oracles reject omission, duplication, reordering, and mutation", async () => {
+		const root = await temporaryRoot();
+		const fixture = await generateSessionOpenFixture(root, { name: "oracle", transcriptBytes: 1_000_000 });
+		const transcript = await readFile(path.join(fixture.directory, "transcript.jsonl"), "utf8");
+		const messages = transcript.trimEnd().split("\n").slice(1).map(line => JSON.parse(line).message);
+		const semanticHash = sha256(projectSessionOpenMessages(messages));
+		const renderedHash = sha256(projectSessionOpenRenderedText(messages));
+		const mutations = [
+			(value: any[]) => value.splice(1, 1),
+			(value: any[]) => value.splice(1, 0, structuredClone(value[1])),
+			(value: any[]) => value.splice(0, 2, value[1], value[0]),
+			(value: any[]) => { value[0].content[0].text += " mutated"; },
+			(value: any[]) => { value.find(message => message.role === "toolResult").toolCallId = "wrong-tool"; },
+		];
+		for (const mutate of mutations) {
+			const mutated = structuredClone(messages);
+			mutate(mutated);
+			assert.notEqual(sha256(projectSessionOpenMessages(mutated)), semanticHash);
+		}
+		for (const mutate of mutations.slice(0, 4)) {
+			const mutated = structuredClone(messages);
+			mutate(mutated);
+			assert.notEqual(sha256(projectSessionOpenRenderedText(mutated)), renderedHash);
+		}
+	});
 
 	it("normalizes all supported tool-error shapes in the independent session projection", () => {
 		const messages = [
@@ -368,6 +456,187 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 			maxMs: 80,
 			reliability: "browser-api",
 		});
+	});
+});
+
+describe("session-open bounded sample lifecycle", () => {
+	type ScheduledTimer = {
+		callback: () => void;
+		delay: number;
+		cleared: boolean;
+	};
+
+	function injectedClock() {
+		let clock = 0;
+		const timers: ScheduledTimer[] = [];
+		return {
+			timers,
+			now: () => clock,
+			advanceTo: (next: number) => { clock = next; },
+			setTimer: (callback: () => void, delay: number) => {
+				const timer = { callback, delay, cleared: false };
+				timers.push(timer);
+				return timer;
+			},
+			clearTimer: (timer: ScheduledTimer) => { timer.cleared = true; },
+		};
+	}
+
+	it("clips Long Tasks to the measured session-open interval", () => {
+		assert.deepEqual(measureLongTasksInWindow([
+			{ startTime: 5, duration: 10 },
+			{ startTime: 15, duration: 20 },
+			{ startTime: 35, duration: 20 },
+			{ startTime: 50, duration: 0 },
+			{ startTime: Number.NaN, duration: 10 },
+		], 10, 40), {
+			count: 3,
+			totalMs: 30,
+			maxMs: 20,
+		});
+		assert.throws(() => measureLongTasksInWindow([], 20, 10), /finite and ordered/);
+	});
+
+	it("aborts the active phase, interrupts execution, and escalates after grace", async () => {
+		const clock = injectedClock();
+		const calls: string[] = [];
+		const browserRuntime = { browser: { close: async () => {} }, cdp: {} };
+		const gatewayRuntime = { process: "owned" };
+		const watchdog = createSessionOpenSampleWatchdog({
+			timeoutMs: 100,
+			graceMs: 10,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			terminateExecution: async (runtime: any) => { assert.equal(runtime, browserRuntime); calls.push("terminate"); },
+			closeBrowser: async (runtime: any) => { assert.equal(runtime, browserRuntime); calls.push("close"); },
+		});
+		watchdog.registerBrowser(browserRuntime);
+		watchdog.registerGateway(gatewayRuntime);
+		clock.advanceTo(25);
+		watchdog.setPhase("tti");
+		clock.advanceTo(60);
+		watchdog.setPhase("paritySettle");
+		clock.advanceTo(100);
+		clock.timers.find(timer => timer.delay === 100)!.callback();
+		await Promise.resolve();
+
+		assert.equal(watchdog.timedOut, true);
+		assert.equal(watchdog.signal.aborted, true);
+		assert.equal(watchdog.error.name, "SessionOpenSampleTimeoutError");
+		assert.equal((watchdog.error as any).phase, "paritySettle");
+		assert.deepEqual((watchdog.error as any).phaseDurationsMs, {
+			prepareMs: 25,
+			ttiMs: 35,
+			paritySettleMs: 40,
+			oracleMs: 0,
+			teardownMs: 0,
+		});
+		assert.deepEqual(watchdog.resources(), { browserRuntime, gatewayRuntime });
+		assert.deepEqual(calls, ["terminate"]);
+		clock.advanceTo(110);
+		clock.timers.find(timer => timer.delay === 10)!.callback();
+		await watchdog.finish();
+		assert.deepEqual(calls, ["terminate", "close"]);
+		assert.throws(() => watchdog.throwIfExpired(), /watchdog expired.*paritySettle/i);
+	});
+
+	it("propagates an injected watchdog expiry through the sample orchestrator", async () => {
+		const clock = injectedClock();
+		let interruptCount = 0;
+		let measureCalled = false;
+		const context = { createSampleRoot: async () => "sample-root" };
+		const fixture = { directory: "fixture", manifest: {} };
+		const entry = { case: "tiny", phase: "measured", cycle: 0, order: 0, caseOrder: 0 };
+		await assert.rejects(runSessionOpenSample(context, entry, fixture, {
+			timeoutMs: 50,
+			watchdogDependencies: {
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+				terminateExecution: async () => { interruptCount += 1; },
+			},
+			prepare: async (_context: any, _sampleRoot: any, watchdog: any) => {
+				watchdog.registerBrowser({ cdp: {} });
+				clock.advanceTo(50);
+				clock.timers.find(timer => timer.delay === 50)!.callback();
+				await Promise.resolve();
+				watchdog.throwIfExpired();
+			},
+			measure: async () => {
+				measureCalled = true;
+				throw new Error("measure must not run after prepare expires");
+			},
+		}), error => {
+			assert.equal((error as any).name, "SessionOpenSampleTimeoutError");
+			assert.equal((error as any).phase, "prepare");
+			assert.match((error as Error).message, /expired after 50ms during prepare phase/);
+			return true;
+		});
+		assert.equal(interruptCount, 1);
+		assert.equal(measureCalled, false);
+		assert.equal(clock.timers[0].cleared, true);
+	});
+
+	it("runs injected prepare/measure phases and disarms the deadline after success", async () => {
+		const clock = injectedClock();
+		const context = {
+			createSampleRoot: async () => {
+				clock.advanceTo(5);
+				return "sample-root";
+			},
+		};
+		const fixture = { directory: "fixture", manifest: { expectedVisibleMessageCount: 1 } };
+		const entry = { case: "tiny", phase: "measured", cycle: 0, order: 0, caseOrder: 0 };
+		const sample = await runSessionOpenSample(context, entry, fixture, {
+			timeoutMs: 100,
+			watchdogDependencies: {
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+			},
+			prepare: async (_context: any, sampleRoot: any, watchdog: any) => {
+				assert.equal(sampleRoot, "sample-root");
+				assert.equal(watchdog.signal.aborted, false);
+				clock.advanceTo(20);
+				return { invocation: { baseUrl: "http://unused.invalid/" }, sessionId: "fixture-session" };
+			},
+			measure: async (_restored: any, _manifest: any, watchdog: any, options: any) => {
+				assert.equal(options.parityBatchSize, 4);
+				clock.advanceTo(45);
+				watchdog.setPhase("paritySettle");
+				clock.advanceTo(70);
+				watchdog.setPhase("oracle");
+				clock.advanceTo(85);
+				return {
+					metrics: { timeToInteractiveMs: 40 },
+					correctness: {
+						messageCount: 1,
+						renderCount: 1,
+						toolPairCount: 0,
+						canonicalErrorIds: [],
+						compactionCount: 0,
+						semanticSha256: "semantic",
+						renderIdsSha256: "render-ids",
+						renderedTextSha256: "rendered-text",
+					},
+					metricSupport: { longTasks: "unsupported" },
+					browserVersion: "injected-browser",
+				};
+			},
+		});
+		assert.equal(sample.correctness.status, "passed");
+		assert.equal(sample.browserVersion, "injected-browser");
+		assert.deepEqual(sample.phaseDurationsMs, {
+			prepareMs: 20,
+			ttiMs: 25,
+			paritySettleMs: 25,
+			oracleMs: 15,
+			teardownMs: 0,
+		});
+		assert.equal(clock.timers[0].cleared, true);
+		clock.timers[0].callback();
+		assert.equal(sample.correctness.status, "passed", "a disarmed watchdog cannot mutate a completed sample");
 	});
 });
 
