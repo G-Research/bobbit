@@ -8,6 +8,13 @@
 > [docs/side-panel-workspace.md](../side-panel-workspace.md). The current inbox
 > panel is a normal closeable `inbox` workspace tab; the server workspace owns
 > open/closed state, active tab, tab order, and size mode.
+>
+> The original design shipped Compact and Preserve while excluding Clear. That
+> historical scope decision has since been superseded: Clear now composes the
+> existing durable `SessionManager.clearContext` transaction rather than
+> terminating or recreating the staff session. The updated policy notes below
+> describe the current contract; the underlying clear design is documented in
+> [Clear Session Context](clear-session-context.md).
 
 Goal: introduce a first-class **inbox** for staff agents — a persistent, per-staff ordered queue of work items that decouples triggers from agent wakes.
 
@@ -101,16 +108,27 @@ Add one field to `PersistedStaff` in `src/server/agent/staff-store.ts`:
 ```ts
 /**
  * What the InboxNudger does to context before injecting a wake digest.
- * - "preserve" — leave conversation context as-is (long-running threads).
  * - "compact"  — run /compact before nudging (default).
- *
- * A future "clear" policy (terminate + respawn subprocess with fresh jsonl) is
- * deliberately deferred — see "Out of scope".
+ * - "preserve" — leave conversation context as-is.
+ * - "clear"    — clear model-facing context in place before nudging.
  */
-contextPolicy: "preserve" | "compact";
+contextPolicy?: "compact" | "preserve" | "clear";
 ```
 
-`StaffStore.load()` normalises missing records to `"compact"` (the same pattern used for `sandboxed` in `staff-store.ts`).
+The field is optional only so creation and legacy records may omit it.
+`StaffStore` normalises missing, unknown, or malformed stored values to
+`"compact"` on load and write. Each valid value round-trips unchanged.
+
+Compact awaits compaction, Preserve performs no context operation, and Clear
+awaits `SessionManager.clearContext` before digest enqueue. Clear reuses the
+manual `/clear` transaction: it retains the staff and Bobbit session identity,
+worktree/runtime configuration, pinned/system context, tools, model settings,
+and inbox while removing prior user, assistant, tool, and compaction-summary
+traffic from model context. The wake digest is the first prompt in the cleared
+generation. The normal durable **Context Cleared** boundary and display-only
+prior history remain available across reload and gateway restart. A clear or
+post-clear admission failure sends no digest, releases `nudgePending`, leaves
+entries pending, and retries on a later eligible tick.
 
 ---
 
@@ -213,7 +231,7 @@ export class InboxNudger {
   private nudgePending = new Map<string, boolean>();        // staffId → in-flight
 
   private tick(): void;
-  private applyPolicyThenNudge(staff: PersistedStaff, count: number): Promise<void>;
+  private applyPolicyThenNudge(staff: PersistedStaff, pending: InboxEntry[]): Promise<void>;
   private runCompact(sessionId: string): Promise<void>;
 }
 ```
@@ -265,7 +283,7 @@ Gating: §6.
 |---|---|
 | `tests/inbox-store.spec.ts` | put/get/list/listPending/update/remove/removeAll round-trip; FIFO order; isolated tmp `stateDir`. |
 | `tests/inbox-manager.spec.ts` | enqueue creates pending entry + WS event; transitionToCompleted only allowed from pending; rejects unknown staff/entry; nudger.poke called once per enqueue. |
-| `tests/inbox-nudger.spec.ts` | Fake clock (`node:test` `mock.timers`). Idle staff + pending entries → wake. Streaming staff → no wake. `nudgePending` gates re-nudge until `agent_start`. compact policy invokes `session.rpcClient.compact` before enqueuing wake prompt. |
+| `tests2/core/inbox-nudger.test.ts` | All three policies and wake gating. Compact compacts before enqueue; Preserve skips both context operations; Clear awaits `clearContext`, never compacts, withholds the digest on clear/admission failure, and releases `nudgePending` for retry while entries remain pending. |
 | `tests/e2e/inbox-api.spec.ts` | REST: POST /api/staff/:id/inbox enqueues. GET ?state=pending returns it. DELETE prunes. Inbox tools (impersonated via direct HTTP) transition state. Modelled on `tests/e2e/staff.spec.ts`. |
 | `tests/e2e/ui/staff-inbox.spec.ts` | Browser E2E: navigate to staff session, open inbox panel, add manual entry, assert it appears, reload page, assert persistence, cancel entry, assert removal. Modelled on `tests/e2e/ui/settings.spec.ts`. |
 
@@ -287,12 +305,20 @@ TriggerEngine.tick (60s, staff-trigger-engine.ts)
 
 InboxNudger.tick (15s)
   └─ for each active staff with idle session + pending entries + !nudgePending:
-       └─ applyPolicyThenNudge(staff, count)
+       └─ applyPolicyThenNudge(staff, pending)
             ├─ nudgePending.set(staff.id, true)
-            ├─ if contextPolicy === "compact": await runCompact(session.id)
+            ├─ Compact: await runCompact(session.id)
+            ├─ Preserve: no context operation
+            ├─ Clear: await sessionManager.clearContext(session.id)
+            │    └─ recheck same active staff/session + idle + empty prompt queue
             └─ sessionManager.enqueuePrompt(session.id,
                  "[INBOX] You have N pending item(s). Use inbox_list ...",
                  { isSteered: true })
+
+Clear's digest is enqueued only after the durable clear transaction and its
+admission recheck complete. Any policy or recheck failure clears
+`nudgePending`, leaves entries pending, and delivers no digest; a later normal
+idle tick retries.
 
 Agent (woken)
   └─ inbox_list                                              // sees N pending
@@ -372,22 +398,34 @@ class InboxNudger {
     if (this.nudgePending.get(staff.id)) return;
     const pending = this.inboxStore.listPending(staff.id);
     if (pending.length === 0) return;
-    void this.applyPolicyThenNudge(staff, pending.length);
+    void this.applyPolicyThenNudge(staff, pending);
   }
 
-  private async applyPolicyThenNudge(staff: PersistedStaff, count: number) {
+  private async applyPolicyThenNudge(staff: PersistedStaff, pending: InboxEntry[]) {
+    const sessionId = staff.currentSessionId!;
     this.nudgePending.set(staff.id, true);
     try {
       if (staff.contextPolicy === "compact") {
-        await this.runCompact(staff.currentSessionId!);
+        await this.runCompact(sessionId);
+      } else if (staff.contextPolicy === "clear") {
+        await this.sessionManager.clearContext(sessionId);
+        const currentStaff = this.staffManager.getStaff(staff.id);
+        const session = this.sessionManager.getSession(sessionId);
+        if (!currentStaff || currentStaff.state !== "active"
+          || currentStaff.currentSessionId !== sessionId
+          || !session || session.staffId !== staff.id
+          || session.status !== "idle" || !session.promptQueue.isEmpty) {
+          throw new Error("Staff wake admission changed while clearing context");
+        }
       }
+      const count = pending.length;
       const word = count === 1 ? "item" : "items";
       const msg =
         `[INBOX] You have ${count} pending ${word}. ` +
         `Use inbox_list to inspect, then process each with inbox_complete or inbox_dismiss.`;
-      await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true });
+      await this.sessionManager.enqueuePrompt(sessionId, msg, { isSteered: true });
     } catch (err) {
-      this.nudgePending.delete(staff.id);                     // allow retry on next tick
+      this.nudgePending.delete(staff.id);                     // entries stay pending; retry later
       console.error(`[inbox-nudger] applyPolicyThenNudge failed for ${staff.id}:`, err);
     }
   }
@@ -422,7 +460,7 @@ A session can't be both (staff sessions have `staffId` set, team-lead sessions h
 
 ### 5.4 Why 15 s tick, no backoff
 
-- 15 s is the maximum visible nudge latency for a freshly-idle staff. Trigger latency is `min(60 s trigger poll, 15 s nudger) + compact time`. The synchronous `poke` after `enqueue` brings down latency for the *enqueue → nudge* edge to ~0; the 15 s only governs *idle → nudge* after a long-running task.
+- 15 s is the maximum visible nudge latency for a freshly-idle staff. Trigger latency is `min(60 s trigger poll, 15 s nudger) + selected context-policy time`. The synchronous `poke` after `enqueue` brings down latency for the *enqueue → nudge* edge to ~0; the 15 s only governs *idle → nudge* after a long-running task.
 - No backoff because inbox nudges only fire against idle agents, by construction. We are not "interrupting productive work" — we are notifying an idle worker that work exists. Re-nudging on every fresh idle is the desired UX. If observed nudge-spam becomes a problem (e.g. agent loops between idle and one-token agent_start), add backoff then.
 
 ---
@@ -557,22 +595,18 @@ Submits `POST /api/staff/:id/inbox` with `{ title, prompt, source: { type: "manu
 
 ### 8.5 `contextPolicy` radio in staff edit form
 
-Insert into `src/app/staff-page.ts::renderEditView` between the "Pinned Context" textarea (`staff-page.ts`) and the save bar (`staff-page.ts`):
+The staff edit form exposes an accessible **Context Policy** fieldset with
+three native radios in this order: Compact (default), Preserve, and Clear. The
+option row wraps at narrow widths. Its helper text explains that Clear removes
+prior conversation from model context while keeping pinned context and prior
+history visible as display-only.
 
-```html
-<div>
-  <label class="text-xs text-muted-foreground mb-1.5 block font-medium">Context Policy</label>
-  <p class="text-[10px] text-muted-foreground mb-1">
-    What happens before a wake digest is sent when the inbox has pending entries.
-  </p>
-  <div class="flex gap-3">
-    <!-- radio: preserve -->
-    <!-- radio: compact (default) -->
-  </div>
-</div>
-```
-
-`editContextPolicy` is added to the page-local state (`staff-page.ts`) and threaded through `handleSave` (which `PUT`s to `/api/staff/:id`). Add `contextPolicy` to the body accepted by `server.ts` and the `StaffStore.update` `Partial` type.
+`editContextPolicy` is page-local state and is sent through `handleSave` to
+`PUT /api/staff/:id`; selecting a radio alone does not run a context operation.
+Saving persists the policy across form reloads and gateway restarts. The server
+accepts the three known tokens. An unknown API token is ignored for this field,
+so the previously stored policy remains unchanged while other valid update
+fields still apply.
 
 ### 8.6 Sidebar — explicit non-change
 
@@ -724,9 +758,12 @@ No compatibility shim. There are no external callers (verified: only the three s
 
 ## 10. Out of scope
 
-Restated from the goal spec for the implementer's convenience:
+Restated from the original goal spec for historical context. The original
+exclusion of Clear was superseded when it was added by reusing the in-place,
+durable `SessionManager.clearContext` transaction. It preserves staff/Bobbit
+session identity and configuration, unlike the rejected terminate-and-respawn
+sketch.
 
-- **`contextPolicy: "clear"`** — terminate + respawn subprocess with fresh jsonl. Deferred; the enum is forward-compatible.
 - **Coalescing / dedup** of pending entries. Every enqueue produces a new entry. Agent dedupes via `inbox_list`.
 - **Memory-editing tool for staff.** Memory remains editable only via the UI (`staff-page.ts`).
 - **Auto-cancel / "stuck entry" surfacing.** Pending is pending. Only the agent or the user resolves entries.
@@ -745,7 +782,8 @@ Restated from the goal spec for the implementer's convenience:
 | 4 | Concurrent enqueue from trigger + manual UI on the same idle staff? | Both append distinct entries (no coalescing). Both call `nudger.poke()`. The poke microtask is idempotent — one tick processes the batch (count = 2) with one digest. |
 | 5 | Does `poke` race the 15 s `setInterval`? | The `queueMicrotask`-scheduled `tickOne(staffId)` and the periodic `tick()` both consult `nudgePending` first. Worst case: one redundant call, gated to a no-op by the `nudgePending.get(...)` check. |
 | 6 | What happens during server restart with a streaming staff session? | Restart restores sessions to `idle` (assuming graceful) and `inboxStore.load()` reads pending entries off disk. First tick after boot nudges. |
-| 7 | Sandboxed staff — does compact work? | Yes; compact is an RPC over the bridge, not a host-side filesystem op. Sidecar entries land at `<projectStateDir>/compaction-sidecar/<sessionId>.jsonl` regardless of sandbox (per `compaction-sidecar.ts`). |
+| 7 | Sandboxed staff — do context policies work? | Yes. Compact uses the bridge RPC. Clear uses `SessionManager.clearContext`, which owns host/container transcript routing and preserves the same sandbox, worktree, pinned/system context, tools, model settings, inbox, and staff/session identity. |
+| 8 | What if Clear fails or another operation wins admission? | The nudger fails closed: no digest is delivered, `nudgePending` is released, inbox entries stay pending, and the next eligible idle tick retries. A successful Clear retains the normal durable **Context Cleared** boundary and display-only prior-history fold. |
 
 ---
 
@@ -770,7 +808,11 @@ Cross-references the goal spec's step 9.
 |---|---|---|
 | `tests/inbox-store.spec.ts` | unit (file://) | `put`/`get`/`list`/`listPending`/`update`/`remove`/`removeAll` with isolated tmp `stateDir`. FIFO ordering. Reload from disk recovers state. Concurrent put on the same staff id collapses to last-writer-wins (mirrors `StaffStore` behaviour). |
 | `tests/inbox-manager.spec.ts` | unit | `enqueue` emits `inbox.entry.added` and calls `nudger.poke(staffId)` exactly once. `transitionToCompleted` rejects non-pending. `transitionToTerminal` rejects unknown id with 404 semantics. `remove` emits `inbox.entry.removed`. Reject unknown staff id. |
-| `tests/inbox-nudger.spec.ts` | unit (fake clock via `node:test` `mock.timers`) | Idle staff + pending → wake exactly once until `agent_start` clears `nudgePending`. Streaming staff → no wake. Starting staff → no wake. `contextPolicy="compact"` calls `session.rpcClient.compact(120_000)` before `enqueuePrompt`. `contextPolicy="preserve"` skips compact. `poke()` fast-paths a wake within one microtask. Empty inbox → no wake. |
+| `tests2/core/inbox-nudger.test.ts` | core | Idle staff + pending wakes exactly once; busy/empty states skip. Compact awaits compaction; Preserve skips compact and clear; Clear awaits `clearContext` before enqueue, never compacts, and withholds/retries after clear or post-clear admission failure. |
+| `tests2/core/staff-context-policy-store.test.ts` | core | Compact, Preserve, and Clear round-trip; missing, legacy, unknown, and malformed stored values normalize to Compact. |
+| `tests2/integration/inbox-api.test.ts` | integration | All three policies round-trip through `PUT`; unknown tokens leave the prior policy unchanged; omitted creation defaults to Compact. |
+| `tests2/integration/staff-clear-context-policy.test.ts` | integration | Clear wake excludes prior model-facing user/assistant/tool/compaction history, makes the digest first, preserves identity/config, and persists the durable clear boundary and display-only history across reload. |
+| `tests2/browser/journeys/staff-context-policy.journey.spec.ts` | browser | Select/save/reload Compact, Preserve, and Clear; preserve staff/session identity; verify accessible radios and narrow-width wrapping. |
 | `tests/e2e/inbox-api.spec.ts` | API E2E (in-process gateway) | `POST /api/staff/:id/inbox` returns 201 with pending entry. `GET /api/staff/:id/inbox?state=pending` lists it. `GET ?state=completed` excludes it. `POST /api/staff/:id/inbox/:entryId/complete` (with valid `sessionId.staffId === :id`) transitions state. `…/dismiss` with `outcome="failed"` and `reason` transitions. `DELETE /api/staff/:id/inbox/:entryId` prunes. 403 on `sessionId` whose `staffId` doesn't match. 404 on unknown staff/entry. 409 on non-pending entry transition. |
 | `tests/e2e/ui/staff-inbox.spec.ts` | Browser E2E (spawned gateway) | Open app → navigate to a staff session (created via REST in the `beforeAll`) → explicitly open the `inbox` workspace tab → "+ Add to inbox" opens dialog → submit → entry appears in Pending section → reload page → entry still there (content persistence) and the tab/size state matches the server workspace → click Cancel on entry → entry moves to History section (state=cancelled) → click delete in history → entry removed. Close the `inbox` tab, reload, and assert it stays closed until explicitly reopened. Required by AGENTS.md ("every user-facing feature MUST have a browser E2E"). |
 | `tests/tool-description-budget.test.ts` | unit (existing — extended) | Add `"inbox"` to `EXTENSION_FILES`. Existing assertions automatically enforce the 150-char / 80-char budgets on the three new tools. |

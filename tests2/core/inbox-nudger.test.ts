@@ -33,7 +33,13 @@ type StaffStatus = "idle" | "streaming" | "starting" | "terminated";
 
 interface FakeSession {
 	id: string;
+	staffId: string;
 	status: StaffStatus;
+	promptQueue: {
+		readonly isEmpty: boolean;
+		readonly length: number;
+		toArray(): unknown[];
+	};
 	rpcClient: {
 		compact: ReturnType<typeof vi.fn>;
 	};
@@ -41,7 +47,7 @@ interface FakeSession {
 
 function makeHarness(opts: {
 	staffId?: string;
-	contextPolicy?: "compact" | "preserve";
+	contextPolicy?: "compact" | "preserve" | "clear";
 	staffState?: "active" | "paused" | "retired";
 	sessionId?: string;
 	sessionStatus?: StaffStatus;
@@ -66,15 +72,24 @@ function makeHarness(opts: {
 		updateStaff: vi.fn((id: string, patch: Record<string, unknown>) => { if (id === staffId) Object.assign(staff, patch); return staff; }),
 	};
 
+	const promptQueueRows: unknown[] = [];
 	const session: FakeSession = {
 		id: sessionId,
+		staffId,
 		status: opts.sessionStatus ?? "idle",
+		promptQueue: {
+			get isEmpty() { return promptQueueRows.length === 0; },
+			get length() { return promptQueueRows.length; },
+			toArray: () => [...promptQueueRows],
+		},
 		rpcClient: { compact: vi.fn(async (_t?: number) => undefined) },
 	};
 	const enqueuePrompt = vi.fn(async (_id: string, _msg: string, _opts?: any) => {});
+	const clearContext = vi.fn(async (_id: string) => undefined);
 	const sessionManager = {
 		getSession: (id: string) => (id === sessionId ? session : undefined),
 		enqueuePrompt,
+		clearContext,
 	};
 
 	const clock = createManualClock();
@@ -85,7 +100,18 @@ function makeHarness(opts: {
 		clock,
 	});
 
-	return { nudger, staff, session, staffManager, sessionManager, inboxStore, enqueuePrompt, clock };
+	return {
+		nudger,
+		staff,
+		session,
+		staffManager,
+		sessionManager,
+		inboxStore,
+		enqueuePrompt,
+		clearContext,
+		promptQueueRows,
+		clock,
+	};
 }
 
 function enqueueDirect(inboxStore: InstanceType<typeof InboxStore>, staffId: string, id = "e1") {
@@ -233,11 +259,12 @@ describe("InboxNudger — contextPolicy", () => {
 
 		assert.equal(h.session.rpcClient.compact.mock.calls.length, 1);
 		assert.equal(h.session.rpcClient.compact.mock.calls[0][0], 120_000);
+		assert.equal(h.clearContext.mock.calls.length, 0);
 		assert.deepEqual(order, ["compact", "enqueue"]);
 		h.nudger.stop();
 	});
 
-	it("\"preserve\" skips compact and goes straight to enqueuePrompt", async () => {
+	it("\"preserve\" skips compact and clear, then goes straight to enqueuePrompt", async () => {
 		const h = makeHarness({ contextPolicy: "preserve" });
 		enqueueDirect(h.inboxStore, h.staff.id);
 		h.nudger.start();
@@ -246,8 +273,113 @@ describe("InboxNudger — contextPolicy", () => {
 		await flushMicrotasks();
 
 		assert.equal(h.session.rpcClient.compact.mock.calls.length, 0);
+		assert.equal(h.clearContext.mock.calls.length, 0);
 		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 		h.nudger.stop();
+	});
+
+	it("\"clear\" awaits clearContext before enqueueing and never compacts", async () => {
+		const h = makeHarness({ contextPolicy: "clear" });
+		enqueueDirect(h.inboxStore, h.staff.id);
+		h.nudger.start();
+
+		const order: string[] = [];
+		let releaseClear!: () => void;
+		const clearFinished = new Promise<void>((resolve) => { releaseClear = resolve; });
+		h.clearContext.mockImplementation(async () => {
+			order.push("clear-start");
+			await clearFinished;
+			order.push("clear-complete");
+		});
+		h.enqueuePrompt.mockImplementation(async () => { order.push("enqueue"); });
+
+		h.clock.advance(15_000);
+		await flushMicrotasks();
+
+		assert.deepEqual(order, ["clear-start"]);
+		assert.equal(h.clearContext.mock.calls[0]?.[0], h.session.id);
+		assert.equal(h.session.rpcClient.compact.mock.calls.length, 0);
+		assert.equal(h.enqueuePrompt.mock.calls.length, 0, "digest must wait for the clear transaction");
+
+		releaseClear();
+		await flushMicrotasks();
+		assert.deepEqual(order, ["clear-start", "clear-complete", "enqueue"]);
+		h.nudger.stop();
+	});
+
+	it("admits a Clear wake digest before a microtask scheduled by the lastWakeAt write", async () => {
+		const h = makeHarness({ contextPolicy: "clear" });
+		enqueueDirect(h.inboxStore, h.staff.id);
+
+		const order: string[] = [];
+		let releaseDelivery!: () => void;
+		const deliveryFinished = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+		h.clearContext.mockImplementation(async () => { order.push("clear-complete"); });
+		h.staffManager.updateStaff.mockImplementation((id: string, patch: Record<string, unknown>) => {
+			if (id === h.staff.id) Object.assign(h.staff, patch);
+			order.push("last-wake-updated");
+			queueMicrotask(() => { order.push("competitor"); });
+			return h.staff;
+		});
+		h.enqueuePrompt.mockImplementation(() => {
+			order.push("digest-admitted");
+			return deliveryFinished;
+		});
+
+		h.nudger.poke(h.staff.id);
+		await flushMicrotasks();
+
+		assert.deepEqual(order, ["clear-complete", "last-wake-updated", "digest-admitted", "competitor"]);
+		assert.equal(h.clearContext.mock.calls.length, 1);
+		assert.equal(h.session.rpcClient.compact.mock.calls.length, 0);
+		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
+
+		releaseDelivery();
+		await flushMicrotasks();
+	});
+
+	it("a rejected clear delivers no digest, keeps inbox pending, and releases nudgePending for retry", async () => {
+		const h = makeHarness({ contextPolicy: "clear" });
+		enqueueDirect(h.inboxStore, h.staff.id);
+		let attempts = 0;
+		h.clearContext.mockImplementation(async () => {
+			attempts++;
+			if (attempts === 1) throw new Error("clear transaction rejected");
+		});
+
+		h.nudger.poke(h.staff.id);
+		await flushMicrotasks();
+
+		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
+		assert.equal(h.session.rpcClient.compact.mock.calls.length, 0);
+		assert.equal(h.inboxStore.listPending(h.staff.id).length, 1, "failed clear must not consume inbox work");
+
+		h.nudger.poke(h.staff.id);
+		await flushMicrotasks();
+		assert.equal(h.clearContext.mock.calls.length, 2, "retry proves nudgePending was released");
+		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
+		assert.equal(h.inboxStore.listPending(h.staff.id).length, 1, "nudging never mutates entry state");
+	});
+
+	it.each([
+		["non-idle session", (h: ReturnType<typeof makeHarness>) => { h.session.status = "streaming"; }, (h: ReturnType<typeof makeHarness>) => { h.session.status = "idle"; }],
+		["non-empty prompt queue", (h: ReturnType<typeof makeHarness>) => { h.promptQueueRows.push({ id: "competing-prompt" }); }, (h: ReturnType<typeof makeHarness>) => { h.promptQueueRows.length = 0; }],
+	] as const)("withholds a Clear digest after an incompatible %s and retries after it clears", async (_name, makeIncompatible, restore) => {
+		const h = makeHarness({ contextPolicy: "clear" });
+		enqueueDirect(h.inboxStore, h.staff.id);
+		h.clearContext.mockImplementation(async () => { makeIncompatible(h); });
+
+		h.nudger.poke(h.staff.id);
+		await flushMicrotasks();
+		assert.equal(h.enqueuePrompt.mock.calls.length, 0);
+		assert.equal(h.inboxStore.listPending(h.staff.id).length, 1);
+
+		restore(h);
+		h.clearContext.mockImplementation(async () => undefined);
+		h.nudger.poke(h.staff.id);
+		await flushMicrotasks();
+		assert.equal(h.clearContext.mock.calls.length, 2, "post-clear admission failure must release nudgePending");
+		assert.equal(h.enqueuePrompt.mock.calls.length, 1);
 	});
 
 	it("tolerates an rpcClient without a compact() method (test double)", async () => {

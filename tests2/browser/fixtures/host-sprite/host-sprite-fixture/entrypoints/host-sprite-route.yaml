@@ -1,0 +1,6 @@
+id: host-sprite.route
+kind: route
+routeId: host-sprite-fixture
+target:
+  panelId: host-sprite.panel
+paramKeys: [staffId]

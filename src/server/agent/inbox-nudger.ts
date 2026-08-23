@@ -173,12 +173,32 @@ export class InboxNudger {
 	private async applyPolicyThenNudge(staff: PersistedStaff, pending: InboxEntry[]): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
-		const counters = diagEnabled ? { attempts: 1, compactCalls: 0, updateStaffErrors: 0, nudgesSent: 0, errors: 0 } : undefined;
+		const counters = diagEnabled ? { attempts: 1, compactCalls: 0, clearCalls: 0, updateStaffErrors: 0, nudgesSent: 0, errors: 0 } : undefined;
+		const sessionId = staff.currentSessionId!;
 		this.nudgePending.set(staff.id, true);
 		try {
 			if (staff.contextPolicy === "compact") {
 				if (counters) counters.compactCalls = 1;
-				await this.runCompact(staff.currentSessionId!);
+				await this.runCompact(sessionId);
+			} else if (staff.contextPolicy === "clear") {
+				if (counters) counters.clearCalls = 1;
+				await this.sessionManager.clearContext(sessionId);
+
+				// clearContext's replacement coordinator drains any prompt admitted
+				// during the transaction before resolving. Fail closed if that work won
+				// admission, or if the staff/session binding changed, so the digest can
+				// be the first prompt delivered into a subsequently cleared context.
+				const currentStaff = this.staffManager.getStaff(staff.id);
+				const clearedSession = this.sessionManager.getSession(sessionId);
+				if (!currentStaff
+					|| currentStaff.state !== "active"
+					|| currentStaff.currentSessionId !== sessionId
+					|| !clearedSession
+					|| clearedSession.staffId !== staff.id
+					|| clearedSession.status !== "idle"
+					|| !clearedSession.promptQueue.isEmpty) {
+					throw new Error("Staff wake admission changed while clearing context");
+				}
 			}
 			// Never merge unrelated notification roots into one staff turn. If any
 			// notification is pending, reserve this wake for its exact entry only;
@@ -203,7 +223,7 @@ export class InboxNudger {
 			if (notificationEntry?.notificationInput && notificationEntry.source.triggerId) {
 				const input = notificationEntry.notificationInput;
 				const notification = input.notification;
-				const result = await this.sessionManager.enqueueStaffNotificationPrompt(staff.currentSessionId!, msg, {
+				const result = await this.sessionManager.enqueueStaffNotificationPrompt(sessionId, msg, {
 					projectId: notification.projectId,
 					staffId: staff.id,
 					triggerId: notificationEntry.source.triggerId,
@@ -213,7 +233,7 @@ export class InboxNudger {
 				});
 				if (result.status !== "dispatched") this.nudgePending.delete(staff.id);
 			} else {
-				await this.sessionManager.enqueuePrompt(staff.currentSessionId!, msg, { isSteered: true, source: "system" });
+				await this.sessionManager.enqueuePrompt(sessionId, msg, { isSteered: true, source: "system" });
 			}
 			if (counters) counters.nudgesSent = 1;
 		} catch (err) {

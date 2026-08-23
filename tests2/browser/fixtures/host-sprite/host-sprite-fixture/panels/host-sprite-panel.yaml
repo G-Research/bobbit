@@ -1,0 +1,4 @@
+id: host-sprite.panel
+title: Host Sprite Fixture
+entry: ../lib/panel.js
+instanceMode: singleton
