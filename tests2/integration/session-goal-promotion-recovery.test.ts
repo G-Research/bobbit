@@ -6,6 +6,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { copyGitTemplate } from "../harness/git-template.js";
 import { apiFetch as harnessApiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
 import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
+import { readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
 
 let operatorCookie: string | undefined;
 
@@ -21,9 +22,10 @@ async function authenticatedOperatorCookie(): Promise<string> {
 
 async function apiFetch(requestPath: string, opts: RequestInit = {}): Promise<Response> {
 	const method = (opts.method ?? "GET").toUpperCase();
-	const mutatesProposal = /^\/api\/sessions\/[^/]+\/proposal\//.test(requestPath)
-		&& (method === "POST" || method === "PUT" || method === "DELETE");
-	if (!mutatesProposal) return harnessApiFetch(requestPath, opts);
+	const requiresOperatorCookie = (/^\/api\/sessions\/[^/]+\/proposal\//.test(requestPath)
+		&& (method === "POST" || method === "PUT" || method === "DELETE"))
+		|| (method === "POST" && /^\/api\/goals\/[^/]+\/(pause|resume)$/.test(requestPath));
+	if (!requiresOperatorCookie) return harnessApiFetch(requestPath, opts);
 	operatorCookie ??= await authenticatedOperatorCookie();
 	return harnessApiFetch(requestPath, {
 		...opts,
@@ -184,6 +186,40 @@ test.describe("current-session goal promotion recovery and ownership continuity"
 		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(200);
 		expect(transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title)), "failed finalization must not dispatch before the goal is in progress").toBe(0);
 
+		const paused = await apiFetch(`/api/goals/${goal.id}/pause`, {
+			method: "POST",
+			body: JSON.stringify({ cascade: false }),
+		});
+		expect(paused.status, await paused.clone().text()).toBe(200);
+		expect(context.goalStore.get(goal.id)?.paused).toBe(true);
+		const pausedLive = gateway.sessionManager.getSession(ownerId) as any;
+		const transcriptBeforePausedRetry = fs.readFileSync(transcriptPath, "utf8");
+		const queueBeforePausedRetry = structuredClone(pausedLive.promptQueue.toArray());
+		const durableQueueBeforePausedRetry = structuredClone(gateway.sessionManager.getPersistedSession(ownerId)?.messageQueue ?? []);
+		const authorSidecarBeforePausedRetry = structuredClone(readAuthorSidecar(ownerId));
+		const statusBeforePausedRetry = pausedLive.status;
+		const activityBeforePausedRetry = gateway.sessionManager.getPersistedSession(ownerId)?.lastActivity;
+
+		const pausedRetry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote finalizer retry" }),
+		});
+		expect(pausedRetry.status).toBe(409);
+		expect(await jsonResponse(pausedRetry)).toMatchObject({ code: "GOAL_PAUSED", goalId: goal.id });
+		expect(fs.readFileSync(transcriptPath, "utf8")).toBe(transcriptBeforePausedRetry);
+		expect(pausedLive.promptQueue.toArray()).toEqual(queueBeforePausedRetry);
+		expect(gateway.sessionManager.getPersistedSession(ownerId)?.messageQueue ?? []).toEqual(durableQueueBeforePausedRetry);
+		expect(readAuthorSidecar(ownerId)).toEqual(authorSidecarBeforePausedRetry);
+		expect(pausedLive.status).toBe(statusBeforePausedRetry);
+		expect(gateway.sessionManager.getPersistedSession(ownerId)?.lastActivity).toBe(activityBeforePausedRetry);
+
+		const resumed = await apiFetch(`/api/goals/${goal.id}/resume`, {
+			method: "POST",
+			body: JSON.stringify({ cascade: false }),
+		});
+		expect(resumed.status, await resumed.clone().text()).toBe(200);
+		expect(context.goalStore.get(goal.id)?.paused).toBe(false);
+
 		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
 			body: JSON.stringify({ title: "Promote finalizer retry" }),
@@ -198,6 +234,16 @@ test.describe("current-session goal promotion recovery and ownership continuity"
 			() => transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title)),
 			{ timeout: 10_000, interval: 100, message: "retry finalization must append exactly one durable kickoff" },
 		).toBe(1);
+
+		await waitForSessionStatus(ownerId, "idle", 30_000);
+		const exactRetry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote finalizer retry" }),
+		});
+		expect(exactRetry.status, await exactRetry.clone().text()).toBe(201);
+		await gateway.teamManager.finalizeAdoptedLead(goal.id, { coldStart: true });
+		expect(transcriptTextOccurrences(transcriptPath, promotionKickoff(goal.title))).toBe(1);
+		expect(readAuthorSidecar(ownerId).filter(binding => binding.intentId === `promotion-kickoff:${goal.id}`)).toHaveLength(1);
 	});
 
 	test("preserves a real two-component worktree set through archive and removes it on final purge", async ({ gateway }) => {

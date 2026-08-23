@@ -299,6 +299,7 @@ async function makeAdoptedAdmissionFixture(options: { durablePromptIntents?: Set
 		cwd: "/worktrees/session-owner",
 		archived: false,
 		paused: false,
+		setupStatus: "ready",
 		worktreeOwnerSessionId: ownerSessionId,
 	};
 	let subscriptionCount = 0;
@@ -316,6 +317,7 @@ async function makeAdoptedAdmissionFixture(options: { durablePromptIntents?: Set
 	const durablePromptIntents = options.durablePromptIntents ?? new Set<string>();
 	const promptOccurrences: Array<{ sessionId: string; text: string; intentId: string }> = [];
 	let failNextTransition = false;
+	let pauseDuringNextTransition = false;
 	const source = {
 		id: ownerSessionId,
 		title: "Regular session",
@@ -351,6 +353,10 @@ async function makeAdoptedAdmissionFixture(options: { durablePromptIntents?: Set
 				throw new Error("injected transition failure");
 			}
 			goals.update(goalId, patch);
+			if (pauseDuringNextTransition) {
+				pauseDuringNextTransition = false;
+				goals.update(goalId, { paused: true });
+			}
 			return goals.get(goalId);
 		},
 	};
@@ -471,6 +477,7 @@ async function makeAdoptedAdmissionFixture(options: { durablePromptIntents?: Set
 		teams,
 		liveSessions,
 		failNextTransition: () => { failNextTransition = true; },
+		pauseDuringNextTransition: () => { pauseDuringNextTransition = true; },
 		get workerCount() { return workerSequence; },
 		get subscriptionCount() { return subscriptionCount; },
 		get unsubscribeCount() { return unsubscribeCount; },
@@ -713,6 +720,52 @@ describe("TeamManager adopted-lead finalization", () => {
 			assert.equal(fixture.activeSubscriptions, 1);
 			assert.equal(fixture.workerCount, 0);
 			assertPromotionKickoff(fixture, undefined);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	for (const scenario of [
+		{ name: "paused", patch: { paused: true }, code: "GOAL_PAUSED" },
+		{ name: "complete", patch: { state: "complete" }, code: "GOAL_COMPLETE" },
+		{ name: "shelved", patch: { state: "shelved" }, code: "GOAL_SHELVED" },
+		{ name: "blocked", patch: { state: "blocked" }, code: "GOAL_BLOCKED" },
+		{ name: "setup-not-ready", patch: { setupStatus: "preparing" }, code: "GOAL_SETUP_INCOMPLETE" },
+	] as const) {
+		it(`rejects ${scenario.name} goals before subscribing or admitting a kickoff`, async () => {
+			const fixture = await makeAdoptedAdmissionFixture();
+			try {
+				committedAttachment(fixture);
+				fixture.goals.update(fixture.goal.id, scenario.patch);
+
+				await assert.rejects(
+					() => fixture.manager.finalizeAdoptedLead(fixture.goal.id),
+					(error: any) => error?.code === scenario.code && error?.status === 409,
+				);
+				assert.equal(fixture.subscriptionCount, 0);
+				assert.equal(fixture.activeSubscriptions, 0);
+				assert.equal(fixture.promptCalls.length, 0);
+				assert.equal(fixture.promptOccurrences.length, 0);
+			} finally {
+				fixture.manager.dispose();
+			}
+		});
+	}
+
+	it("revalidates a todo goal after activation and lets a concurrent pause prevent kickoff", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			committedAttachment(fixture);
+			fixture.pauseDuringNextTransition();
+
+			await assert.rejects(
+				() => fixture.manager.finalizeAdoptedLead(fixture.goal.id),
+				(error: any) => error?.code === "GOAL_PAUSED" && error?.status === 409,
+			);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
+			assert.equal(fixture.goals.get(fixture.goal.id)?.paused, true);
+			assert.equal(fixture.promptCalls.length, 0);
+			assert.equal(fixture.promptOccurrences.length, 0);
 		} finally {
 			fixture.manager.dispose();
 		}

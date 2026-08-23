@@ -16786,6 +16786,8 @@ async function handleApiRoute(
 			} catch (error) {
 				if (error instanceof GoalCandidateValidationResponseError) {
 					writeGoalCandidateError(error.validation);
+				} else if (error instanceof GoalPausedError) {
+					json({ error: error.message, code: error.code, goalId: error.goalId }, error.status);
 				} else {
 					const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : 400;
 					const details = (error as any)?.details;

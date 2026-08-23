@@ -2327,6 +2327,24 @@ export class TeamManager {
 		}
 	}
 
+	/** Finalization may activate only a canonical, runnable adopted goal. */
+	private assertAdoptedLeadFinalizationEligible(goal: PersistedGoal): void {
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot finalize its adopted lead");
+		}
+		if (goal.paused) throw new GoalPausedError(goal.id);
+		if (goal.state === "complete") {
+			throw new TeamStartError("GOAL_COMPLETE", "Goal is complete and cannot finalize its adopted lead");
+		}
+		if (goal.state === "shelved") {
+			throw new TeamStartError("GOAL_SHELVED", "Goal is shelved and cannot finalize its adopted lead");
+		}
+		if (goal.state === "blocked") {
+			throw new TeamStartError("GOAL_BLOCKED", "Goal is waiting for its dependencies before its adopted lead can be finalized");
+		}
+		this.assertGoalSetupReady(goal);
+	}
+
 	/**
 	 * Complete the normal active-team lifecycle after SessionManager has committed
 	 * an in-place lead promotion. This installs the ordinary lead subscription,
@@ -2340,9 +2358,7 @@ export class TeamManager {
 			if (!goal.worktreeOwnerSessionId) {
 				throw new TeamStartError("GOAL_NOT_ADOPTED", "Goal does not adopt an existing session");
 			}
-			if (goal.archived) {
-				throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot finalize its adopted lead");
-			}
+			this.assertAdoptedLeadFinalizationEligible(goal);
 			const entry = this.teams.get(goalId);
 			if (!this.hasExactAdoptedLeadAttachment(goal, entry)) {
 				throw new TeamStartError(
@@ -2361,13 +2377,18 @@ export class TeamManager {
 			if (goal.state === "todo") {
 				await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
 			}
+			// The activation update above is an await boundary. Re-read and revalidate
+			// so an operator pause or concurrent lifecycle transition wins admission.
+			const canonicalGoal = this.resolveGoal(goalId);
+			if (!canonicalGoal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+			this.assertAdoptedLeadFinalizationEligible(canonicalGoal);
 			await this.sessionManager.enqueuePrompt(
-				goal.worktreeOwnerSessionId,
-				`You have been promoted to the team lead for the goal "${goal.title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`,
+				canonicalGoal.worktreeOwnerSessionId!,
+				`You have been promoted to the team lead for the goal "${canonicalGoal.title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`,
 				{
 					source: "system",
 					suppressTitleGen: true,
-					intentId: `promotion-kickoff:${goal.id}`,
+					intentId: `promotion-kickoff:${canonicalGoal.id}`,
 					coldStart: options.coldStart,
 				},
 			);
