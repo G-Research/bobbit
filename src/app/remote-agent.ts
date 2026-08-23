@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { PROPOSAL_PARSERS } from "./proposal-parsers.js";
 import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
@@ -14,12 +14,17 @@ import { gatewayRoute } from "../shared/base-path.js";
  *
  * Mirrors `getModel("anthropic", "claude-opus-4-6")` with `contextWindow: 0`
  * (the previous initial state). The hydrated model from the server replaces
- * this within a few ms of WS connect — only `contextWindow` and `provider`
- * are read from the placeholder, both defensively.
+ * this within a few ms of WS connect — only `contextWindow`, optional display
+ * `modelCapacity`, and `provider` are read from the placeholder, all defensively.
  *
  * See `docs/design/shrink-initial-bundle.md` (Task A) and `pi-ai-lazy.ts`.
  */
-const PLACEHOLDER_DEFAULT_MODEL: Model<"anthropic-messages"> = {
+type ClientModel = Model<Api> & {
+	/** Display-only hard provider request limit. `contextWindow` remains the runtime compaction target. */
+	modelCapacity?: number;
+};
+
+const PLACEHOLDER_DEFAULT_MODEL: ClientModel = {
 	id: "claude-opus-4-6",
 	name: "Claude Opus 4.6",
 	api: "anthropic-messages",
@@ -4001,9 +4006,22 @@ export class RemoteAgent {
 				// `compaction_start` — the snapshot refresh hasn't landed yet).
 				try {
 					const tokens = this._readContextTokens();
-					const win = (this._state.model as any)?.contextWindow;
-					if (typeof tokens === "number" && tokens > 0 && typeof win === "number" && win > 0) {
-						this._compactionStartPct = Math.min(100, Math.round((tokens / win) * 100));
+					const model = this._state.model as Partial<ClientModel> | undefined;
+					const target = model?.contextWindow;
+					const capacity = model?.modelCapacity;
+					const targetLimit = typeof target === "number" && Number.isFinite(target) && target > 0
+						? target
+						: null;
+					const capacityLimit = typeof capacity === "number" && Number.isFinite(capacity) && capacity > 0
+						? capacity
+						: null;
+					// Capacity is display-only: use it for this visual sample only when it is
+					// a distinct larger limit. Never replace the runtime compaction target.
+					const scale = targetLimit != null && capacityLimit != null && capacityLimit > targetLimit
+						? capacityLimit
+						: targetLimit ?? capacityLimit;
+					if (typeof tokens === "number" && tokens > 0 && scale != null) {
+						this._compactionStartPct = Math.min(100, Math.round((tokens / scale) * 100));
 					} else {
 						this._compactionStartPct = null;
 					}

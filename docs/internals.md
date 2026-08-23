@@ -1041,11 +1041,11 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 
 ### Archived session WS handshake
 
-When a client opens an archived session, the WebSocket handler in `src/server/ws/handler.ts` must push a `state` frame as part of the initial handshake - immediately after `auth_ok` / `session_status` / `session_title`. The frame carries the session's persisted `model` (provider, id, plus `contextWindow` / `maxTokens` / `reasoning` / `thinkingLevelMap` resolved by `resolveModelStateMeta`) and any `imageGenerationModel`, matching the shape live sessions receive via the proactive `getState()` push.
+When a client opens an archived session, the WebSocket handler in `src/server/ws/handler.ts` must push a `state` frame as part of the initial handshake - immediately after `auth_ok` / `session_status` / `session_title`. The frame carries the session's persisted `model` identity plus optional exact metadata (`contextWindow`, `modelCapacity`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `input`) resolved by `resolveModelStateMeta`, and any `imageGenerationModel`, matching the shape live sessions receive via the proactive `getState()` push. See [Context target and model capacity](#context-target-and-model-capacity) for ownership of the two context limits.
 
 **Why this exists.** `RemoteAgent` in `src/app/remote-agent.ts` seeds `_state.model` at construction time with a hardcoded placeholder default (currently a Claude Opus id) so the footer model picker has something to render before the first server frame arrives. For live sessions this placeholder is overwritten almost instantly by the `getState()` push the server makes on connect. Archived sessions used to have no equivalent push - the persisted model only shipped if and when the client sent `get_state`, which happens on reconnect but not on initial connect - so the placeholder leaked into the footer until the user reloaded or the WebSocket dropped and resumed. The bug surfaced as "every archived session looks like it ran on Opus regardless of which model it actually used." The fix closes the asymmetry between live and archived initial-connect behaviour.
 
-**Single source of truth.** The archived state payload is built by `buildArchivedStateData(archived, sessionManager, sessionId)` in the same handler module. Both the archived branch of the `auth_ok` flow and the existing `get_state` request handler call it, so the two sites cannot drift in shape (e.g. `get_state` previously emitted a slimmer payload missing `contextWindow` / `maxTokens` / `imageGenerationModel`). Any future field added to the archived state - new model metadata, additional read-only flags - belongs inside that helper.
+**Single source of truth.** The archived state payload is built by `buildArchivedStateData(archived, sessionManager, sessionId)` in the same handler module. Both the archived branch of the `auth_ok` flow and the existing `get_state` request handler call it, so the two sites cannot drift in shape (e.g. `get_state` previously emitted a slimmer payload missing model limits, output metadata, or `imageGenerationModel`). Any future field added to the archived state - new model metadata, additional read-only flags - belongs inside that helper.
 
 **Latent fragility.** The client-side placeholder default in `RemoteAgent` is the underlying reason this bug was visible at all; removing it would require auditing every consumer of `state.model` for null-safety and is out of scope here. As long as the placeholder exists, every code path that hydrates state for an archived session must push a real `state` frame on initial connect. New transports or alternative connect paths (e.g. snapshot replay endpoints, future test harnesses) need to preserve this invariant. The regression test `tests/e2e/archived-footer-model.spec.ts` connects to an archived session **without** sending `get_state` and asserts the inbound `state` frame carries the true persisted model - keep it green.
 
@@ -1478,6 +1478,53 @@ Locked by `tests/spurious-idle-unread.spec.ts`.
 
 ---
 
+## Context target and model capacity
+
+Bobbit distinguishes a model's preferred operating limit from its provider request limit so the context meter can show available headroom without changing when the agent compacts. The distinction is additive metadata on the existing model object, not a new runtime limit or state owner.
+
+### Metadata contract and ownership
+
+| Field | Meaning and owner |
+|---|---|
+| `ApiModel.contextWindow` / `state.model.contextWindow?` | The Pi-compatible context **target**. The exact assembled or direct Pi catalog row owns this value; Pi's compaction logic and settings continue to use it as before. It can be absent from a state frame when exact metadata is unavailable. |
+| `ApiModel.modelCapacity?` / `state.model.modelCapacity?` | The provider-published hard request capacity. Bobbit's exact capacity registry owns this optional, display-only value. It is never a compaction input. |
+
+`modelCapacity` is not persisted separately and is not sent back to Pi as a request or model override. Sessions persist the provider/model identity; live state, reconnect fallback, verified model changes, and archived hydration resolve exact metadata for that identity. This avoids a second client state owner and prevents a stale capacity value from becoming durable session metadata.
+
+Capacity authority is deliberately narrower than ordinary model discovery. The registry lookup requires an exact, case-sensitive provider, exact model ID, and `contextWindow === expectedTarget`. A mismatch omits `modelCapacity`; Bobbit does not infer it from a family name, route alias, `upstreamProvider`, output limit, price tier, or an observed accepted request. In particular, a matching AIGW, custom-provider, snapshot, or lookalike ID does not inherit a direct-provider capacity. A future discovery source may provide a second value only through an explicit authoritative contract.
+
+The following exact facts were verified against the linked provider catalog pages on 2026-08-22. The Codex routes additionally use the linked Codex and Pi records to establish that 272K is the deliberate client/pricing target rather than the physical model window.
+
+| Provider | Model ID | Expected target | Model capacity | Authority |
+|---|---|---:|---:|---|
+| `openai` | `gpt-5.4` | 272,000 | 1,050,000 | [OpenAI GPT-5.4](https://developers.openai.com/api/docs/models/gpt-5.4.md) |
+| `openai` | `gpt-5.5` | 272,000 | 1,050,000 | [OpenAI GPT-5.5](https://developers.openai.com/api/docs/models/gpt-5.5.md) |
+| `openai` | `gpt-5.6-luna` | 272,000 | 1,050,000 | [OpenAI GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna.md) |
+| `openai` | `gpt-5.6-sol` | 272,000 | 1,050,000 | [OpenAI GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol.md) |
+| `openai` | `gpt-5.6-terra` | 272,000 | 1,050,000 | [OpenAI GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra.md) |
+| `openai-codex` | `gpt-5.6-luna` | 272,000 | 1,050,000 | [OpenAI GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna.md), Codex [#33961](https://github.com/openai/codex/issues/33961), Pi [#6838](https://github.com/earendil-works/pi/issues/6838) |
+| `openai-codex` | `gpt-5.6-sol` | 272,000 | 1,050,000 | [OpenAI GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol.md), Codex [#33961](https://github.com/openai/codex/issues/33961), Pi [#6838](https://github.com/earendil-works/pi/issues/6838) |
+| `openai-codex` | `gpt-5.6-terra` | 272,000 | 1,050,000 | [OpenAI GPT-5.6 Terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra.md), Codex [#33961](https://github.com/openai/codex/issues/33961), Pi [#6838](https://github.com/earendil-works/pi/issues/6838) |
+
+The registry enriches only those reviewed direct built-in rows. `resolveModelStateMeta()` then carries capacity from the last exact assembled row or the exact direct Pi row. Existing state builders validate it as a positive finite number and propagate it on `state.model`; canonical live-state normalization removes invalid values and values absent from available exact metadata. During a temporary metadata miss, only a positive identity-matching live field may be retained. Archived and reconnect paths reuse the same resolver instead of persisting a duplicate limit.
+
+### Meter semantics and fallback
+
+The shared context-meter resolver uses model capacity as its scale only when capacity is a valid value greater than the target. In that dual-limit mode:
+
+- the displayed percentage is current context usage divided by capacity;
+- the target marker is positioned as target divided by capacity;
+- primary fill runs below 75% of the target, warning fill runs from 75% through the target, and negative fill starts only above the target;
+- the popover names both limits and shows usage against capacity.
+
+Equal limits collapse to the existing single `Context window` treatment with no marker or duplicate rows. A missing capacity uses the target alone; a capacity below the target fails closed to target-only display. Capacity without a target scales the meter but does not fabricate target zones or a marker. With neither valid value, Bobbit does not show a guessed percentage. Meter geometry clamps at the selected scale, while its numeric percentage can honestly exceed 100%.
+
+Current context usage comes from the most recent successful assistant turn's reported usage, not cumulative session token totals. After compaction, that value remains hidden behind the existing stale shimmer until a clean assistant turn supplies fresh usage; the display may retain the still-valid target, capacity, and marker. The footer and popover share the same meter math and accessibility text.
+
+This feature does not raise `contextWindow`, change compaction thresholds or timing, alter provider routing/model selection/pricing, or increase long-context use. `modelCapacity` is display-only. Session totals and cost remain server-authoritative through the existing state cost path; the meter does not calculate or replace them. See [Context compaction](compaction.md) and [Session cost display](session-cost.md).
+
+---
+
 ## Archived-session state push on auth
 
 Loading an archived session needs to show its real model in the footer on first connect. The original code path sent `auth_ok`, `session_status`, and `session_title` on the archived branch but no `state` frame - the model only arrived if the client later sent `get_state`. Since the client only sends `get_state` on reconnect (not on initial connect), the footer kept showing the client-side placeholder until a manual reload. This is part of the no-flash contract for persisted models such as `anthropic/claude-opus-4-8`.
@@ -1489,7 +1536,7 @@ Loading an archived session needs to show its real model in the footer on first 
 - **Archived auth-ok branch.** Right after `session_title`, the handler builds the payload and sends it. This is the fix - the footer now reads the persisted model on first connect, with no round-trip required.
 - **Legacy `get_state` handler.** The same helper drives the response, so the reconnect path stays consistent with first-connect.
 
-The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow?, maxTokens?, reasoning?, thinkingLevelMap?, input?}` from `resolveModelStateMeta(archived.modelProvider, archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. The resolver uses the last exact assembled row, then an exact direct Pi row; an unknown tuple carries identity only. This keeps archived state consistent with live/catalog metadata without fabricating capabilities. See [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
+The payload mirrors `sendFallbackModelState`: `model.{provider, id, contextWindow?, modelCapacity?, maxTokens?, reasoning?, thinkingLevelMap?, input?}` from `resolveModelStateMeta(archived.modelProvider, archived.modelId)`, plus `imageGenerationModel` from `sessionManager.getImageModelForSession(sessionId)`. The resolver uses the last exact assembled row, then an exact direct Pi row; an unknown tuple carries identity only. This keeps archived state consistent with live/catalog metadata without fabricating capabilities. See [Context target and model capacity](#context-target-and-model-capacity) and [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
 
 The footer model picker remains read-only/disabled for archived sessions - the push only seeds the displayed model, it does not enable editing. UI test hooks `data-testid="footer-model-id"` on the model name span and `window.__bobbitState` (set in `src/app/main.ts`) make the seeded value inspectable from archived-footer model E2E coverage.
 

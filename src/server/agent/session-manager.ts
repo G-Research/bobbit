@@ -2787,6 +2787,7 @@ function isAssistantStreamTerminalBoundary(event: unknown): boolean {
  */
 export function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
 	const meta = resolveModelStateMeta(provider, id);
+	const modelCapacity = (meta as { modelCapacity?: unknown } | undefined)?.modelCapacity;
 	const input = Array.isArray(meta?.input)
 		&& meta.input.length > 0
 		&& meta.input.every((entry) => entry === "text" || entry === "image")
@@ -2797,6 +2798,7 @@ export function buildModelStateData(provider: string, id: string): { model: Reco
 			provider,
 			id,
 			...(meta?.contextWindow !== undefined ? { contextWindow: meta.contextWindow } : {}),
+			...(typeof modelCapacity === "number" && Number.isFinite(modelCapacity) && modelCapacity > 0 ? { modelCapacity } : {}),
 			...(meta?.maxTokens !== undefined ? { maxTokens: meta.maxTokens } : {}),
 			...(meta?.reasoning !== undefined ? { reasoning: meta.reasoning } : {}),
 			...(meta?.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),

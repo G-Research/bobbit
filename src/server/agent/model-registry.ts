@@ -52,7 +52,10 @@ export interface ApiModel {
 	baseUrl?: string;
 	/** For AIGW models, the upstream well-known provider key (e.g. openai, aws-mantle). */
 	upstreamProvider?: string;
+	/** Pi-compatible preferred operating and compaction target. */
 	contextWindow: number;
+	/** Provider-published hard request capacity; display-only and never a compaction input. */
+	modelCapacity?: number;
 	maxTokens: number;
 	reasoning: boolean;
 	thinkingLevelMap?: Record<string, string | null>;
@@ -100,6 +103,58 @@ export interface CustomProviderConfig {
 	models?: Array<{ id: string; name: string }>;
 }
 
+interface AuthoritativeModelCapacityFact {
+	provider: string;
+	id: string;
+	expectedTarget: number;
+	modelCapacity: number;
+}
+
+/**
+ * Exact provider catalog facts verified 2026-08-22. Capacity is deliberately
+ * separate from Pi's 272K operating/compaction target and is display-only.
+ *
+ * Direct OpenAI sources (each publishes the exact ID and 1,050,000-token context):
+ * - https://developers.openai.com/api/docs/models/gpt-5.4.md
+ * - https://developers.openai.com/api/docs/models/gpt-5.5.md
+ * - https://developers.openai.com/api/docs/models/gpt-5.6-luna.md
+ * - https://developers.openai.com/api/docs/models/gpt-5.6-sol.md
+ * - https://developers.openai.com/api/docs/models/gpt-5.6-terra.md
+ *
+ * The three openai-codex GPT-5.6 routes use the matching OpenAI model page plus
+ * Codex #33961 and Pi #6838 to establish 272K as the deliberate client/pricing
+ * target rather than the physical model window:
+ * - https://github.com/openai/codex/issues/33961
+ * - https://github.com/earendil-works/pi/issues/6838
+ *
+ * Never broaden these facts by model family, upstreamProvider, route alias, or
+ * observed request behaviour. The expected-target guard fails closed if Pi's
+ * catalog changes, so a stale fact cannot silently describe a different tuple.
+ */
+const AUTHORITATIVE_MODEL_CAPACITY_FACTS: readonly AuthoritativeModelCapacityFact[] = [
+	{ provider: "openai", id: "gpt-5.4", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai", id: "gpt-5.5", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai", id: "gpt-5.6-luna", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai", id: "gpt-5.6-sol", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai", id: "gpt-5.6-terra", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai-codex", id: "gpt-5.6-luna", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai-codex", id: "gpt-5.6-sol", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+	{ provider: "openai-codex", id: "gpt-5.6-terra", expectedTarget: 272_000, modelCapacity: 1_050_000 },
+];
+
+/** Resolve only a reviewed exact capacity fact; never infer from an ID family. */
+export function resolveAuthoritativeModelCapacity(
+	provider: string | undefined,
+	modelId: string,
+	contextWindow: number | undefined,
+): number | undefined {
+	return AUTHORITATIVE_MODEL_CAPACITY_FACTS.find((fact) =>
+		fact.provider === provider
+		&& fact.id === modelId
+		&& fact.expectedTarget === contextWindow
+	)?.modelCapacity;
+}
+
 // ── Cache ──────────────────────────────────────────────────────────
 
 let cachedModels: ApiModel[] | null = null;
@@ -131,7 +186,10 @@ export function invalidateModelCache(): void {
  * bar and thinking selector consume.
  */
 export interface ResolvedModelStateMeta {
+	/** Pi-compatible preferred operating and compaction target. */
 	contextWindow?: number;
+	/** Provider-published hard request capacity; display-only and never a compaction input. */
+	modelCapacity?: number;
 	maxTokens?: number;
 	reasoning?: boolean;
 	/** Present only when authoritative metadata provides it. */
@@ -155,6 +213,7 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		if (hit) {
 			return {
 				contextWindow: hit.contextWindow,
+				...(hit.modelCapacity !== undefined ? { modelCapacity: hit.modelCapacity } : {}),
 				maxTokens: hit.maxTokens,
 				reasoning: hit.reasoning,
 				...(hit.thinkingLevelMap ? { thinkingLevelMap: hit.thinkingLevelMap } : {}),
@@ -169,8 +228,10 @@ export function resolveModelStateMeta(provider: string | undefined, modelId: str
 		try {
 			const model = getBuiltinModel(normalizedProvider as any, modelId as any);
 			if (model) {
+				const modelCapacity = resolveAuthoritativeModelCapacity(provider, modelId, model.contextWindow);
 				return {
 					contextWindow: model.contextWindow,
+					...(modelCapacity !== undefined ? { modelCapacity } : {}),
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
 					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap as Record<string, string | null> } : {}),
@@ -377,6 +438,12 @@ async function assembleModels(
 		} catch (err) {
 			console.error("[model-registry] Failed to load Google Code Assist models:", err);
 		}
+	}
+
+	for (let index = 0; index < results.length; index++) {
+		const model = results[index];
+		const modelCapacity = resolveAuthoritativeModelCapacity(model.provider, model.id, model.contextWindow);
+		if (modelCapacity !== undefined) results[index] = { ...model, modelCapacity };
 	}
 
 	// 2. AI Gateway models (if configured). Selection reflects the provider Pi

@@ -382,13 +382,18 @@ If an archived team receives event callbacks, a leaked process starts, or the se
 
 ## Context bar / model state
 
-After a server restart, the context bar may show wrong info (e.g. 200k instead of 1M) or nothing at all. This happens because the agent process's `getState()` RPC may fail or return incomplete data before the process is fully ready.
+The footer distinguishes `state.model.contextWindow` (the operating and compaction target) from optional `state.model.modelCapacity` (the provider's hard request limit). When both are valid and capacity is greater, the percentage and full bar scale use capacity while the marker identifies the target. This is display-only: compaction still uses `contextWindow`, and session cost remains server-authoritative. See [Context target and model capacity](internals.md#context-target-and-model-capacity).
 
-- **Server-side fallback**: `sendFallbackModelState()` reads persisted `modelProvider`/`modelId` and calls `resolveModelStateMeta()` (last exact assembled row → exact direct Pi row → unavailable). It never fabricates family metadata. When exact composed metadata is temporarily unavailable, only identity-matching live fields may be preserved; absent fields stay absent. This keeps reconnect/`get_state` from changing context, modalities, reasoning, or advertised thinking tiers. See [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
-- **Client-side retry**: `remote-agent.ts` retries `get_state` after 3s on reconnect if `contextWindow` is still 0.
-- **Default contextWindow is 0**: Before the server provides real data, `contextWindow` starts at 0 (not 200k), so the context bar shows nothing rather than a misleading value.
-- If context bar still shows wrong info after restart, check that `modelProvider` and `modelId` are persisted in `<project-root>/.bobbit/state/sessions.json` for the affected session.
-- `SessionManager.getPersistedSession(id)` exposes persisted session data used by the fallback mechanism.
+If the meter is missing, mislabeled, or changes after reconnect:
+
+1. Inspect the latest `state.model` frame. Confirm its provider and ID exactly match the session's persisted `modelProvider` and `modelId`; `contextWindow` and `modelCapacity`, when present, must be positive finite numbers.
+2. Treat `contextWindow` and `modelCapacity` separately. A correct smaller target with a larger capacity is expected; do not raise the target to make the values match. A capacity marker appears only when capacity is greater than the target.
+3. For an expected capacity that is absent, check the reviewed exact provider/model/target table in the internals guide. Provider aliases, AIGW `upstreamProvider`, custom routes, snapshots, lookalike IDs, and target drift intentionally omit capacity. Never repair this with family-name inference.
+4. `sendFallbackModelState()` resolves the persisted tuple from the last exact assembled row, then the exact direct Pi row, otherwise unavailable. During a temporary miss, only identity-matching live fields may survive; stale or invalid capacity is removed. The same rule covers live state, model changes, reconnect, and archived hydration.
+5. Before authoritative state arrives, the client placeholder has `contextWindow: 0` and no capacity, so no guessed meter is shown. On reconnect, the client retries `get_state` after three seconds while `contextWindow` remains zero.
+6. The meter's current usage comes from the most recent successful assistant turn, not cumulative session totals. Immediately after compaction, `-%`, shimmer, `aria-busy`, and hidden Last Turn details are intentional until a clean assistant turn refreshes usage.
+
+If the model identity itself is wrong or absent, inspect the session record in `<project-root>/.bobbit/state/sessions.json`; `SessionManager.getPersistedSession(id)` is the fallback identity source. If identity is correct but exact metadata is missing, diagnose registry assembly or direct Pi catalog resolution rather than adding defaults. See [Per-model thinking-level capabilities](thinking-levels.md#live-state-metadata).
 
 ## Restored session requires a model
 

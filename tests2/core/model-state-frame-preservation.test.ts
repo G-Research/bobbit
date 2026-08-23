@@ -14,6 +14,7 @@ describe("buildResolvedModelStateModel — exact optional metadata", () => {
 			id: "my-private-model-42",
 			name: "Private model",
 			contextWindow: 512_000,
+			modelCapacity: 1_024_000,
 			maxTokens: 64_000,
 			reasoning: true,
 			input: ["text", "image"],
@@ -24,6 +25,7 @@ describe("buildResolvedModelStateModel — exact optional metadata", () => {
 
 		assert.equal(model.name, "Private model");
 		assert.equal(model.contextWindow, 512_000);
+		assert.equal(model.modelCapacity, 1_024_000);
 		assert.equal(model.maxTokens, 64_000);
 		assert.equal(model.reasoning, true);
 		assert.deepEqual(model.input, ["text", "image"]);
@@ -44,12 +46,26 @@ describe("buildResolvedModelStateModel — exact optional metadata", () => {
 			provider: "custom",
 			id: "different-model",
 			contextWindow: 999_999,
+			modelCapacity: 1_999_999,
 			maxTokens: 88_888,
 			reasoning: true,
 			input: ["text", "image"],
 			thinkingLevelMap: { max: "max" },
 		});
 		assert.deepEqual(model, { provider: "custom", id: "requested-model" });
+	});
+
+	it("deletes invalid capacity metadata from an identity-matched live frame", () => {
+		invalidateModelCache();
+		for (const modelCapacity of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "1050000"]) {
+			const model = buildResolvedModelStateModel("custom", "invalid-capacity", {
+				provider: "custom",
+				id: "invalid-capacity",
+				contextWindow: 272_000,
+				modelCapacity,
+			});
+			assert.equal(Object.prototype.hasOwnProperty.call(model, "modelCapacity"), false);
+		}
 	});
 
 	it("exact Pi metadata overrides stale identity-matched live values", () => {
@@ -60,6 +76,7 @@ describe("buildResolvedModelStateModel — exact optional metadata", () => {
 			provider: "anthropic",
 			id: "claude-fable-5",
 			contextWindow: 1,
+			modelCapacity: 2,
 			maxTokens: 1,
 			reasoning: !exact.reasoning,
 			input: exact.input?.includes("image") ? ["text"] : ["text", "image"],
@@ -67,6 +84,7 @@ describe("buildResolvedModelStateModel — exact optional metadata", () => {
 		});
 
 		assert.equal(model.contextWindow, exact.contextWindow);
+		assert.equal(Object.prototype.hasOwnProperty.call(model, "modelCapacity"), false);
 		assert.equal(model.maxTokens, exact.maxTokens);
 		assert.equal(model.reasoning, exact.reasoning);
 		assert.deepEqual(model.input, exact.input);
