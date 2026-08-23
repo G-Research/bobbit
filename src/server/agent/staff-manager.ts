@@ -54,6 +54,13 @@ interface StaffWorktreePlan {
 	sessionCwd: string;
 }
 
+export interface ForkedStaffPreparation {
+	id: string;
+	name: string;
+	projectId: string;
+	sessionId: string;
+}
+
 export interface ForkedStaffDestination {
 	id: string;
 	name: string;
@@ -178,6 +185,7 @@ export class StaffManager {
 		const orphans: PersistedStaff[] = [];
 		for (const ctx of this.pcm.all()) {
 			for (const staff of ctx.staffStore.getAll()) {
+				if (staff.forkPublication) continue;
 				if (!staff.projectId || staff.projectId === SYSTEM_PROJECT_ID || ctx.project.id === SYSTEM_PROJECT_ID) {
 					orphans.push(staff);
 				}
@@ -251,10 +259,14 @@ export class StaffManager {
 		throw new Error(`Cannot resolve staff store: project "${projectId}" not found`);
 	}
 
-	private findStoreForStaff(id: string): { store: StaffStore; staff: PersistedStaff; projectId: string } | null {
+	private findStoreForStaff(id: string, includePendingFork = false): { store: StaffStore; staff: PersistedStaff; projectId: string } | null {
 		for (const ctx of this.pcm.all()) {
-			const staff = ctx.staffStore.get(id);
-			if (staff) return { store: ctx.staffStore, staff, projectId: ctx.project.id };
+			const staff = includePendingFork
+				? ctx.staffStore.getIncludingPending(id)
+				: ctx.staffStore.get(id);
+			if (staff && (includePendingFork || !staff.forkPublication)) {
+				return { store: ctx.staffStore, staff, projectId: ctx.project.id };
+			}
 		}
 		return null;
 	}
@@ -537,26 +549,22 @@ export class StaffManager {
 	}
 
 	/**
-	 * Publish a staff identity for an already-launched fork session. The source
-	 * record is a snapshot only: lifecycle identity and worktree ownership always
-	 * come from the destination session, while triggers receive fresh identities.
+	 * Durably stage a hidden destination identity before its session can be
+	 * published. The candidate is already a complete configuration snapshot and
+	 * carries fresh trigger IDs; only destination-owned worktree metadata remains
+	 * to be derived from the exact persisted session at commit time.
 	 */
-	registerForkedStaff(sourceSnapshot: PersistedStaff, destination: ForkedStaffDestination): PersistedStaff {
+	prepareForkedStaff(sourceSnapshot: PersistedStaff, destination: ForkedStaffPreparation): PersistedStaff {
 		if (destination.id === sourceSnapshot.id) {
 			throw new Error("Forked staff must have an independent identity");
 		}
 		if (sourceSnapshot.projectId !== destination.projectId) {
 			throw new Error("Forked staff source and destination projects do not match");
 		}
-		if (
-			destination.session.id.length === 0
-			|| destination.session.staffId !== destination.id
-			|| destination.session.projectId !== destination.projectId
-			|| destination.session.archived
-		) {
-			throw new Error("Forked staff destination session is not durably owned by the destination identity");
+		if (!destination.id || !destination.sessionId || !destination.name) {
+			throw new Error("Forked staff destination identity is incomplete");
 		}
-		if (this.getStaff(destination.id)) {
+		if (this.findStoreForStaff(destination.id, true)) {
 			throw new Error(`Staff agent already exists: ${destination.id}`);
 		}
 
@@ -565,10 +573,8 @@ export class StaffManager {
 			id: randomUUID(),
 		}));
 		this.validateTriggers(triggers);
-
 		const now = Date.now();
-		const session = destination.session;
-		const staff: PersistedStaff = {
+		const candidate: PersistedStaff = {
 			id: destination.id,
 			name: destination.name,
 			description: sourceSnapshot.description,
@@ -581,17 +587,51 @@ export class StaffManager {
 			accessory: normalizeStaffAccessory(sourceSnapshot.accessory),
 			createdAt: now,
 			updatedAt: now,
-			currentSessionId: session.id,
+			currentSessionId: destination.sessionId,
 			projectId: destination.projectId,
 			sandboxed: sourceSnapshot.sandboxed,
 			contextPolicy: sourceSnapshot.contextPolicy,
-			...(!session.borrowsWorktree && session.worktreePath ? {
-				worktreePath: session.worktreePath,
-				...(session.branch ? { branch: session.branch } : {}),
-				...(session.repoPath ? { repoPath: session.repoPath } : {}),
-				...(session.repoWorktrees ? { repoWorktrees: structuredClone(session.repoWorktrees) } : {}),
-			} : {}),
+			forkPublication: { version: 1, sessionId: destination.sessionId },
 		};
+		this.getStore(destination.projectId).putStrict(candidate);
+		return candidate;
+	}
+
+	private commitPreparedForkedStaff(
+		candidate: PersistedStaff,
+		destination: ForkedStaffDestination,
+	): PersistedStaff {
+		const marker = candidate.forkPublication;
+		const session = destination.session;
+		if (
+			marker?.version !== 1
+			|| marker.sessionId !== session.id
+			|| candidate.id !== destination.id
+			|| candidate.name !== destination.name
+			|| candidate.projectId !== destination.projectId
+			|| candidate.currentSessionId !== session.id
+			|| session.id.length === 0
+			|| session.staffId !== candidate.id
+			|| session.projectId !== candidate.projectId
+			|| session.archived
+		) {
+			throw new Error("Forked staff destination session is not durably owned by the pending destination identity");
+		}
+		this.validateTriggers(candidate.triggers);
+
+		const staff = structuredClone(candidate);
+		delete staff.forkPublication;
+		delete staff.worktreePath;
+		delete staff.branch;
+		delete staff.repoPath;
+		delete staff.repoWorktrees;
+		if (!session.borrowsWorktree && session.worktreePath) {
+			staff.worktreePath = session.worktreePath;
+			if (session.branch) staff.branch = session.branch;
+			if (session.repoPath) staff.repoPath = session.repoPath;
+			if (session.repoWorktrees) staff.repoWorktrees = structuredClone(session.repoWorktrees);
+		}
+		staff.updatedAt = Date.now();
 
 		const store = this.getStore(destination.projectId);
 		store.putStrict(staff);
@@ -609,6 +649,66 @@ export class StaffManager {
 		return staff;
 	}
 
+	/** Commit an already-staged identity after the exact destination session is durable. */
+	registerForkedStaff(sourceSnapshot: PersistedStaff, destination: ForkedStaffDestination): PersistedStaff {
+		if (destination.id === sourceSnapshot.id || sourceSnapshot.projectId !== destination.projectId) {
+			throw new Error("Forked staff source and destination identities do not match");
+		}
+		const pending = this.findStoreForStaff(destination.id, true)?.staff;
+		if (!pending?.forkPublication) {
+			throw new Error(`Forked staff publication was not prepared: ${destination.id}`);
+		}
+		return this.commitPreparedForkedStaff(pending, destination);
+	}
+
+	/** Remove only an unpublished destination candidate after route compensation. */
+	abortForkedStaffPublication(id: string): boolean {
+		const pending = this.findStoreForStaff(id, true);
+		if (!pending?.staff.forkPublication) return false;
+		const removed = pending.store.removeStrict(id);
+		if (removed) {
+			try { this.pcm.getOrCreate(pending.projectId)?.searchIndex?.removeStaff(id); } catch { /* never indexed normally */ }
+			try { this.inboxManager?.removeAll(id); } catch { /* destination-only best effort */ }
+		}
+		return removed;
+	}
+
+	/**
+	 * Resolve the only cross-store crash window before sessions restore. A pending
+	 * identity commits only through its exact ID/session/project join; a candidate
+	 * with no live durable destination is an unpublished preparation and is removed.
+	 */
+	reconcileForkedStaffPublications(): { committed: string[]; aborted: string[] } {
+		const committed: string[] = [];
+		const aborted: string[] = [];
+		for (const ctx of this.pcm.all()) {
+			for (const candidate of ctx.staffStore.getAllIncludingPending()) {
+				const marker = candidate.forkPublication;
+				if (!marker) continue;
+				if (marker.version !== 1 || !marker.sessionId) {
+					throw new Error(`Invalid staff fork publication marker for ${candidate.id}`);
+				}
+				const session = ctx.sessionStore.get(marker.sessionId);
+				if (!session || session.archived) {
+					ctx.staffStore.removeStrict(candidate.id);
+					try { ctx.searchIndex?.removeStaff(candidate.id); } catch { /* pending rows are non-public */ }
+					try { this.inboxManager?.removeAll(candidate.id); } catch { /* destination-only best effort */ }
+					aborted.push(candidate.id);
+					continue;
+				}
+				const destination: ForkedStaffDestination = {
+					id: candidate.id,
+					name: candidate.name,
+					projectId: ctx.project.id,
+					session,
+				};
+				this.commitPreparedForkedStaff(candidate, destination);
+				committed.push(candidate.id);
+			}
+		}
+		return { committed, aborted };
+	}
+
 	getStaff(id: string): PersistedStaff | undefined {
 		return this.findStoreForStaff(id)?.staff;
 	}
@@ -616,11 +716,11 @@ export class StaffManager {
 	listStaff(projectId?: string): PersistedStaff[] {
 		if (projectId) {
 			const ctx = this.pcm.getOrCreate(projectId);
-			return ctx ? ctx.staffStore.getAll() : [];
+			return ctx ? ctx.staffStore.getAll().filter(staff => !staff.forkPublication) : [];
 		}
 		const all: PersistedStaff[] = [];
 		for (const ctx of this.pcm.all()) {
-			all.push(...ctx.staffStore.getAll());
+			all.push(...ctx.staffStore.getAll().filter(staff => !staff.forkPublication));
 		}
 		return all;
 	}

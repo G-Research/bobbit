@@ -893,6 +893,112 @@ test.describe.serial("staff session fork identity", () => {
 		await assertSandboxWholeStaffFork(gateway, "legacy-host");
 	});
 
+	test("stages a hidden durable staff identity before publishing its destination session, then commits it atomically", async ({ gateway }) => {
+		const source = await createStaff(gateway, { name: "Publication ordering source" });
+		seedSessionTranscript(gateway, source.currentSessionId);
+		const manager = gateway.sessionManager as any;
+		const staffManager = manager.staffRecordSource as any;
+		const originalPrepare = staffManager.prepareForkedStaff;
+		const originalRegister = staffManager.registerForkedStaff;
+		let preparedId = "";
+		let preparedSessionId = "";
+		let observedDurableSession = false;
+		staffManager.prepareForkedStaff = (...args: any[]) => {
+			const destination = args[1];
+			preparedId = destination.id;
+			preparedSessionId = destination.sessionId;
+			expect(manager.getPersistedSession(preparedSessionId)).toBeUndefined();
+			const candidate = originalPrepare.apply(staffManager, args);
+			expect(staffManager.getStaff(preparedId), "pending publication must stay off public staff surfaces").toBeUndefined();
+			const context = gateway.projectContextManager.getOrCreate(destination.projectId);
+			expect(context.staffStore.getIncludingPending(preparedId)?.forkPublication).toEqual({ version: 1, sessionId: preparedSessionId });
+			return candidate;
+		};
+		staffManager.registerForkedStaff = (...args: any[]) => {
+			const destination = args[1];
+			const context = gateway.projectContextManager.getOrCreate(destination.projectId);
+			observedDurableSession = context.sessionStore.get(destination.session.id)?.staffId === preparedId;
+			expect(context.staffStore.getIncludingPending(preparedId)?.forkPublication).toEqual({ version: 1, sessionId: preparedSessionId });
+			return originalRegister.apply(staffManager, args);
+		};
+
+		let result: { response: Response; value: any };
+		try {
+			result = await forkSession(gateway, source.currentSessionId, { newWorktree: false });
+		} finally {
+			staffManager.prepareForkedStaff = originalPrepare;
+			staffManager.registerForkedStaff = originalRegister;
+		}
+
+		expect(result.response.status, JSON.stringify(result.value)).toBe(201);
+		expect(result.value.id).toBe(preparedSessionId);
+		expect(observedDurableSession).toBe(true);
+		expect(staffManager.getStaff(preparedId)).toMatchObject({
+			id: preparedId,
+			currentSessionId: preparedSessionId,
+			projectId: source.projectId,
+		});
+		expect(staffManager.getStaff(preparedId)?.forkPublication).toBeUndefined();
+	});
+
+	test("reconciles the durable destination identity after a crash between session and staff commits", async ({ gateway }) => {
+		const source = await createStaff(gateway, { name: "Crash reconciliation source" });
+		const sourceBefore = structuredClone(await gateway.apiJson(`/api/staff/${source.id}`));
+		const manager = gateway.sessionManager as any;
+		const staffManager = manager.staffRecordSource as any;
+		const projectId = source.projectId as string;
+		const context = gateway.projectContextManager.getOrCreate(projectId);
+		const destinationStaffId = randomUUID();
+		const destinationSessionId = randomUUID();
+		const destinationName = `Fork: ${source.name}`;
+		const now = Date.now();
+
+		staffManager.prepareForkedStaff(sourceBefore, {
+			id: destinationStaffId,
+			name: destinationName,
+			projectId,
+			sessionId: destinationSessionId,
+		});
+		context.sessionStore.put({
+			id: destinationSessionId,
+			title: destinationName,
+			cwd: source.cwd,
+			agentSessionFile: "",
+			createdAt: now,
+			lastActivity: now,
+			projectId,
+			staffId: destinationStaffId,
+			borrowsWorktree: true,
+		});
+		await context.sessionStore.flushAsync();
+		const staffFile = (context.staffStore as any).storeFile as string;
+		const durableCandidate = JSON.parse(fs.readFileSync(staffFile, "utf8"))
+			.find((staff: any) => staff.id === destinationStaffId);
+		expect(durableCandidate?.forkPublication).toEqual({ version: 1, sessionId: destinationSessionId });
+		expect(staffManager.getStaff(destinationStaffId)).toBeUndefined();
+		expect((await listStaff(gateway, projectId)).some((staff: any) => staff.id === destinationStaffId)).toBe(false);
+
+		try {
+			const reconciled = staffManager.reconcileForkedStaffPublications();
+			expect(reconciled).toEqual({ committed: [destinationStaffId], aborted: [] });
+			const destination = staffManager.getStaff(destinationStaffId);
+			expect(destination).toMatchObject({
+				id: destinationStaffId,
+				name: destinationName,
+				currentSessionId: destinationSessionId,
+				projectId,
+			});
+			expect(destination.forkPublication).toBeUndefined();
+			expect(await inbox(gateway, destinationStaffId)).toEqual([]);
+			expect(await gateway.apiJson(`/api/staff/${source.id}`)).toEqual(sourceBefore);
+		} finally {
+			context.staffStore.remove(destinationStaffId);
+			context.searchIndex?.removeStaff(destinationStaffId);
+			context.sessionStore.remove(destinationSessionId);
+			await context.sessionStore.flushAsync();
+		}
+	});
+
 	test("rolls back a failed launch without changing or deauthorizing the source", async ({ gateway }) => {
 		const source = await createStaff(gateway, { name: "Failed launch source" });
 		const sourceBefore = structuredClone(await gateway.apiJson(`/api/staff/${source.id}`));
@@ -917,6 +1023,7 @@ test.describe.serial("staff session fork identity", () => {
 		expect(gateway.sessionManager.getSession(options.sessionId)).toBeUndefined();
 		expect(gateway.sessionManager.getPersistedSession(options.sessionId)).toBeUndefined();
 		expect((gateway.sessionManager as any).staffRecordSource.getStaff(options.staffId)).toBeUndefined();
+		expect(gateway.projectContextManager.getOrCreate(source.projectId).staffStore.getIncludingPending(options.staffId)).toBeUndefined();
 		expect(fs.existsSync(options.preExistingAgentSessionFile)).toBe(false);
 		expect(sourceSnapshot(await gateway.apiJson(`/api/staff/${source.id}`))).toEqual(sourceSnapshot(sourceBefore));
 		expect(gateway.sessionManager.getPersistedSession(source.currentSessionId)?.staffId).toBe(source.id);
@@ -952,6 +1059,7 @@ test.describe.serial("staff session fork identity", () => {
 		expect(gateway.sessionManager.getSession(options.sessionId)).toBeUndefined();
 		expect(gateway.sessionManager.getPersistedSession(options.sessionId)).toBeUndefined();
 		expect((gateway.sessionManager as any).staffRecordSource.getStaff(options.staffId)).toBeUndefined();
+		expect(gateway.projectContextManager.getOrCreate(source.projectId).staffStore.getIncludingPending(options.staffId)).toBeUndefined();
 		expect(fs.existsSync(options.preExistingAgentSessionFile)).toBe(false);
 		expect(sourceSnapshot(await gateway.apiJson(`/api/staff/${source.id}`))).toEqual(sourceSnapshot(sourceBefore));
 	});

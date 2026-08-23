@@ -124,6 +124,11 @@ export type SidebarForkLaunchDependencies<TFork extends { id: string; cwd: strin
 	setTitle(sessionId: string, title: string): void;
 };
 
+export function resolveSidebarSessionForkTitle(source: Pick<ForkSource, "title">, persisted: Pick<PersistedForkSource, "title">): string {
+	const baseTitle = (persisted.title || source.title || "session").trim() || "session";
+	return `Fork: ${baseTitle}`;
+}
+
 /** Production fork launch core. Transcript cloning happens before this boundary;
  * this function owns worktree selection, stale-cwd propagation, creation and title. */
 export async function launchSidebarSessionFork<TFork extends { id: string; cwd: string; status: string }>(input: {
@@ -132,6 +137,8 @@ export async function launchSidebarSessionFork<TFork extends { id: string; cwd: 
 	projectRoot: string;
 	destJsonl: string;
 	newWorktree: boolean;
+	/** Fixed publication title when another durable record must share this identity. */
+	title?: string;
 	source: ForkSource;
 	persisted: PersistedForkSource;
 }, deps: SidebarForkLaunchDependencies<TFork>): Promise<{
@@ -175,8 +182,7 @@ export async function launchSidebarSessionFork<TFork extends { id: string; cwd: 
 		assistantType: input.persisted.assistantType,
 		options: deps.buildCreateOptions(context),
 	});
-	const baseTitle = (input.persisted.title || input.source.title || "session").trim() || "session";
-	const title = `Fork: ${baseTitle}`;
+	const title = input.title ?? resolveSidebarSessionForkTitle(input.source, input.persisted);
 	deps.setTitle(fork.id, title);
 	return { fork, title, projectId: input.projectId, goalId: input.persisted.goalId };
 }

@@ -80,6 +80,12 @@ function normalizeStaffRecord(staff: PersistedStaff): PersistedStaff {
 	return staff;
 }
 
+export interface StaffForkPublicationMarker {
+	version: 1;
+	/** Destination session ID. This is the only session allowed to commit the pending identity. */
+	sessionId: string;
+}
+
 export interface PersistedStaff {
 	id: string;
 	name: string;
@@ -123,6 +129,12 @@ export interface PersistedStaff {
 	 * identity and the display-only transcript history.
 	 */
 	contextPolicy?: "preserve" | "compact" | "clear";
+	/**
+	 * Durable cross-store publication marker for a staff fork. Records carrying
+	 * this marker are internal candidates, not public staff, until the exact
+	 * destination session is durably present and the marker is atomically removed.
+	 */
+	forkPublication?: StaffForkPublicationMarker;
 }
 
 /**
@@ -201,6 +213,12 @@ export class StaffStore {
 	}
 
 	get(id: string): PersistedStaff | undefined {
+		const staff = this.staff.get(id);
+		return staff?.forkPublication ? undefined : staff;
+	}
+
+	/** Internal recovery view; pending fork candidates never cross ordinary store reads. */
+	getIncludingPending(id: string): PersistedStaff | undefined {
 		return this.staff.get(id);
 	}
 
@@ -213,7 +231,27 @@ export class StaffStore {
 		recordDeletionTombstone(this.storeDir, "staff.json", id);
 	}
 
+	/** Fail-loud removal used to abort an unpublished lifecycle candidate. */
+	removeStrict(id: string): boolean {
+		const previous = this.staff.get(id);
+		if (!previous) return false;
+		this.staff.delete(id);
+		try {
+			this.saveStrict();
+		} catch (err) {
+			this.staff.set(id, previous);
+			throw err;
+		}
+		recordDeletionTombstone(this.storeDir, "staff.json", id);
+		return true;
+	}
+
 	getAll(): PersistedStaff[] {
+		return Array.from(this.staff.values()).filter(staff => !staff.forkPublication);
+	}
+
+	/** Internal recovery view; callers must resolve or abort every returned candidate. */
+	getAllIncludingPending(): PersistedStaff[] {
 		return Array.from(this.staff.values());
 	}
 

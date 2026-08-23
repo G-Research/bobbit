@@ -727,7 +727,7 @@ import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy 
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult, GateStatus } from "./agent/gate-store.js";
 import type { GateResetIntent } from "./agent/gate-reset-intent.js";
-import { launchSidebarSessionFork, resolveGoalGithubLink } from "./sidebar-actions.js";
+import { launchSidebarSessionFork, resolveGoalGithubLink, resolveSidebarSessionForkTitle } from "./sidebar-actions.js";
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -5202,6 +5202,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl, basePath);
 				}
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
+
+			// Resolve any cross-store staff-fork publication interrupted after the
+			// destination session commit. This must precede session restoration so role
+			// prompts and BOBBIT_STAFF_ID authorization resolve the recovered identity.
+			await bootPhase("reconcile-staff-fork-publications", () => {
+				staffManager.reconcileForkedStaffPublications();
+			});
 
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
@@ -15338,6 +15345,7 @@ async function handleApiRoute(
 			const projCwd = projectRegistry.get(projectId)!.rootPath;
 			const forkId = randomUUID();
 			const destinationStaffId = forkStaff ? randomUUID() : undefined;
+			const destinationStaffName = resolveSidebarSessionForkTitle(source, ps);
 			// Use the project root for the cloned `.jsonl` slug (same as /continue);
 			// worktree-backed sessions rotate to the final cwd-derived file after the
 			// worktree is ready, adopting this clone via switch_session.
@@ -15470,6 +15478,7 @@ async function handleApiRoute(
 					projectRoot: projCwd,
 					destJsonl,
 					newWorktree,
+					title: forkStaff ? destinationStaffName : undefined,
 					source: source!,
 					persisted: ps,
 				}, {
@@ -15566,6 +15575,18 @@ async function handleApiRoute(
 						source = currentSource;
 					}
 
+					// Stage the complete, hidden staff snapshot before SessionStore can
+					// publish the destination half of the join. A hard exit after session
+					// persistence is reconciled from this ID-bound marker on next boot.
+					if (forkStaff && destinationStaffId) {
+						staffManager.prepareForkedStaff(forkStaff, {
+							id: destinationStaffId,
+							name: destinationStaffName,
+							projectId,
+							sessionId: forkId,
+						});
+					}
+
 					const launched = await launchFork();
 					if (destinationStaffId) (launched.fork as SessionInfo).staffId = destinationStaffId;
 					const destinationContext = projectContextManager.getOrCreate(launched.projectId);
@@ -15643,8 +15664,15 @@ async function handleApiRoute(
 			} catch (err) {
 				// The shared owner FIFO has released before cleanup. A failed destination
 				// may itself be a borrower, so terminating it while holding the owner key
-				// would re-enter the same queue.
+				// would re-enter the same queue. Keep the pending identity durable until
+				// session cleanup finishes, then remove only that unpublished candidate.
 				await cleanupFailedFork();
+				if (destinationStaffId) {
+					try { staffManager.abortForkedStaffPublication(destinationStaffId); }
+					catch (cleanupErr) {
+						console.warn(`[fork] failed-staff publication cleanup failed for ${destinationStaffId}: ${cleanupErr}`);
+					}
+				}
 				if (err instanceof HistoryForkSourceUnavailableError) {
 					json({ error: err.message, code: err.code }, 422);
 				} else {
