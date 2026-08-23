@@ -15,10 +15,17 @@ export const GATEWAY_STARTUP_CASES = Object.freeze([
 	Object.freeze({ name: "1000-sessions", sessionCount: 1_000, liveCount: 3 }),
 ]);
 
-export const GATEWAY_STARTUP_FIXTURE_VERSION = 2;
+export const GATEWAY_STARTUP_FIXTURE_VERSION = 3;
 export const GATEWAY_STARTUP_PROJECT_ID = "headquarters";
 export const GATEWAY_STARTUP_TOKEN = "b0bb17".repeat(10) + "b0bb";
 export const GATEWAY_STARTUP_SEARCH_SENTINEL = "gateway-startup-search-sentinel";
+
+const GATEWAY_STARTUP_MODEL = Object.freeze({
+	provider: "mock",
+	id: "mock-model",
+	pref: "mock/mock-model",
+	thinkingLevel: "medium",
+});
 
 const FIXTURE_EPOCH_MS = 1_700_000_000_000;
 const READY_TIMEOUT_MS = 120_000;
@@ -307,6 +314,17 @@ export async function generateGatewayStartupFixture({ caseName, fixtureRoot, pro
 	await Promise.all([stateDir, configDir, projectRoot, transcriptRoot, secretsRoot].map(directory => mkdir(directory, { recursive: true })));
 	await Promise.all([
 		writeFile(path.join(stateDir, "setup-complete"), "benchmark\n", "utf8"),
+		writeFile(path.join(stateDir, "preferences.json"), JSON.stringify({
+			customProviders: [{
+				id: GATEWAY_STARTUP_MODEL.provider,
+				name: GATEWAY_STARTUP_MODEL.provider,
+				type: "manual",
+				baseUrl: "http://127.0.0.1",
+				models: [{ id: GATEWAY_STARTUP_MODEL.id, name: GATEWAY_STARTUP_MODEL.id }],
+			}],
+			"default.sessionModel": GATEWAY_STARTUP_MODEL.pref,
+			"default.sessionThinkingLevel": GATEWAY_STARTUP_MODEL.thinkingLevel,
+		}, null, 2), "utf8"),
 		writeFile(path.join(secretsRoot, "token"), GATEWAY_STARTUP_TOKEN, "utf8"),
 	]);
 
@@ -431,7 +449,23 @@ async function validateSearch(baseUrl, manifest) {
 	throw new Error(`search index did not expose its expected sentinel (last HTTP ${latestStatus ?? "unknown"})`);
 }
 
-async function validateReadyGateway(baseUrl, manifest) {
+function restoreDiagnostics(session, runtime) {
+	const boundedValue = (value, maximum = 160) => value == null
+		? null
+		: boundedErrorMessage(value, maximum);
+	return JSON.stringify({
+		id: boundedValue(session?.id),
+		status: boundedValue(session?.status),
+		restoreError: boundedValue(session?.restoreError, 500),
+		modelProvider: boundedValue(session?.modelProvider),
+		modelId: boundedValue(session?.modelId),
+		spawnPinnedModel: boundedValue(session?.spawnPinnedModel),
+		spawnPinnedThinkingLevel: boundedValue(session?.spawnPinnedThinkingLevel),
+		gatewayStderrTail: boundedValue(runtime?.stderr?.text?.() ?? "", 1_000),
+	});
+}
+
+async function validateReadyGateway(baseUrl, manifest, runtime) {
 	const projectsResult = await fetchJson(baseUrl, "api/projects");
 	assertion(projectsResult.response.ok, `projects endpoint returned HTTP ${projectsResult.response.status}`);
 	const projects = Array.isArray(projectsResult.body) ? projectsResult.body : projectsResult.body?.projects;
@@ -462,9 +496,21 @@ async function validateReadyGateway(baseUrl, manifest) {
 	for (const id of manifest.liveIds) {
 		const result = await fetchJson(baseUrl, `api/sessions/${encodeURIComponent(id)}`);
 		assertion(result.response.ok, `restored session ${id} returned HTTP ${result.response.status}`);
-		assertion(result.body?.status === "idle", `restored session ${id} was ${result.body?.status ?? "missing"}, not idle`);
-		assertion(!result.body?.restoreError, `restored session ${id} reported a restore error`);
-		liveStates.push({ id, status: result.body.status });
+		const liveStateValid = result.body?.status === "idle"
+			&& !result.body?.restoreError
+			&& result.body?.modelProvider === GATEWAY_STARTUP_MODEL.provider
+			&& result.body?.modelId === GATEWAY_STARTUP_MODEL.id
+			&& result.body?.spawnPinnedModel === GATEWAY_STARTUP_MODEL.pref
+			&& result.body?.spawnPinnedThinkingLevel === GATEWAY_STARTUP_MODEL.thinkingLevel;
+		assertion(liveStateValid, `restored session state/model mismatch ${restoreDiagnostics(result.body, runtime)}`);
+		liveStates.push({
+			id,
+			status: result.body.status,
+			modelProvider: result.body.modelProvider,
+			modelId: result.body.modelId,
+			spawnPinnedModel: result.body.spawnPinnedModel,
+			spawnPinnedThinkingLevel: result.body.spawnPinnedThinkingLevel,
+		});
 	}
 
 	const observedSemantics = validateGatewayStartupSemanticProjection(manifest, sessions);
@@ -473,6 +519,7 @@ async function validateReadyGateway(baseUrl, manifest) {
 		projectCount: projects.length,
 		sessionCount: sessions.length,
 		liveCount: liveStates.length,
+		validatedLiveModelCount: liveStates.length,
 		archivedCount: archived.length,
 		reachableArchivedCount: reachable.length,
 		searchResultCount: search.resultIds.length,
@@ -555,7 +602,7 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 			},
 		});
 		const processMetrics = await readProcessMetrics(runtime.child.pid);
-		const correctness = await validateReadyGateway(active.baseUrl, sample.manifest);
+		const correctness = await validateReadyGateway(active.baseUrl, sample.manifest, runtime);
 		const cpuTimeMs = Number.isFinite(processMetrics.cpuTimeMs) ? processMetrics.cpuTimeMs : null;
 		const peakRssBytes = Number.isFinite(processMetrics.peakRssBytes) ? processMetrics.peakRssBytes : null;
 		return {
@@ -650,6 +697,7 @@ export async function runJourney(context) {
 			status: "passed",
 			sampleCount: samples.length,
 			validatedSessions: samples.reduce((sum, sample) => sum + sample.correctness.sessionCount, 0),
+			validatedLiveModels: samples.reduce((sum, sample) => sum + sample.correctness.validatedLiveModelCount, 0),
 			validatedSearchIndexes: samples.length,
 			validatedRelationshipTraversals: samples.length,
 		},
