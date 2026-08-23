@@ -17,13 +17,18 @@ export const SESSION_OPEN_CASES = Object.freeze([
 	Object.freeze({ name: "25mb", transcriptBytes: 25_000_000 }),
 ]);
 export const SESSION_OPEN_VIEWPORT = Object.freeze({ width: 1280, height: 800 });
-export const SESSION_OPEN_FIXTURE_VERSION = 1;
+export const SESSION_OPEN_FIXTURE_VERSION = 2;
+export const SESSION_OPEN_SAMPLE_TIMEOUT_MS = 180_000;
+export const SESSION_OPEN_WATCHDOG_GRACE_MS = 5_000;
+export const SESSION_OPEN_PARITY_BATCH_SIZE = 4;
+export const SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES = 30 * 1024;
+export const SESSION_OPEN_BALLAST_BLOCKS_PER_MESSAGE = 32;
 
 const FIRST_MARKER = "BOBBIT_SESSION_OPEN_FIRST_MARKER";
 const LAST_MARKER = "BOBBIT_SESSION_OPEN_LAST_MARKER";
 const FIXTURE_TIME_MS = Date.parse("2024-01-01T00:00:00.000Z");
-const SAMPLE_TIMEOUT_MS = 180_000;
-const BODY_CHUNK_BYTES = 24 * 1024;
+const REALISTIC_CYCLE_COUNT = 8;
+const BALLAST_PROSE = " Deterministic plain prose exercises transfer parsing reduction and rendering in stable ordinal order.";
 
 function sha256(value) {
 	return createHash("sha256").update(value).digest("hex");
@@ -223,9 +228,10 @@ function realisticCycle(cycle, firstSequence, parentId) {
 	const markdown = [
 		`## Deterministic analysis ${cycle}`,
 		"",
-		"This assistant response exercises Markdown, code, and the production transcript renderer.",
+		"This assistant response exercises realistic Markdown and a small code sample.",
 		"```text",
-		`fixture-${String(cycle).padStart(5, "0")}:${"abcdef0123456789".repeat(Math.ceil(BODY_CHUNK_BYTES / 16)).slice(0, BODY_CHUNK_BYTES)}`,
+		`fixture-${String(cycle).padStart(5, "0")}: alpha beta gamma`,
+		"status: deterministic",
 		"```",
 	].join("\n");
 	const user = fixtureMessage(sequence, "user", [{ type: "text", text: userText }]);
@@ -266,6 +272,44 @@ function realisticCycle(cycle, firstSequence, parentId) {
 	return { entries: [userEntry, assistantEntry, resultEntry], nextSequence: sequence, parentId: resultEntry.id };
 }
 
+function ballastText(ordinal, byteLength, includeLastMarker = false) {
+	const prefix = `Bobbit session open ballast block ${String(ordinal).padStart(6, "0")}.`;
+	const suffix = includeLastMarker ? ` ${LAST_MARKER}` : "";
+	const minimum = Buffer.byteLength(prefix) + Buffer.byteLength(suffix);
+	if (!Number.isSafeInteger(byteLength) || byteLength < minimum || byteLength > SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES) {
+		return null;
+	}
+	const remaining = byteLength - minimum;
+	const prose = BALLAST_PROSE.repeat(Math.ceil(remaining / BALLAST_PROSE.length)).slice(0, remaining);
+	return `${prefix}${prose}${suffix}`;
+}
+
+function ballastEntry(sequence, parentId, firstOrdinal, blockLengths, includeLastMarker = false) {
+	const content = blockLengths.map((blockLength, index) => {
+		const isLast = includeLastMarker && index === blockLengths.length - 1;
+		const text = ballastText(firstOrdinal + index, blockLength, isLast);
+		if (text === null) throw new Error(`Unable to construct ballast block ${firstOrdinal + index} with ${blockLength} bytes`);
+		return { type: "text", text };
+	});
+	return transcriptEntry(sequence, parentId, fixtureMessage(sequence, "assistant", content, { stopReason: "stop" }));
+}
+
+function finalBallastCandidate(transcriptBytes, targetBytes, sequence, parentId, firstOrdinal) {
+	for (let blockCount = 1; blockCount <= SESSION_OPEN_BALLAST_BLOCKS_PER_MESSAGE; blockCount += 1) {
+		const minimumFinal = Buffer.byteLength(`Bobbit session open ballast block ${String(firstOrdinal + blockCount - 1).padStart(6, "0")}. ${LAST_MARKER}`);
+		const blockLengths = [
+			...Array.from({ length: blockCount - 1 }, () => SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES),
+			minimumFinal,
+		];
+		const candidate = ballastEntry(sequence, parentId, firstOrdinal, blockLengths, true);
+		const missingBytes = targetBytes - transcriptBytes - Buffer.byteLength(jsonLine(candidate));
+		if (missingBytes < 0 || minimumFinal + missingBytes > SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES) continue;
+		blockLengths[blockLengths.length - 1] += missingBytes;
+		return { entry: ballastEntry(sequence, parentId, firstOrdinal, blockLengths, true), blockLengths };
+	}
+	return null;
+}
+
 function buildFixture(targetBytes) {
 	if (!Number.isSafeInteger(targetBytes) || targetBytes < 100_000) throw new RangeError("transcript byte size is too small");
 	const header = {
@@ -278,28 +322,69 @@ function buildFixture(targetBytes) {
 	let transcript = jsonLine(header);
 	let sequence = 1;
 	let parentId = null;
-	let cycle = 0;
-	const minimumTail = 1_024;
-	for (;;) {
+	for (let cycle = 0; cycle < REALISTIC_CYCLE_COUNT; cycle += 1) {
 		const next = realisticCycle(cycle, sequence, parentId);
 		const encoded = next.entries.map(jsonLine).join("");
-		if (Buffer.byteLength(transcript) + Buffer.byteLength(encoded) + minimumTail > targetBytes) break;
+		if (Buffer.byteLength(transcript) + Buffer.byteLength(encoded) >= targetBytes) {
+			throw new Error(`Realistic fixture cycles do not fit into ${targetBytes} bytes`);
+		}
 		transcript += encoded;
 		entries.push(...next.entries);
 		sequence = next.nextSequence;
 		parentId = next.parentId;
-		cycle += 1;
 	}
-	const emptyTailMessage = fixtureMessage(sequence, "assistant", [{ type: "text", text: `\n${LAST_MARKER}` }], { stopReason: "stop" });
-	const emptyTailEntry = transcriptEntry(sequence, parentId, emptyTailMessage);
-	const markerEncodedBytes = Buffer.byteLength(jsonLine(emptyTailEntry));
-	const fillerBytes = targetBytes - Buffer.byteLength(transcript) - markerEncodedBytes;
-	if (fillerBytes < 0) throw new Error(`Unable to fit deterministic tail into ${targetBytes} bytes`);
-	emptyTailEntry.message.content[0].text = `${"z".repeat(fillerBytes)}\n${LAST_MARKER}`;
-	transcript += jsonLine(emptyTailEntry);
-	entries.push(emptyTailEntry);
-	const actualBytes = Buffer.byteLength(transcript);
+
+	let transcriptBytes = Buffer.byteLength(transcript);
+	let ballastBlockCount = 0;
+	const ballastBlockLengths = [];
+	for (;;) {
+		const fullLengths = Array.from({ length: SESSION_OPEN_BALLAST_BLOCKS_PER_MESSAGE }, () => SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES);
+		const maximumFinalBytes = Buffer.byteLength(jsonLine(ballastEntry(sequence, parentId, ballastBlockCount, fullLengths, true)));
+		const remainingTargetBytes = targetBytes - transcriptBytes;
+		let regular = null;
+		if (remainingTargetBytes > maximumFinalBytes + 1_024) {
+			regular = { entry: ballastEntry(sequence, parentId, ballastBlockCount, fullLengths), lengths: fullLengths };
+		} else {
+			const finalCandidate = finalBallastCandidate(transcriptBytes, targetBytes, sequence, parentId, ballastBlockCount);
+			if (finalCandidate) {
+				const encoded = jsonLine(finalCandidate.entry);
+				transcript += encoded;
+				transcriptBytes += Buffer.byteLength(encoded);
+				entries.push(finalCandidate.entry);
+				ballastBlockLengths.push(...finalCandidate.blockLengths);
+				ballastBlockCount += finalCandidate.blockLengths.length;
+				break;
+			}
+		}
+
+		if (!regular) {
+			for (let blockCount = SESSION_OPEN_BALLAST_BLOCKS_PER_MESSAGE; blockCount >= 1; blockCount -= 1) {
+				const lengths = Array.from({ length: blockCount }, () => SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES);
+				const entry = ballastEntry(sequence, parentId, ballastBlockCount, lengths);
+				const nextBytes = transcriptBytes + Buffer.byteLength(jsonLine(entry));
+				if (nextBytes >= targetBytes) continue;
+				if (finalBallastCandidate(nextBytes, targetBytes, sequence + 1, entry.id, ballastBlockCount + blockCount)) {
+					regular = { entry, lengths };
+					break;
+				}
+			}
+		}
+		if (!regular) throw new Error(`Unable to fit deterministic ballast into ${targetBytes} bytes`);
+		const encoded = jsonLine(regular.entry);
+		transcript += encoded;
+		transcriptBytes += Buffer.byteLength(encoded);
+		entries.push(regular.entry);
+		ballastBlockLengths.push(...regular.lengths);
+		ballastBlockCount += regular.lengths.length;
+		parentId = regular.entry.id;
+		sequence += 1;
+	}
+
+	const actualBytes = transcriptBytes;
 	if (actualBytes !== targetBytes) throw new Error(`Fixture byte mismatch: expected ${targetBytes}, got ${actualBytes}`);
+	if (ballastBlockLengths.some(length => length > SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES)) {
+		throw new Error("Fixture ballast exceeded the production-safe block limit");
+	}
 
 	const rawMessages = entries.filter(entry => entry.type === "message").map(entry => entry.message);
 	const sidecars = compactionEntries();
@@ -326,6 +411,10 @@ function buildFixture(targetBytes) {
 		rawEntryIds: entries.map(entry => entry.id),
 		rawMessageIds: rawMessages.map(message => message.id),
 		rawMessageCount: rawMessages.length,
+		realisticCycleCount: REALISTIC_CYCLE_COUNT,
+		ballastBlockCount,
+		ballastBlockMaxBytes: Math.max(...ballastBlockLengths),
+		ballastBlockLengthsSha256: sha256(JSON.stringify(ballastBlockLengths)),
 		expectedVisibleMessageCount: expectedMessages.length,
 		expectedSemanticSha256: sha256(JSON.stringify(projection)),
 		expectedRenderIds: renderIds,
@@ -357,26 +446,127 @@ export async function generateSessionOpenFixture(fixtureRoot, fixtureCase) {
 	return { directory, ...fixture };
 }
 
-async function apiJson(baseUrl, pathname, init = {}) {
+const SESSION_OPEN_PHASES = Object.freeze(["prepare", "tti", "paritySettle", "oracle", "teardown"]);
+
+/**
+ * Own one absolute sample deadline. Expiry interrupts the active renderer rather
+ * than abandoning its promise, so ordinary finally blocks still own teardown.
+ * Clock/timer/interrupt dependencies are injectable for deterministic tests.
+ */
+export function createSessionOpenSampleWatchdog({
+	timeoutMs = SESSION_OPEN_SAMPLE_TIMEOUT_MS,
+	graceMs = SESSION_OPEN_WATCHDOG_GRACE_MS,
+	now = () => performance.now(),
+	setTimer = (callback, delay) => setTimeout(callback, delay),
+	clearTimer = handle => clearTimeout(handle),
+	terminateExecution = runtime => runtime?.cdp?.send("Runtime.terminateExecution") ?? Promise.resolve(),
+	closeBrowser = runtime => runtime?.browser?.close() ?? Promise.resolve(),
+} = {}) {
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError("Session-open sample timeout must be positive");
+	if (!Number.isFinite(graceMs) || graceMs < 0) throw new RangeError("Session-open watchdog grace must be non-negative");
+	const startedAt = now();
+	const deadline = startedAt + timeoutMs;
+	const durations = Object.fromEntries(SESSION_OPEN_PHASES.map(phase => [phase, 0]));
+	const abortController = new AbortController();
+	let phase = "prepare";
+	let phaseStartedAt = startedAt;
+	let browserRuntime = null;
+	let gatewayRuntime = null;
+	let expired = false;
+	let workSettled = false;
+	let timeoutError = null;
+	let fallbackTimer = null;
+	let interruptPromise = Promise.resolve();
+
+	const snapshotDurations = () => {
+		const result = { ...durations };
+		if (phase && !workSettled) result[phase] += Math.max(0, now() - phaseStartedAt);
+		return Object.fromEntries(SESSION_OPEN_PHASES.map(name => [`${name}Ms`, result[name]]));
+	};
+	const expire = () => {
+		if (expired || workSettled) return;
+		expired = true;
+		timeoutError = new Error(`Session-open sample watchdog expired after ${timeoutMs}ms during ${phase} phase`);
+		timeoutError.name = "SessionOpenSampleTimeoutError";
+		timeoutError.phase = phase;
+		timeoutError.phaseDurationsMs = snapshotDurations();
+		abortController.abort(timeoutError);
+		const acquiredBrowser = browserRuntime;
+		interruptPromise = Promise.resolve()
+			.then(() => terminateExecution(acquiredBrowser))
+			.catch(() => {});
+		fallbackTimer = setTimer(() => {
+			if (workSettled || !acquiredBrowser) return;
+			interruptPromise = Promise.allSettled([
+				interruptPromise,
+				Promise.resolve().then(() => closeBrowser(acquiredBrowser)),
+			]).then(() => undefined);
+		}, graceMs);
+	};
+	const deadlineTimer = setTimer(expire, timeoutMs);
+
+	return {
+		signal: abortController.signal,
+		setPhase(nextPhase) {
+			if (!SESSION_OPEN_PHASES.includes(nextPhase)) throw new Error(`Unknown session-open phase: ${nextPhase}`);
+			if (nextPhase === phase) return;
+			const timestamp = now();
+			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
+			phase = nextPhase;
+			phaseStartedAt = timestamp;
+		},
+		registerGateway(runtime) { gatewayRuntime = runtime ?? null; },
+		registerBrowser(runtime) { browserRuntime = runtime ?? null; },
+		resources() { return { browserRuntime, gatewayRuntime }; },
+		remainingMs() { return Math.max(1, Math.ceil(deadline - now())); },
+		throwIfExpired() { if (expired) throw timeoutError; },
+		markWorkSettled() {
+			if (workSettled) return;
+			const timestamp = now();
+			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
+			workSettled = true;
+			clearTimer(deadlineTimer);
+			if (fallbackTimer !== null) clearTimer(fallbackTimer);
+		},
+		async finish() {
+			this.markWorkSettled();
+			await interruptPromise;
+		},
+		phaseDurationsMs: snapshotDurations,
+		get timedOut() { return expired; },
+		get error() { return timeoutError; },
+	};
+}
+
+function requestSignal(signal, timeoutMs = 30_000) {
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+}
+
+async function apiJson(baseUrl, pathname, init = {}, signal) {
 	const response = await fetch(new URL(pathname.replace(/^\//, ""), baseUrl), {
 		...init,
 		headers: { "content-type": "application/json", ...(init.headers ?? {}) },
-		signal: AbortSignal.timeout(30_000),
+		signal: requestSignal(signal),
 	});
 	const body = await response.text();
 	if (!response.ok) throw new Error(`${init.method ?? "GET"} ${pathname} returned HTTP ${response.status}: ${body.slice(0, 1_000)}`);
 	return body ? JSON.parse(body) : null;
 }
 
-async function waitFor(predicate, description, timeoutMs = 30_000) {
+async function waitFor(predicate, description, timeoutMs = 30_000, signal) {
 	const deadline = performance.now() + timeoutMs;
 	let lastError;
 	while (performance.now() < deadline) {
+		signal?.throwIfAborted();
 		try {
 			const result = await predicate();
 			if (result) return result;
-		} catch (error) { lastError = error; }
-		await new Promise(resolve => setTimeout(resolve, 50));
+		} catch (error) {
+			if (signal?.aborted) throw signal.reason;
+			lastError = error;
+		}
+		await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - performance.now()))));
 	}
 	throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError.message}` : ""}`);
 }
@@ -429,7 +619,8 @@ function gatewayInvocation(context, sampleRoot, port) {
 	};
 }
 
-async function prepareRestoredSession(context, sampleRoot) {
+async function prepareRestoredSession(context, sampleRoot, watchdog) {
+	watchdog.throwIfExpired();
 	const invocation = gatewayInvocation(context, sampleRoot, await getFreePort());
 	await Promise.all([
 		invocation.workspace,
@@ -455,32 +646,36 @@ async function prepareRestoredSession(context, sampleRoot) {
 		}, null, 2), "utf8"),
 	]);
 	let runtime = invocation.spawn();
+	watchdog.registerGateway(runtime);
 	try {
-		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, timeoutMs: SAMPLE_TIMEOUT_MS });
-		let projects = await apiJson(invocation.baseUrl, "/api/projects");
+		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, timeoutMs: watchdog.remainingMs() });
+		watchdog.throwIfExpired();
+		let projects = await apiJson(invocation.baseUrl, "/api/projects", {}, watchdog.signal);
 		let project = projects.find(candidate => candidate.rootPath && path.resolve(candidate.rootPath) === path.resolve(invocation.workspace));
 		if (!project) {
 			project = await apiJson(invocation.baseUrl, "/api/projects", {
 				method: "POST",
 				body: JSON.stringify({ name: "benchmark", rootPath: invocation.workspace, acceptCanonical: true }),
-			});
+			}, watchdog.signal);
 		}
 		const session = await apiJson(invocation.baseUrl, "/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: invocation.workspace, projectId: project.id, worktree: false }),
-		});
+		}, watchdog.signal);
 		await waitFor(async () => {
-			const current = await apiJson(invocation.baseUrl, `/api/sessions/${session.id}`);
+			const current = await apiJson(invocation.baseUrl, `/api/sessions/${session.id}`, {}, watchdog.signal);
 			return current.status === "idle" ? current : null;
-		}, "new benchmark session to become idle", 60_000);
+		}, "new benchmark session to become idle", Math.min(60_000, watchdog.remainingMs()), watchdog.signal);
 		const storeFile = path.join(invocation.workspace, ".bobbit", "state", "sessions.json");
 		const persisted = await waitFor(async () => {
 			const store = JSON.parse(await readFile(storeFile, "utf8"));
 			const rows = Array.isArray(store) ? store : store.sessions;
 			return rows?.find(row => row.id === session.id && typeof row.agentSessionFile === "string") ?? null;
-		}, "session transcript path to persist", 30_000);
+		}, "session transcript path to persist", Math.min(30_000, watchdog.remainingMs()), watchdog.signal);
 		await stopGateway(runtime, { baseUrl: invocation.baseUrl });
 		runtime = null;
+		watchdog.registerGateway(null);
+		watchdog.throwIfExpired();
 
 		await writeFile(persisted.agentSessionFile, await readFile(path.join(sampleRoot, "fixture", "transcript.jsonl")));
 		const sidecarDir = path.join(invocation.gatewayDir, "state", "compaction-sidecar");
@@ -491,14 +686,17 @@ async function prepareRestoredSession(context, sampleRoot) {
 		);
 
 		runtime = invocation.spawn();
-		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, timeoutMs: SAMPLE_TIMEOUT_MS });
+		watchdog.registerGateway(runtime);
+		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, timeoutMs: watchdog.remainingMs() });
+		watchdog.throwIfExpired();
 		await waitFor(async () => {
-			const current = await apiJson(invocation.baseUrl, `/api/sessions/${session.id}`);
+			const current = await apiJson(invocation.baseUrl, `/api/sessions/${session.id}`, {}, watchdog.signal);
 			return current.status === "idle" ? current : null;
-		}, "restored benchmark session to become interactive", 60_000);
+		}, "restored benchmark session to become interactive", Math.min(60_000, watchdog.remainingMs()), watchdog.signal);
 		return { invocation, runtime, sessionId: session.id };
 	} catch (error) {
 		if (runtime) await stopGateway(runtime, { baseUrl: invocation.baseUrl }).catch(() => {});
+		watchdog.registerGateway(null);
 		throw error;
 	}
 }
@@ -507,11 +705,18 @@ function metricValue(metrics, name) {
 	return metrics?.find(metric => metric.name === name)?.value ?? null;
 }
 
-async function measureBrowserSample(restored, manifest) {
+async function measureBrowserSample(restored, manifest, watchdog, {
+	parityBatchSize = SESSION_OPEN_PARITY_BATCH_SIZE,
+} = {}) {
+	if (!Number.isInteger(parityBatchSize) || parityBatchSize < 1 || parityBatchSize > 100) {
+		throw new RangeError("Session-open parity batch size must be an integer from 1 to 100");
+	}
+	watchdog.throwIfExpired();
 	const browserRuntime = await launchBenchmarkBrowser({
 		viewport: SESSION_OPEN_VIEWPORT,
 		launchOptions: { args: ["--enable-precise-memory-info"] },
 	});
+	watchdog.registerBrowser(browserRuntime);
 	let snapshotFrameBytes = 0;
 	try {
 		await browserRuntime.context.addInitScript(() => {
@@ -552,7 +757,7 @@ async function measureBrowserSample(restored, manifest) {
 
 		await browserRuntime.page.goto(`${restored.invocation.baseUrl}#/session/${restored.sessionId}`, {
 			waitUntil: "domcontentloaded",
-			timeout: SAMPLE_TIMEOUT_MS,
+			timeout: watchdog.remainingMs(),
 		});
 		await browserRuntime.page.waitForFunction(lastMarker => {
 			const editor = document.querySelector("message-editor textarea");
@@ -560,7 +765,7 @@ async function measureBrowserSample(restored, manifest) {
 			return !!editor && !editor.disabled && editor.getClientRects().length > 0
 				&& document.body.textContent.includes(lastMarker)
 				&& timing?.marks?.some(mark => mark.name === "post-snapshot-paint");
-		}, LAST_MARKER, { timeout: SAMPLE_TIMEOUT_MS });
+		}, LAST_MARKER, { timeout: watchdog.remainingMs() });
 		const timing = await browserRuntime.page.evaluate(async () => {
 			await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 			const sample = window.__bobbitBootTimings;
@@ -578,34 +783,53 @@ async function measureBrowserSample(restored, manifest) {
 				heap: [...(window.__bobbitSessionOpenMetrics?.heap ?? [])],
 			};
 		});
+		watchdog.setPhase("paritySettle");
+		watchdog.throwIfExpired();
 		let heapAfterInteractive = null;
 		if (browserRuntime.cdp) {
 			const afterInteractive = await browserRuntime.cdp.send("Performance.getMetrics");
 			heapAfterInteractive = metricValue(afterInteractive.metrics, "JSHeapUsedSize");
 		}
 
-		await browserRuntime.page.evaluate(async () => {
-			// Resolving wrappers inserts message components, whose own updates then
-			// insert markdown/tool components. Await both generations explicitly.
-			for (let pass = 0; pass < 3; pass += 1) {
-				const deferred = window.DeferredBlock;
-				deferred?.forceResolveAll();
-				if (deferred?.instances) {
-					await Promise.all(Array.from(deferred.instances, element => element.updateComplete ?? Promise.resolve()));
+		await browserRuntime.page.evaluate(async ({ batchSize }) => {
+			const componentSelector = "message-list, user-message, assistant-message, markdown-block, tool-message, code-block";
+			const settleComponents = async roots => {
+				const components = new Set(document.querySelectorAll(componentSelector));
+				for (const root of roots) {
+					for (const component of root.querySelectorAll(componentSelector)) components.add(component);
 				}
-				await Promise.all([...document.querySelectorAll("message-list, user-message, assistant-message, markdown-block, tool-message")]
-					.map(element => element.updateComplete ?? Promise.resolve()));
+				await Promise.all(Array.from(components, component => component.updateComplete ?? Promise.resolve()));
+			};
+			let stablePasses = 0;
+			let previousWrapperCount = -1;
+			while (stablePasses < 2) {
+				const wrappers = [...document.querySelectorAll("deferred-block")];
+				const unresolved = wrappers.filter(wrapper => wrapper.eager !== true);
+				if (unresolved.length > 0) {
+					const batch = unresolved.slice(0, batchSize);
+					for (const wrapper of batch) wrapper.eager = true;
+					await Promise.all(batch.map(wrapper => wrapper.updateComplete ?? Promise.resolve()));
+					await settleComponents(batch);
+					stablePasses = 0;
+				} else {
+					await settleComponents(wrappers);
+					stablePasses = wrappers.length === previousWrapperCount ? stablePasses + 1 : 0;
+					previousWrapperCount = wrappers.length;
+				}
 				await new Promise(resolve => requestAnimationFrame(resolve));
 			}
-			await new Promise(resolve => requestAnimationFrame(resolve));
-		});
+			await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+		}, { batchSize: parityBatchSize });
+		watchdog.throwIfExpired();
 		await browserRuntime.page.waitForFunction(({ compactions, textRows }) =>
 			document.querySelectorAll('[data-testid="compaction-summary-card"]').length === compactions
 				&& [...document.querySelectorAll("user-message markdown-block, assistant-message markdown-block")]
 					.filter(block => !block.closest("tool-message")).length === textRows,
 		{ compactions: manifest.expectedCompactionIds.length, textRows: manifest.expectedRenderedTextCount },
-		{ timeout: 30_000 });
+		{ timeout: Math.min(30_000, watchdog.remainingMs()) });
 
+		watchdog.setPhase("oracle");
+		watchdog.throwIfExpired();
 		const oracle = await browserRuntime.page.evaluate(async ({ firstMarker, lastMarker }) => {
 			const agent = document.querySelector("agent-interface");
 			const messages = agent?.session?.state?.messages;
@@ -734,45 +958,93 @@ async function measureBrowserSample(restored, manifest) {
 			},
 		};
 	} finally {
-		await closeBenchmarkBrowser(browserRuntime);
-	}
-}
-
-async function runSample(context, entry, fixture) {
-	const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: fixture.directory });
-	let restored;
-	try {
-		restored = await prepareRestoredSession(context, sampleRoot);
-		const measured = await measureBrowserSample(restored, fixture.manifest);
-		return {
-			case: entry.case,
-			phase: entry.phase,
-			cycle: entry.cycle,
-			order: entry.order,
-			caseOrder: entry.caseOrder,
-			metrics: measured.metrics,
-			correctness: {
-				status: "passed",
-				messageCount: measured.correctness.messageCount,
-				renderCount: measured.correctness.renderCount,
-				toolPairCount: measured.correctness.toolPairCount,
-				errorCount: measured.correctness.canonicalErrorIds.length,
-				compactionCount: measured.correctness.compactionCount,
-				semanticSha256: measured.correctness.semanticSha256,
-				renderIdsSha256: measured.correctness.renderIdsSha256,
-				renderedTextSha256: measured.correctness.renderedTextSha256,
-			},
-			metricReliability: measured.metricSupport,
-			browserVersion: measured.browserVersion,
-		};
-	} finally {
-		if (restored?.runtime) {
-			await stopGateway(restored.runtime, { baseUrl: restored.invocation.baseUrl });
+		watchdog.setPhase("teardown");
+		try {
+			await closeBenchmarkBrowser(browserRuntime);
+		} catch (error) {
+			if (!watchdog.timedOut) throw error;
+		} finally {
+			watchdog.registerBrowser(null);
 		}
 	}
 }
 
-export async function runJourney(context) {
+export async function runSessionOpenSample(context, entry, fixture, {
+	timeoutMs = SESSION_OPEN_SAMPLE_TIMEOUT_MS,
+	watchdogGraceMs = SESSION_OPEN_WATCHDOG_GRACE_MS,
+	parityBatchSize = SESSION_OPEN_PARITY_BATCH_SIZE,
+	watchdogDependencies = {},
+	prepare = prepareRestoredSession,
+	measure = measureBrowserSample,
+} = {}) {
+	const watchdog = createSessionOpenSampleWatchdog({
+		timeoutMs,
+		graceMs: watchdogGraceMs,
+		...watchdogDependencies,
+	});
+	let restored;
+	let measured;
+	let operationError = null;
+	let cleanupError = null;
+	try {
+		const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: fixture.directory });
+		watchdog.throwIfExpired();
+		restored = await prepare(context, sampleRoot, watchdog);
+		watchdog.setPhase("tti");
+		watchdog.throwIfExpired();
+		measured = await measure(restored, fixture.manifest, watchdog, { parityBatchSize });
+	} catch (error) {
+		operationError = watchdog.timedOut ? watchdog.error : error;
+	} finally {
+		watchdog.setPhase("teardown");
+		if (restored?.runtime) {
+			try {
+				await stopGateway(restored.runtime, { baseUrl: restored.invocation.baseUrl });
+			} catch (error) {
+				cleanupError = error;
+			} finally {
+				watchdog.registerGateway(null);
+			}
+		}
+		try {
+			await watchdog.finish();
+		} catch (error) {
+			cleanupError = cleanupError
+				? new AggregateError([cleanupError, error], "Session-open watchdog cleanup failed")
+				: error;
+		}
+	}
+	operationError ??= watchdog.timedOut ? watchdog.error : null;
+	if (operationError && cleanupError) {
+		throw new AggregateError([operationError, cleanupError], `Session-open sample failed and cleanup was incomplete: ${operationError.message}`);
+	}
+	if (operationError) throw operationError;
+	if (cleanupError) throw cleanupError;
+	return {
+		case: entry.case,
+		phase: entry.phase,
+		cycle: entry.cycle,
+		order: entry.order,
+		caseOrder: entry.caseOrder,
+		metrics: measured.metrics,
+		phaseDurationsMs: watchdog.phaseDurationsMs(),
+		correctness: {
+			status: "passed",
+			messageCount: measured.correctness.messageCount,
+			renderCount: measured.correctness.renderCount,
+			toolPairCount: measured.correctness.toolPairCount,
+			errorCount: measured.correctness.canonicalErrorIds.length,
+			compactionCount: measured.correctness.compactionCount,
+			semanticSha256: measured.correctness.semanticSha256,
+			renderIdsSha256: measured.correctness.renderIdsSha256,
+			renderedTextSha256: measured.correctness.renderedTextSha256,
+		},
+		metricReliability: measured.metricSupport,
+		browserVersion: measured.browserVersion,
+	};
+}
+
+export async function runJourney(context, dependencies = {}) {
 	const fixtures = new Map();
 	for (const fixtureCase of SESSION_OPEN_CASES) {
 		fixtures.set(fixtureCase.name, await generateSessionOpenFixture(context.paths.fixtures, fixtureCase));
@@ -782,7 +1054,7 @@ export async function runJourney(context) {
 	let browserVersion = null;
 	let metricSupport = {};
 	for (const entry of schedule) {
-		const sample = await runSample(context, entry, fixtures.get(entry.case));
+		const sample = await runSessionOpenSample(context, entry, fixtures.get(entry.case), dependencies);
 		browserVersion ??= sample.browserVersion;
 		metricSupport = { ...metricSupport, ...sample.metricReliability };
 		samples.push(sample);
@@ -797,6 +1069,9 @@ export async function runJourney(context) {
 				toolCallCount: fixture.manifest.expectedToolCallIds.length,
 				errorCount: fixture.manifest.expectedErrorIds.length,
 				compactionCount: fixture.manifest.expectedCompactionIds.length,
+				realisticCycleCount: fixture.manifest.realisticCycleCount,
+				ballastBlockCount: fixture.manifest.ballastBlockCount,
+				ballastBlockMaxBytes: fixture.manifest.ballastBlockMaxBytes,
 			}];
 		})),
 		fixtureHashes: Object.fromEntries(SESSION_OPEN_CASES.map(fixtureCase => {
@@ -843,7 +1118,7 @@ export async function runJourney(context) {
 			"Chromium heap peak is sampled and is not a process-wide memory high-water mark.",
 			"WebSocket transfer bytes use CDP payload bytes when available and client frame characters otherwise.",
 			"Long Task totals clip task overlap to the get_messages send through interactive measurement window; unsupported observers produce no numeric Long Task metrics.",
-			"Forcing all deferred blocks is part of parity validation but occurs after the measured interactive boundary.",
+			"Resolving all deferred blocks in bounded eager batches is part of parity validation but occurs after the measured interactive boundary.",
 		],
 		noiseSources: [
 			"filesystem cache and antivirus scanning",
