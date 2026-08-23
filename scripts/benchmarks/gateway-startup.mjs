@@ -15,7 +15,7 @@ export const GATEWAY_STARTUP_CASES = Object.freeze([
 	Object.freeze({ name: "1000-sessions", sessionCount: 1_000, liveCount: 3 }),
 ]);
 
-export const GATEWAY_STARTUP_FIXTURE_VERSION = 3;
+export const GATEWAY_STARTUP_FIXTURE_VERSION = 4;
 export const GATEWAY_STARTUP_PROJECT_ID = "headquarters";
 export const GATEWAY_STARTUP_TOKEN = "b0bb17".repeat(10) + "b0bb";
 export const GATEWAY_STARTUP_SEARCH_SENTINEL = "gateway-startup-search-sentinel";
@@ -24,7 +24,7 @@ const GATEWAY_STARTUP_MODEL = Object.freeze({
 	provider: "mock",
 	id: "mock-model",
 	pref: "mock/mock-model",
-	thinkingLevel: "medium",
+	thinkingLevel: "off",
 });
 
 const FIXTURE_EPOCH_MS = 1_700_000_000_000;

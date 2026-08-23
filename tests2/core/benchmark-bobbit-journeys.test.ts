@@ -371,7 +371,7 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 	});
 });
 
-describe("gateway-startup fixture v3 relationship regression", () => {
+describe("gateway-startup fixture v4 relationship regression", () => {
 	function permutations<T>(values: T[]): T[][] {
 		if (values.length <= 1) return [values];
 		return values.flatMap((value, index) => permutations([
@@ -413,7 +413,7 @@ describe("gateway-startup fixture v3 relationship regression", () => {
 });
 
 describe("gateway-startup generated preferences and containment regression", () => {
-	it("generates the exact v3 restore preferences entirely beneath an owned run root", async () => {
+	it("generates the exact v4 restore preferences entirely beneath an owned run root", async () => {
 		const tempParent = await temporaryRoot();
 		const paths = await createBenchmarkRunRoot({ repoRoot: tempParent, tempDirectory: tempParent, env: {} });
 		const fixtureRoot = path.join(paths.fixtures, "100-sessions");
@@ -464,10 +464,10 @@ describe("gateway-startup generated preferences and containment regression", () 
 					models: [{ id: "mock-model", name: "mock-model" }],
 				}],
 				"default.sessionModel": "mock/mock-model",
-				"default.sessionThinkingLevel": "medium",
+				"default.sessionThinkingLevel": "off",
 			});
-			assert.equal(generated.manifest.fixtureVersion, 3);
-			assert.equal(GATEWAY_STARTUP_FIXTURE_VERSION, 3);
+			assert.equal(generated.manifest.fixtureVersion, 4);
+			assert.equal(GATEWAY_STARTUP_FIXTURE_VERSION, 4);
 			assert.equal(persistedSessions.length, 100);
 
 			const generatedPaths = [
