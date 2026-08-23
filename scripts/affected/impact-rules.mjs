@@ -964,6 +964,19 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/staff-fork-reproducer.test.ts",
+		allowReason: "test-owned host and sandbox transcript fixtures in the isolated integration gateway used to prove whole/history cloning and source-byte preservation",
+		reads: frozen([
+			{ expression: "seededHostPath", count: 1 },
+			{ expression: "sandboxFixture.filesystem.hostPath(sourcePath)", count: 2 },
+			{ expression: "sourcePath", count: 2 },
+			{ expression: "sandboxFixture.filesystem.hostPath(persisted.agentSessionFile)", count: 1 },
+			{ expression: "persisted.agentSessionFile", count: 2 },
+			{ expression: "forkSessionRecord.agentSessionFile", count: 1 },
+			{ expression: "transcript", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/staff-clear-context-policy.test.ts",
 		allowReason: "test-owned prior-generation transcript and isolated SessionStore payload used to prove durable clear history and reload",
 		reads: frozen([

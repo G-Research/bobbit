@@ -15,6 +15,8 @@ import { shouldCreateWorktree } from "./worktree-decision.js";
 import { resolveWorktreeSupport } from "./worktree-support.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import { validateNotificationFilter, type HostNotificationName, type HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
+import type { PersistedSession } from "./session-store.js";
+import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
 type StaffFactName = "staffCreated" | "staffConfigChanged" | "staffRetired" | "staffSessionChanged";
 type StaffFactPublisher = {
@@ -50,6 +52,15 @@ interface StaffWorktreePlan {
 	worktreePath?: string;
 	repoWorktrees?: Record<string, string>;
 	sessionCwd: string;
+}
+
+export interface ForkedStaffDestination {
+	id: string;
+	name: string;
+	projectId: string;
+	session: Pick<PersistedSession,
+		"id" | "staffId" | "projectId" | "archived" | "borrowsWorktree"
+		| "worktreePath" | "branch" | "repoPath" | "repoWorktrees">;
 }
 
 export class StaffManager {
@@ -356,16 +367,32 @@ export class StaffManager {
 		};
 	}
 
-	private async cleanupStaffWorktree(staff: PersistedStaff, projectId?: string): Promise<void> {
+	private async cleanupStaffWorktree(
+		staff: PersistedStaff,
+		projectId?: string,
+		liveSessions: Iterable<WorktreeReferenceRecord> = [],
+	): Promise<void> {
 		const entries = this.staffWorktreeEntries(staff, projectId);
 		if (entries.length === 0) return;
-		const results = await Promise.allSettled(entries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true, this.commandRunner, this.remotePolicy)));
+		const liveSessionSnapshot = Array.from(liveSessions);
+		const cleanupEntries = entries.filter((entry) => {
+			const referenced = isWorktreePathReferencedByLiveSession(entry.worktreePath, liveSessionSnapshot);
+			if (referenced) {
+				console.warn(`[staff-manager] Preserving worktree ${entry.worktreePath}; a live session still references it`);
+			}
+			return !referenced;
+		});
+		const results = await Promise.allSettled(cleanupEntries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true, this.commandRunner, this.remotePolicy)));
 		for (const result of results) {
 			if (result.status === "rejected") {
 				console.error(`[staff-manager] Failed to clean up one worktree for staff ${staff.id}:`, result.reason);
 			}
 		}
-		if (staff.repoWorktrees && staff.worktreePath) {
+		if (
+			staff.repoWorktrees
+			&& staff.worktreePath
+			&& !isWorktreePathReferencedByLiveSession(staff.worktreePath, liveSessionSnapshot)
+		) {
 			try { fs.rmSync(staff.worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	}
@@ -509,6 +536,79 @@ export class StaffManager {
 		return committed;
 	}
 
+	/**
+	 * Publish a staff identity for an already-launched fork session. The source
+	 * record is a snapshot only: lifecycle identity and worktree ownership always
+	 * come from the destination session, while triggers receive fresh identities.
+	 */
+	registerForkedStaff(sourceSnapshot: PersistedStaff, destination: ForkedStaffDestination): PersistedStaff {
+		if (destination.id === sourceSnapshot.id) {
+			throw new Error("Forked staff must have an independent identity");
+		}
+		if (sourceSnapshot.projectId !== destination.projectId) {
+			throw new Error("Forked staff source and destination projects do not match");
+		}
+		if (
+			destination.session.id.length === 0
+			|| destination.session.staffId !== destination.id
+			|| destination.session.projectId !== destination.projectId
+			|| destination.session.archived
+		) {
+			throw new Error("Forked staff destination session is not durably owned by the destination identity");
+		}
+		if (this.getStaff(destination.id)) {
+			throw new Error(`Staff agent already exists: ${destination.id}`);
+		}
+
+		const triggers = structuredClone(sourceSnapshot.triggers).map((trigger) => ({
+			...trigger,
+			id: randomUUID(),
+		}));
+		this.validateTriggers(triggers);
+
+		const now = Date.now();
+		const session = destination.session;
+		const staff: PersistedStaff = {
+			id: destination.id,
+			name: destination.name,
+			description: sourceSnapshot.description,
+			systemPrompt: sourceSnapshot.systemPrompt,
+			cwd: sourceSnapshot.cwd,
+			state: sourceSnapshot.state,
+			triggers,
+			memory: sourceSnapshot.memory,
+			roleId: sourceSnapshot.roleId,
+			accessory: normalizeStaffAccessory(sourceSnapshot.accessory),
+			createdAt: now,
+			updatedAt: now,
+			currentSessionId: session.id,
+			projectId: destination.projectId,
+			sandboxed: sourceSnapshot.sandboxed,
+			contextPolicy: sourceSnapshot.contextPolicy,
+			...(!session.borrowsWorktree && session.worktreePath ? {
+				worktreePath: session.worktreePath,
+				...(session.branch ? { branch: session.branch } : {}),
+				...(session.repoPath ? { repoPath: session.repoPath } : {}),
+				...(session.repoWorktrees ? { repoWorktrees: structuredClone(session.repoWorktrees) } : {}),
+			} : {}),
+		};
+
+		const store = this.getStore(destination.projectId);
+		store.putStrict(staff);
+		try {
+			this.pcm.getOrCreate(destination.projectId)?.searchIndex?.indexStaff(staff, destination.projectId);
+		} catch (err) {
+			console.warn(`[staff-manager] search indexing failed for forked staff ${staff.id}:`, err);
+		}
+		this.publishStaffFact("staffCreated", staff, {
+			staffId: staff.id,
+			state: staff.state,
+			sessionId: session.id,
+		});
+		this.reconcileNotificationDelivery(destination.projectId, staff.id);
+		return staff;
+	}
+
 	getStaff(id: string): PersistedStaff | undefined {
 		return this.findStoreForStaff(id)?.staff;
 	}
@@ -597,41 +697,75 @@ export class StaffManager {
 	}
 
 	async deleteStaff(id: string, sessionManager: SessionManager): Promise<boolean> {
-		const found = this.findStoreForStaff(id);
-		if (!found) return false;
-		const { store, staff } = found;
+		const initial = this.findStoreForStaff(id);
+		if (!initial) return false;
+		const expectedSessionId = initial.staff.currentSessionId;
+		const expectedSession = expectedSessionId
+			? sessionManager.getPersistedSession(expectedSessionId)
+			: undefined;
+		const lifecycleOwnerId = expectedSessionId
+			? (sessionManager.resolveWorktreeOwnerSessionId(expectedSessionId)
+				?? expectedSession?.borrowedWorktreeOwnerSessionId
+				?? expectedSessionId)
+			: undefined;
 
-		// Terminate the permanent session if it exists
-		if (staff.currentSessionId) {
-			try {
-				await sessionManager.terminateSession(staff.currentSessionId);
-			} catch (err) {
-				console.error(`[staff-manager] Failed to terminate session ${staff.currentSessionId} for staff ${id}:`, err);
+		const remove = async (): Promise<boolean> => {
+			// The queue may have been occupied by a fork publication. Re-read identity
+			// after admission so deletion never acts on a stale permanent-session join.
+			const found = this.findStoreForStaff(id);
+			if (!found) return false;
+			const { store, staff } = found;
+			if (staff.currentSessionId !== expectedSessionId) {
+				throw new Error(`Staff ${id} permanent session changed during deletion`);
 			}
-		}
 
-		// Clean up the worktree if it exists
-		if (staff.worktreePath) {
-			try {
-				await this.cleanupStaffWorktree(staff, found.projectId);
-			} catch (err) {
-				console.error(`[staff-manager] Failed to clean up worktree for staff ${id}:`, err);
+			if (staff.currentSessionId) {
+				const currentSession = sessionManager.getPersistedSession(staff.currentSessionId);
+				// Owners fail before bridge stop, archive, inbox deletion, or filesystem
+				// cleanup. Borrower deletion releases only its own logical lifecycle.
+				if (!currentSession?.borrowsWorktree) {
+					sessionManager.assertWorktreeOwnerHasNoLiveBorrowers(staff.currentSessionId);
+				}
+				try {
+					await sessionManager.terminateSession(staff.currentSessionId, {
+						worktreeOwnerLifecycleHeld: lifecycleOwnerId,
+					});
+				} catch (err) {
+					const code = (err as { code?: unknown })?.code;
+					if (code === "SHARED_WORKTREE_IN_USE" || code === "SHARED_SANDBOX_WORKTREE_IN_USE") throw err;
+					console.error(`[staff-manager] Failed to terminate session ${staff.currentSessionId} for staff ${id}:`, err);
+				}
 			}
-		}
 
-		store.remove(id);
-		const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
-		searchIndex?.removeStaff(id);
+			// This cleanup and the preflight above share the owner reservation. A
+			// successful reused-worktree fork must publish its durable borrower before
+			// deletion can reach either destructive boundary.
+			if (staff.worktreePath) {
+				try {
+					await this.cleanupStaffWorktree(staff, found.projectId, sessionManager.listSessions());
+				} catch (err) {
+					console.error(`[staff-manager] Failed to clean up worktree for staff ${id}:`, err);
+				}
+			}
 
-		// Wipe the per-staff inbox file. No-op if the inbox manager isn't wired
-		// (test paths that construct StaffManager directly without server.ts).
-		try {
-			this.inboxManager?.removeAll(id);
-		} catch (err) {
-			console.error(`[staff-manager] inbox removeAll failed for staff ${id}:`, err);
-		}
-		this.reconcileNotificationDelivery(found.projectId, id);
-		return true;
+			store.remove(id);
+			const searchIndex = this.pcm.getOrCreate(found.projectId)?.searchIndex;
+			searchIndex?.removeStaff(id);
+
+			// Wipe the per-staff inbox file. No-op if the inbox manager isn't wired
+			// (test paths that construct StaffManager directly without server.ts).
+			try {
+				this.inboxManager?.removeAll(id);
+			} catch (err) {
+				console.error(`[staff-manager] inbox removeAll failed for staff ${id}:`, err);
+			}
+			this.reconcileNotificationDelivery(found.projectId, id);
+			return true;
+		};
+
+		return lifecycleOwnerId
+			? sessionManager.withWorktreeOwnerLifecycle(lifecycleOwnerId, remove)
+			: remove();
 	}
 
 	/**

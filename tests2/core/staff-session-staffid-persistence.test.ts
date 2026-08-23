@@ -218,7 +218,13 @@ describe("staff session staffId backfill migration", () => {
 			},
 		};
 		function runBackfill(staffManager: {
-			listStaff(): Array<{ id: string; name: string; worktreePath?: string; cwd: string }>;
+			listStaff(): Array<{
+				id: string;
+				name: string;
+				worktreePath?: string;
+				cwd: string;
+				currentSessionId?: string;
+			}>;
 		}): { backfilled: number } {
 			return { backfilled: backfillStaffIds(pcmStub as any, staffManager) };
 		}
@@ -266,6 +272,117 @@ describe("staff session staffId backfill migration", () => {
 		// Idempotent: running again is a no-op.
 		const second = runBackfill({ listStaff: () => staffStore.getAll() });
 		assert.equal(second.backfilled, 0, "backfill is idempotent");
+	});
+
+	it("prefers exact currentSessionId ownership over colliding fork names and paths", () => {
+		const { sessionStore, staffStore, runBackfill } = makeBackfillRunner();
+		const sharedIdentity = {
+			accessory: "",
+			name: "Fork: Collision",
+			description: "",
+			systemPrompt: "",
+			cwd: "/tmp/project-wt/shared",
+			worktreePath: "/tmp/project-wt/shared",
+			state: "active",
+			triggers: [],
+			memory: "",
+			createdAt: 0,
+			updatedAt: 0,
+			projectId: "project-a",
+			sandboxed: false,
+		};
+		staffStore.put({
+			...sharedIdentity,
+			id: "staff-source",
+			currentSessionId: "session-source",
+		});
+		staffStore.put({
+			...sharedIdentity,
+			id: "staff-destination",
+			currentSessionId: "session-destination",
+		});
+		sessionStore.put({
+			id: "session-destination",
+			title: sharedIdentity.name,
+			cwd: sharedIdentity.cwd,
+			worktreePath: sharedIdentity.worktreePath,
+			agentSessionFile: "",
+			createdAt: 0,
+			lastActivity: 0,
+		});
+
+		const { backfilled } = runBackfill({ listStaff: () => staffStore.getAll() });
+
+		assert.equal(backfilled, 1);
+		assert.equal(
+			sessionStore.get("session-destination")?.staffId,
+			"staff-destination",
+			"the durable currentSessionId join must win even when fork names and worktrees collide",
+		);
+	});
+
+	it("refuses ambiguous legacy name and path fallback", () => {
+		const { sessionStore, staffStore, runBackfill } = makeBackfillRunner();
+		for (const id of ["staff-collision-a", "staff-collision-b"]) {
+			staffStore.put({
+				id,
+				accessory: "",
+				name: "Fork: Same Name",
+				description: "",
+				systemPrompt: "",
+				cwd: "/tmp/project-wt/shared",
+				worktreePath: "/tmp/project-wt/shared",
+				currentSessionId: `different-session-${id}`,
+				state: "active",
+				triggers: [],
+				memory: "",
+				createdAt: 0,
+				updatedAt: 0,
+				projectId: "project-a",
+				sandboxed: false,
+			});
+		}
+		sessionStore.put({
+			id: "legacy-ambiguous-session",
+			title: "Fork: Same Name",
+			cwd: "/tmp/project-wt/shared",
+			worktreePath: "/tmp/project-wt/shared",
+			agentSessionFile: "",
+			createdAt: 0,
+			lastActivity: 0,
+		});
+
+		const { backfilled } = runBackfill({ listStaff: () => staffStore.getAll() });
+
+		assert.equal(backfilled, 0, "ambiguous legacy matches must fail closed instead of selecting the first staff row");
+		assert.equal(sessionStore.get("legacy-ambiguous-session")?.staffId, undefined);
+	});
+
+	it("keeps source and fork staff identities distinct across store reload and env restoration", async () => {
+		const store = freshStore();
+		for (const record of [
+			{ id: "session-source", staffId: "staff-source" },
+			{ id: "session-fork", staffId: "staff-fork" },
+		]) {
+			store.put({
+				...record,
+				title: "Fork: Same Name",
+				cwd: "/tmp/project-wt/shared",
+				agentSessionFile: "",
+				createdAt: 1,
+				lastActivity: 1,
+			});
+		}
+		await store.flushAsync();
+
+		const reloaded = new SessionStore(stateDir, memfs);
+		const source = reloaded.get("session-source")!;
+		const fork = reloaded.get("session-fork")!;
+
+		assert.equal(source.staffId, "staff-source");
+		assert.equal(fork.staffId, "staff-fork");
+		assert.equal(buildRestoreEnv(source).BOBBIT_STAFF_ID, "staff-source");
+		assert.equal(buildRestoreEnv(fork).BOBBIT_STAFF_ID, "staff-fork");
 	});
 
 	it("does not touch sessions that already carry staffId", () => {

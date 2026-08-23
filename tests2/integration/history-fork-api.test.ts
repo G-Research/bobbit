@@ -326,15 +326,6 @@ function installSandboxSessionFilesystem(
 	};
 }
 
-function bridgeSandboxTranscriptForHost(
-	filesystem: SandboxSessionFilesystem,
-	containerPath: string,
-): string {
-	const hostPath = path.join(agentSessionsDir, `sandbox-fixture-${randomUUID()}-${path.basename(containerPath)}`);
-	fs.copyFileSync(filesystem.hostPath(containerPath), hostPath);
-	return hostPath;
-}
-
 function configureSandboxOwner(gateway: any, sessionId: string, name: string): {
 	root: string;
 	cwd: string;
@@ -911,7 +902,6 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
-		const sandboxFixture = installSandboxSessionFilesystem(gateway, "flatten");
 		let capturedOptions: any;
 		manager.createSession = async (...args: any[]) => {
 			capturedOptions = args[4];
@@ -919,10 +909,6 @@ test.describe("history fork API", () => {
 			args[4] = {
 				...args[4],
 				sandboxed: false,
-				preExistingAgentSessionFile: bridgeSandboxTranscriptForHost(
-					sandboxFixture.filesystem,
-					args[4].preExistingAgentSessionFile,
-				),
 			};
 			return originalCreateSession.apply(manager, args);
 		};
@@ -931,7 +917,6 @@ test.describe("history fork API", () => {
 			response = await historyFork(gateway, borrowerId, "selected-user", false);
 		} finally {
 			manager.createSession = originalCreateSession;
-			sandboxFixture.restore();
 		}
 
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
@@ -1041,10 +1026,6 @@ test.describe("history fork API", () => {
 			args[4] = {
 				...args[4],
 				sandboxed: false,
-				preExistingAgentSessionFile: bridgeSandboxTranscriptForHost(
-					sandboxFixture.filesystem,
-					args[4].preExistingAgentSessionFile,
-				),
 			};
 			return originalCreateSession.apply(manager, args);
 		};
@@ -1267,10 +1248,6 @@ test.describe("history fork API", () => {
 			args[4] = {
 				...args[4],
 				sandboxed: false,
-				preExistingAgentSessionFile: bridgeSandboxTranscriptForHost(
-					sandboxFixture.filesystem,
-					args[4].preExistingAgentSessionFile,
-				),
 			};
 			const created = await originalCreateSession.apply(manager, args);
 			configureSandboxBorrower(gateway, created.id, sourceId, sourceCoordinates.cwd);
@@ -1453,7 +1430,6 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
-		const sandboxFixture = installSandboxSessionFilesystem(gateway, "deduplicated-failure");
 		let capturedDestinationId = "";
 		let capturedDestinationFile = "";
 		let capturedOptions: any;
@@ -1505,12 +1481,15 @@ test.describe("history fork API", () => {
 				rejectLaunch(new Error("fixture released blocked launch during assertion cleanup"));
 			}
 			manager.createSession = originalCreateSession;
-			sandboxFixture.restore();
 		}
 
 		expect(capturedDestinationId).toBeTruthy();
-		expect(capturedDestinationFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-		expect(fs.existsSync(sandboxFixture.filesystem.hostPath(capturedDestinationFile))).toBe(false);
+		expect(path.isAbsolute(capturedDestinationFile)).toBe(true);
+		expect(capturedDestinationFile.replace(/\\/g, "/")).not.toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const destinationRelative = path.relative(agentSessionsDir, capturedDestinationFile);
+		expect(path.isAbsolute(destinationRelative)).toBe(false);
+		expect(destinationRelative).not.toMatch(/^\.\.(?:[\\/]|$)/);
+		expect(fs.existsSync(capturedDestinationFile)).toBe(false);
 		expect(fs.existsSync(authorPath(gateway, capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "skill-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);

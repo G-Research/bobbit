@@ -868,12 +868,23 @@ export class ModelSelectionRecoveryError extends Error {
 	}
 }
 
-/** Owner termination is rejected before any lifecycle mutation while a history fork borrows its sandbox worktree. */
-export class SharedSandboxWorktreeInUseError extends Error {
-	readonly code = "SHARED_SANDBOX_WORKTREE_IN_USE";
+/** Owner termination is rejected before any lifecycle mutation while another live session borrows its worktree. */
+export class SharedWorktreeInUseError extends Error {
+	readonly code: string = "SHARED_WORKTREE_IN_USE";
 
 	constructor(ownerSessionId: string) {
-		super(`Session ${ownerSessionId} cannot be terminated while another live session is using its sandbox worktree`);
+		super(`Session ${ownerSessionId} cannot be terminated while another live session is using its worktree`);
+		this.name = "SharedWorktreeInUseError";
+	}
+}
+
+/** Backward-compatible sandbox-specific conflict identity and response code. */
+export class SharedSandboxWorktreeInUseError extends SharedWorktreeInUseError {
+	override readonly code: string = "SHARED_SANDBOX_WORKTREE_IN_USE";
+
+	constructor(ownerSessionId: string) {
+		super(ownerSessionId);
+		this.message = `Session ${ownerSessionId} cannot be terminated while another live session is using its sandbox worktree`;
 		this.name = "SharedSandboxWorktreeInUseError";
 	}
 }
@@ -3311,7 +3322,7 @@ type IdleWaiter = {
 	cleanup: () => void;
 };
 
-type SandboxBorrowerLifecycleQueue = {
+type WorktreeOwnerLifecycleQueue = {
 	tail: Promise<void>;
 	pending: number;
 };
@@ -3474,8 +3485,10 @@ export class SessionManager {
 	 * replacement coordinator: it closes admission before any graph mutation.
 	 */
 	private _sessionGoalPromotionReservations = new Map<string, OwnedSessionGoalPromotionReservation>();
-	/** Per-owner FIFO shared by sandbox history-reuse registration and termination. */
-	private _sandboxBorrowerLifecycleQueues = new Map<string, SandboxBorrowerLifecycleQueue>();
+	/** Per-owner FIFO shared by worktree-reuse publication and destructive lifecycle operations in every realm. */
+	private _worktreeOwnerLifecycleQueues = new Map<string, WorktreeOwnerLifecycleQueue>();
+	/** @deprecated Compatibility alias for diagnostics; use the realm-neutral lifecycle methods. */
+	readonly _sandboxBorrowerLifecycleQueues = this._worktreeOwnerLifecycleQueues;
 	/**
 	 * Raw explicit/inherited thinking requests retained only while initial setup is
 	 * verifying its spawn tuple. The provisional spawn pin may already have been
@@ -5555,7 +5568,11 @@ export class SessionManager {
 			};
 			return manager.getAllSessions?.() ?? manager.getAllLiveSessions?.() ?? [];
 		}
-		return this._testStore?.getAll() ?? [];
+		// Some focused tests inject a deliberately partial store to exercise archive
+		// persistence failures. Real SessionStore instances always expose getAll;
+		// only let those partial fixtures opt out of borrower discovery.
+		const testStore = this._testStore as (Partial<Pick<SessionStore, "getAll">> | null);
+		return typeof testStore?.getAll === "function" ? testStore.getAll() : [];
 	}
 
 	/**
@@ -5599,12 +5616,33 @@ export class SessionManager {
 		return inferred.length === 1 ? inferred[0].id : undefined;
 	}
 
-	/** Rejection-safe FIFO for one flattened sandbox worktree owner. */
-	async withSandboxWorktreeOwnerLifecycle<T>(ownerSessionId: string, operation: () => Promise<T>): Promise<T> {
-		let queue = this._sandboxBorrowerLifecycleQueues.get(ownerSessionId);
+	/** Resolve a durable flattened worktree owner in either host or sandbox realm. */
+	resolveWorktreeOwnerSessionId(sessionId: string): string | undefined {
+		const source = this.getPersistedSession(sessionId);
+		if (!source || source.archived) return undefined;
+		if (source.sandboxed) return this.resolveSandboxWorktreeOwnerSessionId(sessionId);
+		if (!source.borrowsWorktree) return source.id;
+
+		const all = this.getAllPersistedSessionsForWorktreeGuard();
+		const byId = new Map(all.map(session => [session.id, session]));
+		const visited = new Set([source.id]);
+		let ownerId = source.borrowedWorktreeOwnerSessionId;
+		while (ownerId) {
+			if (visited.has(ownerId)) return undefined;
+			visited.add(ownerId);
+			const owner = byId.get(ownerId);
+			if (!owner || owner.archived || owner.projectId !== source.projectId || owner.sandboxed) return undefined;
+			if (!owner.borrowsWorktree) return owner.id;
+			ownerId = owner.borrowedWorktreeOwnerSessionId;
+		}
+		return undefined;
+	}
+
+	private async runWorktreeOwnerLifecycle<T>(ownerSessionId: string, operation: () => Promise<T>): Promise<T> {
+		let queue = this._worktreeOwnerLifecycleQueues.get(ownerSessionId);
 		if (!queue) {
 			queue = { tail: Promise.resolve(), pending: 0 };
-			this._sandboxBorrowerLifecycleQueues.set(ownerSessionId, queue);
+			this._worktreeOwnerLifecycleQueues.set(ownerSessionId, queue);
 		}
 		const predecessor = queue.tail;
 		let release!: () => void;
@@ -5616,25 +5654,38 @@ export class SessionManager {
 		} finally {
 			release();
 			queue.pending--;
-			if (queue.pending === 0 && this._sandboxBorrowerLifecycleQueues.get(ownerSessionId) === queue) {
-				this._sandboxBorrowerLifecycleQueues.delete(ownerSessionId);
+			if (queue.pending === 0 && this._worktreeOwnerLifecycleQueues.get(ownerSessionId) === queue) {
+				this._worktreeOwnerLifecycleQueues.delete(ownerSessionId);
 			}
 		}
 	}
 
-	private assertSandboxOwnerHasNoLiveBorrowers(ownerSessionId: string): void {
+	/** Rejection-safe FIFO for one flattened worktree owner, independent of filesystem realm. */
+	async withWorktreeOwnerLifecycle<T>(ownerSessionId: string, operation: () => Promise<T>): Promise<T> {
+		return this.runWorktreeOwnerLifecycle(ownerSessionId, operation);
+	}
+
+	/** Backward-compatible sandbox entry point backed by the realm-neutral owner FIFO. */
+	async withSandboxWorktreeOwnerLifecycle<T>(ownerSessionId: string, operation: () => Promise<T>): Promise<T> {
+		return this.runWorktreeOwnerLifecycle(ownerSessionId, operation);
+	}
+
+	/** Authoritative preflight for flattened borrowers; legacy path inference remains sandbox-only. */
+	assertWorktreeOwnerHasNoLiveBorrowers(ownerSessionId: string): void {
 		const owner = this.getPersistedSession(ownerSessionId);
-		if (!owner || owner.archived || !owner.sandboxed || owner.borrowsWorktree) return;
-		const coordinates = sandboxWorktreeOwnerCoordinates(owner);
-		if (!coordinates) return;
+		if (!owner || owner.archived || owner.borrowsWorktree) return;
+		const sandboxCoordinates = owner.sandboxed ? sandboxWorktreeOwnerCoordinates(owner) : undefined;
 		for (const borrower of this.getAllPersistedSessionsForWorktreeGuard()) {
 			if (borrower.archived || !borrower.borrowsWorktree || borrower.projectId !== owner.projectId) continue;
 			const explicitlyOwned = borrower.borrowedWorktreeOwnerSessionId === ownerSessionId;
-			const legacyReference = !borrower.borrowedWorktreeOwnerSessionId
-				&& !!coordinates
-				&& isWorktreePathReferencedByLiveSession(coordinates.root, [borrower]);
-			if (explicitlyOwned || legacyReference) {
-				throw new SharedSandboxWorktreeInUseError(ownerSessionId);
+			const legacySandboxReference = owner.sandboxed
+				&& !borrower.borrowedWorktreeOwnerSessionId
+				&& !!sandboxCoordinates
+				&& isWorktreePathReferencedByLiveSession(sandboxCoordinates.root, [borrower]);
+			if (explicitlyOwned || legacySandboxReference) {
+				throw owner.sandboxed
+					? new SharedSandboxWorktreeInUseError(ownerSessionId)
+					: new SharedWorktreeInUseError(ownerSessionId);
 			}
 		}
 	}
@@ -16840,21 +16891,26 @@ export class SessionManager {
 		return true;
 	}
 
-	async terminateSession(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
+	async terminateSession(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean; worktreeOwnerLifecycleHeld?: string } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Legacy callers may still pass the old option, but canonical goal state —
 		// never a caller boolean — is the only authority for promoted teardown.
 		this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
 		const live = this.sessions.get(id);
-		const lifecycleOwnerId = (live?.sandboxed || persisted?.sandboxed)
-			? ((live?.borrowsWorktree || persisted?.borrowsWorktree)
-				? (this.resolveSandboxWorktreeOwnerSessionId(id)
-					?? live?.borrowedWorktreeOwnerSessionId
-					?? persisted?.borrowedWorktreeOwnerSessionId
-					?? id)
-				: id)
-			: undefined;
+		const borrowsWorktree = !!(live?.borrowsWorktree || persisted?.borrowsWorktree);
+		const hasOwnedLifecycle = !!(
+			live?.sandboxed || persisted?.sandboxed
+			|| live?.worktreePath || persisted?.worktreePath
+			|| live?.repoWorktrees || persisted?.repoWorktrees
+			|| live?.staffId || persisted?.staffId
+		);
+		const lifecycleOwnerId = borrowsWorktree
+			? (this.resolveWorktreeOwnerSessionId(id)
+				?? live?.borrowedWorktreeOwnerSessionId
+				?? persisted?.borrowedWorktreeOwnerSessionId
+				?? id)
+			: (hasOwnedLifecycle ? id : undefined);
 
 		const terminate = async (): Promise<boolean> => {
 			// In-place restore temporarily removes the SessionInfo from the map. A
@@ -16868,21 +16924,23 @@ export class SessionManager {
 			const currentPersisted = this.getPersistedSession(id);
 			if (
 				!options.preserveEvidence
-				&& (current?.sandboxed || currentPersisted?.sandboxed)
 				&& !(current?.borrowsWorktree || currentPersisted?.borrowsWorktree)
 			) {
-				this.assertSandboxOwnerHasNoLiveBorrowers(id);
+				this.assertWorktreeOwnerHasNoLiveBorrowers(id);
 			}
 			if (coordinator) coordinator.terminalRequest = "terminate";
 			return this._coordinateSessionReplacement(id, "terminate", (token) =>
 				this._terminateSessionOwned(id, token, options), { coalesceKey: "terminate", drainOnRelease: false });
 		};
 
-		// Evidence-preserving archival never mutates the sandbox worktree, so it
-		// must not enter the owner lock recursively while cascading borrowed children.
-		return lifecycleOwnerId && !options.preserveEvidence
+		// Evidence-preserving archival never mutates a worktree. Callers that already
+		// hold this exact owner key pass it explicitly to avoid recursive FIFO entry.
+		if (!lifecycleOwnerId || options.preserveEvidence || options.worktreeOwnerLifecycleHeld === lifecycleOwnerId) {
+			return terminate();
+		}
+		return (live?.sandboxed || persisted?.sandboxed)
 			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, terminate)
-			: terminate();
+			: this.withWorktreeOwnerLifecycle(lifecycleOwnerId, terminate);
 	}
 
 	private async _terminateSessionOwned(id: string, token: SessionReplacementToken, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string> }): Promise<boolean> {
@@ -17069,28 +17127,27 @@ export class SessionManager {
 	 * Routes through the runtime archive seam (§6) so a dormant parent's live
 	 * children are cascade-reaped before it is archived.
 	 */
-	async storeArchive(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
+	async storeArchive(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean; worktreeOwnerLifecycleHeld?: string } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Preserve the legacy call shape without preserving its authority bypass.
 		this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
-		const lifecycleOwnerId = persisted?.sandboxed
-			? (persisted.borrowsWorktree
-				? (this.resolveSandboxWorktreeOwnerSessionId(id)
-					?? persisted.borrowedWorktreeOwnerSessionId
-					?? id)
-				: id)
-			: undefined;
+		const lifecycleOwnerId = persisted?.borrowsWorktree
+			? (this.resolveWorktreeOwnerSessionId(id) ?? persisted.borrowedWorktreeOwnerSessionId ?? id)
+			: (persisted && (persisted.sandboxed || persisted.worktreePath || persisted.repoWorktrees || persisted.staffId) ? id : undefined);
 		const archive = async () => {
 			const current = this.getPersistedSession(id);
-			if (!options.preserveEvidence && current?.sandboxed && !current.borrowsWorktree) {
-				this.assertSandboxOwnerHasNoLiveBorrowers(id);
+			if (!options.preserveEvidence && current && !current.borrowsWorktree) {
+				this.assertWorktreeOwnerHasNoLiveBorrowers(id);
 			}
 			return this.archiveWithCascade(id, undefined, options);
 		};
-		return lifecycleOwnerId && !options.preserveEvidence
+		if (!lifecycleOwnerId || options.preserveEvidence || options.worktreeOwnerLifecycleHeld === lifecycleOwnerId) {
+			return archive();
+		}
+		return persisted?.sandboxed
 			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, archive)
-			: archive();
+			: this.withWorktreeOwnerLifecycle(lifecycleOwnerId, archive);
 	}
 
 	/** Update metadata on an archived session (stored in the session store). */

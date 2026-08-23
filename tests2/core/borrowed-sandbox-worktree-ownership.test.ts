@@ -35,7 +35,7 @@ function persistedSession(id: string, transcript: string, borrowed: boolean): Pe
 function lifecycleSession(
 	id: string,
 	transcript: string,
-	opts: { borrowed?: boolean; ownerId?: string; branch?: string } = {},
+	opts: { borrowed?: boolean; ownerId?: string; branch?: string; staffId?: string } = {},
 ): PersistedSession {
 	const branch = opts.branch ?? "session/source";
 	const root = `/workspace-wt/${branch}`;
@@ -48,6 +48,7 @@ function lifecycleSession(
 		lastActivity: 1_700_000_000_100,
 		projectId: "project-sandbox",
 		sandboxed: true,
+		staffId: opts.staffId,
 		borrowsWorktree: opts.borrowed || undefined,
 		borrowedWorktreeOwnerSessionId: opts.ownerId,
 		...(opts.borrowed ? {} : {
@@ -178,6 +179,7 @@ async function sandboxLifecycleFixture(records: PersistedSession[]): Promise<{
 	store: SessionStore;
 	removeWorktree: ReturnType<typeof vi.fn>;
 	bridges: Map<string, { getState: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }>;
+	bridgeOptions: Map<string, Record<string, any>>;
 }> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sandbox-lifecycle-"));
 	fixtureRoots.push(root);
@@ -192,9 +194,11 @@ async function sandboxLifecycleFixture(records: PersistedSession[]): Promise<{
 		removeWorktree,
 	};
 	const bridges = new Map<string, { getState: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }>();
+	const bridgeOptions = new Map<string, Record<string, any>>();
 	let bridgeIndex = 0;
-	registerRpcBridgeFactory(() => {
+	registerRpcBridgeFactory((options: Record<string, any>) => {
 		const record = records[bridgeIndex++];
+		if (record) bridgeOptions.set(record.id, { ...options, env: { ...options.env } });
 		const bridge = {
 			running: true,
 			start: vi.fn(async () => {}),
@@ -239,7 +243,7 @@ async function sandboxLifecycleFixture(records: PersistedSession[]): Promise<{
 	manager.tryApplyDefaultThinkingLevel = vi.fn(async () => {});
 
 	for (const record of records) await manager.restoreSession(store.get(record.id)!);
-	return { manager, store, removeWorktree, bridges };
+	return { manager, store, removeWorktree, bridges, bridgeOptions };
 }
 
 afterEach(() => {
@@ -314,22 +318,44 @@ describe("borrowed sandbox worktree ownership", () => {
 		assert.deepEqual(fixture.removeWorktree.mock.calls, [["session/owned"]]);
 	});
 
-	it("persists flattened ownership and rejects owner termination before mutation until its nested-cwd borrower is archived", async () => {
+	it("persists staff-fork identity and flattened ownership, then rejects owner termination until its borrower is archived", async () => {
 		const ownerTranscript = writeTranscript("lifecycle-owner");
 		const borrowerTranscript = writeTranscript("lifecycle-borrower");
-		const owner = lifecycleSession("lifecycle-owner", ownerTranscript);
+		const owner = lifecycleSession("lifecycle-owner", ownerTranscript, { staffId: "staff-source" });
 		const borrower = lifecycleSession("lifecycle-borrower", borrowerTranscript, {
 			borrowed: true,
 			ownerId: owner.id,
+			staffId: "staff-fork",
 		});
 		const fixture = await sandboxLifecycleFixture([owner, borrower]);
 		const ownerBridge = fixture.bridges.get(owner.id)!;
 		const borrowerBridge = fixture.bridges.get(borrower.id)!;
 
-		assert.equal(fixture.store.get(borrower.id)?.borrowedWorktreeOwnerSessionId, owner.id,
+		const persistedOwner = fixture.store.get(owner.id)!;
+		const persistedBorrower = fixture.store.get(borrower.id)!;
+		assert.equal(persistedOwner.staffId, "staff-source");
+		assert.equal(persistedBorrower.staffId, "staff-fork",
+			"the borrowed staff fork must retain its independent staff identity after a real store reload");
+		assert.equal(persistedBorrower.borrowsWorktree, true);
+		assert.equal(persistedBorrower.borrowedWorktreeOwnerSessionId, owner.id,
 			"flattened ownership provenance must survive a real store reload");
+		assert.deepEqual({
+			cwd: persistedBorrower.cwd,
+			worktreePath: persistedBorrower.worktreePath,
+			repoPath: persistedBorrower.repoPath,
+			branch: persistedBorrower.branch,
+		}, {
+			cwd: owner.cwd,
+			worktreePath: undefined,
+			repoPath: undefined,
+			branch: undefined,
+		}, "a whole-session staff fork may borrow the exact cwd but never ownership coordinates");
 		assert.equal(fixture.manager.getSession(borrower.id)?.borrowedWorktreeOwnerSessionId, owner.id);
+		assert.equal(fixture.manager.getSession(borrower.id)?.staffId, "staff-fork");
 		assert.equal(fixture.manager.resolveSandboxWorktreeOwnerSessionId(borrower.id), owner.id);
+		assert.equal(fixture.bridgeOptions.get(owner.id)?.env?.BOBBIT_STAFF_ID, "staff-source");
+		assert.equal(fixture.bridgeOptions.get(borrower.id)?.env?.BOBBIT_STAFF_ID, "staff-fork",
+			"restored borrower authorization must target only the destination staff record");
 
 		await assert.rejects(
 			fixture.manager.terminateSession(owner.id),
