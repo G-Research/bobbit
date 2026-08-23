@@ -48,7 +48,11 @@ async function assertOwnedDirectory(root, candidate, label) {
 	const lexicalRoot = path.resolve(root);
 	const lexicalCandidate = path.resolve(candidate);
 	if (!isWithin(lexicalRoot, lexicalCandidate)) throw new Error(`${label} escaped the owned benchmark root`);
-	const [canonicalRoot, canonicalCandidate] = await Promise.all([realpath(lexicalRoot), realpath(lexicalCandidate)]);
+	if ((await lstat(lexicalRoot)).isSymbolicLink()) {
+		throw new Error(`${label} root must not be a symbolic link or junction`);
+	}
+	const canonicalRoot = await realpath(lexicalRoot);
+	const canonicalCandidate = await realpath(lexicalCandidate);
 	if (!isWithin(canonicalRoot, canonicalCandidate)) throw new Error(`${label} resolved outside the owned benchmark root`);
 	let current = lexicalRoot;
 	for (const segment of path.relative(lexicalRoot, lexicalCandidate).split(path.sep).filter(Boolean)) {
@@ -56,6 +60,9 @@ async function assertOwnedDirectory(root, candidate, label) {
 		if ((await lstat(current)).isSymbolicLink()) {
 			throw new Error(`${label} must not traverse a symbolic link or junction`);
 		}
+	}
+	if ((await lstat(lexicalRoot)).isSymbolicLink() || (await realpath(lexicalRoot)) !== canonicalRoot) {
+		throw new Error(`${label} root identity changed during validation`);
 	}
 	return canonicalCandidate;
 }

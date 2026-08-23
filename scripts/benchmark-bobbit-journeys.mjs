@@ -69,20 +69,34 @@ function projectedCanonicalPath(candidate) {
 }
 
 function rejectExistingOutputLinks(root, destination) {
-	let current = path.resolve(root);
-	if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
-		throw new Error("Benchmark output root must not be a symbolic link or junction");
+	const resolvedRoot = path.resolve(root);
+	const destinationParent = path.dirname(path.resolve(destination));
+	let current = path.parse(destinationParent).root;
+	if (lstatSync(current).isSymbolicLink()) {
+		throw new Error("--output must not traverse a symbolic link or junction");
 	}
-	const relative = path.relative(current, path.dirname(destination));
-	for (const segment of relative.split(path.sep).filter(Boolean)) {
+	for (const segment of path.relative(current, destinationParent).split(path.sep).filter(Boolean)) {
 		current = path.join(current, segment);
-		if (!existsSync(current)) break;
-		if (lstatSync(current).isSymbolicLink()) {
+		let stats;
+		try {
+			stats = lstatSync(current);
+		} catch (error) {
+			if (error?.code === "ENOENT") break;
+			throw error;
+		}
+		if (stats.isSymbolicLink()) {
+			if (path.resolve(current) === resolvedRoot) {
+				throw new Error("Benchmark output root must not be a symbolic link or junction");
+			}
 			throw new Error("--output must not traverse a symbolic link or junction");
 		}
 	}
-	if (existsSync(destination) && lstatSync(destination).isSymbolicLink()) {
-		throw new Error("--output must not replace a symbolic link or junction");
+	try {
+		if (lstatSync(destination).isSymbolicLink()) {
+			throw new Error("--output must not replace a symbolic link or junction");
+		}
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
 	}
 }
 

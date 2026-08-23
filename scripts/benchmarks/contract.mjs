@@ -262,19 +262,19 @@ async function existingPathInfo(candidate) {
 }
 
 async function rejectLinksWithin(root, candidate) {
-	let current = path.resolve(root);
-	try {
-		if ((await lstat(current)).isSymbolicLink()) {
-			throw new Error("Benchmark report output root must not be a symbolic link or junction");
-		}
-	} catch (error) {
-		if (error?.code !== "ENOENT") throw error;
+	const resolvedRoot = path.resolve(root);
+	const resolvedCandidate = path.resolve(candidate);
+	let current = path.parse(resolvedCandidate).root;
+	if ((await lstat(current)).isSymbolicLink()) {
+		throw new Error("Benchmark report output must not traverse a symbolic link or junction");
 	}
-	const relative = path.relative(current, path.resolve(candidate));
-	for (const segment of relative.split(path.sep).filter(Boolean)) {
+	for (const segment of path.relative(current, resolvedCandidate).split(path.sep).filter(Boolean)) {
 		current = path.join(current, segment);
 		try {
 			if ((await lstat(current)).isSymbolicLink()) {
+				if (path.resolve(current) === resolvedRoot) {
+					throw new Error("Benchmark report output root must not be a symbolic link or junction");
+				}
 				throw new Error("Benchmark report output must not traverse a symbolic link or junction");
 			}
 		} catch (error) {
