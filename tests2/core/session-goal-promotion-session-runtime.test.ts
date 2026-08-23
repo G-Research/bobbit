@@ -12,6 +12,7 @@ process.env.BOBBIT_DIR = root;
 process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
 
 const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
@@ -24,6 +25,10 @@ const {
 } = await import("../../src/server/agent/session-manager.ts");
 
 loadOrCreateToken();
+initAuthorSidecarDir(root, {
+	secretsDir: path.join(root, "private-secrets"),
+	hmacKey: Buffer.alloc(32, 0x50),
+});
 
 const provider = "promotion-runtime";
 const modelId = "continuity-model";
@@ -334,7 +339,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		goal.paused = false;
 		fx.manager.drainGoalGuardedPrompts(goal.id);
 		await vi.waitFor(() => expect(replacement.prompt).toHaveBeenCalledTimes(1));
-		expect(replacement.prompt).toHaveBeenCalledWith(kickoff, undefined);
+		expect(replacement.prompt).toHaveBeenCalledWith(`[System]: ${kickoff}`, undefined);
 		expect(guardedRows()).toEqual([]);
 		expect(fx.live.pendingPromptAuthors).toEqual([
 			expect.objectContaining({
@@ -384,7 +389,7 @@ describe("SessionManager current-session runtime promotion", () => {
 
 		(fx.manager as any).drainQueue(fx.live);
 		await vi.waitFor(() => expect(fx.oldBridge.prompt).toHaveBeenCalledTimes(1));
-		expect(fx.oldBridge.prompt).toHaveBeenCalledWith("legacy unguarded prompt", undefined);
+		expect(fx.oldBridge.prompt).toHaveBeenCalledWith("[System]: legacy unguarded prompt", undefined);
 		expect(fx.live.promptQueue.toArray()).toEqual([]);
 	});
 

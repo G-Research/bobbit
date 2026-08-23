@@ -1495,6 +1495,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/session-goal-promotion-session-runtime.test.ts",
+		allowReason: "test-owned temporary promotion transcript used to prove durable queued content remains byte-stable while paused",
+		reads: frozen([
+			{ expression: "fx.persisted.agentSessionFile", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
 		declarations: frozen(["scan:search-worker-main-thread-boundary"]),
 		reads: frozen([
