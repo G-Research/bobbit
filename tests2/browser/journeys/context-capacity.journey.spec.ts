@@ -140,7 +140,7 @@ test.describe("Journey: Context target and model capacity", () => {
 			await renderContextScenario(page, { usage: 50_000, target: TARGET, capacity: CAPACITY });
 			const trigger = contextTrigger(page);
 			await expect(trigger).toBeVisible();
-			await expect(trigger).toHaveAttribute("aria-label", "Context: 50k / 400k tokens (13% of model capacity); target 100k tokens");
+			await expect(trigger).toHaveAttribute("aria-label", "Context: 50k / 400k tokens (13% of model capacity); soft limit 100k tokens");
 			await expect(trigger).toHaveAttribute("aria-expanded", "false");
 			await expectFooterGeometry(page);
 			await expect(footerTrack(page).getByTestId("context-meter-target-marker")).toHaveAttribute("style", /left:\s*25%/);
@@ -181,7 +181,7 @@ test.describe("Journey: Context target and model capacity", () => {
 			await renderContextScenario(page, { usage: 390_000, target: TARGET, capacity: CAPACITY });
 			await expect(contextTrigger(page)).toContainText("98%");
 			expect(await segmentWidth(footerTrack(page), "context-meter-negative")).toBeCloseTo(72.5, 3);
-			await expect(contextTrigger(page)).toHaveAttribute("aria-label", "Context: 390k / 400k tokens (98% of model capacity); target 100k tokens");
+			await expect(contextTrigger(page)).toHaveAttribute("aria-label", "Context: 390k / 400k tokens (98% of model capacity); soft limit 100k tokens");
 
 			// Equal and absent capacity honestly collapse to the existing single-limit treatment.
 			await renderContextScenario(page, { usage: 50_000, target: TARGET, capacity: TARGET });

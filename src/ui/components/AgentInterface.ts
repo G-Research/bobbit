@@ -2352,12 +2352,12 @@ export class AgentInterface extends LitElement {
 		const showContext = hasContextScale && (usageStale || lastUsage !== undefined);
 		const contextAccessibleText = usageStale
 			? hasDistinctCapacity
-				? `Context usage refreshing after compaction; model capacity ${formatTokenCount(contextMeter.capacity!)} tokens; target ${formatTokenCount(contextMeter.target!)} tokens`
+				? `Context usage refreshing after compaction; model capacity ${formatTokenCount(contextMeter.capacity!)} tokens; soft limit ${formatTokenCount(contextMeter.target!)} tokens`
 				: `Context usage refreshing after compaction${contextMeter.scale ? `; limit ${formatTokenCount(contextMeter.scale)} tokens` : ""}`
 			: hasDistinctCapacity
-				? `Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.capacity!)} tokens (${contextPct}% of model capacity); target ${formatTokenCount(contextMeter.target!)} tokens`
+				? `Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.capacity!)} tokens (${contextPct}% of model capacity); soft limit ${formatTokenCount(contextMeter.target!)} tokens`
 				: contextMeter.scale
-					? `Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.scale)} tokens (${contextPct}%${contextMeter.target ? " of context target" : " of model capacity"})`
+					? `Context: ${formatTokenCount(contextTokens)} / ${formatTokenCount(contextMeter.scale)} tokens (${contextPct}%${contextMeter.target ? " of soft limit" : " of model capacity"})`
 					: "Context usage unavailable";
 		const renderContextMeter = (variant: "footer" | "popover", stale = false) => {
 			const startPct = (this.session as any)?._compactionStartPct as number | null | undefined;

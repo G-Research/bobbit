@@ -202,7 +202,7 @@ describe("AgentInterface context target and capacity meter", () => {
 		expect(trigger.type).toBe("button");
 		expect(trigger.getAttribute("aria-expanded")).toBe("false");
 		expect(trigger.getAttribute("aria-controls")).toBe("context-usage-popover");
-		expect(trigger.getAttribute("aria-label")).toBe("Context: 300k / 1050k tokens (29% of model capacity); target 272k tokens");
+		expect(trigger.getAttribute("aria-label")).toBe("Context: 300k / 1050k tokens (29% of model capacity); soft limit 272k tokens");
 		expect(track.getAttribute("role")).toBe("progressbar");
 		expect(track.getAttribute("aria-valuemax")).toBe("1050000");
 		expect(track.getAttribute("aria-valuenow")).toBe("300000");
