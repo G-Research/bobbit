@@ -15,12 +15,12 @@
  * `defaults/tools/inbox/extension.ts` silently refused to register the three
  * inbox tools.
  *
- * Match algorithm: walk every project context's `SessionStore`, find
- * sessions with no `staffId` whose `title` matches a known staff `name`
- * AND whose `worktreePath` / `cwd` matches the staff's `worktreePath`
- * (with a `cwd === cwd` fallback for staff that lack `worktreePath`).
- * Title alone is too weak — a bare title match WITHOUT the path agreement
- * is NOT enough to trigger a backfill. Healed via `store.update(id, { staffId })`.
+ * Match algorithm: walk every project context's `SessionStore` and skip every
+ * session that already has a `staffId`. Prefer an exact `currentSessionId`
+ * owner. For legacy records without that pointer, require title plus worktree /
+ * cwd agreement and heal only when exactly one staff record matches. Ambiguous
+ * fork names and shared cwd values are deliberately left untouched. Healed via
+ * `store.update(id, { staffId })`.
  *
  * Behaviour contract:
  *   - **Runs once at server boot**, from `createGateway` in `server.ts`
@@ -43,11 +43,13 @@ export interface BackfillStaff {
 	name: string;
 	worktreePath?: string;
 	cwd: string;
+	currentSessionId?: string;
+	projectId?: string;
 }
 
 /** Subset of `ProjectContextManager` the backfill consults. */
 export interface BackfillPcm {
-	all(): IterableIterator<{ sessionStore: SessionStore }>;
+	all(): IterableIterator<{ sessionStore: SessionStore; project?: { id: string } }>;
 }
 
 /** Subset of `StaffManager` the backfill consults. */
@@ -65,16 +67,24 @@ export function backfillStaffIds(pcm: BackfillPcm, staffManager: BackfillStaffMa
 	if (allStaff.length === 0) return 0;
 	let backfilled = 0;
 	for (const ctx of pcm.all()) {
+		const projectStaff = ctx.project?.id
+			? allStaff.filter(staff => !staff.projectId || staff.projectId === ctx.project!.id)
+			: allStaff;
 		for (const ps of ctx.sessionStore.getAll()) {
 			if (ps.staffId) continue;
-			const match = allStaff.find(s =>
-				s.name === ps.title &&
-				(
-					(!!s.worktreePath && (s.worktreePath === ps.worktreePath || s.worktreePath === ps.cwd))
-					|| (!!ps.cwd && s.cwd === ps.cwd)
-				),
-			);
-			if (!match) continue;
+			const exactOwners = projectStaff.filter(s => s.currentSessionId === ps.id);
+			const legacyMatches = exactOwners.length === 0
+				? projectStaff.filter(s =>
+					s.name === ps.title &&
+					(
+						(!!s.worktreePath && (s.worktreePath === ps.worktreePath || s.worktreePath === ps.cwd))
+						|| (!!ps.cwd && s.cwd === ps.cwd)
+					),
+				)
+				: [];
+			const candidates = exactOwners.length > 0 ? exactOwners : legacyMatches;
+			if (candidates.length !== 1) continue;
+			const match = candidates[0];
 			console.warn(
 				`[staff-backfill] backfilling staffId="${match.id}" for session=${ps.id} ` +
 				`(title="${ps.title}", cwd="${ps.cwd}", worktreePath="${ps.worktreePath ?? ""}"); ` +

@@ -42,7 +42,7 @@ import { doRenderApp, showHeaderToast, workspaceSessionId, dismissExtRouteUnavai
 import { getSidePanelWorkspace, hydrateSidePanelWorkspace, setActiveSidePanelTab } from "./side-panel-workspace.js";
 import { registerToolRenderer, renderTool } from "../ui/tools/index.js";
 import { navigateSidebar, expandActiveSidebarItem, installKeyboardNavOverrideClearListener } from "./sidebar-nav.js";
-import { toggleRolePicker } from "./sidebar.js";
+import { reloadStaffList, toggleRolePicker } from "./sidebar.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { toggleShowArchived, toggleShowBusy, toggleShowRead } from "../ui/components/sidebar-filters.js";
 // goal-dashboard is dynamic-imported lazily to keep it out of the main chunk.
@@ -769,6 +769,12 @@ async function initApp() {
 			} else if (route.view === "session" && route.sessionId) {
 				const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 				if (checkRes.ok) {
+					// Cold session routes must hydrate staff before connecting renders the
+					// sidebar. Relying on renderStaffSidebarSection's fire-and-forget load
+					// leaves a persisted permanent session temporarily unclassified after
+					// reload, so an already-expanded Staff section can be toggled closed
+					// before its owning row arrives.
+					await reloadStaffList();
 					await connectToSession(route.sessionId, true);
 					await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 					revealSidebarTargetForRoute(route);

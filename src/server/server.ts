@@ -46,7 +46,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { PromotedSessionLifecycleConflictError, SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
+import { PromotedSessionLifecycleConflictError, SessionManager, SessionPinNotFoundError, SharedWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -727,7 +727,7 @@ import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy 
 import type { PersistedGoal } from "./agent/goal-store.js";
 import type { GateResetResult, GateStatus } from "./agent/gate-store.js";
 import type { GateResetIntent } from "./agent/gate-reset-intent.js";
-import { launchSidebarSessionFork, resolveGoalGithubLink } from "./sidebar-actions.js";
+import { launchSidebarSessionFork, resolveGoalGithubLink, resolveSidebarSessionForkTitle } from "./sidebar-actions.js";
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData, seedModelDefaultsFromLegacy } from "./agent/state-migration.js";
 import { migrateAllProjects as migrateAllProjectYaml } from "./state-migration/migrate-project-yaml.js";
 import { resolveScalarConfig } from "./agent/config-resolver.js";
@@ -5203,6 +5203,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
+			// Resolve any cross-store staff-fork publication interrupted after the
+			// destination session commit. This must precede session restoration so role
+			// prompts and BOBBIT_STAFF_ID authorization resolve the recovered identity.
+			await bootPhase("reconcile-staff-fork-publications", () => {
+				staffManager.reconcileForkedStaffPublications();
+			});
+
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
@@ -7464,7 +7471,7 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
-			if (err instanceof SharedSandboxWorktreeInUseError) {
+			if (err instanceof SharedWorktreeInUseError) {
 				json({ error: err.message, code: err.code }, 409);
 				return;
 			}
@@ -15122,7 +15129,7 @@ async function handleApiRoute(
 				terminated = await sessionManager.terminateSession(id);
 			} catch (err) {
 				if (writeSessionLifecycleConflict(err)) return;
-				if (err instanceof SharedSandboxWorktreeInUseError) {
+				if (err instanceof SharedWorktreeInUseError) {
 					json({ error: err.message, code: err.code }, 409);
 					return;
 				}
@@ -15147,7 +15154,7 @@ async function handleApiRoute(
 					await sessionManager.storeArchive(id);
 				} catch (err) {
 					if (writeSessionLifecycleConflict(err)) return;
-					if (err instanceof SharedSandboxWorktreeInUseError) {
+					if (err instanceof SharedWorktreeInUseError) {
 						json({ error: err.message, code: err.code }, 409);
 						return;
 					}
@@ -15226,21 +15233,38 @@ async function handleApiRoute(
 				json({ error: "source project no longer registered" }, 410);
 				return;
 			}
-			const sharedSandboxReuse = hasEntryId && !newWorktree && ps.sandboxed === true;
-			const sharedSandboxOwnerSessionId = sharedSandboxReuse
-				? sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId)
+			// A staff fork is identified only by the durable ID join and exact permanent
+			// session ownership. A stale session carrying somebody else's staffId stays
+			// a plain session fork; names and cwd are never identity authority.
+			const staffCandidate = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+			const forkStaff = staffCandidate?.projectId === projectId
+				&& staffCandidate.currentSessionId === sourceId
+				? structuredClone(staffCandidate)
 				: undefined;
-			if (sharedSandboxReuse && !sharedSandboxOwnerSessionId) {
+			const reuseBorrowsWorktree = !newWorktree && (hasEntryId || !!forkStaff);
+			const sharedStaffWorktreeReuse = reuseBorrowsWorktree && !!forkStaff;
+			const sharedSandboxReuse = reuseBorrowsWorktree && ps.sandboxed === true;
+			const sharedWorktreeOwnerSessionId = sharedStaffWorktreeReuse
+				? sessionManager.resolveWorktreeOwnerSessionId(sourceId)
+				: (sharedSandboxReuse ? sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId) : undefined);
+			if ((sharedStaffWorktreeReuse || sharedSandboxReuse) && !sharedWorktreeOwnerSessionId) {
 				json({
-					error: "The source sandbox worktree owner is unavailable for history forking",
+					error: hasEntryId
+						? "The source worktree owner is unavailable for history forking"
+						: "The source worktree owner is unavailable for forking",
 					code: "HISTORY_FORK_SOURCE_UNAVAILABLE",
 				}, 422);
 				return;
 			}
-			const sharedSandboxSourceCwd = sharedSandboxReuse ? source.cwd : undefined;
-			const sharedSandboxPersistedCwd = sharedSandboxReuse ? ps.cwd : undefined;
+			// Staff forks persist flattened ownership provenance for every reused cwd.
+			// Plain host history forks retain their established marker-free behavior.
+			const borrowedWorktreeOwnerSessionId = sharedWorktreeOwnerSessionId
+				?? (reuseBorrowsWorktree && forkStaff
+					? (ps.borrowedWorktreeOwnerSessionId ?? sourceId)
+					: undefined);
+			const sharedSourceCwd = sharedWorktreeOwnerSessionId ? source.cwd : undefined;
+			const sharedPersistedCwd = sharedWorktreeOwnerSessionId ? ps.cwd : undefined;
 			const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
-			const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
 			const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
 			const forkInitialModel = forkSourceTuple.initialModel
 				?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
@@ -15320,20 +15344,25 @@ async function handleApiRoute(
 
 			const projCwd = projectRegistry.get(projectId)!.rootPath;
 			const forkId = randomUUID();
+			const destinationStaffId = forkStaff ? randomUUID() : undefined;
+			const destinationStaffName = resolveSidebarSessionForkTitle(source, ps);
 			// Use the project root for the cloned `.jsonl` slug (same as /continue);
 			// worktree-backed sessions rotate to the final cwd-derived file after the
 			// worktree is ready, adopting this clone via switch_session.
 			const formattedDestJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
-			const sandboxHistoryDestination = hasEntryId && ps.sandboxed === true;
-			const sandboxDestJsonl = sandboxHistoryDestination
+			// The recovered source path is the filesystem-realm authority. Canonical
+			// sandbox transcripts stay in container coordinates for whole and history
+			// forks; legacy host-absolute sandbox transcripts remain host-to-host.
+			const sandboxTranscriptDestination = srcCtx.sandboxed === true;
+			const sandboxDestJsonl = sandboxTranscriptDestination
 				? tryHostPathToContainer(formattedDestJsonl)
 				: null;
-			if (sandboxHistoryDestination && !sandboxDestJsonl) {
+			if (sandboxTranscriptDestination && !sandboxDestJsonl) {
 				json({ error: "failed to resolve sandbox transcript destination" }, 500);
 				return;
 			}
 			const destJsonl = sandboxDestJsonl ?? formattedDestJsonl;
-			const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
+			const dstCtx = sessionFsContextForAgentFile({ sandboxed: sandboxTranscriptDestination, projectId }, destJsonl);
 			const cleanupFailedFork = async (): Promise<void> => {
 				let failedRecord = sessionManager.getPersistedSession(forkId);
 				const failedTranscripts = new Set<string>([destJsonl]);
@@ -15346,7 +15375,7 @@ async function handleApiRoute(
 					}
 					failedRecord = sessionManager.getPersistedSession(forkId);
 					if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
-					if (sandboxHistoryDestination && failedRecord?.archived) {
+					if (sandboxTranscriptDestination && failedRecord?.archived) {
 						for (const transcript of failedTranscripts) {
 							await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
 						}
@@ -15363,7 +15392,7 @@ async function handleApiRoute(
 				}
 				failedRecord = sessionManager.getPersistedSession(forkId);
 				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
-				if (sandboxHistoryDestination) {
+				if (sandboxTranscriptDestination) {
 					for (const transcript of failedTranscripts) {
 						await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
 					}
@@ -15449,6 +15478,7 @@ async function handleApiRoute(
 					projectRoot: projCwd,
 					destJsonl,
 					newWorktree,
+					title: forkStaff ? destinationStaffName : undefined,
 					source: source!,
 					persisted: ps,
 				}, {
@@ -15469,13 +15499,14 @@ async function handleApiRoute(
 							worktreeOpts,
 							preExistingAgentSessionFile: destJsonl,
 							preExistingAgentSessionOldCwds: oldTranscriptCwds,
-							// A cut-before history fork is writable in the exact source cwd, but
-							// the flattened original owner retains the worktree lifecycle.
-							borrowsWorktree: (hasEntryId && !newWorktree) || undefined,
-							borrowedWorktreeOwnerSessionId: sharedSandboxOwnerSessionId,
+							// A cut-before history fork, and any staff fork reusing its source cwd,
+							// borrows the worktree. Flattened owner provenance plus the durable cwd
+							// reference keep sandbox and host lifecycle cleanup destination-safe.
+							borrowsWorktree: reuseBorrowsWorktree || undefined,
+							borrowedWorktreeOwnerSessionId,
 							taskId: ps.taskId,
 							reattemptGoalId: ps.reattemptGoalId,
-							staffId: ps.staffId,
+							staffId: destinationStaffId,
 							allowedTools: ps.allowedTools,
 						};
 						// A fresh Git fork must not return the temporary project-root cwd
@@ -15490,7 +15521,7 @@ async function handleApiRoute(
 							createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
 							createOpts.roleName = forkStaff.roleId;
 							createOpts.accessory = forkStaff.accessory;
-							createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+							createOpts.env = { BOBBIT_STAFF_ID: destinationStaffId };
 						} else {
 							if (forkRole) {
 								const opts = roleCreateOptions(forkRole);
@@ -15513,34 +15544,90 @@ async function handleApiRoute(
 					createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
 					setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
 				});
-				const launchSharedSandboxFork = async () => {
-					const currentSource = sessionManager.getSession(sourceId);
-					const currentPersisted = sessionManager.getPersistedSession(sourceId);
-					const currentOwnerSessionId = sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId);
-					if (
-						!currentSource
-						|| !currentPersisted
-						|| currentPersisted.archived
-						|| currentSource.cwd !== sharedSandboxSourceCwd
-						|| currentPersisted.cwd !== sharedSandboxPersistedCwd
-						|| currentOwnerSessionId !== sharedSandboxOwnerSessionId
-						|| isUnsupportedForkSource(currentSource, currentPersisted)
-					) {
-						throw new HistoryForkSourceUnavailableError();
+				const launchAndRegisterFork = async () => {
+					if (sharedWorktreeOwnerSessionId) {
+						const currentSource = sessionManager.getSession(sourceId);
+						const currentPersisted = sessionManager.getPersistedSession(sourceId);
+						const currentOwnerSessionId = sharedStaffWorktreeReuse
+							? sessionManager.resolveWorktreeOwnerSessionId(sourceId)
+							: sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId);
+						const currentStaff = forkStaff ? staffManager.getStaff(forkStaff.id) : undefined;
+						const exactStaffJoinChanged = !!forkStaff && (
+							!currentStaff
+							|| currentStaff.projectId !== projectId
+							|| currentStaff.currentSessionId !== sourceId
+							|| currentPersisted?.staffId !== forkStaff.id
+						);
+						if (
+							!currentSource
+							|| !currentPersisted
+							|| currentPersisted.archived
+							|| currentSource.projectId !== projectId
+							|| currentPersisted.projectId !== projectId
+							|| currentSource.cwd !== sharedSourceCwd
+							|| currentPersisted.cwd !== sharedPersistedCwd
+							|| currentOwnerSessionId !== sharedWorktreeOwnerSessionId
+							|| exactStaffJoinChanged
+							|| isUnsupportedForkSource(currentSource, currentPersisted)
+						) {
+							throw new HistoryForkSourceUnavailableError();
+						}
+						source = currentSource;
 					}
-					source = currentSource;
-					return launchFork();
+
+					// Stage the complete, hidden staff snapshot before SessionStore can
+					// publish the destination half of the join. A hard exit after session
+					// persistence is reconciled from this ID-bound marker on next boot.
+					if (forkStaff && destinationStaffId) {
+						staffManager.prepareForkedStaff(forkStaff, {
+							id: destinationStaffId,
+							name: destinationStaffName,
+							projectId,
+							sessionId: forkId,
+						});
+					}
+
+					const launched = await launchFork();
+					if (destinationStaffId) (launched.fork as SessionInfo).staffId = destinationStaffId;
+					const destinationContext = projectContextManager.getOrCreate(launched.projectId);
+					if (!destinationContext) throw new Error("fork destination project context is unavailable");
+					// Hold the owner boundary through both durable halves of publication.
+					// Deletion can proceed only after the borrower session and staff join exist.
+					await destinationContext.sessionStore.flushAsync();
+					const persistedFork = sessionManager.getPersistedSession(launched.fork.id);
+					if (!persistedFork || persistedFork.projectId !== launched.projectId) {
+						throw new Error("fork destination session was not persisted in its project");
+					}
+					let registeredForkStaff: ReturnType<typeof staffManager.registerForkedStaff> | undefined;
+					if (forkStaff && destinationStaffId) {
+						registeredForkStaff = staffManager.registerForkedStaff(forkStaff, {
+							id: destinationStaffId,
+							name: launched.title,
+							projectId: launched.projectId,
+							session: persistedFork,
+						});
+					}
+					return { launched, destinationContext, persistedFork, registeredForkStaff };
 				};
-				const launched = sharedSandboxReuse
-					? await sessionManager.withSandboxWorktreeOwnerLifecycle(
-						sharedSandboxOwnerSessionId!,
-						launchSharedSandboxFork,
+
+				const publication = sharedStaffWorktreeReuse
+					? await sessionManager.withWorktreeOwnerLifecycle(
+						sharedWorktreeOwnerSessionId!,
+						launchAndRegisterFork,
 					)
-					: await launchFork();
-				if (ps.staffId) (launched.fork as SessionInfo).staffId = ps.staffId;
-				const persistedFork = sessionManager.getPersistedSession(launched.fork.id);
-				if (persistedFork?.projectId === launched.projectId) {
-					projectContextManager.getOrCreate(launched.projectId)?.publishHostNotification("sessionForked", {
+					: (sharedSandboxReuse
+						? await sessionManager.withSandboxWorktreeOwnerLifecycle(
+							sharedWorktreeOwnerSessionId!,
+							launchAndRegisterFork,
+						)
+						: await launchAndRegisterFork());
+				const { launched, destinationContext, persistedFork, registeredForkStaff } = publication;
+
+				// Everything after strict staff publication is failure-isolated: once the
+				// row is visible, a notification or client disconnect must not trigger
+				// compensation that would orphan its permanent session.
+				try {
+					destinationContext.publishHostNotification("sessionForked", {
 						aggregateId: launched.fork.id,
 						aggregateRevision: Math.max(persistedFork.createdAt, persistedFork.lastActivity),
 						payload: {
@@ -15550,20 +15637,42 @@ async function handleApiRoute(
 							forkMode: hasEntryId ? "history" : "whole",
 						},
 					});
+				} catch (err) {
+					console.warn(`[fork] sessionForked publication failed for ${launched.fork.id}:`, err);
 				}
-				json({
-					id: launched.fork.id,
-					cwd: launched.fork.cwd,
-					status: launched.fork.status,
-					projectId: launched.projectId,
-					goalId: launched.goalId,
-					title: launched.title,
-				}, 201);
+				if (registeredForkStaff) {
+					broadcastStaffChanged({
+						type: "staff_changed",
+						reason: "created",
+						staffId: registeredForkStaff.id,
+						projectId: launched.projectId,
+						sessionId: launched.fork.id,
+					});
+				}
+				try {
+					json({
+						id: launched.fork.id,
+						cwd: launched.fork.cwd,
+						status: launched.fork.status,
+						projectId: launched.projectId,
+						goalId: launched.goalId,
+						title: launched.title,
+					}, 201);
+				} catch (err) {
+					console.warn(`[fork] response write failed after publishing ${launched.fork.id}:`, err);
+				}
 			} catch (err) {
 				// The shared owner FIFO has released before cleanup. A failed destination
 				// may itself be a borrower, so terminating it while holding the owner key
-				// would re-enter the same queue.
+				// would re-enter the same queue. Keep the pending identity durable until
+				// session cleanup finishes, then remove only that unpublished candidate.
 				await cleanupFailedFork();
+				if (destinationStaffId) {
+					try { staffManager.abortForkedStaffPublication(destinationStaffId); }
+					catch (cleanupErr) {
+						console.warn(`[fork] failed-staff publication cleanup failed for ${destinationStaffId}: ${cleanupErr}`);
+					}
+				}
 				if (err instanceof HistoryForkSourceUnavailableError) {
 					json({ error: err.message, code: err.code }, 422);
 				} else {
@@ -19802,7 +19911,16 @@ async function handleApiRoute(
 
 		if (req.method === "DELETE") {
 			const previousStaff = staffManager.getStaff(id);
-			const ok = await staffManager.deleteStaff(id, sessionManager);
+			let ok: boolean;
+			try {
+				ok = await staffManager.deleteStaff(id, sessionManager);
+			} catch (err) {
+				if (err instanceof SharedWorktreeInUseError) {
+					json({ error: err.message, code: err.code }, 409);
+					return;
+				}
+				throw err;
+			}
 			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
 			if (previousStaff) {
 				broadcastStaffChanged({

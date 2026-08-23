@@ -3310,6 +3310,24 @@
       }
     },
     {
+      "path": "tests2/integration/staff-fork-reproducer.test.ts",
+      "reason": "Minimal integration reproducer proving a fork of a staff-owned permanent session receives a distinct persisted staff identity and an empty inbox while preserving the source inbox.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/staff-fork.journey.spec.ts",
+      "reason": "Browser journey covering staff-session fork creation, immediate independent Staff placement and inbox authority, transcript preservation, reload persistence, and destination-only cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/history-fork-api.test.ts",
       "reason": "Integration coverage for authoritative persisted/recovered transcript resolution, malicious raw-path rejection, history-fork route validation, strict duplicate-author filtering, transcript and sidecar cuts, unchanged source state, canonical container-coordinate sandbox publication/rebase/rehydration, flattened ownership, controlled fork/session/project-delete FIFO races, shared-cwd and fresh-worktree modes, duplicate reservations, and failure cleanup.",
       "execution": {
