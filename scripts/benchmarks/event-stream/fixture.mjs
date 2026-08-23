@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const EVENT_STREAM_FIXTURE_VERSION = 1;
+export const EVENT_STREAM_FIXTURE_VERSION = 2;
 export const EVENT_STREAM_UPDATE_COUNT = 48;
 export const EVENT_STREAM_INTERVAL_MS = 12;
 export const EVENT_STREAM_VIEWPORT = Object.freeze({ width: 1280, height: 800 });
@@ -33,6 +33,66 @@ function taggedEvent(index, type, data, extra = {}) {
 		delayAfterMs: 0,
 		persistMessage: false,
 	};
+}
+
+function semanticPayload(value) {
+	if (value === null || ["string", "number", "boolean"].includes(typeof value)) return value;
+	if (Array.isArray(value)) return value.map(semanticPayload);
+	if (!value || typeof value !== "object") return null;
+	return Object.fromEntries(Object.keys(value).sort().map(key => [key, semanticPayload(value[key])]));
+}
+
+export function eventStreamSemanticMessage(message) {
+	return {
+		id: typeof message?.id === "string" && message.id.startsWith("benchmark-") ? message.id : null,
+		role: message?.role ?? null,
+		content: Array.isArray(message?.content) ? message.content.map(block => ({
+			type: block?.type ?? null,
+			text: typeof block?.text === "string" ? block.text : null,
+			id: block?.id ?? block?.toolCallId ?? null,
+			name: block?.name ?? block?.toolName ?? null,
+			arguments: semanticPayload(block?.arguments),
+			input: semanticPayload(block?.input),
+		})) : [],
+		toolCallId: message?.toolCallId ?? null,
+		toolName: message?.toolName ?? null,
+		isError: typeof message?.isError === "boolean" ? message.isError : null,
+	};
+}
+
+export function eventStreamSemanticCounts(projection) {
+	const messages = Array.isArray(projection) ? projection : [];
+	const content = messages.flatMap(message => Array.isArray(message?.content) ? message.content : []);
+	const toolResults = messages.filter(message => message?.role === "toolResult");
+	return {
+		messageCount: messages.length,
+		roles: {
+			user: messages.filter(message => message?.role === "user").length,
+			assistant: messages.filter(message => message?.role === "assistant").length,
+			toolResult: toolResults.length,
+		},
+		toolCallCount: content.filter(block => block?.type === "toolCall").length,
+		toolResultCount: toolResults.length,
+		successfulToolResultCount: toolResults.filter(message => message?.isError === false).length,
+		errorToolResultCount: toolResults.filter(message => message?.isError === true).length,
+	};
+}
+
+export function eventStreamToolPairs(projection) {
+	const messages = Array.isArray(projection) ? projection : [];
+	const calls = new Map();
+	for (const message of messages) {
+		for (const block of Array.isArray(message?.content) ? message.content : []) {
+			if (block?.type === "toolCall" && typeof block.id === "string") calls.set(block.id, block);
+		}
+	}
+	return messages.filter(message => message?.role === "toolResult").map(result => ({
+		toolCallId: result.toolCallId,
+		toolName: calls.get(result.toolCallId)?.name ?? result.toolName,
+		resultMessageId: result.id,
+		isError: result.isError,
+		output: result.content?.find(block => block?.type === "text")?.text ?? null,
+	}));
 }
 
 /**
@@ -214,6 +274,22 @@ export function createEventStreamFixture({
 		type: data.type,
 		ordinal: data.benchmarkOrdinal ?? null,
 	}));
+	const trigger = `BENCHMARK_EVENT_STREAM:${updateCount}:${intervalMs}`;
+	const expectedFinalSemanticProjection = [
+		eventStreamSemanticMessage({ role: "user", content: [{ type: "text", text: trigger }] }),
+		...events
+			.filter(entry => entry.persistMessage && entry.data?.message)
+			.map(entry => eventStreamSemanticMessage(entry.data.message)),
+	];
+	const expectedFinalSemanticCounts = eventStreamSemanticCounts(expectedFinalSemanticProjection);
+	const expectedToolPairs = [
+		{ toolCallId: "benchmark-proposal-tool", toolName: "propose_goal", resultMessageId: "benchmark-proposal-result", isError: false, output: "Proposal submitted." },
+		{ toolCallId: "benchmark-success-tool", toolName: "Read", resultMessageId: "benchmark-success-result", isError: false, output: EVENT_STREAM_TOOL_OUTPUT },
+		{ toolCallId: "benchmark-error-tool", toolName: "Read", resultMessageId: "benchmark-error-result", isError: true, output: EVENT_STREAM_ERROR_OUTPUT },
+	];
+	if (JSON.stringify(eventStreamToolPairs(expectedFinalSemanticProjection)) !== JSON.stringify(expectedToolPairs)) {
+		throw new Error("Event-stream fixture messages did not satisfy the independent tool pairing oracle");
+	}
 	const semanticProjection = {
 		fixtureVersion: EVENT_STREAM_FIXTURE_VERSION,
 		updateCount,
@@ -228,13 +304,19 @@ export function createEventStreamFixture({
 			`${EVENT_STREAM_DONE_MARKER}:${updateCount}`,
 		],
 		settlementMarkers: [EVENT_STREAM_PROPOSAL_SPEC],
+		expectedFinalSemanticProjection,
+		expectedFinalSemanticCounts,
+		expectedToolPairs,
 	};
 	const semanticHash = createHash("sha256")
 		.update(JSON.stringify(semanticProjection))
 		.digest("hex");
+	const expectedFinalSemanticHash = createHash("sha256")
+		.update(JSON.stringify(expectedFinalSemanticProjection))
+		.digest("hex");
 
 	return {
-		trigger: `BENCHMARK_EVENT_STREAM:${updateCount}:${intervalMs}`,
+		trigger,
 		updateCount,
 		intervalMs,
 		events,
@@ -242,6 +324,10 @@ export function createEventStreamFixture({
 		markers: semanticProjection.markers,
 		finalMarkers: semanticProjection.finalMarkers,
 		settlementMarkers: semanticProjection.settlementMarkers,
+		expectedFinalSemanticProjection,
+		expectedFinalSemanticCounts,
+		expectedToolPairs,
+		expectedFinalSemanticHash,
 		semanticHash,
 	};
 }
