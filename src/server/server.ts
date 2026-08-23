@@ -14274,11 +14274,10 @@ async function handleApiRoute(
 			// resumed the goal. Resume authority remains limited to the paused
 			// snapshot that passed operator authorization above.
 			const session = await teamManager.startTeam(goalId, { explicitIdempotent: true, resumePaused });
-			// A successful paused-team start has now durably resumed the goal and
-			// established (or recovered) its canonical lead. Release only work that
-			// was lifecycle-guarded for this operator-authorized resume; dispatch is
-			// intentionally asynchronous and may heal a prior crash-stranded row.
-			if (resumePaused) sessionManager.drainGoalGuardedPrompts?.(goalId);
+			// A successful team start has established (or recovered) its canonical
+			// lead. Always retry guarded dispatch: the request that durably resumed a
+			// paused goal may have ended before reaching this asynchronous release.
+			sessionManager.drainGoalGuardedPrompts?.(goalId);
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
 			if (err instanceof TeamStartError) {

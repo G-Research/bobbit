@@ -90,10 +90,11 @@ test.describe("paused team-start API lifecycle", () => {
 		}
 	});
 
-	test("POST /team/start resume releases one guarded prompt on the existing lead without duplicate activity", async ({ gateway }) => {
+	test("POST /team/start retry releases one retained guarded prompt without duplicate activity", async ({ gateway }) => {
 		const goal = await createManualTeamGoal("guarded resume");
 		let leadId: string | undefined;
 		let prompt: any;
+		let redrain: any;
 		try {
 			const initial = await start(goal.id);
 			expect(initial.response.status, JSON.stringify(initial.body)).toBe(201);
@@ -129,9 +130,25 @@ test.describe("paused team-start API lifecycle", () => {
 				expect.objectContaining({ id: intentId, text, goalDispatchGuardId: goal.id }),
 			]);
 
+			// Model interruption after startTeam commits the pause clear but before
+			// its nonblocking release can begin. The durable guarded row survives.
+			redrain = vi.spyOn(gateway.sessionManager, "drainGoalGuardedPrompts")
+				.mockImplementationOnce(() => {});
 			const resumed = await start(goal.id, humanHeaders());
 			expect(resumed.response.status, JSON.stringify(resumed.body)).toBe(201);
 			expect(resumed.body.sessionId).toBe(leadId);
+			expect(redrain).toHaveBeenCalledTimes(1);
+			expect((await getGoal(goal.id)).paused).toBe(false);
+			expect(prompt).not.toHaveBeenCalled();
+			expect(live.promptQueue.toArray()).toEqual([
+				expect.objectContaining({ id: intentId, text, goalDispatchGuardId: goal.id }),
+			]);
+
+			redrain.mockClear();
+			const retry = await start(goal.id);
+			expect(retry.response.status, JSON.stringify(retry.body)).toBe(201);
+			expect(retry.body.sessionId).toBe(leadId);
+			expect(redrain).toHaveBeenCalledTimes(1);
 			await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
 			expect(prompt.mock.calls[0]?.[0]).toMatch(new RegExp(`${text}$`));
 			expect(live.promptQueue.toArray()).toEqual([]);
@@ -139,8 +156,10 @@ test.describe("paused team-start API lifecycle", () => {
 			const repeated = await start(goal.id);
 			expect(repeated.response.status, JSON.stringify(repeated.body)).toBe(201);
 			expect(repeated.body.sessionId).toBe(leadId);
+			expect(redrain).toHaveBeenCalledTimes(2);
 			expect(prompt).toHaveBeenCalledTimes(1);
 		} finally {
+			redrain?.mockRestore();
 			prompt?.mockRestore();
 			const context = gateway.projectContextManager.getContextForGoal(goal.id);
 			const cleanupGoal = context?.goalStore.get(goal.id);
