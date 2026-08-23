@@ -1003,7 +1003,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/session-goal-promotion-recovery.test.ts",
 		allowReason: "test-owned isolated promotion transcript used to assert restart recovery dispatches the pending kickoff exactly once",
 		reads: frozen([
-			{ expression: "transcriptPath", count: 1 },
+			{ expression: "transcriptPath", count: 3 },
 		]),
 	},
 	{
