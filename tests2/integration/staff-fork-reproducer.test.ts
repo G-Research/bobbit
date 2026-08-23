@@ -939,6 +939,17 @@ test.describe.serial("staff session fork identity", () => {
 			projectId: source.projectId,
 		});
 		expect(staffManager.getStaff(preparedId)?.forkPublication).toBeUndefined();
+		const context = gateway.projectContextManager.getOrCreate(source.projectId);
+		const durableStaff = JSON.parse(fs.readFileSync((context.staffStore as any).storeFile, "utf8"))
+			.find((staff: any) => staff.id === preparedId);
+		expect(durableStaff).toMatchObject({
+			id: preparedId,
+			currentSessionId: preparedSessionId,
+			projectId: source.projectId,
+		});
+		expect(durableStaff.forkPublication, "successful publication must durably clear the hidden marker").toBeUndefined();
+		expect((await listStaff(gateway, source.projectId)).find((staff: any) => staff.id === preparedId))
+			.toMatchObject({ currentSessionId: preparedSessionId });
 	});
 
 	test("reconciles the durable destination identity after a crash between session and staff commits", async ({ gateway }) => {
