@@ -15,7 +15,7 @@ export const GATEWAY_STARTUP_CASES = Object.freeze([
 	Object.freeze({ name: "1000-sessions", sessionCount: 1_000, liveCount: 3 }),
 ]);
 
-export const GATEWAY_STARTUP_FIXTURE_VERSION = 1;
+export const GATEWAY_STARTUP_FIXTURE_VERSION = 2;
 export const GATEWAY_STARTUP_PROJECT_ID = "headquarters";
 export const GATEWAY_STARTUP_TOKEN = "b0bb17".repeat(10) + "b0bb";
 export const GATEWAY_STARTUP_SEARCH_SENTINEL = "gateway-startup-search-sentinel";
@@ -45,6 +45,12 @@ function sameStrings(actual, expected) {
 function boundedErrorMessage(error, maximum = 1_000) {
 	const message = String(error?.message ?? error ?? "unknown cleanup failure");
 	return message.length <= maximum ? message : `${message.slice(0, maximum - 14)}…[truncated]`;
+}
+
+function boundedIdArray(values, maximumItems = 16, maximumIdLength = 160) {
+	const bounded = values.slice(0, maximumItems).map(value => boundedErrorMessage(value, maximumIdLength));
+	if (values.length > maximumItems) bounded.push(`…[${values.length - maximumItems} omitted]`);
+	return JSON.stringify(bounded);
 }
 
 function normalizeSemanticSession(session) {
@@ -173,9 +179,11 @@ export function buildGatewayStartupFixtureRecords(caseName, { projectRoot, trans
 	for (let index = 0; index < archivedCount; index += 1) {
 		const id = archivedIds[index];
 		const relationship = {};
+		// Concurrent restoration may permute live seed insertion order. Anchor all
+		// direct session edges to one seed while retaining every relationship type.
 		if (index === 0) relationship.delegateOf = liveIds[0];
-		else if (index === 1) relationship.parentSessionId = liveIds[1];
-		else if (index === 2) relationship.teamLeadSessionId = liveIds[2];
+		else if (index === 1) relationship.parentSessionId = liveIds[0];
+		else if (index === 2) relationship.teamLeadSessionId = liveIds[0];
 		else if (index === 3) relationship.goalId = goalId;
 		else if (index === 4) relationship.teamGoalId = goalId;
 		else if (index === 5) relationship.delegateOf = archivedIds[0];
@@ -442,8 +450,12 @@ async function validateReadyGateway(baseUrl, manifest) {
 
 	const reachable = sessionsResult.body?.archivedDelegates;
 	assertion(Array.isArray(reachable), "sessions endpoint omitted archived relationship traversal");
-	assertion(JSON.stringify(reachable.map(session => session.id)) === JSON.stringify(manifest.reachableArchivedIds), "archived relationship BFS order changed");
-	const reachableSet = new Set(reachable.map(session => session.id));
+	const reachableIds = reachable.map(session => session.id);
+	assertion(
+		JSON.stringify(reachableIds) === JSON.stringify(manifest.reachableArchivedIds),
+		`archived relationship BFS order changed (expected ${boundedIdArray(manifest.reachableArchivedIds)}, actual ${boundedIdArray(reachableIds)})`,
+	);
+	const reachableSet = new Set(reachableIds);
 	assertion(manifest.controls.every(id => !reachableSet.has(id)), "an unrelated archived control entered relationship traversal");
 
 	const liveStates = [];
