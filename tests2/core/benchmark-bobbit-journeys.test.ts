@@ -37,8 +37,11 @@ import {
 	cleanupTrackedGateways,
 	buildGatewayStartupFixtureRecords,
 	GATEWAY_STARTUP_CASES,
+	GATEWAY_STARTUP_FIXTURE_VERSION,
+	generateGatewayStartupFixture,
 	validateGatewayStartupSemanticProjection,
 } from "../../scripts/benchmarks/gateway-startup.mjs";
+import { bfsEnrichArchivedIndexed } from "../../src/server/agent/archived-session-bfs.js";
 import {
 	cleanupBenchmarkRunRoot,
 	closeBenchmarkBrowser,
@@ -365,6 +368,126 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 			maxMs: 80,
 			reliability: "browser-api",
 		});
+	});
+});
+
+describe("gateway-startup fixture v3 relationship regression", () => {
+	function permutations<T>(values: T[]): T[][] {
+		if (values.length <= 1) return [values];
+		return values.flatMap((value, index) => permutations([
+			...values.slice(0, index),
+			...values.slice(index + 1),
+		]).map(rest => [value, ...rest]));
+	}
+
+	it("keeps the production archived BFS exact for every live-seed permutation", () => {
+		for (const caseName of ["100-sessions", "1000-sessions"]) {
+			const records = buildGatewayStartupFixtureRecords(caseName, {
+				projectRoot: "project",
+				transcriptRoot: "agent",
+			});
+			const archived = records.sessions.filter((session: any) => session.archived === true);
+			const seedPermutations = permutations(records.manifest.liveIds);
+			assert.equal(seedPermutations.length, 6);
+			assert.ok(records.manifest.goalId);
+
+			for (const liveSeeds of seedPermutations) {
+				const actualIds = bfsEnrichArchivedIndexed(
+					[...liveSeeds, records.manifest.goalId],
+					archived,
+					(session: any) => ({ ...session }),
+				).map((session: any) => session.id);
+				assert.deepEqual(
+					actualIds,
+					records.manifest.reachableArchivedIds,
+					`${caseName} changed BFS order for live seeds ${liveSeeds.join(",")}`,
+				);
+				const reachable = new Set(actualIds);
+				assert.ok(
+					records.manifest.controls.every((id: string) => !reachable.has(id)),
+					`${caseName} admitted an unrelated archived control`,
+				);
+			}
+		}
+	});
+});
+
+describe("gateway-startup generated preferences and containment regression", () => {
+	it("generates the exact v3 restore preferences entirely beneath an owned run root", async () => {
+		const tempParent = await temporaryRoot();
+		const paths = await createBenchmarkRunRoot({ repoRoot: tempParent, tempDirectory: tempParent, env: {} });
+		const fixtureRoot = path.join(paths.fixtures, "100-sessions");
+		const dependencyPaths: string[] = [];
+		const persistedSessions: any[] = [];
+		const expectedArchivedSearchId = "benchmark-100-sessions-archived-0000";
+
+		class SessionStore {
+			constructor(directory: string) { dependencyPaths.push(directory); }
+			put(session: any) { persistedSessions.push(structuredClone(session)); }
+			async flushAsync() {}
+		}
+		class ProjectRegistry {
+			constructor(directory: string) { dependencyPaths.push(directory); }
+			ensureHeadquartersProject(gatewayRoot: string, options: { stateDir: string; configDir: string }) {
+				dependencyPaths.push(gatewayRoot, options.stateDir, options.configDir);
+			}
+		}
+		class GoalStore {
+			constructor(directory: string) { dependencyPaths.push(directory); }
+			put(_goal: any) {}
+			async flush() {}
+			async close() {}
+		}
+		class SearchService {
+			constructor(options: { stateDir: string }) { dependencyPaths.push(options.stateDir); }
+			open(_stores: any) {}
+			async whenReady() {}
+			async rebuildFromStores(_goalStore: any, _sessionStore: any) {}
+			async search() { return { results: [{ sessionId: expectedArchivedSearchId }] }; }
+			async close() {}
+		}
+
+		try {
+			const generated = await generateGatewayStartupFixture({
+				caseName: "100-sessions",
+				fixtureRoot,
+				productionModules: { SessionStore, ProjectRegistry, GoalStore, SearchService },
+			});
+			const preferencesPath = path.join(fixtureRoot, "gateway", "state", "preferences.json");
+			const preferencesText = await readFile(preferencesPath, "utf8");
+			assert.deepEqual(JSON.parse(preferencesText), {
+				customProviders: [{
+					id: "mock",
+					name: "mock",
+					type: "manual",
+					baseUrl: "http://127.0.0.1",
+					models: [{ id: "mock-model", name: "mock-model" }],
+				}],
+				"default.sessionModel": "mock/mock-model",
+				"default.sessionThinkingLevel": "medium",
+			});
+			assert.equal(generated.manifest.fixtureVersion, 3);
+			assert.equal(GATEWAY_STARTUP_FIXTURE_VERSION, 3);
+			assert.equal(persistedSessions.length, 100);
+
+			const generatedPaths = [
+				fixtureRoot,
+				preferencesPath,
+				...dependencyPaths,
+				...persistedSessions.flatMap(session => [session.cwd, session.agentSessionFile].filter(Boolean)),
+			];
+			for (const candidate of generatedPaths) {
+				const relative = path.relative(paths.root, path.resolve(candidate));
+				assert.ok(
+					relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative)),
+					`generated fixture path escaped its owned run root: ${candidate}`,
+				);
+				assert.equal(path.resolve(candidate).split(path.sep).includes(".bobbit"), false);
+			}
+		} finally {
+			await cleanupBenchmarkRunRoot(paths);
+		}
+		assert.equal(existsSync(paths.root), false, "owned fixture run root must be cleaned after generation");
 	});
 });
 
