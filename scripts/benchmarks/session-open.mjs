@@ -95,6 +95,15 @@ export function measureLongTasksInWindow(entries, windowStart, windowEnd) {
 	};
 }
 
+/** Preserve the declared Long Task metric shape when the browser API is unsupported. */
+export function sessionOpenLongTaskMetricFields(measurement) {
+	return {
+		longTaskCount: measurement?.count ?? null,
+		longTaskTotalMs: measurement?.totalMs ?? null,
+		longTaskMaxMs: measurement?.maxMs ?? null,
+	};
+}
+
 /** A deliberately small, implementation-independent projection used as the parity oracle. */
 export function projectSessionOpenMessages(messages) {
 	return messages.map(message => {
@@ -700,20 +709,20 @@ async function measureBrowserSample(restored, manifest) {
 			: null;
 		const heapSamples = [heapBefore, heapAfterInteractive, ...timing.heap].filter(Number.isFinite);
 		const serverTiming = timing.serverTiming ?? {};
-		const metrics = Object.fromEntries(Object.entries({
-			timeToInteractiveMs: timing.now - timing.sent,
-			serverResponseLatencyMs: timing.received - timing.sent,
-			transferredBytes: snapshotFrameBytes || timing.snapshotChars,
-			longTaskCount: longTaskMetrics?.count ?? null,
-			longTaskTotalMs: longTaskMetrics?.totalMs ?? null,
-			longTaskMaxMs: longTaskMetrics?.maxMs ?? null,
-			heapGrowthBytes: Number.isFinite(heapBefore) && Number.isFinite(heapAfterInteractive) ? heapAfterInteractive - heapBefore : null,
-			heapPeakBytes: heapSamples.length ? Math.max(...heapSamples) : null,
-			rpcMs: serverTiming.rpcMs ?? null,
-			pipelineMs: serverTiming.pipelineMs ?? null,
-			stampMs: serverTiming.stampMs ?? null,
-			stringifyMs: serverTiming.stringifyMs ?? null,
-		}).filter(([, value]) => Number.isFinite(value)));
+		const metrics = {
+			...Object.fromEntries(Object.entries({
+				timeToInteractiveMs: timing.now - timing.sent,
+				serverResponseLatencyMs: timing.received - timing.sent,
+				transferredBytes: snapshotFrameBytes || timing.snapshotChars,
+				heapGrowthBytes: Number.isFinite(heapBefore) && Number.isFinite(heapAfterInteractive) ? heapAfterInteractive - heapBefore : null,
+				heapPeakBytes: heapSamples.length ? Math.max(...heapSamples) : null,
+				rpcMs: serverTiming.rpcMs ?? null,
+				pipelineMs: serverTiming.pipelineMs ?? null,
+				stampMs: serverTiming.stampMs ?? null,
+				stringifyMs: serverTiming.stringifyMs ?? null,
+			}).filter(([, value]) => Number.isFinite(value))),
+			...sessionOpenLongTaskMetricFields(longTaskMetrics),
+		};
 		return {
 			metrics,
 			correctness: oracle,

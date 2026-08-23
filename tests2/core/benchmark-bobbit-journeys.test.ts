@@ -48,6 +48,7 @@ import {
 	generateSessionOpenFixture,
 	projectSessionOpenMessages,
 	SESSION_OPEN_CASES,
+	sessionOpenLongTaskMetricFields,
 } from "../../scripts/benchmarks/session-open.mjs";
 import * as eventStreamBenchmark from "../../scripts/benchmarks/event-stream.mjs";
 import * as eventStreamFixture from "../../scripts/benchmarks/event-stream/fixture.mjs";
@@ -246,6 +247,19 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 		];
 		assert.deepEqual(projectSessionOpenMessages(messages).map((message: any) => message.isError), [true, true, true, false]);
 		assert.notEqual(sha256(projectSessionOpenMessages(messages)), sha256(projectSessionOpenMessages([...messages].reverse())));
+	});
+
+	it("preserves unsupported session-open Long Task keys as null and supported zeroes", () => {
+		assert.deepEqual(sessionOpenLongTaskMetricFields(null), {
+			longTaskCount: null,
+			longTaskTotalMs: null,
+			longTaskMaxMs: null,
+		});
+		assert.deepEqual(sessionOpenLongTaskMetricFields({ count: 0, totalMs: 0, maxMs: 0 }), {
+			longTaskCount: 0,
+			longTaskTotalMs: 0,
+			longTaskMaxMs: 0,
+		});
 	});
 
 	it("pins store counts and detects observed relationship mutations independently", () => {
