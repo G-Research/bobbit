@@ -818,6 +818,39 @@ describe("TeamManager adopted-lead finalization", () => {
 		}
 	});
 
+	it("restores the ordinary listener and idle timers when boot finalization fails before subscription", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		let restored: TeamManager | undefined;
+		try {
+			committedAttachment(fixture);
+			fixture.manager.dispose();
+			fixture.simulateProcessRestart();
+
+			restored = new TeamManager(
+				fixture.sessionManager as any,
+				fixture.managerConfig as any,
+				undefined,
+				noTimerClock as any,
+			);
+			await restored.waitForRestore();
+			(restored as any).finalizeAdoptedLead = async () => {
+				throw new Error("injected pre-subscription finalization failure");
+			};
+			await restored.resubscribeTeamEvents();
+
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress", "the restored adopted goal remains runnable");
+			assert.equal(fixture.subscriptionCount, 1, "ordinary boot recovery must install the missing lead listener");
+			assert.equal(fixture.activeSubscriptions, 1, "the fallback must leave exactly one active listener");
+			assert.equal((restored as any).noWorkersNudgeTimers.size, 1, "the idle no-workers watchdog must be restored");
+			assert.equal((restored as any).idleNudgeTimers.size, 1, "the idle workers watchdog must be restored");
+			assert.equal(fixture.promptCalls.length, 0, "failed finalization must not admit a promotion kickoff");
+			assert.equal(fixture.promptOccurrences.length, 0);
+		} finally {
+			restored?.dispose();
+			fixture.manager.dispose();
+		}
+	});
+
 	it("cold-delivers one kickoff occurrence through manager restart recovery", async () => {
 		const fixture = await makeAdoptedAdmissionFixture();
 		let restored: TeamManager | undefined;

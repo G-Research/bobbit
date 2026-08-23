@@ -1474,9 +1474,12 @@ export class TeamManager {
 		// finalizeAdoptedLead. restoreTeams repairs the durable graph before session
 		// restoration; now that the canonical runtime is live, complete that same
 		// finalization seam. Keep boot deterministic and isolate a broken relation so
-		// other teams still resume. Attempted adopted leads own their subscription in
-		// finalizeAdoptedLead and must not be subscribed a second time below.
+		// other teams still resume. Finalization owns the subscription only once it
+		// has actually installed one; a pre-subscription failure must fall through to
+		// ordinary recovery, while an installed subscription must not be duplicated if
+		// a later finalization step fails.
 		const adoptedFinalizationAttempts = new Set<string>();
+		const adoptedFinalizationSubscriptions = new Set<string>();
 		for (const [goalId, entry] of this.teams) {
 			if (!this.isRestoredAdoptedLeadFinalizationCandidate(goalId, entry)) continue;
 			adoptedFinalizationAttempts.add(goalId);
@@ -1485,12 +1488,20 @@ export class TeamManager {
 			} catch (err) {
 				console.error(`[team-manager] Adopted team-lead finalization failed for goal=${goalId}:`, err);
 			}
+			if (entry.unsubscribeTeamLeadEvents) adoptedFinalizationSubscriptions.add(goalId);
 		}
 
 		for (const [goalId, entry] of this.teams) {
 			// Re-subscribe to team lead events and restart idle timer if needed.
-			// Recovered adopted leads already did both through their finalization seam.
-			if (entry.teamLeadSessionId && !adoptedFinalizationAttempts.has(goalId)) {
+			// A failed adopted finalization falls back only while it remains an
+			// authoritative runnable candidate; paused/inactive transitions stay closed.
+			const adoptedFallbackEligible = adoptedFinalizationAttempts.has(goalId)
+				&& !adoptedFinalizationSubscriptions.has(goalId)
+				&& this.isRestoredAdoptedLeadFinalizationCandidate(goalId, entry);
+			if (
+				entry.teamLeadSessionId
+				&& (!adoptedFinalizationAttempts.has(goalId) || adoptedFallbackEligible)
+			) {
 				const tlSession = this.sessionManager.getSession(entry.teamLeadSessionId);
 				if (tlSession && tlSession.status !== "terminated") {
 					this.subscribeTeamLeadEvents(goalId);
