@@ -3752,11 +3752,11 @@
     },
     {
       "path": "tests2/integration/benchmark-bobbit-journeys.test.ts",
-      "reason": "Integration coverage for reduced benchmark fixtures through production session stores, gateway readiness, WebSocket snapshots, archived relationships, and failure cleanup.",
+      "reason": "Vitest E2E coverage for reduced benchmark fixtures through a real production gateway process, session stores, readiness, WebSocket snapshots, archived relationships, and failure cleanup.",
       "execution": {
         "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {

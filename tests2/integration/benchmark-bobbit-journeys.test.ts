@@ -1,3 +1,5 @@
+// v2-e2e-vitest real-process owner: this benchmark boundary intentionally starts
+// the production gateway and must remain outside the subprocess-free tier-1 lane.
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
