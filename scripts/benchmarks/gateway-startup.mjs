@@ -42,6 +42,70 @@ function sameStrings(actual, expected) {
 	return JSON.stringify(sorted(actual)) === JSON.stringify(sorted(expected));
 }
 
+function boundedErrorMessage(error, maximum = 1_000) {
+	const message = String(error?.message ?? error ?? "unknown cleanup failure");
+	return message.length <= maximum ? message : `${message.slice(0, maximum - 14)}…[truncated]`;
+}
+
+function normalizeSemanticSession(session) {
+	return {
+		id: session?.id ?? null,
+		title: session?.title ?? null,
+		archived: session?.archived === true || session?.status === "archived",
+		delegateOf: session?.delegateOf ?? null,
+		parentSessionId: session?.parentSessionId ?? null,
+		teamLeadSessionId: session?.teamLeadSessionId ?? null,
+		teamGoalId: session?.teamGoalId ?? null,
+		goalId: session?.goalId ?? null,
+	};
+}
+
+function semanticProjection(manifest, sessions) {
+	return {
+		fixtureVersion: manifest.fixtureVersion,
+		caseName: manifest.caseName,
+		projectId: manifest.projectId,
+		goalId: manifest.goalId,
+		liveIds: [...manifest.liveIds],
+		archivedIds: [...manifest.archivedIds],
+		reachableArchivedIds: [...manifest.reachableArchivedIds],
+		controls: [...manifest.controls],
+		sessions,
+	};
+}
+
+/** Project production API rows into the fixture's stable, non-volatile semantic order. */
+export function projectObservedGatewayStartupSemantics(manifest, observedSessions) {
+	if (!manifest || !Array.isArray(manifest.sessions) || !Array.isArray(observedSessions)) {
+		throw new TypeError("Gateway-startup semantic projection requires a manifest and observed sessions");
+	}
+	const observedById = new Map();
+	for (const session of observedSessions) {
+		assertion(typeof session?.id === "string" && session.id.length > 0, "an observed session omitted its ID");
+		assertion(!observedById.has(session.id), `production returned duplicate session ${session.id}`);
+		observedById.set(session.id, session);
+	}
+	assertion(observedById.size === manifest.sessions.length, `semantic projection expected ${manifest.sessions.length} sessions, received ${observedById.size}`);
+	const sessions = manifest.sessions.map(expected => {
+		const observed = observedById.get(expected.id);
+		assertion(observed, `semantic projection could not find ${expected.id}`);
+		return normalizeSemanticSession(observed);
+	});
+	return semanticProjection(manifest, sessions);
+}
+
+/** Validate and hash only the stable session semantics observed through production APIs. */
+export function validateGatewayStartupSemanticProjection(manifest, observedSessions) {
+	const expectedProjection = semanticProjection(manifest, manifest.sessions.map(normalizeSemanticSession));
+	const expectedSha256 = sha256(JSON.stringify(expectedProjection));
+	assertion(expectedSha256 === manifest.semanticSha256, "fixture manifest semantic hash did not match its projection");
+	const observedProjection = projectObservedGatewayStartupSemantics(manifest, observedSessions);
+	const observedSha256 = sha256(JSON.stringify(observedProjection));
+	assertion(JSON.stringify(observedProjection) === JSON.stringify(expectedProjection), "observed session relationship semantics changed");
+	assertion(observedSha256 === expectedSha256, "observed semantic hash did not match the fixture");
+	return { projection: observedProjection, semanticSha256: observedSha256 };
+}
+
 function caseDefinition(caseName) {
 	const definition = GATEWAY_STARTUP_CASES.find(candidate => candidate.name === caseName);
 	if (!definition) throw new Error(`Unknown gateway-startup case: ${caseName}`);
@@ -391,6 +455,7 @@ async function validateReadyGateway(baseUrl, manifest) {
 		liveStates.push({ id, status: result.body.status });
 	}
 
+	const observedSemantics = validateGatewayStartupSemanticProjection(manifest, sessions);
 	const search = await validateSearch(baseUrl, manifest);
 	return {
 		projectCount: projects.length,
@@ -399,8 +464,48 @@ async function validateReadyGateway(baseUrl, manifest) {
 		archivedCount: archived.length,
 		reachableArchivedCount: reachable.length,
 		searchResultCount: search.resultIds.length,
-		semanticSha256: manifest.semanticSha256,
+		semanticSha256: observedSemantics.semanticSha256,
 	};
+}
+
+/** Stop one tracked gateway and forget it only after process closure is verified. */
+export async function stopTrackedGateway(active, activeGateways, stopGatewayImpl = stopGateway) {
+	let result;
+	try {
+		result = await stopGatewayImpl(active.runtime, {
+			baseUrl: active.baseUrl,
+			token: GATEWAY_STARTUP_TOKEN,
+		});
+	} catch (error) {
+		throw new Error(`Gateway cleanup failed: ${boundedErrorMessage(error)}`, { cause: error });
+	}
+	const verifiedClosed = result?.closed === true
+		|| (result?.closed !== false && active.runtime?.closed === true);
+	if (!verifiedClosed) {
+		throw new Error("Gateway cleanup did not verify process closure");
+	}
+	activeGateways.delete(active);
+	return result;
+}
+
+/** Retry every retained gateway and aggregate bounded failures after all attempts. */
+export async function cleanupTrackedGateways(activeGateways, stopGatewayImpl = stopGateway) {
+	const failures = [];
+	for (const active of [...activeGateways]) {
+		try {
+			await stopTrackedGateway(active, activeGateways, stopGatewayImpl);
+		} catch (error) {
+			failures.push(new Error(boundedErrorMessage(error)));
+		}
+	}
+	if (failures.length > 0) {
+		throw new AggregateError(failures, `Gateway cleanup failed for ${failures.length} tracked process${failures.length === 1 ? "" : "es"}`);
+	}
+}
+
+function aggregateMetricReliability(samples, metric) {
+	const observed = sorted(new Set(samples.map(sample => sample.metricReliability?.[metric] ?? "unsupported")));
+	return observed.length === 1 ? observed[0] : `mixed (${observed.join(", ")})`;
 }
 
 async function runSample(context, entry, canonicalFixture, productionModules, activeGateways) {
@@ -439,6 +544,8 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 		});
 		const processMetrics = await readProcessMetrics(runtime.child.pid);
 		const correctness = await validateReadyGateway(active.baseUrl, sample.manifest);
+		const cpuTimeMs = Number.isFinite(processMetrics.cpuTimeMs) ? processMetrics.cpuTimeMs : null;
+		const peakRssBytes = Number.isFinite(processMetrics.peakRssBytes) ? processMetrics.peakRssBytes : null;
 		return {
 			case: entry.case,
 			phase: entry.phase,
@@ -447,13 +554,13 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 			order: entry.order,
 			metrics: {
 				readyMs: readiness.readyMs,
-				cpuTimeMs: processMetrics.cpuTimeMs,
-				peakRssBytes: processMetrics.peakRssBytes,
+				cpuTimeMs,
+				peakRssBytes,
 			},
 			metricReliability: {
 				readyMs: "reliable",
-				cpuTimeMs: processMetrics.cpuTimeMs === null ? "unsupported" : processMetrics.reliability,
-				peakRssBytes: processMetrics.peakRssBytes === null ? "unsupported" : processMetrics.reliability,
+				cpuTimeMs: cpuTimeMs === null ? "unsupported" : processMetrics.reliability,
+				peakRssBytes: peakRssBytes === null ? "unsupported" : processMetrics.reliability,
 			},
 			readiness: {
 				finalStatus: readiness.status,
@@ -463,8 +570,7 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 			correctness,
 		};
 	} finally {
-		await stopGateway(runtime, { baseUrl: active.baseUrl, token: GATEWAY_STARTUP_TOKEN });
-		activeGateways.delete(active);
+		await stopTrackedGateway(active, activeGateways);
 	}
 }
 
@@ -481,13 +587,7 @@ export async function runJourney(context) {
 	}
 
 	const activeGateways = new Set();
-	context.deferCleanup(async () => {
-		await Promise.allSettled([...activeGateways].map(active => stopGateway(active.runtime, {
-			baseUrl: active.baseUrl,
-			token: GATEWAY_STARTUP_TOKEN,
-		})));
-		activeGateways.clear();
-	});
+	context.deferCleanup(() => cleanupTrackedGateways(activeGateways));
 
 	const schedule = context.scheduleFor(GATEWAY_STARTUP_CASES.map(definition => definition.name));
 	const samples = [];
@@ -511,7 +611,8 @@ export async function runJourney(context) {
 		definition.name,
 		fixtures.get(definition.name).manifest.semanticSha256,
 	]));
-	const metricReliabilities = new Set(samples.flatMap(sample => Object.values(sample.metricReliability)));
+	const cpuTimeReliability = aggregateMetricReliability(samples, "cpuTimeMs");
+	const peakRssReliability = aggregateMetricReliability(samples, "peakRssBytes");
 
 	return {
 		fixtureDimensions: {
@@ -523,14 +624,14 @@ export async function runJourney(context) {
 		samples,
 		metricDefinitions: {
 			readyMs: { unit: "ms", direction: "lower", reliability: "reliable" },
-			cpuTimeMs: { unit: "ms", direction: "lower", reliability: process.platform === "linux" ? "reliable" : process.platform === "win32" ? "lower-confidence" : "partial" },
-			peakRssBytes: { unit: "bytes", direction: "lower", reliability: process.platform === "linux" ? "reliable" : process.platform === "win32" ? "lower-confidence" : "unsupported" },
+			cpuTimeMs: { unit: "ms", direction: "lower", reliability: cpuTimeReliability },
+			peakRssBytes: { unit: "bytes", direction: "lower", reliability: peakRssReliability },
 		},
 		environment: {
 			metricSupport: {
-				readyMs: "monotonic process spawn through authenticated health readiness",
-				cpuTimeMs: metricReliabilities.has("unsupported") ? "platform-dependent" : "process-specific",
-				peakRssBytes: process.platform === "darwin" ? "unsupported" : "process-specific high-water mark where exposed",
+				readyMs: "reliable: monotonic process spawn through authenticated health readiness",
+				cpuTimeMs: `${cpuTimeReliability}: process-specific child-process CPU time where exposed`,
+				peakRssBytes: `${peakRssReliability}: process-specific high-water mark where exposed`,
 			},
 		},
 		correctness: {
