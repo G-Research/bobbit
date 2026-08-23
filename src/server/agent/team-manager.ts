@@ -2347,8 +2347,8 @@ export class TeamManager {
 
 	/**
 	 * Complete the normal active-team lifecycle after SessionManager has committed
-	 * an in-place lead promotion. This installs the ordinary lead subscription,
-	 * activates a todo goal, then reliably kicks off the canonical promoted runtime.
+	 * an in-place lead promotion. This activates a todo goal, installs the ordinary
+	 * lead subscription, then reliably kicks off the canonical promoted runtime.
 	 */
 	async finalizeAdoptedLead(goalId: string, options: { coldStart?: boolean } = {}): Promise<TeamState> {
 		if (!this.restoreCompleted) await this.restorePromise;
@@ -2366,14 +2366,6 @@ export class TeamManager {
 					"The adopted team lead is still attaching to this goal; wait for promotion to finish",
 				);
 			}
-			if (!this.subscribeTeamLeadEvents(goalId)) {
-				throw new TeamStartError(
-					"ADOPTED_LEAD_SUBSCRIPTION_FAILED",
-					"The adopted team lead lifecycle could not be activated; retry finalization",
-				);
-			}
-			const lead = this.sessionManager.getSession(goal.worktreeOwnerSessionId);
-			if (lead?.status === "idle") this.startIdleNudgeTimer(goalId);
 			if (goal.state === "todo") {
 				await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
 			}
@@ -2382,6 +2374,14 @@ export class TeamManager {
 			const canonicalGoal = this.resolveGoal(goalId);
 			if (!canonicalGoal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
 			this.assertAdoptedLeadFinalizationEligible(canonicalGoal);
+			if (!this.subscribeTeamLeadEvents(goalId)) {
+				throw new TeamStartError(
+					"ADOPTED_LEAD_SUBSCRIPTION_FAILED",
+					"The adopted team lead lifecycle could not be activated; retry finalization",
+				);
+			}
+			const lead = this.sessionManager.getSession(canonicalGoal.worktreeOwnerSessionId!);
+			if (lead?.status === "idle") this.startIdleNudgeTimer(goalId);
 			await this.sessionManager.enqueuePrompt(
 				canonicalGoal.worktreeOwnerSessionId!,
 				`You have been promoted to the team lead for the goal "${canonicalGoal.title}".  Proceed to complete the goal, following the instructions in your system prompt carefully.`,

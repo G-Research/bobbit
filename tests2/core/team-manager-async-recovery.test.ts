@@ -764,6 +764,9 @@ describe("TeamManager adopted-lead finalization", () => {
 			);
 			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
 			assert.equal(fixture.goals.get(fixture.goal.id)?.paused, true);
+			assert.equal(fixture.activeSubscriptions, 0);
+			assert.equal((fixture.manager as any).idleNudgeTimers.size, 0);
+			assert.equal((fixture.manager as any).noWorkersNudgeTimers.size, 0);
 			assert.equal(fixture.promptCalls.length, 0);
 			assert.equal(fixture.promptOccurrences.length, 0);
 		} finally {
@@ -801,7 +804,7 @@ describe("TeamManager adopted-lead finalization", () => {
 				/injected transition failure/,
 			);
 			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "todo");
-			assert.equal(fixture.activeSubscriptions, 1);
+			assert.equal(fixture.activeSubscriptions, 0);
 			assert.equal(fixture.promptCalls.length, 0, "a failed pre-kickoff transition must not enqueue work");
 			assert.equal(fixture.promptOccurrences.length, 0);
 
