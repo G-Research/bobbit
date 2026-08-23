@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { isDeepStrictEqual } from "node:util";
 import { p95 } from "./contract.mjs";
 import {
 	closeBenchmarkBrowser,
@@ -20,6 +21,8 @@ import {
 	EVENT_STREAM_UPDATE_COUNT,
 	EVENT_STREAM_VIEWPORT,
 	createEventStreamFixture,
+	eventStreamSemanticCounts,
+	eventStreamToolPairs,
 } from "./event-stream/fixture.mjs";
 
 const CASE_NAME = `stream-${EVENT_STREAM_UPDATE_COUNT}`;
@@ -203,7 +206,7 @@ function installBrowserObserver(config) {
 		});
 		longTaskObserver.observe({ type: "longtask", buffered: true });
 		state.longTasksSupported = true;
-	} catch { /* metric is explicitly reported unsupported when empty */ }
+	} catch { /* metric is explicitly reported unsupported */ }
 
 	const sampleFrame = now => {
 		if (!state.finished) requestAnimationFrame(sampleFrame);
@@ -248,7 +251,7 @@ function normalizedText(value) {
 		.trim();
 }
 
-async function settleAndFingerprint(page) {
+async function settleAndFingerprint(page, trigger) {
 	await page.evaluate(async () => {
 		const deferred = window.DeferredBlock;
 		if (deferred?.forceResolveAll) {
@@ -257,34 +260,50 @@ async function settleAndFingerprint(page) {
 		}
 		await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 	});
-	const result = await page.evaluate(({ selector, proposalSpec }) => {
+	const result = await page.evaluate(({ selector, proposalSpec, trigger }) => {
 		const normalize = value => String(value ?? "")
 			.replace(proposalSpec, "")
 			.replace(/\b\d+(?:\.\d+)?s\b/g, "Xs")
 			.replace(/\s+/g, " ")
 			.trim();
-		const nodes = Array.from(document.querySelectorAll(selector));
-		const messages = nodes.map(node => ({ role: node.tagName.toLowerCase(), text: normalize(node.textContent) }));
-		const app = window.bobbitState ?? window.__bobbitState;
-		const remote = app?.remoteAgent?.state ?? {};
-		const semanticMessages = Array.isArray(remote.messages) ? remote.messages.map(message => ({
+		const semanticPayload = value => {
+			if (value === null || ["string", "number", "boolean"].includes(typeof value)) return value;
+			if (Array.isArray(value)) return value.map(semanticPayload);
+			if (!value || typeof value !== "object") return null;
+			return Object.fromEntries(Object.keys(value).sort().map(key => [key, semanticPayload(value[key])]));
+		};
+		const semanticMessage = message => ({
+			id: typeof message?.id === "string" && message.id.startsWith("benchmark-") ? message.id : null,
 			role: message?.role ?? null,
 			content: Array.isArray(message?.content) ? message.content.map(block => ({
 				type: block?.type ?? null,
 				text: typeof block?.text === "string" ? block.text : null,
 				id: block?.id ?? block?.toolCallId ?? null,
 				name: block?.name ?? block?.toolName ?? null,
-				isError: block?.isError ?? null,
+				arguments: semanticPayload(block?.arguments),
+				input: semanticPayload(block?.input),
 			})) : [],
 			toolCallId: message?.toolCallId ?? null,
 			toolName: message?.toolName ?? null,
-			isError: message?.isError ?? null,
-		})) : [];
+			isError: typeof message?.isError === "boolean" ? message.isError : null,
+		});
+		const isBenchmarkMessage = (message, projected) => projected.id !== null
+			|| (typeof projected.toolCallId === "string" && projected.toolCallId.startsWith("benchmark-"))
+			|| projected.content.some(block => (typeof block.id === "string" && block.id.startsWith("benchmark-"))
+				|| (typeof block.text === "string" && (block.text === trigger || block.text.includes("BOBBIT_BENCH_"))));
+		const nodes = Array.from(document.querySelectorAll(selector));
+		const messages = nodes.map(node => ({ role: node.tagName.toLowerCase(), text: normalize(node.textContent) }));
+		const app = window.bobbitState ?? window.__bobbitState;
+		const remote = app?.remoteAgent?.state ?? {};
+		const semanticProjection = Array.isArray(remote.messages) ? remote.messages
+			.map(message => ({ message, projected: semanticMessage(message) }))
+			.filter(({ message, projected }) => isBenchmarkMessage(message, projected))
+			.map(({ projected }) => projected) : [];
 		const textarea = document.querySelector("message-editor textarea");
 		const streamingContainer = document.querySelector("streaming-message-container");
 		return {
 			messages,
-			semanticMessages,
+			semanticProjection,
 			transcriptText: normalize(nodes.map(node => node.textContent ?? "").join(" ")),
 			streamingMessageVisible: Boolean(streamingContainer?.querySelector("assistant-message")),
 			streamingActive: streamingContainer?.isStreaming === true,
@@ -293,23 +312,39 @@ async function settleAndFingerprint(page) {
 			status: remote.status ?? null,
 			editorEnabled: textarea instanceof HTMLTextAreaElement && !textarea.disabled,
 		};
-	}, { selector: MESSAGE_SELECTOR, proposalSpec: EVENT_STREAM_PROPOSAL_SPEC });
+	}, { selector: MESSAGE_SELECTOR, proposalSpec: EVENT_STREAM_PROPOSAL_SPEC, trigger });
 	return {
 		...result,
 		domHash: sha256(result.messages),
-		semanticHash: sha256(result.semanticMessages),
+		semanticHash: sha256(result.semanticProjection),
 	};
 }
 
-function frameCadenceMetrics(frameDeltas) {
-	const plausible = frameDeltas.filter(value => Number.isFinite(value) && value > 0 && value < 100);
-	if (plausible.length === 0) return { estimatedRefreshMs: null, slowFrames: null, droppedFrames: null };
-	const sorted = [...plausible].sort((a, b) => a - b);
-	const fastestHalf = sorted.slice(0, Math.max(1, Math.ceil(sorted.length / 2)));
-	const estimatedRefreshMs = fastestHalf[Math.floor(fastestHalf.length / 2)];
-	const slow = plausible.filter(value => value > estimatedRefreshMs * 1.5);
+export function frameCadenceMetrics(frameDeltas) {
+	const gaps = frameDeltas.filter(value => Number.isFinite(value) && value > 0);
+	if (gaps.length === 0) return { estimatedRefreshMs: null, slowFrames: null, droppedFrames: null };
+	const sorted = [...gaps].sort((a, b) => a - b);
+	const estimationCount = Math.min(32, Math.max(1, Math.ceil(sorted.length / 2)));
+	const lowEndCadence = sorted.slice(0, estimationCount);
+	const estimatedRefreshMs = lowEndCadence[Math.floor(lowEndCadence.length / 2)];
+	const slow = gaps.filter(value => value > estimatedRefreshMs * 1.5);
 	const droppedFrames = slow.reduce((total, value) => total + Math.max(0, Math.round(value / estimatedRefreshMs) - 1), 0);
 	return { estimatedRefreshMs, slowFrames: slow.length, droppedFrames };
+}
+
+export function longTaskMetrics(longTasks, supported) {
+	if (!supported) {
+		return { count: null, totalMs: null, maxMs: null, reliability: "unsupported" };
+	}
+	const durations = (Array.isArray(longTasks) ? longTasks : [])
+		.map(task => task?.durationMs)
+		.filter(Number.isFinite);
+	return {
+		count: durations.length,
+		totalMs: durations.reduce((sum, value) => sum + value, 0),
+		maxMs: durations.length ? Math.max(...durations) : 0,
+		reliability: "browser-api",
+	};
 }
 
 function assertFixtureFrames(observed, expected) {
@@ -327,23 +362,73 @@ function assertFixtureFrames(observed, expected) {
 	}
 }
 
-function assertFinalState(snapshot, fixture) {
-	assert(snapshot.status === "idle", `Final client status was ${snapshot.status}, expected idle`);
-	assert(snapshot.pendingToolCount === 0, `Final UI retained ${snapshot.pendingToolCount} pending tools`);
-	assert(!snapshot.streamingMessageVisible, "Final UI retained an assistant message in the streaming container");
-	assert(!snapshot.streamingActive, "Final streaming container remained active after agent settlement");
-	assert(!snapshot.streamingTimerVisible, "Final UI retained a live streaming timer after agent settlement");
-	assert(snapshot.editorEnabled, "Final message editor was not enabled");
+export function assertExpectedFinalSemanticState(snapshot, fixture, label = "Final") {
+	const actual = snapshot?.semanticProjection;
+	assert(Array.isArray(actual), `${label} semantic projection was unavailable`);
+	const actualCounts = eventStreamSemanticCounts(actual);
+	assert(
+		isDeepStrictEqual(actualCounts, fixture.expectedFinalSemanticCounts),
+		`${label} semantic counts ${JSON.stringify(actualCounts)} did not match fixture ${JSON.stringify(fixture.expectedFinalSemanticCounts)}`,
+	);
+	const actualToolPairs = eventStreamToolPairs(actual);
+	assert(
+		isDeepStrictEqual(actualToolPairs, fixture.expectedToolPairs),
+		`${label} tool pairs ${JSON.stringify(actualToolPairs)} did not match fixture ${JSON.stringify(fixture.expectedToolPairs)}`,
+	);
+	if (!isDeepStrictEqual(actual, fixture.expectedFinalSemanticProjection)) {
+		const expected = fixture.expectedFinalSemanticProjection;
+		const mismatch = Array.from({ length: Math.max(actual.length, expected.length) }, (_, index) => ({
+			index,
+			actual: actual[index] ?? null,
+			expected: expected[index] ?? null,
+		})).find(row => !isDeepStrictEqual(row.actual, row.expected));
+		throw new Error(`${label} semantic projection did not match fixture ${fixture.expectedFinalSemanticHash}; first mismatch ${JSON.stringify(mismatch).slice(0, 1_500)}`);
+	}
+}
+
+export function assertFinalState(snapshot, fixture, label = "Final") {
+	assert(snapshot.status === "idle", `${label} client status was ${snapshot.status}, expected idle`);
+	assert(snapshot.pendingToolCount === 0, `${label} UI retained ${snapshot.pendingToolCount} pending tools`);
+	assert(!snapshot.streamingMessageVisible, `${label} UI retained an assistant message in the streaming container`);
+	assert(!snapshot.streamingActive, `${label} streaming container remained active after agent settlement`);
+	assert(!snapshot.streamingTimerVisible, `${label} UI retained a live streaming timer after agent settlement`);
+	assert(snapshot.editorEnabled, `${label} message editor was not enabled`);
 	for (const marker of fixture.markers) {
 		const count = snapshot.transcriptText.split(marker).length - 1;
-		assert(count === 1, `Expected marker ${marker} exactly once in the final transcript, found ${count}`);
+		assert(count === 1, `Expected marker ${marker} exactly once in the ${label.toLowerCase()} transcript, found ${count}`);
 	}
 	let previous = -1;
 	for (const marker of fixture.finalMarkers) {
 		const index = snapshot.transcriptText.indexOf(marker);
-		assert(index >= 0, `Final transcript omitted ${marker}`);
-		assert(index > previous, `Final transcript reordered ${marker}`);
+		assert(index >= 0, `${label} transcript omitted ${marker}`);
+		assert(index > previous, `${label} transcript reordered ${marker}`);
 		previous = index;
+	}
+	assertExpectedFinalSemanticState(snapshot, fixture, label);
+}
+
+function boundedErrorMessage(error) {
+	return String(error?.message ?? error ?? "unknown error").replace(/\s+/g, " ").slice(0, 1_000);
+}
+
+export async function cleanupEventStreamSample({ browser, gateway, baseUrl, token }, {
+	closeBrowser = closeBenchmarkBrowser,
+	stopRuntime = stopGateway,
+} = {}) {
+	const errors = [];
+	try {
+		await closeBrowser(browser);
+	} catch (error) {
+		errors.push(new Error(`Browser cleanup failed: ${boundedErrorMessage(error)}`, { cause: error }));
+	}
+	try {
+		await stopRuntime(gateway, { baseUrl, token });
+	} catch (error) {
+		errors.push(new Error(`Gateway cleanup failed: ${boundedErrorMessage(error)}`, { cause: error }));
+	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) {
+		throw new AggregateError(errors, `Event-stream cleanup failed: ${errors.map(error => error.message).join("; ")}`);
 	}
 }
 
@@ -396,6 +481,9 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 	});
 	let browser;
 	let token;
+	let sampleResult;
+	let sampleError;
+	let cleanupError;
 	try {
 		token = await waitForValue(async () => {
 			const value = (await readFile(path.join(secretsDir, "token"), "utf8")).trim();
@@ -447,10 +535,10 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 		await browser.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 		const observed = await browser.page.evaluate(() => window.__bobbitEventStreamBenchmark.finish());
 		const elapsedMs = performance.now() - sampleStartedAt;
-		const live = await settleAndFingerprint(browser.page);
+		const live = await settleAndFingerprint(browser.page, fixture.trigger);
 
 		assertFixtureFrames(observed.frames, fixture.expectedFrames);
-		assertFinalState(live, fixture);
+		assertFinalState(live, fixture, "Live final");
 		const committedLatencies = [];
 		for (let ordinal = 1; ordinal <= fixture.updateCount; ordinal += 1) {
 			const arrival = observed.arrivalByOrdinal[ordinal];
@@ -470,8 +558,8 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 			const text = document.body?.textContent ?? "";
 			return markers.every(marker => text.includes(marker));
 		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: 20_000 });
-		const refreshed = await settleAndFingerprint(browser.page);
-		assertFinalState(refreshed, fixture);
+		const refreshed = await settleAndFingerprint(browser.page, fixture.trigger);
+		assertFinalState(refreshed, fixture, "Refreshed final");
 		if (live.domHash !== refreshed.domHash) {
 			const mismatch = Math.max(live.messages.length, refreshed.messages.length) > 0
 				? Array.from({ length: Math.max(live.messages.length, refreshed.messages.length) }, (_, index) => ({
@@ -490,12 +578,12 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 			? Math.max(0.001, lastArrival - firstArrival)
 			: elapsedMs;
 		const cadence = frameCadenceMetrics(observed.frameDeltas);
-		const longTaskDurations = observed.longTasks.map(task => task.durationMs).filter(Number.isFinite);
+		const longTasks = longTaskMetrics(observed.longTasks, observed.longTasksSupported);
 		const heapGrowthBytes = observed.heapSupported
 			? observed.heapFinalBytes - observed.heapInitialBytes
 			: null;
 		const browserVersion = browser.browser.version();
-		return {
+		sampleResult = {
 			sample: {
 				case: entry.case,
 				phase: entry.phase,
@@ -508,9 +596,9 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 					elapsedMs,
 					slowFrames: cadence.slowFrames,
 					droppedFrames: cadence.droppedFrames,
-					longTaskCount: observed.longTasks.length,
-					longTaskTotalMs: longTaskDurations.reduce((sum, value) => sum + value, 0),
-					longTaskMaxMs: longTaskDurations.length ? Math.max(...longTaskDurations) : 0,
+					longTaskCount: longTasks.count,
+					longTaskTotalMs: longTasks.totalMs,
+					longTaskMaxMs: longTasks.maxMs,
 					heapGrowthBytes,
 					peakHeapBytes: observed.heapSupported ? observed.heapPeakBytes : null,
 				},
@@ -525,11 +613,13 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 					refreshDomHash: refreshed.domHash,
 					liveSemanticHash: live.semanticHash,
 					refreshSemanticHash: refreshed.semanticHash,
+					expectedSemanticHash: fixture.expectedFinalSemanticHash,
+					semanticCounts: fixture.expectedFinalSemanticCounts,
 				},
 				metricReliability: {
 					eventToRender: "reliable",
 					frameCadence: cadence.estimatedRefreshMs === null ? "unsupported" : "estimated",
-					longTasks: "browser-api",
+					longTasks: longTasks.reliability,
 					heap: observed.heapSupported ? "chromium-precise-memory" : "unsupported",
 				},
 			},
@@ -542,11 +632,23 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 		};
 	} catch (error) {
 		const detail = gateway.stderr.text() || gateway.stdout.text();
-		throw new Error(`${error.message ?? error}${detail ? `; gateway log tail: ${normalizedText(detail).slice(-2_000)}` : ""}`, { cause: error });
+		sampleError = new Error(`${error.message ?? error}${detail ? `; gateway log tail: ${normalizedText(detail).slice(-2_000)}` : ""}`, { cause: error });
 	} finally {
-		await closeBenchmarkBrowser(browser);
-		await stopGateway(gateway, { baseUrl, token }).catch(() => {});
+		try {
+			await cleanupEventStreamSample({ browser, gateway, baseUrl, token });
+		} catch (error) {
+			cleanupError = error;
+		}
 	}
+	if (sampleError && cleanupError) {
+		throw new AggregateError(
+			[sampleError, cleanupError],
+			`Event-stream sample and cleanup failed: ${boundedErrorMessage(sampleError)}; ${boundedErrorMessage(cleanupError)}`,
+		);
+	}
+	if (sampleError) throw sampleError;
+	if (cleanupError) throw cleanupError;
+	return sampleResult;
 }
 
 export async function runJourney(context) {
@@ -558,7 +660,7 @@ export async function runJourney(context) {
 	]);
 
 	const fixture = createEventStreamFixture();
-	const fixtureRoot = path.join(context.paths.fixtures, "event-stream-v1");
+	const fixtureRoot = path.join(context.paths.fixtures, `event-stream-v${EVENT_STREAM_FIXTURE_VERSION}`);
 	const projectRoot = path.join(fixtureRoot, "project");
 	await mkdir(projectRoot, { recursive: true });
 	await Promise.all([
@@ -569,6 +671,10 @@ export async function runJourney(context) {
 			updateCount: fixture.updateCount,
 			intervalMs: fixture.intervalMs,
 			expectedFrames: fixture.expectedFrames,
+			expectedFinalSemanticProjection: fixture.expectedFinalSemanticProjection,
+			expectedFinalSemanticCounts: fixture.expectedFinalSemanticCounts,
+			expectedToolPairs: fixture.expectedToolPairs,
+			expectedFinalSemanticHash: fixture.expectedFinalSemanticHash,
 			semanticHash: fixture.semanticHash,
 		}, null, 2)}\n`, "utf8"),
 	]);
@@ -596,10 +702,14 @@ export async function runJourney(context) {
 				updateCount: EVENT_STREAM_UPDATE_COUNT,
 				intervalMs: EVENT_STREAM_INTERVAL_MS,
 				taggedEventCount: fixture.expectedFrames.length,
+				finalSemanticMessageCount: fixture.expectedFinalSemanticCounts.messageCount,
 			}],
 			viewport: EVENT_STREAM_VIEWPORT,
 		},
-		fixtureHashes: { eventSequenceSha256: fixture.semanticHash },
+		fixtureHashes: {
+			eventSequenceSha256: fixture.semanticHash,
+			finalSemanticProjectionSha256: fixture.expectedFinalSemanticHash,
+		},
 		samples,
 		metricDefinitions: {
 			eventToRenderP95Ms: { unit: "ms", direction: "lower", reliability: "reliable" },
@@ -607,9 +717,9 @@ export async function runJourney(context) {
 			elapsedMs: { unit: "ms", direction: "lower", reliability: "reliable" },
 			slowFrames: { unit: "count", direction: "lower", reliability: "estimated" },
 			droppedFrames: { unit: "count", direction: "lower", reliability: "estimated" },
-			longTaskCount: { unit: "count", direction: "lower", reliability: "browser-api" },
-			longTaskTotalMs: { unit: "ms", direction: "lower", reliability: "browser-api" },
-			longTaskMaxMs: { unit: "ms", direction: "lower", reliability: "browser-api" },
+			longTaskCount: { unit: "count", direction: "lower", reliability: metricSupport.longTasks ? "browser-api" : "unsupported" },
+			longTaskTotalMs: { unit: "ms", direction: "lower", reliability: metricSupport.longTasks ? "browser-api" : "unsupported" },
+			longTaskMaxMs: { unit: "ms", direction: "lower", reliability: metricSupport.longTasks ? "browser-api" : "unsupported" },
 			heapGrowthBytes: { unit: "bytes", direction: "lower", reliability: metricSupport.heap ? "chromium-precise-memory" : "unsupported" },
 			peakHeapBytes: { unit: "bytes", direction: "lower", reliability: metricSupport.heap ? "chromium-precise-memory" : "unsupported" },
 		},
@@ -623,12 +733,14 @@ export async function runJourney(context) {
 			samplesPassed: samples.length,
 			expectedEventsPerSample: fixture.expectedFrames.length,
 			fixtureSemanticHash: fixture.semanticHash,
+			expectedFinalSemanticHash: fixture.expectedFinalSemanticHash,
+			expectedFinalSemanticCounts: fixture.expectedFinalSemanticCounts,
 			liveRefreshParity: true,
 		},
 		interpretation: "Validate event and live-refresh parity first. Then compare lower event-to-render p95 and frame/long-task/heap metrics from alternating runs on the same host.",
 		limitations: [
 			"Slow and dropped frames are estimates derived from requestAnimationFrame cadence, not compositor telemetry.",
-			"Heap metrics are reported only when Chromium exposes precise performance.memory values; unsupported values remain null.",
+			"Long-task and heap metrics are reported only when Chromium exposes their browser APIs; unsupported values remain null.",
 			"Mutation-to-animation-frame timing measures the first committed DOM containing each cumulative marker; superseded updates remain present in protocol counts.",
 		],
 		noiseSources: [
