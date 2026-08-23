@@ -395,7 +395,6 @@ async function assembleModels(
 	previousDynamicModels: ReadonlyMap<string, ApiModel[]>,
 ): Promise<AssembledModelCatalog> {
 	const results: ApiModel[] = [];
-	const directModels: ApiModel[] = [];
 	const dynamicModels = new Map<string, ApiModel[]>();
 	const aigwUrl = getAigwUrl(prefs);
 
@@ -417,7 +416,7 @@ async function assembleModels(
 				const models = getBuiltinModels(providerId as any);
 				const isAuth = detectProviderAuth(providerId as string, prefs);
 				for (const m of models) {
-					directModels.push({
+					results.push({
 						...m,
 						provider: providerId as string,
 						authenticated: isAuth,
@@ -434,20 +433,18 @@ async function assembleModels(
 		// only emitted when an account credential is present.
 		try {
 			for (const m of getGoogleCodeAssistModels()) {
-				directModels.push({ ...m, authenticated: detectProviderAuth(m.provider, prefs) });
+				results.push({ ...m, authenticated: detectProviderAuth(m.provider, prefs) });
 			}
 		} catch (err) {
 			console.error("[model-registry] Failed to load Google Code Assist models:", err);
 		}
 	}
 
-	results.push(...directModels.map((model) => {
+	for (let index = 0; index < results.length; index++) {
+		const model = results[index];
 		const modelCapacity = resolveAuthoritativeModelCapacity(model.provider, model.id, model.contextWindow);
-		return {
-			...model,
-			...(modelCapacity !== undefined ? { modelCapacity } : {}),
-		};
-	}));
+		if (modelCapacity !== undefined) results[index] = { ...model, modelCapacity };
+	}
 
 	// 2. AI Gateway models (if configured). Selection reflects the provider Pi
 	// will actually load: an unmarked user block is authoritative over discovery,
