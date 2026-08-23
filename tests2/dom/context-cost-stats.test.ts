@@ -202,7 +202,7 @@ describe("AgentInterface context target and capacity meter", () => {
 		expect(trigger.type).toBe("button");
 		expect(trigger.getAttribute("aria-expanded")).toBe("false");
 		expect(trigger.getAttribute("aria-controls")).toBe("context-usage-popover");
-		expect(trigger.getAttribute("aria-label")).toBe("Context: 300k / 1050k tokens (29% of model capacity); target 272k tokens");
+		expect(trigger.getAttribute("aria-label")).toBe("Context: 300k / 1050k tokens (29% of model capacity); soft limit 272k tokens");
 		expect(track.getAttribute("role")).toBe("progressbar");
 		expect(track.getAttribute("aria-valuemax")).toBe("1050000");
 		expect(track.getAttribute("aria-valuenow")).toBe("300000");
@@ -216,11 +216,11 @@ describe("AgentInterface context target and capacity meter", () => {
 
 		const popover = openContextPopover(fixture);
 		expect(popover.getAttribute("role")).toBe("dialog");
-		expect(popover.textContent).toMatch(/Context target\s*272k tokens/);
+		expect(popover.textContent).toMatch(/Soft limit\s*272k tokens/);
 		expect(popover.textContent).toMatch(/Model capacity\s*1050k tokens/);
 		expect(popover.textContent).not.toContain("Context window");
 		expect(popover.textContent).toContain("300k / 1050k tokens");
-		expect(popover.querySelector('[data-testid="context-meter-scale"]')?.textContent).toContain("Target 272k");
+		expect(popover.querySelector('[data-testid="context-meter-scale"]')?.textContent).toContain("Soft limit 272k");
 		expect(popover.querySelector('[data-testid="context-meter-scale"]')?.textContent).toContain("Capacity 1050k");
 
 		const escape = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
@@ -238,7 +238,7 @@ describe("AgentInterface context target and capacity meter", () => {
 			expect(fixture.container.querySelector('[data-testid="context-meter-target-marker"]')).toBeNull();
 			const popover = openContextPopover(fixture);
 			expect(popover.textContent).toMatch(/Context window\s*272k tokens/);
-			expect(popover.textContent).not.toContain("Context target");
+			expect(popover.textContent).not.toContain("Soft limit");
 			expect(popover.textContent).not.toContain("Model capacity");
 			expect(popover.querySelector('[data-testid="context-meter-scale"]')).toBeNull();
 		}
