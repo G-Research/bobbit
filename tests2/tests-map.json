@@ -3740,6 +3740,33 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/benchmark-bobbit-journeys.test.ts",
+      "reason": "Core contract coverage for benchmark CLI bounds, deterministic fixtures, alternating schedules, statistics, bounded reports, and cleanup safety.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/benchmark-bobbit-journeys.test.ts",
+      "reason": "Integration coverage for reduced benchmark fixtures through production session stores, gateway readiness, WebSocket snapshots, archived relationships, and failure cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/benchmark-bobbit-journeys.spec.ts",
+      "reason": "Browser journey covering reduced session-open and event-stream benchmarks through production WebSocket and UI boundaries, metric presence, exact ordering, reload equivalence, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
