@@ -51,6 +51,50 @@ function normalizedError(message) {
 	}
 }
 
+export function canonicalizeRenderedText(value) {
+	return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Independent fixture-side projection of the text rows the message components
+ * must commit. It intentionally knows only the fixture's small Markdown subset;
+ * the browser-side projection is built separately from rendered DOM.
+ */
+export function projectSessionOpenRenderedText(messages) {
+	const projection = [];
+	for (const message of messages) {
+		if (message?.role !== "user" && message?.role !== "assistant") continue;
+		for (const block of Array.isArray(message.content) ? message.content : []) {
+			if (block?.type !== "text" || typeof block.text !== "string" || !block.text.trim()) continue;
+			const rendered = block.text
+				.replace(/^```[^\n]*\n([\s\S]*?)\n```[\t ]*$/gm, "$1")
+				.replace(/^ {0,3}#{1,6}[\t ]+/gm, "");
+			projection.push({ role: message.role, text: canonicalizeRenderedText(rendered) });
+		}
+	}
+	return projection;
+}
+
+/** Return Long Task overlap metrics for exactly one measured browser interval. */
+export function measureLongTasksInWindow(entries, windowStart, windowEnd) {
+	if (!Number.isFinite(windowStart) || !Number.isFinite(windowEnd) || windowEnd < windowStart) {
+		throw new RangeError("Long Task measurement window must be finite and ordered");
+	}
+	const overlaps = [];
+	for (const entry of Array.isArray(entries) ? entries : []) {
+		const startTime = entry?.startTime;
+		const duration = entry?.duration;
+		if (!Number.isFinite(startTime) || !Number.isFinite(duration) || duration < 0) continue;
+		const overlap = Math.min(windowEnd, startTime + duration) - Math.max(windowStart, startTime);
+		if (overlap > 0) overlaps.push(overlap);
+	}
+	return {
+		count: overlaps.length,
+		totalMs: overlaps.reduce((sum, duration) => sum + duration, 0),
+		maxMs: overlaps.length ? Math.max(...overlaps) : 0,
+	};
+}
+
 /** A deliberately small, implementation-independent projection used as the parity oracle. */
 export function projectSessionOpenMessages(messages) {
 	return messages.map(message => {
@@ -252,10 +296,15 @@ function buildFixture(targetBytes) {
 	const sidecars = compactionEntries();
 	const expectedMessages = [...sidecars.flatMap(syntheticCompactionMessages), ...rawMessages];
 	const projection = projectSessionOpenMessages(expectedMessages);
+	const renderedTextProjection = projectSessionOpenRenderedText(expectedMessages);
 	const toolCallIds = rawMessages.flatMap(message => message.role === "assistant"
 		? message.content.filter(block => block.type === "toolCall").map(block => block.id)
 		: []);
 	const errorIds = rawMessages.filter(message => message.role === "toolResult" && normalizedError(message)).map(message => message.id);
+	const modernErrorIds = rawMessages.filter(message => message.role === "toolResult" && message.isError === true).map(message => message.id);
+	const legacyErrorIds = rawMessages.filter(message => message.role === "toolResult" && message.is_error === true).map(message => message.id);
+	const serializedErrorIds = rawMessages.filter(message => message.role === "toolResult"
+		&& message.isError !== true && message.is_error !== true && normalizedError(message)).map(message => message.id);
 	const renderIds = [
 		...sidecars.map(entry => entry.id),
 		...rawMessages.filter(message => message.role === "user" || message.role === "assistant").map(message => message.id),
@@ -272,8 +321,13 @@ function buildFixture(targetBytes) {
 		expectedSemanticSha256: sha256(JSON.stringify(projection)),
 		expectedRenderIds: renderIds,
 		expectedRenderIdsSha256: sha256(JSON.stringify(renderIds)),
+		expectedRenderedTextCount: renderedTextProjection.length,
+		expectedRenderedTextSha256: sha256(JSON.stringify(renderedTextProjection)),
 		expectedToolCallIds: toolCallIds,
 		expectedErrorIds: errorIds,
+		expectedModernErrorIds: modernErrorIds,
+		expectedLegacyErrorIds: legacyErrorIds,
+		expectedSerializedErrorIds: serializedErrorIds,
 		expectedCompactionIds: sidecars.map(entry => entry.id),
 		firstMarker: FIRST_MARKER,
 		lastMarker: LAST_MARKER,
@@ -453,11 +507,20 @@ async function measureBrowserSample(restored, manifest) {
 	try {
 		await browserRuntime.context.addInitScript(() => {
 			localStorage.setItem("bobbit-perf-instrumentation", "1");
-			window.__bobbitSessionOpenMetrics = { longTasks: [], heap: [] };
+			window.__bobbitSessionOpenMetrics = { longTasks: [], longTasksSupported: false, heap: [] };
 			try {
-				new PerformanceObserver(list => {
-					for (const entry of list.getEntries()) window.__bobbitSessionOpenMetrics.longTasks.push(entry.duration);
-				}).observe({ type: "longtask", buffered: true });
+				const supported = PerformanceObserver.supportedEntryTypes;
+				if (!Array.isArray(supported) || supported.includes("longtask")) {
+					new PerformanceObserver(list => {
+						for (const entry of list.getEntries()) {
+							window.__bobbitSessionOpenMetrics.longTasks.push({
+								startTime: entry.startTime,
+								duration: entry.duration,
+							});
+						}
+					}).observe({ type: "longtask", buffered: true });
+					window.__bobbitSessionOpenMetrics.longTasksSupported = true;
+				}
 			} catch { /* unsupported */ }
 			window.setInterval(() => {
 				const used = performance.memory?.usedJSHeapSize;
@@ -502,6 +565,7 @@ async function measureBrowserSample(restored, manifest) {
 				snapshotChars: sample.snapshotChars,
 				serverTiming: sample.serverTiming,
 				longTasks: [...(window.__bobbitSessionOpenMetrics?.longTasks ?? [])],
+				longTasksSupported: window.__bobbitSessionOpenMetrics?.longTasksSupported === true,
 				heap: [...(window.__bobbitSessionOpenMetrics?.heap ?? [])],
 			};
 		});
@@ -512,22 +576,32 @@ async function measureBrowserSample(restored, manifest) {
 		}
 
 		await browserRuntime.page.evaluate(async () => {
-			window.DeferredBlock?.forceResolveAll();
-			for (const element of document.querySelectorAll("deferred-block, message-list, user-message, assistant-message")) {
-				if (element.updateComplete) await element.updateComplete;
+			// Resolving wrappers inserts message components, whose own updates then
+			// insert markdown/tool components. Await both generations explicitly.
+			for (let pass = 0; pass < 3; pass += 1) {
+				const deferred = window.DeferredBlock;
+				deferred?.forceResolveAll();
+				if (deferred?.instances) {
+					await Promise.all(Array.from(deferred.instances, element => element.updateComplete ?? Promise.resolve()));
+				}
+				await Promise.all([...document.querySelectorAll("message-list, user-message, assistant-message, markdown-block, tool-message")]
+					.map(element => element.updateComplete ?? Promise.resolve()));
+				await new Promise(resolve => requestAnimationFrame(resolve));
 			}
-			await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+			await new Promise(resolve => requestAnimationFrame(resolve));
 		});
-		await browserRuntime.page.waitForFunction(expected =>
-			document.querySelectorAll('[data-testid="compaction-summary-card"]').length === expected,
-		manifest.expectedCompactionIds.length,
+		await browserRuntime.page.waitForFunction(({ compactions, textRows }) =>
+			document.querySelectorAll('[data-testid="compaction-summary-card"]').length === compactions
+				&& [...document.querySelectorAll("user-message markdown-block, assistant-message markdown-block")]
+					.filter(block => !block.closest("tool-message")).length === textRows,
+		{ compactions: manifest.expectedCompactionIds.length, textRows: manifest.expectedRenderedTextCount },
 		{ timeout: 30_000 });
 
 		const oracle = await browserRuntime.page.evaluate(async ({ firstMarker, lastMarker }) => {
 			const agent = document.querySelector("agent-interface");
 			const messages = agent?.session?.state?.messages;
 			if (!Array.isArray(messages)) throw new Error("Interactive session did not expose a client transcript");
-			const normalizeError = message => {
+			const normalizeErrorForSemanticProjection = message => {
 				if (message?.isError === true || message?.is_error === true) return true;
 				const text = Array.isArray(message?.content)
 					? message.content.map(part => typeof part?.text === "string" ? part.text : "").join("\n").trim()
@@ -550,7 +624,7 @@ async function measureBrowserSample(restored, manifest) {
 				if (message?.role === "toolResult" || message?.role === "tool_result" || message?.role === "tool") {
 					projected.toolCallId = message.toolCallId ?? message.tool_use_id ?? null;
 					projected.toolName = message.toolName ?? message.name ?? null;
-					projected.isError = normalizeError(message);
+					projected.isError = normalizeErrorForSemanticProjection(message);
 				}
 				return projected;
 			});
@@ -562,6 +636,23 @@ async function measureBrowserSample(restored, manifest) {
 				.filter(id => typeof id === "string");
 			const renderDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(renderIds)));
 			const renderIdsSha256 = Array.from(new Uint8Array(renderDigest), byte => byte.toString(16).padStart(2, "0")).join("");
+			const canonicalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
+			const renderedTextProjection = [];
+			for (const element of document.querySelectorAll("user-message, assistant-message")) {
+				const role = element.tagName === "USER-MESSAGE" ? "user" : "assistant";
+				for (const block of element.querySelectorAll(":scope markdown-block")) {
+					if (block.closest("tool-message")) continue;
+					const committed = block.cloneNode(true);
+					for (const codeBlock of committed.querySelectorAll("code-block")) {
+						codeBlock.replaceWith(` ${codeBlock.querySelector("pre code")?.textContent ?? ""} `);
+					}
+					for (const lineBreak of committed.querySelectorAll("br")) lineBreak.replaceWith(" ");
+					const text = canonicalize(committed.textContent);
+					if (text) renderedTextProjection.push({ role, text });
+				}
+			}
+			const renderedTextDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(renderedTextProjection)));
+			const renderedTextSha256 = Array.from(new Uint8Array(renderedTextDigest), byte => byte.toString(16).padStart(2, "0")).join("");
 			const ids = messages.map(message => message?.id).filter(id => typeof id === "string");
 			const orders = messages.map(message => message?._order);
 			const toolCalls = messages.flatMap(message => message?.role === "assistant" && Array.isArray(message.content)
@@ -573,11 +664,13 @@ async function measureBrowserSample(restored, manifest) {
 				semanticSha256,
 				renderCount: renderIds.length,
 				renderIdsSha256,
+				renderedTextCount: renderedTextProjection.length,
+				renderedTextSha256,
 				uniqueIds: new Set(ids).size === ids.length,
 				monotonicOrder: orders.every((order, index) => Number.isFinite(order) && (index === 0 || order > orders[index - 1])),
 				toolPairCount: toolCalls.filter(id => toolResults.has(id)).length,
 				toolCallCount: toolCalls.length,
-				errorIds: messages.filter(message => message?.role === "toolResult" && normalizeError(message)).map(message => message.id).filter(Boolean),
+				canonicalErrorIds: messages.filter(message => message?.role === "toolResult" && message.isError === true).map(message => message.id).filter(Boolean),
 				compactionCount: document.querySelectorAll('[data-testid="compaction-summary-card"]').length,
 				firstMarkerCount: document.body.textContent.split(firstMarker).length - 1,
 				lastMarkerCount: document.body.textContent.split(lastMarker).length - 1,
@@ -590,26 +683,30 @@ async function measureBrowserSample(restored, manifest) {
 			[oracle.semanticSha256 === manifest.expectedSemanticSha256, `semantic projection hash ${oracle.semanticSha256}/${manifest.expectedSemanticSha256}`],
 			[oracle.renderCount === manifest.expectedRenderIds.length, `rendered role count ${oracle.renderCount}/${manifest.expectedRenderIds.length}`],
 			[oracle.renderIdsSha256 === manifest.expectedRenderIdsSha256, `rendered role order ${oracle.renderIdsSha256}/${manifest.expectedRenderIdsSha256}`],
+			[oracle.renderedTextCount === manifest.expectedRenderedTextCount, `rendered text count ${oracle.renderedTextCount}/${manifest.expectedRenderedTextCount}`],
+			[oracle.renderedTextSha256 === manifest.expectedRenderedTextSha256, `rendered role/text projection ${oracle.renderedTextSha256}/${manifest.expectedRenderedTextSha256}`],
 			[oracle.uniqueIds, "unique message ids"],
 			[oracle.monotonicOrder, "strict snapshot order"],
 			[oracle.toolCallCount === expectedToolCount && oracle.toolPairCount === expectedToolCount, `tool call/result pairs ${oracle.toolPairCount}/${oracle.toolCallCount}/${expectedToolCount}`],
-			[JSON.stringify(oracle.errorIds) === JSON.stringify(manifest.expectedErrorIds), `legacy error normalization ${oracle.errorIds.length}/${manifest.expectedErrorIds.length}`],
+			[JSON.stringify(oracle.canonicalErrorIds) === JSON.stringify(manifest.expectedErrorIds), `canonical isError normalization ${oracle.canonicalErrorIds.length}/${manifest.expectedErrorIds.length} (modern ${manifest.expectedModernErrorIds.length}, legacy ${manifest.expectedLegacyErrorIds.length}, serialized ${manifest.expectedSerializedErrorIds.length})`],
 			[oracle.compactionCount === manifest.expectedCompactionIds.length, `compaction cards ${oracle.compactionCount}/${manifest.expectedCompactionIds.length}`],
 			[oracle.firstMarkerCount === 1 && oracle.lastMarkerCount === 1, `first/last markers ${oracle.firstMarkerCount}/${oracle.lastMarkerCount}`],
 		];
 		const failure = assertions.find(([passed]) => !passed);
 		if (failure) throw new Error(`Session-open parity failed: ${failure[1]}`);
 
-		const longTaskTotalMs = timing.longTasks.reduce((sum, value) => sum + value, 0);
+		const longTaskMetrics = timing.longTasksSupported
+			? measureLongTasksInWindow(timing.longTasks, timing.sent, timing.now)
+			: null;
 		const heapSamples = [heapBefore, heapAfterInteractive, ...timing.heap].filter(Number.isFinite);
 		const serverTiming = timing.serverTiming ?? {};
 		const metrics = Object.fromEntries(Object.entries({
 			timeToInteractiveMs: timing.now - timing.sent,
 			serverResponseLatencyMs: timing.received - timing.sent,
 			transferredBytes: snapshotFrameBytes || timing.snapshotChars,
-			longTaskCount: timing.longTasks.length,
-			longTaskTotalMs,
-			longTaskMaxMs: timing.longTasks.length ? Math.max(...timing.longTasks) : 0,
+			longTaskCount: longTaskMetrics?.count ?? null,
+			longTaskTotalMs: longTaskMetrics?.totalMs ?? null,
+			longTaskMaxMs: longTaskMetrics?.maxMs ?? null,
 			heapGrowthBytes: Number.isFinite(heapBefore) && Number.isFinite(heapAfterInteractive) ? heapAfterInteractive - heapBefore : null,
 			heapPeakBytes: heapSamples.length ? Math.max(...heapSamples) : null,
 			rpcMs: serverTiming.rpcMs ?? null,
@@ -623,7 +720,7 @@ async function measureBrowserSample(restored, manifest) {
 			browserVersion: browserRuntime.browser.version(),
 			metricSupport: {
 				webSocketFrames: snapshotFrameBytes > 0 ? "reliable" : "estimated-from-client-frame-chars",
-				longTasks: "reliable-in-chromium",
+				longTasks: timing.longTasksSupported ? "reliable-measurement-window-overlap" : "unsupported",
 				heap: heapSamples.length ? "chromium-precise-memory-lower-confidence-peak-sampling" : "unsupported",
 			},
 		};
@@ -650,10 +747,11 @@ async function runSample(context, entry, fixture) {
 				messageCount: measured.correctness.messageCount,
 				renderCount: measured.correctness.renderCount,
 				toolPairCount: measured.correctness.toolPairCount,
-				errorCount: measured.correctness.errorIds.length,
+				errorCount: measured.correctness.canonicalErrorIds.length,
 				compactionCount: measured.correctness.compactionCount,
 				semanticSha256: measured.correctness.semanticSha256,
 				renderIdsSha256: measured.correctness.renderIdsSha256,
+				renderedTextSha256: measured.correctness.renderedTextSha256,
 			},
 			metricReliability: measured.metricSupport,
 			browserVersion: measured.browserVersion,
@@ -698,6 +796,7 @@ export async function runJourney(context) {
 				transcriptSha256: manifest.transcriptSha256,
 				semanticSha256: manifest.expectedSemanticSha256,
 				renderIdsSha256: manifest.expectedRenderIdsSha256,
+				renderedTextSha256: manifest.expectedRenderedTextSha256,
 			}];
 		})),
 		schedule,
@@ -726,6 +825,7 @@ export async function runJourney(context) {
 			sampleCount: samples.length,
 			semanticParity: true,
 			renderedOrderParity: true,
+			renderedTextParity: true,
 			legacyErrorNormalization: true,
 			compactionParity: true,
 		},
@@ -733,6 +833,7 @@ export async function runJourney(context) {
 		limitations: [
 			"Chromium heap peak is sampled and is not a process-wide memory high-water mark.",
 			"WebSocket transfer bytes use CDP payload bytes when available and client frame characters otherwise.",
+			"Long Task totals clip task overlap to the get_messages send through interactive measurement window; unsupported observers produce no numeric Long Task metrics.",
 			"Forcing all deferred blocks is part of parity validation but occurs after the measured interactive boundary.",
 		],
 		noiseSources: [
