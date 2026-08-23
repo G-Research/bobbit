@@ -36,13 +36,23 @@ const MESSAGE_SELECTOR = "user-message, assistant-message, tool-message";
 
 type MetricSupport = "reliable" | "browser-api" | "estimated" | "unsupported";
 
+type ChromiumPerformanceMemory = {
+	readonly usedJSHeapSize: number;
+	readonly totalJSHeapSize: number;
+	readonly jsHeapSizeLimit: number;
+};
+
+type ChromiumPerformance = Performance & {
+	readonly memory?: ChromiumPerformanceMemory;
+};
+
 type SessionOpenMetrics = {
 	timeToInteractiveMs: number;
 	serverResponseLatencyMs: number;
 	transferredBytes: number;
-	longTaskCount: number;
-	longTaskTotalMs: number;
-	longTaskMaxMs: number;
+	longTaskCount: number | null;
+	longTaskTotalMs: number | null;
+	longTaskMaxMs: number | null;
 	heapGrowthBytes: number | null;
 	heapPeakBytes: number | null;
 	metricReliability: {
@@ -55,11 +65,11 @@ type SessionOpenMetrics = {
 type EventMetrics = {
 	eventThroughputPerSecond: number;
 	eventToRenderP95Ms: number;
-	droppedFrames: number;
-	slowFrames: number;
-	longTaskCount: number;
-	longTaskTotalMs: number;
-	longTaskMaxMs: number;
+	droppedFrames: number | null;
+	slowFrames: number | null;
+	longTaskCount: number | null;
+	longTaskTotalMs: number | null;
+	longTaskMaxMs: number | null;
 	heapGrowthBytes: number | null;
 	peakHeapBytes: number | null;
 	metricReliability: {
@@ -70,8 +80,43 @@ type EventMetrics = {
 	};
 };
 
+type TranscriptFingerprint = {
+	messages: Array<{ tag: string; id: string | null; text: string }>;
+	clientMessages: Array<{
+		id: string | null;
+		role: string | null;
+		toolCallId: string | null;
+		isError: boolean;
+		text: string;
+	}>;
+};
+
 function sha256(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function frameCadenceMetrics(frameDeltas: unknown[]): { estimatedRefreshMs: number | null; slowFrames: number | null; droppedFrames: number | null } {
+	const gaps = frameDeltas.filter((value): value is number => Number.isFinite(value) && Number(value) > 0);
+	if (gaps.length === 0) return { estimatedRefreshMs: null, slowFrames: null, droppedFrames: null };
+	const sorted = [...gaps].sort((a, b) => a - b);
+	const estimationCount = Math.min(32, Math.max(1, Math.ceil(sorted.length / 2)));
+	const lowEndCadence = sorted.slice(0, estimationCount);
+	const estimatedRefreshMs = lowEndCadence[Math.floor(lowEndCadence.length / 2)];
+	const slow = gaps.filter(value => value > estimatedRefreshMs * 1.5);
+	const droppedFrames = slow.reduce((total, value) => total + Math.max(0, Math.round(value / estimatedRefreshMs) - 1), 0);
+	return { estimatedRefreshMs, slowFrames: slow.length, droppedFrames };
+}
+
+async function expectSessionArchived(sessionId: string, label: string): Promise<void> {
+	await expect.poll(async () => {
+		const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}?include=archived`);
+		if (!response.ok) return false;
+		const body = await response.json() as { archived?: boolean; status?: string };
+		return body.archived === true || body.status === "archived" || body.status === "terminated";
+	}, {
+		timeout: 15_000,
+		message: `${label} must leave the active set and be retained as archived`,
+	}).toBe(true);
 }
 
 function transcriptEntry(id: string, parentId: string | null, message: Record<string, unknown>, offset: number) {
@@ -150,12 +195,14 @@ function reducedSessionTranscript(): string {
 }
 
 function installSessionOpenObserver(): void {
+	const memory = (performance as ChromiumPerformance).memory;
 	const state = {
-		startedAt: performance.now(),
+		requestAt: null as number | null,
 		responseAt: null as number | null,
 		transferredBytes: 0,
 		longTasks: [] as number[],
-		heapInitialBytes: Number.isFinite(performance.memory?.usedJSHeapSize) ? performance.memory.usedJSHeapSize : null,
+		longTasksSupported: false,
+		heapInitialBytes: Number.isFinite(memory?.usedJSHeapSize) ? memory!.usedJSHeapSize : null,
 		heapSamples: [] as number[],
 	};
 	(window as any).__browserBenchmarkSessionOpen = state;
@@ -164,7 +211,7 @@ function installSessionOpenObserver(): void {
 		constructor(url: string | URL, protocols?: string | string[]) {
 			super(url, protocols);
 			this.addEventListener("message", event => {
-				if (typeof event.data !== "string") return;
+				if (state.requestAt === null || typeof event.data !== "string") return;
 				let frame: any;
 				try { frame = JSON.parse(event.data); } catch { return; }
 				if (frame?.type !== "messages" || state.responseAt !== null) return;
@@ -172,16 +219,26 @@ function installSessionOpenObserver(): void {
 				state.transferredBytes = new TextEncoder().encode(event.data).byteLength;
 			});
 		}
+
+		send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+			if (state.requestAt === null && typeof data === "string") {
+				try {
+					if (JSON.parse(data)?.type === "get_messages") state.requestAt = performance.now();
+				} catch { /* non-JSON application frame */ }
+			}
+			super.send(data);
+		}
 	}
 	window.WebSocket = ObservedWebSocket;
 	try {
 		new PerformanceObserver(list => {
 			for (const entry of list.getEntries()) state.longTasks.push(entry.duration);
 		}).observe({ type: "longtask", buffered: true });
+		state.longTasksSupported = true;
 	} catch { /* unsupported browser metric */ }
 	window.setInterval(() => {
-		const heap = performance.memory?.usedJSHeapSize;
-		if (Number.isFinite(heap)) state.heapSamples.push(heap);
+		const heap = (performance as ChromiumPerformance).memory?.usedJSHeapSize;
+		if (Number.isFinite(heap)) state.heapSamples.push(heap!);
 	}, 25);
 }
 
@@ -192,6 +249,7 @@ function installEventObserver(config: { markerPrefix: string; updateCount: numbe
 		arrivalByOrdinal: {} as Record<number, number>,
 		renderByOrdinal: {} as Record<number, number>,
 		longTasks: [] as number[],
+		longTasksSupported: false,
 		frameDeltas: [] as number[],
 		lastFrameAt: null as number | null,
 		heapInitialBytes: null as number | null,
@@ -205,7 +263,8 @@ function installEventObserver(config: { markerPrefix: string; updateCount: numbe
 			this.longTasks = [];
 			this.frameDeltas = [];
 			this.lastFrameAt = null;
-			this.heapInitialBytes = Number.isFinite(performance.memory?.usedJSHeapSize) ? performance.memory.usedJSHeapSize : null;
+			const memory = (performance as ChromiumPerformance).memory;
+			this.heapInitialBytes = Number.isFinite(memory?.usedJSHeapSize) ? memory!.usedJSHeapSize : null;
 			this.heapPeakBytes = this.heapInitialBytes;
 		},
 	};
@@ -232,14 +291,15 @@ function installEventObserver(config: { markerPrefix: string; updateCount: numbe
 		new PerformanceObserver(list => {
 			if (state.armed) for (const entry of list.getEntries()) state.longTasks.push(entry.duration);
 		}).observe({ type: "longtask", buffered: true });
+		state.longTasksSupported = true;
 	} catch { /* unsupported browser metric */ }
 	const sampleFrame = (now: number) => {
 		requestAnimationFrame(sampleFrame);
 		if (!state.armed) return;
 		if (state.lastFrameAt !== null) state.frameDeltas.push(now - state.lastFrameAt);
 		state.lastFrameAt = now;
-		const heap = performance.memory?.usedJSHeapSize;
-		if (Number.isFinite(heap)) state.heapPeakBytes = Math.max(state.heapPeakBytes ?? 0, heap);
+		const heap = (performance as ChromiumPerformance).memory?.usedJSHeapSize;
+		if (Number.isFinite(heap)) state.heapPeakBytes = Math.max(state.heapPeakBytes ?? 0, heap!);
 	};
 	requestAnimationFrame(sampleFrame);
 	let queued = false;
@@ -265,9 +325,13 @@ async function settle(page: Page): Promise<void> {
 	});
 }
 
-async function transcriptFingerprint(page: Page) {
-	return page.evaluate((selector) => {
-		const normalize = (value: unknown) => String(value ?? "").replace(/\b\d+(?:\.\d+)?s\b/g, "Xs").replace(/\s+/g, " ").trim();
+async function transcriptFingerprint(page: Page, ignoredText: string[] = []): Promise<TranscriptFingerprint> {
+	return page.evaluate<TranscriptFingerprint, { selector: string; ignoredText: string[] }>(({ selector, ignoredText }) => {
+		const normalize = (value: unknown) => ignoredText
+			.reduce((text, ignored) => text.replaceAll(ignored, ""), String(value ?? ""))
+			.replace(/\b\d+(?:\.\d+)?s\b/g, "Xs")
+			.replace(/\s+/g, " ")
+			.trim();
 		const nodes = Array.from(document.querySelectorAll(selector)) as any[];
 		const messages = nodes.map(node => ({ tag: node.tagName.toLowerCase(), id: node.message?.id ?? null, text: normalize(node.textContent) }));
 		const agent = document.querySelector("agent-interface") as any;
@@ -284,7 +348,7 @@ async function transcriptFingerprint(page: Page) {
 					: "",
 			})),
 		};
-	}, MESSAGE_SELECTOR);
+	}, { selector: MESSAGE_SELECTOR, ignoredText });
 }
 
 function expectFiniteMetric(value: unknown, label: string): asserts value is number {
@@ -293,28 +357,37 @@ function expectFiniteMetric(value: unknown, label: string): asserts value is num
 
 function expectSessionMetricContract(metrics: SessionOpenMetrics): void {
 	for (const [name, value] of Object.entries(metrics).filter(([name]) => name !== "metricReliability")) {
-		if (name.startsWith("heap") && value === null) continue;
+		if (value === null) continue;
 		expectFiniteMetric(value, name);
 	}
 	expect(metrics.transferredBytes).toBeGreaterThan(0);
 	expect(metrics.metricReliability).toEqual({
 		webSocketFrames: "reliable",
-		longTasks: "browser-api",
+		longTasks: expect.stringMatching(/^(browser-api|unsupported)$/),
 		heap: expect.stringMatching(/^(estimated|unsupported)$/),
 	});
+	if (metrics.metricReliability.longTasks === "unsupported") {
+		expect([metrics.longTaskCount, metrics.longTaskTotalMs, metrics.longTaskMaxMs]).toEqual([null, null, null]);
+	}
 }
 
 function expectEventMetricContract(metrics: EventMetrics): void {
 	for (const [name, value] of Object.entries(metrics).filter(([name]) => name !== "metricReliability")) {
-		if ((name === "heapGrowthBytes" || name === "peakHeapBytes") && value === null) continue;
+		if (value === null) continue;
 		expectFiniteMetric(value, name);
 	}
 	expect(metrics.metricReliability).toEqual({
 		eventToRender: "reliable",
-		frameCadence: "estimated",
-		longTasks: "browser-api",
+		frameCadence: expect.stringMatching(/^(estimated|unsupported)$/),
+		longTasks: expect.stringMatching(/^(browser-api|unsupported)$/),
 		heap: expect.stringMatching(/^(estimated|unsupported)$/),
 	});
+	if (metrics.metricReliability.frameCadence === "unsupported") {
+		expect([metrics.slowFrames, metrics.droppedFrames]).toEqual([null, null]);
+	}
+	if (metrics.metricReliability.longTasks === "unsupported") {
+		expect([metrics.longTaskCount, metrics.longTaskTotalMs, metrics.longTaskMaxMs]).toEqual([null, null, null]);
+	}
 }
 
 test.describe("durable Bobbit browser benchmarks", () => {
@@ -387,22 +460,24 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			const metrics = await page.evaluate(async () => {
 				const state = (window as any).__browserBenchmarkSessionOpen;
 				await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+				if (!Number.isFinite(state.requestAt)) throw new Error("get_messages WebSocket request was not observed");
 				if (!Number.isFinite(state.responseAt)) throw new Error("messages WebSocket response was not observed");
 				const interactiveAt = performance.now();
-				const heapFinal = Number.isFinite(performance.memory?.usedJSHeapSize) ? performance.memory.usedJSHeapSize : null;
+				const memory = (performance as ChromiumPerformance).memory;
+				const heapFinal = Number.isFinite(memory?.usedJSHeapSize) ? memory!.usedJSHeapSize : null;
 				const heapValues = [state.heapInitialBytes, heapFinal, ...state.heapSamples].filter(Number.isFinite);
 				return {
-					timeToInteractiveMs: interactiveAt - state.startedAt,
-					serverResponseLatencyMs: state.responseAt - state.startedAt,
+					timeToInteractiveMs: interactiveAt - state.requestAt,
+					serverResponseLatencyMs: state.responseAt - state.requestAt,
 					transferredBytes: state.transferredBytes,
-					longTaskCount: state.longTasks.length,
-					longTaskTotalMs: state.longTasks.reduce((sum: number, value: number) => sum + value, 0),
-					longTaskMaxMs: state.longTasks.length ? Math.max(...state.longTasks) : 0,
+					longTaskCount: state.longTasksSupported ? state.longTasks.length : null,
+					longTaskTotalMs: state.longTasksSupported ? state.longTasks.reduce((sum: number, value: number) => sum + value, 0) : null,
+					longTaskMaxMs: state.longTasksSupported ? (state.longTasks.length ? Math.max(...state.longTasks) : 0) : null,
 					heapGrowthBytes: state.heapInitialBytes !== null && heapFinal !== null ? heapFinal - state.heapInitialBytes : null,
 					heapPeakBytes: heapValues.length ? Math.max(...heapValues) : null,
 					metricReliability: {
 						webSocketFrames: "reliable",
-						longTasks: "browser-api",
+						longTasks: state.longTasksSupported ? "browser-api" : "unsupported",
 						heap: heapValues.length ? "estimated" : "unsupported",
 					},
 				};
@@ -416,11 +491,14 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			const refreshed = await transcriptFingerprint(page);
 			expect(sha256(refreshed), "session-open DOM/client projection must be identical after reload").toBe(sha256(first));
 		} finally {
-			await deleteSession(sessionId);
-			expect((await apiFetch(`/api/sessions/${sessionId}`)).status, "session-open fixture session must be deleted").toBe(404);
-			rmSync(transcriptFile, { force: true });
-			rmSync(sidecarFile, { force: true });
-			expect(existsSync(transcriptFile) || existsSync(sidecarFile), "session-open fixture files must be removed").toBe(false);
+			try {
+				await deleteSession(sessionId);
+				await expectSessionArchived(sessionId, "session-open fixture session");
+			} finally {
+				rmSync(transcriptFile, { force: true });
+				rmSync(sidecarFile, { force: true });
+				expect(existsSync(transcriptFile) || existsSync(sidecarFile), "session-open fixture files must be removed").toBe(false);
+			}
 		}
 	});
 
@@ -450,12 +528,16 @@ test.describe("durable Bobbit browser benchmarks", () => {
 				const remote = app?.remoteAgent?.state;
 				return remote?.status === "idle" && remote?.isStreaming !== true;
 			}, undefined, { timeout: 20_000 });
+			for (const marker of fixture.settlementMarkers) {
+				await expect(page.getByText(marker, { exact: true }), `${marker} must settle before the live fingerprint`).toBeVisible({ timeout: 20_000 });
+			}
 			await settle(page);
 
 			const observed = await page.evaluate(() => {
 				const state = (window as any).__browserBenchmarkEventStream;
 				state.armed = false;
-				state.heapFinalBytes = Number.isFinite(performance.memory?.usedJSHeapSize) ? performance.memory.usedJSHeapSize : null;
+				const memory = (performance as ChromiumPerformance).memory;
+				state.heapFinalBytes = Number.isFinite(memory?.usedJSHeapSize) ? memory!.usedJSHeapSize : null;
 				return state;
 			});
 			expect(observed.frames.map((frame: any) => ({ id: frame.id, type: frame.type, ordinal: frame.ordinal }))).toEqual(fixture.expectedFrames);
@@ -477,7 +559,7 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			});
 			expect(finalUi).toEqual({ status: "idle", pendingTools: 0, streaming: false, editorEnabled: true });
 
-			const live = await transcriptFingerprint(page);
+			const live = await transcriptFingerprint(page, fixture.settlementMarkers);
 			const benchmarkIds = live.clientMessages.map(message => message.id).filter(id => typeof id === "string" && id.startsWith("benchmark-"));
 			expect(benchmarkIds).toEqual([
 				"benchmark-stream-message",
@@ -506,27 +588,24 @@ test.describe("durable Bobbit browser benchmarks", () => {
 				return render - arrival;
 			});
 			const sortedLatencies = [...committedLatencies].sort((a, b) => a - b);
-			const frameDeltas = observed.frameDeltas.filter((value: number) => Number.isFinite(value) && value > 0 && value < 100);
-			const refreshEstimate = [...frameDeltas].sort((a: number, b: number) => a - b)[Math.floor(frameDeltas.length / 2)];
-			expectFiniteMetric(refreshEstimate, "estimated refresh interval");
-			const slowFrames = frameDeltas.filter((value: number) => value > refreshEstimate * 1.5);
+			const cadence = frameCadenceMetrics(observed.frameDeltas);
 			const deliveryMs = Math.max(0.001, observed.frames.at(-1).arrivalMs - observed.frames[0].arrivalMs);
 			const metrics: EventMetrics = {
 				eventThroughputPerSecond: observed.frames.length * 1_000 / deliveryMs,
 				eventToRenderP95Ms: sortedLatencies[Math.ceil(sortedLatencies.length * 0.95) - 1],
-				droppedFrames: slowFrames.reduce((sum: number, value: number) => sum + Math.max(0, Math.round(value / refreshEstimate) - 1), 0),
-				slowFrames: slowFrames.length,
-				longTaskCount: observed.longTasks.length,
-				longTaskTotalMs: observed.longTasks.reduce((sum: number, value: number) => sum + value, 0),
-				longTaskMaxMs: observed.longTasks.length ? Math.max(...observed.longTasks) : 0,
+				droppedFrames: cadence.droppedFrames,
+				slowFrames: cadence.slowFrames,
+				longTaskCount: observed.longTasksSupported ? observed.longTasks.length : null,
+				longTaskTotalMs: observed.longTasksSupported ? observed.longTasks.reduce((sum: number, value: number) => sum + value, 0) : null,
+				longTaskMaxMs: observed.longTasksSupported ? (observed.longTasks.length ? Math.max(...observed.longTasks) : 0) : null,
 				heapGrowthBytes: observed.heapInitialBytes !== null && observed.heapFinalBytes !== null
 					? observed.heapFinalBytes - observed.heapInitialBytes
 					: null,
 				peakHeapBytes: observed.heapPeakBytes,
 				metricReliability: {
 					eventToRender: "reliable",
-					frameCadence: "estimated",
-					longTasks: "browser-api",
+					frameCadence: cadence.estimatedRefreshMs === null ? "unsupported" : "estimated",
+					longTasks: observed.longTasksSupported ? "browser-api" : "unsupported",
 					heap: observed.heapInitialBytes !== null ? "estimated" : "unsupported",
 				},
 			};
@@ -535,11 +614,11 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.getByText(`${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`, { exact: true })).toBeVisible({ timeout: 20_000 });
 			await settle(page);
-			const refreshed = await transcriptFingerprint(page);
-			expect(sha256(refreshed), "event-stream DOM/client projection must be identical after reload").toBe(sha256(live));
+			const refreshed = await transcriptFingerprint(page, fixture.settlementMarkers);
+			expect(refreshed, "event-stream DOM/client projection must be identical after reload").toEqual(live);
 		} finally {
 			await deleteSession(sessionId);
-			expect((await apiFetch(`/api/sessions/${sessionId}`)).status, "event-stream fixture session must be deleted").toBe(404);
+			await expectSessionArchived(sessionId, "event-stream fixture session");
 		}
 	});
 });
