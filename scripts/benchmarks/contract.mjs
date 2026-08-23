@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -239,13 +239,77 @@ export function serializeBoundedReport(report) {
 	return `${JSON.stringify(boundReport(report), null, 2)}\n`;
 }
 
+function isWithin(parent, candidate) {
+	const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function existingPathInfo(candidate) {
+	const missing = [];
+	let existing = path.resolve(candidate);
+	while (true) {
+		try {
+			await lstat(existing);
+			return { existing, missing, canonical: path.join(await realpath(existing), ...missing) };
+		} catch (error) {
+			if (error?.code !== "ENOENT") throw error;
+			const parent = path.dirname(existing);
+			if (parent === existing) throw new Error(`No existing ancestor for ${candidate}`);
+			missing.unshift(path.basename(existing));
+			existing = parent;
+		}
+	}
+}
+
+async function rejectLinksWithin(root, candidate) {
+	let current = path.resolve(root);
+	try {
+		if ((await lstat(current)).isSymbolicLink()) {
+			throw new Error("Benchmark report output root must not be a symbolic link or junction");
+		}
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
+	}
+	const relative = path.relative(current, path.resolve(candidate));
+	for (const segment of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, segment);
+		try {
+			if ((await lstat(current)).isSymbolicLink()) {
+				throw new Error("Benchmark report output must not traverse a symbolic link or junction");
+			}
+		} catch (error) {
+			if (error?.code === "ENOENT") break;
+			throw error;
+		}
+	}
+}
+
+async function assertSafeReportMutation(destination, allowedRoot) {
+	const root = path.resolve(allowedRoot);
+	if (!isWithin(root, destination) || path.resolve(destination) === root) {
+		throw new Error("Benchmark report output escaped its allowed root");
+	}
+	await rejectLinksWithin(root, destination);
+	const [rootInfo, parentInfo] = await Promise.all([
+		existingPathInfo(root),
+		existingPathInfo(path.dirname(destination)),
+	]);
+	if (!isWithin(rootInfo.canonical, parentInfo.canonical)) {
+		throw new Error("Benchmark report output resolved outside its allowed root");
+	}
+}
+
 /** Write through a same-directory temporary file so rename is atomic. */
-export async function atomicWriteReport(outputPath, report) {
+export async function atomicWriteReport(outputPath, report, { allowedRoot = path.dirname(path.resolve(outputPath)) } = {}) {
 	const destination = path.resolve(outputPath);
+	await assertSafeReportMutation(destination, allowedRoot);
 	await mkdir(path.dirname(destination), { recursive: true });
+	// Re-check after directory creation and immediately before both mutations.
+	await assertSafeReportMutation(destination, allowedRoot);
 	const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
 	try {
 		await writeFile(temporary, serializeBoundedReport(report), { encoding: "utf8", flag: "wx" });
+		await assertSafeReportMutation(destination, allowedRoot);
 		await rename(temporary, destination);
 	} finally {
 		await rm(temporary, { force: true }).catch(() => {});

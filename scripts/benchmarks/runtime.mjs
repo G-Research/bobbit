@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:net";
@@ -12,6 +12,7 @@ export const RUN_OWNER_MARKER = ".bobbit-benchmark-owner.json";
 export const DEFAULT_GATEWAY_TIMEOUT_MS = 120_000;
 export const DEFAULT_STOP_GRACE_MS = 5_000;
 export const DEFAULT_LOG_TAIL_BYTES = 32 * 1024;
+export const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 
 function isWithin(parent, candidate) {
 	const relative = path.relative(path.resolve(parent), path.resolve(candidate));
@@ -19,12 +20,51 @@ function isWithin(parent, candidate) {
 }
 
 function canonicalExistingDirectory(directory) {
-	return realpathSync(path.resolve(directory));
+	const resolved = path.resolve(directory);
+	if (lstatSync(resolved).isSymbolicLink()) {
+		throw new Error(`Benchmark owned directory must not be a symbolic link or junction: ${resolved}`);
+	}
+	return realpathSync(resolved);
+}
+
+function projectedCanonicalPath(candidate) {
+	const missing = [];
+	let existing = path.resolve(candidate);
+	while (!existsSync(existing)) {
+		const parent = path.dirname(existing);
+		if (parent === existing) throw new Error(`No existing ancestor for ${candidate}`);
+		missing.unshift(path.basename(existing));
+		existing = parent;
+	}
+	return path.join(realpathSync(existing), ...missing);
 }
 
 function benchmarkTempParent(env, tempDirectory) {
 	const inherited = env.BOBBIT_V2_RUN_ROOT?.trim();
 	return canonicalExistingDirectory(inherited || tempDirectory);
+}
+
+async function assertOwnedDirectory(root, candidate, label) {
+	const lexicalRoot = path.resolve(root);
+	const lexicalCandidate = path.resolve(candidate);
+	if (!isWithin(lexicalRoot, lexicalCandidate)) throw new Error(`${label} escaped the owned benchmark root`);
+	const [canonicalRoot, canonicalCandidate] = await Promise.all([realpath(lexicalRoot), realpath(lexicalCandidate)]);
+	if (!isWithin(canonicalRoot, canonicalCandidate)) throw new Error(`${label} resolved outside the owned benchmark root`);
+	let current = lexicalRoot;
+	for (const segment of path.relative(lexicalRoot, lexicalCandidate).split(path.sep).filter(Boolean)) {
+		current = path.join(current, segment);
+		if ((await lstat(current)).isSymbolicLink()) {
+			throw new Error(`${label} must not traverse a symbolic link or junction`);
+		}
+	}
+	return canonicalCandidate;
+}
+
+async function assertTreeHasNoLinks(directory) {
+	for (const entry of await readdir(directory, { withFileTypes: true })) {
+		if (entry.isSymbolicLink()) throw new Error("Canonical fixtures must not contain symbolic links or junctions");
+		if (entry.isDirectory()) await assertTreeHasNoLinks(path.join(directory, entry.name));
+	}
 }
 
 /** Create the only recursively removable root used by a benchmark invocation. */
@@ -33,12 +73,18 @@ export async function createBenchmarkRunRoot({
 	env = process.env,
 	tempDirectory = os.tmpdir(),
 } = {}) {
+	const requestedParent = path.resolve(env.BOBBIT_V2_RUN_ROOT?.trim() || tempDirectory);
+	const lexicalForbiddenState = path.join(path.resolve(repoRoot), ".bobbit");
+	if (isWithin(lexicalForbiddenState, requestedParent)) {
+		throw new Error("Benchmark temporary roots may not traverse the repository .bobbit state tree");
+	}
 	const parent = benchmarkTempParent(env, tempDirectory);
-	const forbiddenState = path.join(path.resolve(repoRoot), ".bobbit");
+	const forbiddenState = projectedCanonicalPath(lexicalForbiddenState);
 	if (isWithin(forbiddenState, parent)) {
 		throw new Error("Benchmark temporary roots may not use the repository .bobbit state tree");
 	}
 	const root = realpathSync(await mkdtemp(path.join(parent, RUN_PREFIX)));
+	if (!isWithin(parent, root)) throw new Error("Benchmark run root escaped its canonical temporary parent");
 	const ownerToken = randomUUID();
 	const paths = {
 		root,
@@ -64,7 +110,8 @@ export async function createBenchmarkRunRoot({
 			paths.fixtures,
 			paths.samples,
 		].map(directory => mkdir(directory, { recursive: true })));
-		return { ...paths, ownerToken };
+		await Promise.all(Object.values(paths).map(directory => assertOwnedDirectory(root, directory, "Benchmark run directory")));
+		return { ...paths, ownerToken, tempParent: parent };
 	} catch (error) {
 		await rm(root, { recursive: true, force: true }).catch(() => {});
 		throw error;
@@ -79,32 +126,42 @@ function safeSegment(value) {
 
 /** Allocate a fresh sample root and optionally copy an immutable canonical fixture. */
 export async function createSampleRoot(paths, entry, { fixtureRoot } = {}) {
-	if (!paths?.root || !paths?.samples || !isWithin(paths.root, paths.samples)) {
+	if (!paths?.root || !paths?.samples || !paths?.fixtures) {
 		throw new Error("Sample roots require owned benchmark paths");
 	}
-	const order = Number.isInteger(entry?.order) && entry.order >= 0 ? entry.order : 0;
+	if (!Number.isInteger(entry?.order) || entry.order < 0) {
+		throw new Error("Benchmark samples require a non-negative scheduled order");
+	}
+	await assertOwnedDirectory(paths.root, paths.samples, "Samples root");
+	await assertOwnedDirectory(paths.root, paths.fixtures, "Fixtures root");
 	const directory = path.join(
 		paths.samples,
-		`${String(order).padStart(4, "0")}-${safeSegment(entry?.phase ?? "sample")}-${safeSegment(entry?.case ?? "case")}`,
+		`${String(entry.order).padStart(4, "0")}-${safeSegment(entry?.phase ?? "sample")}-${safeSegment(entry?.case ?? "case")}`,
 	);
 	if (!isWithin(paths.samples, directory)) throw new Error("Sample path escaped the owned samples root");
 	await mkdir(directory, { recursive: false });
+	await assertOwnedDirectory(paths.samples, directory, "Sample directory");
 	if (fixtureRoot) {
-		const canonicalFixture = realpathSync(path.resolve(fixtureRoot));
-		if (!isWithin(paths.fixtures, canonicalFixture)) {
-			throw new Error("Canonical fixtures must live beneath the owned fixture root");
-		}
-		await cp(canonicalFixture, path.join(directory, "fixture"), {
+		const canonicalFixture = await assertOwnedDirectory(paths.fixtures, fixtureRoot, "Canonical fixture");
+		await assertTreeHasNoLinks(canonicalFixture);
+		const destination = path.join(directory, "fixture");
+		await assertOwnedDirectory(paths.root, directory, "Sample directory");
+		await cp(canonicalFixture, destination, {
 			recursive: true,
 			force: false,
 			errorOnExist: true,
 		});
+		await assertOwnedDirectory(directory, destination, "Copied fixture");
+		await assertTreeHasNoLinks(destination);
 	}
 	return directory;
 }
 
 async function readOwner(paths) {
 	const markerPath = path.join(paths.root, RUN_OWNER_MARKER);
+	if ((await lstat(markerPath)).isSymbolicLink()) {
+		throw new Error("Refusing to follow a linked benchmark owner marker");
+	}
 	const marker = JSON.parse(await readFile(markerPath, "utf8"));
 	if (marker?.ownerToken !== paths.ownerToken || marker?.pid !== process.pid) {
 		throw new Error("Refusing to clean a benchmark root not owned by this process");
@@ -115,7 +172,16 @@ async function readOwner(paths) {
 export async function cleanupBenchmarkRunRoot(paths) {
 	if (!paths?.root || !paths?.ownerToken) throw new Error("Missing benchmark root ownership metadata");
 	if (!existsSync(paths.root)) return;
+	if (lstatSync(paths.root).isSymbolicLink()) {
+		throw new Error("Refusing to clean a linked benchmark root");
+	}
 	const root = realpathSync(paths.root);
+	if (path.resolve(root) !== path.resolve(paths.root)) {
+		throw new Error("Refusing to clean a benchmark root whose identity changed");
+	}
+	if (paths.tempParent && !isWithin(realpathSync(paths.tempParent), root)) {
+		throw new Error("Refusing to clean a benchmark root outside its temporary parent");
+	}
 	if (path.basename(root).startsWith(RUN_PREFIX) !== true) {
 		throw new Error("Refusing to clean a root without the benchmark prefix");
 	}
@@ -182,22 +248,30 @@ function rootExited(runtime) {
 }
 
 function signalOwnedTree(runtime, signal) {
-	if (rootExited(runtime) || !runtime.child.pid) return false;
+	if (rootExited(runtime) || !runtime.child.pid) return { sent: false, error: null };
 	if (process.platform === "win32") {
-		spawnSync("taskkill", ["/pid", String(runtime.child.pid), "/T", "/F"], {
+		const result = spawnSync("taskkill", ["/pid", String(runtime.child.pid), "/T", "/F"], {
 			stdio: "ignore",
 			windowsHide: true,
+			timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
 		});
-		return true;
+		const error = result.error
+			?? (result.status === 0 ? null : new Error(`taskkill exited with status ${result.status ?? "unknown"}`));
+		return { sent: !error, error };
 	}
 	try {
 		process.kill(-runtime.child.pid, 0);
 		runtime.posixGroupOwned = true;
 		process.kill(-runtime.child.pid, signal);
-	} catch {
-		try { runtime.child.kill(signal); } catch { /* process exited between observations */ }
+		return { sent: true, error: null };
+	} catch (groupError) {
+		try {
+			const sent = runtime.child.kill(signal);
+			return { sent, error: sent ? null : groupError };
+		} catch (error) {
+			return { sent: false, error };
+		}
 	}
-	return true;
 }
 
 function forceExitedPosixGroup(runtime) {
@@ -276,30 +350,48 @@ export async function stopGateway(runtime, {
 	forcedCloseMs = 8_000,
 	fetchImpl = fetch,
 } = {}) {
-	if (!runtime || runtime.closed) return { graceful: true, forced: false };
+	if (!runtime || runtime.closed) return { graceful: true, forced: false, closed: true };
+	let shutdownResponseError = null;
 	if (baseUrl && !rootExited(runtime)) {
+		// Claim the detached POSIX group before asking the root to exit. If the
+		// HTTP shutdown closes the root while a descendant retains stdio, the
+		// exit listener can safely finish that already-owned group at the exact
+		// root-exit boundary without ever retargeting a later reused PGID.
+		if (process.platform !== "win32" && runtime.child.pid) {
+			try {
+				process.kill(-runtime.child.pid, 0);
+				runtime.posixGroupOwned = true;
+				runtime.shutdownStarted = true;
+			} catch { /* root may exit before the graceful request */ }
+		}
 		try {
-			await fetchImpl(new URL("api/shutdown", baseUrl), {
+			const response = await fetchImpl(new URL("api/shutdown", baseUrl), {
 				method: "POST",
 				headers: token ? { Authorization: `Bearer ${token}` } : undefined,
 				signal: AbortSignal.timeout(Math.min(2_000, graceMs)),
 			});
-		} catch { /* signal escalation below remains authoritative */ }
-		if (await waitForClose(runtime, graceMs)) return { graceful: true, forced: false };
+			if (!response.ok) shutdownResponseError = new Error(`Gateway shutdown returned HTTP ${response.status}`);
+		} catch (error) { shutdownResponseError = error; }
+		if (await waitForClose(runtime, graceMs)) return { graceful: true, forced: false, closed: true };
 	}
 	if (rootExited(runtime)) {
+		if (await waitForClose(runtime, forcedCloseMs)) return { graceful: true, forced: false, closed: true };
 		releaseStdio(runtime);
-		return { graceful: true, forced: false };
+		throw new Error("Gateway root exited but its owned process tree did not close");
 	}
-	runtime.shutdownStarted = signalOwnedTree(runtime, "SIGTERM");
-	if (await waitForClose(runtime, graceMs)) return { graceful: true, forced: false };
+	const term = signalOwnedTree(runtime, "SIGTERM");
+	runtime.shutdownStarted ||= term.sent;
+	if (await waitForClose(runtime, graceMs)) return { graceful: false, forced: true, closed: true };
+	let forceError = term.error;
 	if (!rootExited(runtime) && process.platform !== "win32") {
-		signalOwnedTree(runtime, "SIGKILL");
-		runtime.finalGroupSignalSent = true;
+		const forced = signalOwnedTree(runtime, "SIGKILL");
+		forceError ??= forced.error;
+		runtime.finalGroupSignalSent = forced.sent;
 	}
-	const closed = await waitForClose(runtime, forcedCloseMs);
-	if (!closed) releaseStdio(runtime);
-	return { graceful: false, forced: true, closed };
+	if (await waitForClose(runtime, forcedCloseMs)) return { graceful: false, forced: true, closed: true };
+	releaseStdio(runtime);
+	const details = [shutdownResponseError, forceError].filter(Boolean).map(error => error?.message ?? String(error));
+	throw new Error(`Gateway process tree did not close after forced termination${details.length ? ` (${details.join("; ")})` : ""}`);
 }
 
 export async function getFreePort() {
@@ -320,26 +412,51 @@ export async function getFreePort() {
 }
 
 /** Lazily launch Chromium so the startup-only journey need not load Playwright. */
-export async function launchBenchmarkBrowser({ viewport = { width: 1280, height: 800 }, launchOptions = {} } = {}) {
-	const { chromium } = await import("playwright");
-	const browser = await chromium.launch({ headless: true, ...launchOptions });
-	const context = await browser.newContext({ viewport });
-	const page = await context.newPage();
-	let cdp = null;
-	try { cdp = await context.newCDPSession(page); } catch { /* optional Chromium metrics unsupported */ }
-	return { browser, context, page, cdp, viewport };
+export async function launchBenchmarkBrowser({
+	viewport = { width: 1280, height: 800 },
+	launchOptions = {},
+	playwrightLoader = () => import("playwright"),
+} = {}) {
+	const partial = { browser: null, context: null, page: null, cdp: null, viewport };
+	try {
+		const { chromium } = await playwrightLoader();
+		partial.browser = await chromium.launch({ headless: true, ...launchOptions });
+		partial.context = await partial.browser.newContext({ viewport });
+		partial.page = await partial.context.newPage();
+		try { partial.cdp = await partial.context.newCDPSession(partial.page); } catch { /* optional Chromium metrics unsupported */ }
+		return partial;
+	} catch (error) {
+		try {
+			await closeBenchmarkBrowser(partial);
+		} catch (cleanupError) {
+			throw new AggregateError([error, cleanupError], `Browser acquisition failed and rollback was incomplete: ${error?.message ?? error}; ${cleanupError?.message ?? cleanupError}`);
+		}
+		throw error;
+	}
 }
 
 export async function closeBenchmarkBrowser(runtime) {
 	if (!runtime) return;
-	try { await runtime.cdp?.detach(); } catch { /* best effort */ }
-	try { await runtime.page?.close(); } catch { /* best effort */ }
-	try { await runtime.context?.close(); } catch { /* best effort */ }
-	try { await runtime.browser?.close(); } catch { /* best effort */ }
+	const errors = [];
+	for (const [label, close] of [
+		["CDP session", () => runtime.cdp?.detach()],
+		["browser page", () => runtime.page?.close()],
+		["browser context", () => runtime.context?.close()],
+		["browser", () => runtime.browser?.close()],
+	]) {
+		try { await close(); } catch (error) { errors.push(new Error(`${label} close failed: ${error?.message ?? error}`, { cause: error })); }
+	}
+	if (runtime.browser && typeof runtime.browser.isConnected === "function" && runtime.browser.isConnected()) {
+		errors.push(new Error("Browser remained connected after teardown"));
+	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, `Browser teardown failed: ${errors.map(error => error.message).join("; ")}`);
 }
 
 function parseProcessTime(value) {
-	const parts = String(value).trim().split(":").map(Number);
+	const text = String(value).trim();
+	if (!text) return null;
+	const parts = text.split(":").map(Number);
 	if (parts.some(valuePart => !Number.isFinite(valuePart))) return null;
 	if (parts.length === 3) return ((parts[0] * 3600) + (parts[1] * 60) + parts[2]) * 1_000;
 	if (parts.length === 2) return ((parts[0] * 60) + parts[1]) * 1_000;
@@ -347,16 +464,20 @@ function parseProcessTime(value) {
 }
 
 /** Best-effort process-specific CPU/RSS metrics; unsupported values remain null. */
-export async function readProcessMetrics(pid) {
+export async function readProcessMetrics(pid, {
+	platform = process.platform,
+	spawnSyncImpl = spawnSync,
+	readFileImpl = readFile,
+} = {}) {
 	if (!Number.isInteger(pid) || pid <= 0) return { cpuTimeMs: null, peakRssBytes: null, rssBytes: null, reliability: "unsupported" };
-	if (process.platform === "linux") {
+	if (platform === "linux") {
 		try {
 			const [stat, status] = await Promise.all([
-				readFile(`/proc/${pid}/stat`, "utf8"),
-				readFile(`/proc/${pid}/status`, "utf8"),
+				readFileImpl(`/proc/${pid}/stat`, "utf8"),
+				readFileImpl(`/proc/${pid}/status`, "utf8"),
 			]);
 			const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-			const ticksResult = spawnSync("getconf", ["CLK_TCK"], { encoding: "utf8" });
+			const ticksResult = spawnSyncImpl("getconf", ["CLK_TCK"], { encoding: "utf8" });
 			const ticks = Number(ticksResult.stdout) || 100;
 			const highWaterKb = Number(status.match(/^VmHWM:\s+(\d+)\s+kB$/m)?.[1]);
 			const currentKb = Number(status.match(/^VmRSS:\s+(\d+)\s+kB$/m)?.[1]);
@@ -368,10 +489,10 @@ export async function readProcessMetrics(pid) {
 			};
 		} catch { /* unsupported or process exited */ }
 	}
-	if (process.platform === "win32") {
+	if (platform === "win32") {
 		try {
 			const script = `Get-Process -Id ${pid} | Select-Object CPU,PeakWorkingSet64,WorkingSet64 | ConvertTo-Json -Compress`;
-			const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+			const result = spawnSyncImpl("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
 				encoding: "utf8",
 				windowsHide: true,
 				timeout: 2_000,
@@ -385,10 +506,11 @@ export async function readProcessMetrics(pid) {
 			};
 		} catch { /* unsupported or process exited */ }
 	}
-	if (process.platform === "darwin") {
+	if (platform === "darwin") {
 		try {
-			const result = spawnSync("ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000 });
-			return { cpuTimeMs: parseProcessTime(result.stdout), peakRssBytes: null, rssBytes: null, reliability: "partial" };
+			const result = spawnSyncImpl("ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000 });
+			const cpuTimeMs = result.status === 0 && !result.error ? parseProcessTime(result.stdout) : null;
+			if (cpuTimeMs !== null) return { cpuTimeMs, peakRssBytes: null, rssBytes: null, reliability: "partial" };
 		} catch { /* unsupported or process exited */ }
 	}
 	return { cpuTimeMs: null, peakRssBytes: null, rssBytes: null, reliability: "unsupported" };
