@@ -737,7 +737,7 @@ import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from 
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
-import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
+import { scopedToolContext, type MarketplacePiExtensionResolver, type ResolvedPiExtensionContribution, type PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
@@ -2899,6 +2899,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// roots (server < global-user < project) — applied to existing + future ctxs.
 	projectContextManager.setContextConfigurator((ctx) => {
 		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+		ctx.toolGroupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
+		ctx.toolGroupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 		// Goal-metadata lifecycle wiring: connect this project's GoalManager to the
 		// shared LifecycleHub `goalProvisioned` dispatcher so every worktree
 		// provisioning in the goal subtree fans out to extension providers with the
@@ -3820,14 +3822,27 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// verb registered). Mirrors SessionManager.resolveEffectiveAllowedTools.
 		resolveEffectiveTools: (sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
-			if (session?.allowedTools && session.allowedTools.length > 0) return session.allowedTools;
 			const ps = sessionManager.getPersistedSession(sessionId);
+			if (session?.allowedTools !== undefined) return session.allowedTools;
+			if (ps?.allowedTools !== undefined) return ps.allowedTools;
+			const projectId = session?.projectId ?? ps?.projectId;
+			const cwd = session?.cwd ?? ps?.cwd;
 			const roleName = session?.role ?? ps?.role
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
-			const role = resolveRoleForProject(roleName, session?.projectId ?? ps?.projectId);
+			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
+			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+			const scopedToolManager = projectId ? projectContext?.toolManager : toolManager;
+			if (!scopedToolManager) return undefined;
+			const scopedGroupPolicyStore = projectId ? projectContext?.toolGroupPolicyStore : groupPolicyStore;
 			const mcpManager = sessionManager.getMcpManagerForSession(sessionId);
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
+			return computeEffectiveAllowedTools(
+				scopedToolManager,
+				role,
+				scopedGroupPolicyStore,
+				mcpManager ?? undefined,
+				scopedToolContext(projectId, cwd),
+			).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
 		// (orchestration-core Decision A.2 — FAIL CLOSED). Resolves pack-contributed
@@ -3836,11 +3851,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// falls back to roleManager so EVERY built-in role still resolves (backward
 		// compat: a role-carrying team_delegate spawn must not fail closed). Mirrors
 		// the resolveEffectiveTools grant pipeline above.
-		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
+		resolveRoleAllowedTools: (roleName: string, projectId?: string, cwd?: string) => {
 			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
-			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : null;
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
+			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+			const scopedToolManager = projectId ? projectContext?.toolManager : toolManager;
+			if (!scopedToolManager) return undefined;
+			const scopedGroupPolicyStore = projectId ? projectContext?.toolGroupPolicyStore : groupPolicyStore;
+			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId, cwd }) : null;
+			return computeEffectiveAllowedTools(
+				scopedToolManager,
+				role,
+				scopedGroupPolicyStore,
+				mcpManager ?? undefined,
+				scopedToolContext(projectId, cwd),
+			).map(e => e.name);
 		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
@@ -19454,10 +19479,17 @@ async function handleApiRoute(
 		const parts = sessionManager.getPromptParts(id);
 		if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
 
-		// Ensure tool docs are populated (they may have been injected at assemblePrompt time,
-		// but re-inject if missing to handle edge cases)
-		if (!parts.toolDocs && toolManager) {
-			parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+		// Ensure tool docs are populated from the same project scope as the session.
+		if (!parts.toolDocs) {
+			const liveSession = sessionManager.getSession(id);
+			const persistedSession = sessionManager.getPersistedSession(id);
+			const projectId = liveSession?.projectId ?? persistedSession?.projectId;
+			const cwd = liveSession?.cwd ?? persistedSession?.cwd;
+			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+			const promptToolManager = projectId ? projectContext?.toolManager : toolManager;
+			if (promptToolManager) {
+				parts.toolDocs = promptToolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), scopedToolContext(projectId, cwd));
+			}
 		}
 
 		const sections = getPromptSections(parts);
@@ -20296,10 +20328,18 @@ async function handleApiRoute(
 			// after the meta-tool is granted wholesale.
 			if (toolStr.startsWith("mcp__")) {
 				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
-				const role = roleName ? resolveRoleForProject(roleName, mcpSession?.projectId ?? (persistedSession as any)?.projectId) : undefined;
+				const projectId = mcpSession?.projectId ?? (persistedSession as any)?.projectId;
+				const role = roleName ? resolveRoleForProject(roleName, projectId) : undefined;
 				const parsed = parseMcpToolName(toolStr);
 				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
-				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);
+				const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+				const policyToolManager = projectId ? projectContext?.toolManager : toolManager;
+				const policyStore = projectId ? projectContext?.toolGroupPolicyStore : groupPolicyStore;
+				if (!policyToolManager) {
+					json({ error: `tool ${toolStr} denied: project tool scope unavailable`, tool: toolStr }, 403);
+					return;
+				}
+				const policy = resolveGrantPolicy(toolStr, opGroup, role, policyToolManager, policyStore);
 				if (policy === "never") {
 					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
 					return;
