@@ -1507,10 +1507,10 @@ export async function cleanupWorktree(
 		}
 	}
 
-	// Alias cleanup and failed removal are not complete until the exact linked
+	// A snapshotted linked-worktree cleanup is not complete until the exact
 	// directory and admin entry captured while live are both absent. This fence
-	// runs before branch deletion so a failed removal cannot be swallowed.
-	if (snapshot && (snapshot.aliased || removalError)) {
+	// runs before branch deletion so residue or a failed removal cannot be swallowed.
+	if (snapshot) {
 		let directoryRemains: boolean;
 		let adminRemains: boolean;
 		try {
