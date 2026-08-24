@@ -15,7 +15,7 @@ export interface FencedCommandRunnerOptions {
 const NETWORK_GIT_COMMANDS = new Set(["push", "fetch", "clone", "ls-remote"]);
 
 function commandName(file: string): string {
-	return path.basename(file).replace(/\.exe$/i, "").toLowerCase();
+	return path.basename(file).replace(/\.(?:exe|cmd|bat)$/i, "").toLowerCase();
 }
 
 function fakeKey(file: string, args: readonly string[]): string {
@@ -63,8 +63,12 @@ function hasGitMetadataAtOrAbove(candidate: string): boolean {
 	}
 }
 
-function shouldShortCircuitGitDiscovery(args: readonly string[], options?: ExecFileOptions | ExecFileSyncOptions): boolean {
-	if (!isReadOnlyGitDiscovery(args) || hasExplicitGitDirectory(args, options)) return false;
+function shouldShortCircuitGitDiscovery(
+	commandArgs: readonly string[],
+	invocationArgs: readonly string[],
+	options?: ExecFileOptions | ExecFileSyncOptions,
+): boolean {
+	if (!isReadOnlyGitDiscovery(commandArgs) || hasExplicitGitDirectory(invocationArgs, options)) return false;
 	const cwd = gitProbeCwd(options);
 	return cwd !== null && !hasGitMetadataAtOrAbove(cwd);
 }
@@ -153,14 +157,101 @@ function assertGitRemoteAllowedSync(realCommandRunner: CommandRunner, args: read
 	}
 }
 
+const GIT_GLOBAL_FLAGS = new Set([
+	"--version",
+	"--help",
+	"-h",
+	"-p",
+	"--paginate",
+	"-P",
+	"--no-pager",
+	"--no-replace-objects",
+	"--bare",
+	"--no-lazy-fetch",
+	"--no-optional-locks",
+	"--no-advice",
+	"--literal-pathspecs",
+	"--glob-pathspecs",
+	"--noglob-pathspecs",
+	"--icase-pathspecs",
+	"--html-path",
+	"--man-path",
+	"--info-path",
+	"--exec-path",
+]);
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+	"-C",
+	"-c",
+	"--git-dir",
+	"--work-tree",
+	"--namespace",
+	"--config-env",
+	"--attr-source",
+	"--super-prefix",
+]);
+
+const GIT_GLOBAL_LONG_OPTIONS_WITH_EQUALS = new Set([
+	"--git-dir",
+	"--work-tree",
+	"--namespace",
+	"--config-env",
+	"--attr-source",
+	"--super-prefix",
+	"--exec-path",
+]);
+
+const MALFORMED_GIT_INVOCATION = "[fenced-command-runner] blocked unclassified git invocation";
+const GIT_CREDENTIAL_INVOCATION = "[fenced-command-runner] blocked git credential invocation";
+
+/**
+ * Find the Git subcommand without consulting Git or host configuration. Unknown
+ * and incomplete leading options are rejected rather than guessed at: this is a
+ * test security boundary, not a general-purpose Git argument parser.
+ */
+function classifyGitCommand(args: readonly string[]): readonly string[] {
+	let index = 0;
+	while (index < args.length) {
+		const arg = args[index];
+		if (arg === "--") {
+			index++;
+			break;
+		}
+		if (arg.length > 0 && !arg.startsWith("-")) return args.slice(index);
+		if (GIT_GLOBAL_FLAGS.has(arg)) {
+			index++;
+			continue;
+		}
+		if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(arg)) {
+			const value = args[index + 1];
+			if (value === undefined || value.length === 0) throw new Error(MALFORMED_GIT_INVOCATION);
+			index += 2;
+			continue;
+		}
+		if ((arg.startsWith("-C") || arg.startsWith("-c")) && arg.length > 2) {
+			index++;
+			continue;
+		}
+		const equals = arg.indexOf("=");
+		if (equals > 0 && GIT_GLOBAL_LONG_OPTIONS_WITH_EQUALS.has(arg.slice(0, equals)) && equals < arg.length - 1) {
+			index++;
+			continue;
+		}
+		throw new Error(MALFORMED_GIT_INVOCATION);
+	}
+	const commandArgs = args.slice(index);
+	if (!commandArgs[0] || commandArgs[0].startsWith("-")) throw new Error(MALFORMED_GIT_INVOCATION);
+	return commandArgs;
+}
+
 /**
  * `git credential` reads the developer's real credential configuration, so
  * letting it through would make host trust — and the security assertions that
  * depend on it — vary by machine. Applied to every invocation path, not just the
  * one that has a caller today. Callers fail closed on a throw.
  */
-function assertNotGitCredential(args: readonly string[]): void {
-	if (args[0] === "credential") throw new Error("[fenced-command-runner] blocked git credential invocation");
+function assertNotGitCredential(commandArgs: readonly string[]): void {
+	if (commandArgs[0] === "credential") throw new Error(GIT_CREDENTIAL_INVOCATION);
 }
 
 export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts: FencedCommandRunnerOptions = {}): CommandRunner {
@@ -176,9 +267,10 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
 			if (name === "git") {
-				assertNotGitCredential(args);
-				if (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);
-				await assertGitRemoteAllowed(realCommandRunner, args, options);
+				const commandArgs = classifyGitCommand(args);
+				assertNotGitCredential(commandArgs);
+				if (shouldShortCircuitGitDiscovery(commandArgs, args, options)) throw nonRepositoryGitError(commandArgs, options);
+				await assertGitRemoteAllowed(realCommandRunner, commandArgs, options);
 			}
 			return realCommandRunner.execFile(file, args, options);
 		},
@@ -187,9 +279,10 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
 			if (name === "git") {
-				assertNotGitCredential(args);
-				if (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);
-				assertGitRemoteAllowedSync(realCommandRunner, args, options);
+				const commandArgs = classifyGitCommand(args);
+				assertNotGitCredential(commandArgs);
+				if (shouldShortCircuitGitDiscovery(commandArgs, args, options)) throw nonRepositoryGitError(commandArgs, options);
+				assertGitRemoteAllowedSync(realCommandRunner, commandArgs, options);
 			}
 			return realCommandRunner.execFileSync!(file, args, options);
 		},
@@ -198,8 +291,9 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
 			if (name === "git") {
-				assertNotGitCredential(args);
-				assertGitRemoteAllowedSync(realCommandRunner, args, options);
+				const commandArgs = classifyGitCommand(args);
+				assertNotGitCredential(commandArgs);
+				assertGitRemoteAllowedSync(realCommandRunner, commandArgs, options);
 			}
 			return realCommandRunner.spawn!(file, args, options);
 		},

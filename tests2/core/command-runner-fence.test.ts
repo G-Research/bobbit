@@ -45,11 +45,12 @@ describe("fenced command runner", () => {
 	it("rejects network and host-control commands", async () => {
 		const runner = createFencedCommandRunner(unexpectedDelegate());
 		await expect(runner.execFile("git", ["push", "https://github.com/example/repo.git", "HEAD"])).rejects.toThrow(/blocked git push/);
-		await expect(runner.execFile("gh", ["pr", "list"])).rejects.toThrow(/blocked gh/);
-		await expect(runner.execFile("docker", ["ps"])).rejects.toThrow(/blocked docker/);
+		await expect(runner.execFile("git.cmd", ["--no-pager", "push", "https://github.com/example/repo.git", "HEAD"])).rejects.toThrow(/blocked git push/);
+		await expect(runner.execFile("gh.cmd", ["pr", "list"])).rejects.toThrow(/blocked gh/);
+		await expect(runner.execFile("docker.bat", ["ps"])).rejects.toThrow(/blocked docker/);
 	});
 
-	it("blocks git credential across async, sync, and spawn paths before delegation", async () => {
+	it("blocks credential subcommands behind Git global options on every runner path", async () => {
 		const delegations: string[] = [];
 		const delegate: CommandRunner = {
 			execFile: async (file, args) => {
@@ -66,33 +67,106 @@ describe("fenced command runner", () => {
 			},
 		};
 		const runner = createFencedCommandRunner(delegate);
-		const expected = "[fenced-command-runner] blocked git credential invocation";
+		const expected = new Error("[fenced-command-runner] blocked git credential invocation");
+		const fixture = makeFixtureRoot("bobbit-fenced-credential-options-");
+		const bypasses = [
+			{ file: "git", args: ["credential", "fill"] },
+			{ file: "git.exe", args: ["--no-pager", "credential", "fill"] },
+			{ file: "git.cmd", args: ["-C", fixture, "credential", "fill"] },
+			{ file: "git.bat", args: [`-C${fixture}`, "credential", "fill"] },
+			{ file: "git", args: ["-c", "credential.helper=fixture", "credential", "fill"] },
+			{ file: "git.exe", args: ["-ccredential.helper=fixture", "credential", "fill"] },
+			{ file: "git.cmd", args: ["--config-env", "credential.helper=FIXTURE_HELPER", "credential", "fill"] },
+			{ file: "git.bat", args: ["--config-env=credential.helper=FIXTURE_HELPER", "credential", "fill"] },
+			{ file: "git", args: [`--git-dir=${fixture}`, "credential", "fill"] },
+			{ file: "git.exe", args: ["--", "credential", "fill"] },
+		];
 
-		const asyncMessage = await runner.execFile("git", ["credential", "fill", "fixture-secret"])
-			.then(() => "unexpected success", error => String(error.message));
-		expect(asyncMessage).toBe(expected);
-		expect(() => runner.execFileSync!("git.exe", ["credential", "approve", "fixture-secret"])).toThrow(new Error(expected));
-		expect(() => runner.spawn!("git", ["credential", "reject", "fixture-secret"])).toThrow(new Error(expected));
+		for (const { file, args } of bypasses) {
+			await expect(runner.execFile(file, args)).rejects.toThrow(expected);
+			expect(() => runner.execFileSync!(file, args)).toThrow(expected);
+			expect(() => runner.spawn!(file, args)).toThrow(expected);
+		}
 		expect(delegations).toEqual([]);
 
-		const delegateWithoutSpawn: CommandRunner = {
+		const runnerWithoutSpawn = createFencedCommandRunner({
 			execFile: async () => ({ stdout: "", stderr: "" }),
-		};
-		const runnerWithoutSpawn = createFencedCommandRunner(delegateWithoutSpawn);
-		expect(() => runnerWithoutSpawn.spawn!("git", ["credential", "fill"])).toThrow(expected);
+		});
+		expect(() => runnerWithoutSpawn.spawn!("git.cmd", ["--no-pager", "credential", "fill"])).toThrow(expected);
 	});
 
-	it("allows an explicit async fake to stand in for git credential without delegation", async () => {
+	it("fails closed on unknown or malformed Git global options before delegation", async () => {
+		const delegations: string[] = [];
+		const delegate: CommandRunner = {
+			execFile: async () => { delegations.push("async"); return { stdout: "", stderr: "" }; },
+			execFileSync: () => { delegations.push("sync"); return ""; },
+			spawn: () => { delegations.push("spawn"); return {} as any; },
+		};
+		const runner = createFencedCommandRunner(delegate);
+		const expected = new Error("[fenced-command-runner] blocked unclassified git invocation");
+		for (const args of [
+			[],
+			["--unknown-global", "credential", "fill"],
+			["-C"],
+			["--config-env"],
+			["--git-dir=", "status"],
+			["--", "--not-a-command"],
+		]) {
+			await expect(runner.execFile("git", args)).rejects.toThrow(expected);
+			expect(() => runner.execFileSync!("git.cmd", args)).toThrow(expected);
+			expect(() => runner.spawn!("git.bat", args)).toThrow(expected);
+		}
+		expect(delegations).toEqual([]);
+	});
+
+	it("allows classified non-credential global options through every runner path", async () => {
+		const { repo } = makeRepositoryMetadata(makeFixtureRoot("bobbit-fenced-global-options-"));
+		const calls: string[] = [];
+		const fakeChild = { pid: 4321 };
+		const delegate: CommandRunner = {
+			execFile: async (file, args) => {
+				calls.push(`async ${file} ${args.join(" ")}`);
+				return { stdout: "clean", stderr: "" };
+			},
+			execFileSync: (file, args) => {
+				calls.push(`sync ${file} ${args.join(" ")}`);
+				return "clean";
+			},
+			spawn: (file, args) => {
+				calls.push(`spawn ${file} ${args.join(" ")}`);
+				return fakeChild as any;
+			},
+		};
+		const runner = createFencedCommandRunner(delegate);
+
+		await expect(runner.execFile("git.cmd", ["--no-pager", "status", "--short"], { cwd: repo })).resolves.toEqual({ stdout: "clean", stderr: "" });
+		expect(runner.execFileSync!("git.bat", ["-c", "color.ui=false", "status", "--short"], { cwd: repo })).toBe("clean");
+		expect(runner.spawn!("git.exe", [`--git-dir=${path.join(repo, ".git")}`, "status", "--short"], { cwd: repo })).toBe(fakeChild);
+		expect(calls).toEqual([
+			"async git.cmd --no-pager status --short",
+			"sync git.bat -c color.ui=false status --short",
+			`spawn git.exe --git-dir=${path.join(repo, ".git")} status --short`,
+		]);
+	});
+
+	it("allows explicit async fakes to stand in for fenced Git credential forms", async () => {
+		const response = { stdout: "protocol=https\nhost=git.example.test\n\n" };
 		const runner = createFencedCommandRunner(unexpectedDelegate(), {
 			fakes: {
-				"git credential fill": { stdout: "protocol=https\nhost=git.example.test\n\n" },
+				"git credential fill": response,
+				"git --no-pager credential fill": response,
 			},
 		});
 
-		await expect(runner.execFile("git", ["credential", "fill"])).resolves.toEqual({
-			stdout: "protocol=https\nhost=git.example.test\n\n",
-			stderr: "",
-		});
+		for (const [file, args] of [
+			["git", ["credential", "fill"]],
+			["git.cmd", ["--no-pager", "credential", "fill"]],
+		] as const) {
+			await expect(runner.execFile(file, args)).resolves.toEqual({
+				stdout: response.stdout,
+				stderr: "",
+			});
+		}
 	});
 
 	it("short-circuits read-only discovery outside repositories without delegating or mutating git", async () => {
@@ -215,6 +289,7 @@ describe("fenced command runner", () => {
 			["fetch", "https://github.com/example/repo.git"],
 			["clone", "https://github.com/example/repo.git", path.join(repo, "clone")],
 			["push", "https://github.com/example/repo.git", "HEAD"],
+			["--no-pager", "push", "https://github.com/example/repo.git", "HEAD"],
 		]) {
 			expect(() => runner.execFileSync!("git", args, { cwd: repo })).toThrow(/blocked git/);
 			expect(() => runner.spawn!("git", args, { cwd: repo })).toThrow(/blocked git/);
