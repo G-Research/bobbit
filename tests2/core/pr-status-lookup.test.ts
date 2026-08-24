@@ -15,6 +15,7 @@ import {
 	buildGhPrMergeArgs,
 	buildGhPrMergePermissionsArgs,
 	buildGhPrViewArgs,
+	buildGhRepoPermissionArgs,
 	buildGhRulesetArgs,
 	selectCoordinatedPrResult,
 	shouldLogRemoteStateTelemetry,
@@ -332,16 +333,17 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.equal(status?.viewerCanMergeAsAdmin, false);
 	});
 
-	it("falls back to legacy repo permission lookup when GraphQL cannot be used", async () => {
+	it("keeps the permission fallback bound to the exact repository when GraphQL cannot be used", async () => {
 		const branch = "feature/sidebar-actions && node -e \"throw new Error('shell executed')\"";
 		const calls: Array<{ args: string[]; cwd: string; timeout: number }> = [];
+		const remote = { host: "github.com", owner: "acme", repository: "widget" };
 
 		__setGhExecFileForPrStatusTests(async (args, opts) => {
 			calls.push({ args: [...args], cwd: opts.cwd, timeout: opts.timeout });
 			if (args[0] === "pr" && args[1] === "view") {
 				return JSON.stringify({
 					state: "OPEN",
-					url: "https://example.com/acme/widget/pull/7",
+					url: "https://github.com/acme/widget/pull/7",
 					number: 7,
 					title: "Sidebar actions",
 					mergeable: "MERGEABLE",
@@ -350,6 +352,7 @@ describe("PR status GitHub CLI lookup", () => {
 					reviewDecision: "APPROVED",
 				});
 			}
+			if (args[0] === "api") throw new Error("GraphQL unavailable");
 			if (args[0] === "repo" && args[1] === "view") {
 				return JSON.stringify({ viewerPermission: "ADMIN" });
 			}
@@ -360,7 +363,7 @@ describe("PR status GitHub CLI lookup", () => {
 
 		assert.deepEqual(status, {
 			number: 7,
-			url: "https://example.com/acme/widget/pull/7",
+			url: "https://github.com/acme/widget/pull/7",
 			title: "Sidebar actions",
 			state: "OPEN",
 			mergeable: "MERGEABLE",
@@ -372,8 +375,16 @@ describe("PR status GitHub CLI lookup", () => {
 		});
 		assert.deepEqual(calls.map((call) => call.args), [
 			["pr", "view", branch, "--json", PR_FIELDS],
-			["repo", "view", "--json", "viewerPermission"],
+			buildGhPrMergePermissionsArgs(remote, 7),
+			buildGhRepoPermissionArgs(remote),
 		]);
 		assert.equal(calls[0].args[2], branch);
+	});
+
+	it("builds the permission fallback for an exact enterprise host and repository", () => {
+		assert.deepEqual(
+			buildGhRepoPermissionArgs({ host: "ghe.example.test:8443", owner: "acme", repository: "widget" }),
+			["repo", "view", "--repo", "ghe.example.test:8443/acme/widget", "--json", "viewerPermission"],
+		);
 	});
 });

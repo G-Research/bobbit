@@ -2,8 +2,9 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
+import { parseTrustedGithubRemote, parseUntrustedGithubRemoteCandidate, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { GithubTrustedHostResolver } from "./github-trusted-hosts.js";
+import { GithubHostCredentialTrust } from "./github-host-credential-trust.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
@@ -1268,6 +1269,10 @@ export function buildGhPrMergePermissionsArgs(remote: TrustedGithubRemote, numbe
 	];
 }
 
+export function buildGhRepoPermissionArgs(remote: TrustedGithubRemote): string[] {
+	return ["repo", "view", "--repo", githubRepositorySelector(remote), "--json", "viewerPermission"];
+}
+
 export function buildGhBranchRulesArgs(remote: TrustedGithubRemote, branch: string): string[] {
 	return [
 		"api", ...ghApiHostnameArgs(remote),
@@ -1309,20 +1314,26 @@ export function __resetPrStatusCachesForTests(): void {
 	_repoPermCache.clear();
 }
 
-// Cache viewer permission per repo (rarely changes, long TTL)
+// Cache viewer permission per exact repository (rarely changes, long TTL).
+// The cwd alone is not an authority: a remote can change while the process runs.
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
 const REPO_PERM_CACHE_TTL_MS = 300_000; // 5 minutes
 
-async function getViewerIsAdmin(cwd: string): Promise<boolean> {
-	const cached = _repoPermCache.get(cwd);
+function repoPermissionCacheKey(cwd: string, remote: TrustedGithubRemote): string {
+	return `${cwd}\0${githubRepositorySelector(remote)}`;
+}
+
+async function getViewerIsAdmin(cwd: string, remote: TrustedGithubRemote): Promise<boolean> {
+	const cacheKey = repoPermissionCacheKey(cwd, remote);
+	const cached = _repoPermCache.get(cacheKey);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
 	try {
-		const stdout = await execGh(["repo", "view", "--json", "viewerPermission"], cwd);
+		const stdout = await execGh(buildGhRepoPermissionArgs(remote), cwd);
 		const perm = JSON.parse(stdout).viewerPermission ?? "";
-		_repoPermCache.set(cwd, { perm, ts: Date.now() });
+		_repoPermCache.set(cacheKey, { perm, ts: Date.now() });
 		return perm === "ADMIN";
 	} catch {
-		_repoPermCache.set(cwd, { perm: "", ts: Date.now() });
+		_repoPermCache.set(cacheKey, { perm: "", ts: Date.now() });
 		return false;
 	}
 }
@@ -1352,7 +1363,7 @@ async function getViewerMergePermissions(
 			const parsed = JSON.parse(stdout);
 			const repository = parsed?.data?.repository;
 			const perm = repository?.viewerPermission ?? "";
-			_repoPermCache.set(cwd, { perm, ts: Date.now() });
+			_repoPermCache.set(repoPermissionCacheKey(cwd, remote), { perm, ts: Date.now() });
 
 			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
 			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
@@ -1364,7 +1375,10 @@ async function getViewerMergePermissions(
 			// Fall through to legacy permission probe.
 		}
 	}
-	return { viewerIsAdmin: await getViewerIsAdmin(cwd), viewerCanMergeAsAdmin: false };
+	return {
+		viewerIsAdmin: remote ? await getViewerIsAdmin(cwd, remote) : false,
+		viewerCanMergeAsAdmin: false,
+	};
 }
 
 async function getViewerCanBypassBranchRules(
@@ -2708,6 +2722,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		getManagedHosts: () => normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts")),
 		env: process.env,
 	});
+	// This fallback is deliberately separate from the configured/discovered host
+	// resolver: it grants process-local admission only to PR operations and never
+	// persists or broadens githubTrustedHosts. Resolve spawn and environment per
+	// probe so injected runners and live ambient-token refusal remain authoritative.
+	const githubHostCredentialTrust = new GithubHostCredentialTrust({
+		resolveSpawn: () => gatewayDeps.commandRunner.spawn,
+		clock: gatewayDeps.clock,
+		getEnv: () => process.env,
+	});
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir, gatewayDeps.fsImpl);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
@@ -3438,7 +3461,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
 		try {
 			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
-			return parseTrustedGithubRemote(origin, await githubTrustedHostResolver.resolve());
+			const listed = parseTrustedGithubRemote(origin, await githubTrustedHostResolver.resolve());
+			if (listed) return listed;
+
+			// Structural parsing remains the sole authority for malformed/unsafe remote
+			// rejection. Only an otherwise-valid, unlisted candidate reaches the local
+			// credential probe, and the exact candidate is returned only when vouched.
+			const candidate = parseUntrustedGithubRemoteCandidate(origin);
+			if (!candidate) return undefined;
+			return await githubHostCredentialTrust.isTrusted(candidate.host) ? candidate : undefined;
 		} catch {
 			return undefined;
 		}
@@ -3769,6 +3800,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	const remoteStateRoutes = {
 		resolveGithubTrustedHosts: () => githubTrustedHostResolver.resolve(),
+		forgetUnverifiedGithubHosts: () => githubHostCredentialTrust.forgetUnverified(),
 		publicSnapshot: publicRemoteSnapshot,
 		publicGitSnapshot,
 		gitSnapshotFor,
@@ -14641,6 +14673,7 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
 		const optional = url.searchParams.get("optional") === "1";
+		if (url.searchParams.get("intent") === "explicit") remoteState.forgetUnverifiedGithubHosts();
 		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
 		const snapshot = target
 			? await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, url.searchParams.get("intent"))
@@ -18243,6 +18276,7 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
+		if (url.searchParams.get("intent") === "explicit") remoteState.forgetUnverifiedGithubHosts();
 		const selector = await resolveSessionPrRouteSelector(id, session);
 		const optional = url.searchParams.get("optional") === "1";
 		const snapshot = selector.target
