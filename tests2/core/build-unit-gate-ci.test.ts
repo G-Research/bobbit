@@ -21,7 +21,10 @@ type CrossOsGateJob = {
 	"timeout-minutes": number;
 	strategy: {
 		"fail-fast": boolean;
-		matrix: { os: string[] };
+		matrix: {
+			os: string[];
+			include?: Array<{ os: string; workers: number }>;
+		};
 	};
 	steps: WorkflowStep[];
 };
@@ -174,9 +177,22 @@ describe("native CI qualification workflows", () => {
 			assert.equal(stepByName(job.steps, gateName).run, command, `${jobId} must use the standard retry-enabled command`);
 		}
 
+		assert.deepEqual(
+			jobs.browser.strategy.matrix,
+			{
+				os: expectedOs,
+				include: [
+					{ os: "ubuntu-latest", workers: 2 },
+					{ os: "windows-latest", workers: 1 },
+					{ os: "macos-latest", workers: 2 },
+				],
+			},
+			"hosted Windows must use one Browser worker while Linux and macOS retain two",
+		);
 		assert.deepEqual(stepByName(jobs.browser.steps, "Browser gate").env, {
-			BOBBIT_V2_PLAYWRIGHT_WORKERS: "2",
+			BOBBIT_V2_PLAYWRIGHT_WORKERS: "${{ matrix.workers }}",
 		});
+		assert.deepEqual(jobs.e2e.strategy.matrix, { os: expectedOs }, "the Browser pressure bound must not alter E2E");
 		assert.equal(stepByName(jobs.e2e.steps, "E2E gate").env, undefined);
 	});
 
