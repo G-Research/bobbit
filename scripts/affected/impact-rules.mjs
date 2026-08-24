@@ -752,6 +752,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/project-scoped-group-grant.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "visit", "fixture callback recursively snapshots only run-owned temporary server and project role directories to detect cross-scope writes"),
+		]),
+	},
+	{
 		consumer: "tests2/core/provider-bridge-extension.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "pathToFileURL(file).href", "test-owned transpiled provider bridge"),
@@ -1676,6 +1682,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["impact:builtin-roles"]),
 		reads: frozen([
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-scoped-group-grant.test.ts",
+		allowReason: "fixture callback reads only files beneath run-owned temporary server and project role directories to compare grant side effects",
+		reads: frozen([
+			{ expression: "absolute", count: 1 },
 		]),
 	},
 	{

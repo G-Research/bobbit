@@ -40,7 +40,7 @@
     },
     {
       "path": "tests2/core/project-scoped-group-grant.test.ts",
-      "reason": "Core lifecycle coverage for project-scoped persistent group grants, builtin copy-on-write role overrides, cross-project isolation, read-only marketplace fallback, projectless persistence, stale pending requests, and explicit empty allowlists.",
+      "reason": "Core lifecycle coverage that statically owns SessionManager changes affecting project-scoped persistent group grants, builtin copy-on-write role overrides, cross-project isolation, read-only marketplace fallback, projectless persistence, stale pending requests, and explicit empty allowlists; its recursive fixture callback reads only run-owned temporary role snapshots.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
