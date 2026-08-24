@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import {
 	RECOVERY_IO_CONCURRENCY,
@@ -18,6 +19,7 @@ import {
 } from "./repository-mutation-coordinator.js";
 
 const primaryBranchFallbackWarningCwds = new Set<string>();
+const nativeRealpath = promisify(fs.realpath.native);
 
 export const UNRESOLVED_HEAD_WORKTREE_CODE = "WORKTREE_UNRESOLVED_HEAD";
 
@@ -542,17 +544,25 @@ async function existingWorktreeCleanupSnapshot(
 	requestedPath: string,
 	commandRunner: CommandRunner,
 ): Promise<ExistingWorktreeCleanupSnapshot | undefined> {
+	const segments = requestedPath.split(/[\\/]+/);
+	const nativeAliasCandidate = segments.includes(".")
+		|| segments.includes("..")
+		|| (process.platform === "win32" && segments.some(segment => /~\d/i.test(segment)));
+	// Ordinary coordinates retain cleanup's established single Git command and
+	// scheduling. Native canonicalization is reserved for alias spellings.
+	if (!nativeAliasCandidate) return undefined;
+
 	let requestedIdentity: string;
 	try {
-		// promises.realpath uses the host's native filesystem identity without
-		// blocking the event loop; on Windows this expands an 8.3 path spelling.
-		requestedIdentity = await fs.promises.realpath(path.resolve(requestedPath));
+		// The explicit native seam expands Windows 8.3 spellings without blocking.
+		requestedIdentity = await nativeRealpath(path.resolve(requestedPath));
 	} catch {
 		return undefined;
 	}
 	const comparableIdentity = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
 	requestedIdentity = comparableIdentity(requestedIdentity);
 	const nativeAlias = requestedIdentity !== comparableIdentity(path.resolve(requestedPath));
+	if (!nativeAlias) return undefined;
 
 	let registeredPaths: string[];
 	try {
@@ -563,19 +573,13 @@ async function existingWorktreeCleanupSnapshot(
 		);
 		registeredPaths = porcelainWorktreePaths(stdout.toString());
 	} catch (err) {
-		// Older injected runners may materialize a fake non-aliased coordinate but
-		// not model worktree listing. A real native alias must fail closed rather
-		// than falling back to the spelling that Git already rejected.
-		if (nativeAlias) {
-			throw new Error(`Cannot resolve Git worktree spelling for ${requestedPath}: ${gitErrorText(err)}`);
-		}
-		return undefined;
+		throw new Error(`Cannot resolve Git worktree spelling for ${requestedPath}: ${gitErrorText(err)}`);
 	}
 
 	for (const removalPath of registeredPaths) {
 		let registeredIdentity: string;
 		try {
-			registeredIdentity = comparableIdentity(await fs.promises.realpath(path.resolve(removalPath)));
+			registeredIdentity = comparableIdentity(await nativeRealpath(path.resolve(removalPath)));
 		} catch {
 			continue;
 		}
@@ -589,7 +593,7 @@ async function existingWorktreeCleanupSnapshot(
 			requestedPath,
 			removalPath,
 			adminPath,
-			aliased: !samePath(requestedPath, removalPath),
+			aliased: nativeAlias,
 		};
 	}
 	return undefined;

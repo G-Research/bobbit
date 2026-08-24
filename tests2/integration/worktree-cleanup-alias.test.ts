@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.js";
 import { cleanupWorktree } from "../../src/server/skills/git.js";
+
+const nativeRealpath = promisify(fs.realpath.native);
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
 	const result = await realCommandRunner.execFile("git", args, { cwd, encoding: "utf8", timeout: 10_000 });
@@ -22,7 +25,7 @@ async function createFixture(label: string): Promise<{
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `bobbit-cleanup-${label}-`));
 	const repo = path.join(root, "repo");
 	const worktree = path.join(root, "worktrees", "linked");
-	const alias = path.join(root, "linked-alias");
+	let alias: string;
 	const branch = `session/${label}`;
 	await fs.promises.mkdir(repo, { recursive: true });
 	await git(repo, ["init"]);
@@ -33,7 +36,19 @@ async function createFixture(label: string): Promise<{
 	await git(repo, ["commit", "-m", "fixture"]);
 	await fs.promises.mkdir(path.dirname(worktree), { recursive: true });
 	await git(repo, ["worktree", "add", "-b", branch, worktree, "HEAD"]);
-	await fs.promises.symlink(worktree, alias, process.platform === "win32" ? "junction" : "dir");
+	if (process.platform === "win32") {
+		const result = await realCommandRunner.execFile(
+			"cmd.exe",
+			["/d", "/c", `for %I in (${worktree}) do @echo %~sI`],
+			{ encoding: "utf8", timeout: 10_000 },
+		);
+		alias = String(result.stdout).trim();
+		if (!alias || alias.toLowerCase() === worktree.toLowerCase()) {
+			throw new Error(`fixture did not obtain a distinct Windows short path for ${worktree}`);
+		}
+	} else {
+		alias = `${worktree}${path.sep}..${path.sep}${path.basename(worktree)}`;
+	}
 
 	const marker = await fs.promises.readFile(path.join(worktree, ".git"), "utf8");
 	const gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
@@ -57,10 +72,10 @@ describe("cleanupWorktree filesystem aliases", () => {
 	it("passes Git its registered spelling and removes the exact directory, admin entry, and branch", async () => {
 		const fixture = await createFixture("alias-success");
 		try {
-			const aliasIdentity = await fs.promises.realpath(fixture.alias);
+			const aliasIdentity = await nativeRealpath(fixture.alias);
 			let registeredPath: string | undefined;
 			for (const candidate of await registeredWorktreePaths(fixture.repo)) {
-				if (await fs.promises.realpath(candidate) === aliasIdentity) {
+				if (await nativeRealpath(candidate) === aliasIdentity) {
 					registeredPath = candidate;
 					break;
 				}
@@ -110,7 +125,7 @@ describe("cleanupWorktree filesystem aliases", () => {
 			)).rejects.toThrow(/directory remains.*synthetic worktree removal failure/i);
 
 			expect(removeTargets).toHaveLength(1);
-			expect(await fs.promises.realpath(removeTargets[0]!)).toBe(await fs.promises.realpath(fixture.worktree));
+			expect(await nativeRealpath(removeTargets[0]!)).toBe(await nativeRealpath(fixture.worktree));
 			expect((await fs.promises.readFile(path.join(fixture.worktree, "README.md"), "utf8")).trim()).toBe("fixture");
 			expect((await fs.promises.lstat(fixture.adminPath)).isDirectory()).toBe(true);
 			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
