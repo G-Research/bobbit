@@ -19,7 +19,7 @@ interface FakeHelper {
 
 function fakeHelper(
 	output: string | Buffer | readonly (string | Buffer)[],
-	options: { close?: boolean; code?: number; spawnError?: Error } = {},
+	options: { close?: boolean; code?: number; spawnError?: Error; stdoutError?: Error } = {},
 ): FakeHelper {
 	const calls: FakeHelper["calls"] = [];
 	const requests: string[] = [];
@@ -45,6 +45,11 @@ function fakeHelper(
 			});
 			setImmediate(() => {
 				for (const chunk of Array.isArray(output) ? output : [output]) stdout.write(chunk);
+				if (options.stdoutError) {
+					stdout.emit("error", options.stdoutError);
+					child.emit("close", 1, null);
+					return;
+				}
 				if (options.close === false) return;
 				stdout.end();
 				child.emit("close", options.code ?? 0, null);
@@ -135,32 +140,74 @@ describe("GithubHostCredentialTrust cache", () => {
 
 describe("Git credential probe", () => {
 	it("uses only injected spawn from a dedicated neutral directory with prompting disabled, then cleans up", async () => {
-		const helper = fakeHelper(credential());
-		await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(true);
-		expect(helper.calls).toHaveLength(1);
-		const call = helper.calls[0];
-		expect(call.file).toBe("git");
-		expect(call.args).toEqual(["credential", "fill"]);
-		expect(call.options.cwd).not.toBe(tmpdir());
-		expect(String(call.options.cwd).startsWith(tmpdir())).toBe(true);
-		expect(existsSync(String(call.options.cwd))).toBe(false);
-		expect(call.options.stdio).toEqual(["pipe", "pipe", "ignore"]);
-		expect(call.options.windowsHide).toBe(true);
-		const env = call.options.env as NodeJS.ProcessEnv;
-		expect(env.GIT_TERMINAL_PROMPT).toBe("0");
-		expect(env.GCM_INTERACTIVE).toBe("never");
-		expect(env.GIT_CEILING_DIRECTORIES).toBe(tmpdir());
-		expect(env.GIT_ASKPASS).toBeUndefined();
-		expect(env.SSH_ASKPASS).toBeUndefined();
-		expect(env.DISPLAY).toBeUndefined();
-		expect(helper.requests.join("")).toBe("url=https://git.example.com\n\n");
-		expect(helper.kills).toEqual([]);
+		const inherited = {
+			GIT_ASKPASS: process.env.GIT_ASKPASS,
+			SSH_ASKPASS: process.env.SSH_ASKPASS,
+			DISPLAY: process.env.DISPLAY,
+		};
+		process.env.GIT_ASKPASS = "configured-core-askpass-sentinel";
+		process.env.SSH_ASKPASS = "configured-ssh-askpass-sentinel";
+		process.env.DISPLAY = "gui-prompt-sentinel";
+		try {
+			const helper = fakeHelper(credential());
+			await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(true);
+			expect(helper.calls).toHaveLength(1);
+			const call = helper.calls[0];
+			expect(call.file).toBe("git");
+			expect(call.args).toEqual(["credential", "fill"]);
+			expect(call.options.cwd).not.toBe(tmpdir());
+			expect(String(call.options.cwd).startsWith(tmpdir())).toBe(true);
+			expect(existsSync(String(call.options.cwd))).toBe(false);
+			expect(call.options.stdio).toEqual(["pipe", "pipe", "ignore"]);
+			expect(call.options.windowsHide).toBe(true);
+			const env = call.options.env as NodeJS.ProcessEnv;
+			expect(env.GIT_TERMINAL_PROMPT).toBe("0");
+			expect(env.GCM_INTERACTIVE).toBe("never");
+			expect(env.GIT_CEILING_DIRECTORIES).toBe(tmpdir());
+			// Empty values override both inherited variables and Git's core.askPass;
+			// deleting GIT_ASKPASS here would allow the configured fallback to run.
+			expect(env.GIT_ASKPASS).toBe("");
+			expect(env.SSH_ASKPASS).toBe("");
+			expect(env.DISPLAY).toBeUndefined();
+			expect(helper.requests.join("")).toBe("url=https://git.example.com\n\n");
+			expect(helper.kills).toEqual([]);
+		} finally {
+			for (const [name, value] of Object.entries(inherited)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 
 	it("fails closed without spawn support or when injected spawn throws", async () => {
 		await expect(new GithubHostCredentialTrust({ getEnv: () => ({}) }).isTrusted("git.example.com")).resolves.toBe(false);
 		const helper = fakeHelper("", { spawnError: new Error("fenced") });
 		await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(false);
+	});
+
+	it("never logs credential output or helper error values", async () => {
+		const stdoutSecret = "stdout-password-must-not-escape";
+		const errorSecret = "helper-error-must-not-escape";
+		const spies = [
+			vi.spyOn(console, "log").mockImplementation(() => {}),
+			vi.spyOn(console, "warn").mockImplementation(() => {}),
+			vi.spyOn(console, "error").mockImplementation(() => {}),
+		];
+		try {
+			await expect(subject(fakeHelper(credential("git.example.com", stdoutSecret))).isTrusted("git.example.com"))
+				.resolves.toBe(true);
+			await expect(subject(fakeHelper("host=git.example.com\npassword=partial-secret", {
+				stdoutError: new Error(errorSecret),
+			})).isTrusted("git.example.com")).resolves.toBe(false);
+
+			const logged = JSON.stringify(spies.flatMap(spy => spy.mock.calls));
+			expect(logged).not.toContain(stdoutSecret);
+			expect(logged).not.toContain("partial-secret");
+			expect(logged).not.toContain(errorSecret);
+			expect(spies.every(spy => spy.mock.calls.length === 0)).toBe(true);
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
 	});
 
 	it("requires one exact echoed normalized authority and a non-empty password", async () => {

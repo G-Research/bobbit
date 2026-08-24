@@ -146,12 +146,14 @@ function probeEnvironment(root: string): NodeJS.ProcessEnv {
 		...process.env,
 		GIT_TERMINAL_PROMPT: "0",
 		GCM_INTERACTIVE: "never",
+		// Empty overrides are intentional: deleting these variables would let Git
+		// fall back to core.askPass or SSH_ASKPASS and execute a configured prompt.
+		GIT_ASKPASS: "",
+		SSH_ASKPASS: "",
 		// The dedicated child is empty; the ceiling also prevents an operator-
 		// overridden temp root from inheriting repository-local credential config.
 		GIT_CEILING_DIRECTORIES: root,
 	};
-	delete env.GIT_ASKPASS;
-	delete env.SSH_ASKPASS;
 	delete env.DISPLAY;
 	return env;
 }
