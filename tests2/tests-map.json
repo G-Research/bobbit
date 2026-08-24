@@ -3068,7 +3068,7 @@
     },
     {
       "path": "tests2/core/build-unit-gate-ci.test.ts",
-      "reason": "Structural CI qualification pin: validates YAML syntax, main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, the full standard unit invocation, and the temporary exclusion of affected testing from CI.",
+      "reason": "Structural CI qualification pin: validates YAML syntax, main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, full standard unit invocation, cross-OS browser and E2E PR checks with Linux Docker coverage, and the temporary exclusion of affected testing from CI.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

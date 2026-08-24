@@ -7,10 +7,22 @@ type BranchTrigger = { branches: string[] };
 type NoInputDispatch = Record<string, never>;
 type WorkflowStep = {
 	name: string;
+	if?: string;
 	run?: string;
 	uses?: string;
 	env?: Record<string, string>;
 	with?: Record<string, unknown>;
+};
+
+type CrossOsGateJob = {
+	if: string;
+	"runs-on": string;
+	"timeout-minutes": number;
+	strategy: {
+		"fail-fast": boolean;
+		matrix: { os: string[] };
+	};
+	steps: WorkflowStep[];
 };
 
 type BuildUnitGateWorkflow = {
@@ -33,6 +45,8 @@ type BuildUnitGateWorkflow = {
 			};
 			steps: WorkflowStep[];
 		};
+		browser: CrossOsGateJob;
+		e2e: CrossOsGateJob;
 	};
 };
 
@@ -65,7 +79,7 @@ function readWorkflow<T>(path: URL): T {
 	return YAML.parse(workflowSource(path)) as T;
 }
 
-function stepByName(steps: Array<{ name: string }>, name: string): { name: string; uses?: string } {
+function stepByName(steps: WorkflowStep[], name: string): WorkflowStep {
 	const step = steps.find((candidate) => candidate.name === name);
 	assert.ok(step, `workflow must include ${name}`);
 	return step;
@@ -112,6 +126,52 @@ describe("native CI qualification workflows", () => {
 			steps.some((step) => step.run?.includes("test:affected")),
 			false,
 			"affected feedback must not replace the authoritative full-suite job",
+		);
+	});
+
+	it("runs browser and E2E PR checks natively on every supported OS", () => {
+		const jobs = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs;
+		const expectedOs = ["ubuntu-latest", "windows-latest", "macos-latest"];
+
+		for (const [name, job, gateStep, command] of [
+			["browser", jobs.browser, "Browser gate", "npm run test:browser"],
+			["e2e", jobs.e2e, "E2E gate", "npm run test:e2e"],
+		] as const) {
+			assert.equal(job.if, "github.event_name == 'pull_request'", `${name} must run only for PR checks`);
+			assert.equal(job["runs-on"], "${{ matrix.os }}");
+			assert.equal(job["timeout-minutes"], 40);
+			assert.equal(job.strategy["fail-fast"], false);
+			assert.deepEqual(job.strategy.matrix.os, expectedOs);
+			assert.equal(stepByName(job.steps, "Checkout").uses, "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd");
+			assert.equal(stepByName(job.steps, "Set up Node").uses, "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+			assert.equal(stepByName(job.steps, "Install").run, "npm ci");
+			assert.deepEqual(
+				stepByName(job.steps, "Install Chromium with dependencies"),
+				{
+					name: "Install Chromium with dependencies",
+					if: "runner.os == 'Linux'",
+					run: "npx playwright install --with-deps chromium",
+				},
+			);
+			assert.deepEqual(
+				stepByName(job.steps, "Install Chromium"),
+				{
+					name: "Install Chromium",
+					if: "runner.os != 'Linux'",
+					run: "npx playwright install chromium",
+				},
+			);
+			assert.equal(stepByName(job.steps, gateStep).run, command);
+		}
+
+		const sandboxBuild = stepByName(jobs.e2e.steps, "Build sandbox image");
+		assert.equal(sandboxBuild.if, "runner.os == 'Linux'", "only the Linux runner exposes Docker");
+		assert.match(sandboxBuild.run ?? "", /PI_AGENT_VERSION=.*@earendil-works\/pi-coding-agent/);
+		assert.match(sandboxBuild.run ?? "", /docker build --build-arg .* -t bobbit-agent docker\//);
+		assert.doesNotMatch(
+			workflowSource(BUILD_UNIT_GATE_WORKFLOW_PATH),
+			/BOBBIT_V2_RETRY_FREE/,
+			"ordinary PR checks must retain the repository's normal workflow retry policy",
 		);
 	});
 
