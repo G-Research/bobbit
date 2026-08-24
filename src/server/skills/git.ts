@@ -1434,12 +1434,12 @@ export async function cleanupWorktree(
 		}
 	}
 
-	// Git can report a successful ordinary removal before the checkout directory
-	// has fully disappeared (notably on hosted Windows runners). Preserve the
-	// operation-first single-command surface, then remove only the exact requested
-	// path through the bounded async remover and fence its absence before branch
-	// deletion. Alias snapshots keep their stricter directory + admin proof below.
-	if (!snapshot && !removalError) {
+	// Git can report a successful removal before the checkout directory has fully
+	// disappeared (notably on hosted Windows runners). This applies equally when
+	// the caller's short/lexical alias was resolved to Git's authoritative spelling.
+	// Preserve one Git remove command, then recover only that exact coordinate
+	// through the bounded async remover before any absence fence or branch deletion.
+	if (!removalError) {
 		try {
 			await removeTargetedTree(removalPath);
 			if (await pathRemainsStrict(removalPath)) {

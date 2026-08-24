@@ -24,7 +24,11 @@ async function createFixture(label: string, aliasKind: AliasKind = process.platf
 	branch: string;
 	adminPath: string;
 }> {
-	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), `bobbit-cleanup-${label}-`));
+	const lexicalRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), `bobbit-cleanup-${label}-`));
+	// Hosted Windows can expose os.tmpdir() through RUNNER~1. Build ordinary
+	// coordinates from the native spelling so only explicit alias cases take the
+	// authoritative-list path.
+	const root = await nativeRealpath(lexicalRoot);
 	const repo = path.join(root, "repo");
 	const worktree = path.join(root, "worktrees", "linked");
 	let alias: string;
@@ -100,6 +104,48 @@ describe("cleanupWorktree filesystem aliases", () => {
 				await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
 				await expect(fs.promises.lstat(fixture.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
 				expect(await registeredWorktreePaths(fixture.repo)).not.toContain(registeredPath);
+				await expect(git(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${fixture.branch}`])).rejects.toBeTruthy();
+			} finally {
+				await removeFixture(fixture.root);
+			}
+		},
+	);
+
+	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
+		"recovers residue left after successful Git removal through a %s alias before deleting the branch",
+		async (aliasKind) => {
+			const fixture = await createFixture(`alias-residue-${aliasKind}`, aliasKind);
+			try {
+				let branchDeleteCalls = 0;
+				let branchDeleteObservedAbsent = false;
+				const runner: CommandRunner = {
+					execFile: async (file, args, options) => {
+						if (args[0] === "worktree" && args[1] === "remove") {
+							const result = await realCommandRunner.execFile(file, args, options);
+							await fs.promises.mkdir(fixture.worktree, { recursive: true });
+							await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "residue\n");
+							return result;
+						}
+						if (args[0] === "branch" && args[1] === "-D") {
+							branchDeleteCalls += 1;
+							branchDeleteObservedAbsent = !await fs.promises.lstat(fixture.worktree).then(
+								() => true,
+								(err: NodeJS.ErrnoException) => {
+									if (err.code === "ENOENT") return false;
+									throw err;
+								},
+							);
+						}
+						return realCommandRunner.execFile(file, args, options);
+					},
+				};
+
+				await cleanupWorktree(fixture.repo, fixture.alias, fixture.branch, true, runner, { skipRemotePush: true });
+
+				expect(branchDeleteCalls).toBe(1);
+				expect(branchDeleteObservedAbsent).toBe(true);
+				await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
+				await expect(fs.promises.lstat(fixture.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
 				await expect(git(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${fixture.branch}`])).rejects.toBeTruthy();
 			} finally {
 				await removeFixture(fixture.root);
