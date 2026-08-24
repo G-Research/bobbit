@@ -1,9 +1,11 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import WebSocket from "ws";
+import { Type } from "@sinclair/typebox";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectContext } from "../../src/server/agent/project-context.js";
 import { broadcastStatus } from "../../src/server/agent/session-status.js";
+import type { PiExtensionExternalTool, ScopedToolContext } from "../../src/server/agent/tool-manager.js";
 import type { RegisteredProject } from "../../src/server/agent/project-registry.js";
 import { TaskManager } from "../../src/server/agent/task-manager.js";
 import {
@@ -218,6 +220,58 @@ function writeInterceptorAuditPack(gw: GatewayFixture, packName: string): string
 	return packDir;
 }
 
+function writeToolMutationPack(gw: GatewayFixture, packName: string): string {
+	const packDir = path.join(gw.bobbitDir, "config", "market-packs", packName);
+	mkdirSync(path.join(packDir, "hooks"), { recursive: true });
+	mkdirSync(path.join(packDir, "lib"), { recursive: true });
+	writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2", `name: ${packName}`, "description: Tool mutation validation fixture", "version: 1.0.0",
+		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  hooks: [tool-mutation]",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
+		"sourceUrl: integration", "sourceRef: local", "commit: test", `packName: ${packName}`, "version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "hooks", "tool-mutation.yaml"), [
+		"id: tool.mutation", "module: ../lib/hooks.mjs", "kind: interceptor",
+		"interceptors: [beforeToolCall, afterToolResult]", "failurePolicy: failClosed", "capabilities: []",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "lib", "hooks.mjs"), [
+		"export default {",
+		"  beforeToolCall: async (_ctx, input) => ({ action: 'replaceArgs', args: { approved: input.args?.approved } }),",
+		"  afterToolResult: async (_ctx, input) => {",
+		"    let result = input.result;",
+		"    if (result?.generateDeep === true) { result = 'leaf'; for (let depth = 0; depth < 9; depth++) result = { child: result }; }",
+		"    return { action: 'replaceResult', result };",
+		"  },",
+		"};",
+	].join("\n") + "\n");
+	return packDir;
+}
+
+function scopedPiTool(name: string, packName: string): PiExtensionExternalTool {
+	return {
+		name,
+		runtimeName: name,
+		description: `${name} scoped fixture`,
+		group: "Pi Extensions",
+		inputSchema: Type.Object({ approved: Type.Literal(true) }, { additionalProperties: false }),
+		providerKey: `pi-ext:fixture:${packName}:${name}`,
+		packName,
+		packId: `market:fixture:${packName}`,
+		listName: "fixture",
+		scope: "fixture",
+	};
+}
+
+function toolScope(projectId: string | undefined, cwd: string): ScopedToolContext {
+	return {
+		...(projectId ? { projectId } : {}),
+		cwd,
+		scopeKey: projectId ? `project:${projectId}` : `cwd:${path.resolve(cwd)}`,
+	};
+}
+
 describe("gateway-owned host hook boundaries", () => {
 	it("routes project store commits through one canonical dispatcher without replacing legacy callbacks", async () => {
 		const delivered: HostNotification[] = [];
@@ -393,6 +447,128 @@ describe("real gateway notification authority", () => {
 			rmSync(packDir, { recursive: true, force: true });
 			await refreshServerPackIndex(gw);
 		}
+	});
+
+	it("validates project and projectless tool mutations against their owning ToolManagers", async () => {
+		const packName = `host-tool-scope-${process.pid}-${Date.now()}`;
+		const packDir = writeToolMutationPack(gw, packName);
+		const projectContext = gw.projectContextManager.getOrCreate(gw.defaultProjectId);
+		const projectManager = projectContext.toolManager;
+		const serverManager = (gw.sessionManager as any).toolManager;
+		const cwd = projectContext.project.rootPath as string;
+		const projectScope = toolScope(gw.defaultProjectId, cwd);
+		const serverScope = toolScope(undefined, cwd);
+		const projectToolName = `project_pi_${Date.now()}`;
+		const serverToolName = `server_pi_${Date.now()}`;
+		try {
+			await refreshServerPackIndex(gw);
+			expect(projectManager).not.toBe(serverManager);
+			projectManager.setScopedPiExtensionTools(projectScope, [scopedPiTool(projectToolName, packName)]);
+			serverManager.setScopedPiExtensionTools(serverScope, [scopedPiTool(serverToolName, packName)]);
+			expect(serverManager.getToolByName(projectToolName, serverScope)).toBeUndefined();
+
+			const projectHookContext = {
+				projectId: gw.defaultProjectId,
+				sessionId: "project-tool-validator",
+				cwd,
+				signal: new AbortController().signal,
+			};
+			const projectBefore = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "project-before",
+				toolName: projectToolName,
+				args: { approved: true },
+			}, projectHookContext);
+			expect(projectBefore.value.args).toEqual({ approved: true });
+			expect(projectBefore.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			const projectAfter = await gw.hostInterceptorRouter.dispatch("afterToolResult", {
+				toolCallId: "project-after",
+				toolName: projectToolName,
+				result: { approved: true },
+			}, projectHookContext);
+			expect(projectAfter.value.result).toEqual({ approved: true });
+			expect(projectAfter.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			const unboundedAfter = await gw.hostInterceptorRouter.dispatch("afterToolResult", {
+				toolCallId: "project-unbounded-result",
+				toolName: projectToolName,
+				result: { generateDeep: true },
+			}, projectHookContext);
+			expect(unboundedAfter.terminal).toEqual({ action: "syntheticError", code: "handler_error" });
+			expect(unboundedAfter.decisions).toMatchObject([{ outcome: "failed-closed", valid: false, applied: false }]);
+
+			const rejected = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "project-invalid-schema",
+				toolName: projectToolName,
+				args: { approved: "wrong-schema" },
+			}, projectHookContext);
+			expect(rejected.value.args).toEqual({ approved: "wrong-schema" });
+			expect(rejected.terminal).toEqual({ action: "block", reasonCode: "not_permitted" });
+			expect(rejected.decisions).toMatchObject([{ outcome: "failed-closed", valid: false, applied: false }]);
+
+			const projectlessContext = { cwd, signal: new AbortController().signal };
+			const serverBefore = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "server-before",
+				toolName: serverToolName,
+				args: { approved: true },
+			}, projectlessContext);
+			expect(serverBefore.value.args).toEqual({ approved: true });
+			expect(serverBefore.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			const unknownAfter = await gw.hostInterceptorRouter.dispatch("afterToolResult", {
+				toolCallId: "server-unknown",
+				toolName: projectToolName,
+				result: { approved: true },
+			}, projectlessContext);
+			expect(unknownAfter.terminal).toEqual({ action: "syntheticError", code: "handler_error" });
+			expect(unknownAfter.decisions).toMatchObject([{ outcome: "failed-closed", valid: false, applied: false }]);
+		} finally {
+			rmSync(packDir, { recursive: true, force: true });
+			await refreshServerPackIndex(gw);
+		}
+	});
+
+	it("clears server and project Pi registrations through marketplace invalidation before group grants", async () => {
+		const projectContext = gw.projectContextManager.getOrCreate(gw.defaultProjectId);
+		const projectManager = projectContext.toolManager;
+		const serverManager = (gw.sessionManager as any).toolManager;
+		const cwd = projectContext.project.rootPath as string;
+		const projectScope = toolScope(gw.defaultProjectId, cwd);
+		const serverScope = toolScope(undefined, cwd);
+		const staleProjectTool = `stale_project_pi_${Date.now()}`;
+		const staleServerTool = `stale_server_pi_${Date.now()}`;
+		const session = await scope.createSession({ cwd, sandboxed: false, worktree: false });
+		await waitForIdle(gw, session.id);
+
+		projectManager.setScopedPiExtensionTools(projectScope, [scopedPiTool(staleProjectTool, "stale-project-pack")]);
+		serverManager.setScopedPiExtensionTools(serverScope, [scopedPiTool(staleServerTool, "stale-server-pack")]);
+		expect(projectManager.getToolByName(staleProjectTool, projectScope)).toBeDefined();
+		expect(serverManager.getToolByName(staleServerTool, serverScope)).toBeDefined();
+
+		const registry = (gw.hostInterceptorRouter as any).options.registry;
+		const epochBefore = registry.getActivationEpoch();
+		await refreshServerPackIndex(gw);
+
+		expect(projectManager.resolveScopedPiExtensionTools(projectScope)).toEqual([]);
+		expect(serverManager.resolveScopedPiExtensionTools(serverScope)).toEqual([]);
+		expect(projectManager.getToolByName(staleProjectTool, projectScope)).toBeUndefined();
+		expect(serverManager.getToolByName(staleServerTool, serverScope)).toBeUndefined();
+		expect(registry.getActivationEpoch()).toBeGreaterThan(epochBefore);
+
+		const granted = await gw.sessionManager.grantToolPermission(
+			session.id,
+			"current_pi_permission_request",
+			"group",
+			"Pi Extensions",
+			"session-only",
+		);
+		expect(granted).not.toContain(staleProjectTool);
+		expect(granted).not.toContain(staleServerTool);
+
+		const source = readFileSync(path.resolve("src/server/server.ts"), "utf8");
+		const invalidator = source.slice(source.indexOf("const invalidateResolverCaches"), source.indexOf("const refreshMcpExternalTools"));
+		expect(invalidator).toContain("piExtensionDiscoveryCache.clear()");
+		expect(invalidator).toContain("dispatcher.invalidate()");
 	});
 
 	async function createTaskAndObserver(suffix: string) {
