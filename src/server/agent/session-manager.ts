@@ -11225,7 +11225,13 @@ export class SessionManager {
 		} else {
 			grantScopeTools.push(toolName);
 		}
-		const approvedGrantTools = this.mergeToolNames(undefined, grantScopeTools.length > 0 ? grantScopeTools : [toolName]) ?? [toolName];
+		// A group approval is bounded by the group's currently registered members.
+		// If marketplace invalidation removed the group between request and approval,
+		// never reinterpret the stale request name as an individual grant or restart
+		// the runtime merely to install the already-current empty catalogue.
+		const approvedGrantTools = scope === "group"
+			? this.mergeToolNames(undefined, grantScopeTools) ?? []
+			: this.mergeToolNames(undefined, [toolName]) ?? [toolName];
 
 		if (permissionId && !session.pendingGrantRequest) {
 			throw new Error(`Ignored stale permission grant for ${toolName}; request is no longer pending.`);
@@ -11264,6 +11270,8 @@ export class SessionManager {
 				return session.allowedTools ?? [];
 			}
 		}
+
+		if (approvedGrantTools.length === 0) return session.allowedTools ?? [];
 
 		let resultTools: string[];
 
@@ -19246,7 +19254,6 @@ export class SessionManager {
 			}
 			// Preserve the pre-abort activity timestamp across any late replay.
 			suppressSessionActivityUntilPrompt(session);
-			switchingSession = false;
 
 			// Replay completed: remaining attempts have proven no correlated start.
 			// Coordinator release owns their one exact redispatch.
@@ -19257,31 +19264,62 @@ export class SessionManager {
 				throw new Error(`Session ${id} force-abort replacement was superseded after rehydration`);
 			}
 
-			// Swap in the new bridge only after history rehydration.
-			session.rpcClient = rpcClient;
-			session.runtimePiExtensions = bridgeOptions.piExtensions;
-			session.unsubscribe = unsub;
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-
+			// Model verification belongs to the candidate runtime. Keep its bridge and
+			// Pi schema snapshot off the canonical SessionInfo until every fallible
+			// verification and ownership check succeeds.
+			const candidateRuntimePiExtensions = bridgeOptions.piExtensions;
+			const stagedSession = {
+				...session,
+				rpcClient,
+				runtimePiExtensions: candidateRuntimePiExtensions,
+				unsubscribe: unsub,
+				spawnPinnedModel: bridgeOptions.initialModel,
+				spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+				_deferVerifiedTupleCommit: true,
+				clients: new Set<WebSocket>(),
+			} as SessionInfo;
+			let verifiedReplacementTuple: VerifiedSessionModelTuple | undefined;
 			try {
-				await this.tryAutoSelectModel(session);
-				try {
-					await this.tryApplyDefaultThinkingLevel(session);
-				} catch (err) {
-					if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
+				verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession);
+				if (!verifiedReplacementTuple) {
+					try {
+						verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
+					} catch (err) {
+						if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+						console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
+					}
 				}
 			} catch (err) {
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
-			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session || session.rpcClient !== rpcClient) {
+			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
 			}
+
+			// Publish bridge identity and its schema snapshot together only after the
+			// candidate is complete and still owns the replacement token.
+			session.rpcClient = rpcClient;
+			session.runtimePiExtensions = candidateRuntimePiExtensions;
+			session.unsubscribe = unsub;
+			session.spawnPinnedModel = verifiedReplacementTuple
+				? `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`
+				: bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = verifiedReplacementTuple?.thinkingLevel
+				?? bridgeOptions.initialThinkingLevel;
+			if (verifiedReplacementTuple) {
+				this.persistSessionModel(
+					id,
+					verifiedReplacementTuple.provider,
+					verifiedReplacementTuple.modelId,
+					verifiedReplacementTuple.thinkingLevel,
+				);
+				this._writeModelNameFile(id, `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`);
+			}
+			switchingSession = false;
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
