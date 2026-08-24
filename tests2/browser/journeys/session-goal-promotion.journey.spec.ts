@@ -133,6 +133,32 @@ async function teamRecord(goalId: string): Promise<any> {
 	return responseJson(await apiFetch(`/api/goals/${goalId}/team`));
 }
 
+async function waitForTeamStarted(goalId: string): Promise<any> {
+	let team: any;
+	await expect.poll(async () => {
+		const response = await apiFetch(`/api/goals/${goalId}/team`);
+		const body = await response.text();
+		let candidate: any;
+		try {
+			candidate = body ? JSON.parse(body) : {};
+		} catch {
+			candidate = {};
+		}
+		if (response.status === 200
+			&& typeof candidate.teamLeadSessionId === "string"
+			&& candidate.teamLeadSessionId.length > 0) {
+			team = candidate;
+			return "ready";
+		}
+		return `status=${response.status} body=${body || "<empty>"}`;
+	}, {
+		timeout: 30_000,
+		intervals: [100, 250, 500],
+		message: `team ${goalId} should start with a team lead`,
+	}).toBe("ready");
+	return team;
+}
+
 function transcriptSnapshot(gateway: GatewayInfo, sessionId: string): { path: string; bytes: string } {
 	const transcriptPath = gateway.sessionManager?.getPersistedSession(sessionId)?.agentSessionFile;
 	expect(transcriptPath, `session ${sessionId} should retain its transcript path`).toEqual(expect.any(String));
@@ -380,7 +406,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 				return goal?.id || "";
 			}, { timeout: 40_000, intervals: [100, 250, 500] }).not.toBe("");
 			const goal = await waitForGoalSetup(goalId!);
-			const team = await teamRecord(goal.id);
+			const team = await waitForTeamStarted(goal.id);
 			expect(goal.worktreePath).toBeTruthy();
 			expect(goal.worktreePath).not.toBe(before.worktreePath);
 			expect(goal.branch).not.toBe(before.branch);
