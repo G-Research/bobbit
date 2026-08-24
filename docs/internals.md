@@ -150,6 +150,33 @@ All API endpoints and WebSocket handlers resolve the correct per-project store t
 
 Session snapshots, archived-session traversal, persistence hot paths, eager restoration, and task-generation caching share a behavior-preserving performance contract. See [Session-loading performance](session-loading-performance.md) for the cache boundaries, ordering and durability invariants, test ownership, benchmarks, and first-open transcript limitation.
 
+#### Session tool runtime scope
+
+A session's project owns more than its persisted record: it also owns the tool catalogue and policy inputs used to construct the agent's callable surface. An explicit project session therefore uses that `ProjectContext.toolManager`; only a genuinely projectless session uses the server `ToolManager`. `projectId` selects the owner, while `cwd` remains execution and runtime-cache context and must not independently redirect project ownership.
+
+Each setup or replacement operation carries one coherent tuple of project id, cwd, `ToolManager`, group-policy provider, and scoped `McpManager`. The group-policy provider resolves the live builtin → server → project cascade, with the project override winning. That same tuple must be used for:
+
+- tool and standalone Pi-extension discovery, effective policy computation, disabled-tool filtering, and group-grant expansion;
+- agent activation arguments and callable extensions, prompt tool documentation, MCP proxies, and generated tool guards;
+- ordinary and staff creation, delegation before the child allowlist is frozen, restore/restart, role changes, and force-abort replacement;
+- host interceptor argument/result mutation validation, including schema and known-tool checks; and
+- MCP and Pi discovery/guard registration that feeds the generated surface.
+
+This is an authorization invariant, not only a discovery detail. If project discovery uses one manager while policy, activation, or validation uses another, a project-only tool can disappear from prompt docs or activation even though it is visible in the project catalogue. The inverse mismatch is more dangerous: a loaded Pi tool may be absent from the `ask`/`never` guard map, a host interceptor may validate against the wrong schema, or a group approval may include stale registrations. Resolving the tuple once per operation keeps discovery, visibility, and enforcement in agreement.
+
+Discovered Pi tools are registered under the exact project/cwd scope in the selected manager. A project's registration is visible to that project plus applicable default-scope contributions, but not to sibling projects or the server manager. Marketplace install, update, uninstall, order, and activation mutations invalidate discovery caches and clear scoped Pi registrations from the server manager and every live project manager. The next setup or replacement rediscovers into the correct owner; group grants therefore cannot reuse tools removed from a stale manager. See [Marketplace Pi extensions](marketplace.md#marketplace-pi-extensions) and [Marketplace MCP and scoped managers](mcp-meta-tools.md#marketplace-mcp-and-scoped-managers).
+
+Preserve the session-allowlist distinction through every lifecycle transformation: `undefined` means unrestricted by an explicit session allowlist, while `[]` means intentionally no tools. An empty allowlist must never be treated as missing and widened to the role-derived surface. Pi extension loading is separate from permission: even when an extension must load for runtime compatibility, the generated guard must enforce the empty or policy-restricted callable surface. Policy resolution details are in [Tool access policies](#tool-access-policies).
+
+##### Post-merge runtime validation
+
+> This checklist is an operational follow-up after the routing change is merged and the gateway has restarted. It is not completed on the feature branch.
+
+1. Restart the fresh Optimisation Scanner and Director sessions so their callable surfaces are regenerated.
+2. Confirm `perf_programme_get_settings` and the Scanner coverage tools are callable.
+3. Run one Scanner reconciliation pass.
+4. Verify it writes durable, project-owned coverage state without installing, copying, or relying on a server-scope pack workaround.
+
 #### Store resolution pattern
 
 Store resolution **never falls back to a default project**. Every operation resolves its store through one of these paths:
