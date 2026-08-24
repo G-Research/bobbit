@@ -65,14 +65,28 @@ test.describe("Journey: Staff", () => {
 
 	test("staff page shows empty-state or table when there are no staff agents", async ({ page }) => {
 		await openApp(page);
+		const staffListResponse = page.waitForResponse((response) => {
+			const url = new URL(response.url());
+			return response.request().method() === "GET" && url.pathname === "/api/staff";
+		});
 		await navigateToHash(page, "#/staff");
-		await expect(page.locator("h1").filter({ hasText: "Staff Agents" })).toBeVisible({ timeout: 15_000 });
+		const response = await staffListResponse;
+		const responseText = await response.text();
+		expect(response.ok(), `staff list failed: ${response.status()} ${responseText}`).toBe(true);
+		const payload = JSON.parse(responseText) as StaffRecord[] | { staff?: StaffRecord[] };
+		const staffAgents = Array.isArray(payload) ? payload : (payload.staff ?? []);
 
-		// Either the empty-state message or a staff table must be present.
+		await expect(page.locator("h1").filter({ hasText: "Staff Agents" })).toBeVisible({ timeout: 15_000 });
 		const emptyState = page.getByText("No staff agents yet");
 		const staffTable = page.locator("table");
-		// Use or() to accept either state — whichever renders first.
-		await expect(emptyState.or(staffTable).first()).toBeVisible({ timeout: 20_000 });
+		if (staffAgents.length === 0) {
+			await expect(emptyState).toBeVisible({ timeout: 20_000 });
+			await expect(staffTable).toHaveCount(0);
+		} else {
+			await expect(staffTable).toBeVisible({ timeout: 20_000 });
+			await expect(staffTable.locator("tbody tr")).toHaveCount(staffAgents.length);
+			await expect(emptyState).toHaveCount(0);
+		}
 	});
 });
 
