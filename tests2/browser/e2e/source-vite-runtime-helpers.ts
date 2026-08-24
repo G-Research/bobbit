@@ -21,6 +21,8 @@ export interface RunningSourceProcess {
 export interface StopSourceProcessOptions {
 	/** Test seam: production teardown keeps a ten-second graceful shutdown window. */
 	gracefulStopTimeoutMs?: number;
+	/** Test seam: an authoritative signal receipt may gate forced escalation instead of elapsed time. */
+	gracefulSignalReceipt?: Promise<void>;
 	/** Test seam: bounds how long teardown waits for close after force-killing. */
 	forceStopTimeoutMs?: number;
 }
@@ -341,6 +343,11 @@ function waitForProcessClose(runtime: RunningSourceProcess, timeoutMs: number): 
 	});
 }
 
+function waitForProcessCloseEvent(runtime: RunningSourceProcess): Promise<true> {
+	if (runtime.closed) return Promise.resolve(true);
+	return new Promise(resolveClosed => runtime.child.once("close", () => resolveClosed(true)));
+}
+
 function releaseProcessStdio(child: ChildProcess): void {
 	for (const stream of [child.stdin, child.stdout, child.stderr]) {
 		try { stream?.destroy(); } catch { /* best-effort cleanup after a failed OS close */ }
@@ -369,7 +376,17 @@ export async function stopSourceProcess(
 	// exits while descendants retain stdio, captureSourceProcess sends the final
 	// POSIX group signal synchronously at that exit boundary.
 	runtime.shutdownStarted = signalOwnedProcessTree(runtime, "SIGTERM");
-	if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) return;
+	if (options.gracefulSignalReceipt) {
+		// A fixture that proves its handler is installed can fence escalation on the
+		// actual signal receipt. This avoids sampling buffered stdio after SIGKILL.
+		const closedBeforeReceipt = await Promise.race([
+			waitForProcessCloseEvent(runtime),
+			options.gracefulSignalReceipt.then(() => false as const),
+		]);
+		if (closedBeforeReceipt) return;
+	} else if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) {
+		return;
+	}
 
 	// SIGTERM is deliberately not retried here: a stuck gateway may ignore it.
 	// Force-kill only an identity still owned by this runtime, then wait for close
