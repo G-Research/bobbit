@@ -2085,6 +2085,15 @@
       }
     },
     {
+      "path": "tests2/core/gateway-readiness-classification.test.ts",
+      "reason": "Gateway startup readiness retries exact ECONNREFUSED transport failures through fetch causes and AggregateError address attempts while failing closed for resets, malformed responses, mixed codes, and unclassified wrappers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/verification-command-runner-contract.test.ts",
       "reason": "DI seam contract: fake verification command-step runner is observably equivalent to the real durable runner; seam defaults to real; cli wires no fake.",
       "execution": {
