@@ -277,17 +277,6 @@ async function pathExists(filePath: string): Promise<boolean> {
 	}
 }
 
-async function pathExistsStrict(filePath: string): Promise<boolean> {
-	try {
-		await fs.promises.lstat(filePath);
-		return true;
-	} catch (err) {
-		const code = (err as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR") return false;
-		throw err;
-	}
-}
-
 // Targeted worktree removals share one small process-wide I/O ceiling. Keeping
 // the limiter here prevents a bounded outer cleanup (pool drain, purge, or
 // inventory) from multiplying concurrency while walking a partial worktree.
@@ -514,164 +503,19 @@ export async function getRepoRoot(cwd: string, commandRunner: CommandRunner = re
 
 /**
  * Canonicalize a path for robust equality comparison: resolve to absolute,
- * follow symlinks via native `realpath` where possible (no-op when the path
- * doesn't exist), and lowercase on win32 where the filesystem is
+ * follow symlinks via asynchronous `realpath` where possible (no-op when the
+ * path doesn't exist), and lowercase on win32 where the filesystem is
  * case-insensitive. Mirrors the comparison style of
  * `worktree-pool.ts::resolveRepoToplevel`.
  */
 async function canonicalizePath(p: string): Promise<string> {
 	let resolved = path.resolve(p);
 	try {
-		// Native realpath is the filesystem identity boundary on Windows: Git can
-		// publish a long path while persisted state still contains its 8.3 alias.
-		resolved = fs.realpathSync.native(resolved);
+		resolved = await fs.promises.realpath(resolved);
 	} catch {
-		// Missing paths have no filesystem identity — retain the absolute lexical
-		// spelling so exact stale registrations can still be matched safely.
+		// realpath fails when the path doesn't exist — fall back to resolve().
 	}
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-}
-
-function parsePorcelainWorktreePaths(output: string): string[] {
-	return output
-		.split("\0")
-		.filter(field => field.startsWith("worktree "))
-		.map(field => field.slice("worktree ".length));
-}
-
-async function listRegisteredWorktreePaths(
-	repoPath: string,
-	commandRunner: CommandRunner,
-): Promise<string[]> {
-	const { stdout } = await execGit(
-		["worktree", "list", "--porcelain", "-z"],
-		{ cwd: repoPath, timeout: 5_000 },
-		commandRunner,
-	);
-	return parsePorcelainWorktreePaths(stdout.toString());
-}
-
-async function findRegisteredWorktreePath(
-	registeredPaths: readonly string[],
-	requestedPath: string,
-): Promise<string | undefined> {
-	const requestedIdentity = await canonicalizePath(requestedPath);
-	for (const registeredPath of registeredPaths) {
-		if (await canonicalizePath(registeredPath) === requestedIdentity) return registeredPath;
-	}
-	return undefined;
-}
-
-async function strictGitCommonDir(repoPath: string, commandRunner: CommandRunner): Promise<string> {
-	let commonDir = "";
-	try {
-		const { stdout } = await execGit(
-			["rev-parse", "--path-format=absolute", "--git-common-dir"],
-			{ cwd: repoPath, timeout: 5_000 },
-			commandRunner,
-		);
-		commonDir = stdout.toString().trim();
-	} catch {
-		const { stdout } = await execGit(
-			["rev-parse", "--git-common-dir"],
-			{ cwd: repoPath, timeout: 5_000 },
-			commandRunner,
-		);
-		commonDir = stdout.toString().trim();
-	}
-	if (!commonDir) throw new Error(`Git returned an empty common directory for ${repoPath}`);
-	return path.isAbsolute(commonDir) ? commonDir : path.resolve(repoPath, commonDir);
-}
-
-interface CleanupWorktreeOwnership {
-	removalPath: string;
-	adminPath?: string;
-}
-
-/**
- * Prove that a cleanup coordinate identifies one exact, non-main linked
- * worktree. Recursive deletion is forbidden without this snapshot: Git's
- * refusal to remove a main or unknown directory must never become authority to
- * delete it ourselves.
- */
-async function proveCleanupWorktreeOwnership(
-	repoPath: string,
-	requestedPath: string,
-	commandRunner: CommandRunner,
-): Promise<CleanupWorktreeOwnership> {
-	const registeredPaths = await listRegisteredWorktreePaths(repoPath, commandRunner);
-	const { stdout: topLevelStdout } = await execGit(
-		["rev-parse", "--show-toplevel"],
-		{ cwd: repoPath, timeout: 5_000 },
-		commandRunner,
-	);
-	const topLevel = topLevelStdout.toString().trim();
-	if (!topLevel) throw new Error(`Git returned an empty repository root for ${repoPath}`);
-	const commonDir = await strictGitCommonDir(repoPath, commandRunner);
-	const requestedIdentity = await canonicalizePath(requestedPath);
-	const protectedPaths = [repoPath, topLevel, commonDir];
-	if (path.basename(commonDir) === ".git") protectedPaths.push(path.dirname(commonDir));
-	for (const protectedPath of protectedPaths) {
-		if (await canonicalizePath(protectedPath) === requestedIdentity) {
-			throw new Error(`Refusing to clean up protected repository or Git common-root path: ${requestedPath}`);
-		}
-	}
-
-	const removalPath = await findRegisteredWorktreePath(registeredPaths, requestedPath);
-	if (!removalPath) {
-		throw new Error(`Refusing to clean up ${requestedPath}: path is not an exact registered linked worktree of ${repoPath}`);
-	}
-	const primaryPath = registeredPaths[0];
-	if (primaryPath && await canonicalizePath(primaryPath) === requestedIdentity) {
-		throw new Error(`Refusing to clean up main worktree: ${requestedPath}`);
-	}
-
-	let removalPathExists: boolean;
-	try {
-		removalPathExists = await pathExistsStrict(removalPath);
-	} catch (err) {
-		throw new Error(`Failed to inspect registered worktree ${removalPath}: ${gitErrorText(err)}`);
-	}
-
-	let adminPath: string | undefined;
-	if (removalPathExists) {
-		const { stdout } = await execGit(
-			["rev-parse", "--absolute-git-dir"],
-			{ cwd: removalPath, timeout: 5_000 },
-			commandRunner,
-		);
-		const candidate = stdout.toString().trim();
-		if (!candidate) {
-			throw new Error(`Git returned an empty linked-worktree admin directory for ${removalPath}`);
-		}
-		const adminParent = path.join(commonDir, "worktrees");
-		const candidateIdentity = await canonicalizePath(candidate);
-		const adminParentIdentity = await canonicalizePath(adminParent);
-		const commonDirIdentity = await canonicalizePath(commonDir);
-		if (path.dirname(candidateIdentity) !== adminParentIdentity || candidateIdentity === commonDirIdentity) {
-			throw new Error(`Invalid linked-worktree admin directory for ${removalPath}: ${candidate}`);
-		}
-
-		const adminBacklinkPath = path.join(candidate, "gitdir");
-		let adminBacklink: string;
-		try {
-			adminBacklink = (await fs.promises.readFile(adminBacklinkPath, "utf8")).trim();
-		} catch (err) {
-			throw new Error(`Failed to read linked-worktree admin backlink ${adminBacklinkPath}: ${gitErrorText(err)}`);
-		}
-		if (!adminBacklink) {
-			throw new Error(`Invalid empty linked-worktree admin backlink at ${adminBacklinkPath}`);
-		}
-		const resolvedBacklink = path.isAbsolute(adminBacklink)
-			? adminBacklink
-			: path.resolve(candidate, adminBacklink);
-		const expectedBacklink = path.join(removalPath, ".git");
-		if (await canonicalizePath(resolvedBacklink) !== await canonicalizePath(expectedBacklink)) {
-			throw new Error(`Invalid linked-worktree admin backlink for ${removalPath}: ${adminBacklink}`);
-		}
-		adminPath = candidate;
-	}
-	return { removalPath, adminPath };
 }
 
 /**
@@ -1459,60 +1303,33 @@ export async function cleanupWorktree(
 	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<void> {
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
-	if (!await pathExists(repoPath)) {
-		console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
-		return;
-	}
-	const ownership = await proveCleanupWorktreeOwnership(repoPath, worktreePath, commandRunner);
-	const removalPath = ownership.removalPath;
-	let removalError: unknown;
 
 	try {
-		// Git requires the spelling it published in worktree-list output on hosts
-		// where a persisted short path and Git's long path name the same directory.
-		await runGit(["worktree", "remove", removalPath, "--force"], {
+		// Operation first: a successful Git removal needs no preliminary path
+		// probe, and a missing worktree is handled by the targeted fallback below.
+		await runGit(["worktree", "remove", worktreePath, "--force"], {
 			cwd: repoPath,
 		});
-	} catch (err) {
-		removalError = err;
-		// Only metadata resolved from this exact registered linked worktree is a
-		// safe recursive fallback target. Never derive an admin child by basename.
-		if (ownership.adminPath) {
-			try { await removeTargetedTree(ownership.adminPath); } catch { /* verified below */ }
+	} catch {
+		// Preserve the old missing-repository warning/early return without making
+		// every successful cleanup pay a check-then-act race.
+		if (!await pathExists(repoPath)) {
+			console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
+			return;
 		}
-	}
 
-	// Ownership was proven before Git mutation, so the filesystem fallback may
-	// remove only Git's matched spelling. Never substitute a caller spelling,
-	// root-containment guess, or blanket worktree prune.
-	try { await removeTargetedTree(removalPath); } catch { /* verified below */ }
-
-	let directoryRemains: boolean;
-	let adminRemains: boolean;
-	try {
-		directoryRemains = await pathExistsStrict(removalPath);
-		adminRemains = ownership.adminPath ? await pathExistsStrict(ownership.adminPath) : false;
-	} catch (err) {
-		throw new Error(`Failed to verify worktree cleanup for ${worktreePath}: ${gitErrorText(err)}`);
-	}
-
-	let remainingRegisteredPath: string | undefined;
-	try {
-		remainingRegisteredPath = await findRegisteredWorktreePath(
-			await listRegisteredWorktreePaths(repoPath, commandRunner),
-			removalPath,
-		);
-	} catch (err) {
-		throw new Error(`Failed to verify worktree cleanup for ${worktreePath}: ${gitErrorText(err)}`);
-	}
-	if (remainingRegisteredPath || directoryRemains || adminRemains) {
-		const detail = [
-			remainingRegisteredPath ? `Git registration remains at ${remainingRegisteredPath}` : "",
-			directoryRemains ? `directory remains at ${removalPath}` : "",
-			adminRemains ? `admin directory remains at ${ownership.adminPath}` : "",
-			removalError ? `git remove failed: ${gitErrorText(removalError)}` : "",
-		].filter(Boolean).join("; ");
-		throw new Error(`Failed to clean up worktree ${worktreePath}: ${detail}`);
+		// If remove fails, clean up the admin entry for this specific worktree
+		// (NOT a blanket prune — that could damage other worktrees whose
+		// directories exist but have broken .git metadata). `basename` keeps the
+		// target to one direct admin child; an empty/root basename removes nothing.
+		const trimmedWorktreePath = worktreePath.trim();
+		const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
+			? path.basename(path.resolve(trimmedWorktreePath))
+			: "";
+		if (safeName) {
+			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+			try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
+		}
 	}
 
 	if (deleteBranch && branchName) {
