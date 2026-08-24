@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.js";
+import { sameFileIdentity, type AsyncTreeStats } from "../../src/server/agent/bounded-async-work.js";
 import { isWorktreePathReferencedByLiveSessionForCleanup } from "../../src/server/agent/worktree-reference-guard.js";
 import { cleanupWorktree } from "../../src/server/skills/git.js";
 
@@ -74,6 +75,19 @@ async function registeredWorktreePaths(repo: string): Promise<string[]> {
 
 async function removeFixture(root: string): Promise<void> {
 	await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+}
+
+async function recreateWithDistinctGeneration(worktree: string, original: AsyncTreeStats): Promise<AsyncTreeStats> {
+	for (let attempt = 0; attempt < 8; attempt++) {
+		await fs.promises.mkdir(worktree);
+		const replacement = await fs.promises.lstat(worktree);
+		if (!sameFileIdentity(original, replacement)) return replacement;
+		await fs.promises.rmdir(worktree);
+		// Consume promptly recycled directory identities before retrying the exact
+		// pathname so the fixture authoritatively establishes an ABA replacement.
+		await fs.promises.mkdir(`${worktree}-generation-${attempt}`);
+	}
+	throw new Error(`fixture could not establish a distinct directory generation at ${worktree}`);
 }
 
 describe("cleanupWorktree filesystem aliases", () => {
@@ -365,9 +379,10 @@ describe("cleanupWorktree filesystem aliases", () => {
 		}
 	});
 
-	it("removes ordinary residue after Git succeeds and fences absence before branch deletion", async () => {
+	it("removes ordinary same-generation residue without porcelain before deleting the branch", async () => {
 		const fixture = await createFixture("ordinary-residue-success", "lexical");
 		try {
+			const capturedGeneration = await fs.promises.lstat(fixture.worktree);
 			let listCalls = 0;
 			let branchDeleteCalls = 0;
 			let branchDeleteObservedAbsent = false;
@@ -375,10 +390,12 @@ describe("cleanupWorktree filesystem aliases", () => {
 				execFile: async (file, args, options) => {
 					if (args[0] === "worktree" && args[1] === "list") listCalls += 1;
 					if (args[0] === "worktree" && args[1] === "remove") {
-						const result = await realCommandRunner.execFile(file, args, options);
-						await fs.promises.mkdir(fixture.worktree, { recursive: true });
+						// Model Git dropping registration while the original checkout
+						// generation remains as hosted-runner filesystem residue.
+						await fs.promises.rm(fixture.adminPath, { recursive: true, force: true });
+						expect(sameFileIdentity(capturedGeneration, await fs.promises.lstat(fixture.worktree))).toBe(true);
 						await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "residue\n");
-						return result;
+						return { stdout: "", stderr: "" };
 					}
 					if (args[0] === "branch" && args[1] === "-D") {
 						branchDeleteCalls += 1;
@@ -407,6 +424,47 @@ describe("cleanupWorktree filesystem aliases", () => {
 		}
 	});
 
+	it("preserves an ordinary ABA replacement and branch without porcelain", async () => {
+		const fixture = await createFixture("ordinary-aba-replacement", "lexical");
+		try {
+			const capturedGeneration = await fs.promises.lstat(fixture.worktree);
+			let replacementGeneration: AsyncTreeStats | undefined;
+			let listCalls = 0;
+			let branchDeleteCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (args[0] === "worktree" && args[1] === "list") listCalls += 1;
+					if (args[0] === "worktree" && args[1] === "remove") {
+						const result = await realCommandRunner.execFile(file, args, options);
+						replacementGeneration = await recreateWithDistinctGeneration(fixture.worktree, capturedGeneration);
+						await fs.promises.writeFile(path.join(fixture.worktree, "replacement.txt"), "replacement\n");
+						return result;
+					}
+					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await expect(cleanupWorktree(
+				fixture.repo,
+				fixture.worktree,
+				fixture.branch,
+				true,
+				runner,
+				{ skipRemotePush: true },
+			)).rejects.toThrow(/directory changed during traversal/i);
+
+			expect(replacementGeneration).toBeDefined();
+			expect(sameFileIdentity(capturedGeneration, replacementGeneration!)).toBe(false);
+			expect(listCalls).toBe(0);
+			expect(branchDeleteCalls).toBe(0);
+			expect(await fs.promises.readFile(path.join(fixture.worktree, "replacement.txt"), "utf8")).toBe("replacement\n");
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
 	it("retains the branch when ordinary residual recovery fails", async () => {
 		const fixture = await createFixture("ordinary-residue-failure", "lexical");
 		const realRename = fs.promises.rename.bind(fs.promises);
@@ -423,10 +481,9 @@ describe("cleanupWorktree filesystem aliases", () => {
 				execFile: async (file, args, options) => {
 					if (args[0] === "worktree" && args[1] === "list") listCalls += 1;
 					if (args[0] === "worktree" && args[1] === "remove") {
-						const result = await realCommandRunner.execFile(file, args, options);
-						await fs.promises.mkdir(fixture.worktree, { recursive: true });
+						await fs.promises.rm(fixture.adminPath, { recursive: true, force: true });
 						await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "residue\n");
-						return result;
+						return { stdout: "", stderr: "" };
 					}
 					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
 					return realCommandRunner.execFile(file, args, options);
