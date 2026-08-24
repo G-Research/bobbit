@@ -126,6 +126,11 @@ describe("native CI qualification workflows", () => {
 		assert.equal(unitGates.length, 1, "workflow must run the unit suite once");
 		assert.equal(steps[typeCheckIndex + 1]?.name, "Unit gate", "unit gate must start immediately after type-checking");
 		assert.equal(unitGates[0]?.run, "npm run test:unit", "branch checks use the normal Vitest retry policy");
+		assert.deepEqual(
+			unitGates[0]?.env,
+			{ VITEST_MAX_WORKERS: "${{ runner.os == 'Windows' && '2' || '' }}" },
+			"hosted Windows must use two Vitest workers while an empty non-Windows override retains the normal fixed cap",
+		);
 		assert.equal(
 			steps.some((step) => step.run?.includes("test:affected")),
 			false,
