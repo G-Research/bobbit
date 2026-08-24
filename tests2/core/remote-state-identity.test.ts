@@ -7,6 +7,7 @@ import {
 	normalizePullRequestIdentity,
 	normalizeRemoteIdentity,
 	parseTrustedGithubRemote,
+	parseUntrustedGithubRemoteCandidate,
 	RemoteStateCoordinator,
 } from "../../src/server/remote-state-coordinator.ts";
 
@@ -78,7 +79,20 @@ describe("remote state canonical identity", () => {
 		);
 	});
 
-	it("rejects trusted-looking substrings, extra paths, and encoded separators", () => {
+	it("separates structural parsing from the unchanged list trust gate", () => {
+		assert.deepEqual(parseUntrustedGithubRemoteCandidate("https://GHE.Example.Test/Acme/Widget.git"), {
+			host: "ghe.example.test",
+			owner: "acme",
+			repository: "widget",
+		});
+		assert.equal(parseTrustedGithubRemote("https://ghe.example.test/acme/widget.git"), undefined);
+		assert.deepEqual(
+			parseTrustedGithubRemote("https://ghe.example.test/acme/widget.git", ["ghe.example.test"]),
+			parseUntrustedGithubRemoteCandidate("https://ghe.example.test/acme/widget.git"),
+		);
+	});
+
+	it("preserves every malformed remote rejection for structural candidates", () => {
 		const rejected = [
 			"https://evil.example/a/https://github.com/acme/widget.git",
 			"ssh://git@evil.example/a/git@github.com:acme/widget.git",
@@ -89,8 +103,24 @@ describe("remote state canonical identity", () => {
 			"https://github.com/acme/widget%252Fother.git",
 			"https://github.com/acme/widget.git?token=secret",
 			"git@github.com:acme%2Fother/widget.git",
+			"ssh://root@ghe.example.test/acme/widget.git",
+			"file:///tmp/acme/widget.git",
+			"https://ghe.example.test/acme/..",
 		];
-		for (const remote of rejected) assert.equal(parseTrustedGithubRemote(remote), undefined, remote);
+		for (const remote of rejected) {
+			assert.equal(parseUntrustedGithubRemoteCandidate(remote), undefined, remote);
+			assert.equal(parseTrustedGithubRemote(remote, ["ghe.example.test"]), undefined, remote);
+		}
+	});
+
+	it("continues rejecting structurally valid but unlisted hosts on the list path", () => {
+		const remote = "https://evil.example/acme/widget.git";
+		assert.deepEqual(parseUntrustedGithubRemoteCandidate(remote), {
+			host: "evil.example",
+			owner: "acme",
+			repository: "widget",
+		});
+		assert.equal(parseTrustedGithubRemote(remote), undefined);
 	});
 
 	it("canonicalizes Windows local paths", () => {
