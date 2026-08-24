@@ -6638,13 +6638,18 @@ export class SessionManager {
 		this.packLocalDataBindingsResolver = resolver ?? null;
 	}
 
-	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
-		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? []);
+	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string, selectedToolManager?: ToolManager): ReturnType<MarketplacePiExtensionResolver> {
+		const toolManager = selectedToolManager ?? this.getToolManagerForProject(projectId);
+		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }, toolManager) ?? []);
 	}
 
-	private resolveMarketplacePiExtensionArgs(projectId?: string, cwd?: string): MarketplacePiExtensionActivation {
-		const activation = resolveMarketplacePiExtensionActivation((scope) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd), projectId, cwd);
-		return activation;
+	private resolveMarketplacePiExtensionArgs(projectId: string | undefined, cwd: string | undefined, toolManager: ToolManager | undefined): MarketplacePiExtensionActivation {
+		return resolveMarketplacePiExtensionActivation(
+			(scope, selectedToolManager) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd, selectedToolManager),
+			projectId,
+			cwd,
+			toolManager,
+		);
 	}
 
 	private piExtensionDiagnosticKeys(extension: Pick<RuntimePiExtensionInfo, "entryPath" | "listName" | "origin">): string[] {
@@ -6963,6 +6968,10 @@ export class SessionManager {
 		const toolManager = this.getToolManagerForProject(projectId);
 		const groupPolicyStore = this.getGroupPolicyProviderForProject(projectId);
 
+		// Pi discovery registers names into this exact manager before any policy or
+		// guard snapshot is computed. Reuse the same contribution snapshot for argv.
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd, toolManager);
+
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
 			? writeMcpProxyExtensions(mcpManager, flatNames, role, toolManager, groupPolicyStore, disabledTools, toolScope)
@@ -6970,7 +6979,6 @@ export class SessionManager {
 
 		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(filteredAllowed, toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
-		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 
