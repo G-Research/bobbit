@@ -2729,7 +2729,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// persists or broadens githubTrustedHosts. Resolve spawn and environment per
 	// probe so injected runners and live ambient-token refusal remain authoritative.
 	const githubHostCredentialTrust = new GithubHostCredentialTrust({
-		resolveSpawn: () => gatewayDeps.commandRunner.spawn,
+		resolveCommandRunner: () => gatewayDeps.commandRunner,
 		clock: gatewayDeps.clock,
 		getEnv: () => process.env,
 	});

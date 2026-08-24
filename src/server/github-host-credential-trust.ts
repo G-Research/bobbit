@@ -1,20 +1,22 @@
-import type { ChildProcess, SpawnOptions } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TextDecoder } from "node:util";
-import { realClock, type Clock, type TimerHandle } from "./gateway-deps.js";
+import { realClock, type Clock, type CommandRunner, type TimerHandle } from "./gateway-deps.js";
+import { ownedTreeSpawnOptions, type OwnedTreeControl } from "./owned-tree-command-spawn.js";
 import { normalizeGithubHost } from "./remote-state-coordinator.js";
 
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_KILL_GRACE_MS = 500;
+const PROBE_TREE_SETTLE_MS = 1_500;
+const PROBE_CLEANUP_RETRY_MS = 100;
 const PROBE_MAX_OUTPUT_BYTES = 8 * 1024;
 const GITHUB_COM_CLASS_TOKENS = ["GH_TOKEN", "GITHUB_TOKEN"] as const;
 const ENTERPRISE_SERVER_CLASS_TOKENS = ["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"] as const;
 
 export type CredentialProbe = (host: string) => Promise<boolean>;
-export type SpawnLike = (file: string, args: readonly string[], options: SpawnOptions) => ChildProcess;
-export type SpawnResolver = () => SpawnLike | undefined;
+export type CommandRunnerResolver = () => CommandRunner | undefined;
 export type EnvironmentResolver = () => Readonly<Record<string, string | undefined>>;
 
 type VerdictEntry =
@@ -24,7 +26,7 @@ type VerdictEntry =
 
 export interface GithubHostCredentialTrustOptions {
 	probe?: CredentialProbe;
-	resolveSpawn?: SpawnResolver;
+	resolveCommandRunner?: CommandRunnerResolver;
 	clock?: Clock;
 	getEnv?: EnvironmentResolver;
 	warn?: (message: string) => void;
@@ -45,9 +47,9 @@ export class GithubHostCredentialTrust {
 	private generation = 0;
 
 	constructor(options: GithubHostCredentialTrustOptions = {}) {
-		const resolveSpawn = options.resolveSpawn ?? (() => undefined);
+		const resolveCommandRunner = options.resolveCommandRunner ?? (() => undefined);
 		const clock = options.clock ?? realClock;
-		this.probe = options.probe ?? (host => probeLocalGitCredential(host, resolveSpawn(), clock));
+		this.probe = options.probe ?? (host => probeLocalGitCredential(host, resolveCommandRunner(), clock));
 		this.getEnv = options.getEnv ?? (() => process.env);
 		this.warn = options.warn ?? (message => console.warn(message));
 	}
@@ -254,8 +256,10 @@ class CredentialRecordParser {
 	}
 }
 
-function probeLocalGitCredential(host: string, spawn: SpawnLike | undefined, clock: Clock): Promise<boolean> {
-	if (!spawn) return Promise.resolve(false);
+function probeLocalGitCredential(host: string, runner: CommandRunner | undefined, clock: Clock): Promise<boolean> {
+	// Capability is checked before spawning. A runner that cannot synchronously
+	// hand back an owned tree is never allowed to start a credential helper.
+	if (!runner?.spawn || runner.supportsOwnedTreeSpawn !== true) return Promise.resolve(false);
 
 	let cwd: string;
 	try {
@@ -265,75 +269,123 @@ function probeLocalGitCredential(host: string, spawn: SpawnLike | undefined, clo
 	}
 
 	return new Promise<boolean>((resolve) => {
+		let tree: OwnedTreeControl | undefined;
 		let child: ChildProcess;
 		try {
-			child = spawn("git", ["credential", "fill"], {
+			child = runner.spawn!("git", ["credential", "fill"], ownedTreeSpawnOptions({
 				cwd,
 				env: probeEnvironment(tmpdir()),
 				windowsHide: true,
 				stdio: ["pipe", "pipe", "ignore"],
-			});
+			}, clock, control => {
+				if (tree) throw new Error("Owned tree control was bound more than once");
+				tree = control;
+			}));
 		} catch {
 			cleanupProbeDirectory(cwd);
 			resolve(false);
 			return;
 		}
+		if (!tree) {
+			// A capability-bearing injected runner that ignored the branded handoff is
+			// untrusted. There is no safe root-PID fallback or post-exit tree scan.
+			cleanupProbeDirectory(cwd);
+			resolve(false);
+			return;
+		}
 
+		const ownedTree = tree;
 		const parser = new CredentialRecordParser(host);
 		let settled = false;
-		let closed = false;
-		let killTimer: TimerHandle | undefined;
-		const cleanup = () => cleanupProbeDirectory(cwd);
-		const settle = (result: boolean, keepKillTimer = false) => {
+		let aborting = false;
+		let ownershipEstablished = false;
+		let requestWritten = false;
+		let closeResult: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+		let closeHandled = false;
+		let timeoutTimer: TimerHandle | undefined;
+
+		const cleanupAfterTreeBoundary = () => {
+			if (cleanupProbeDirectory(cwd)) return;
+			const retry = clock.setTimeout(() => { cleanupProbeDirectory(cwd); }, PROBE_CLEANUP_RETRY_MS);
+			unref(retry);
+		};
+		const settle = (result: boolean) => {
 			if (settled) return;
 			settled = true;
-			clock.clearTimeout(timeoutTimer);
-			if (killTimer && !keepKillTimer) clock.clearTimeout(killTimer);
-			cleanup();
+			if (timeoutTimer) clock.clearTimeout(timeoutTimer);
+			cleanupAfterTreeBoundary();
 			resolve(result);
 		};
-		const abort = () => {
-			if (settled) return;
-			try { child.kill("SIGTERM"); } catch { /* fail closed below */ }
-			killTimer = clock.setTimeout(() => {
-				if (!closed) {
-					try { child.kill("SIGKILL"); } catch { /* already gone */ }
-				}
-				cleanup();
-			}, PROBE_KILL_GRACE_MS);
-			unref(killTimer);
-			settle(false, true);
+		const abort = async () => {
+			if (settled || aborting) return;
+			aborting = true;
+			if (timeoutTimer) clock.clearTimeout(timeoutTimer);
+			try { ownedTree.killTree("SIGTERM", PROBE_KILL_GRACE_MS); } catch { /* fail closed */ }
+			let completed = false;
+			try { completed = await ownedTree.waitForTreeExit(PROBE_KILL_GRACE_MS); } catch { /* escalate */ }
+			if (!completed) {
+				try { ownedTree.killTree("SIGKILL"); } catch { /* fail closed */ }
+				try { await ownedTree.waitForTreeExit(PROBE_TREE_SETTLE_MS); } catch { /* bounded failure */ }
+			}
+			settle(false);
 		};
-		const timeoutTimer = clock.setTimeout(abort, PROBE_TIMEOUT_MS);
+		const finishClose = async () => {
+			if (settled || aborting || closeHandled || !ownershipEstablished || !requestWritten || !closeResult) return;
+			closeHandled = true;
+			if (timeoutTimer) clock.clearTimeout(timeoutTimer);
+			const exitedCleanly = closeResult.code === 0 && closeResult.signal == null;
+			if (exitedCleanly && !parser.finish()) {
+				closeHandled = false;
+				await abort();
+				return;
+			}
+			let completed = false;
+			try { completed = await ownedTree.waitForTreeExit(PROBE_TREE_SETTLE_MS); } catch { /* fail closed */ }
+			settle(exitedCleanly && completed);
+		};
+
+		timeoutTimer = clock.setTimeout(() => { void abort(); }, PROBE_TIMEOUT_MS);
 		unref(timeoutTimer);
 
+		child.on("error", () => { void abort(); });
+		child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+			closeResult = { code, signal };
+			void finishClose();
+		});
 		if (!child.stdout || !child.stdin) {
-			abort();
+			void abort();
 			return;
 		}
 		child.stdout.on("data", (chunk: Buffer | string) => {
-			if (!settled && !parser.push(chunk)) abort();
+			if (!settled && !aborting && !parser.push(chunk)) void abort();
 		});
-		child.stdout.on("error", abort);
-		child.on("error", abort);
-		child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
-			closed = true;
-			if (killTimer) clock.clearTimeout(killTimer);
-			if (settled) {
-				cleanup();
+		child.stdout.on("error", () => { void abort(); });
+		child.stdin.on("error", () => { void abort(); });
+
+		void ownedTree.ownershipReady.then(() => {
+			if (settled || aborting) return;
+			ownershipEstablished = true;
+			if (closeResult) {
+				// A helper that completed before receiving our exact request cannot vouch
+				// for the authority, even if its unsolicited output looks well formed.
+				void abort();
 				return;
 			}
-			settle(code === 0 && signal == null && parser.finish());
-		});
-		child.stdin.on("error", abort);
-		try {
-			child.stdin.end(`url=https://${host}\n\n`);
-		} catch {
-			abort();
-		}
+			try {
+				child.stdin!.end(`url=https://${host}\n\n`);
+				requestWritten = true;
+			} catch {
+				void abort();
+			}
+		}, () => { void abort(); });
 	});
 }
 
-function cleanupProbeDirectory(cwd: string): void {
-	try { rmSync(cwd, { recursive: true, force: true }); } catch { /* best-effort retry occurs after kill */ }
+function cleanupProbeDirectory(cwd: string): boolean {
+	try {
+		rmSync(cwd, { recursive: true, force: true });
+		return true;
+	} catch {
+		return false;
+	}
 }

@@ -4,63 +4,85 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import type { Clock, TimerHandle } from "../../src/server/gateway-deps.js";
-import {
-	GithubHostCredentialTrust,
-	type SpawnLike,
-} from "../../src/server/github-host-credential-trust.js";
+import type { Clock, CommandRunner, TimerHandle } from "../../src/server/gateway-deps.js";
+import { GithubHostCredentialTrust } from "../../src/server/github-host-credential-trust.js";
+import { createCommandSpawnAdapter, type OwnedTreeControl } from "../../src/server/owned-tree-command-spawn.js";
 
 interface FakeHelper {
-	spawn: SpawnLike;
+	runner: CommandRunner;
 	calls: Array<{ file: string; args: string[]; options: SpawnOptions }>;
 	requests: string[];
 	kills: string[];
+	waits: number[];
 }
 
 function fakeHelper(
 	output: string | Buffer | readonly (string | Buffer)[],
-	options: { close?: boolean; code?: number; spawnError?: Error; stdoutError?: Error } = {},
+	options: {
+		close?: boolean;
+		code?: number;
+		spawnError?: Error;
+		stdoutError?: Error;
+		ownershipReady?: Promise<void>;
+		waitResults?: Array<boolean | Promise<boolean>>;
+	} = {},
 ): FakeHelper {
 	const calls: FakeHelper["calls"] = [];
 	const requests: string[] = [];
 	const kills: string[] = [];
+	const waits: number[] = [];
+	const waitResults = [...(options.waitResults ?? [true])];
+	const ownedSpawn = ((file: string, args: readonly string[], spawnOptions: SpawnOptions & { clock?: Clock }) => {
+		if (options.spawnError) throw options.spawnError;
+		calls.push({ file, args: [...args], options: spawnOptions });
+		const child = new EventEmitter() as ChildProcess;
+		const stdout = new PassThrough();
+		const stdin = new PassThrough();
+		stdin.on("data", chunk => requests.push(String(chunk)));
+		Object.assign(child, {
+			stdout,
+			stdin,
+			kill() { throw new Error("credential probe must never kill the root directly"); },
+		});
+		const control: OwnedTreeControl = {
+			child,
+			ownershipReady: options.ownershipReady ?? Promise.resolve(),
+			killTree(signal = "SIGTERM") { kills.push(signal); },
+			async waitForTreeExit(timeoutMs?: number) {
+				waits.push(timeoutMs ?? -1);
+				return await (waitResults.shift() ?? true);
+			},
+			killed: () => kills.length > 0,
+			timedOut: () => false,
+		} as OwnedTreeControl & { child: ChildProcess };
+		setImmediate(() => {
+			for (const chunk of Array.isArray(output) ? output : [output]) stdout.write(chunk);
+			if (options.stdoutError) {
+				stdout.emit("error", options.stdoutError);
+				child.emit("close", 1, null);
+				return;
+			}
+			if (options.close === false) return;
+			stdout.end();
+			child.emit("close", options.code ?? 0, null);
+		});
+		return control;
+	}) as any;
 	return {
 		calls,
 		requests,
 		kills,
-		spawn(file, args, spawnOptions) {
-			if (options.spawnError) throw options.spawnError;
-			calls.push({ file, args: [...args], options: spawnOptions });
-			const child = new EventEmitter() as ChildProcess;
-			const stdout = new PassThrough();
-			const stdin = new PassThrough();
-			stdin.on("data", chunk => requests.push(String(chunk)));
-			Object.assign(child, {
-				stdout,
-				stdin,
-				kill(signal?: string) {
-					kills.push(signal ?? "SIGTERM");
-					return true;
-				},
-			});
-			setImmediate(() => {
-				for (const chunk of Array.isArray(output) ? output : [output]) stdout.write(chunk);
-				if (options.stdoutError) {
-					stdout.emit("error", options.stdoutError);
-					child.emit("close", 1, null);
-					return;
-				}
-				if (options.close === false) return;
-				stdout.end();
-				child.emit("close", options.code ?? 0, null);
-			});
-			return child;
+		waits,
+		runner: {
+			execFile: async () => { throw new Error("unexpected execFile"); },
+			spawn: createCommandSpawnAdapter(() => { throw new Error("unexpected direct spawn"); }, ownedSpawn),
+			supportsOwnedTreeSpawn: true,
 		},
 	};
 }
 
 function subject(helper: FakeHelper, clock?: Clock): GithubHostCredentialTrust {
-	return new GithubHostCredentialTrust({ resolveSpawn: () => helper.spawn, clock, getEnv: () => ({}) });
+	return new GithubHostCredentialTrust({ resolveCommandRunner: () => helper.runner, clock, getEnv: () => ({}) });
 }
 
 function credential(host = "git.example.com", password = "fixture-secret"): string {
@@ -188,10 +210,61 @@ describe("Git credential probe", () => {
 		}
 	});
 
-	it("fails closed without spawn support or when injected spawn throws", async () => {
+	it("does not write the credential request before ownership is established", async () => {
+		let establishOwnership!: () => void;
+		const helper = fakeHelper(credential(), {
+			ownershipReady: new Promise<void>(resolve => { establishOwnership = resolve; }),
+		});
+		const verdict = subject(helper).isTrusted("git.example.com");
+		expect(helper.requests).toEqual([]);
+		establishOwnership();
+		await expect(verdict).resolves.toBe(true);
+		expect(helper.requests).toEqual(["url=https://git.example.com\n\n"]);
+	});
+
+	it("rejects unsolicited credential output from a helper that closes before ownership readiness", async () => {
+		let establishOwnership!: () => void;
+		const helper = fakeHelper(credential(), {
+			ownershipReady: new Promise<void>(resolve => { establishOwnership = resolve; }),
+		});
+		const verdict = subject(helper).isTrusted("git.example.com");
+		await new Promise(resolve => setImmediate(resolve));
+		expect(helper.requests).toEqual([]);
+		establishOwnership();
+		await expect(verdict).resolves.toBe(false);
+		expect(helper.requests).toEqual([]);
+		expect(helper.kills).toEqual(["SIGTERM"]);
+	});
+
+	it("fails closed without spawn, capability, synchronous binding, or ownership readiness", async () => {
 		await expect(new GithubHostCredentialTrust({ getEnv: () => ({}) }).isTrusted("git.example.com")).resolves.toBe(false);
 		const helper = fakeHelper("", { spawnError: new Error("fenced") });
 		await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(false);
+
+		const noCapability: CommandRunner = {
+			execFile: async () => ({ stdout: "", stderr: "" }),
+			spawn: helper.runner.spawn,
+		};
+		await expect(new GithubHostCredentialTrust({
+			resolveCommandRunner: () => noCapability,
+			getEnv: () => ({}),
+		}).isTrusted("git.example.com")).resolves.toBe(false);
+		expect(helper.calls).toHaveLength(0);
+
+		const unbound: CommandRunner = {
+			execFile: async () => ({ stdout: "", stderr: "" }),
+			spawn: () => new EventEmitter() as ChildProcess,
+			supportsOwnedTreeSpawn: true,
+		};
+		await expect(new GithubHostCredentialTrust({
+			resolveCommandRunner: () => unbound,
+			getEnv: () => ({}),
+		}).isTrusted("git.example.com")).resolves.toBe(false);
+
+		const rejected = fakeHelper(credential(), { ownershipReady: Promise.reject(new Error("ownership secret")) });
+		await expect(subject(rejected).isTrusted("git.example.com")).resolves.toBe(false);
+		expect(rejected.requests).toEqual([]);
+		expect(rejected.kills).toEqual(["SIGTERM"]);
 	});
 
 	it("never logs credential output or helper error values", async () => {
@@ -250,34 +323,56 @@ describe("Git credential probe", () => {
 		await expect(subject(trailing).isTrusted("git.example.com")).resolves.toBe(false);
 	});
 
-	it("rejects output beyond the byte cap in one chunk or across chunks", async () => {
+	it("rejects bounded output only after the owned descendant tree is reaped", async () => {
 		const padding = "field=" + "x".repeat(9 * 1024);
 		for (const output of [
 			`${credential()}${padding}\n`,
 			["host=git.example.com\npassword=secret\n", "field=", "x".repeat(9 * 1024)],
 		]) {
-			const helper = fakeHelper(output);
+			const helper = fakeHelper(output, { waitResults: [false, true] });
 			await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(false);
-			expect(helper.kills).toEqual(["SIGTERM"]);
+			expect(helper.kills).toEqual(["SIGTERM", "SIGKILL"]);
+			expect(helper.waits).toEqual([500, 1_500]);
 		}
 	});
 
-	it("times out, sends TERM, escalates a wedged process to KILL, and never kills normal success", async () => {
+	it("waits for tree completion, escalates wedged descendants, and never kills normal success", async () => {
 		const clock = manualClock();
-		const wedged = fakeHelper("host=git.example.com\n", { close: false });
+		const wedged = fakeHelper("host=git.example.com\n", { close: false, waitResults: [false, true] });
 		const verdict = subject(wedged, clock).isTrusted("git.example.com");
 		await new Promise(resolve => setImmediate(resolve));
 		clock.runPending();
 		await expect(verdict).resolves.toBe(false);
-		expect(wedged.kills).toEqual(["SIGTERM"]);
-		clock.runPending();
 		expect(wedged.kills).toEqual(["SIGTERM", "SIGKILL"]);
+		expect(wedged.waits).toEqual([500, 1_500]);
 
 		const normalClock = manualClock();
 		const normal = fakeHelper(credential());
 		await expect(subject(normal, normalClock).isTrusted("git.example.com")).resolves.toBe(true);
 		normalClock.runPending();
 		expect(normal.kills).toEqual([]);
+		expect(normal.waits).toEqual([1_500]);
+	});
+
+	it("keeps the verdict and temporary directory pending until the owned tree completes", async () => {
+		let completeTree!: (completed: boolean) => void;
+		const helper = fakeHelper(credential(), {
+			waitResults: [new Promise<boolean>(resolve => { completeTree = resolve; })],
+		});
+		let settled = false;
+		const verdict = subject(helper).isTrusted("git.example.com").finally(() => { settled = true; });
+		await new Promise(resolve => setImmediate(resolve));
+		expect(settled).toBe(false);
+		expect(existsSync(String(helper.calls[0].options.cwd))).toBe(true);
+		completeTree(true);
+		await expect(verdict).resolves.toBe(true);
+		expect(existsSync(String(helper.calls[0].options.cwd))).toBe(false);
+	});
+
+	it("fails closed when the owned-tree completion boundary cannot be confirmed", async () => {
+		const helper = fakeHelper(credential(), { waitResults: [false] });
+		await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(false);
+		expect(helper.kills).toEqual([]);
 	});
 });
 
