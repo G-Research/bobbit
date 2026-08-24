@@ -17,6 +17,8 @@ const {
 } = await import("../../src/server/mcp/mcp-manager.ts");
 const { parseMcpToolName } = await import("../../src/server/mcp/mcp-meta.ts");
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { ToolManager, __resetToolScanCache } = await import("../../src/server/agent/tool-manager.ts");
+const { scopedToolContext } = await import("../../src/server/agent/session-setup.ts");
 const { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } = await import("../../src/server/agent/mcp-gateway-runtime-identity.ts");
 const { ProjectConfigStore } = await import("../../src/server/agent/project-config-store.ts");
 const { ProjectContextManager } = await import("../../src/server/agent/project-context-manager.ts");
@@ -896,6 +898,94 @@ describe("SessionManager scoped MCP manager creation", () => {
     const projectStateDir = path.join(projectRoot, ".bobbit", "state");
     assert.equal(fs.existsSync(path.join(projectStateDir, "goals.sqlite")), false);
     assert.equal(fs.existsSync(path.join(projectStateDir, "tasks.sqlite")), false);
+  });
+
+  it("routes project-only marketplace tools through pipeline, policy, docs, and activation", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-project-tool-route-"));
+    const registryStateDir = path.join(root, "state");
+    const projectRoot = path.join(root, "project");
+    const projectConfigDir = path.join(projectRoot, ".bobbit", "config");
+    const serverConfigDir = path.join(root, "server-config");
+    const marketToolsDir = path.join(projectConfigDir, "market-packs", "project-scanner", "tools");
+    const toolGroupDir = path.join(marketToolsDir, "project-scanner");
+    fs.mkdirSync(toolGroupDir, { recursive: true });
+    fs.mkdirSync(registryStateDir, { recursive: true });
+    fs.mkdirSync(serverConfigDir, { recursive: true });
+    fs.writeFileSync(path.join(toolGroupDir, "scan_reconcile.yaml"), [
+      "name: project_scan_reconcile",
+      "description: Reconcile project scanner coverage.",
+      "group: Project Scanner",
+      "provider:",
+      "  type: bobbit-extension",
+      "  extension: extension.ts",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(toolGroupDir, "extension.ts"), "export default function extension() {}\n");
+
+    const projectId = "project-tool-route";
+    fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([{
+      id: projectId,
+      name: "Project Tool Route",
+      rootPath: projectRoot,
+      createdAt: Date.now(),
+      colorLight: "#3b82f6",
+      colorDark: "#60a5fa",
+    }]));
+
+    const registry = new ProjectRegistry(registryStateDir);
+    const pcm = new ProjectContextManager(registry, {
+      goalPersistence: "json",
+      taskPersistence: "json",
+      gatePersistence: "json",
+    });
+    const serverToolManager = new ToolManager(serverConfigDir);
+    const sessionManager = new SessionManager({
+      projectContextManager: pcm,
+      toolManager: serverToolManager,
+    });
+
+    try {
+      const projectContext = pcm.getOrCreate(projectId);
+      assert.ok(projectContext);
+      const projectToolManager = projectContext.toolManager;
+      projectToolManager.setMarketToolRootsProvider(() => [marketToolsDir]);
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "allow");
+      __resetToolScanCache();
+
+      const pipeline = sessionManager.buildPipelineContext(projectId, projectRoot);
+      assert.equal(pipeline.toolManager, projectToolManager);
+      assert.equal(pipeline.groupPolicyStore, projectContext.toolGroupPolicyStore);
+      assert.notEqual(projectToolManager, serverToolManager);
+      assert.equal((sessionManager as any).getToolManagerForProject(undefined), serverToolManager,
+        "projectless sessions retain the server ToolManager");
+      assert.equal(serverToolManager.getToolByName("project_scan_reconcile"), undefined);
+      assert.ok(projectToolManager.getToolByName("project_scan_reconcile"));
+
+      const role = { name: "scanner", toolPolicies: { "Project Scanner": "allow" } };
+      const effective = (sessionManager as any).resolveEffectiveAllowedTools(role, projectId, projectRoot);
+      assert.ok(effective.some((tool: { name: string }) => tool.name === "project_scan_reconcile"));
+
+      const docs = projectToolManager.getToolDocsForPrompt(
+        ["project_scan_reconcile"],
+        path.join(root, "prompt-state"),
+        scopedToolContext(projectId, projectRoot),
+      );
+      assert.match(docs, /project_scan_reconcile/);
+      assert.doesNotMatch(serverToolManager.getToolDocsForPrompt(["project_scan_reconcile"]), /project_scan_reconcile/);
+
+      const activation = (sessionManager as any).buildToolActivationArgs(
+        "project-tool-session",
+        effective.filter((tool: { name: string }) => tool.name === "project_scan_reconcile"),
+        role,
+        projectRoot,
+        projectId,
+      );
+      const extensionPath = path.join(toolGroupDir, "extension.ts");
+      assert.ok(activation.args.includes(extensionPath), `expected callable activation to include ${extensionPath}`);
+    } finally {
+      await pcm.closeAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("fails closed for no-project MCP sessions without cwd/default fallback", async () => {
