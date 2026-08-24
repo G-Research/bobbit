@@ -240,9 +240,12 @@ describe("shared worktree guard reproductions", () => {
 	});
 
 	it("resolves only explicit aliases and fails closed when their identity is unavailable", async () => {
-		const candidate = path.join(stateRoot, "worktrees", "shared");
+		const fixtureRoot = path.join(stateRoot, "identity-fixture");
+		fs.mkdirSync(fixtureRoot, { recursive: true });
+		const canonicalRoot = await nativeRealpath(fixtureRoot);
+		const candidate = path.join(canonicalRoot, "worktrees", "shared");
 		const child = path.join(candidate, "packages", "api");
-		const distinct = path.join(stateRoot, "different");
+		const distinct = path.join(canonicalRoot, "different");
 		fs.mkdirSync(child, { recursive: true });
 		fs.mkdirSync(distinct, { recursive: true });
 		const candidateAlias = await traversableDotAlias(candidate);
@@ -251,12 +254,12 @@ describe("shared worktree guard reproductions", () => {
 
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: candidate }], { realpathNative }), true);
 		assert.equal(realpathNative.mock.calls.length, 0, "ordinary sync matches perform no native filesystem I/O");
-		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: path.join(stateRoot, "missing") }], { realpathNative }), false);
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: path.join(canonicalRoot, "missing") }], { realpathNative }), false);
 		assert.equal(realpathNative.mock.calls.length, 0, "ordinary missing mismatches perform no native filesystem I/O");
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: candidateAlias }], { realpathNative }), true);
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ repoWorktrees: { api: candidateAlias } }], { realpathNative }), true);
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ cwd: childAlias }], { realpathNative }), true);
-		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: explicitDotAlias(path.join(stateRoot, "other")) }], { realpathNative }), true,
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: explicitDotAlias(path.join(canonicalRoot, "other")) }], { realpathNative }), true,
 			"an unresolved explicit alias must conservatively preserve cleanup candidates");
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: await traversableDotAlias(distinct) }], { realpathNative }), false,
 			"proven-distinct alias identities remain cleanable");
@@ -302,15 +305,16 @@ describe("shared worktree guard reproductions", () => {
 	it("purging an archived multi-repo session must keep shared repoWorktrees and may clean unshared ones", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-purge-multi-"));
 		try {
-			const root = path.join(tmp, "project");
+			const canonicalRoot = await nativeRealpath(tmp);
+			const root = path.join(canonicalRoot, "project");
 			const api = path.join(root, "api");
 			const web = path.join(root, "web");
 			fs.mkdirSync(path.join(api, ".git"), { recursive: true });
 			fs.mkdirSync(path.join(web, ".git"), { recursive: true });
 
 			const branch = "session/shared-multi";
-			const apiWorktree = path.join(tmp, "project-wt", "session-shared", "api");
-			const webWorktree = path.join(tmp, "project-wt", "session-shared", "web");
+			const apiWorktree = path.join(canonicalRoot, "project-wt", "session-shared", "api");
+			const webWorktree = path.join(canonicalRoot, "project-wt", "session-shared", "web");
 			makeWorktree(api, apiWorktree);
 			makeWorktree(web, webWorktree);
 
@@ -320,11 +324,13 @@ describe("shared worktree guard reproductions", () => {
 				archivedAt: Date.now(),
 				repoPath: root,
 				branch,
-				worktreePath: path.join(tmp, "project-wt", "session-shared"),
+				worktreePath: path.join(canonicalRoot, "project-wt", "session-shared"),
 				repoWorktrees: { api: apiWorktree, web: webWorktree },
 			}));
+			const unrelatedCwd = path.join(canonicalRoot, "unrelated-live-cwd");
+			fs.mkdirSync(unrelatedCwd, { recursive: true });
 			store.put(makeSession("live-api-owner", {
-				cwd: path.join(tmp, "unrelated-live-cwd"),
+				cwd: unrelatedCwd,
 				branch: "session/live-api-owner",
 				repoWorktrees: { api: await traversableDotAlias(apiWorktree) },
 			}));
