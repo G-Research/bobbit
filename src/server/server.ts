@@ -3032,10 +3032,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const source = marketplaceSourceStore.getByUrl(sourceUrl);
 		return typeof source?.trustedAt === "string" && source.trustedAt.trim().length > 0;
 	};
-	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope) => {
+	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope, selectedToolManager) => {
 		const contributions: ResolvedPiExtensionContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
-		const scopedContext = piExtensionToolScopeContext(scope);
+		// Headquarters aliases server scope only when the selected manager is also
+		// the server manager. A project manager must retain the session's exact key.
+		const scopedContext = selectedToolManager === toolManager
+			? piExtensionToolScopeContext(scope)
+			: scopedToolContext(scope.projectId, scope.cwd);
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
 			const manifest = entry.manifest;
@@ -3096,7 +3100,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.warn(`[pi-extension] failed to load Marketplace pi extension contributions from ${entry.path}:`, (err as Error).message);
 			}
 		}
-		toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
+		// Discovery is part of session authorization: register names only into the
+		// exact manager that will compute this session's policy and guard surface.
+		selectedToolManager?.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
 		return contributions;
 	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
