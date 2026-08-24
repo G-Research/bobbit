@@ -36,6 +36,27 @@ async function authenticateMockProposalTools(
 	);
 }
 
+async function holdProposalStream(
+	page: import("@playwright/test").Page,
+	gateway: any,
+	type: string,
+): Promise<{ entered: Promise<unknown>; release: () => void }> {
+	const sessionId = await page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return state?.selectedSessionId as string | undefined;
+	});
+	const core = sessionId ? gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent : undefined;
+	if (!core || typeof core.armBarrier !== "function" || typeof core.waitForBarrier !== "function") {
+		throw new Error("proposal journey requires the in-process mock agent barrier seam");
+	}
+	const boundary = `proposal-stream:${type}:intermediate-delta`;
+	core.armBarrier(boundary);
+	return {
+		entered: Promise.resolve(core.waitForBarrier(boundary)),
+		release: () => { core.releaseBarrier(boundary); },
+	};
+}
+
 async function waitForProposalSlot(page: import("@playwright/test").Page, type: string): Promise<void> {
 	await page.waitForFunction(
 		(t: string) => {
@@ -175,38 +196,50 @@ test.describe("Journey: Proposals — behavioral", () => {
 		await expect(roleTab.locator(".goal-tab-dot")).toBeVisible({ timeout: 15_000 });
 	});
 
-	test("goal proposal streaming badge visible during STAY_BUSY stream then disappears", async ({ page }) => {
+	test("goal proposal streaming badge visible during STAY_BUSY stream then disappears", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
-		// Five paced deltas retain the partial-stream lifecycle while avoiding
-		// redundant idle time in this per-spec wall-budgeted journey.
+		const stream = await holdProposalStream(page, gateway, "goal");
 		await sendMessage(page, "STAY_BUSY:propose_goal:5:100");
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
-		await expect(badge).toBeVisible({ timeout: 15_000 });
+		try {
+			await stream.entered;
+			await expect(badge).toBeVisible({ timeout: 15_000 });
+		} finally {
+			stream.release();
+		}
 		await expect(badge).toBeHidden({ timeout: 20_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.remoteAgent?.state?.status ?? ""),
+			{ timeout: 15_000 },
+		).toBe("idle");
 	});
 
-	test("goal proposal submit disabled while streaming then enables", async ({ page }) => {
+	test("goal proposal submit disabled while streaming then enables", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
-		// Retain multiple streamed updates, but keep the deterministic fixture
-		// short enough for the journey's 60-second aggregate budget.
+		const stream = await holdProposalStream(page, gateway, "goal");
 		await sendMessage(page, "STAY_BUSY:propose_goal:5:100");
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
 		const submitWrap = page.locator('[data-testid="proposal-primary-submit"]').first();
-		await expect(submitWrap).toBeVisible({ timeout: 15_000 });
+		try {
+			await stream.entered;
+			await expect(submitWrap).toBeVisible({ timeout: 15_000 });
+			const submitBtn = submitWrap.locator("button").first();
+			await expect(badge).toBeVisible({ timeout: 15_000 });
+			await expect(submitBtn).toBeDisabled({ timeout: 15_000 });
+		} finally {
+			stream.release();
+		}
 		const submitBtn = submitWrap.locator("button").first();
-		await expect.poll(async () => {
-			const [badgeVisible, disabled] = await Promise.all([
-				badge.isVisible().catch(() => false),
-				submitBtn.isDisabled().catch(() => false),
-			]);
-			return badgeVisible && disabled;
-		}, { timeout: 15_000, intervals: [50, 100, 150] }).toBe(true);
 		await expect(badge).toBeHidden({ timeout: 20_000 });
 		await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.remoteAgent?.state?.status ?? ""),
+			{ timeout: 15_000 },
+		).toBe("idle");
 	});
 
 	test("role proposal pane visible after clicking role tab", async ({ page }) => {
@@ -245,27 +278,32 @@ test.describe("Journey: Proposals — behavioral", () => {
 		);
 	});
 
-	test("goal proposal dismiss during streaming sticks after stream ends", async ({ page }) => {
+	test("goal proposal dismiss during streaming sticks after stream ends", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
-		// Enough updates to exercise a live, growing stream and its terminal
-		// restore path without spending three seconds in the mock fixture.
+		const stream = await holdProposalStream(page, gateway, "goal");
 		await sendMessage(page, "STAY_BUSY:propose_goal:8:100");
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 15_000 });
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
-		await expect(badge).toBeVisible({ timeout: 15_000 });
-		const dismissBtn = page.locator("button").filter({ hasText: "Dismiss" }).first();
-		await expect(dismissBtn).toBeVisible({ timeout: 15_000 });
-		await expect(dismissBtn).toBeEnabled();
-		await dismissBtn.click();
-		await expect(titleInput).toBeHidden({ timeout: 15_000 });
+		try {
+			await stream.entered;
+			await expect(titleInput).toBeVisible({ timeout: 15_000 });
+			await expect(badge).toBeVisible({ timeout: 15_000 });
+			const dismissBtn = page.locator("button").filter({ hasText: "Dismiss" }).first();
+			await expect(dismissBtn).toBeVisible({ timeout: 15_000 });
+			await expect(dismissBtn).toBeEnabled();
+			await dismissBtn.click();
+			await expect(titleInput).toBeHidden({ timeout: 15_000 });
+		} finally {
+			stream.release();
+		}
 		await page.waitForFunction(
 			() => (window as any).bobbitState?.remoteAgent?.state?.status === "idle",
 			{ timeout: 15_000 },
 		);
 		await expect(titleInput).toBeHidden();
+		await expect(badge).toBeHidden();
 	});
 });
 
