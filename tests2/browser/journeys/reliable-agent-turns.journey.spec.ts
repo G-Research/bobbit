@@ -365,10 +365,9 @@ test.describe("Journey: Reliable Agent Turns", () => {
 
 			compaction.compaction.release();
 			await steerStart.entered;
-			const firstStreamingVersion = scenario.runtime.surfaceActiveRun();
-			await waitForRemoteStatus(page, firstStreamingVersion);
-			const activeRunVersion = scenario.runtime.surfaceActiveRun();
-			await waitForRemoteStatus(page, activeRunVersion, "streaming");
+			await waitForRemoteStatus(page, scenario.runtime.statusRevision());
+			const activeRunRevision = scenario.runtime.surfaceActiveRun();
+			await waitForRemoteStatus(page, activeRunRevision);
 			const abort = scenario.runtime.holdNextAbort();
 			const stop = page.getByRole("button", { name: "Stop current turn" });
 			await expect(stop).toBeVisible({ timeout: 15_000 });
