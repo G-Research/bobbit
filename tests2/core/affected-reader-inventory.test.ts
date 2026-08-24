@@ -467,6 +467,17 @@ describe("affected repository reader inventory", () => {
 			expect(graph.testDeps.get(staffGoalTriggers)?.has(read.expression),
 				`${read.expression} remains test-owned fixture content`).toBe(false);
 		}
+
+		const worktreeCleanupAlias = "tests2/integration/worktree-cleanup-alias.test.ts";
+		expect(audit.find((entry) => entry.consumer === worktreeCleanupAlias)).toEqual({
+			consumer: worktreeCleanupAlias,
+			allowReason: "test-owned temporary linked-worktree metadata and content used to verify exact alias cleanup",
+			reads: [
+				{ expression: "path.join(worktree, \".git\")", count: 1 },
+				{ expression: "path.join(fixture.worktree, \"README.md\")", count: 1 },
+				{ expression: "path.join(fixture.worktree, \"replacement.txt\")", count: 1 },
+			],
+		});
 	});
 
 	it("rejects a new unresolved read and a declaration that no longer supplies edges", () => {
