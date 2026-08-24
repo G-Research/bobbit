@@ -21,19 +21,50 @@ import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 
+type FakeWorktree = { path: string; branch: string; adminPath?: string };
 const fakeGitState = {
 	commands: [] as Array<{ args: string[]; cwd?: string }>,
+	registrations: new Map<string, Map<string, FakeWorktree>>(),
 };
+
+function fakePathKey(filePath: string): string {
+	const resolved = path.resolve(filePath);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function registeredWorktrees(repoPath: string): Map<string, FakeWorktree> {
+	const root = path.resolve(repoPath);
+	const repoKey = fakePathKey(root);
+	let worktrees = fakeGitState.registrations.get(repoKey);
+	if (!worktrees) {
+		worktrees = new Map([[fakePathKey(root), { path: root, branch: "master" }]]);
+		fakeGitState.registrations.set(repoKey, worktrees);
+	}
+	return worktrees;
+}
+
+function nulPorcelain(worktrees: Iterable<FakeWorktree>): string {
+	return [...worktrees]
+		.map(worktree => `worktree ${worktree.path}\0HEAD ${"0".repeat(40)}\0branch refs/heads/${worktree.branch}\0\0`)
+		.join("");
+}
 
 const fakeGitRunner: CommandRunner = {
 	async execFile(command, args, options) {
 		assert.equal(command, "git");
-		fakeGitState.commands.push({
-			args: [...args],
-			cwd: options?.cwd === undefined ? undefined : String(options.cwd),
-		});
+		const cwd = options?.cwd === undefined ? undefined : String(options.cwd);
+		fakeGitState.commands.push({ args: [...args], cwd });
+		if (args[0] === "worktree" && args[1] === "list") {
+			assert.deepEqual(args, ["worktree", "list", "--porcelain", "-z"]);
+			return { stdout: nulPorcelain(registeredWorktrees(cwd ?? stateRoot).values()), stderr: "" };
+		}
 		if (args[0] === "worktree" && args[1] === "remove") {
-			fs.rmSync(String(args[2]), { recursive: true, force: true });
+			const worktreePath = path.resolve(String(args[2]));
+			const worktrees = registeredWorktrees(cwd ?? stateRoot);
+			const registered = worktrees.get(fakePathKey(worktreePath));
+			fs.rmSync(worktreePath, { recursive: true, force: true });
+			if (registered?.adminPath) fs.rmSync(registered.adminPath, { recursive: true, force: true });
+			worktrees.delete(fakePathKey(worktreePath));
 		}
 		return { stdout: "", stderr: "" };
 	},
@@ -67,12 +98,21 @@ let stateRoot = "";
 function makeRepo(root: string): string {
 	const repo = path.join(root, "repo");
 	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+	registeredWorktrees(repo);
 	return repo;
 }
 
-function makeWorktree(worktreePath: string): void {
-	fs.mkdirSync(worktreePath, { recursive: true });
-	fs.writeFileSync(path.join(worktreePath, ".git"), "gitdir: test-marker\n", "utf8");
+function makeWorktree(repoPath: string, worktreePath: string): void {
+	const resolvedPath = path.resolve(worktreePath);
+	const adminPath = path.join(path.resolve(repoPath), ".git", "worktrees", path.basename(resolvedPath));
+	fs.mkdirSync(adminPath, { recursive: true });
+	fs.mkdirSync(resolvedPath, { recursive: true });
+	fs.writeFileSync(path.join(resolvedPath, ".git"), `gitdir: ${adminPath}\n`, "utf8");
+	registeredWorktrees(repoPath).set(fakePathKey(resolvedPath), {
+		path: resolvedPath,
+		branch: `session/${path.basename(resolvedPath)}`,
+		adminPath,
+	});
 }
 
 function equivalentPath(worktreePath: string): string {
@@ -120,6 +160,7 @@ function cleanupManager(manager: any): void {
 describe("shared worktree guard reproductions", () => {
 	beforeEach(() => {
 		fakeGitState.commands.length = 0;
+		fakeGitState.registrations.clear();
 		stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-state-"));
 		prevBobbitDir = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
@@ -143,7 +184,7 @@ describe("shared worktree guard reproductions", () => {
 			const repo = makeRepo(tmp);
 			const sharedWorktree = path.join(tmp, "repo-wt", "session-shared");
 			const branch = "session/shared-single";
-			makeWorktree(sharedWorktree);
+			makeWorktree(repo, sharedWorktree);
 
 			const store = new SessionStore(stateRoot);
 			store.put(makeSession("archived-a", {
@@ -186,8 +227,8 @@ describe("shared worktree guard reproductions", () => {
 			const branch = "session/shared-multi";
 			const apiWorktree = path.join(tmp, "project-wt", "session-shared", "api");
 			const webWorktree = path.join(tmp, "project-wt", "session-shared", "web");
-			makeWorktree(apiWorktree);
-			makeWorktree(webWorktree);
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
 
 			const store = new SessionStore(stateRoot);
 			store.put(makeSession("archived-multi", {
@@ -214,7 +255,7 @@ describe("shared worktree guard reproductions", () => {
 			);
 			assert.equal(fs.existsSync(webWorktree), false, "unshared multi-repo worktree should remain cleanable");
 			assert.deepEqual(
-				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
+				fakeGitState.commands.filter(call => call.args[0] === "worktree" && call.args[1] === "remove").map(call => call.args[2]),
 				[webWorktree],
 			);
 		} finally {
@@ -262,8 +303,8 @@ describe("shared worktree guard reproductions", () => {
 			const branch = "goal/archive-shared";
 			const apiWorktree = path.join(tmp, "project-wt", "goal-archive", "api");
 			const webWorktree = path.join(tmp, "project-wt", "goal-archive", "web");
-			makeWorktree(apiWorktree);
-			makeWorktree(webWorktree);
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
 
 			const goalState = path.join(tmp, "goal-state");
 			const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
@@ -299,7 +340,7 @@ describe("shared worktree guard reproductions", () => {
 			);
 			assert.equal(fs.existsSync(webWorktree), false, "unshared goal repoWorktree should remain cleanable");
 			assert.deepEqual(
-				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
+				fakeGitState.commands.filter(call => call.args[0] === "worktree" && call.args[1] === "remove").map(call => call.args[2]),
 				[webWorktree],
 			);
 		} finally {
@@ -319,8 +360,8 @@ describe("shared worktree guard reproductions", () => {
 				fs.mkdirSync(path.join(web, ".git"), { recursive: true });
 				const apiWorktree = path.join(tmp, "project-wt", "recovered-team", "api");
 				const webWorktree = path.join(tmp, "project-wt", "recovered-team", "web");
-				makeWorktree(apiWorktree);
-				makeWorktree(webWorktree);
+				makeWorktree(api, apiWorktree);
+				makeWorktree(web, webWorktree);
 
 				const goalState = path.join(tmp, "goal-state");
 				const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
@@ -374,7 +415,7 @@ describe("shared worktree guard reproductions", () => {
 		try {
 			const repo = makeRepo(tmp);
 			const worktree = path.join(tmp, "repo-wt", "quiesced-session");
-			makeWorktree(worktree);
+			makeWorktree(repo, worktree);
 			const store = new SessionStore(stateRoot);
 			const persisted = makeSession("quiesced-session", {
 				archived: false,
@@ -459,8 +500,8 @@ describe("shared worktree guard reproductions", () => {
 
 			const apiWorktree = path.join(tmp, "project-wt", "team-goal", "api");
 			const webWorktree = path.join(tmp, "project-wt", "team-goal", "web");
-			makeWorktree(apiWorktree);
-			makeWorktree(webWorktree);
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
 
 			const goalStore = new GoalStore(path.join(tmp, "goal-state"), undefined, { persistence: "json" });
 			const goalManager = new GoalManager(goalStore, undefined, undefined, {
@@ -503,7 +544,7 @@ describe("shared worktree guard reproductions", () => {
 			const repo = makeRepo(tmp);
 			const sharedWorktree = path.join(tmp, "repo-wt", "session-shared-setup");
 			const branch = "session/setup-failed";
-			makeWorktree(sharedWorktree);
+			makeWorktree(repo, sharedWorktree);
 
 			const store = new SessionStore(stateRoot);
 			const failedSession = makeSession("setup-failed", {
