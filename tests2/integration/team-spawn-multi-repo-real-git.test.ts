@@ -1,9 +1,7 @@
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { vi } from "vitest";
-
-import { executionPathIdentity } from "../../src/server/agent/resolve-project.js";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
@@ -56,8 +54,16 @@ async function waitForGoalReady(goalId: string): Promise<any> {
 	);
 }
 
+/** Native filesystem identity, with a lexical fallback for missing paths. */
 function normalized(filePath: string): string {
-	return executionPathIdentity(filePath);
+	const lexical = resolve(filePath);
+	let identity: string;
+	try {
+		identity = realpathSync.native(lexical);
+	} catch {
+		identity = lexical;
+	}
+	return process.platform === "win32" ? identity.toLowerCase() : identity;
 }
 
 function liveRepoWorktrees(session: any): Record<string, string> {
@@ -494,7 +500,10 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		expect(Object.keys(postSpawnSessionShape?.repoWorktrees ?? {}).sort()).toEqual([...COMPONENTS].sort());
 		for (const repo of COMPONENTS) {
 			expect(postSpawnWorktrees[repo], `${repo} must be provisioned before createSession post-spawn setup`).toBeTruthy();
-			expect(postSpawnSessionShape?.repoWorktrees?.[repo], `${repo} cleanup coordinate must reach the live session`).toBe(postSpawnWorktrees[repo]);
+			expect(
+				normalized(postSpawnSessionShape?.repoWorktrees?.[repo] ?? ""),
+				`${repo} cleanup coordinate must reach the live session`,
+			).toBe(normalized(postSpawnWorktrees[repo]!));
 			expect(componentsExistedDuringPostSpawn[repo], `${repo} must exist when post-spawn setup fails`).toBe(true);
 		}
 		expect(existsSync(join(projectRoot, ".git")), "post-spawn failure must leave the project root non-Git").toBe(false);
@@ -592,12 +601,12 @@ test("direct and REST team spawn preserve exact local component HEADs across col
 		expect(firstDurableWriteIndex, "createSession must make a durable worker write").toBeGreaterThanOrEqual(0);
 		expect(laterTeamMetaIndex, "TeamManager must retain its later worker metadata update").toBeGreaterThan(firstDurableWriteIndex);
 		const firstDurableWorker = firstDurableWriteIndex >= 0 ? sessionWriteEvents[firstDurableWriteIndex].value : {};
-		expect.soft(firstDurableWorker.worktreePath, "first durable write must already own the branch container").toBe(directResult.worktreePath!);
-		expect.soft(firstDurableWorker.repoPath, "first durable write must already own the non-Git repo container").toBe(projectRoot);
+		expect.soft(normalized(firstDurableWorker.worktreePath ?? ""), "first durable write must already own the branch container").toBe(normalized(directResult.worktreePath!));
+		expect.soft(normalized(firstDurableWorker.repoPath ?? ""), "first durable write must already own the non-Git repo container").toBe(normalized(projectRoot));
 		expect.soft(firstDurableWorker.branch, "first durable write must already own the worker branch").toBe(directBranch);
 		expect.soft(Object.keys(firstDurableWorker.repoWorktrees ?? {}).sort(), "first durable write must already own both component cleanup paths").toEqual([...COMPONENTS].sort());
 		for (const repo of COMPONENTS) {
-			expect.soft(firstDurableWorker.repoWorktrees?.[repo], `${repo} cleanup coordinate must exist in the first durable write`).toBe(directPaths[repo]);
+			expect.soft(normalized(firstDurableWorker.repoWorktrees?.[repo] ?? ""), `${repo} cleanup coordinate must exist in the first durable write`).toBe(normalized(directPaths[repo]));
 			expect(await git(runner, directPaths[repo], ["rev-parse", "HEAD"]), `${repo} must start at its exact local goal HEAD`).toBe(goalHeads[repo]);
 			expect(await git(runner, directPaths[repo], ["branch", "--show-current"]), `${repo} must use the common worker branch`).toBe(directBranch);
 		}
@@ -786,14 +795,16 @@ test("team lead borrows goal-owned polyrepo coordinates and both git-status rout
 			deletionsVsPrimary: 0,
 		};
 		const sortedEntries = (value: Record<string, string> | undefined) =>
-			Object.entries(value ?? {}).sort(([a], [b]) => a.localeCompare(b));
+			Object.entries(value ?? {})
+				.map(([repo, worktreePath]) => [repo, normalized(worktreePath)] as const)
+				.sort(([a], [b]) => a.localeCompare(b));
 		const checkCoordinates = (label: string, actual: any, repoWorktrees: Record<string, string>) => {
 			if (!actual) {
 				problems.push(`${label} metadata is missing`);
 				return;
 			}
-			if (actual.worktreePath !== goal.worktreePath) problems.push(`${label}.worktreePath=${JSON.stringify(actual.worktreePath)}`);
-			if (actual.repoPath !== goal.repoPath) problems.push(`${label}.repoPath=${JSON.stringify(actual.repoPath)}`);
+			if (normalized(actual.worktreePath ?? "") !== normalized(goal.worktreePath)) problems.push(`${label}.worktreePath=${JSON.stringify(actual.worktreePath)}`);
+			if (normalized(actual.repoPath ?? "") !== normalized(goal.repoPath)) problems.push(`${label}.repoPath=${JSON.stringify(actual.repoPath)}`);
 			if (actual.branch !== goal.branch) problems.push(`${label}.branch=${JSON.stringify(actual.branch)}`);
 			if (JSON.stringify(sortedEntries(repoWorktrees)) !== JSON.stringify(sortedEntries(expectedRepoWorktrees))) {
 				problems.push(`${label}.repoWorktrees=${JSON.stringify(repoWorktrees)}`);
