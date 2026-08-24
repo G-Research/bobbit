@@ -10,7 +10,6 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { executionPathIdentity } from "../src/server/agent/resolve-project.ts";
 import { classifyWorktrees, sweepOrphanedWorktrees } from "../src/server/agent/worktree-sweeper.ts";
 
 const REPO = "/tmp/repo";
@@ -188,6 +187,16 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 	}
 
+	function nativePathIdentity(input: string): string {
+		let resolved = path.resolve(input);
+		try {
+			resolved = fs.realpathSync.native(resolved);
+		} catch {
+			// Missing paths have no native filesystem identity; compare lexically.
+		}
+		return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+	}
+
 	it("preserves archived-owned orphan worktrees and durable archived branches", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sweeper-archived-branch-"));
 		const repo = path.join(tmp, "repo");
@@ -216,7 +225,7 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 				git(repo, ["worktree", "list", "--porcelain"])
 					.split(/\r?\n/)
 					.some(line => line.startsWith("worktree ")
-						&& executionPathIdentity(line.slice("worktree ".length)) === executionPathIdentity(wt)),
+						&& nativePathIdentity(line.slice("worktree ".length)) === nativePathIdentity(wt)),
 				true,
 				"archived worktree metadata must remain",
 			);
