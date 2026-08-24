@@ -153,6 +153,16 @@ function assertGitRemoteAllowedSync(realCommandRunner: CommandRunner, args: read
 	}
 }
 
+/**
+ * `git credential` reads the developer's real credential configuration, so
+ * letting it through would make host trust — and the security assertions that
+ * depend on it — vary by machine. Applied to every invocation path, not just the
+ * one that has a caller today. Callers fail closed on a throw.
+ */
+function assertNotGitCredential(args: readonly string[]): void {
+	if (args[0] === "credential") throw new Error("[fenced-command-runner] blocked git credential invocation");
+}
+
 export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts: FencedCommandRunnerOptions = {}): CommandRunner {
 	return {
 		async execFile(file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> {
@@ -166,6 +176,7 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
 			if (name === "git") {
+				assertNotGitCredential(args);
 				if (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);
 				await assertGitRemoteAllowed(realCommandRunner, args, options);
 			}
@@ -176,6 +187,7 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
 			if (name === "git") {
+				assertNotGitCredential(args);
 				if (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);
 				assertGitRemoteAllowedSync(realCommandRunner, args, options);
 			}
@@ -185,7 +197,10 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			const name = commandName(file);
 			if (name === "gh") throw new Error("[fenced-command-runner] blocked gh invocation");
 			if (name === "docker" || name === "podman") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);
-			if (name === "git") assertGitRemoteAllowedSync(realCommandRunner, args, options);
+			if (name === "git") {
+				assertNotGitCredential(args);
+				assertGitRemoteAllowedSync(realCommandRunner, args, options);
+			}
 			return realCommandRunner.spawn!(file, args, options);
 		},
 	};
