@@ -1625,7 +1625,7 @@ Grant duration is chosen by the user at grant time, not configured in policy YAM
 
 | Duration | Effect |
 |---|---|
-| **Always** (permanent) | Tool is added to the role's `toolPolicies` as `allow` - persists across sessions. The active guard may cache only the approved tool/group scope returned for the blocked request. |
+| **Always** (permanent) | For a writable resolved role, writes `allow` to `toolPolicies` so future sessions inherit the grant. A project session updates a project-local winner or creates a project-local copy-on-write override for an inherited builtin, server, or global-user winner; the source remains unchanged. If the winner is Marketplace or otherwise immutable/read-only and no writable override can be created, it is not written: the approval is session-only and expires with the session. The active guard may cache only the approved tool/group scope returned for the blocked request. See [Session tool runtime scope](#session-tool-runtime-scope). |
 | **This session** | Grant stored in the session's in-memory grant set - lasts until session ends. The active guard may cache only the approved tool/group scope returned for the blocked request. |
 | **Just this once** | Grant authorizes only the currently blocked invocation. The active guard does not cache it, so the next invocation prompts again. |
 
