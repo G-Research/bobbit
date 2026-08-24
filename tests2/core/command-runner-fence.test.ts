@@ -1,5 +1,6 @@
 import type { ChildProcess } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,6 +17,34 @@ import { VerificationHarness } from "../../src/server/agent/verification-harness
 import { createFencedCommandRunner } from "../harness/fenced-command-runner.js";
 import { installMemoryFs } from "./helpers/memory-fs-spies.js";
 import type { MemFs } from "../harness/mem-fs.js";
+
+const nativeExistsSync = fs.existsSync.bind(fs);
+const nativeMkdtempSync = fs.mkdtempSync.bind(fs);
+const nativeRmSync = fs.rmSync.bind(fs);
+const nativeUnlinkSync = fs.unlinkSync.bind(fs);
+const nativeWriteFileSync = fs.writeFileSync.bind(fs);
+
+type NativeExecFile = typeof import("node:child_process").execFile;
+type NativeExecFileSync = typeof import("node:child_process").execFileSync;
+type NativeSpawn = typeof import("node:child_process").spawn;
+type SpawnGuardState = { originals?: { execFile?: NativeExecFile; execFileSync?: NativeExecFileSync; spawn?: NativeSpawn } };
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+
+/** Narrow real-process delegate for this fence's own end-to-end containment regression. */
+function preservedNativeCommandRunner(): CommandRunner {
+	const originals = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: SpawnGuardState })[SPAWN_GUARD_STATE]?.originals;
+	if (!originals?.execFile || !originals.execFileSync || !originals.spawn) throw new Error("tier-1 spawn guard originals unavailable");
+	return {
+		execFile: (file, args, options) => new Promise((resolve, reject) => {
+			originals.execFile!(file, [...args], options as any, (error, stdout, stderr) => {
+				if (error) return reject(Object.assign(error, { stdout, stderr }));
+				resolve({ stdout, stderr });
+			});
+		}),
+		execFileSync: (file, args, options) => originals.execFileSync!(file, [...args], options),
+		spawn: (file, args, options) => originals.spawn!(file, [...args], options as any),
+	};
+}
 
 let memoryFs: MemFs;
 let restoreFs: () => void;
@@ -143,9 +172,12 @@ describe("fenced command runner", () => {
 		expect(hasOwnedTreeSpawnRequest(delegatedOptions)).toBe(true);
 		expect(delegatedOptions).not.toBe(options);
 		expect(delegatedOptions?.env).toMatchObject({
-			GIT_CONFIG_GLOBAL: os.devNull,
-			GIT_CONFIG_SYSTEM: os.devNull,
+			GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : os.devNull,
+			GIT_CONFIG_SYSTEM: process.platform === "win32" ? "NUL" : os.devNull,
 			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_COUNT: "1",
+			GIT_CONFIG_KEY_0: "credential.helper",
+			GIT_CONFIG_VALUE_0: "",
 		});
 		expect(bound).toBe(control);
 		expect(directSpawn).not.toHaveBeenCalled();
@@ -290,18 +322,75 @@ describe("fenced command runner", () => {
 			"sync git.bat -ccore.filemode=false status --short",
 			"spawn git.exe --config-env=core.filemode=FIXTURE_FILEMODE status --short",
 		]);
+		const expectedNullConfig = process.platform === "win32" ? "NUL" : os.devNull;
 		for (const env of environments) {
 			expect(env.GIT_CONFIG).toBeUndefined();
-			expect(env.GIT_CONFIG_GLOBAL).toBe(os.devNull);
-			expect(env.GIT_CONFIG_SYSTEM).toBe(os.devNull);
+			expect(env.GIT_CONFIG_GLOBAL).toBe(expectedNullConfig);
+			expect(env.GIT_CONFIG_SYSTEM).toBe(expectedNullConfig);
 			expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
+			expect(env[`GIT_CONFIG_KEY_${Number(env.GIT_CONFIG_COUNT) - 1}`]).toBe("credential.helper");
+			expect(env[`GIT_CONFIG_VALUE_${Number(env.GIT_CONFIG_COUNT) - 1}`]).toBe("");
 		}
 		expect(environments[1]).toMatchObject({
-			GIT_CONFIG_COUNT: "1",
+			GIT_CONFIG_COUNT: "2",
 			GIT_CONFIG_KEY_0: "user.email",
 			GIT_CONFIG_VALUE_0: "fixture@example.test",
+			GIT_CONFIG_KEY_1: "credential.helper",
+			GIT_CONFIG_VALUE_1: "",
 		});
 		expect(environments[2]?.FIXTURE_FILEMODE).toBe("false");
+	});
+
+	it("keeps repository alias/include credential helpers inert through every real delegate path", async () => {
+		const root = nativeMkdtempSync(path.join(os.tmpdir(), "bobbit-fenced-real-helper-"));
+		const repo = path.join(root, "repo");
+		const includePath = path.join(root, "included.gitconfig");
+		const helperPath = path.join(root, "marker-helper.cjs");
+		const markerPath = path.join(root, "helper-called");
+		const nullConfig = process.platform === "win32" ? "NUL" : os.devNull;
+		const env = { ...process.env };
+		for (const name of Object.keys(env)) {
+			if (name.toUpperCase().startsWith("GIT_CONFIG")) delete env[name];
+		}
+		Object.assign(env, {
+			GIT_CONFIG_GLOBAL: nullConfig,
+			GIT_CONFIG_SYSTEM: nullConfig,
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_TERMINAL_PROMPT: "0",
+		});
+
+		const realDelegate = preservedNativeCommandRunner();
+		const gitSync = (args: string[]) => realDelegate.execFileSync!("git", args, { cwd: root, env, encoding: "utf8" });
+		const slash = (value: string) => value.replaceAll("\\", "/");
+		try {
+			nativeWriteFileSync(helperPath, [
+				'const fs = require("node:fs");',
+				'fs.writeFileSync(process.argv[2], "called");',
+				"process.stdin.resume();",
+			].join("\n"));
+			gitSync(["init", repo]);
+			gitSync(["config", "--file", includePath, "credential.helper", `!node "${slash(helperPath)}" "${slash(markerPath)}"`]);
+			realDelegate.execFileSync!("git", ["config", "include.path", slash(includePath)], { cwd: repo, env, encoding: "utf8" });
+			realDelegate.execFileSync!("git", ["config", "alias.nested-creds", "!printf 'protocol=https\\nhost=marker.invalid\\n\\n' | git credential fill"], { cwd: repo, env, encoding: "utf8" });
+
+			// Prove the controlled fixture is live without exposing or returning a credential.
+			try { realDelegate.execFileSync!("git", ["nested-creds"], { cwd: repo, env, encoding: "utf8" }); } catch { /* expected: marker helper returns no password */ }
+			expect(nativeExistsSync(markerPath)).toBe(true);
+			nativeUnlinkSync(markerPath);
+
+			const runner = createFencedCommandRunner(realDelegate);
+			await runner.execFile("git", ["nested-creds"], { cwd: repo, env, encoding: "utf8" }).catch(() => undefined);
+			expect(nativeExistsSync(markerPath)).toBe(false);
+
+			try { runner.execFileSync!("git", ["nested-creds"], { cwd: repo, env, encoding: "utf8" }); } catch { /* expected: no helper can answer */ }
+			expect(nativeExistsSync(markerPath)).toBe(false);
+
+			const child = runner.spawn!("git", ["nested-creds"], { cwd: repo, env, stdio: "ignore" });
+			await once(child, "close");
+			expect(nativeExistsSync(markerPath)).toBe(false);
+		} finally {
+			nativeRmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("allows explicit async fakes to stand in for fenced Git credential forms", async () => {

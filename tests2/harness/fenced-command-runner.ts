@@ -248,7 +248,12 @@ function normalizedConfigEnvironment(env: NodeJS.ProcessEnv): Map<string, { name
 	return normalized;
 }
 
-function assertSafeGitConfigEnvironment(env: NodeJS.ProcessEnv): void {
+interface GitConfigEnvironmentEntry {
+	key: string;
+	value: string;
+}
+
+function safeGitConfigEnvironmentEntries(env: NodeJS.ProcessEnv): GitConfigEnvironmentEntry[] {
 	const normalized = normalizedConfigEnvironment(env);
 	if (normalized.has("GIT_CONFIG_PARAMETERS")) throw new Error(UNSAFE_GIT_CONFIGURATION);
 
@@ -258,30 +263,50 @@ function assertSafeGitConfigEnvironment(env: NodeJS.ProcessEnv): void {
 	const indexed = injectionNames;
 	if (!countEntry) {
 		if (indexed.length > 0) throw new Error(MALFORMED_GIT_INVOCATION);
-		return;
+		return [];
 	}
 	if (!/^(?:0|[1-9]\d*)$/.test(countEntry.value)) throw new Error(MALFORMED_GIT_INVOCATION);
 	const count = Number(countEntry.value);
 	if (!Number.isSafeInteger(count) || count > MAX_GIT_CONFIG_ENV_ENTRIES || indexed.length !== count * 2) {
 		throw new Error(MALFORMED_GIT_INVOCATION);
 	}
+	const entries: GitConfigEnvironmentEntry[] = [];
 	for (let index = 0; index < count; index++) {
 		const key = normalized.get(`GIT_CONFIG_KEY_${index}`)?.value;
 		const value = normalized.get(`GIT_CONFIG_VALUE_${index}`)?.value;
 		if (key === undefined || value === undefined) throw new Error(MALFORMED_GIT_INVOCATION);
 		assertSafeGitConfigKey(gitConfigName(key));
+		entries.push({ key, value });
 	}
+	return entries;
 }
+
+const GIT_NULL_CONFIG_PATH = process.platform === "win32" ? "NUL" : os.devNull;
 
 function fencedGitOptions<T extends ExecFileOptions | ExecFileSyncOptions | SpawnOptions>(options: T | undefined): T {
 	const env = { ...(options?.env ?? process.env) };
-	assertSafeGitConfigEnvironment(env);
+	const configEntries = safeGitConfigEnvironmentEntries(env);
 	for (const name of Object.keys(env)) {
-		if (["GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"].includes(name.toUpperCase())) delete env[name];
+		const upper = name.toUpperCase();
+		if (
+			["GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT"].includes(upper)
+			|| /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/.test(upper)
+		) delete env[name];
 	}
-	env.GIT_CONFIG_GLOBAL = os.devNull;
-	env.GIT_CONFIG_SYSTEM = os.devNull;
+	env.GIT_CONFIG_GLOBAL = GIT_NULL_CONFIG_PATH;
+	env.GIT_CONFIG_SYSTEM = GIT_NULL_CONFIG_PATH;
 	env.GIT_CONFIG_NOSYSTEM = "1";
+
+	// An empty helper entry resets every helper loaded from repository-local
+	// config (including transitive includes). GIT_CONFIG_COUNT is inherited by
+	// shell aliases and their nested Git processes, unlike a root-only command
+	// check, so no unfaked runner path can consult a developer credential helper.
+	configEntries.push({ key: "credential.helper", value: "" });
+	env.GIT_CONFIG_COUNT = String(configEntries.length);
+	for (const [index, entry] of configEntries.entries()) {
+		env[`GIT_CONFIG_KEY_${index}`] = entry.key;
+		env[`GIT_CONFIG_VALUE_${index}`] = entry.value;
+	}
 	return { ...(options ?? {}), env } as T;
 }
 
