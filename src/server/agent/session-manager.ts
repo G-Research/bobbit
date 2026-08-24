@@ -1139,6 +1139,8 @@ export interface SessionInfo {
 	lifecycleGeneration?: number;
 	/** True once this SessionInfo has been replaced or is being replaced by a restore/respawn. */
 	lifecycleFenced?: boolean;
+	/** Terminal teardown has closed metadata admission and cancelled RPC retry authority. */
+	terminalMetadataFenced?: boolean;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -9923,6 +9925,11 @@ export class SessionManager {
 			abortAttemptOutcome?: "ambiguous" | "proven-no-start";
 		},
 	): void {
+		// Terminal teardown fences the canonical listener before snapshotting its
+		// metadata lane. Ignore any event already queued by the bridge after that
+		// fence; coordinated Stop/context replacement replays its owned terminal
+		// evidence explicitly through replacementOwnedTerminal.
+		if (session.terminalMetadataFenced && !opts?.replacementOwnedTerminal) return;
 		if (!session.onStatusChanged || !session.onEventAccepted) this.attachHostLifecycleObservers(session);
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
@@ -15240,6 +15247,10 @@ export class SessionManager {
 			try {
 				const stateResp = await session.rpcClient.getState();
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
+					// Terminal process stop owns cancellation. Once teardown has fenced
+					// admission, a failed command is final rather than authority to start
+					// another backoff/RPC cycle against the stopped bridge.
+					if (session.terminalMetadataFenced) return;
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
 						await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
@@ -15309,6 +15320,7 @@ export class SessionManager {
 				}
 				return; // success
 			} catch (err) {
+				if (session.terminalMetadataFenced) return;
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
 					await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
@@ -16882,6 +16894,57 @@ export class SessionManager {
 	}
 
 	/**
+	 * Close lifecycle admission synchronously and snapshot the complete metadata
+	 * lane. JavaScript event delivery cannot interleave between the fence and
+	 * unsubscribe, and handleAgentLifecycle rejects any already-queued late frame.
+	 */
+	private fenceTerminalMetadataAdmission(session: SessionInfo): Promise<void> | undefined {
+		session.terminalMetadataFenced = true;
+		session.lifecycleFenced = true;
+		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
+		return session.pendingMetadataPersist;
+	}
+
+	/**
+	 * Ask Pi for one final best-effort state while it is live, then start process
+	 * stop immediately. Process exit is the authoritative cancellation signal for
+	 * any unresponsive RPC already in the metadata lane. Already-admitted durable
+	 * work is still joined; no promise is abandoned behind a timeout race.
+	 */
+	private async stopTerminalRuntime(
+		session: SessionInfo,
+		metadataOwner: Promise<void> | undefined,
+	): Promise<unknown | undefined> {
+		let finalState: Promise<void>;
+		try {
+			finalState = Promise.resolve(session.rpcClient.getState()).then(
+				() => undefined,
+				() => undefined,
+			);
+		} catch {
+			finalState = Promise.resolve();
+		}
+
+		let bridgeStopError: unknown;
+		let stop: Promise<void>;
+		try {
+			stop = Promise.resolve(session.rpcClient.stop()).catch((error) => {
+				bridgeStopError = error;
+			});
+		} catch (error) {
+			bridgeStopError = error;
+			stop = Promise.resolve();
+		}
+
+		await Promise.all([
+			metadataOwner?.catch(() => { /* metadata owner logged its failure */ }) ?? Promise.resolve(),
+			finalState,
+			stop,
+		]);
+		return bridgeStopError;
+	}
+
+	/**
 	 * Stop and detach a live runtime while deliberately leaving its persisted row
 	 * live. Archived-goal reconciliation uses this only when it cannot durably
 	 * publish the sticky team ownership marker: the row must remain available for
@@ -16908,23 +16971,16 @@ export class SessionManager {
 			throw new Error(`Session ${id} quiesce was superseded before start`);
 		}
 
-		// Fence dispatch before the first await, then stop the bridge even when an
-		// auxiliary cleanup hook is unhealthy. The durable SessionStore row is never
-		// mutated by this seam.
-		session.lifecycleFenced = true;
+		// Fence dispatch before the first await. The durable SessionStore row is
+		// never mutated by this seam, but already-admitted metadata work must finish
+		// before the live runtime is detached.
 		session.dormant = true;
 		session.staffNotificationTurnContext = undefined;
+		const metadataOwner = this.fenceTerminalMetadataAdmission(session);
 		this.clearToolCallProvenance(session);
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
-		if (session.pendingMetadataPersist) {
-			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
-		}
-		try { await session.rpcClient.getState(); } catch { /* process may already be stopped */ }
-		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
-		let bridgeStopError: unknown;
-		try { await session.rpcClient.stop(); }
-		catch (err) { bridgeStopError = err; }
+		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
 		}
@@ -17029,6 +17085,11 @@ export class SessionManager {
 			throw new Error(`Session ${id} termination was superseded before start`);
 		}
 
+		// Close lifecycle admission before the first await. Cascade ordering remains
+		// child-before-parent; the parent bridge is stopped only after its children
+		// and extension channels have completed their existing teardown steps.
+		const metadataOwner = this.fenceTerminalMetadataAdmission(session);
+
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id, options);
 
@@ -17060,26 +17121,11 @@ export class SessionManager {
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
 		this.cancelPendingAutoRetry(session, "terminated");
 
-		// Wait for in-flight metadata persist so the agentSessionFile path is
-		// saved before we archive.  Without this, a quick terminate can race
-		// the fire-and-forget persist, leaving agentSessionFile as "" and the
-		// session's .jsonl history unreachable.
-		if (session.pendingMetadataPersist) {
-			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
-		}
-
-		// Final get_state to flush conversation history to the .jsonl file.
-		// persistSessionMetadata runs at creation time (fire-and-forget) when
-		// the conversation may still be empty. This ensures the latest messages
-		// are written before we archive.
-		try {
-			await session.rpcClient.getState();
-		} catch {
-			// Agent may already be stopped — best-effort flush
-		}
-
-		session.unsubscribe();
-		await session.rpcClient.stop();
+		// Issue the final best-effort get_state before stop, but do not put process
+		// cancellation behind an unresponsive metadata RPC. The snapshotted lane is
+		// joined before any archive or project-context removal can proceed.
+		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+		if (bridgeStopError) throw bridgeStopError;
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} termination was superseded after bridge stop`);
 		}
@@ -19272,6 +19318,9 @@ export class SessionManager {
 			if (!session) continue;
 
 			this.clearToolCallProvenance(session);
+			// Fence lifecycle admission before the first per-session await, then retain
+			// the complete already-admitted metadata lane for the stop barrier below.
+			const metadataOwner = this.fenceTerminalMetadataAdmission(session);
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
 			// Snapshot the current active state before we kill the process.
@@ -19292,14 +19341,11 @@ export class SessionManager {
 			// closing in shutdown so suppress the cancellation broadcast.
 			this.cancelPendingAutoRetry(session, "shutdown");
 
-			// Stop admitting first-turn lifecycle work, then join the session-owned
-			// metadata lane before the bridge or its project store can be torn down.
-			session.unsubscribe();
-			if (session.pendingMetadataPersist) {
-				try { await session.pendingMetadataPersist; }
-				catch { /* the metadata owner already logged the actionable failure */ }
-			}
-			await session.rpcClient.stop();
+			// Start stop alongside the final state request so process exit cancels any
+			// unresponsive metadata RPC. Durable work is still joined before the store
+			// flush and project-context teardown below.
+			const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+			if (bridgeStopError) throw bridgeStopError;
 			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
 			// Status mutation here is the documented exception to the broadcastStatus rule.
 			session.status = "terminated";
