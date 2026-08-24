@@ -3095,7 +3095,7 @@
     },
     {
       "path": "tests2/core/build-unit-gate-ci.test.ts",
-      "reason": "Structural CI qualification pin: validates YAML syntax, main-scoped build/unit and CodeQL triggers, PR-only Ubuntu/Windows/macOS Browser and E2E matrices on exact Node 22.19.0 with Chromium, standard commands, retry and failure policy, two Browser workers, Linux-only version-matched sandbox image construction, and the temporary exclusion of affected testing from CI.",
+      "reason": "Structural CI qualification pin: validates YAML syntax, main-scoped build/unit and CodeQL triggers, PR-only Ubuntu/Windows/macOS Browser and E2E matrices on exact Node 22.19.0 with Chromium, unskippable standard gate commands, retry and failure policy, one Browser worker on Windows and two on Ubuntu/macOS, Linux-only version-matched sandbox image construction, and the temporary exclusion of affected testing from CI.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

@@ -174,7 +174,9 @@ describe("native CI qualification workflows", () => {
 				1,
 				`${jobId} must invoke its complete suite exactly once`,
 			);
-			assert.equal(stepByName(job.steps, gateName).run, command, `${jobId} must use the standard retry-enabled command`);
+			const gate = stepByName(job.steps, gateName);
+			assert.equal(gate.run, command, `${jobId} must use the standard retry-enabled command`);
+			assert.equal(gate.if, undefined, `${jobId} gate must execute in every PR matrix job`);
 		}
 
 		assert.deepEqual(
