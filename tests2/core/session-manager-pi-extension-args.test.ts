@@ -762,49 +762,27 @@ describe("marketplace pi extension activation args", () => {
 		}
 	});
 
-	it("discovers cold project Pi tools before restart allowlist recomputation and preserves []", () => {
-		const cwd = fixtureRoot("restart-cold-project");
-		const extensionPath = path.join(cwd, "project-market", "dangerous", "extension.ts");
-		const serverManager = realToolManager("restart-cold-server");
-		const projectManager = realToolManager("restart-cold-project");
-		const role = {
-			name: "security-fixture",
-			promptTemplate: "Security fixture",
-			accessory: "none",
-			toolPolicies: { pi_dangerous_tool: "ask" as const },
-		};
-		const manager: any = new SessionManager({
-			toolManager: serverManager,
-			roleManager: { getRole: (name: string) => name === role.name ? role : undefined } as any,
+	it("cold restart restore preserves an explicit empty allowlist after Pi discovery", async () => {
+		const fixture = coldProjectReplacementFixture("cold-restore-empty");
+		fixture.persisted.allowedTools = [];
+		let activationAllowed: Array<{ name: string }> | undefined;
+		fixture.manager.preparePersistedIntentRestore = (ps: any) => ({
+			ps,
+			store: fixture.store,
+			bindings: [],
+			changed: false,
 		});
-		manager.projectContextManager = {
-			getOrCreate: (id: string) => id === "project-security"
-				? { toolManager: projectManager, toolGroupPolicyStore: undefined }
-				: undefined,
+		fixture.manager.buildToolActivationArgs = (_id: string, allowed: Array<{ name: string }> | undefined) => {
+			activationAllowed = allowed;
+			throw new Error("stop-after-empty-restore-allowlist");
 		};
-		let discoveryCount = 0;
-		manager.setMarketplacePiExtensionResolver((receivedScope: { projectId?: string; cwd?: string }, receivedManager?: ToolManager) => {
-			discoveryCount += 1;
-			assert.equal(receivedManager, projectManager);
-			registerDangerousTool(receivedManager!, scopedToolContext(receivedScope.projectId, receivedScope.cwd), extensionPath);
-			return [dangerousContribution(extensionPath)];
-		});
-		const persisted: any = {
-			id: "restart-cold",
-			cwd,
-			projectId: "project-security",
-			role: role.name,
-		};
-		const live: any = { sessionOnlyGrantedTools: ["explicit_grant"] };
 
-		const recomputed = manager.recomputeAllowedToolsForRestart(live, persisted);
+		await assert.rejects(
+			fixture.manager.restoreSession(fixture.persisted),
+			/stop-after-empty-restore-allowlist/,
+		);
 
-		assert.equal(discoveryCount, 1, "restart must discover before computing the cold project allowlist");
-		assert.deepEqual(recomputed, ["pi_dangerous_tool", "explicit_grant"]);
-		assert.equal(serverManager.getToolByName("pi_dangerous_tool", scopedToolContext("project-security", cwd)), undefined);
-
-		persisted.allowedTools = [];
-		assert.deepEqual(manager.recomputeAllowedToolsForRestart(live, persisted), ["explicit_grant"],
-			"an explicit [] remains no base tools while live grants remain layered separately");
+		assert.equal(fixture.discoveryCount(), 1);
+		assert.deepEqual(activationAllowed, [], "persisted [] must remain no tools rather than widening to the role surface");
 	});
 });
