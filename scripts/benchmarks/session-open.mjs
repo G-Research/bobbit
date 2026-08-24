@@ -448,7 +448,18 @@ export async function generateSessionOpenFixture(fixtureRoot, fixtureCase) {
 	return { directory, ...fixture };
 }
 
-const SESSION_OPEN_PHASES = Object.freeze(["prepare", "tti", "paritySettle", "oracle", "teardown"]);
+export const SESSION_OPEN_BROWSER_ACQUISITION_TIMEOUT_MS = 30_000;
+
+const SESSION_OPEN_PHASES = Object.freeze([
+	"prepare",
+	"browserAcquire",
+	"browserSetup",
+	"navigate",
+	"interactiveWait",
+	"paritySettle",
+	"oracle",
+	"teardown",
+]);
 
 /** Session-open compatibility facade over the shared interrupting watchdog. */
 export function createSessionOpenSampleWatchdog(options = {}) {
@@ -648,22 +659,34 @@ function metricValue(metrics, name) {
 	return metrics?.find(metric => metric.name === name)?.value ?? null;
 }
 
-async function measureBrowserSample(restored, manifest, watchdog, {
+export async function measureBrowserSample(restored, manifest, watchdog, {
 	parityBatchSize = SESSION_OPEN_PARITY_BATCH_SIZE,
+	launchBrowser = launchBenchmarkBrowser,
 	closeBrowser = closeBenchmarkBrowser,
 } = {}) {
 	if (!Number.isInteger(parityBatchSize) || parityBatchSize < 1 || parityBatchSize > 100) {
 		throw new RangeError("Session-open parity batch size must be an integer from 1 to 100");
 	}
 	watchdog.throwIfExpired();
-	const browserRuntime = await launchBenchmarkBrowser({
-		viewport: SESSION_OPEN_VIEWPORT,
-		launchOptions: {
-			args: ["--enable-precise-memory-info"],
-			timeout: watchdog.remainingMs(),
-		},
-		registerRuntime: runtime => watchdog.registerBrowser(runtime),
-	});
+	let browserRuntime;
+	try {
+		browserRuntime = await launchBrowser({
+			viewport: SESSION_OPEN_VIEWPORT,
+			launchOptions: {
+				args: ["--enable-precise-memory-info"],
+				timeout: Math.min(SESSION_OPEN_BROWSER_ACQUISITION_TIMEOUT_MS, watchdog.remainingMs()),
+			},
+			registerRuntime: runtime => watchdog.registerBrowser(runtime),
+		});
+	} catch (error) {
+		const acquisitionError = new Error(
+			`Session-open browser acquisition failed during browserAcquire phase: ${error?.message ?? error}`,
+			{ cause: error },
+		);
+		acquisitionError.phase = "browserAcquire";
+		throw acquisitionError;
+	}
+	watchdog.setPhase("browserSetup");
 	watchdog.throwIfExpired();
 	let snapshotFrameBytes = 0;
 	try {
@@ -703,10 +726,14 @@ async function measureBrowserSample(restored, manifest, watchdog, {
 			});
 		}
 
+		watchdog.setPhase("navigate");
+		watchdog.throwIfExpired();
 		await browserRuntime.page.goto(`${restored.invocation.baseUrl}#/session/${restored.sessionId}`, {
 			waitUntil: "domcontentloaded",
 			timeout: watchdog.remainingMs(),
 		});
+		watchdog.setPhase("interactiveWait");
+		watchdog.throwIfExpired();
 		await browserRuntime.page.waitForFunction(lastMarker => {
 			const editor = document.querySelector("message-editor textarea");
 			const timing = window.__bobbitBootTimings;
@@ -939,9 +966,33 @@ async function cleanupSessionOpenResources(watchdog, {
 	if (failures.length > 1) throw new AggregateError(failures, "Session-open browser and gateway cleanup failed");
 }
 
+function combineSessionOpenOperationErrors(watchdogError, interruptedOperationError) {
+	if (!watchdogError || !interruptedOperationError) return watchdogError ?? interruptedOperationError ?? null;
+	const phase = watchdogError.phase ?? "unknown";
+	const combined = new AggregateError(
+		[watchdogError, interruptedOperationError],
+		`Session-open sample operation was interrupted during ${phase} phase: ${interruptedOperationError.message ?? interruptedOperationError}`,
+		{ cause: watchdogError },
+	);
+	combined.phase = watchdogError.phase;
+	combined.phaseDurationsMs = watchdogError.phaseDurationsMs;
+	return combined;
+}
+
+function combineSessionOpenCleanupErrors(firstCleanupError, secondCleanupError) {
+	if (firstCleanupError && secondCleanupError) {
+		return new AggregateError([firstCleanupError, secondCleanupError], "Session-open cleanup failed in multiple operations");
+	}
+	return firstCleanupError ?? secondCleanupError ?? null;
+}
+
 function combineSessionOpenErrors(operationError, cleanupError) {
 	if (operationError && cleanupError) {
-		return new AggregateError([operationError, cleanupError], `Session-open sample failed and cleanup was incomplete: ${operationError.message ?? operationError}`);
+		return new AggregateError(
+		[operationError, cleanupError],
+		`Session-open sample failed and cleanup was incomplete: ${operationError.message ?? operationError}`,
+		{ cause: operationError },
+		);
 	}
 	return operationError ?? cleanupError ?? null;
 }
@@ -953,6 +1004,7 @@ export async function runSessionOpenSample(context, entry, fixture, {
 	watchdogDependencies = {},
 	prepare = prepareRestoredSession,
 	measure = measureBrowserSample,
+	launchBrowser = launchBenchmarkBrowser,
 	closeBrowser = closeBenchmarkBrowser,
 	stopRuntime = stopGateway,
 } = {}) {
@@ -975,12 +1027,12 @@ export async function runSessionOpenSample(context, entry, fixture, {
 		const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: fixture.directory });
 		watchdog.throwIfExpired();
 		restored = await prepare(context, sampleRoot, watchdog, { stopRuntime });
-		watchdog.setPhase("tti");
+		watchdog.setPhase("browserAcquire");
 		watchdog.throwIfExpired();
-		measured = await measure(restored, fixture.manifest, watchdog, { parityBatchSize, closeBrowser });
+		measured = await measure(restored, fixture.manifest, watchdog, { parityBatchSize, launchBrowser, closeBrowser });
 	} catch (error) {
 		operationError = watchdog.timedOut && error !== watchdog.error
-			? combineSessionOpenErrors(watchdog.error, error)
+			? combineSessionOpenOperationErrors(watchdog.error, error)
 			: (watchdog.timedOut ? watchdog.error : error);
 	} finally {
 		watchdog.setPhase("teardown");
@@ -992,7 +1044,7 @@ export async function runSessionOpenSample(context, entry, fixture, {
 		try {
 			await watchdog.finish();
 		} catch (error) {
-			cleanupError = combineSessionOpenErrors(cleanupError, error);
+			cleanupError = combineSessionOpenCleanupErrors(cleanupError, error);
 		}
 	}
 	operationError ??= watchdog.timedOut ? watchdog.error : null;

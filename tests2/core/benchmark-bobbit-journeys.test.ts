@@ -56,11 +56,13 @@ import {
 import {
 	createSessionOpenSampleWatchdog,
 	generateSessionOpenFixture,
+	measureBrowserSample,
 	measureLongTasksInWindow,
 	projectSessionOpenMessages,
 	projectSessionOpenRenderedText,
 	runSessionOpenSample,
 	SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES,
+	SESSION_OPEN_BROWSER_ACQUISITION_TIMEOUT_MS,
 	SESSION_OPEN_CASES,
 	SESSION_OPEN_FIXTURE_VERSION,
 	sessionOpenLongTaskMetricFields,
@@ -784,7 +786,13 @@ describe("session-open bounded sample lifecycle", () => {
 		watchdog.registerBrowser(browserRuntime);
 		watchdog.registerGateway(gatewayRuntime);
 		clock.advanceTo(25);
-		watchdog.setPhase("tti");
+		watchdog.setPhase("browserAcquire");
+		clock.advanceTo(35);
+		watchdog.setPhase("browserSetup");
+		clock.advanceTo(45);
+		watchdog.setPhase("navigate");
+		clock.advanceTo(50);
+		watchdog.setPhase("interactiveWait");
 		clock.advanceTo(60);
 		watchdog.setPhase("paritySettle");
 		clock.advanceTo(100);
@@ -797,7 +805,10 @@ describe("session-open bounded sample lifecycle", () => {
 		assert.equal((watchdog.error as any).phase, "paritySettle");
 		assert.deepEqual((watchdog.error as any).phaseDurationsMs, {
 			prepareMs: 25,
-			ttiMs: 35,
+			browserAcquireMs: 10,
+			browserSetupMs: 10,
+			navigateMs: 5,
+			interactiveWaitMs: 10,
 			paritySettleMs: 40,
 			oracleMs: 0,
 			teardownMs: 0,
@@ -809,6 +820,50 @@ describe("session-open bounded sample lifecycle", () => {
 		await watchdog.finish();
 		assert.deepEqual(calls, ["terminate", "close"]);
 		assert.throws(() => watchdog.throwIfExpired(), /watchdog expired.*paritySettle/i);
+	});
+
+	it("names each asynchronous session-open browser boundary when it expires", async () => {
+		for (const phase of ["browserAcquire", "browserSetup", "navigate", "interactiveWait"]) {
+			const clock = injectedClock();
+			const watchdog = createSessionOpenSampleWatchdog({
+				timeoutMs: 10,
+				graceMs: 1,
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+			});
+			watchdog.setPhase(phase);
+			clock.advanceTo(10);
+			clock.timers.find(timer => timer.delay === 10)!.callback();
+			assert.equal(watchdog.error.phase, phase);
+			assert.match(watchdog.error.message, new RegExp(`during ${phase} phase`));
+			await watchdog.finish();
+		}
+	});
+
+	it("caps browser acquisition and reports launch rejection in its active phase", async () => {
+		const watchdog = createSessionOpenSampleWatchdog({ timeoutMs: 180_000 });
+		watchdog.setPhase("browserAcquire");
+		let capturedOptions: any;
+		await assert.rejects(measureBrowserSample(
+			{ invocation: { baseUrl: "http://unused.invalid/" }, sessionId: "fixture-session" },
+			{},
+			watchdog,
+			{
+				launchBrowser: async (options: any) => {
+					capturedOptions = options;
+					throw new Error("injected Chromium launch rejection");
+				},
+			},
+		), error => {
+			assert.equal((error as any).phase, "browserAcquire");
+			assert.match((error as Error).message, /browser acquisition failed during browserAcquire phase/i);
+			assert.match(String((error as any).cause), /injected Chromium launch rejection/);
+			return true;
+		});
+		assert.equal(capturedOptions.launchOptions.timeout, SESSION_OPEN_BROWSER_ACQUISITION_TIMEOUT_MS);
+		assert.equal(watchdog.timedOut, false, "acquisition rejection must surface before the sample deadline");
+		await watchdog.finish();
 	});
 
 	it("uses the shared watchdog to interrupt a never-settling event renderer operation", async () => {
@@ -940,6 +995,37 @@ describe("session-open bounded sample lifecycle", () => {
 		assert.equal(clock.timers[0].cleared, true);
 	});
 
+	it("does not describe an interrupted operation as incomplete cleanup when teardown succeeds", async () => {
+		const clock = injectedClock();
+		await assert.rejects(runSessionOpenSample(
+			{ createSampleRoot: async () => "sample-root" },
+			{ case: "tiny", phase: "measured", cycle: 0, order: 0, caseOrder: 0 },
+			{ directory: "fixture", manifest: {} },
+			{
+				timeoutMs: 50,
+				watchdogDependencies: {
+					now: clock.now,
+					setTimer: clock.setTimer,
+					clearTimer: clock.clearTimer,
+				},
+				prepare: async () => ({ invocation: { baseUrl: "http://unused.invalid/" }, sessionId: "fixture-session" }),
+				measure: async () => {
+					clock.advanceTo(50);
+					clock.timers.find(timer => timer.delay === 50)!.callback();
+					throw new Error("browser operation rejected after interruption");
+				},
+			},
+		), error => {
+			assert.ok(error instanceof AggregateError);
+			assert.equal((error as any).phase, "browserAcquire");
+			assert.equal((error as AggregateError).errors[0].name, "SessionOpenSampleTimeoutError");
+			assert.equal((error as AggregateError).errors[0].phase, "browserAcquire");
+			assert.match((error as Error).message, /operation was interrupted during browserAcquire phase/i);
+			assert.doesNotMatch((error as Error).message, /cleanup (?:was incomplete|failed)/i);
+			return true;
+		});
+	});
+
 	it("retains cleanup ownership, aggregates failures, and lets the backstop retry browser before gateway", async () => {
 		const deferred: Array<() => Promise<void>> = [];
 		const cleanupOrder: string[] = [];
@@ -1006,6 +1092,13 @@ describe("session-open bounded sample lifecycle", () => {
 			},
 			measure: async (_restored: any, _manifest: any, watchdog: any, options: any) => {
 				assert.equal(options.parityBatchSize, 4);
+				assert.equal(typeof options.launchBrowser, "function");
+				clock.advanceTo(25);
+				watchdog.setPhase("browserSetup");
+				clock.advanceTo(30);
+				watchdog.setPhase("navigate");
+				clock.advanceTo(35);
+				watchdog.setPhase("interactiveWait");
 				clock.advanceTo(45);
 				watchdog.setPhase("paritySettle");
 				clock.advanceTo(70);
@@ -1032,7 +1125,10 @@ describe("session-open bounded sample lifecycle", () => {
 		assert.equal(sample.browserVersion, "injected-browser");
 		assert.deepEqual(sample.phaseDurationsMs, {
 			prepareMs: 20,
-			ttiMs: 25,
+			browserAcquireMs: 5,
+			browserSetupMs: 5,
+			navigateMs: 5,
+			interactiveWaitMs: 10,
 			paritySettleMs: 25,
 			oracleMs: 15,
 			teardownMs: 0,
