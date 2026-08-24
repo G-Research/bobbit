@@ -167,6 +167,15 @@
       }
     },
     {
+      "path": "tests2/core/github-host-credential-trust.test.ts",
+      "reason": "Core security coverage for PR-only credential-derived host trust: exact bounded credential records, injected spawn isolation, neutral temporary directories, prompt suppression, timeout kill escalation, per-host refresh generations, live ambient-token refusal, and secret-redacted failure behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/github-trusted-host-resolver.test.ts",
       "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
       "execution": {

@@ -223,14 +223,11 @@ export interface TrustedGithubRemote {
 }
 
 /**
- * Parse a complete Git remote and trust-gate its actual host. URL and scp forms
- * are deliberately separate so a trusted-looking suffix embedded in an
- * attacker-controlled URL can never become the canonical PR identity.
+ * Structurally parse a complete GitHub-shaped remote without deciding whether
+ * its host is trusted. Callers must apply an independent host trust decision
+ * before using the result for any external operation.
  */
-export function parseTrustedGithubRemote(
-	remote: string,
-	configuredEnterpriseHosts: readonly string[] = [],
-): TrustedGithubRemote | undefined {
+export function parseUntrustedGithubRemoteCandidate(remote: string): TrustedGithubRemote | undefined {
 	const value = remote.trim();
 	if (!value || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
 
@@ -244,7 +241,6 @@ export function parseTrustedGithubRemote(
 		if (url.search || url.hash) return undefined;
 		if (url.protocol === "ssh:" && url.password) return undefined;
 		if (url.protocol === "ssh:" && url.username && url.username !== "git") return undefined;
-		if (!isTrustedGithubRemoteHost(url.hostname, configuredEnterpriseHosts)) return undefined;
 		// An SSH port belongs to Git transport, not to the GitHub web/API
 		// authority used by `gh` and host-scoped credentials. HTTPS/HTTP ports do
 		// identify a distinct API authority and therefore remain canonical.
@@ -258,7 +254,7 @@ export function parseTrustedGithubRemote(
 		[, host, rawOwner, rawRepository] = scp;
 	}
 
-	if (!host || !isTrustedGithubRemoteHost(host, configuredEnterpriseHosts)) return undefined;
+	if (!host) return undefined;
 	const owner = decodeGithubPathSegment(rawOwner);
 	const decodedRepository = decodeGithubPathSegment(rawRepository);
 	if (!owner || !decodedRepository) return undefined;
@@ -269,6 +265,16 @@ export function parseTrustedGithubRemote(
 		owner: owner.toLowerCase(),
 		repository: repository.toLowerCase(),
 	};
+}
+
+/** Parse a complete Git remote and trust-gate its actual host against the existing list. */
+export function parseTrustedGithubRemote(
+	remote: string,
+	configuredEnterpriseHosts: readonly string[] = [],
+): TrustedGithubRemote | undefined {
+	const candidate = parseUntrustedGithubRemoteCandidate(remote);
+	if (!candidate) return undefined;
+	return isTrustedGithubRemoteHost(candidate.host, configuredEnterpriseHosts) ? candidate : undefined;
 }
 
 function decodeGithubPathSegment(value: string): string | undefined {
