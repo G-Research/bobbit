@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import {
 	lstat,
@@ -36,6 +37,7 @@ import {
 import {
 	cleanupTrackedGateways,
 	buildGatewayStartupFixtureRecords,
+	combineGatewayStartupSampleFailures,
 	GATEWAY_STARTUP_CASES,
 	GATEWAY_STARTUP_FIXTURE_VERSION,
 	generateGatewayStartupFixture,
@@ -47,7 +49,9 @@ import {
 	cleanupBenchmarkRunRoot,
 	closeBenchmarkBrowser,
 	createBenchmarkRunRoot,
+	createTailBuffer,
 	readProcessMetrics,
+	waitForGatewayReady,
 } from "../../scripts/benchmarks/runtime.mjs";
 import {
 	createSessionOpenSampleWatchdog,
@@ -169,6 +173,72 @@ describe("benchmark journey CLI and scheduling contract", () => {
 		});
 		assert.equal(twice.exitCode, 1);
 		assert.match(twice.report.correctness.error, /exactly once/);
+	});
+
+	it("retains the runner schedule and exact safe failing-sample diagnostic", async () => {
+		const repoRoot = await temporaryRoot();
+		const outputRoot = path.join(repoRoot, "reports");
+		await mkdir(outputRoot);
+		const baseline = path.join(outputRoot, "baseline.json");
+		await writeFile(baseline, "known-good\n");
+		const options = parseArgs([
+			"--journey", "gateway-startup",
+			"--warmups", "2",
+			"--repetitions", "3",
+			"--output", "baseline.json",
+		]);
+		const result = await runBenchmark(options, {
+			repoRoot,
+			outputRoot,
+			importer: async () => ({ runJourney: async (context: any) => {
+				const schedule = context.scheduleFor(["small", "medium", "large"]);
+				const current = schedule.find((entry: any) => entry.order === 13);
+				const failure: any = new Error("failed at /tmp/private/state token=unsafe-token");
+				failure.benchmarkDiagnostic = {
+					sample: current,
+					childExit: {
+						exitCode: 1,
+						signal: "SIGTERM",
+						spawnFailure: String.raw`spawn failed at C:\private\gateway.js password=unsafe-password
+failed command: node evil.js`,
+						pipesClosed: true,
+						output: {
+							tail: "command: node evil.js --token unsafe-token\nfatal /tmp/private/gateway.js\nOUTPUT-SENTINEL",
+							truncated: false,
+						},
+						error: {
+							tail: String.raw`Authorization: Bearer unsafe-authorization
+\\server\share\private.log
+ERROR-SENTINEL`,
+							truncated: true,
+						},
+					},
+				};
+				throw failure;
+			} }),
+		});
+
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.report.protocol.schedule.length, 15);
+		assert.deepEqual(result.report.failure.sample, {
+			phase: "measured", cycle: 2, case: "medium", caseOrder: 1, order: 13,
+		});
+		assert.equal(result.report.failure.childExit.exitCode, 1);
+		assert.equal(result.report.failure.childExit.signal, "SIGTERM");
+		assert.equal(result.report.failure.childExit.pipesClosed, true);
+		assert.match(result.report.failure.childExit.output.tail, /OUTPUT-SENTINEL/);
+		assert.match(result.report.failure.childExit.error.tail, /ERROR-SENTINEL/);
+		assert.deepEqual(result.report.samples, []);
+		assert.deepEqual(result.report.summaryByCase, {});
+		assert.equal(await readFile(baseline, "utf8"), "known-good\n");
+		const serialized = JSON.stringify(result.report);
+		for (const forbidden of [
+			"/tmp/private", "C:\\private", "unsafe-token", "unsafe-password",
+			"unsafe-authorization", "node evil.js", String.raw`\\server\share`,
+		]) {
+			assert.equal(serialized.includes(forbidden), false, `failed report leaked ${forbidden}`);
+		}
+		assert.ok(Buffer.byteLength(serialized) < 100_000, "failed report must remain tightly bounded");
 	});
 });
 
@@ -552,6 +622,66 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 			maxMs: 80,
 			reliability: "browser-api",
 		});
+	});
+});
+
+describe("bounded gateway child-exit diagnostics", () => {
+	it("waits for close before formatting capped and redacted final pipe tails", async () => {
+		const child: any = new EventEmitter();
+		child.exitCode = 1;
+		child.signalCode = "SIGTERM";
+		const output = createTailBuffer(64);
+		const error = createTailBuffer(64);
+		output.push(`${"o".repeat(96)}OUTPUT-END`);
+		error.push(`${"e".repeat(96)} token=secret-value C:\\private\\gateway.js`);
+		const runtime: any = {
+			child,
+			stdout: output,
+			stderr: error,
+			exited: true,
+			closed: false,
+			spawnError: new Error(String.raw`synthetic spawn failure at /tmp/private/gateway.js token=secret-value
+Authorization: Bearer authorization-secret
+failed command: node evil.js
+\\server\share\gateway.log`),
+			diagnosticRedactions: ["secret-value"],
+		};
+		let finalPipeWrite = false;
+		setTimeout(() => {
+			error.push("\nFINAL-PIPE-SENTINEL");
+			finalPipeWrite = true;
+			runtime.closed = true;
+			child.emit("close");
+		}, 5);
+
+		await assert.rejects(
+			waitForGatewayReady({
+				runtime,
+				baseUrl: "http://127.0.0.1:1/",
+				timeoutMs: 100,
+				fetchImpl: async () => { throw new Error("health probe must not run after exit"); },
+			}),
+			(failure: any) => {
+				assert.equal(finalPipeWrite, true, "diagnostic formatting must wait for child close");
+				const diagnostic = failure.benchmarkDiagnostic.childExit;
+				assert.equal(diagnostic.exitCode, 1);
+				assert.equal(diagnostic.signal, "SIGTERM");
+				assert.equal(diagnostic.pipesClosed, true);
+				assert.equal(diagnostic.output.truncated, true);
+				assert.equal(diagnostic.error.truncated, true);
+				assert.match(diagnostic.output.tail, /OUTPUT-END/);
+				assert.match(diagnostic.error.tail, /FINAL-PIPE-SENTINEL/);
+				assert.match(diagnostic.spawnFailure, /synthetic spawn failure/);
+				const serialized = JSON.stringify(diagnostic);
+				assert.equal(serialized.includes("secret-value"), false);
+				assert.equal(serialized.includes("/tmp/private"), false);
+				assert.equal(serialized.includes("C:\\private"), false);
+				assert.equal(serialized.includes("authorization-secret"), false);
+				assert.equal(serialized.includes("node evil.js"), false);
+				assert.equal(serialized.includes(String.raw`\\server\share`), false);
+				return true;
+			},
+		);
 	});
 });
 
@@ -1087,6 +1217,15 @@ describe("filesystem containment and aggregated cleanup", () => {
 		await assert.rejects(cleanupBenchmarkRunRoot(paths), /linked|identity changed/);
 		assert.equal((await lstat(paths.root)).isSymbolicLink(), true);
 		assert.equal(existsSync(moved), true);
+	});
+
+	it("preserves the operation failure when gateway cleanup also fails", () => {
+		const operation = new Error("OPERATION-SENTINEL");
+		const cleanup = new Error("CLEANUP-SENTINEL");
+		const combined = combineGatewayStartupSampleFailures(operation, cleanup);
+		assert.ok(combined instanceof AggregateError);
+		assert.deepEqual(combined.errors, [operation, cleanup]);
+		assert.match(combined.message, /OPERATION-SENTINEL.*CLEANUP-SENTINEL/);
 	});
 
 	it("attempts every browser and gateway cleanup and aggregates all failures", async () => {

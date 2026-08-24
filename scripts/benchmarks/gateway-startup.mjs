@@ -4,6 +4,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
 	aggregateMeasuredReliability,
+	captureGatewayFailureDiagnostic,
 	readProcessMetrics,
 	spawnGateway,
 	stopGateway,
@@ -401,12 +402,22 @@ function gatewayEnvironment(sample) {
 	};
 }
 
+async function publishedUrlExitError(message, runtime) {
+	const error = new Error(message);
+	error.benchmarkDiagnostic = await captureGatewayFailureDiagnostic(runtime, {
+		redactions: [GATEWAY_STARTUP_TOKEN],
+	});
+	return error;
+}
+
 async function waitForPublishedGatewayUrl(runtime, stateDir, timeoutMs = URL_TIMEOUT_MS) {
 	const gatewayUrlPath = path.join(stateDir, "gateway-url");
 	const deadline = performance.now() + timeoutMs;
 	while (performance.now() < deadline) {
-		if (runtime.spawnError) throw runtime.spawnError;
-		if (runtime.exited || runtime.child.exitCode !== null) throw new Error(`Gateway exited before publishing its URL (code ${runtime.child.exitCode ?? "unknown"})`);
+		if (runtime.spawnError) throw await publishedUrlExitError("Gateway failed to spawn before publishing its URL", runtime);
+		if (runtime.exited || runtime.child.exitCode !== null || runtime.child.signalCode !== null) {
+			throw await publishedUrlExitError(`Gateway exited before publishing its URL (code ${runtime.child.exitCode ?? "unknown"})`, runtime);
+		}
 		try {
 			const raw = (await readFile(gatewayUrlPath, "utf8")).trim();
 			if (/^http:\/\/127\.0\.0\.1:\d+$/.test(raw)) return `${raw}/`;
@@ -563,6 +574,30 @@ export async function cleanupTrackedGateways(activeGateways, stopGatewayImpl = s
 	}
 }
 
+export function combineGatewayStartupSampleFailures(operationError, cleanupError) {
+	if (operationError && cleanupError) {
+		return new AggregateError(
+			[operationError, cleanupError],
+			`Gateway-startup sample failed: ${boundedErrorMessage(operationError, 500)}; cleanup failed: ${boundedErrorMessage(cleanupError, 500)}`,
+		);
+	}
+	return operationError ?? cleanupError ?? null;
+}
+
+async function scheduledSampleError(error, runtime, entry) {
+	const captured = await captureGatewayFailureDiagnostic(runtime, {
+		sample: entry,
+		redactions: [GATEWAY_STARTUP_TOKEN],
+	});
+	const inheritedChildExit = error?.benchmarkDiagnostic?.childExit ?? null;
+	const wrapped = new Error(boundedErrorMessage(error), { cause: error });
+	wrapped.benchmarkDiagnostic = {
+		sample: captured.sample,
+		childExit: inheritedChildExit ?? captured.childExit,
+	};
+	return wrapped;
+}
+
 async function runSample(context, entry, canonicalFixture, productionModules, activeGateways) {
 	const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: canonicalFixture.fixtureRoot });
 	const sample = await relocateSampleFixture(path.join(sampleRoot, "fixture"), productionModules);
@@ -583,6 +618,9 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 	const active = { runtime, baseUrl: null };
 	activeGateways.add(active);
 	const readinessStatuses = [];
+	let result;
+	let operationError = null;
+	let cleanupError = null;
 	try {
 		active.baseUrl = await waitForPublishedGatewayUrl(runtime, sample.stateDir);
 		const readiness = await waitForGatewayReady({
@@ -601,7 +639,7 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 		const correctness = await validateReadyGateway(active.baseUrl, sample.manifest, runtime);
 		const cpuTimeMs = Number.isFinite(processMetrics.cpuTimeMs) ? processMetrics.cpuTimeMs : null;
 		const peakRssBytes = Number.isFinite(processMetrics.peakRssBytes) ? processMetrics.peakRssBytes : null;
-		return {
+		result = {
 			case: entry.case,
 			phase: entry.phase,
 			cycle: entry.cycle,
@@ -624,9 +662,18 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 			},
 			correctness,
 		};
-	} finally {
-		await stopTrackedGateway(active, activeGateways);
+	} catch (error) {
+		operationError = error;
 	}
+	try {
+		await stopTrackedGateway(active, activeGateways);
+	} catch (error) {
+		cleanupError = error;
+	}
+	if (operationError) operationError = await scheduledSampleError(operationError, runtime, entry);
+	const failure = combineGatewayStartupSampleFailures(operationError, cleanupError);
+	if (failure) throw failure;
+	return result;
 }
 
 export async function runJourney(context) {

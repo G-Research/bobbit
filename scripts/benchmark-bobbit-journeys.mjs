@@ -18,6 +18,7 @@ import {
 	cleanupBenchmarkRunRoot,
 	createBenchmarkRunRoot,
 	createSampleRoot,
+	sanitizeBenchmarkDiagnosticText,
 } from "./benchmarks/runtime.mjs";
 
 export const BENCHMARKS = Object.freeze({
@@ -295,7 +296,57 @@ function aggregateErrors(label, errors) {
 	return new AggregateError(errors, `${label}: ${errors.map(error => error?.message ?? String(error)).join("; ")}`);
 }
 
-function makeFailureReport({ benchmark, options, error, cleanup, repoRoot }) {
+function findFailureDiagnostic(error) {
+	const pending = [error];
+	const seen = new Set();
+	while (pending.length > 0 && seen.size < 32) {
+		const current = pending.shift();
+		if (!current || (typeof current !== "object" && typeof current !== "function") || seen.has(current)) continue;
+		seen.add(current);
+		if (current.benchmarkDiagnostic && typeof current.benchmarkDiagnostic === "object") {
+			return current.benchmarkDiagnostic;
+		}
+		if (Array.isArray(current.errors)) pending.push(...current.errors);
+		if (current.cause) pending.push(current.cause);
+	}
+	return null;
+}
+
+function safeFailureDiagnostic(error, schedule) {
+	const raw = findFailureDiagnostic(error);
+	if (!raw) return null;
+	const identityFields = ["phase", "cycle", "case", "caseOrder", "order"];
+	const scheduled = Array.isArray(schedule)
+		? schedule.find(entry => identityFields.every(field => entry?.[field] === raw.sample?.[field]))
+		: null;
+	const rawExit = raw.childExit;
+	let childExit = null;
+	if (rawExit && typeof rawExit === "object" && !Array.isArray(rawExit)) {
+		const output = sanitizeBenchmarkDiagnosticText(rawExit.output?.tail ?? "");
+		const errorTail = sanitizeBenchmarkDiagnosticText(rawExit.error?.tail ?? "");
+		const spawnFailure = rawExit.spawnFailure == null
+			? null
+			: sanitizeBenchmarkDiagnosticText(rawExit.spawnFailure, { maximumBytes: 512 }).text;
+		childExit = {
+			exitCode: Number.isInteger(rawExit.exitCode) ? rawExit.exitCode : null,
+			signal: typeof rawExit.signal === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(rawExit.signal) ? rawExit.signal : null,
+			spawnFailure,
+			pipesClosed: rawExit.pipesClosed === true,
+			output: { tail: output.text, truncated: rawExit.output?.truncated === true || output.truncated },
+			error: { tail: errorTail.text, truncated: rawExit.error?.truncated === true || errorTail.truncated },
+		};
+	}
+	if (!scheduled && !childExit) return null;
+	return {
+		sample: scheduled ? Object.fromEntries(identityFields.map(field => [field, scheduled[field]])) : null,
+		childExit,
+	};
+}
+
+function makeFailureReport({ benchmark, options, error, cleanup, repoRoot, schedule }) {
+	const safeError = sanitizeBenchmarkDiagnosticText(error?.message ?? error ?? "Unknown benchmark failure", {
+		maximumBytes: 1_000,
+	}).text;
 	return {
 		schemaVersion: BENCHMARK_SCHEMA_VERSION,
 		benchmark,
@@ -304,9 +355,10 @@ function makeFailureReport({ benchmark, options, error, cleanup, repoRoot }) {
 		environment: collectEnvironmentMetadata(),
 		fixtureDimensions: {},
 		fixtureHashes: {},
-		protocol: { warmups: options.warmups, repetitions: options.repetitions, schedule: [] },
+		protocol: { warmups: options.warmups, repetitions: options.repetitions, schedule: schedule ?? [] },
 		samples: [],
 		summaryByCase: {},
+		failure: safeFailureDiagnostic(error, schedule),
 		interpretation: "This run failed correctness or lifecycle validation and must not be used as a baseline.",
 		limitations: [],
 		noiseSources: [],
@@ -314,7 +366,7 @@ function makeFailureReport({ benchmark, options, error, cleanup, repoRoot }) {
 		cleanup,
 		correctness: {
 			status: "failed",
-			error: String(error?.message ?? error ?? "Unknown benchmark failure"),
+			error: safeError,
 		},
 	};
 }
@@ -410,6 +462,7 @@ export async function runBenchmark(options, {
 		error,
 		cleanup,
 		repoRoot,
+		schedule: usedSchedule,
 	}));
 	let boundedReport;
 	try {

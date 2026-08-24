@@ -12,6 +12,7 @@ export const RUN_OWNER_MARKER = ".bobbit-benchmark-owner.json";
 export const DEFAULT_GATEWAY_TIMEOUT_MS = 120_000;
 export const DEFAULT_STOP_GRACE_MS = 5_000;
 export const DEFAULT_LOG_TAIL_BYTES = 32 * 1024;
+export const DIAGNOSTIC_TAIL_BYTES = 2 * 1024;
 export const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 
 function boundedReliability(value) {
@@ -376,15 +377,62 @@ export async function cleanupBenchmarkRunRoot(paths) {
 export function createTailBuffer(maxBytes = DEFAULT_LOG_TAIL_BYTES) {
 	if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new RangeError("maxBytes must be a positive integer");
 	let buffer = Buffer.alloc(0);
+	let truncated = false;
 	return {
 		push(chunk) {
 			const next = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
 			buffer = buffer.length === 0 ? next : Buffer.concat([buffer, next]);
-			if (buffer.length > maxBytes) buffer = buffer.subarray(buffer.length - maxBytes);
+			if (buffer.length > maxBytes) {
+				buffer = buffer.subarray(buffer.length - maxBytes);
+				truncated = true;
+			}
 		},
 		text() { return buffer.toString("utf8"); },
 		bytes() { return buffer.length; },
+		truncated() { return truncated; },
 	};
+}
+
+function diagnosticRedactions(cwd, env) {
+	const values = [];
+	for (const [key, value] of Object.entries(env ?? {})) {
+		if (/(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|AUTH)/i.test(key) && typeof value === "string" && value.length >= 4) {
+			values.push(value);
+		}
+	}
+	if (typeof cwd === "string" && cwd.length >= 4) values.push(cwd);
+	return [...new Set(values)].sort((left, right) => right.length - left.length).slice(0, 64);
+}
+
+function capDiagnosticTail(value, maximumBytes) {
+	const bytes = Buffer.from(value);
+	if (bytes.length <= maximumBytes) return { text: value, truncated: false };
+	const marker = "[truncated]\n";
+	const available = Math.max(0, maximumBytes - Buffer.byteLength(marker));
+	const suffix = bytes.subarray(bytes.length - available).toString("utf8").replace(/^\uFFFD+/, "");
+	return { text: `${marker}${suffix}`, truncated: true };
+}
+
+/** Redact credentials, absolute paths, and command-line dumps from bounded child diagnostics. */
+export function sanitizeBenchmarkDiagnosticText(value, {
+	maximumBytes = DIAGNOSTIC_TAIL_BYTES,
+	redactions = [],
+} = {}) {
+	let text = String(value ?? "").replace(/\r\n?/g, "\n");
+	for (const redaction of redactions) {
+		const secret = String(redaction ?? "");
+		if (secret.length >= 4) text = text.split(secret).join("[redacted]");
+	}
+	text = text
+		.replace(/\b(authorization\s*[:=]\s*)[^\r\n]+/gi, "$1[redacted]")
+		.replace(/\b((?:bearer|token|api[-_ ]?key|password|secret|credential)\b\s*[:=]?\s*)[^\s,;]+/gi, "$1[redacted]")
+		.replace(/\b(?:command|argv|args|environment|env)\s*[:=].*$/gim, "[redacted diagnostic line]")
+		.replace(/(["'])(?:[A-Za-z]:[\\/]|\\\\|\/)[^"']+\1/g, "[path]")
+		.replace(/file:\/\/\/?[A-Za-z]:[\\/][^\s"'`)]+/gi, "[path]")
+		.replace(/\\\\(?:\?\\)?[^\s"'`)]+/g, "[path]")
+		.replace(/\b[A-Za-z]:[\\/][^\s"'`)]+/g, "[path]")
+		.replace(/(^|[\s("'=])\/(?!\/)[^\s"'`)]+/gm, "$1[path]");
+	return capDiagnosticTail(text, maximumBytes);
 }
 
 /** Spawn a fixed journey-owned gateway invocation without a shell. */
@@ -413,6 +461,7 @@ export function spawnGateway({ command = process.execPath, args, cwd, env, maxLo
 		shutdownStarted: false,
 		posixGroupOwned: false,
 		finalGroupSignalSent: false,
+		diagnosticRedactions: diagnosticRedactions(cwd, env),
 	};
 	child.stdout?.on("data", chunk => stdout.push(chunk));
 	child.stderr?.on("data", chunk => stderr.push(chunk));
@@ -493,6 +542,66 @@ function releaseStdio(runtime) {
 	try { runtime.child.unref(); } catch { /* already exited */ }
 }
 
+function scheduledSampleIdentity(sample) {
+	if (!sample || typeof sample !== "object") return null;
+	const identity = {
+		order: Number.isInteger(sample.order) && sample.order >= 0 ? sample.order : null,
+		phase: typeof sample.phase === "string" ? sample.phase.slice(0, 32) : null,
+		cycle: Number.isInteger(sample.cycle) && sample.cycle >= 0 ? sample.cycle : null,
+		case: typeof sample.case === "string" ? sample.case.slice(0, 160) : null,
+		caseOrder: Number.isInteger(sample.caseOrder) && sample.caseOrder >= 0 ? sample.caseOrder : null,
+	};
+	return identity.order === null ? null : identity;
+}
+
+/**
+ * Capture only failure-safe child state. For an exited child, wait for `close`
+ * first so both pipe tails include their final writes before they are formatted.
+ */
+export async function captureGatewayFailureDiagnostic(runtime, {
+	sample = null,
+	closeTimeoutMs = 8_000,
+	redactions = [],
+} = {}) {
+	const identity = scheduledSampleIdentity(sample);
+	if (!runtime || (!runtime.spawnError && !rootExited(runtime))) {
+		return { sample: identity, childExit: null };
+	}
+	const pipesClosed = runtime.closed || await waitForClose(runtime, closeTimeoutMs);
+	const allRedactions = [...(runtime.diagnosticRedactions ?? []), ...redactions];
+	const output = sanitizeBenchmarkDiagnosticText(runtime.stdout?.text?.() ?? "", { redactions: allRedactions });
+	const error = sanitizeBenchmarkDiagnosticText(runtime.stderr?.text?.() ?? "", { redactions: allRedactions });
+	const spawnFailure = runtime.spawnError
+		? sanitizeBenchmarkDiagnosticText(runtime.spawnError?.message ?? runtime.spawnError, {
+			maximumBytes: 512,
+			redactions: allRedactions,
+		}).text
+		: null;
+	return {
+		sample: identity,
+		childExit: {
+			exitCode: Number.isInteger(runtime.child?.exitCode) ? runtime.child.exitCode : null,
+			signal: typeof runtime.child?.signalCode === "string" ? runtime.child.signalCode.slice(0, 32) : null,
+			spawnFailure,
+			pipesClosed,
+			output: {
+				tail: output.text,
+				truncated: runtime.stdout?.truncated?.() === true || output.truncated,
+			},
+			error: {
+				tail: error.text,
+				truncated: runtime.stderr?.truncated?.() === true || error.truncated,
+			},
+		},
+	};
+}
+
+async function gatewayExitError(message, runtime) {
+	const error = new Error(message);
+	error.benchmarkDiagnostic = await captureGatewayFailureDiagnostic(runtime);
+	return error;
+}
+
 /** Probe the existing authenticated 503-to-200 readiness boundary. */
 export async function waitForGatewayReady({
 	runtime,
@@ -508,9 +617,9 @@ export async function waitForGatewayReady({
 	let lastError = null;
 	while (performance.now() < deadline) {
 		signal?.throwIfAborted();
-		if (runtime.spawnError) throw new Error(`Gateway failed to spawn: ${runtime.spawnError.message}`, { cause: runtime.spawnError });
+		if (runtime.spawnError) throw await gatewayExitError("Gateway failed to spawn before readiness", runtime);
 		if (rootExited(runtime)) {
-			throw new Error(`Gateway exited before readiness (code ${runtime.child.exitCode ?? "unknown"})`);
+			throw await gatewayExitError(`Gateway exited before readiness (code ${runtime.child.exitCode ?? "unknown"})`, runtime);
 		}
 		try {
 			const probeSignal = AbortSignal.timeout(Math.min(2_000, Math.max(1, Math.ceil(deadline - performance.now()))));
