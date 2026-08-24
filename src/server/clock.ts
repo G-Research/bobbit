@@ -8,10 +8,20 @@ export interface Clock {
 	clearInterval(handle: TimerHandle): void;
 }
 
+// Node coerces non-finite and out-of-range delays to 1 ms, which can turn a
+// long wait or interval into a tight loop. Keep real timers inside Node's
+// signed 32-bit range; virtual test clocks retain their own delay semantics.
+const MAX_REAL_TIMER_DELAY_MS = 2_147_483_647;
+
+function normalizeRealTimerDelay(ms: number): number {
+	if (!Number.isFinite(ms)) return MAX_REAL_TIMER_DELAY_MS;
+	return Math.min(MAX_REAL_TIMER_DELAY_MS, Math.max(0, ms));
+}
+
 export const realClock: Clock = {
 	now: () => Date.now(),
-	setTimeout: (handler, ms) => globalThis.setTimeout(handler, ms),
-	setInterval: (handler, ms) => globalThis.setInterval(handler, ms),
+	setTimeout: (handler, ms) => globalThis.setTimeout(handler, normalizeRealTimerDelay(ms)),
+	setInterval: (handler, ms) => globalThis.setInterval(handler, normalizeRealTimerDelay(ms)),
 	clearTimeout: handle => globalThis.clearTimeout(handle),
 	clearInterval: handle => globalThis.clearInterval(handle),
 };
