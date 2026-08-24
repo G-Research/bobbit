@@ -49,6 +49,52 @@ describe("fenced command runner", () => {
 		await expect(runner.execFile("docker", ["ps"])).rejects.toThrow(/blocked docker/);
 	});
 
+	it("blocks git credential across async, sync, and spawn paths before delegation", async () => {
+		const delegations: string[] = [];
+		const delegate: CommandRunner = {
+			execFile: async (file, args) => {
+				delegations.push(`async ${file} ${args.join(" ")}`);
+				return { stdout: "", stderr: "" };
+			},
+			execFileSync: (file, args) => {
+				delegations.push(`sync ${file} ${args.join(" ")}`);
+				return "";
+			},
+			spawn: (file, args) => {
+				delegations.push(`spawn ${file} ${args.join(" ")}`);
+				return {} as any;
+			},
+		};
+		const runner = createFencedCommandRunner(delegate);
+		const expected = "[fenced-command-runner] blocked git credential invocation";
+
+		const asyncMessage = await runner.execFile("git", ["credential", "fill", "fixture-secret"])
+			.then(() => "unexpected success", error => String(error.message));
+		expect(asyncMessage).toBe(expected);
+		expect(() => runner.execFileSync!("git.exe", ["credential", "approve", "fixture-secret"])).toThrow(new Error(expected));
+		expect(() => runner.spawn!("git", ["credential", "reject", "fixture-secret"])).toThrow(new Error(expected));
+		expect(delegations).toEqual([]);
+
+		const delegateWithoutSpawn: CommandRunner = {
+			execFile: async () => ({ stdout: "", stderr: "" }),
+		};
+		const runnerWithoutSpawn = createFencedCommandRunner(delegateWithoutSpawn);
+		expect(() => runnerWithoutSpawn.spawn!("git", ["credential", "fill"])).toThrow(expected);
+	});
+
+	it("allows an explicit async fake to stand in for git credential without delegation", async () => {
+		const runner = createFencedCommandRunner(unexpectedDelegate(), {
+			fakes: {
+				"git credential fill": { stdout: "protocol=https\nhost=git.example.test\n\n" },
+			},
+		});
+
+		await expect(runner.execFile("git", ["credential", "fill"])).resolves.toEqual({
+			stdout: "protocol=https\nhost=git.example.test\n\n",
+			stderr: "",
+		});
+	});
+
 	it("short-circuits read-only discovery outside repositories without delegating or mutating git", async () => {
 		const cwd = makeFixtureRoot("bobbit-fenced-nonrepo-");
 		let asyncDelegations = 0;
