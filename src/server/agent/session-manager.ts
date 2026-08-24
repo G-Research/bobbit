@@ -121,7 +121,7 @@ import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -5840,10 +5840,15 @@ export class SessionManager {
 		return this.projectContextManager.getOrCreate(projectId)?.toolManager;
 	}
 
-	/** Resolve the group-policy store from the same scope as the ToolManager. */
-	private getGroupPolicyStoreForProject(projectId?: string): ToolGroupPolicyStore | undefined {
-		if (!projectId || !this.projectContextManager) return this.groupPolicyStore;
-		return this.projectContextManager.getOrCreate(projectId)?.toolGroupPolicyStore;
+	/** Resolve effective group policies through the same project cascade as tools. */
+	private getGroupPolicyProviderForProject(projectId?: string): GroupPolicyProvider | undefined {
+		// Preserve the established server-scope path for genuinely projectless
+		// sessions and the raw-store path used by isolated SessionManager tests.
+		if (!projectId || !this.configCascade) {
+			if (!projectId || !this.projectContextManager) return this.groupPolicyStore;
+			return this.projectContextManager.getOrCreate(projectId)?.toolGroupPolicyStore;
+		}
+		return this.configCascade.createToolGroupPolicyProvider(projectId, this.groupPolicyStore);
 	}
 
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
@@ -5854,7 +5859,7 @@ export class SessionManager {
 		let resolvedTaskManager: TaskManager;
 		let resolvedProjectConfigStore = this.projectConfigStore ?? null;
 		let resolvedToolManager = this.toolManager ?? null;
-		let resolvedGroupPolicyStore = this.groupPolicyStore ?? null;
+		let resolvedGroupPolicyStore: GroupPolicyProvider | null = this.getGroupPolicyProviderForProject(projectId) ?? null;
 		let resolvedCostTracker: CostTracker;
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
@@ -5863,7 +5868,6 @@ export class SessionManager {
 				resolvedTaskManager = new TaskManager(ctx.taskStore);
 				resolvedProjectConfigStore = ctx.projectConfigStore;
 				resolvedToolManager = ctx.toolManager;
-				resolvedGroupPolicyStore = ctx.toolGroupPolicyStore;
 				resolvedCostTracker = ctx.costTracker;
 			} else {
 				throw new Error(`Cannot build pipeline context: project "${projectId}" not found`);
@@ -6828,7 +6832,7 @@ export class SessionManager {
 			return computeEffectiveAllowedTools(
 				toolManager,
 				role,
-				this.getGroupPolicyStoreForProject(projectId),
+				this.getGroupPolicyProviderForProject(projectId),
 				this.getMcpManagerForContext(projectId, cwd) ?? undefined,
 				scopedToolContext(projectId, cwd),
 			);
@@ -6957,7 +6961,7 @@ export class SessionManager {
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 		const toolManager = this.getToolManagerForProject(projectId);
-		const groupPolicyStore = this.getGroupPolicyStoreForProject(projectId);
+		const groupPolicyStore = this.getGroupPolicyProviderForProject(projectId);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager

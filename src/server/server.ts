@@ -2808,7 +2808,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
-		getToolGroupPolicies: () => groupPolicyStore.getAll(),
+		// ConfigCascade owns the builtin layer; expose only server overrides here.
+		getToolGroupPolicies: () => groupPolicyStore.getAllLocal(),
 	}, projectContextManager);
 	// Keep the cascade's first-party pack band aligned with the runtime tool loader
 	// (buildMarketToolRootsForProject below also resolves via config.builtinPacksDir).
@@ -2899,7 +2900,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// roots (server < global-user < project) — applied to existing + future ctxs.
 	projectContextManager.setContextConfigurator((ctx) => {
 		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
-		ctx.toolGroupPolicyStore.setBuiltins(builtinConfigProvider.getToolGroupPolicies());
+		// Keep the project store local-only. Builtin and server policies are
+		// composed at read time by ConfigCascade, preserving layer precedence.
 		ctx.toolGroupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 		// Goal-metadata lifecycle wiring: connect this project's GoalManager to the
 		// shared LifecycleHub `goalProvisioned` dispatcher so every worktree
@@ -3834,7 +3836,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
 			const scopedToolManager = projectId ? projectContext?.toolManager : toolManager;
 			if (!scopedToolManager) return undefined;
-			const scopedGroupPolicyStore = projectId ? projectContext?.toolGroupPolicyStore : groupPolicyStore;
+			const scopedGroupPolicyStore = projectId
+				? configCascade.createToolGroupPolicyProvider(projectId, groupPolicyStore)
+				: groupPolicyStore;
 			const mcpManager = sessionManager.getMcpManagerForSession(sessionId);
 			return computeEffectiveAllowedTools(
 				scopedToolManager,
@@ -3857,7 +3861,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
 			const scopedToolManager = projectId ? projectContext?.toolManager : toolManager;
 			if (!scopedToolManager) return undefined;
-			const scopedGroupPolicyStore = projectId ? projectContext?.toolGroupPolicyStore : groupPolicyStore;
+			const scopedGroupPolicyStore = projectId
+				? configCascade.createToolGroupPolicyProvider(projectId, groupPolicyStore)
+				: groupPolicyStore;
 			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId, cwd }) : null;
 			return computeEffectiveAllowedTools(
 				scopedToolManager,
@@ -20329,17 +20335,27 @@ async function handleApiRoute(
 			if (toolStr.startsWith("mcp__")) {
 				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
 				const projectId = mcpSession?.projectId ?? (persistedSession as any)?.projectId;
+				const sessionCwd = mcpSession?.cwd ?? (persistedSession as any)?.cwd;
 				const role = roleName ? resolveRoleForProject(roleName, projectId) : undefined;
 				const parsed = parseMcpToolName(toolStr);
 				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
 				const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
 				const policyToolManager = projectId ? projectContext?.toolManager : toolManager;
-				const policyStore = projectId ? projectContext?.toolGroupPolicyStore : groupPolicyStore;
+				const policyStore = projectId
+					? configCascade.createToolGroupPolicyProvider(projectId, groupPolicyStore)
+					: groupPolicyStore;
 				if (!policyToolManager) {
 					json({ error: `tool ${toolStr} denied: project tool scope unavailable`, tool: toolStr }, 403);
 					return;
 				}
-				const policy = resolveGrantPolicy(toolStr, opGroup, role, policyToolManager, policyStore);
+				const policy = resolveGrantPolicy(
+					toolStr,
+					opGroup,
+					role,
+					policyToolManager,
+					policyStore,
+					scopedToolContext(projectId, sessionCwd),
+				);
 				if (policy === "never") {
 					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
 					return;
