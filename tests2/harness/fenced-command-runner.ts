@@ -344,7 +344,7 @@ function assertNotGitCredential(commandArgs: readonly string[]): void {
 }
 
 export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts: FencedCommandRunnerOptions = {}): CommandRunner {
-	return {
+	const runner: CommandRunner = {
 		async execFile(file: string, args: readonly string[], options?: ExecFileOptions): Promise<ExecFileResult> {
 			const name = commandName(file);
 			const key = fakeKey(file, args);
@@ -393,4 +393,6 @@ export function createFencedCommandRunner(realCommandRunner: CommandRunner, opts
 			return realCommandRunner.spawn!(file, args, delegatedOptions);
 		},
 	};
+	if (realCommandRunner.supportsOwnedTreeSpawn === true) runner.supportsOwnedTreeSpawn = true;
+	return runner;
 }

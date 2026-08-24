@@ -1,8 +1,16 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { realClock, type CommandRunner } from "../../src/server/gateway-deps.js";
+import {
+	createCommandSpawnAdapter,
+	hasOwnedTreeSpawnRequest,
+	ownedTreeSpawnOptions,
+	type OwnedTreeControl,
+} from "../../src/server/owned-tree-command-spawn.js";
 import { resolveWorktreeSupport } from "../../src/server/agent/worktree-support.js";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import { createFencedCommandRunner } from "../harness/fenced-command-runner.js";
@@ -94,6 +102,82 @@ describe("fenced command runner", () => {
 			execFile: async () => ({ stdout: "", stderr: "" }),
 		});
 		expect(() => runnerWithoutSpawn.spawn!("git.cmd", ["--no-pager", "credential", "fill"])).toThrow(expected);
+	});
+
+	it("forwards owned-tree capability and branded safe Git spawns through the fence", () => {
+		const { repo } = makeRepositoryMetadata(makeFixtureRoot("bobbit-fenced-owned-tree-"));
+		const child = new EventEmitter() as ChildProcess;
+		const control: OwnedTreeControl & { child: ChildProcess } = {
+			child,
+			ownershipReady: Promise.resolve(),
+			killTree: vi.fn(),
+			waitForTreeExit: vi.fn(async () => true),
+			killed: () => false,
+			timedOut: () => false,
+		};
+		const directSpawn = vi.fn();
+		const ownedSpawn = vi.fn(() => control);
+		const capableSpawn = createCommandSpawnAdapter(directSpawn as any, ownedSpawn as any);
+		let delegatedOptions: Parameters<typeof capableSpawn>[2];
+		const delegate: CommandRunner = {
+			execFile: async () => ({ stdout: "", stderr: "" }),
+			spawn: (file, args, options) => {
+				delegatedOptions = options;
+				return capableSpawn(file, args, options);
+			},
+			supportsOwnedTreeSpawn: true,
+		};
+		const runner = createFencedCommandRunner(delegate);
+		let bound: OwnedTreeControl | undefined;
+		const options = ownedTreeSpawnOptions({
+			cwd: repo,
+			env: {
+				GIT_CONFIG_GLOBAL: "/developer/.gitconfig",
+				GIT_CONFIG_SYSTEM: "/etc/gitconfig",
+			},
+			stdio: "ignore",
+		}, realClock, value => { bound = value; });
+
+		expect(runner.supportsOwnedTreeSpawn).toBe(true);
+		expect(runner.spawn!("git", ["status", "--short"], options)).toBe(child);
+		expect(hasOwnedTreeSpawnRequest(delegatedOptions)).toBe(true);
+		expect(delegatedOptions).not.toBe(options);
+		expect(delegatedOptions?.env).toMatchObject({
+			GIT_CONFIG_GLOBAL: os.devNull,
+			GIT_CONFIG_SYSTEM: os.devNull,
+			GIT_CONFIG_NOSYSTEM: "1",
+		});
+		expect(bound).toBe(control);
+		expect(directSpawn).not.toHaveBeenCalled();
+		expect(ownedSpawn).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not advertise owned-tree spawning when its delegate lacks the capability", () => {
+		const runner = createFencedCommandRunner({
+			execFile: async () => ({ stdout: "", stderr: "" }),
+			spawn: () => new EventEmitter() as ChildProcess,
+		});
+
+		expect(runner.supportsOwnedTreeSpawn).toBeUndefined();
+		expect(Object.hasOwn(runner, "supportsOwnedTreeSpawn")).toBe(false);
+	});
+
+	it("blocks branded Git credential requests before capable delegate activity", () => {
+		const delegateSpawn = vi.fn(() => new EventEmitter() as ChildProcess);
+		const delegate: CommandRunner = {
+			execFile: async () => ({ stdout: "", stderr: "" }),
+			spawn: delegateSpawn,
+			supportsOwnedTreeSpawn: true,
+		};
+		const runner = createFencedCommandRunner(delegate);
+		const bind = vi.fn();
+		const options = ownedTreeSpawnOptions({ cwd: makeFixtureRoot("bobbit-fenced-owned-credential-") }, realClock, bind);
+
+		expect(runner.supportsOwnedTreeSpawn).toBe(true);
+		expect(() => runner.spawn!("git.cmd", ["--no-pager", "credential", "fill"], options))
+			.toThrow("[fenced-command-runner] blocked git credential invocation");
+		expect(delegateSpawn).not.toHaveBeenCalled();
+		expect(bind).not.toHaveBeenCalled();
 	});
 
 	it("blocks alias and config-include injection on every runner path without delegation", async () => {
