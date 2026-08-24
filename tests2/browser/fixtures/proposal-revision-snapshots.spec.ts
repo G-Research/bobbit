@@ -88,8 +88,14 @@ async function holdProposalStream(page: Page, gateway: any, type: string): Promi
 	}
 	const boundary = `proposal-stream:${type}:intermediate-delta`;
 	core.armBarrier(boundary);
+	const entered = Promise.resolve(core.waitForBarrier(boundary)).then((details: any) => {
+		if (details?.proposalType !== type || details?.delta !== 1 || typeof details?.toolId !== "string") {
+			throw new Error(`proposal stream reached an uncorrelated intermediate barrier: ${JSON.stringify(details)}`);
+		}
+		return details;
+	});
 	return {
-		entered: Promise.resolve(core.waitForBarrier(boundary)),
+		entered,
 		release: () => { core.releaseBarrier(boundary); },
 	};
 }
@@ -242,11 +248,11 @@ test.describe("Proposal revision snapshots", () => {
 		await createSessionViaUI(page);
 
 		const stream = await holdProposalStream(page, gateway, "goal");
-		await sendMessage(page, "STAY_BUSY:propose_goal:8");
 		try {
+			await sendMessage(page, "STAY_BUSY:propose_goal:8:0");
 			await stream.entered;
 			await page.waitForFunction(
-				() => String((window as any).bobbitState?.activeProposals?.goal?.fields?.spec ?? "").includes("Paragraph 2"),
+				() => String((window as any).bobbitState?.activeProposals?.goal?.fields?.spec ?? "").includes("Paragraph 1"),
 				null,
 				{ timeout: 15_000 },
 			);

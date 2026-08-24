@@ -163,6 +163,23 @@ async function captureMainSprite(row: Locator): Promise<MainSprite> {
 	});
 }
 
+async function waitForRenderedMainIdentity(
+	page: Page,
+	sessionId: string,
+	staffSessionId: string,
+	expected: { session: MainSprite; staff: MainSprite },
+): Promise<void> {
+	const sessionRow = await ensureSidebarRow(page, sessionId);
+	const staffRow = await ensureSidebarRow(page, staffSessionId, true);
+	await expect.poll(async () => ({
+		session: await captureMainSprite(sessionRow),
+		staff: await captureMainSprite(staffRow),
+	}), {
+		timeout: 20_000,
+		message: "reloaded sidebar sprites must render the persisted identity before the Host snapshots it",
+	}).toEqual(expected);
+}
+
 function hueDegrees(filter: string): number {
 	const match = filter.match(/hue-rotate\((-?\d+(?:\.\d+)?)deg\)/);
 	if (!match) throw new Error(`missing canonical hue rotation in ${filter}`);
@@ -304,10 +321,13 @@ test.describe("Journey: Host Bobbit sprite fixture panel", () => {
 			await page.evaluate(() => document.documentElement.classList.add("bobbit-wizard-hat"));
 			const firstMain = await expectSpriteParity(page, sessionId, staff.currentSessionId!);
 
-			await page.reload({ waitUntil: "domcontentloaded" });
+			// Reload from the session route rather than the extension route. The Host
+			// sprite intentionally snapshots appearance at element creation, so an
+			// extension mounted during bootstrap would correctly retain the fallback.
 			await navigateToHash(page, `#/session/${sessionId}`);
+			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-			await waitForAppearanceProjection(page, sessionId, staff.id, staff.currentSessionId!);
+			await waitForRenderedMainIdentity(page, sessionId, staff.currentSessionId!, firstMain);
 			await navigateToHash(page, `#/ext/host-sprite-fixture?staffId=${encodeURIComponent(staff.id)}`);
 			await page.evaluate(() => document.documentElement.classList.add("bobbit-wizard-hat"));
 			await expectSpriteParity(page, sessionId, staff.currentSessionId!, firstMain);
