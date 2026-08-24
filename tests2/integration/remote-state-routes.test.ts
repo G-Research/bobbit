@@ -7,6 +7,7 @@ import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
+import { createCommandSpawnAdapter } from "../../src/server/owned-tree-command-spawn.js";
 
 let serverModule: any;
 let forceRequestedAt = 1_000;
@@ -78,12 +79,19 @@ function credentialHelperResult(output: string): any {
 	const child: any = new EventEmitter();
 	child.stdout = new PassThrough();
 	child.stdin = new PassThrough();
-	child.kill = () => true;
+	child.kill = () => { throw new Error("credential route fixture must use owned-tree control"); };
 	setImmediate(() => {
 		child.stdout.end(output);
 		child.emit("close", 0, null);
 	});
-	return child;
+	return {
+		child,
+		ownershipReady: Promise.resolve(),
+		killTree: () => {},
+		waitForTreeExit: async () => true,
+		killed: () => false,
+		timedOut: () => false,
+	};
 }
 
 function ownedHeadEvidence(owner: string, repository: string): Record<string, unknown> {
@@ -315,6 +323,7 @@ test.describe("remote-state coordinator routes", () => {
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		const originalSpawn = runner.spawn;
+		const originalOwnedTreeCapability = runner.supportsOwnedTreeSpawn;
 		const previousEnterpriseTokens = new Map<string, string | undefined>(
 			["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].map(name => [name, process.env[name]] as const),
 		);
@@ -348,21 +357,25 @@ test.describe("remote-state coordinator routes", () => {
 				setupStatus: "ready",
 			});
 
-			runner.spawn = (file: string, args: readonly string[], options?: any) => {
-				const child = credentialHelperResult(remoteHost === vouchedHost
-					? `protocol=https\nhost=${vouchedHost}\nusername=route-fixture\npassword=fixture-secret\n`
-					: `protocol=https\nhost=${unvouchedHost}\nusername=route-fixture\n`);
-				const probe = {
-					file: commandName(file),
-					args: [...args],
-					cwd: String(options?.cwd ?? ""),
-					env: options?.env ?? {},
-					request: "",
-				};
-				probes.push(probe);
-				child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
-				return child;
-			};
+			runner.spawn = createCommandSpawnAdapter(
+				() => { throw new Error("credential fixture received an ordinary spawn"); },
+				((file: string, args: readonly string[], options?: any) => {
+					const tracked = credentialHelperResult(remoteHost === vouchedHost
+						? `protocol=https\nhost=${vouchedHost}\nusername=route-fixture\npassword=fixture-secret\n`
+						: `protocol=https\nhost=${unvouchedHost}\nusername=route-fixture\n`);
+					const probe = {
+						file: commandName(file),
+						args: [...args],
+						cwd: String(options?.cwd ?? ""),
+						env: options?.env ?? {},
+						request: "",
+					};
+					probes.push(probe);
+					tracked.child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
+					return tracked;
+				}) as any,
+			);
+			runner.supportsOwnedTreeSpawn = true;
 			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 				const command = commandName(file);
 				if (command === "git" && args.join(" ") === "remote get-url origin") {
@@ -464,6 +477,8 @@ test.describe("remote-state coordinator routes", () => {
 		} finally {
 			runner.execFile = originalExecFile;
 			runner.spawn = originalSpawn;
+			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
+			else runner.supportsOwnedTreeSpawn = originalOwnedTreeCapability;
 			for (const [name, value] of previousEnterpriseTokens) {
 				if (value === undefined) delete process.env[name];
 				else process.env[name] = value;
@@ -511,6 +526,7 @@ test.describe("remote-state coordinator routes", () => {
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		const originalSpawn = runner.spawn;
+		const originalOwnedTreeCapability = runner.supportsOwnedTreeSpawn;
 		const previousEnterpriseTokens = new Map<string, string | undefined>(
 			["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].map(name => [name, process.env[name]] as const),
 		);
@@ -533,15 +549,19 @@ test.describe("remote-state coordinator routes", () => {
 		try {
 			delete process.env.GH_ENTERPRISE_TOKEN;
 			delete process.env.GITHUB_ENTERPRISE_TOKEN;
-			runner.spawn = (_file: string, _args: readonly string[], options?: any) => {
-				const child = credentialHelperResult(
-					`protocol=https\nhost=${selectedHost}\nusername=route-fixture\npassword=fixture-secret\n`,
-				);
-				const probe = { request: "", cwd: String(options?.cwd ?? "") };
-				probes.push(probe);
-				child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
-				return child;
-			};
+			runner.spawn = createCommandSpawnAdapter(
+				() => { throw new Error("credential fixture received an ordinary spawn"); },
+				((_file: string, _args: readonly string[], options?: any) => {
+					const tracked = credentialHelperResult(
+						`protocol=https\nhost=${selectedHost}\nusername=route-fixture\npassword=fixture-secret\n`,
+					);
+					const probe = { request: "", cwd: String(options?.cwd ?? "") };
+					probes.push(probe);
+					tracked.child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
+					return tracked;
+				}) as any,
+			);
+			runner.supportsOwnedTreeSpawn = true;
 			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 				const command = commandName(file);
 				const cwd = String(options?.cwd ?? "");
@@ -613,6 +633,8 @@ test.describe("remote-state coordinator routes", () => {
 		} finally {
 			runner.execFile = originalExecFile;
 			runner.spawn = originalSpawn;
+			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
+			else runner.supportsOwnedTreeSpawn = originalOwnedTreeCapability;
 			for (const [name, value] of previousEnterpriseTokens) {
 				if (value === undefined) delete process.env[name];
 				else process.env[name] = value;
