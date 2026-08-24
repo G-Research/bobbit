@@ -25,6 +25,7 @@ resetAgentDirStateForTests();
 
 // Import AFTER setting env var and resetting cached agent-dir state so bobbitDir() picks it up.
 const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
+const { TOOLS_DIR } = await import("../../src/server/agent/tool-manager.ts");
 import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
 
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
@@ -358,6 +359,39 @@ describe("TeamManager", () => {
 			assert.deepEqual(projectToolManager.getExtensionPath.mock.calls, [["team", "extension.ts"]]);
 			assert.equal(serverToolManager.getExtensionPath.mock.calls.length, 0,
 				"a project-owned goal must not consult the server ToolManager");
+		});
+
+		it("retains the TOOLS_DIR fallback for partial PCM config without a ToolManager", async () => {
+			const goal = createMockGoal();
+			const goals = new Map([[goal.id, goal]]);
+			const sm = createMockSessionManager(goals);
+			const createSession = vi.spyOn(sm, "createSession");
+			const teamStore = { getAll: () => [], put: vi.fn(), remove: vi.fn() };
+			const projectContext = {
+				goalStore: { get: (id: string) => goals.get(id), getAll: () => [...goals.values()] },
+				goalManager: {
+					updateGoal: (id: string, updates: Partial<MockGoal>) => {
+						const stored = goals.get(id);
+						if (stored) Object.assign(stored, updates);
+						return !!stored;
+					},
+				},
+				teamStore,
+			};
+			const team = createTeamManager(sm, {
+				...DEFAULT_CONFIG,
+				projectContextManager: {
+					all: () => [],
+					getContextForGoal: (id: string) => id === goal.id ? projectContext : null,
+				},
+			} as unknown as TeamManagerConfig);
+
+			await team.startTeam(goal.id);
+
+			assert.deepEqual(createSession.mock.calls[0]?.[1], [
+				"--extension",
+				path.join(TOOLS_DIR, "team", "extension.ts"),
+			]);
 		});
 
 		it("retains the configured server Team extension for non-PCM startTeam", async () => {
