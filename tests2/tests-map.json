@@ -3068,7 +3068,16 @@
     },
     {
       "path": "tests2/core/build-unit-gate-ci.test.ts",
-      "reason": "Structural CI qualification pin: validates YAML syntax, main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, the full standard unit invocation, and the temporary exclusion of affected testing from CI.",
+      "reason": "Structural CI qualification pin: validates YAML syntax, main-scoped build/unit and CodeQL triggers, PR-only Ubuntu/Windows/macOS Browser and E2E matrices on exact Node 22.19.0 with Chromium, standard commands, retry and failure policy, two Browser workers, Linux-only version-matched sandbox image construction, and the temporary exclusion of affected testing from CI.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/e2e-docker-scheduling.test.ts",
+      "reason": "Core scheduling contract pinning daemon-plus-image Docker capability detection, image-backed-only sandbox skips with non-Docker coverage retained, and serial Group D execution after Groups A-C without changing standard retries or worker controls.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
