@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+	aggregateMeasuredReliability,
 	readProcessMetrics,
 	spawnGateway,
 	stopGateway,
@@ -562,11 +563,6 @@ export async function cleanupTrackedGateways(activeGateways, stopGatewayImpl = s
 	}
 }
 
-function aggregateMetricReliability(samples, metric) {
-	const observed = sorted(new Set(samples.map(sample => sample.metricReliability?.[metric] ?? "unsupported")));
-	return observed.length === 1 ? observed[0] : `mixed (${observed.join(", ")})`;
-}
-
 async function runSample(context, entry, canonicalFixture, productionModules, activeGateways) {
 	const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: canonicalFixture.fixtureRoot });
 	const sample = await relocateSampleFixture(path.join(sampleRoot, "fixture"), productionModules);
@@ -618,8 +614,8 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 			},
 			metricReliability: {
 				readyMs: "reliable",
-				cpuTimeMs: cpuTimeMs === null ? "unsupported" : processMetrics.reliability,
-				peakRssBytes: peakRssBytes === null ? "unsupported" : processMetrics.reliability,
+				cpuTimeMs: cpuTimeMs === null ? "unsupported" : (processMetrics.cpuReliability ?? processMetrics.reliability),
+				peakRssBytes: peakRssBytes === null ? "unsupported" : (processMetrics.peakRssReliability ?? processMetrics.reliability),
 			},
 			readiness: {
 				finalStatus: readiness.status,
@@ -670,8 +666,8 @@ export async function runJourney(context) {
 		definition.name,
 		fixtures.get(definition.name).manifest.semanticSha256,
 	]));
-	const cpuTimeReliability = aggregateMetricReliability(samples, "cpuTimeMs");
-	const peakRssReliability = aggregateMetricReliability(samples, "peakRssBytes");
+	const cpuTimeReliability = aggregateMeasuredReliability(samples, "cpuTimeMs");
+	const peakRssReliability = aggregateMeasuredReliability(samples, "peakRssBytes");
 
 	return {
 		fixtureDimensions: {

@@ -5,7 +5,9 @@ import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import { p95 } from "./contract.mjs";
 import {
+	aggregateMeasuredReliability,
 	closeBenchmarkBrowser,
+	createInterruptingSampleWatchdog,
 	getFreePort,
 	launchBenchmarkBrowser,
 	spawnGateway,
@@ -14,6 +16,7 @@ import {
 } from "./runtime.mjs";
 import {
 	EVENT_STREAM_DONE_MARKER,
+	EVENT_STREAM_ERROR_OUTPUT,
 	EVENT_STREAM_FIXTURE_VERSION,
 	EVENT_STREAM_INTERVAL_MS,
 	EVENT_STREAM_MARKER_PREFIX,
@@ -26,7 +29,9 @@ import {
 } from "./event-stream/fixture.mjs";
 
 const CASE_NAME = `stream-${EVENT_STREAM_UPDATE_COUNT}`;
-const SAMPLE_TIMEOUT_MS = 120_000;
+export const EVENT_STREAM_SAMPLE_TIMEOUT_MS = 120_000;
+export const EVENT_STREAM_WATCHDOG_GRACE_MS = 5_000;
+const EVENT_STREAM_PHASES = Object.freeze(["prepare", "stream", "oracle", "teardown"]);
 const CLI_RELATIVE = path.join("dist", "server", "cli.js");
 const MOCK_AGENT_RELATIVE = path.join("tests", "e2e", "mock-agent.mjs");
 const MESSAGE_SELECTOR = "user-message, assistant-message, tool-message";
@@ -37,6 +42,19 @@ function sha256(value) {
 
 function assert(condition, message) {
 	if (!condition) throw new Error(message);
+}
+
+export function createEventStreamSampleWatchdog(options = {}) {
+	return createInterruptingSampleWatchdog({
+		...options,
+		label: "Event-stream sample",
+		errorName: "EventStreamSampleTimeoutError",
+		phaseLabel: "event-stream",
+		phases: EVENT_STREAM_PHASES,
+		initialPhase: "prepare",
+		timeoutMs: options.timeoutMs ?? EVENT_STREAM_SAMPLE_TIMEOUT_MS,
+		graceMs: options.graceMs ?? EVENT_STREAM_WATCHDOG_GRACE_MS,
+	});
 }
 
 async function waitForValue(read, label, timeoutMs = 30_000, intervalMs = 50) {
@@ -293,6 +311,24 @@ async function settleAndFingerprint(page, trigger) {
 				|| (typeof block.text === "string" && (block.text === trigger || block.text.includes("BOBBIT_BENCH_"))));
 		const nodes = Array.from(document.querySelectorAll(selector));
 		const messages = nodes.map(node => ({ role: node.tagName.toLowerCase(), text: normalize(node.textContent) }));
+		const composedText = root => {
+			const chunks = [];
+			const visit = node => {
+				if (node.nodeType === Node.TEXT_NODE) {
+					chunks.push(node.textContent ?? "");
+					return;
+				}
+				if (node instanceof HTMLSlotElement) {
+					for (const assigned of node.assignedNodes({ flatten: true })) visit(assigned);
+					return;
+				}
+				if (node instanceof Element && ["SCRIPT", "STYLE", "TEMPLATE"].includes(node.tagName)) return;
+				const children = node instanceof Element && node.shadowRoot ? node.shadowRoot.childNodes : node.childNodes;
+				for (const child of children) visit(child);
+			};
+			visit(root);
+			return chunks.join(" ");
+		};
 		const app = window.bobbitState ?? window.__bobbitState;
 		const remote = app?.remoteAgent?.state ?? {};
 		const semanticProjection = Array.isArray(remote.messages) ? remote.messages
@@ -305,6 +341,7 @@ async function settleAndFingerprint(page, trigger) {
 			messages,
 			semanticProjection,
 			transcriptText: normalize(nodes.map(node => node.textContent ?? "").join(" ")),
+			renderedText: normalize(document.body ? composedText(document.body) : ""),
 			streamingMessageVisible: Boolean(streamingContainer?.querySelector("assistant-message")),
 			streamingActive: streamingContainer?.isStreaming === true,
 			streamingTimerVisible: Boolean(streamingContainer?.querySelector("live-timer")),
@@ -393,16 +430,20 @@ export function assertFinalState(snapshot, fixture, label = "Final") {
 	assert(!snapshot.streamingActive, `${label} streaming container remained active after agent settlement`);
 	assert(!snapshot.streamingTimerVisible, `${label} UI retained a live streaming timer after agent settlement`);
 	assert(snapshot.editorEnabled, `${label} message editor was not enabled`);
-	for (const marker of fixture.markers) {
-		const count = snapshot.transcriptText.split(marker).length - 1;
-		assert(count === 1, `Expected marker ${marker} exactly once in the ${label.toLowerCase()} transcript, found ${count}`);
-	}
+	const renderedMarkers = [...fixture.markers, ...fixture.finalMarkers.flatMap(marker =>
+		marker === EVENT_STREAM_ERROR_OUTPUT ? [marker, marker] : [marker])];
+	const expectedCounts = new Map();
 	let previous = -1;
-	for (const marker of fixture.finalMarkers) {
-		const index = snapshot.transcriptText.indexOf(marker);
-		assert(index >= 0, `${label} transcript omitted ${marker}`);
-		assert(index > previous, `${label} transcript reordered ${marker}`);
+	for (const marker of renderedMarkers) {
+		const occurrence = (expectedCounts.get(marker) ?? 0) + 1;
+		expectedCounts.set(marker, occurrence);
+		const index = snapshot.renderedText.indexOf(marker, previous + 1);
+		assert(index > previous, `${label} UI omitted or reordered rendered marker ${marker} occurrence ${occurrence}`);
 		previous = index;
+	}
+	for (const [marker, expected] of expectedCounts) {
+		const count = snapshot.renderedText.split(marker).length - 1;
+		assert(count === expected, `Expected rendered marker ${marker} ${expected} time(s) in the ${label.toLowerCase()} UI, found ${count}`);
 	}
 	assertExpectedFinalSemanticState(snapshot, fixture, label);
 }
@@ -439,57 +480,88 @@ async function waitForSessionIdle(baseUrl, token, sessionId) {
 	}, `session ${sessionId} to become idle`, 30_000, 100);
 }
 
-async function runSample(context, entry, fixture, fixtureRoot) {
-	const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot });
-	const workspace = path.join(sampleRoot, "fixture", "project");
-	const gatewayDir = path.join(sampleRoot, "gateway");
-	const secretsDir = path.join(sampleRoot, "secrets");
-	const agentDir = path.join(sampleRoot, "agent");
-	const homeDir = path.join(sampleRoot, "home");
-	await Promise.all([gatewayDir, secretsDir, agentDir, homeDir].map(directory => mkdir(directory, { recursive: true })));
-
-	const port = await getFreePort();
-	const baseUrl = `http://127.0.0.1:${port}/`;
-	const gateway = spawnGateway({
-		args: [
-			path.join(context.repoRoot, CLI_RELATIVE),
-			"--cwd", workspace,
-			"--host", "127.0.0.1",
-			"--port", String(port),
-			"--no-tls",
-			"--agent-cli", path.join(context.repoRoot, MOCK_AGENT_RELATIVE),
-		],
-		cwd: context.repoRoot,
-		env: {
-			...process.env,
-			NODE_ENV: "test",
-			NO_COLOR: "1",
-			BOBBIT_DIR: gatewayDir,
-			BOBBIT_SECRETS_DIR: secretsDir,
-			BOBBIT_AGENT_DIR: agentDir,
-			BOBBIT_SKIP_MCP: "1",
-			BOBBIT_SKIP_WORKTREE_POOL: "1",
-			BOBBIT_SKIP_TITLE_GEN: "1",
-			BOBBIT_SKIP_AIGW_DISCOVERY: "1",
-			BOBBIT_SKIP_NPM_CI: "1",
-			BOBBIT_TEST_NO_EXTERNAL: "1",
-			BOBBIT_TEST_NO_REMOTE: "1",
-			BOBBIT_NO_OPEN: "1",
-			HOME: homeDir,
-			USERPROFILE: homeDir,
-		},
-	});
+export async function runEventStreamSample(context, entry, fixture, fixtureRoot, {
+	timeoutMs = EVENT_STREAM_SAMPLE_TIMEOUT_MS,
+	watchdogGraceMs = EVENT_STREAM_WATCHDOG_GRACE_MS,
+	watchdogDependencies = {},
+	closeBrowser = closeBenchmarkBrowser,
+	stopRuntime = stopGateway,
+} = {}) {
+	const watchdog = createEventStreamSampleWatchdog({ timeoutMs, graceMs: watchdogGraceMs, ...watchdogDependencies });
+	let gateway;
 	let browser;
 	let token;
+	let baseUrl;
+	let workspace;
+	let secretsDir;
 	let sampleResult;
 	let sampleError;
 	let cleanupError;
+	const cleanupOwnedResources = async () => {
+		const errors = [];
+		const resources = watchdog.resources();
+		if (resources.browserRuntime) {
+			try {
+				await closeBrowser(resources.browserRuntime);
+				watchdog.registerBrowser(null);
+			} catch (error) { errors.push(error); }
+		}
+		if (resources.gatewayRuntime) {
+			try {
+				await stopRuntime(resources.gatewayRuntime, { baseUrl, token });
+				watchdog.registerGateway(null);
+			} catch (error) { errors.push(error); }
+		}
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Event-stream browser and gateway cleanup failed");
+	};
+	context.deferCleanup?.(cleanupOwnedResources);
 	try {
+		const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot });
+		workspace = path.join(sampleRoot, "fixture", "project");
+		const gatewayDir = path.join(sampleRoot, "gateway");
+		secretsDir = path.join(sampleRoot, "secrets");
+		const agentDir = path.join(sampleRoot, "agent");
+		const homeDir = path.join(sampleRoot, "home");
+		await Promise.all([gatewayDir, secretsDir, agentDir, homeDir].map(directory => mkdir(directory, { recursive: true })));
+
+		const port = await getFreePort();
+		baseUrl = `http://127.0.0.1:${port}/`;
+		gateway = spawnGateway({
+			args: [
+				path.join(context.repoRoot, CLI_RELATIVE),
+				"--cwd", workspace,
+				"--host", "127.0.0.1",
+				"--port", String(port),
+				"--no-tls",
+				"--agent-cli", path.join(context.repoRoot, MOCK_AGENT_RELATIVE),
+			],
+			cwd: context.repoRoot,
+			env: {
+				...process.env,
+				NODE_ENV: "test",
+				NO_COLOR: "1",
+				BOBBIT_DIR: gatewayDir,
+				BOBBIT_SECRETS_DIR: secretsDir,
+				BOBBIT_AGENT_DIR: agentDir,
+				BOBBIT_SKIP_MCP: "1",
+				BOBBIT_SKIP_WORKTREE_POOL: "1",
+				BOBBIT_SKIP_TITLE_GEN: "1",
+				BOBBIT_SKIP_AIGW_DISCOVERY: "1",
+				BOBBIT_SKIP_NPM_CI: "1",
+				BOBBIT_TEST_NO_EXTERNAL: "1",
+				BOBBIT_TEST_NO_REMOTE: "1",
+				BOBBIT_NO_OPEN: "1",
+				HOME: homeDir,
+				USERPROFILE: homeDir,
+			},
+		});
+		watchdog.registerGateway(gateway);
 		token = await waitForValue(async () => {
 			const value = (await readFile(path.join(secretsDir, "token"), "utf8")).trim();
 			return value.length >= 64 ? value : null;
 		}, "gateway token", 30_000);
-		await waitForGatewayReady({ runtime: gateway, baseUrl, token, timeoutMs: SAMPLE_TIMEOUT_MS });
+		await waitForGatewayReady({ runtime: gateway, baseUrl, token, timeoutMs: watchdog.remainingMs() });
 		const { sessionId } = await seedGateway(baseUrl, token, workspace);
 		await waitForSessionIdle(baseUrl, token, sessionId);
 
@@ -497,6 +569,7 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 			viewport: EVENT_STREAM_VIEWPORT,
 			launchOptions: { args: ["--enable-precise-memory-info"] },
 		});
+		watchdog.registerBrowser(browser);
 		await browser.page.addInitScript(installBrowserObserver, {
 			updateCount: fixture.updateCount,
 			markerPrefix: EVENT_STREAM_MARKER_PREFIX,
@@ -512,6 +585,8 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 			return app?.selectedSessionId === id && app?.remoteAgent?.state?.status === "idle";
 		}, sessionId, { timeout: 20_000 });
 
+		watchdog.setPhase("stream");
+		watchdog.throwIfExpired();
 		await browser.page.evaluate(() => window.__bobbitEventStreamBenchmark.arm());
 		const sampleStartedAt = performance.now();
 		await browser.page.evaluate(trigger => {
@@ -537,6 +612,8 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 		const elapsedMs = performance.now() - sampleStartedAt;
 		const live = await settleAndFingerprint(browser.page, fixture.trigger);
 
+		watchdog.setPhase("oracle");
+		watchdog.throwIfExpired();
 		assertFixtureFrames(observed.frames, fixture.expectedFrames);
 		assertFinalState(live, fixture, "Live final");
 		const committedLatencies = [];
@@ -620,7 +697,8 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 					eventToRender: "reliable",
 					frameCadence: cadence.estimatedRefreshMs === null ? "unsupported" : "estimated",
 					longTasks: longTasks.reliability,
-					heap: observed.heapSupported ? "chromium-precise-memory" : "unsupported",
+					heapGrowth: observed.heapSupported ? "chromium-precise-memory" : "unsupported",
+					peakHeap: observed.heapSupported ? "chromium-precise-memory-lower-confidence-peak-sampling" : "unsupported",
 				},
 			},
 			browserVersion,
@@ -631,13 +709,23 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 			},
 		};
 	} catch (error) {
-		const detail = gateway.stderr.text() || gateway.stdout.text();
-		sampleError = new Error(`${error.message ?? error}${detail ? `; gateway log tail: ${normalizedText(detail).slice(-2_000)}` : ""}`, { cause: error });
+		const detail = gateway ? gateway.stderr.text() || gateway.stdout.text() : "";
+		const reported = watchdog.timedOut ? watchdog.error : error;
+		sampleError = new Error(`${reported.message ?? reported}${detail ? `; gateway log tail: ${normalizedText(detail).slice(-2_000)}` : ""}`, { cause: error });
+		if (watchdog.timedOut && error !== watchdog.error) {
+			sampleError = new AggregateError([sampleError, error], `Event-stream sample timed out and the active operation also failed: ${boundedErrorMessage(error)}`);
+		}
 	} finally {
+		watchdog.setPhase("teardown");
 		try {
-			await cleanupEventStreamSample({ browser, gateway, baseUrl, token });
+			await cleanupOwnedResources();
 		} catch (error) {
 			cleanupError = error;
+		}
+		try {
+			await watchdog.finish();
+		} catch (error) {
+			cleanupError = cleanupError ? new AggregateError([cleanupError, error], "Event-stream watchdog cleanup failed") : error;
 		}
 	}
 	if (sampleError && cleanupError) {
@@ -648,6 +736,7 @@ async function runSample(context, entry, fixture, fixtureRoot) {
 	}
 	if (sampleError) throw sampleError;
 	if (cleanupError) throw cleanupError;
+	sampleResult.sample.phaseDurationsMs = watchdog.phaseDurationsMs();
 	return sampleResult;
 }
 
@@ -682,17 +771,18 @@ export async function runJourney(context) {
 	const schedule = context.scheduleFor([CASE_NAME]);
 	const samples = [];
 	let browserVersion = null;
-	let metricSupport = { longTasks: false, frameCadence: false, heap: false };
 	for (const entry of schedule) {
-		const result = await runSample(context, entry, fixture, fixtureRoot);
+		const result = await runEventStreamSample(context, entry, fixture, fixtureRoot);
 		samples.push(result.sample);
 		browserVersion ??= result.browserVersion;
-		metricSupport = {
-			longTasks: metricSupport.longTasks || result.metricSupport.longTasks,
-			frameCadence: metricSupport.frameCadence || result.metricSupport.frameCadence,
-			heap: metricSupport.heap || result.metricSupport.heap,
-		};
 	}
+	const metricSupport = {
+		eventToRender: aggregateMeasuredReliability(samples, "eventToRender"),
+		frameCadence: aggregateMeasuredReliability(samples, "frameCadence"),
+		longTasks: aggregateMeasuredReliability(samples, "longTasks"),
+		heapGrowth: aggregateMeasuredReliability(samples, "heapGrowth"),
+		peakHeap: aggregateMeasuredReliability(samples, "peakHeap"),
+	};
 
 	return {
 		fixtureDimensions: {
@@ -712,16 +802,16 @@ export async function runJourney(context) {
 		},
 		samples,
 		metricDefinitions: {
-			eventToRenderP95Ms: { unit: "ms", direction: "lower", reliability: "reliable" },
-			eventThroughputPerSecond: { unit: "events/s", direction: "higher", reliability: "reliable" },
-			elapsedMs: { unit: "ms", direction: "lower", reliability: "reliable" },
-			slowFrames: { unit: "count", direction: "lower", reliability: "estimated" },
-			droppedFrames: { unit: "count", direction: "lower", reliability: "estimated" },
-			longTaskCount: { unit: "count", direction: "lower", reliability: metricSupport.longTasks ? "browser-api" : "unsupported" },
-			longTaskTotalMs: { unit: "ms", direction: "lower", reliability: metricSupport.longTasks ? "browser-api" : "unsupported" },
-			longTaskMaxMs: { unit: "ms", direction: "lower", reliability: metricSupport.longTasks ? "browser-api" : "unsupported" },
-			heapGrowthBytes: { unit: "bytes", direction: "lower", reliability: metricSupport.heap ? "chromium-precise-memory" : "unsupported" },
-			peakHeapBytes: { unit: "bytes", direction: "lower", reliability: metricSupport.heap ? "chromium-precise-memory" : "unsupported" },
+			eventToRenderP95Ms: { unit: "ms", direction: "lower", reliability: metricSupport.eventToRender },
+			eventThroughputPerSecond: { unit: "events/s", direction: "higher", reliability: metricSupport.eventToRender },
+			elapsedMs: { unit: "ms", direction: "lower", reliability: metricSupport.eventToRender },
+			slowFrames: { unit: "count", direction: "lower", reliability: metricSupport.frameCadence },
+			droppedFrames: { unit: "count", direction: "lower", reliability: metricSupport.frameCadence },
+			longTaskCount: { unit: "count", direction: "lower", reliability: metricSupport.longTasks },
+			longTaskTotalMs: { unit: "ms", direction: "lower", reliability: metricSupport.longTasks },
+			longTaskMaxMs: { unit: "ms", direction: "lower", reliability: metricSupport.longTasks },
+			heapGrowthBytes: { unit: "bytes", direction: "lower", reliability: metricSupport.heapGrowth },
+			peakHeapBytes: { unit: "bytes", direction: "lower", reliability: metricSupport.peakHeap },
 		},
 		environment: {
 			browser: browserVersion ? `Chromium ${browserVersion}` : null,
@@ -740,7 +830,7 @@ export async function runJourney(context) {
 		interpretation: "Validate event and live-refresh parity first. Then compare lower event-to-render p95 and frame/long-task/heap metrics from alternating runs on the same host.",
 		limitations: [
 			"Slow and dropped frames are estimates derived from requestAnimationFrame cadence, not compositor telemetry.",
-			"Long-task and heap metrics are reported only when Chromium exposes their browser APIs; unsupported values remain null.",
+			"Long-task and heap metrics are reported only when Chromium exposes their browser APIs; unsupported values remain null. peakHeapBytes is the largest periodic precise-memory sample, so it is a sampled lower bound rather than a true high-water mark.",
 			"Mutation-to-animation-frame timing measures the first committed DOM containing each cumulative marker; superseded updates remain present in protocol counts.",
 		],
 		noiseSources: [

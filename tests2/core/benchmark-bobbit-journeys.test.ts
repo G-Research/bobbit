@@ -43,9 +43,11 @@ import {
 } from "../../scripts/benchmarks/gateway-startup.mjs";
 import { bfsEnrichArchivedIndexed } from "../../src/server/agent/archived-session-bfs.js";
 import {
+	aggregateMeasuredReliability,
 	cleanupBenchmarkRunRoot,
 	closeBenchmarkBrowser,
 	createBenchmarkRunRoot,
+	readProcessMetrics,
 } from "../../scripts/benchmarks/runtime.mjs";
 import {
 	createSessionOpenSampleWatchdog,
@@ -416,6 +418,42 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 		}
 	});
 
+	it("rejects missing, changed, duplicated, or reordered rendered event markers", () => {
+		const fixture: any = createEventStreamFixture();
+		const renderedMarkers = [
+			...fixture.markers,
+			EVENT_STREAM_PROPOSAL_TITLE,
+			EVENT_STREAM_PROPOSAL_SPEC,
+			EVENT_STREAM_TOOL_OUTPUT,
+			EVENT_STREAM_ERROR_OUTPUT,
+			EVENT_STREAM_ERROR_OUTPUT,
+			`${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`,
+		];
+		const base: any = {
+			status: "idle",
+			pendingToolCount: 0,
+			streamingMessageVisible: false,
+			streamingActive: false,
+			streamingTimerVisible: false,
+			editorEnabled: true,
+			renderedText: renderedMarkers.join(" | "),
+			semanticProjection: structuredClone(fixture.expectedFinalSemanticProjection),
+		};
+		eventStreamBenchmark.assertFinalState(base, fixture);
+		const mutations = [
+			(text: string) => text.replace(EVENT_STREAM_PROPOSAL_TITLE, ""),
+			(text: string) => text.replace(EVENT_STREAM_ERROR_OUTPUT, "CHANGED_ERROR_OUTPUT"),
+			(text: string) => `${text} ${EVENT_STREAM_TOOL_OUTPUT}`,
+			(text: string) => text.replace(
+				`${EVENT_STREAM_ERROR_OUTPUT} | ${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`,
+				`${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount} | ${EVENT_STREAM_ERROR_OUTPUT}`,
+			),
+		];
+		for (const mutate of mutations) {
+			assert.throws(() => eventStreamBenchmark.assertFinalState({ ...base, renderedText: mutate(base.renderedText) }, fixture), /rendered marker|omitted|reordered/i);
+		}
+	});
+
 	it("rejects event semantic omission, duplication, reordering, and tool mutation", () => {
 		const assertSemantic = (eventStreamBenchmark as any).assertExpectedFinalSemanticState;
 		if (typeof assertSemantic !== "function") return; // Repair branch supplies this pure seam before integration.
@@ -456,6 +494,50 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 			maxMs: 80,
 			reliability: "browser-api",
 		});
+	});
+});
+
+describe("process metrics and reliability aggregation", () => {
+	it("does not fabricate Linux CPU time and preserves independently valid RSS", async () => {
+		const stat = `123 (benchmark) S ${Array.from({ length: 10 }, () => 0).join(" ")} 10 20`;
+		const status = "Name:\tbenchmark\nVmHWM:\t42 kB\nVmRSS:\t21 kB\n";
+		const valid = await readProcessMetrics(123, {
+			platform: "linux",
+			readFileImpl: async (file: string) => file.endsWith("/stat") ? stat : status,
+			spawnSyncImpl: () => ({ status: 0, stdout: "100\n" }),
+		});
+		assert.equal(valid.cpuTimeMs, 300);
+		assert.equal(valid.peakRssBytes, 42 * 1024);
+		assert.equal(valid.cpuReliability, "reliable");
+		assert.equal(valid.peakRssReliability, "reliable");
+
+		for (const result of [
+			{ status: 0, stdout: "" },
+			{ status: 1, stdout: "100" },
+			{ status: 0, stdout: "not-a-number" },
+		]) {
+			const partial = await readProcessMetrics(123, {
+				platform: "linux",
+				readFileImpl: async (file: string) => file.endsWith("/stat") ? stat : status,
+				spawnSyncImpl: () => result,
+			});
+			assert.equal(partial.cpuTimeMs, null);
+			assert.equal(partial.cpuReliability, "unsupported");
+			assert.equal(partial.peakRssBytes, 42 * 1024);
+			assert.equal(partial.peakRssReliability, "reliable");
+		}
+	});
+
+	it("summarizes measured reliability conservatively and ignores warm-ups", () => {
+		const samples = [
+			{ phase: "warmup", metricReliability: { heap: "unsupported" } },
+			{ phase: "measured", metricReliability: { heap: "reliable" } },
+			{ phase: "measured", metricReliability: { heap: "lower-confidence" } },
+		];
+		assert.equal(aggregateMeasuredReliability(samples, "heap"), "mixed (lower-confidence, reliable)");
+		assert.equal(aggregateMeasuredReliability([{ phase: "measured", metricReliability: { heap: "partial" } }], "heap"), "partial");
+		assert.equal(aggregateMeasuredReliability([{ phase: "warmup", metricReliability: { heap: "reliable" } }], "heap"), "unsupported");
+		assert.equal(aggregateMeasuredReliability([{ phase: "measured", metricReliability: {} }], "heap"), "unsupported");
 	});
 });
 
@@ -541,6 +623,32 @@ describe("session-open bounded sample lifecycle", () => {
 		assert.throws(() => watchdog.throwIfExpired(), /watchdog expired.*paritySettle/i);
 	});
 
+	it("uses the shared watchdog to interrupt a never-settling event renderer operation", async () => {
+		const clock = injectedClock();
+		let rejectRenderer!: (error: Error) => void;
+		const renderer = new Promise((_resolve, reject) => { rejectRenderer = reject; });
+		const browserRuntime = { cdp: {} };
+		const watchdog = eventStreamBenchmark.createEventStreamSampleWatchdog({
+			timeoutMs: 40,
+			graceMs: 5,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			terminateExecution: async (runtime: any) => {
+				assert.equal(runtime, browserRuntime);
+				rejectRenderer(new Error("renderer execution terminated"));
+			},
+		});
+		watchdog.registerBrowser(browserRuntime);
+		watchdog.setPhase("stream");
+		clock.advanceTo(40);
+		clock.timers.find(timer => timer.delay === 40)!.callback();
+		await assert.rejects(renderer, /execution terminated/);
+		await watchdog.finish();
+		assert.equal(watchdog.error.name, "EventStreamSampleTimeoutError");
+		assert.equal(watchdog.error.phase, "stream");
+	});
+
 	it("propagates an injected watchdog expiry through the sample orchestrator", async () => {
 		const clock = injectedClock();
 		let interruptCount = 0;
@@ -567,6 +675,7 @@ describe("session-open bounded sample lifecycle", () => {
 				measureCalled = true;
 				throw new Error("measure must not run after prepare expires");
 			},
+			closeBrowser: async () => {},
 		}), error => {
 			assert.equal((error as any).name, "SessionOpenSampleTimeoutError");
 			assert.equal((error as any).phase, "prepare");
@@ -576,6 +685,47 @@ describe("session-open bounded sample lifecycle", () => {
 		assert.equal(interruptCount, 1);
 		assert.equal(measureCalled, false);
 		assert.equal(clock.timers[0].cleared, true);
+	});
+
+	it("retains cleanup ownership, aggregates failures, and lets the backstop retry browser before gateway", async () => {
+		const deferred: Array<() => Promise<void>> = [];
+		const cleanupOrder: string[] = [];
+		let browserAttempts = 0;
+		let gatewayAttempts = 0;
+		const context = {
+			createSampleRoot: async () => "sample-root",
+			deferCleanup: (cleanup: () => Promise<void>) => deferred.push(cleanup),
+		};
+		await assert.rejects(runSessionOpenSample(
+			context,
+			{ case: "tiny", phase: "measured", cycle: 0, order: 0, caseOrder: 0 },
+			{ directory: "fixture", manifest: {} },
+			{
+				prepare: async (_context: any, _root: any, watchdog: any) => {
+					watchdog.registerBrowser({ id: "browser" });
+					watchdog.registerGateway({ id: "gateway" });
+					throw new Error("prepare operation failed");
+				},
+				closeBrowser: async () => {
+					cleanupOrder.push("browser");
+					browserAttempts += 1;
+					if (browserAttempts === 1) throw new Error("first browser close failed");
+				},
+				stopRuntime: async () => {
+					cleanupOrder.push("gateway");
+					gatewayAttempts += 1;
+					if (gatewayAttempts === 1) throw new Error("first gateway stop failed");
+				},
+			},
+		), error => {
+			assert.ok(error instanceof AggregateError);
+			assert.match(String(error), /prepare operation failed/);
+			return true;
+		});
+		assert.deepEqual(cleanupOrder, ["browser", "gateway"]);
+		assert.equal(deferred.length, 1);
+		await deferred[0]();
+		assert.deepEqual(cleanupOrder, ["browser", "gateway", "browser", "gateway"]);
 	});
 
 	it("runs injected prepare/measure phases and disarms the deadline after success", async () => {

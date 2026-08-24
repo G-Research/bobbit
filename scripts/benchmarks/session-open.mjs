@@ -3,7 +3,9 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+	aggregateMeasuredReliability,
 	closeBenchmarkBrowser,
+	createInterruptingSampleWatchdog,
 	getFreePort,
 	launchBenchmarkBrowser,
 	spawnGateway,
@@ -448,94 +450,22 @@ export async function generateSessionOpenFixture(fixtureRoot, fixtureCase) {
 
 const SESSION_OPEN_PHASES = Object.freeze(["prepare", "tti", "paritySettle", "oracle", "teardown"]);
 
-/**
- * Own one absolute sample deadline. Expiry interrupts the active renderer rather
- * than abandoning its promise, so ordinary finally blocks still own teardown.
- * Clock/timer/interrupt dependencies are injectable for deterministic tests.
- */
-export function createSessionOpenSampleWatchdog({
-	timeoutMs = SESSION_OPEN_SAMPLE_TIMEOUT_MS,
-	graceMs = SESSION_OPEN_WATCHDOG_GRACE_MS,
-	now = () => performance.now(),
-	setTimer = (callback, delay) => setTimeout(callback, delay),
-	clearTimer = handle => clearTimeout(handle),
-	terminateExecution = runtime => runtime?.cdp?.send("Runtime.terminateExecution") ?? Promise.resolve(),
-	closeBrowser = runtime => runtime?.browser?.close() ?? Promise.resolve(),
-} = {}) {
+/** Session-open compatibility facade over the shared interrupting watchdog. */
+export function createSessionOpenSampleWatchdog(options = {}) {
+	const timeoutMs = options.timeoutMs ?? SESSION_OPEN_SAMPLE_TIMEOUT_MS;
+	const graceMs = options.graceMs ?? SESSION_OPEN_WATCHDOG_GRACE_MS;
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError("Session-open sample timeout must be positive");
 	if (!Number.isFinite(graceMs) || graceMs < 0) throw new RangeError("Session-open watchdog grace must be non-negative");
-	const startedAt = now();
-	const deadline = startedAt + timeoutMs;
-	const durations = Object.fromEntries(SESSION_OPEN_PHASES.map(phase => [phase, 0]));
-	const abortController = new AbortController();
-	let phase = "prepare";
-	let phaseStartedAt = startedAt;
-	let browserRuntime = null;
-	let gatewayRuntime = null;
-	let expired = false;
-	let workSettled = false;
-	let timeoutError = null;
-	let fallbackTimer = null;
-	let interruptPromise = Promise.resolve();
-
-	const snapshotDurations = () => {
-		const result = { ...durations };
-		if (phase && !workSettled) result[phase] += Math.max(0, now() - phaseStartedAt);
-		return Object.fromEntries(SESSION_OPEN_PHASES.map(name => [`${name}Ms`, result[name]]));
-	};
-	const expire = () => {
-		if (expired || workSettled) return;
-		expired = true;
-		timeoutError = new Error(`Session-open sample watchdog expired after ${timeoutMs}ms during ${phase} phase`);
-		timeoutError.name = "SessionOpenSampleTimeoutError";
-		timeoutError.phase = phase;
-		timeoutError.phaseDurationsMs = snapshotDurations();
-		abortController.abort(timeoutError);
-		const acquiredBrowser = browserRuntime;
-		interruptPromise = Promise.resolve()
-			.then(() => terminateExecution(acquiredBrowser))
-			.catch(() => {});
-		fallbackTimer = setTimer(() => {
-			if (workSettled || !acquiredBrowser) return;
-			interruptPromise = Promise.allSettled([
-				interruptPromise,
-				Promise.resolve().then(() => closeBrowser(acquiredBrowser)),
-			]).then(() => undefined);
-		}, graceMs);
-	};
-	const deadlineTimer = setTimer(expire, timeoutMs);
-
-	return {
-		signal: abortController.signal,
-		setPhase(nextPhase) {
-			if (!SESSION_OPEN_PHASES.includes(nextPhase)) throw new Error(`Unknown session-open phase: ${nextPhase}`);
-			if (nextPhase === phase) return;
-			const timestamp = now();
-			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
-			phase = nextPhase;
-			phaseStartedAt = timestamp;
-		},
-		registerGateway(runtime) { gatewayRuntime = runtime ?? null; },
-		registerBrowser(runtime) { browserRuntime = runtime ?? null; },
-		resources() { return { browserRuntime, gatewayRuntime }; },
-		remainingMs() { return Math.max(1, Math.ceil(deadline - now())); },
-		throwIfExpired() { if (expired) throw timeoutError; },
-		markWorkSettled() {
-			if (workSettled) return;
-			const timestamp = now();
-			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
-			workSettled = true;
-			clearTimer(deadlineTimer);
-			if (fallbackTimer !== null) clearTimer(fallbackTimer);
-		},
-		async finish() {
-			this.markWorkSettled();
-			await interruptPromise;
-		},
-		phaseDurationsMs: snapshotDurations,
-		get timedOut() { return expired; },
-		get error() { return timeoutError; },
-	};
+	return createInterruptingSampleWatchdog({
+		...options,
+		label: "Session-open sample",
+		errorName: "SessionOpenSampleTimeoutError",
+		phaseLabel: "session-open",
+		phases: SESSION_OPEN_PHASES,
+		initialPhase: "prepare",
+		timeoutMs,
+		graceMs,
+	});
 }
 
 function requestSignal(signal, timeoutMs = 30_000) {
@@ -619,7 +549,9 @@ function gatewayInvocation(context, sampleRoot, port) {
 	};
 }
 
-async function prepareRestoredSession(context, sampleRoot, watchdog) {
+async function prepareRestoredSession(context, sampleRoot, watchdog, {
+	stopRuntime = stopGateway,
+} = {}) {
 	watchdog.throwIfExpired();
 	const invocation = gatewayInvocation(context, sampleRoot, await getFreePort());
 	await Promise.all([
@@ -672,9 +604,9 @@ async function prepareRestoredSession(context, sampleRoot, watchdog) {
 			const rows = Array.isArray(store) ? store : store.sessions;
 			return rows?.find(row => row.id === session.id && typeof row.agentSessionFile === "string") ?? null;
 		}, "session transcript path to persist", Math.min(30_000, watchdog.remainingMs()), watchdog.signal);
-		await stopGateway(runtime, { baseUrl: invocation.baseUrl });
-		runtime = null;
+		await stopRuntime(runtime, { baseUrl: invocation.baseUrl });
 		watchdog.registerGateway(null);
+		runtime = null;
 		watchdog.throwIfExpired();
 
 		await writeFile(persisted.agentSessionFile, await readFile(path.join(sampleRoot, "fixture", "transcript.jsonl")));
@@ -695,8 +627,19 @@ async function prepareRestoredSession(context, sampleRoot, watchdog) {
 		}, "restored benchmark session to become interactive", Math.min(60_000, watchdog.remainingMs()), watchdog.signal);
 		return { invocation, runtime, sessionId: session.id };
 	} catch (error) {
-		if (runtime) await stopGateway(runtime, { baseUrl: invocation.baseUrl }).catch(() => {});
-		watchdog.registerGateway(null);
+		let cleanupError = null;
+		if (runtime) {
+			try {
+				await stopRuntime(runtime, { baseUrl: invocation.baseUrl });
+				watchdog.registerGateway(null);
+				runtime = null;
+			} catch (failure) {
+				cleanupError = failure;
+			}
+		}
+		if (cleanupError) {
+			throw new AggregateError([error, cleanupError], `Session-open preparation failed and gateway cleanup was incomplete: ${error.message ?? error}`);
+		}
 		throw error;
 	}
 }
@@ -707,6 +650,7 @@ function metricValue(metrics, name) {
 
 async function measureBrowserSample(restored, manifest, watchdog, {
 	parityBatchSize = SESSION_OPEN_PARITY_BATCH_SIZE,
+	closeBrowser = closeBenchmarkBrowser,
 } = {}) {
 	if (!Number.isInteger(parityBatchSize) || parityBatchSize < 1 || parityBatchSize > 100) {
 		throw new RangeError("Session-open parity batch size must be an integer from 1 to 100");
@@ -959,14 +903,43 @@ async function measureBrowserSample(restored, manifest, watchdog, {
 		};
 	} finally {
 		watchdog.setPhase("teardown");
+		await closeBrowser(browserRuntime);
+		watchdog.registerBrowser(null);
+	}
+}
+
+async function cleanupSessionOpenResources(watchdog, {
+	closeBrowser = closeBenchmarkBrowser,
+	stopRuntime = stopGateway,
+	baseUrl,
+} = {}) {
+	const failures = [];
+	const { browserRuntime, gatewayRuntime } = watchdog.resources();
+	if (browserRuntime) {
 		try {
-			await closeBenchmarkBrowser(browserRuntime);
-		} catch (error) {
-			if (!watchdog.timedOut) throw error;
-		} finally {
+			await closeBrowser(browserRuntime);
 			watchdog.registerBrowser(null);
+		} catch (error) {
+			failures.push(error);
 		}
 	}
+	if (gatewayRuntime) {
+		try {
+			await stopRuntime(gatewayRuntime, { baseUrl });
+			watchdog.registerGateway(null);
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "Session-open browser and gateway cleanup failed");
+}
+
+function combineSessionOpenErrors(operationError, cleanupError) {
+	if (operationError && cleanupError) {
+		return new AggregateError([operationError, cleanupError], `Session-open sample failed and cleanup was incomplete: ${operationError.message ?? operationError}`);
+	}
+	return operationError ?? cleanupError ?? null;
 }
 
 export async function runSessionOpenSample(context, entry, fixture, {
@@ -976,6 +949,8 @@ export async function runSessionOpenSample(context, entry, fixture, {
 	watchdogDependencies = {},
 	prepare = prepareRestoredSession,
 	measure = measureBrowserSample,
+	closeBrowser = closeBenchmarkBrowser,
+	stopRuntime = stopGateway,
 } = {}) {
 	const watchdog = createSessionOpenSampleWatchdog({
 		timeoutMs,
@@ -986,40 +961,39 @@ export async function runSessionOpenSample(context, entry, fixture, {
 	let measured;
 	let operationError = null;
 	let cleanupError = null;
+	const cleanupOwnedResources = () => cleanupSessionOpenResources(watchdog, {
+		closeBrowser,
+		stopRuntime,
+		baseUrl: restored?.invocation?.baseUrl,
+	});
+	context.deferCleanup?.(cleanupOwnedResources);
 	try {
 		const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: fixture.directory });
 		watchdog.throwIfExpired();
-		restored = await prepare(context, sampleRoot, watchdog);
+		restored = await prepare(context, sampleRoot, watchdog, { stopRuntime });
 		watchdog.setPhase("tti");
 		watchdog.throwIfExpired();
-		measured = await measure(restored, fixture.manifest, watchdog, { parityBatchSize });
+		measured = await measure(restored, fixture.manifest, watchdog, { parityBatchSize, closeBrowser });
 	} catch (error) {
-		operationError = watchdog.timedOut ? watchdog.error : error;
+		operationError = watchdog.timedOut && error !== watchdog.error
+			? combineSessionOpenErrors(watchdog.error, error)
+			: (watchdog.timedOut ? watchdog.error : error);
 	} finally {
 		watchdog.setPhase("teardown");
-		if (restored?.runtime) {
-			try {
-				await stopGateway(restored.runtime, { baseUrl: restored.invocation.baseUrl });
-			} catch (error) {
-				cleanupError = error;
-			} finally {
-				watchdog.registerGateway(null);
-			}
+		try {
+			await cleanupOwnedResources();
+		} catch (error) {
+			cleanupError = error;
 		}
 		try {
 			await watchdog.finish();
 		} catch (error) {
-			cleanupError = cleanupError
-				? new AggregateError([cleanupError, error], "Session-open watchdog cleanup failed")
-				: error;
+			cleanupError = combineSessionOpenErrors(cleanupError, error);
 		}
 	}
 	operationError ??= watchdog.timedOut ? watchdog.error : null;
-	if (operationError && cleanupError) {
-		throw new AggregateError([operationError, cleanupError], `Session-open sample failed and cleanup was incomplete: ${operationError.message}`);
-	}
-	if (operationError) throw operationError;
-	if (cleanupError) throw cleanupError;
+	const failure = combineSessionOpenErrors(operationError, cleanupError);
+	if (failure) throw failure;
 	return {
 		case: entry.case,
 		phase: entry.phase,
@@ -1052,13 +1026,16 @@ export async function runJourney(context, dependencies = {}) {
 	const schedule = context.scheduleFor(SESSION_OPEN_CASES.map(fixtureCase => fixtureCase.name));
 	const samples = [];
 	let browserVersion = null;
-	let metricSupport = {};
 	for (const entry of schedule) {
 		const sample = await runSessionOpenSample(context, entry, fixtures.get(entry.case), dependencies);
 		browserVersion ??= sample.browserVersion;
-		metricSupport = { ...metricSupport, ...sample.metricReliability };
 		samples.push(sample);
 	}
+	const metricSupport = {
+		webSocketFrames: aggregateMeasuredReliability(samples, "webSocketFrames"),
+		longTasks: aggregateMeasuredReliability(samples, "longTasks"),
+		heap: aggregateMeasuredReliability(samples, "heap"),
+	};
 	return {
 		fixtureDimensions: Object.fromEntries(SESSION_OPEN_CASES.map(fixtureCase => {
 			const fixture = fixtures.get(fixtureCase.name);

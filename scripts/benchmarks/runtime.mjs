@@ -14,6 +14,130 @@ export const DEFAULT_STOP_GRACE_MS = 5_000;
 export const DEFAULT_LOG_TAIL_BYTES = 32 * 1024;
 export const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
 
+function boundedReliability(value) {
+	const normalized = String(value ?? "unsupported").replace(/\s+/g, " ").trim() || "unsupported";
+	return normalized.slice(0, 120);
+}
+
+/** Conservatively summarize per-sample reliability without letting warm-ups influence measured results. */
+export function aggregateMeasuredReliability(samples, metric) {
+	const measured = (Array.isArray(samples) ? samples : [])
+		.filter(sample => sample?.phase === "measured")
+		.map(sample => boundedReliability(sample?.metricReliability?.[metric]));
+	if (measured.length === 0) return "unsupported";
+	const observed = [...new Set(measured)].sort();
+	if (observed.length === 1) return observed[0];
+	const mixed = `mixed (${observed.join(", ")})`;
+	return mixed.length <= 240 ? mixed : `${mixed.slice(0, 227)}... (truncated)`;
+}
+
+/**
+ * Own one absolute browser-sample deadline. Expiry interrupts active page
+ * execution instead of abandoning its promise, leaving ordinary finally blocks
+ * responsible for verified browser-before-gateway teardown.
+ */
+export function createInterruptingSampleWatchdog({
+	label,
+	errorName,
+	phaseLabel = label?.toLowerCase(),
+	phases,
+	initialPhase = phases?.[0],
+	timeoutMs,
+	graceMs,
+	now = () => performance.now(),
+	setTimer = (callback, delay) => setTimeout(callback, delay),
+	clearTimer = handle => clearTimeout(handle),
+	terminateExecution = runtime => runtime?.cdp?.send("Runtime.terminateExecution") ?? Promise.resolve(),
+	closeBrowser = runtime => runtime?.browser?.close() ?? Promise.resolve(),
+} = {}) {
+	if (typeof label !== "string" || !label.trim()) throw new TypeError("Watchdog label is required");
+	if (typeof errorName !== "string" || !errorName.trim()) throw new TypeError("Watchdog error name is required");
+	if (!Array.isArray(phases) || phases.length === 0 || new Set(phases).size !== phases.length || phases.some(phase => typeof phase !== "string" || !phase)) {
+		throw new TypeError("Watchdog phases must be unique non-empty strings");
+	}
+	if (!phases.includes(initialPhase)) throw new Error(`Unknown ${phaseLabel} phase: ${initialPhase}`);
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError(`${label} timeout must be positive`);
+	if (!Number.isFinite(graceMs) || graceMs < 0) throw new RangeError(`${label} watchdog grace must be non-negative`);
+
+	const startedAt = now();
+	const deadline = startedAt + timeoutMs;
+	const durations = Object.fromEntries(phases.map(phase => [phase, 0]));
+	const abortController = new AbortController();
+	const interruptErrors = [];
+	let phase = initialPhase;
+	let phaseStartedAt = startedAt;
+	let browserRuntime = null;
+	let gatewayRuntime = null;
+	let expired = false;
+	let workSettled = false;
+	let timeoutError = null;
+	let fallbackTimer = null;
+	let terminatePromise = Promise.resolve();
+	let fallbackPromise = Promise.resolve();
+
+	const snapshotDurations = () => {
+		const result = { ...durations };
+		if (phase && !workSettled) result[phase] += Math.max(0, now() - phaseStartedAt);
+		return Object.fromEntries(phases.map(name => [`${name}Ms`, result[name]]));
+	};
+	const captureInterrupt = async operation => {
+		try { await operation(); } catch (error) { interruptErrors.push(error); }
+	};
+	const expire = () => {
+		if (expired || workSettled) return;
+		expired = true;
+		timeoutError = new Error(`${label} watchdog expired after ${timeoutMs}ms during ${phase} phase`);
+		timeoutError.name = errorName;
+		timeoutError.phase = phase;
+		timeoutError.phaseDurationsMs = snapshotDurations();
+		abortController.abort(timeoutError);
+		const acquiredBrowser = browserRuntime;
+		terminatePromise = captureInterrupt(() => terminateExecution(acquiredBrowser));
+		fallbackTimer = setTimer(() => {
+			if (workSettled || !acquiredBrowser) return;
+			fallbackPromise = captureInterrupt(async () => {
+				await terminatePromise;
+				await closeBrowser(acquiredBrowser);
+			});
+		}, graceMs);
+	};
+	const deadlineTimer = setTimer(expire, timeoutMs);
+
+	return {
+		signal: abortController.signal,
+		setPhase(nextPhase) {
+			if (!phases.includes(nextPhase)) throw new Error(`Unknown ${phaseLabel} phase: ${nextPhase}`);
+			if (nextPhase === phase) return;
+			const timestamp = now();
+			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
+			phase = nextPhase;
+			phaseStartedAt = timestamp;
+		},
+		registerGateway(runtime) { gatewayRuntime = runtime ?? null; },
+		registerBrowser(runtime) { browserRuntime = runtime ?? null; },
+		resources() { return { browserRuntime, gatewayRuntime }; },
+		remainingMs() { return Math.max(1, Math.ceil(deadline - now())); },
+		throwIfExpired() { if (expired) throw timeoutError; },
+		markWorkSettled() {
+			if (workSettled) return;
+			const timestamp = now();
+			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
+			workSettled = true;
+			clearTimer(deadlineTimer);
+			if (fallbackTimer !== null) clearTimer(fallbackTimer);
+		},
+		async finish() {
+			this.markWorkSettled();
+			await Promise.allSettled([terminatePromise, fallbackPromise]);
+			if (interruptErrors.length === 1) throw interruptErrors[0];
+			if (interruptErrors.length > 1) throw new AggregateError(interruptErrors, `${label} watchdog interruption failed`);
+		},
+		phaseDurationsMs: snapshotDurations,
+		get timedOut() { return expired; },
+		get error() { return timeoutError; },
+	};
+}
+
 function isWithin(parent, candidate) {
 	const relative = path.relative(path.resolve(parent), path.resolve(candidate));
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -484,15 +608,25 @@ export async function readProcessMetrics(pid, {
 				readFileImpl(`/proc/${pid}/status`, "utf8"),
 			]);
 			const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+			const utime = Number(fields[11]);
+			const stime = Number(fields[12]);
 			const ticksResult = spawnSyncImpl("getconf", ["CLK_TCK"], { encoding: "utf8" });
-			const ticks = Number(ticksResult.stdout) || 100;
+			const ticks = ticksResult?.status === 0 && !ticksResult?.error ? Number(String(ticksResult.stdout).trim()) : null;
+			const cpuSupported = Number.isFinite(ticks) && ticks > 0
+				&& Number.isFinite(utime) && utime >= 0
+				&& Number.isFinite(stime) && stime >= 0;
 			const highWaterKb = Number(status.match(/^VmHWM:\s+(\d+)\s+kB$/m)?.[1]);
 			const currentKb = Number(status.match(/^VmRSS:\s+(\d+)\s+kB$/m)?.[1]);
+			const peakRssBytes = Number.isFinite(highWaterKb) ? highWaterKb * 1024 : null;
+			const rssBytes = Number.isFinite(currentKb) ? currentKb * 1024 : null;
 			return {
-				cpuTimeMs: ((Number(fields[11]) + Number(fields[12])) / ticks) * 1_000,
-				peakRssBytes: Number.isFinite(highWaterKb) ? highWaterKb * 1024 : null,
-				rssBytes: Number.isFinite(currentKb) ? currentKb * 1024 : null,
-				reliability: "reliable",
+				cpuTimeMs: cpuSupported ? ((utime + stime) / ticks) * 1_000 : null,
+				peakRssBytes,
+				rssBytes,
+				cpuReliability: cpuSupported ? "reliable" : "unsupported",
+				peakRssReliability: peakRssBytes === null ? "unsupported" : "reliable",
+				rssReliability: rssBytes === null ? "unsupported" : "reliable",
+				reliability: cpuSupported && peakRssBytes !== null ? "reliable" : (cpuSupported || peakRssBytes !== null || rssBytes !== null ? "partial" : "unsupported"),
 			};
 		} catch { /* unsupported or process exited */ }
 	}
@@ -505,10 +639,16 @@ export async function readProcessMetrics(pid, {
 				timeout: 2_000,
 			});
 			const value = JSON.parse(result.stdout);
+			const cpuTimeMs = Number.isFinite(value.CPU) ? value.CPU * 1_000 : null;
+			const peakRssBytes = Number.isFinite(value.PeakWorkingSet64) ? value.PeakWorkingSet64 : null;
+			const rssBytes = Number.isFinite(value.WorkingSet64) ? value.WorkingSet64 : null;
 			return {
-				cpuTimeMs: Number.isFinite(value.CPU) ? value.CPU * 1_000 : null,
-				peakRssBytes: Number.isFinite(value.PeakWorkingSet64) ? value.PeakWorkingSet64 : null,
-				rssBytes: Number.isFinite(value.WorkingSet64) ? value.WorkingSet64 : null,
+				cpuTimeMs,
+				peakRssBytes,
+				rssBytes,
+				cpuReliability: cpuTimeMs === null ? "unsupported" : "lower-confidence",
+				peakRssReliability: peakRssBytes === null ? "unsupported" : "lower-confidence",
+				rssReliability: rssBytes === null ? "unsupported" : "lower-confidence",
 				reliability: "lower-confidence",
 			};
 		} catch { /* unsupported or process exited */ }
@@ -517,8 +657,24 @@ export async function readProcessMetrics(pid, {
 		try {
 			const result = spawnSyncImpl("ps", ["-o", "time=", "-p", String(pid)], { encoding: "utf8", timeout: 2_000 });
 			const cpuTimeMs = result.status === 0 && !result.error ? parseProcessTime(result.stdout) : null;
-			if (cpuTimeMs !== null) return { cpuTimeMs, peakRssBytes: null, rssBytes: null, reliability: "partial" };
+			if (cpuTimeMs !== null) return {
+				cpuTimeMs,
+				peakRssBytes: null,
+				rssBytes: null,
+				cpuReliability: "partial",
+				peakRssReliability: "unsupported",
+				rssReliability: "unsupported",
+				reliability: "partial",
+			};
 		} catch { /* unsupported or process exited */ }
 	}
-	return { cpuTimeMs: null, peakRssBytes: null, rssBytes: null, reliability: "unsupported" };
+	return {
+		cpuTimeMs: null,
+		peakRssBytes: null,
+		rssBytes: null,
+		cpuReliability: "unsupported",
+		peakRssReliability: "unsupported",
+		rssReliability: "unsupported",
+		reliability: "unsupported",
+	};
 }
