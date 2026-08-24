@@ -375,27 +375,42 @@ test.describe("Journey: Proposals — API error handling", () => {
 			const draft = (await response.json())?.data?.activeGoalProposal;
 			return draft?.title === "E2E Test Goal" && String(draft?.spec ?? "").includes("EDITED SPEC BODY for Mode A repro.");
 		}, sid, { timeout: 15_000 });
-		await page.evaluate((sidArg: string) => {
-			const state = (window as any).bobbitState;
-			const fields = { ...(state?.activeProposals?.goal?.fields ?? {}) };
-			if (typeof fields.spec === "string") fields.spec = fields.spec.replace(/\s+$/u, "");
-			const ordered: Record<string, unknown> = {};
-			for (const key of Object.keys(fields).sort()) ordered[key] = fields[key];
-			localStorage.setItem(`bobbit-goal-proposal-dismissed-${sidArg}`, JSON.stringify(ordered));
-			delete state.activeProposals.goal;
-			state.assistantHasProposal = false;
-		}, sid);
+		const goalTab = page.locator('.goal-tab-pill[title="Goal"]').first();
+		await expect(goalTab).toBeVisible();
+		await goalTab.click();
+		await expect(panel).toBeVisible();
+		const proposalDelete = page.waitForResponse((response) => {
+			const pathname = new URL(response.url()).pathname;
+			return response.request().method() === "DELETE"
+				&& pathname === `/api/sessions/${encodeURIComponent(sid)}/proposal/goal`;
+		});
+		const dismissButton = goalTab.getByRole("button", { name: "Dismiss Goal" });
+		await expect(dismissButton).toBeVisible();
+		await expect(dismissButton).toBeEnabled();
+		await dismissButton.click();
+		const deleteResponse = await proposalDelete;
+		expect(deleteResponse.status()).toBe(204);
+		const dismissalFingerprint = await page.evaluate(
+			(sidArg: string) => localStorage.getItem(`bobbit-goal-proposal-dismissed-${sidArg}`),
+			sid,
+		);
+		expect(dismissalFingerprint, "the real Dismiss action must persist its proposal fingerprint").toBeTruthy();
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null),
+		).toBeNull();
+		await expect(titleInput).toBeHidden();
 		await page.reload();
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 		await page.waitForFunction((sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg, sid, { timeout: 15_000 });
-		await page.waitForFunction(
-			() => !!(window as any).bobbitState?.activeProposals?.goal?.fields?.title,
-			null,
-			{ timeout: 1_000 },
-		).catch(() => { /* expected: stays dismissed */ });
+		await expect.poll(() => page.evaluate(({ sidArg, fingerprint }) => {
+			const state = (window as any).bobbitState;
+			return state?.selectedSessionId === sidArg
+				&& !state.activeProposals?.goal
+				&& state.previewTitle === ""
+				&& localStorage.getItem(`bobbit-goal-proposal-dismissed-${sidArg}`) === fingerprint;
+		}, { sidArg: sid, fingerprint: dismissalFingerprint })).toBe(true);
 		const titleAfterReload = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleAfterReload).toBeVisible({ timeout: 10_000 });
-		await expect(titleAfterReload).not.toHaveValue("E2E Test Goal", { timeout: 5_000 });
+		await expect(titleAfterReload).toBeHidden({ timeout: 10_000 });
 		expect(await page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null)).toBeNull();
 	});
 });
