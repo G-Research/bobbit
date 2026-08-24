@@ -4273,12 +4273,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			: toolManager,
 		scopedContext: scopedToolContext(context.projectId, context.cwd),
 	});
+	const resolveActiveRuntimePiTool = (toolName: string, context: HostInterceptorContext) => {
+		if (!context.sessionId) return undefined;
+		const session = sessionManager.getSession(context.sessionId);
+		// The session id is claim-derived in production. Keep the scope equality
+		// explicit so a synthetic/direct router caller cannot borrow another runtime.
+		if (!session || session.projectId !== context.projectId || session.cwd !== context.cwd) return undefined;
+		const normalizedName = toolName.toLowerCase();
+		return session.runtimePiExtensions
+			?.flatMap(extension => extension.tools ?? [])
+			.find(tool => tool.name.toLowerCase() === normalizedName);
+	};
 	const validateBoundedToolResult = (toolName: string, result: unknown, context: HostInterceptorContext): boolean => {
 		const { toolManager: scopedToolManager, scopedContext } = resolveHostInterceptorToolScope(context);
-		if (!scopedToolManager) return false;
-		const knownTool = scopedToolManager.resolveScopedPiExtensionTools(scopedContext).some(tool =>
-			(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
-		) || scopedToolManager.getToolByName(toolName, scopedContext) !== undefined;
+		const knownTool = resolveActiveRuntimePiTool(toolName, context) !== undefined
+			|| scopedToolManager?.resolveScopedPiExtensionTools(scopedContext).some(tool =>
+				(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
+			) === true
+			|| scopedToolManager?.getToolByName(toolName, scopedContext) !== undefined;
 		if (!knownTool) return false;
 		let nodes = 0;
 		const visit = (value: unknown, depth: number): boolean => {
@@ -4304,6 +4316,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		validateToolArgs: (toolName, args, context) => {
 			try {
 				if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+				const runtimePiTool = resolveActiveRuntimePiTool(toolName, context);
+				if (runtimePiTool) {
+					return runtimePiTool.inputSchema
+						? Value.Check(runtimePiTool.inputSchema as never, args)
+						: Object.keys(args).length === 0;
+				}
 				const { toolManager: scopedToolManager, scopedContext } = resolveHostInterceptorToolScope(context);
 				if (!scopedToolManager) return false;
 				const piTool = scopedToolManager.resolveScopedPiExtensionTools(scopedContext).find(tool =>
