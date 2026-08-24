@@ -483,6 +483,147 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+	test("credential-vouches only the selected repository in a multi-repository PR status lookup", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const projectRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-credential-selected-"));
+		const selectedSource = join(projectRoot, "selected");
+		const siblingSource = join(projectRoot, "sibling");
+		mkdirSync(selectedSource, { recursive: true });
+		mkdirSync(siblingSource, { recursive: true });
+		const selectedHost = `selected-credential-${Date.now()}.invalid`;
+		const siblingHost = `unrelated-sibling-${Date.now()}.invalid`;
+		const branch = `fixture/selected-credential-${Date.now()}`;
+		const project = await registerProject({
+			name: `Selected credential repository ${Date.now()}`,
+			rootPath: projectRoot,
+			components: [
+				{ name: "selected", repo: "selected" },
+				{ name: "sibling", repo: "sibling" },
+			],
+			seedWorkflows: false,
+		});
+		const sessionId = await createRemoteStateSession(gateway, selectedSource, project.id);
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch, repoPath: projectRoot });
+		const session = gateway.sessionManager.getSession(sessionId) as any;
+		session.cwd = selectedSource;
+		session.repoPath = projectRoot;
+
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const originalSpawn = runner.spawn;
+		const previousEnterpriseTokens = new Map<string, string | undefined>(
+			["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].map(name => [name, process.env[name]] as const),
+		);
+		const probes: Array<{ request: string; cwd: string }> = [];
+		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
+		const repositoryFor = (cwd: string) => {
+			if (cwd === selectedSource) return {
+				host: selectedHost,
+				slug: "acme/selected-repository",
+				commonDir: join(selectedSource, ".git"),
+			};
+			if (cwd === siblingSource) return {
+				host: siblingHost,
+				slug: "acme/unrelated-sibling",
+				commonDir: join(siblingSource, ".git"),
+			};
+			return undefined;
+		};
+
+		try {
+			delete process.env.GH_ENTERPRISE_TOKEN;
+			delete process.env.GITHUB_ENTERPRISE_TOKEN;
+			runner.spawn = (_file: string, _args: readonly string[], options?: any) => {
+				const child = credentialHelperResult(
+					`protocol=https\nhost=${selectedHost}\nusername=route-fixture\npassword=fixture-secret\n`,
+				);
+				const probe = { request: "", cwd: String(options?.cwd ?? "") };
+				probes.push(probe);
+				child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
+				return child;
+			};
+			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+				const command = commandName(file);
+				const cwd = String(options?.cwd ?? "");
+				const repository = repositoryFor(cwd);
+				if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+					if (!repository) throw new Error("not a configured repository source");
+					return { stdout: `${cwd}\n`, stderr: "" };
+				}
+				if (command === "git" && args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") {
+					if (!repository) throw new Error("unknown repository identity");
+					return { stdout: `${repository.commonDir}\n`, stderr: "" };
+				}
+				if (command === "git" && args.join(" ") === "rev-parse --git-dir") {
+					if (cwd !== selectedSource) throw new Error("PR execution escaped selected repository");
+					return { stdout: ".git\n", stderr: "" };
+				}
+				if (command === "git" && args.join(" ") === "remote get-url origin") {
+					if (!repository) throw new Error("unknown repository remote");
+					return { stdout: `https://${repository.host}/${repository.slug}.git\n`, stderr: "" };
+				}
+				if (command === "git" && args.join(" ") === `check-ref-format --branch ${branch}`) {
+					return { stdout: `${branch}\n`, stderr: "" };
+				}
+				if (command === "gh") {
+					ghCalls.push({ args: [...args], cwd });
+					if (cwd !== selectedSource) throw new Error("gh escaped selected repository");
+					if (args[0] === "pr" && args[1] === "list") {
+						return { stdout: JSON.stringify([{
+							number: 119,
+							url: `https://${selectedHost}/acme/selected-repository/pull/119`,
+							title: "selected credential repository",
+							state: "OPEN",
+							mergeable: "MERGEABLE",
+							headRefName: branch,
+							baseRefName: "main",
+							...ownedHeadEvidence("acme", "selected-repository"),
+						}]), stderr: "" };
+					}
+					if (args[0] === "api") {
+						return {
+							stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }),
+							stderr: "",
+						};
+					}
+				}
+				return unexpectedRunnerCommand(file, args, options);
+			};
+
+			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(status.status).toBe(200);
+			expect(await status.json()).toMatchObject({
+				stale: false,
+				data: { number: 119, title: "selected credential repository" },
+			});
+			expect(probes).toEqual([expect.objectContaining({
+				request: `url=https://${selectedHost}\n\n`,
+			})]);
+			expect(probes[0].cwd).not.toBe(selectedSource);
+			expect(probes[0].request).not.toContain(siblingHost);
+			const listCall = ghCalls.find(call => call.args[0] === "pr" && call.args[1] === "list");
+			expect(listCall).toMatchObject({ cwd: selectedSource });
+			expect(listCall?.args.slice(0, 6)).toEqual([
+				"pr", "list", "--repo", `${selectedHost}/acme/selected-repository`, "--head", branch,
+			]);
+			expect(ghCalls.filter(call => call.args[0] === "api").every(call => (
+				call.args[1] === "--hostname" && call.args[2] === selectedHost
+			))).toBe(true);
+			expect(JSON.stringify(ghCalls)).not.toContain(siblingHost);
+		} finally {
+			runner.execFile = originalExecFile;
+			runner.spawn = originalSpawn;
+			for (const [name, value] of previousEnterpriseTokens) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			await deleteSession(sessionId);
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			const cleanup = await awaitableRm(projectRoot, { maxAttempts: 5, backoffMs: 50 });
+			expect(cleanup.removed, `selected credential fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());

@@ -3693,7 +3693,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				const siblingTopLevel = await resolveConfiguredPrTopLevel(siblingSource);
 				if (!siblingTopLevel) continue;
 				if (comparableOwnedPath(siblingTopLevel) !== comparableOwnedPath(siblingSource)) return [];
-				const siblingIdentity = await resolveOwnedPrRepositoryIdentity(siblingSource, trustMode);
+				// Siblings are inspected only for pre-existing listed-host aliases. A status
+				// request may credential-vouch its selected source, but must not invoke an
+				// operator's credential helpers for unrelated configured repositories.
+				const siblingIdentity = await resolveOwnedPrRepositoryIdentity(siblingSource, "listed-only");
 				if (siblingIdentity && sameOwnedPrRepository(sourceIdentity, siblingIdentity)) return [];
 			}
 			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
