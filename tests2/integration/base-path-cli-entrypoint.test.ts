@@ -138,6 +138,7 @@ async function waitForHealthyGateway(
 		return { kind: "ready", health };
 	}, { timeoutMs: 5_000, intervalMs: 50, label: `${label} authoritative health` });
 
+	if (result === null) throw new Error(`${label} health polling returned without a readiness result`);
 	if (result.kind === "failed") throw new Error(result.message);
 	return result.health;
 }
