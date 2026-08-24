@@ -28,7 +28,15 @@ const fakeGitState = {
 };
 
 function fakePathKey(filePath: string): string {
-	const resolved = path.resolve(filePath);
+	let resolved = path.resolve(filePath);
+	try {
+		// Model Git's native filesystem identity while the coordinate exists. On
+		// hosted Windows the fixture root can arrive as RUNNER~1 while production
+		// passes the long spelling back to this fake runner.
+		resolved = fs.realpathSync.native(resolved);
+	} catch {
+		// Deleted and synthetic coordinates retain deterministic lexical identity.
+	}
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
@@ -61,10 +69,11 @@ const fakeGitRunner: CommandRunner = {
 		if (args[0] === "worktree" && args[1] === "remove") {
 			const worktreePath = path.resolve(String(args[2]));
 			const worktrees = registeredWorktrees(cwd ?? stateRoot);
-			const registered = worktrees.get(fakePathKey(worktreePath));
+			const worktreeKey = fakePathKey(worktreePath);
+			const registered = worktrees.get(worktreeKey);
 			fs.rmSync(worktreePath, { recursive: true, force: true });
 			if (registered?.adminPath) fs.rmSync(registered.adminPath, { recursive: true, force: true });
-			worktrees.delete(fakePathKey(worktreePath));
+			worktrees.delete(worktreeKey);
 		}
 		return { stdout: "", stderr: "" };
 	},
