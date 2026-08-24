@@ -85,8 +85,8 @@ export interface HostInterceptorRouterOptions {
 		contributionId: string;
 		capability: string;
 	}>) => boolean;
-	readonly validateToolArgs?: (toolName: string, args: unknown) => boolean;
-	readonly validateToolResult?: (toolName: string, result: unknown) => boolean;
+	readonly validateToolArgs?: (toolName: string, args: unknown, context: HostInterceptorContext) => boolean;
+	readonly validateToolResult?: (toolName: string, result: unknown, context: HostInterceptorContext) => boolean;
 	readonly audit?: (decision: HostInterceptorAuditDecision) => void;
 	readonly now?: () => number;
 	readonly monotonicNow?: () => number;
@@ -174,7 +174,7 @@ export class HostInterceptorRouter {
 						? await this.invokeLegacy(name, value, context, contribution, timeoutMs, dispatchController.signal)
 						: await this.invokeExplicit(name, value, context, contribution, timeoutMs, dispatchController.signal);
 					proposalReceived = true;
-					valid = validateInterceptorResult(name, proposal) && this.validateOperationMutation(name, value, proposal);
+					valid = validateInterceptorResult(name, proposal) && this.validateOperationMutation(name, value, proposal, context);
 					if (!valid) {
 						const failed = this.failClosedResult(name, contribution, definition);
 						this.record(decisions, contribution, name, context, started, failed === undefined ? "invalid-result" : "failed-closed", true, false, false);
@@ -303,6 +303,7 @@ export class HostInterceptorRouter {
 		name: N,
 		value: HostInterceptorRequest<N>,
 		proposal: unknown,
+		context: HostInterceptorContext,
 	): boolean {
 		if (!proposal || typeof proposal !== "object") return true;
 		const record = proposal as Record<string, unknown>;
@@ -310,12 +311,12 @@ export class HostInterceptorRouter {
 		if (name === "beforeToolCall" && (action === "replaceArgs" || "args" in record)) {
 			const request = value as unknown as Record<string, unknown>;
 			return !!this.options.validateToolArgs && typeof request.toolName === "string"
-				&& this.options.validateToolArgs(request.toolName, record.args);
+				&& this.options.validateToolArgs(request.toolName, record.args, context);
 		}
 		if (name === "afterToolResult" && (action === "replaceResult" || "result" in record)) {
 			const request = value as unknown as Record<string, unknown>;
 			return !this.options.validateToolResult || typeof request.toolName !== "string"
-				|| this.options.validateToolResult(request.toolName, record.result);
+				|| this.options.validateToolResult(request.toolName, record.result, context);
 		}
 		return true;
 	}
