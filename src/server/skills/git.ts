@@ -596,7 +596,7 @@ async function existingWorktreeCleanupSnapshot(
 			aliased: nativeAlias,
 		};
 	}
-	return undefined;
+	throw new Error(`Cannot resolve Git worktree registration for aliased path ${requestedPath}`);
 }
 
 async function pathRemainsStrict(filePath: string): Promise<boolean> {

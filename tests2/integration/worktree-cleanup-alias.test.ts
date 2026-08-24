@@ -101,6 +101,40 @@ describe("cleanupWorktree filesystem aliases", () => {
 		}
 	});
 
+	it("fails closed when porcelain omits the proven alias registration", async () => {
+		const fixture = await createFixture("alias-unregistered");
+		try {
+			let removeCalls = 0;
+			let branchDeleteCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (args[0] === "worktree" && args[1] === "list") {
+						return { stdout: `worktree ${fixture.repo}\0`, stderr: "" };
+					}
+					if (args[0] === "worktree" && args[1] === "remove") removeCalls += 1;
+					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await expect(cleanupWorktree(
+				fixture.repo,
+				fixture.alias,
+				fixture.branch,
+				true,
+				runner,
+				{ skipRemotePush: true },
+			)).rejects.toThrow(/cannot resolve git worktree registration for aliased path/i);
+
+			expect(removeCalls).toBe(0);
+			expect(branchDeleteCalls).toBe(0);
+			expect((await fs.promises.lstat(fixture.worktree)).isDirectory()).toBe(true);
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
 	it("rejects a failed aliased removal before deleting the branch", async () => {
 		const fixture = await createFixture("alias-failure");
 		try {
