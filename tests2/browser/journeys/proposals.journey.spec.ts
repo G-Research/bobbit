@@ -129,13 +129,12 @@ test.describe("Journey: Proposals — shell", () => {
 			expect(await page.title()).toBeTruthy();
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
 			const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-			if (await newGoalBtn.isVisible({ timeout: 15_000 }).catch(() => false)) {
-				await newGoalBtn.click();
-				await expect(page.locator(
-					"dialog, [role='dialog'], [role='alertdialog'], goal-proposal-panel, [data-testid='goal-proposal'], input[placeholder*='title' i], input[placeholder*='goal' i]",
-				).first()).toBeVisible({ timeout: 20_000 });
-				await page.keyboard.press("Escape");
-			}
+			await expect(newGoalBtn).toBeVisible({ timeout: 15_000 });
+			await newGoalBtn.click();
+			await expect(page.locator(
+				"dialog, [role='dialog'], [role='alertdialog'], goal-proposal-panel, [data-testid='goal-proposal'], input[placeholder*='title' i], input[placeholder*='goal' i]",
+			).first()).toBeVisible({ timeout: 20_000 });
+			await page.keyboard.press("Escape");
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
