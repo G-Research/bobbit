@@ -423,11 +423,11 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 		const renderedMarkers = [
 			...fixture.markers,
 			EVENT_STREAM_PROPOSAL_TITLE,
-			EVENT_STREAM_PROPOSAL_SPEC,
 			EVENT_STREAM_TOOL_OUTPUT,
 			EVENT_STREAM_ERROR_OUTPUT,
 			EVENT_STREAM_ERROR_OUTPUT,
 			`${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`,
+			EVENT_STREAM_PROPOSAL_SPEC,
 		];
 		const base: any = {
 			status: "idle",

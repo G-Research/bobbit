@@ -269,7 +269,9 @@ function normalizedText(value) {
 		.trim();
 }
 
-async function settleAndFingerprint(page, trigger) {
+async function settleAndFingerprint(page, fixture, capturedRenderedText) {
+	const { trigger } = fixture;
+	const renderedText = capturedRenderedText ?? normalizedText(await page.evaluate(() => document.body?.textContent ?? ""));
 	await page.evaluate(async () => {
 		const deferred = window.DeferredBlock;
 		if (deferred?.forceResolveAll) {
@@ -278,9 +280,8 @@ async function settleAndFingerprint(page, trigger) {
 		}
 		await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 	});
-	const result = await page.evaluate(({ selector, proposalSpec, trigger }) => {
+	const result = await page.evaluate(({ selector, trigger }) => {
 		const normalize = value => String(value ?? "")
-			.replace(proposalSpec, "")
 			.replace(/\b\d+(?:\.\d+)?s\b/g, "Xs")
 			.replace(/\s+/g, " ")
 			.trim();
@@ -311,24 +312,6 @@ async function settleAndFingerprint(page, trigger) {
 				|| (typeof block.text === "string" && (block.text === trigger || block.text.includes("BOBBIT_BENCH_"))));
 		const nodes = Array.from(document.querySelectorAll(selector));
 		const messages = nodes.map(node => ({ role: node.tagName.toLowerCase(), text: normalize(node.textContent) }));
-		const composedText = root => {
-			const chunks = [];
-			const visit = node => {
-				if (node.nodeType === Node.TEXT_NODE) {
-					chunks.push(node.textContent ?? "");
-					return;
-				}
-				if (node instanceof HTMLSlotElement) {
-					for (const assigned of node.assignedNodes({ flatten: true })) visit(assigned);
-					return;
-				}
-				if (node instanceof Element && ["SCRIPT", "STYLE", "TEMPLATE"].includes(node.tagName)) return;
-				const children = node instanceof Element && node.shadowRoot ? node.shadowRoot.childNodes : node.childNodes;
-				for (const child of children) visit(child);
-			};
-			visit(root);
-			return chunks.join(" ");
-		};
 		const app = window.bobbitState ?? window.__bobbitState;
 		const remote = app?.remoteAgent?.state ?? {};
 		const semanticProjection = Array.isArray(remote.messages) ? remote.messages
@@ -341,7 +324,6 @@ async function settleAndFingerprint(page, trigger) {
 			messages,
 			semanticProjection,
 			transcriptText: normalize(nodes.map(node => node.textContent ?? "").join(" ")),
-			renderedText: normalize(document.body ? composedText(document.body) : ""),
 			streamingMessageVisible: Boolean(streamingContainer?.querySelector("assistant-message")),
 			streamingActive: streamingContainer?.isStreaming === true,
 			streamingTimerVisible: Boolean(streamingContainer?.querySelector("live-timer")),
@@ -349,10 +331,14 @@ async function settleAndFingerprint(page, trigger) {
 			status: remote.status ?? null,
 			editorEnabled: textarea instanceof HTMLTextAreaElement && !textarea.disabled,
 		};
-	}, { selector: MESSAGE_SELECTOR, proposalSpec: EVENT_STREAM_PROPOSAL_SPEC, trigger });
+	}, { selector: MESSAGE_SELECTOR, trigger });
+	const markerProjection = [...new Set([...fixture.markers, ...fixture.finalMarkers, ...fixture.settlementMarkers])]
+		.map(marker => ({ marker, count: renderedText.split(marker).length - 1 }));
 	return {
 		...result,
-		domHash: sha256(result.messages),
+		renderedText,
+		markerProjection,
+		domHash: sha256(markerProjection),
 		semanticHash: sha256(result.semanticProjection),
 	};
 }
@@ -430,8 +416,10 @@ export function assertFinalState(snapshot, fixture, label = "Final") {
 	assert(!snapshot.streamingActive, `${label} streaming container remained active after agent settlement`);
 	assert(!snapshot.streamingTimerVisible, `${label} UI retained a live streaming timer after agent settlement`);
 	assert(snapshot.editorEnabled, `${label} message editor was not enabled`);
-	const renderedMarkers = [...fixture.markers, ...fixture.finalMarkers.flatMap(marker =>
-		marker === EVENT_STREAM_ERROR_OUTPUT ? [marker, marker] : [marker])];
+	const renderedMarkers = [
+		...fixture.markers,
+		...fixture.finalMarkers.flatMap(marker => marker === EVENT_STREAM_ERROR_OUTPUT ? [marker, marker] : [marker]),
+	];
 	const expectedCounts = new Map();
 	let previous = -1;
 	for (const marker of renderedMarkers) {
@@ -441,6 +429,7 @@ export function assertFinalState(snapshot, fixture, label = "Final") {
 		assert(index > previous, `${label} UI omitted or reordered rendered marker ${marker} occurrence ${occurrence}`);
 		previous = index;
 	}
+	for (const marker of fixture.settlementMarkers) expectedCounts.set(marker, 1);
 	for (const [marker, expected] of expectedCounts) {
 		const count = snapshot.renderedText.split(marker).length - 1;
 		assert(count === expected, `Expected rendered marker ${marker} ${expected} time(s) in the ${label.toLowerCase()} UI, found ${count}`);
@@ -603,14 +592,15 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			const remote = app?.remoteAgent?.state;
 			return remote?.status === "idle" && remote?.isStreaming !== true;
 		}, undefined, { timeout: 20_000 });
-		await browser.page.waitForFunction(markers => {
+		const liveMarkerSnapshot = await browser.page.waitForFunction(markers => {
 			const text = document.body?.textContent ?? "";
-			return markers.every(marker => text.includes(marker));
+			return markers.every(marker => text.includes(marker)) ? text : false;
 		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: 20_000 });
+		const liveRenderedText = normalizedText(await liveMarkerSnapshot.jsonValue());
 		await browser.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 		const observed = await browser.page.evaluate(() => window.__bobbitEventStreamBenchmark.finish());
 		const elapsedMs = performance.now() - sampleStartedAt;
-		const live = await settleAndFingerprint(browser.page, fixture.trigger);
+		const live = await settleAndFingerprint(browser.page, fixture, liveRenderedText);
 
 		watchdog.setPhase("oracle");
 		watchdog.throwIfExpired();
@@ -631,11 +621,12 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 		await browser.page.waitForFunction(done => document.body?.textContent?.includes(done), `${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`, {
 			timeout: 20_000,
 		});
-		await browser.page.waitForFunction(markers => {
+		const refreshedMarkerSnapshot = await browser.page.waitForFunction(markers => {
 			const text = document.body?.textContent ?? "";
-			return markers.every(marker => text.includes(marker));
+			return markers.every(marker => text.includes(marker)) ? text : false;
 		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: 20_000 });
-		const refreshed = await settleAndFingerprint(browser.page, fixture.trigger);
+		const refreshedRenderedText = normalizedText(await refreshedMarkerSnapshot.jsonValue());
+		const refreshed = await settleAndFingerprint(browser.page, fixture, refreshedRenderedText);
 		assertFinalState(refreshed, fixture, "Refreshed final");
 		if (live.domHash !== refreshed.domHash) {
 			const mismatch = Math.max(live.messages.length, refreshed.messages.length) > 0
