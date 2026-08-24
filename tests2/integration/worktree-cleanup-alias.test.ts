@@ -14,7 +14,9 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
 	return String(result.stdout).trim();
 }
 
-async function createFixture(label: string): Promise<{
+type AliasKind = "lexical" | "native";
+
+async function createFixture(label: string, aliasKind: AliasKind = process.platform === "win32" ? "native" : "lexical"): Promise<{
 	root: string;
 	repo: string;
 	worktree: string;
@@ -36,7 +38,8 @@ async function createFixture(label: string): Promise<{
 	await git(repo, ["commit", "-m", "fixture"]);
 	await fs.promises.mkdir(path.dirname(worktree), { recursive: true });
 	await git(repo, ["worktree", "add", "-b", branch, worktree, "HEAD"]);
-	if (process.platform === "win32") {
+	if (aliasKind === "native") {
+		if (process.platform !== "win32") throw new Error("native alias fixture requires Windows");
 		const result = await realCommandRunner.execFile(
 			"cmd.exe",
 			["/d", "/c", `for %I in (${worktree}) do @echo %~sI`],
@@ -69,37 +72,40 @@ async function removeFixture(root: string): Promise<void> {
 }
 
 describe("cleanupWorktree filesystem aliases", () => {
-	it("passes Git its registered spelling and removes the exact directory, admin entry, and branch", async () => {
-		const fixture = await createFixture("alias-success");
-		try {
-			const aliasIdentity = await nativeRealpath(fixture.alias);
-			let registeredPath: string | undefined;
-			for (const candidate of await registeredWorktreePaths(fixture.repo)) {
-				if (await nativeRealpath(candidate) === aliasIdentity) {
-					registeredPath = candidate;
-					break;
+	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
+		"passes Git its registered spelling for a %s alias and removes the exact directory, admin entry, and branch",
+		async (aliasKind) => {
+			const fixture = await createFixture(`alias-success-${aliasKind}`, aliasKind);
+			try {
+				const aliasIdentity = await nativeRealpath(fixture.alias);
+				let registeredPath: string | undefined;
+				for (const candidate of await registeredWorktreePaths(fixture.repo)) {
+					if (await nativeRealpath(candidate) === aliasIdentity) {
+						registeredPath = candidate;
+						break;
+					}
 				}
+				expect(registeredPath).toBeTruthy();
+				const removeTargets: string[] = [];
+				const runner: CommandRunner = {
+					execFile: async (file, args, options) => {
+						if (args[0] === "worktree" && args[1] === "remove") removeTargets.push(String(args[2]));
+						return realCommandRunner.execFile(file, args, options);
+					},
+				};
+
+				await cleanupWorktree(fixture.repo, fixture.alias, fixture.branch, true, runner, { skipRemotePush: true });
+
+				expect(removeTargets).toEqual([registeredPath]);
+				await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
+				await expect(fs.promises.lstat(fixture.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
+				expect(await registeredWorktreePaths(fixture.repo)).not.toContain(registeredPath);
+				await expect(git(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${fixture.branch}`])).rejects.toBeTruthy();
+			} finally {
+				await removeFixture(fixture.root);
 			}
-			expect(registeredPath).toBeTruthy();
-			const removeTargets: string[] = [];
-			const runner: CommandRunner = {
-				execFile: async (file, args, options) => {
-					if (args[0] === "worktree" && args[1] === "remove") removeTargets.push(String(args[2]));
-					return realCommandRunner.execFile(file, args, options);
-				},
-			};
-
-			await cleanupWorktree(fixture.repo, fixture.alias, fixture.branch, true, runner, { skipRemotePush: true });
-
-			expect(removeTargets).toEqual([registeredPath]);
-			await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
-			await expect(fs.promises.lstat(fixture.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
-			expect(await registeredWorktreePaths(fixture.repo)).not.toContain(registeredPath);
-			await expect(git(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${fixture.branch}`])).rejects.toBeTruthy();
-		} finally {
-			await removeFixture(fixture.root);
-		}
-	});
+		},
+	);
 
 	it("fails closed when porcelain omits the proven alias registration", async () => {
 		const fixture = await createFixture("alias-unregistered");
