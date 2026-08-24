@@ -49,10 +49,18 @@ async function sendChatMessage(page: Page, text: string) {
 	await textarea.press("Enter");
 }
 
-async function waitForGoalProposal(page: Page, expectedTitle: string, options: { expectTitleVisible?: boolean } = {}) {
+async function waitForGoalProposal(
+	page: Page,
+	expectedTitle: string,
+	expectedRev: number,
+	options: { expectTitleVisible?: boolean } = {},
+) {
 	await page.waitForFunction(
-		(title) => (window as any).bobbitState?.activeProposals?.goal?.fields?.title === title,
-		expectedTitle,
+		({ title, rev }) => {
+			const proposal = (window as any).bobbitState?.activeProposals?.goal;
+			return proposal?.rev === rev && proposal?.fields?.title === title;
+		},
+		{ title: expectedTitle, rev: expectedRev },
 		{ timeout: 20_000 },
 	);
 	if (options.expectTitleVisible === false) return;
@@ -61,24 +69,81 @@ async function waitForGoalProposal(page: Page, expectedTitle: string, options: {
 	await expect(titleInput).toHaveValue(expectedTitle, { timeout: 20_000 });
 }
 
-async function openNewGoalAssistantProposal(page: Page) {
+async function sendGoalProposal(
+	page: Page,
+	gateway: any,
+	trigger: string,
+	expectedTitle: string,
+	options: { expectTitleVisible?: boolean } = {},
+): Promise<number> {
+	const sessionId = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId as string | undefined);
+	expect(sessionId, "proposal fixture requires an active session").toBeTruthy();
+	const core = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!core || typeof core.armBarrier !== "function" || typeof core.waitForBarrier !== "function") {
+		throw new Error("goal proposal fixture requires the in-process mock agent barrier seam");
+	}
+
+	const previousPrompts = Array.isArray(core.commandJournal)
+		? core.commandJournal.filter((entry: any) => entry?.kind === "prompt")
+		: [];
+	const occurrence = (previousPrompts.at(-1)?.occurrence ?? 0) + 1;
+	const receiptBoundary = `prompt:${occurrence}:received`;
+	const completionBoundary = "turn:before-agent-end";
+	core.releaseBarrier(completionBoundary);
+	core.armBarrier(receiptBoundary);
+	core.armBarrier(completionBoundary);
+	const receipt = Promise.resolve(core.waitForBarrier(receiptBoundary));
+	const completed = Promise.resolve(core.waitForBarrier(completionBoundary));
+
+	let persistedRev: number | undefined;
+	try {
+		await sendChatMessage(page, trigger);
+		const details: any = await receipt;
+		if (details?.kind !== "prompt" || details?.occurrence !== occurrence || details?.text !== trigger) {
+			throw new Error(`goal proposal fixture received an uncorrelated prompt: ${JSON.stringify(details)}`);
+		}
+		core.releaseBarrier(receiptBoundary);
+		await completed;
+
+		const persisted = await page.evaluate(async ({ sid, title }) => {
+			const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposals`, { credentials: "include" });
+			const text = await response.text();
+			const proposals = response.ok
+				? (JSON.parse(text) as { proposals?: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }> }).proposals
+				: undefined;
+			const proposal = proposals?.find((candidate) => candidate.proposalType === "goal" && candidate.fields?.title === title);
+			return { status: response.status, text, proposal };
+		}, { sid: sessionId!, title: expectedTitle });
+		expect(persisted.status, `read persisted goal proposal failed: ${persisted.text}`).toBe(200);
+		expect(persisted.proposal, `expected persisted goal proposal titled ${expectedTitle}: ${persisted.text}`).toBeDefined();
+		expect(persisted.proposal?.rev, "persisted goal proposal should carry its server revision").toBeGreaterThan(0);
+		persistedRev = persisted.proposal!.rev;
+	} finally {
+		core.releaseBarrier(receiptBoundary);
+		core.releaseBarrier(completionBoundary);
+	}
+
+	await waitForGoalProposal(page, expectedTitle, persistedRev!, options);
+	return persistedRev!;
+}
+
+async function openNewGoalAssistantProposal(page: Page, gateway: any) {
 	test.setTimeout(90_000);
 	await openApp(page);
 	await createGoalAssistantViaUI(page, { timeout: 60_000 });
 	await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 10_000 });
-	await sendChatMessage(page, "Please create a GOAL_PROPOSAL for testing");
-	await waitForGoalProposal(page, "E2E Test Goal");
+	await sendGoalProposal(page, gateway, "Please create a GOAL_PROPOSAL for testing", "E2E Test Goal");
 }
 
 async function openRegularSessionProposal(
 	page: Page,
+	gateway: any,
 	trigger: string,
 	expectedTitle: string,
 	options: { expectTitleVisible?: boolean; createSession?: boolean } = {},
 ) {
 	if (options.createSession !== false) await createSessionViaUI(page);
-	await sendChatMessage(page, trigger);
-	await waitForGoalProposal(page, expectedTitle, options);
+	await sendGoalProposal(page, gateway, trigger, expectedTitle, options);
 }
 
 async function visiblePanelTabs(page: Page): Promise<Array<{ index: number; title: string; kind: string; active: boolean }>> {
@@ -124,8 +189,8 @@ async function clickProposalOpenButtonForRev(page: Page, rev: number, errorPrefi
 }
 
 test.describe("Goal proposal — tab wiring repro", () => {
-	test("+ New Goal Workflow customization opens the editable workflow editor @repro", async ({ page }) => {
-		await openNewGoalAssistantProposal(page);
+	test("+ New Goal Workflow customization opens the editable workflow editor @repro", async ({ page, gateway }) => {
+		await openNewGoalAssistantProposal(page, gateway);
 
 		await page.locator(WORKFLOW_TAB).click();
 		await expect(page.locator(WORKFLOW_PANEL)).toBeVisible({ timeout: 10_000 });
@@ -139,11 +204,11 @@ test.describe("Goal proposal — tab wiring repro", () => {
 		).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("new proposal contexts start on the Goal tab after another context visits other tabs @repro", async ({ page }) => {
+	test("new proposal contexts start on the Goal tab after another context visits other tabs @repro", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await openApp(page);
 
-		await openRegularSessionProposal(page, "Please create a GOAL_PROPOSAL for testing", "E2E Test Goal");
+		await openRegularSessionProposal(page, gateway, "Please create a GOAL_PROPOSAL for testing", "E2E Test Goal");
 		await expect(page.locator(GOAL_TAB)).toHaveAttribute("aria-selected", "true", { timeout: 10_000 });
 		await expect(page.locator(GOAL_PANEL)).toBeVisible({ timeout: 10_000 });
 
@@ -159,7 +224,7 @@ test.describe("Goal proposal — tab wiring repro", () => {
 		await page.locator(WORKFLOW_CUSTOMIZE).click();
 		await expect(page.locator(`${WORKFLOW_PANEL} [data-testid='workflow-editor']`)).toBeVisible({ timeout: 10_000 });
 
-		await openRegularSessionProposal(page, "Please create GOAL_PROPOSAL_REV2 now", "Revised Goal Title", {
+		await openRegularSessionProposal(page, gateway, "Please create GOAL_PROPOSAL_REV2 now", "Revised Goal Title", {
 			expectTitleVisible: false,
 			createSession: false,
 		});
@@ -178,11 +243,10 @@ test.describe("Goal proposal — tab wiring repro", () => {
 		await expect(page.locator(`${WORKFLOW_PANEL} [data-testid='workflow-editor']`)).toHaveCount(0);
 	});
 
-	test("historical goal revisions in a goal assistant render historical fields and keep live tab state isolated", async ({ page }) => {
+	test("historical goal revisions in a goal assistant render historical fields and keep live tab state isolated", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
-		await openNewGoalAssistantProposal(page);
-		await sendChatMessage(page, "Please create GOAL_PROPOSAL_REV2 now");
-		await waitForGoalProposal(page, "Revised Goal Title");
+		await openNewGoalAssistantProposal(page, gateway);
+		await sendGoalProposal(page, gateway, "Please create GOAL_PROPOSAL_REV2 now", "Revised Goal Title");
 
 		await page.locator(WORKFLOW_TAB).click();
 		await expect(page.locator(WORKFLOW_TAB)).toHaveAttribute("aria-selected", "true", { timeout: 5_000 });
