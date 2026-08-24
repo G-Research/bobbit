@@ -49,7 +49,6 @@ import type { SearchService } from "../search/search-service.js";
 import type { CostTracker } from "./cost-tracker.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
-import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext } from "./system-prompt.js";
@@ -62,7 +61,7 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -433,7 +432,7 @@ export interface PipelineContext {
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	/** S1 — per-session capability secret store (see session-secret.ts). */
 	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
-	groupPolicyStore: ToolGroupPolicyStore | null;
+	groupPolicyStore: GroupPolicyProvider | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
 	/** Additive typed interceptor port. Its implementation composes legacy providers. */
