@@ -1,5 +1,5 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -141,6 +141,32 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 	});
 }
 
+function waitForFixtureMessage(child: ChildProcess, expectedType: string): Promise<void> {
+	return new Promise((resolveMessage, rejectMessage) => {
+		const cleanup = () => {
+			child.removeListener("message", onMessage);
+			child.removeListener("error", onError);
+			child.removeListener("close", onClose);
+		};
+		const onMessage = (message: unknown) => {
+			if (!message || typeof message !== "object" || !("type" in message) || message.type !== expectedType) return;
+			cleanup();
+			resolveMessage();
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			rejectMessage(error);
+		};
+		const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+			cleanup();
+			rejectMessage(new Error(`fixture closed before ${expectedType}: code=${code} signal=${signal}`));
+		};
+		child.on("message", onMessage);
+		child.once("error", onError);
+		child.once("close", onClose);
+	});
+}
+
 // This is a real source-runtime smoke. It intentionally owns both child
 // processes rather than relying on Playwright's compiled-dist gateway fixture.
 test.describe("source Vite inline HTML theme runtime", () => {
@@ -149,37 +175,32 @@ test.describe("source Vite inline HTML theme runtime", () => {
 	test("teardown escalates a SIGTERM-ignoring detached source process and awaits close", async () => {
 		test.setTimeout(10_000);
 		const child = spawn(process.execPath, ["--input-type=module", "--eval", [
-			'process.stdout.write("ready\\n");',
-			'process.on("SIGTERM", () => process.stdout.write("SIGTERM ignored\\n"));',
+			'process.on("SIGTERM", () => process.send?.({ type: "sigterm-received" }));',
+			'process.send?.({ type: "handler-ready" });',
 			"setInterval(() => {}, 1_000);",
 		].join("")], {
 			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
 			windowsHide: true,
 		});
+		const handlerReady = waitForFixtureMessage(child, "handler-ready");
 		const runtime = captureSourceProcess(child, "SIGTERM-ignoring source helper fixture");
 		try {
-			await new Promise<void>((resolveReady, rejectReady) => {
-				const timeout = setTimeout(() => rejectReady(new Error("SIGTERM-ignoring fixture did not become ready")), 2_000);
-				child.stdout?.on("data", chunk => {
-					if (!String(chunk).includes("ready")) return;
-					clearTimeout(timeout);
-					resolveReady();
-				});
-				child.once("error", error => {
-					clearTimeout(timeout);
-					rejectReady(error);
-				});
-			});
+			await handlerReady;
+			let gracefulSignalReceived = false;
+			const gracefulSignalReceipt = process.platform === "win32"
+				? undefined
+				: waitForFixtureMessage(child, "sigterm-received").then(() => { gracefulSignalReceived = true; });
 
 			await stopSourceProcess(runtime, {
 				gracefulStopTimeoutMs: 100,
+				gracefulSignalReceipt,
 				forceStopTimeoutMs: 2_000,
 			});
 
 			expect(runtime.closed, "teardown must wait for close after forced termination").toBe(true);
 			if (process.platform !== "win32") {
-				expect(runtime.stdout.join(""), "fixture must receive graceful SIGTERM before escalation").toContain("SIGTERM ignored");
+				expect(gracefulSignalReceived, "fixture must acknowledge graceful SIGTERM before escalation").toBe(true);
 				expect(child.signalCode, "detached POSIX process must be force-killed after grace").toBe("SIGKILL");
 			}
 		} finally {
