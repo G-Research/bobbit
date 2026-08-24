@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import {
 	RECOVERY_IO_CONCURRENCY,
@@ -18,6 +19,7 @@ import {
 } from "./repository-mutation-coordinator.js";
 
 const primaryBranchFallbackWarningCwds = new Set<string>();
+const nativeRealpath = promisify(fs.realpath.native);
 
 export const UNRESOLVED_HEAD_WORKTREE_CODE = "WORKTREE_UNRESOLVED_HEAD";
 
@@ -516,6 +518,96 @@ async function canonicalizePath(p: string): Promise<string> {
 		// realpath fails when the path doesn't exist — fall back to resolve().
 	}
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+interface ExistingWorktreeCleanupSnapshot {
+	requestedPath: string;
+	removalPath: string;
+	adminPath: string;
+	aliased: boolean;
+}
+
+function porcelainWorktreePaths(output: string): string[] {
+	return output
+		.split("\0")
+		.filter(field => field.startsWith("worktree "))
+		.map(field => field.slice("worktree ".length));
+}
+
+/**
+ * Snapshot Git's spelling and exact admin coordinate only while the requested
+ * linked worktree still exists. Missing/stale coordinates retain the historic
+ * operation-first command surface used by injected runners.
+ */
+async function existingWorktreeCleanupSnapshot(
+	repoPath: string,
+	requestedPath: string,
+	commandRunner: CommandRunner,
+): Promise<ExistingWorktreeCleanupSnapshot | undefined> {
+	const segments = requestedPath.split(/[\\/]+/);
+	const nativeAliasCandidate = segments.includes(".")
+		|| segments.includes("..")
+		|| (process.platform === "win32" && segments.some(segment => /~\d/i.test(segment)));
+	// Ordinary coordinates retain cleanup's established single Git command and
+	// scheduling. Native canonicalization is reserved for alias spellings.
+	if (!nativeAliasCandidate) return undefined;
+
+	let requestedIdentity: string;
+	try {
+		// The explicit native seam expands Windows 8.3 spellings without blocking.
+		requestedIdentity = await nativeRealpath(path.resolve(requestedPath));
+	} catch {
+		return undefined;
+	}
+	const comparableIdentity = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+	requestedIdentity = comparableIdentity(requestedIdentity);
+	const nativeAlias = requestedIdentity !== comparableIdentity(path.resolve(requestedPath));
+	if (!nativeAlias) return undefined;
+
+	let registeredPaths: string[];
+	try {
+		const { stdout } = await execGit(
+			["worktree", "list", "--porcelain", "-z"],
+			{ cwd: repoPath, timeout: 5_000 },
+			commandRunner,
+		);
+		registeredPaths = porcelainWorktreePaths(stdout.toString());
+	} catch (err) {
+		throw new Error(`Cannot resolve Git worktree spelling for ${requestedPath}: ${gitErrorText(err)}`);
+	}
+
+	for (const removalPath of registeredPaths) {
+		let registeredIdentity: string;
+		try {
+			registeredIdentity = comparableIdentity(await nativeRealpath(path.resolve(removalPath)));
+		} catch {
+			continue;
+		}
+		if (registeredIdentity !== requestedIdentity) continue;
+
+		const marker = await fs.promises.readFile(path.join(removalPath, ".git"), "utf8");
+		const gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
+		if (!gitDir) throw new Error(`Cannot snapshot linked-worktree admin path for ${requestedPath}`);
+		const adminPath = path.isAbsolute(gitDir) ? path.normalize(gitDir) : path.resolve(removalPath, gitDir);
+		return {
+			requestedPath,
+			removalPath,
+			adminPath,
+			aliased: nativeAlias,
+		};
+	}
+	throw new Error(`Cannot resolve Git worktree registration for aliased path ${requestedPath}`);
+}
+
+async function pathRemainsStrict(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.lstat(filePath);
+		return true;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return false;
+		throw err;
+	}
 }
 
 /**
@@ -1303,14 +1395,18 @@ export async function cleanupWorktree(
 	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<void> {
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
+	const snapshot = await existingWorktreeCleanupSnapshot(repoPath, worktreePath, commandRunner);
+	const removalPath = snapshot?.removalPath ?? worktreePath;
+	let removalError: unknown;
 
 	try {
-		// Operation first: a successful Git removal needs no preliminary path
-		// probe, and a missing worktree is handled by the targeted fallback below.
-		await runGit(["worktree", "remove", worktreePath, "--force"], {
+		// Existing aliases use Git's authoritative porcelain spelling. Missing
+		// coordinates retain the established operation-first cleanup behavior.
+		await runGit(["worktree", "remove", removalPath, "--force"], {
 			cwd: repoPath,
 		});
-	} catch {
+	} catch (err) {
+		removalError = err;
 		// Preserve the old missing-repository warning/early return without making
 		// every successful cleanup pay a check-then-act race.
 		if (!await pathExists(repoPath)) {
@@ -1318,17 +1414,41 @@ export async function cleanupWorktree(
 			return;
 		}
 
-		// If remove fails, clean up the admin entry for this specific worktree
-		// (NOT a blanket prune — that could damage other worktrees whose
-		// directories exist but have broken .git metadata). `basename` keeps the
-		// target to one direct admin child; an empty/root basename removes nothing.
-		const trimmedWorktreePath = worktreePath.trim();
-		const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
-			? path.basename(path.resolve(trimmedWorktreePath))
-			: "";
-		if (safeName) {
-			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
-			try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
+		// Keep an exact linked-worktree snapshot intact after a failed Git removal
+		// so the operation stays retryable and the postcondition below can reject.
+		// The basename fallback remains only for legacy missing/fake coordinates
+		// that have no filesystem identity snapshot.
+		if (!snapshot) {
+			const trimmedWorktreePath = worktreePath.trim();
+			const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
+				? path.basename(path.resolve(trimmedWorktreePath))
+				: "";
+			if (safeName) {
+				const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+				try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
+			}
+		}
+	}
+
+	// Alias cleanup and failed removal are not complete until the exact linked
+	// directory and admin entry captured while live are both absent. This fence
+	// runs before branch deletion so a failed removal cannot be swallowed.
+	if (snapshot && (snapshot.aliased || removalError)) {
+		let directoryRemains: boolean;
+		let adminRemains: boolean;
+		try {
+			directoryRemains = await pathRemainsStrict(snapshot.removalPath);
+			adminRemains = await pathRemainsStrict(snapshot.adminPath);
+		} catch (err) {
+			throw new Error(`Failed to verify worktree cleanup for ${worktreePath}: ${gitErrorText(err)}`);
+		}
+		if (directoryRemains || adminRemains) {
+			const detail = [
+				directoryRemains ? `directory remains at ${snapshot.removalPath}` : "",
+				adminRemains ? `admin directory remains at ${snapshot.adminPath}` : "",
+				removalError ? `git remove failed: ${gitErrorText(removalError)}` : "",
+			].filter(Boolean).join("; ");
+			throw new Error(`Failed to clean up worktree ${snapshot.requestedPath}: ${detail}`);
 		}
 	}
 
