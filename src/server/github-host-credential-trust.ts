@@ -21,8 +21,10 @@ export type EnvironmentResolver = () => Readonly<Record<string, string | undefin
 
 type VerdictEntry =
 	| { kind: "positive"; generation: number }
-	| { kind: "negative"; generation: number }
-	| { kind: "pending"; generation: number; promise: Promise<boolean> };
+	| { kind: "negative"; generation: number };
+
+type ActiveFlight = { generation: number; promise: Promise<boolean> };
+type QueuedFlight = { generation: number; promise: Promise<boolean> };
 
 export interface GithubHostCredentialTrustOptions {
 	probe?: CredentialProbe;
@@ -39,7 +41,14 @@ export interface GithubHostCredentialTrustOptions {
  * logged.
  */
 export class GithubHostCredentialTrust {
-	private readonly states = new Map<string, VerdictEntry>();
+	private readonly verdicts = new Map<string, VerdictEntry>();
+	// An active flight owns the host's credential-helper tree until the probe has
+	// crossed its owned-tree completion boundary. Refresh invalidation must never
+	// delete this ownership record or another tree could start concurrently.
+	private readonly activeFlights = new Map<string, ActiveFlight>();
+	// At most one successor waits behind the active owner. Its mutable generation
+	// is advanced by later callers so skipped refresh generations never start trees.
+	private readonly queuedFlights = new Map<string, QueuedFlight>();
 	private readonly probe: CredentialProbe;
 	private readonly getEnv: EnvironmentResolver;
 	private readonly warn: (message: string) => void;
@@ -71,42 +80,85 @@ export class GithubHostCredentialTrust {
 			return false;
 		}
 
-		const existing = this.states.get(key);
-		if (existing?.kind === "positive") return true;
-		if (existing?.kind === "negative") return false;
-		if (existing?.kind === "pending") return existing.promise;
+		const verdict = this.verdicts.get(key);
+		if (verdict?.kind === "positive") return true;
+		if (verdict?.kind === "negative") return false;
 
-		const generation = this.generation;
-		let pending!: VerdictEntry & { kind: "pending" };
-		const promise = this.resolveVerdict(key, generation, () => pending);
-		pending = { kind: "pending", generation, promise };
-		this.states.set(key, pending);
-		return promise;
+		const active = this.activeFlights.get(key);
+		if (!active) return this.startFlight(key, this.generation);
+		if (active.generation === this.generation) return active.promise;
+		return this.queueLatestSuccessor(key, active);
 	}
 
-	/** Keep positive trust for the process lifetime; invalidate negative and stale pending work. */
+	/**
+	 * Keep positive trust for the process lifetime and invalidate negative
+	 * verdicts. Active tree ownership remains intact; a later request can queue
+	 * one serialized successor for the newest generation.
+	 */
 	forgetUnverified(): void {
 		this.generation++;
-		for (const [host, state] of this.states) {
-			if (state.kind !== "positive") this.states.delete(host);
+		for (const [host, verdict] of this.verdicts) {
+			if (verdict.kind === "negative") this.verdicts.delete(host);
 		}
 	}
 
-	private async resolveVerdict(
-		host: string,
-		generation: number,
-		entry: () => VerdictEntry,
-	): Promise<boolean> {
+	private startFlight(host: string, generation: number): Promise<boolean> {
+		const existing = this.activeFlights.get(host);
+		if (existing) {
+			return existing.generation === this.generation
+				? existing.promise
+				: this.queueLatestSuccessor(host, existing);
+		}
+
+		let complete!: (trusted: boolean) => void;
+		const promise = new Promise<boolean>(resolve => { complete = resolve; });
+		const flight: ActiveFlight = { generation, promise };
+		this.activeFlights.set(host, flight);
+		// Install ownership before invoking an injected probe: even a runner that
+		// throws synchronously cannot leave an unowned or immortal flight entry.
+		void this.resolveFlight(host, flight).then(complete, () => {
+			if (this.activeFlights.get(host) === flight) this.activeFlights.delete(host);
+			complete(false);
+		});
+		return promise;
+	}
+
+	private queueLatestSuccessor(host: string, active: ActiveFlight): Promise<boolean> {
+		const existing = this.queuedFlights.get(host);
+		if (existing) {
+			existing.generation = this.generation;
+			return existing.promise;
+		}
+
+		let queued!: QueuedFlight;
+		const promise = (async () => {
+			await active.promise;
+			if (this.queuedFlights.get(host) !== queued) return false;
+			this.queuedFlights.delete(host);
+			// A refresh with no subsequent trust request invalidates the queued
+			// intent. Only a caller from the latest generation may start a tree.
+			if (queued.generation !== this.generation) return false;
+			return this.startFlight(host, queued.generation);
+		})();
+		queued = { generation: this.generation, promise };
+		this.queuedFlights.set(host, queued);
+		return promise;
+	}
+
+	private async resolveFlight(host: string, flight: ActiveFlight): Promise<boolean> {
 		let trusted = false;
 		try {
 			trusted = (await this.probe(host)) === true;
 		} catch {
 			trusted = false;
 		}
-		const current = this.states.get(host);
-		if (generation === this.generation && current === entry()) {
-			this.states.set(host, { kind: trusted ? "positive" : "negative", generation });
-		}
+
+		const current = this.activeFlights.get(host);
+		const currentGeneration = flight.generation === this.generation;
+		if (current === flight) this.activeFlights.delete(host);
+		if (!currentGeneration) return false;
+		if (current !== flight) return false;
+		this.verdicts.set(host, { kind: trusted ? "positive" : "negative", generation: flight.generation });
 		return trusted;
 	}
 

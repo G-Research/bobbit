@@ -498,6 +498,186 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+	test("serializes staggered explicit credential refreshes before exact-bound PR lookup", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const host = `credential-serialized-${Date.now()}.invalid`;
+		const branch = `fixture/credential-serialized-${Date.now()}`;
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const originalSpawn = runner.spawn;
+		const originalOwnedTreeCapability = runner.supportsOwnedTreeSpawn;
+		const previousEnterpriseTokens = new Map<string, string | undefined>(
+			["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].map(name => [name, process.env[name]] as const),
+		);
+		let sessionId: string | undefined;
+		let originalTrustedHosts: unknown = [];
+		let activeTrees = 0;
+		let maxActiveTrees = 0;
+		let remoteReads = 0;
+		const ghCalls: string[][] = [];
+		const probes: Array<{
+			request: string;
+			complete: (trusted: boolean) => void;
+		}> = [];
+		const routeRequests: Array<Promise<Response>> = [];
+		const waitForCount = async (read: () => number, expected: number) => {
+			for (let attempt = 0; attempt < 100 && read() < expected; attempt++) {
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			expect(read()).toBe(expected);
+		};
+
+		try {
+			delete process.env.GH_ENTERPRISE_TOKEN;
+			delete process.env.GITHUB_ENTERPRISE_TOKEN;
+			sessionId = await createRemoteStateSession(gateway, gitCwd());
+			gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+
+			runner.spawn = createCommandSpawnAdapter(
+				() => { throw new Error("credential serialization fixture received an ordinary spawn"); },
+				((_file: string, _args: readonly string[]) => {
+					const child: any = new EventEmitter();
+					child.stdout = new PassThrough();
+					child.stdin = new PassThrough();
+					child.kill = () => { throw new Error("credential serialization fixture must use owned-tree control"); };
+					activeTrees++;
+					maxActiveTrees = Math.max(maxActiveTrees, activeTrees);
+					let reaped = false;
+					let completed = false;
+					const probe = {
+						request: "",
+						complete: (trusted: boolean) => {
+							if (completed) return;
+							completed = true;
+							child.stdout.end(trusted
+								? `protocol=https\nhost=${host}\nusername=route-fixture\npassword=fixture-secret\n`
+								: `protocol=https\nhost=${host}\nusername=route-fixture\n`);
+							child.emit("close", 0, null);
+						},
+					};
+					child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
+					probes.push(probe);
+					return {
+						child,
+						ownershipReady: Promise.resolve(),
+						killTree: () => {},
+						waitForTreeExit: async () => {
+							if (!reaped) { reaped = true; activeTrees--; }
+							return true;
+						},
+						killed: () => false,
+						timedOut: () => false,
+					};
+				}) as any,
+			);
+			runner.supportsOwnedTreeSpawn = true;
+			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+				const command = commandName(file);
+				if (command === "git" && args.join(" ") === "remote get-url origin") {
+					remoteReads++;
+					return { stdout: `https://${host}/acme/widget.git\n`, stderr: "" };
+				}
+				if (command === "gh") {
+					ghCalls.push([...args]);
+					if (args[0] === "pr" && args[1] === "list") {
+						return {
+							stdout: JSON.stringify([{
+								number: 93,
+								url: `https://${host}/acme/widget/pull/93`,
+								title: "Serialized credential refresh",
+								state: "OPEN",
+								mergeable: "MERGEABLE",
+								headRefName: branch,
+								baseRefName: "main",
+								...ownedHeadEvidence("acme", "widget"),
+							}]),
+							stderr: "",
+						};
+					}
+					if (args[0] === "api") throw new Error("fixture GraphQL unavailable");
+					if (args[0] === "repo" && args[1] === "view") {
+						return { stdout: JSON.stringify({ viewerPermission: "ADMIN" }), stderr: "" };
+					}
+				}
+				const standard = standardSingleRepositoryProbe(file, args, gitCwd());
+				if (standard) return standard;
+				return unexpectedRunnerCommand(file, args, options);
+			};
+
+			const originalPreferences = await apiFetch("/api/preferences");
+			if (originalPreferences.ok) originalTrustedHosts = (await originalPreferences.json()).githubTrustedHosts ?? [];
+			expect((await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: [] }),
+			})).status).toBe(200);
+			gateway.clock.advance(60_000);
+
+			routeRequests.push(apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`));
+			await waitForCount(() => probes.length, 1);
+			expect(activeTrees).toBe(1);
+
+			// Each request advances the refresh generation after the prior helper tree
+			// has started. They must update one queued successor, not spawn siblings.
+			routeRequests.push(apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`));
+			await waitForCount(() => remoteReads, 2);
+			routeRequests.push(apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`));
+			await waitForCount(() => remoteReads, 3);
+			expect(probes).toHaveLength(1);
+			expect(activeTrees).toBe(1);
+			expect(ghCalls).toHaveLength(0);
+
+			probes[0].complete(true);
+			await waitForCount(() => probes.length, 2);
+			expect(probes[1].request).toBe(`url=https://${host}\n\n`);
+			expect(activeTrees).toBe(1);
+			expect(maxActiveTrees).toBe(1);
+			expect(ghCalls).toHaveLength(0);
+
+			probes[1].complete(true);
+			const responses = await Promise.all(routeRequests);
+			expect(responses.map(response => response.status).sort()).toEqual([200, 200, 204]);
+			expect(activeTrees).toBe(0);
+			expect(maxActiveTrees).toBe(1);
+			expect(probes).toHaveLength(2);
+			const prLookups = ghCalls.filter(args => args[0] === "pr" && args[1] === "list");
+			expect(prLookups).toHaveLength(1);
+			expect(prLookups[0].slice(0, 6)).toEqual([
+				"pr", "list", "--repo", `${host}/acme/widget`, "--head", branch,
+			]);
+			expect(ghCalls.filter(args => args[0] === "api").every(args => (
+				args[1] === "--hostname" && args[2] === host
+			))).toBe(true);
+			expect(ghCalls.find(args => args[0] === "repo" && args[1] === "view")).toEqual([
+				"repo", "view", "--repo", `${host}/acme/widget`, "--json", "viewerPermission",
+			]);
+		} finally {
+			// Completing one stale tree may schedule its serialized successor in a
+			// microtask, so drain twice before awaiting any still-pending routes.
+			for (let pass = 0; pass < 3; pass++) {
+				for (const probe of probes) probe.complete(false);
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			await Promise.allSettled(routeRequests);
+			runner.execFile = originalExecFile;
+			runner.spawn = originalSpawn;
+			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
+			else runner.supportsOwnedTreeSpawn = originalOwnedTreeCapability;
+			for (const [name, value] of previousEnterpriseTokens) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			gateway.clock.advance(60_000);
+			try {
+				if (sessionId) await deleteSession(sessionId);
+			} finally {
+				await apiFetch("/api/preferences", {
+					method: "PUT",
+					body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
+				}).catch(() => {});
+			}
+		}
+	});
+
 	test("credential-vouches only the selected repository in a multi-repository PR status lookup", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const projectRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-credential-selected-"));

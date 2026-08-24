@@ -127,28 +127,70 @@ describe("GithubHostCredentialTrust cache", () => {
 		expect(probe).toHaveBeenCalledTimes(1);
 	});
 
-	it("clears negatives only on refresh and fences stale pending completions", async () => {
-		let firstRelease!: (value: boolean) => void;
-		let calls = 0;
-		const probe = vi.fn(async () => {
-			calls++;
-			if (calls === 1) return new Promise<boolean>(resolve => { firstRelease = resolve; });
-			return true;
+	it("serializes repeated refresh generations and never authorizes from stale flights", async () => {
+		const releases: Array<(value: boolean) => void> = [];
+		let active = 0;
+		let maxActive = 0;
+		const probe = vi.fn(() => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			return new Promise<boolean>(resolve => {
+				releases.push(value => {
+					active--;
+					resolve(value);
+				});
+			});
 		});
 		const trust = new GithubHostCredentialTrust({ probe, getEnv: () => ({}) });
 
-		const stale = trust.isTrusted("git.example.com");
+		const first = trust.isTrusted("git.example.com");
+		for (let refresh = 0; refresh < 4; refresh++) {
+			trust.forgetUnverified();
+			void trust.isTrusted("git.example.com");
+			expect(probe, `refresh ${refresh} must join one queued successor`).toHaveBeenCalledTimes(1);
+		}
+
+		// The old tree may return a credential, but its generation is stale. Only
+		// one successor for the latest requested generation starts after it exits.
+		releases[0](true);
+		await expect(first).resolves.toBe(false);
+		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+		expect(active).toBe(1);
+		expect(maxActive).toBe(1);
+
+		const beforeLatestRefresh = trust.isTrusted("git.example.com");
 		trust.forgetUnverified();
-		const fresh = trust.isTrusted("git.example.com");
-		firstRelease(false);
-		await expect(stale).resolves.toBe(false);
-		await expect(fresh).resolves.toBe(true);
+		const latest = trust.isTrusted("git.example.com");
+		expect(probe).toHaveBeenCalledTimes(2);
+		releases[1](true);
+		await expect(beforeLatestRefresh).resolves.toBe(false);
+		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(3));
+		expect(active).toBe(1);
+		expect(maxActive).toBe(1);
+
+		releases[2](true);
+		await expect(latest).resolves.toBe(true);
+		await expect(trust.isTrusted("git.example.com")).resolves.toBe(true);
+		expect(probe).toHaveBeenCalledTimes(3);
+		expect(active).toBe(0);
+	});
+
+	it("clears cached negatives only on explicit refresh", async () => {
+		const probe = vi.fn()
+			.mockResolvedValueOnce(false)
+			.mockResolvedValueOnce(true);
+		const trust = new GithubHostCredentialTrust({ probe, getEnv: () => ({}) });
+
+		await expect(trust.isTrusted("git.example.com")).resolves.toBe(false);
+		await expect(trust.isTrusted("git.example.com")).resolves.toBe(false);
+		expect(probe).toHaveBeenCalledTimes(1);
+		trust.forgetUnverified();
 		await expect(trust.isTrusted("git.example.com")).resolves.toBe(true);
 		expect(probe).toHaveBeenCalledTimes(2);
 	});
 
 	it("caches thrown probes as negative until refresh and rejects malformed authorities", async () => {
-		const probe = vi.fn(async () => { throw new Error("secret-bearing helper failure"); });
+		const probe = vi.fn(() => { throw new Error("secret-bearing helper failure"); });
 		const trust = new GithubHostCredentialTrust({ probe, getEnv: () => ({}) });
 		await expect(trust.isTrusted("git.example.com")).resolves.toBe(false);
 		await expect(trust.isTrusted("git.example.com")).resolves.toBe(false);
