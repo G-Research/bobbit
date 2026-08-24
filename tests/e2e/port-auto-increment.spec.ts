@@ -6,6 +6,7 @@
  */
 import { test, expect } from "./gateway-harness.js";
 import { pollUntil } from "./test-utils/cleanup.js";
+import { isConnectionRefusal } from "./test-utils/gateway-readiness.js";
 import { createServer as createTcpServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -36,6 +37,39 @@ function occupyPort(port: number): Promise<ReturnType<typeof createTcpServer>> {
 			resolve(srv);
 		});
 	});
+}
+
+function closePort(server: ReturnType<typeof createTcpServer>): Promise<void> {
+	if (!server.listening) return Promise.resolve();
+	return new Promise((resolve, reject) => {
+		server.close((error) => error ? reject(error) : resolve());
+	});
+}
+
+/** Reserve a base port and its successor until the helper is ready to spawn. */
+async function reserveConsecutivePorts(): Promise<{
+	basePort: number;
+	blocker: ReturnType<typeof createTcpServer>;
+	nextPortGuard: ReturnType<typeof createTcpServer>;
+}> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		// Stay below the OS ephemeral-client ranges so releasing the successor
+		// cannot immediately turn it into an unrelated outbound source port.
+		const basePort = 20_000 + ((process.pid + attempt * 997) % 10_000);
+		let blocker: ReturnType<typeof createTcpServer>;
+		try {
+			blocker = await occupyPort(basePort);
+		} catch {
+			continue;
+		}
+		try {
+			const nextPortGuard = await occupyPort(basePort + 1);
+			return { basePort, blocker, nextPortGuard };
+		} catch {
+			await closePort(blocker);
+		}
+	}
+	throw new Error("could not reserve consecutive ports for auto-increment coverage");
 }
 
 /** Find a free port to use as a base for tests. */
@@ -83,12 +117,6 @@ function startHelper(env: Record<string, string>): { child: ChildProcess; output
 type GatewayReadiness =
 	| { kind: "ready" }
 	| { kind: "failed"; message: string };
-
-function isConnectionRefusal(error: unknown): boolean {
-	if (!error || typeof error !== "object") return false;
-	const candidate = error as { code?: unknown; cause?: unknown };
-	return candidate.code === "ECONNREFUSED" || isConnectionRefusal(candidate.cause);
-}
 
 function childExitDescription(child: ChildProcess): string | null {
 	if (child.exitCode === null && child.signalCode === null) return null;
@@ -161,35 +189,18 @@ function killChild(child: ChildProcess): Promise<void> {
 }
 
 test.describe("Port auto-increment", () => {
-	test("retries only coded connection refusals", () => {
-		const refusal = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
-		expect(isConnectionRefusal(refusal)).toBe(true);
-		expect(isConnectionRefusal(Object.assign(new TypeError("fetch failed"), { cause: refusal }))).toBe(true);
-
-		for (const unexpected of [
-			new Error("connect ECONNREFUSED 127.0.0.1"),
-			new TypeError("fetch failed"),
-			Object.assign(new TypeError("fetch failed"), {
-				cause: Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
-			}),
-			Object.assign(new TypeError("fetch failed"), {
-				cause: Object.assign(new Error("malformed HTTP response"), { code: "HPE_INVALID_CONSTANT" }),
-			}),
-		]) {
-			expect(isConnectionRefusal(unexpected)).toBe(false);
-		}
-	});
-
 	test("auto-increments to next port when default port is occupied", async () => {
-		const basePort = await findFreePort();
 		const bobbitDir = makeBobbitDir("auto-inc");
 		const secretsDir = join(bobbitDir, "secrets");
 		const authToken = "port-readiness-test-token".padEnd(64, "0");
 		mkdirSync(secretsDir, { recursive: true });
 		writeFileSync(join(secretsDir, "token"), authToken, "utf8");
-		const blocker = await occupyPort(basePort);
+		const { basePort, blocker, nextPortGuard } = await reserveConsecutivePorts();
 
 		try {
+			// Hold both ports through setup, then release only the expected target
+			// immediately before spawn so an unrelated listener cannot own it.
+			await closePort(nextPortGuard);
 			const { child, output } = startHelper({
 				BOBBIT_DIR: bobbitDir,
 				BOBBIT_SECRETS_DIR: secretsDir,
@@ -219,7 +230,7 @@ test.describe("Port auto-increment", () => {
 				await killChild(child);
 			}
 		} finally {
-			blocker.close();
+			await closePort(blocker);
 		}
 	});
 
@@ -240,7 +251,7 @@ test.describe("Port auto-increment", () => {
 			expect(result.code).toBe(0);
 			expect(result.output).toContain("EADDRINUSE");
 		} finally {
-			blocker.close();
+			await closePort(blocker);
 		}
 	});
 

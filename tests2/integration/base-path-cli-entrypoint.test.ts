@@ -8,6 +8,7 @@ import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 
 import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { isConnectionRefusal } from "../../tests/e2e/test-utils/gateway-readiness.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const CLI_ENTRY = join(REPO_ROOT, "src", "server", "cli.ts");
@@ -80,12 +81,6 @@ type GatewayReadiness =
 	| { kind: "ready"; health: GatewayHealth }
 	| { kind: "failed"; message: string };
 
-function isConnectionRefusal(error: unknown): boolean {
-	if (!error || typeof error !== "object") return false;
-	const candidate = error as { code?: unknown; cause?: unknown };
-	return candidate.code === "ECONNREFUSED" || isConnectionRefusal(candidate.cause);
-}
-
 function childExitDescription(child: ChildProcess): string | null {
 	if (child.exitCode === null && child.signalCode === null) return null;
 	return String(child.exitCode ?? child.signalCode);
@@ -142,27 +137,6 @@ async function waitForHealthyGateway(
 	if (result.kind === "failed") throw new Error(result.message);
 	return result.health;
 }
-
-describe("gateway readiness transport classification", () => {
-	it("retries only coded connection refusals", () => {
-		const refusal = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
-		expect(isConnectionRefusal(refusal)).toBe(true);
-		expect(isConnectionRefusal(Object.assign(new TypeError("fetch failed"), { cause: refusal }))).toBe(true);
-
-		for (const unexpected of [
-			new Error("connect ECONNREFUSED 127.0.0.1"),
-			new TypeError("fetch failed"),
-			Object.assign(new TypeError("fetch failed"), {
-				cause: Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
-			}),
-			Object.assign(new TypeError("fetch failed"), {
-				cause: Object.assign(new Error("malformed HTTP response"), { code: "HPE_INVALID_CONSTANT" }),
-			}),
-		]) {
-			expect(isConnectionRefusal(unexpected)).toBe(false);
-		}
-	});
-});
 
 describe("executable CLI root and nested base-path smoke", () => {
 	it("prints only the package version and exits before all gateway side effects", async () => {
