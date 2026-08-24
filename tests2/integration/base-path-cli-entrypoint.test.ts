@@ -82,14 +82,8 @@ type GatewayReadiness =
 
 function isConnectionRefusal(error: unknown): boolean {
 	if (!error || typeof error !== "object") return false;
-	const candidate = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
-	if (candidate.code === "ECONNREFUSED" || /ECONNREFUSED/i.test(String(candidate.message ?? ""))) return true;
-	if (isConnectionRefusal(candidate.cause)) return true;
-	if (Array.isArray(candidate.errors) && candidate.errors.some(isConnectionRefusal)) return true;
-	// Some child-process test transports expose Undici's loopback refusal only
-	// as its outer TypeError. The fixed loopback HTTP URL has no DNS/TLS failure
-	// modes, so this exact error still identifies the pre-listen refusal.
-	return error instanceof TypeError && error.message === "fetch failed";
+	const candidate = error as { code?: unknown; cause?: unknown };
+	return candidate.code === "ECONNREFUSED" || isConnectionRefusal(candidate.cause);
 }
 
 function childExitDescription(child: ChildProcess): string | null {
@@ -147,6 +141,27 @@ async function waitForHealthyGateway(
 	if (result.kind === "failed") throw new Error(result.message);
 	return result.health;
 }
+
+describe("gateway readiness transport classification", () => {
+	it("retries only coded connection refusals", () => {
+		const refusal = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+		expect(isConnectionRefusal(refusal)).toBe(true);
+		expect(isConnectionRefusal(Object.assign(new TypeError("fetch failed"), { cause: refusal }))).toBe(true);
+
+		for (const unexpected of [
+			new Error("connect ECONNREFUSED 127.0.0.1"),
+			new TypeError("fetch failed"),
+			Object.assign(new TypeError("fetch failed"), {
+				cause: Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+			}),
+			Object.assign(new TypeError("fetch failed"), {
+				cause: Object.assign(new Error("malformed HTTP response"), { code: "HPE_INVALID_CONSTANT" }),
+			}),
+		]) {
+			expect(isConnectionRefusal(unexpected)).toBe(false);
+		}
+	});
+});
 
 describe("executable CLI root and nested base-path smoke", () => {
 	it("prints only the package version and exits before all gateway side effects", async () => {

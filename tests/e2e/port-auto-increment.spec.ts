@@ -86,14 +86,8 @@ type GatewayReadiness =
 
 function isConnectionRefusal(error: unknown): boolean {
 	if (!error || typeof error !== "object") return false;
-	const candidate = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
-	if (candidate.code === "ECONNREFUSED" || /ECONNREFUSED/i.test(String(candidate.message ?? ""))) return true;
-	if (isConnectionRefusal(candidate.cause)) return true;
-	if (Array.isArray(candidate.errors) && candidate.errors.some(isConnectionRefusal)) return true;
-	// Undici can expose a loopback refusal only as its outer TypeError in a test
-	// worker. With a fixed http://127.0.0.1 target, this exact error is the
-	// connection-level refusal before the child listener binds.
-	return error instanceof TypeError && error.message === "fetch failed";
+	const candidate = error as { code?: unknown; cause?: unknown };
+	return candidate.code === "ECONNREFUSED" || isConnectionRefusal(candidate.cause);
 }
 
 function childExitDescription(child: ChildProcess): string | null {
@@ -167,6 +161,25 @@ function killChild(child: ChildProcess): Promise<void> {
 }
 
 test.describe("Port auto-increment", () => {
+	test("retries only coded connection refusals", () => {
+		const refusal = Object.assign(new Error("connection refused"), { code: "ECONNREFUSED" });
+		expect(isConnectionRefusal(refusal)).toBe(true);
+		expect(isConnectionRefusal(Object.assign(new TypeError("fetch failed"), { cause: refusal }))).toBe(true);
+
+		for (const unexpected of [
+			new Error("connect ECONNREFUSED 127.0.0.1"),
+			new TypeError("fetch failed"),
+			Object.assign(new TypeError("fetch failed"), {
+				cause: Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
+			}),
+			Object.assign(new TypeError("fetch failed"), {
+				cause: Object.assign(new Error("malformed HTTP response"), { code: "HPE_INVALID_CONSTANT" }),
+			}),
+		]) {
+			expect(isConnectionRefusal(unexpected)).toBe(false);
+		}
+	});
+
 	test("auto-increments to next port when default port is occupied", async () => {
 		const basePort = await findFreePort();
 		const bobbitDir = makeBobbitDir("auto-inc");
