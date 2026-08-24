@@ -211,6 +211,9 @@ export function resolveMarketplacePiExtensionActivation(
 				entryPath: contribution.entryPath,
 				...(contribution.entryRelativePath ? { entryRelativePath: contribution.entryRelativePath } : {}),
 				packRoot: contribution.packRoot,
+				// Retain the schema catalogue beside the exact runtime activation. Discovery
+				// caches may be invalidated while this already-loaded Pi process keeps running.
+				tools: (contribution.discovery?.tools ?? []).map((tool) => ({ ...tool })),
 				origin: contribution.origin,
 			});
 		}
@@ -1611,6 +1614,7 @@ export async function executeWorktreeAsync(
 	// Create real RpcBridge (replacing placeholder)
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
+	session.runtimePiExtensions = plan.bridgeOptions.piExtensions;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	// resolveTools may have applied the role's accessory (generic role-accessory
 	// application); mirror it onto the live worktree session so the sidebar
@@ -1795,6 +1799,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		lastActivity: now,
 		clients: new Set(),
 		rpcClient,
+		runtimePiExtensions: plan.bridgeOptions.piExtensions,
 		eventBuffer,
 		unsubscribe: () => {},
 		isCompacting: false,

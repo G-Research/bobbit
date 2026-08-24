@@ -1010,6 +1010,8 @@ export interface SessionInfo {
 	lastActivity: number;
 	clients: Set<WebSocket>;
 	rpcClient: RpcBridge;
+	/** Pi extension/schema snapshot owned by the currently installed runtime. */
+	runtimePiExtensions?: RuntimePiExtensionInfo[];
 	eventBuffer: EventBuffer;
 	unsubscribe: () => void;
 	isCompacting: boolean;
@@ -13090,6 +13092,7 @@ export class SessionManager {
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
 			rpcClient,
+			runtimePiExtensions: bridgeOptions.piExtensions,
 			eventBuffer,
 			unsubscribe: () => {},
 			isCompacting: false,
@@ -16408,6 +16411,7 @@ export class SessionManager {
 		const stagedSession = {
 			...replacementSession,
 			rpcClient,
+			runtimePiExtensions: bridgeOptions.piExtensions,
 			unsubscribe: unsub,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
@@ -16513,6 +16517,7 @@ export class SessionManager {
 
 		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
 		session.rpcClient = rpcClient;
+		session.runtimePiExtensions = bridgeOptions.piExtensions;
 		session.unsubscribe = unsub;
 		// Snapshot bases and cursor projections are bridge-specific. Clear both at
 		// the commit boundary so no response from the stopped bridge can be reused or
@@ -19254,6 +19259,7 @@ export class SessionManager {
 
 			// Swap in the new bridge only after history rehydration.
 			session.rpcClient = rpcClient;
+			session.runtimePiExtensions = bridgeOptions.piExtensions;
 			session.unsubscribe = unsub;
 			session.spawnPinnedModel = bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
