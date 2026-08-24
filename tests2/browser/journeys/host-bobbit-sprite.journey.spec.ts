@@ -73,6 +73,33 @@ async function patchSessionAppearance(sessionId: string, colorIndex: number, acc
 	expect(response.status, `session appearance patch failed: ${await responseText(response)}`).toBe(200);
 }
 
+async function waitForAppearanceProjection(
+	page: Page,
+	sessionId: string,
+	staffId: string,
+	staffSessionId: string,
+): Promise<void> {
+	await expect.poll(() => page.evaluate(({ sessionId: expectedSessionId, staffId: expectedStaffId, staffSessionId: expectedStaffSessionId }) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const sessions = [...(state?.gatewaySessions ?? []), ...(state?.archivedSessions ?? [])];
+		const session = sessions.find((candidate: any) => candidate.id === expectedSessionId);
+		const staffSession = sessions.find((candidate: any) => candidate.id === expectedStaffSessionId);
+		const staff = state?.staffList?.find((candidate: any) => candidate.id === expectedStaffId);
+		return {
+			session: session ? { colorIndex: session.colorIndex, accessory: session.accessory } : null,
+			staff: staff ? { currentSessionId: staff.currentSessionId } : null,
+			staffSession: staffSession ? { colorIndex: staffSession.colorIndex, accessory: staffSession.accessory } : null,
+		};
+	}, { sessionId, staffId, staffSessionId }), {
+		timeout: 20_000,
+		message: "persisted session and staff appearance must reach the client projection before sprite capture",
+	}).toEqual({
+		session: { colorIndex: SESSION_COLOR_INDEX, accessory: "crown" },
+		staff: { currentSessionId: staffSessionId },
+		staffSession: { colorIndex: STAFF_COLOR_INDEX, accessory: "ponytail" },
+	});
+}
+
 function panelSprite(page: Page, key: string): Locator {
 	return page.locator(`[data-fixture-sprite="${key}"]`);
 }
@@ -272,6 +299,7 @@ test.describe("Journey: Host Bobbit sprite fixture panel", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForAppearanceProjection(page, sessionId, staff.id, staff.currentSessionId!);
 			await navigateToHash(page, `#/ext/host-sprite-fixture?staffId=${encodeURIComponent(staff.id)}`);
 			await page.evaluate(() => document.documentElement.classList.add("bobbit-wizard-hat"));
 			const firstMain = await expectSpriteParity(page, sessionId, staff.currentSessionId!);
@@ -279,6 +307,7 @@ test.describe("Journey: Host Bobbit sprite fixture panel", () => {
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForAppearanceProjection(page, sessionId, staff.id, staff.currentSessionId!);
 			await navigateToHash(page, `#/ext/host-sprite-fixture?staffId=${encodeURIComponent(staff.id)}`);
 			await page.evaluate(() => document.documentElement.classList.add("bobbit-wizard-hat"));
 			await expectSpriteParity(page, sessionId, staff.currentSessionId!, firstMain);
