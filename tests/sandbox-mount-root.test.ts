@@ -17,7 +17,6 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { executionPathIdentity } from "../src/server/agent/resolve-project.ts";
 import { resolveSandboxMountRoot } from "../src/server/skills/git.ts";
 
 const tmpDirs: string[] = [];
@@ -44,13 +43,16 @@ function makeTempRepo(): string {
 	return root;
 }
 
-/** realpath, falling back to resolve when the path doesn't exist. */
-function realpath(p: string): string {
+/** Native filesystem identity, with a lexical fallback for missing paths. */
+function pathIdentity(filePath: string): string {
+	const lexical = path.resolve(filePath);
+	let identity: string;
 	try {
-		return fs.realpathSync(p);
+		identity = fs.realpathSync.native(lexical);
 	} catch {
-		return path.resolve(p);
+		identity = lexical;
 	}
+	return process.platform === "win32" ? identity.toLowerCase() : identity;
 }
 
 after(() => {
@@ -61,7 +63,7 @@ describe("resolveSandboxMountRoot", () => {
 	it("returns realpath(repoRoot) for a normal (main) repo", async () => {
 		const root = makeTempRepo();
 		const result = await resolveSandboxMountRoot(root);
-		assert.equal(executionPathIdentity(result), executionPathIdentity(realpath(root)));
+		assert.equal(pathIdentity(result), pathIdentity(root));
 	});
 
 	it("returns the MAIN repo root for a linked worktree (origin-less regression)", async () => {
@@ -76,8 +78,8 @@ describe("resolveSandboxMountRoot", () => {
 		const result = await resolveSandboxMountRoot(wtPath);
 		// Must resolve to the MAIN working tree, NOT the worktree path. Git can
 		// publish a long Windows path even when TMPDIR supplied its 8.3 alias.
-		assert.equal(executionPathIdentity(result), executionPathIdentity(realpath(main)));
-		assert.notEqual(executionPathIdentity(result), executionPathIdentity(realpath(wtPath)));
+		assert.equal(pathIdentity(result), pathIdentity(main));
+		assert.notEqual(pathIdentity(result), pathIdentity(wtPath));
 	});
 
 	it("falls back to a canonicalized path for a non-git directory", async () => {
@@ -86,6 +88,6 @@ describe("resolveSandboxMountRoot", () => {
 		const result = await resolveSandboxMountRoot(dir);
 		// Non-git → fallback canonicalizePath(repoPath). Compare filesystem
 		// identity rather than one spelling or case projection.
-		assert.equal(executionPathIdentity(result), executionPathIdentity(realpath(dir)));
+		assert.equal(pathIdentity(result), pathIdentity(dir));
 	});
 });
