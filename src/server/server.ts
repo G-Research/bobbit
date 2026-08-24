@@ -91,7 +91,7 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
-import { HostInterceptorRouter } from "./extension-host/host-interceptor-router.js";
+import { HostInterceptorRouter, type HostInterceptorContext } from "./extension-host/host-interceptor-router.js";
 import { hostInterceptorAuditSink } from "./extension-host/host-interceptor-audit.js";
 import {
 	HostNotificationDispatcher,
@@ -4267,10 +4267,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	};
 
-	const validateBoundedToolResult = (toolName: string, result: unknown): boolean => {
-		const knownTool = toolManager.resolveScopedPiExtensionTools().some(tool =>
+	const resolveHostInterceptorToolScope = (context: HostInterceptorContext) => ({
+		toolManager: context.projectId !== undefined
+			? projectContextManager.getOrCreate(context.projectId)?.toolManager
+			: toolManager,
+		scopedContext: scopedToolContext(context.projectId, context.cwd),
+	});
+	const validateBoundedToolResult = (toolName: string, result: unknown, context: HostInterceptorContext): boolean => {
+		const { toolManager: scopedToolManager, scopedContext } = resolveHostInterceptorToolScope(context);
+		if (!scopedToolManager) return false;
+		const knownTool = scopedToolManager.resolveScopedPiExtensionTools(scopedContext).some(tool =>
 			(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
-		) || toolManager.getToolByName(toolName) !== undefined;
+		) || scopedToolManager.getToolByName(toolName, scopedContext) !== undefined;
 		if (!knownTool) return false;
 		let nodes = 0;
 		const visit = (value: unknown, depth: number): boolean => {
@@ -4293,14 +4301,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		lifecycleHub: sessionManager.lifecycleHub,
 		createHostApi: ({ context, packId, contributionId, capabilities }) =>
 			createHookHostApi(context, packId, contributionId, capabilities),
-		validateToolArgs: (toolName, args) => {
+		validateToolArgs: (toolName, args, context) => {
 			try {
 				if (!args || typeof args !== "object" || Array.isArray(args)) return false;
-				const piTool = toolManager.resolveScopedPiExtensionTools().find(tool =>
+				const { toolManager: scopedToolManager, scopedContext } = resolveHostInterceptorToolScope(context);
+				if (!scopedToolManager) return false;
+				const piTool = scopedToolManager.resolveScopedPiExtensionTools(scopedContext).find(tool =>
 					(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
 				);
 				if (piTool?.inputSchema) return Value.Check(piTool.inputSchema as never, args);
-				const params = toolManager.getToolByName(toolName)?.params;
+				const params = scopedToolManager.getToolByName(toolName, scopedContext)?.params;
 				if (!params) return Object.keys(args).length === 0;
 				const allowed = new Set(params.map(param => param.replace(/\?$/, "")));
 				const required = params.filter(param => !param.endsWith("?")).map(param => param.replace(/\?$/, ""));
@@ -5896,7 +5906,20 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => {
+		invalidateMarketPackScanCache();
+		invalidateBuiltinPackScanCache();
+		invalidateSlashSkillsCache();
+		__resetToolScanCache();
+		const toolManagers = new Set([toolManager, ...Array.from(projectContextManager.all(), context => context.toolManager)]);
+		for (const scopedToolManager of toolManagers) scopedToolManager.clearScopedPiExtensionTools();
+		piExtensionDiscoveryCache.clear();
+		dispatcher.invalidate();
+		routeDispatcher.invalidate();
+		routeRegistry.invalidate();
+		packContributionRegistry.invalidate();
+		closeUnavailableExtensionChannels();
+	};
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
