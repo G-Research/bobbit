@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
+import { executionPathIdentity } from "../src/server/agent/resolve-project.js";
 import { resolveWorktreeSupport } from "../src/server/agent/worktree-support.js";
 import { WorktreePool } from "../src/server/agent/worktree-pool.js";
 import { createWorktree } from "../src/server/skills/git.js";
@@ -135,7 +136,7 @@ describe("unborn HEAD worktree fallback regressions", () => {
 		try {
 			const support = await resolveWorktreeSupport([{ name: "root", repo: "." }], repo, repo, undefined, { configuredBaseRef: "origin/main" });
 			assert.equal(support.supported, true);
-			assert.equal(path.normalize(support.repoPath ?? ""), path.normalize(repo));
+			assert.equal(executionPathIdentity(support.repoPath ?? ""), executionPathIdentity(repo));
 
 			const result = await createWorktree(repo, "session/configured-base", { skipPush: true, configuredBaseRef: "origin/main" });
 			const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: result.worktreePath });
@@ -192,7 +193,7 @@ describe("unborn HEAD worktree fallback regressions", () => {
 		try {
 			const support = await resolveWorktreeSupport([{ name: "root", repo: "." }], repo, repo);
 			assert.equal(support.supported, true);
-			assert.equal(path.normalize(support.repoPath ?? ""), path.normalize(repo));
+			assert.equal(executionPathIdentity(support.repoPath ?? ""), executionPathIdentity(repo));
 			assert.equal(support.multiRepo, false);
 
 			const result = await createWorktree(repo, "session/committed-head", { skipPush: true });

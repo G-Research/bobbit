@@ -10,7 +10,10 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { executionPathIdentity } from "../src/server/agent/resolve-project.ts";
 import { classifyWorktrees, sweepOrphanedWorktrees } from "../src/server/agent/worktree-sweeper.ts";
+import { realCommandRunner, type CommandRunner } from "../src/server/gateway-deps.ts";
+import { cleanupWorktree } from "../src/server/skills/git.ts";
 
 const REPO = "/tmp/repo";
 
@@ -187,6 +190,13 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 	}
 
+	function registeredWorktreePaths(repo: string): string[] {
+		return git(repo, ["worktree", "list", "--porcelain"])
+			.split(/\r?\n/)
+			.filter(line => line.startsWith("worktree "))
+			.map(line => line.slice("worktree ".length));
+	}
+
 	it("preserves archived-owned orphan worktrees and durable archived branches", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sweeper-archived-branch-"));
 		const repo = path.join(tmp, "repo");
@@ -211,8 +221,54 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 			assert.equal(result.cleaned, 0);
 			assert.equal(result.repaired, 0);
 			assert.equal(fs.existsSync(wt), true, "archived worktree must remain");
-			assert.equal(git(repo, ["worktree", "list", "--porcelain"]).replaceAll("\\", "/").includes(wt.replaceAll("\\", "/")), true, "archived worktree metadata must remain");
+			assert.equal(
+				registeredWorktreePaths(repo).some(candidate => executionPathIdentity(candidate) === executionPathIdentity(wt)),
+				true,
+				"archived worktree metadata must remain",
+			);
 			assert.doesNotThrow(() => git(repo, ["show-ref", "--verify", "--quiet", "refs/heads/session/arch"]), "durable archived branch must remain");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("removes a worktree through Git's registered spelling when the caller supplies a filesystem alias", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-alias-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-alias");
+		const alias = path.join(tmp, "worktree-alias");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/alias", wt, "HEAD"]);
+			fs.symlinkSync(wt, alias, process.platform === "win32" ? "junction" : "dir");
+			const removeTargets: string[] = [];
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (file === "git" && args[0] === "worktree" && args[1] === "remove") {
+						removeTargets.push(String(args[2]));
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			assert.equal(executionPathIdentity(alias), executionPathIdentity(wt), "fixture alias must identify the registered worktree");
+			const gitSpelling = registeredWorktreePaths(repo).find(candidate => executionPathIdentity(candidate) === executionPathIdentity(wt));
+			assert.ok(gitSpelling, "fixture worktree must appear in Git porcelain output");
+			await cleanupWorktree(repo, alias, undefined, false, runner);
+
+			assert.deepEqual(removeTargets, [gitSpelling], "cleanup must pass Git its authoritative porcelain spelling");
+			assert.equal(fs.existsSync(wt), false, "cleanup must remove the registered worktree directory");
+			assert.equal(
+				registeredWorktreePaths(repo).some(candidate => executionPathIdentity(candidate) === executionPathIdentity(wt)),
+				false,
+				"cleanup must remove the exact Git registration",
+			);
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}

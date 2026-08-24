@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { vi } from "vitest";
 
+import { executionPathIdentity } from "../../src/server/agent/resolve-project.js";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
@@ -56,8 +57,7 @@ async function waitForGoalReady(goalId: string): Promise<any> {
 }
 
 function normalized(filePath: string): string {
-	const absolute = resolve(filePath);
-	return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+	return executionPathIdentity(filePath);
 }
 
 function liveRepoWorktrees(session: any): Record<string, string> {
