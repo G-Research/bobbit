@@ -846,6 +846,56 @@ describe("bounded recursive benchmark error sanitization", () => {
 		assert.ok(Buffer.byteLength(serialized) < 20_000);
 	});
 
+	it("fails closed on hostile graph accessors and exact-redacts retained metadata strings", () => {
+		const secret = "MetaSecret";
+		const thrown = () => { throw new Error(`accessor escaped ${secret}`); };
+		const hostile: any = new AggregateError([], "placeholder");
+		Object.defineProperties(hostile, {
+			message: { configurable: true, get: thrown },
+			errors: { configurable: true, get: thrown },
+			cause: { configurable: true, get: thrown },
+			name: { configurable: true, value: `Error${secret}` },
+			phase: { configurable: true, get: thrown },
+			phaseDurationsMs: { configurable: true, get: thrown },
+			benchmarkDiagnostic: {
+				configurable: true,
+				value: {
+					sample: {
+						order: 4,
+						phase: `measured${secret}`,
+						cycle: 1,
+						case: `case-${secret}`,
+						caseOrder: 0,
+					},
+					childExit: {
+						exitCode: 1,
+						signal: secret,
+						spawnFailure: `spawn ${secret}`,
+						pipesClosed: true,
+						output: Object.defineProperty({}, "tail", { get: thrown }),
+						error: { tail: `stderr ${secret}`, truncated: false },
+					},
+				},
+			},
+		});
+
+		const sanitized: any = sanitizeBenchmarkError(hostile, { redactions: [secret] });
+		const serialized = JSON.stringify(projectErrorGraph(sanitized));
+		assert.ok(sanitized instanceof AggregateError);
+		const safe: any = sanitized;
+		assert.equal(safe.name, "AggregateError");
+		assert.equal(safe.message, "Unknown benchmark error");
+		assert.deepEqual(safe.errors, []);
+		assert.equal(safe.cause, undefined);
+		assert.equal(safe.phase, undefined);
+		assert.equal(safe.benchmarkDiagnostic.sample.phase, "measured[redacted]");
+		assert.equal(safe.benchmarkDiagnostic.sample.case, "case-[redacted]");
+		assert.equal(safe.benchmarkDiagnostic.childExit.signal, null);
+		assert.equal(safe.benchmarkDiagnostic.childExit.output.tail, "");
+		assert.equal(serialized.includes(secret), false);
+		assert.match(serialized, /\[redacted\]/);
+	});
+
 	it("keeps recursively sanitized journey failures credential-free in the failed report", async () => {
 		const repoRoot = await temporaryRoot();
 		const token = "ef".repeat(32);
@@ -856,10 +906,11 @@ describe("bounded recursive benchmark error sanitization", () => {
 				runJourney: async (context: any) => {
 					const [entry] = context.scheduleFor(["only"]);
 					const leaf: any = new Error(`navigation http://127.0.0.1/?token=${token}#/private`);
+					leaf.name = `Error${token}`;
 					leaf.benchmarkDiagnostic = {
-						sample: entry,
+						sample: { ...entry, case: `only-${token}` },
 						childExit: {
-							exitCode: 1, signal: null, spawnFailure: null, pipesClosed: true,
+							exitCode: 1, signal: token, spawnFailure: null, pipesClosed: true,
 							output: { tail: token, truncated: false },
 							error: { tail: `Bearer ${token}`, truncated: false },
 						},
@@ -874,6 +925,31 @@ describe("bounded recursive benchmark error sanitization", () => {
 		const serialized = JSON.stringify(result.report);
 		assert.equal(serialized.includes(token), false);
 		assert.match(serialized, /\[redacted\]/);
+	});
+
+	it("emits bounded failed JSON when the unsanitized failure graph has throwing accessors", async () => {
+		const repoRoot = await temporaryRoot();
+		const options = parseArgs(["--journey", "event-stream", "--warmups", "2", "--repetitions", "1"]);
+		const result = await runBenchmark(options, {
+			repoRoot,
+			importer: async () => ({
+				runJourney: async () => {
+					const hostile: any = new Error("placeholder");
+					for (const field of ["message", "errors", "cause", "benchmarkDiagnostic"]) {
+						Object.defineProperty(hostile, field, {
+							configurable: true,
+							get() { throw new Error("hostile accessor must stay unread"); },
+						});
+					}
+					throw hostile;
+				},
+			}),
+		});
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.report.correctness.status, "failed");
+		assert.equal(result.report.correctness.error, "Unknown benchmark error");
+		assert.doesNotThrow(() => JSON.stringify(result.report));
+		assert.ok(Buffer.byteLength(JSON.stringify(result.report)) < 100_000);
 	});
 });
 
@@ -1222,6 +1298,7 @@ describe("session-open bounded sample lifecycle", () => {
 		const gatewayRuntime = { id: "gateway", diagnosticRedactions: [token] };
 		let browserClosed = 0;
 		let gatewayStopped = 0;
+		const cleanupOrder: string[] = [];
 		await assert.rejects(runSessionOpenSample(
 			{ createSampleRoot: async () => "sample-root" },
 			{ case: "tiny", phase: "measured", cycle: 0, order: 0, caseOrder: 0 },
@@ -1240,9 +1317,13 @@ describe("session-open bounded sample lifecycle", () => {
 						new Error(`page.goto: http://127.0.0.1:4321/?token=${token}#/session/fixture-session`),
 					], `navigation failed ${token}`);
 				},
-				closeBrowser: async () => { browserClosed += 1; },
+				closeBrowser: async () => {
+					cleanupOrder.push("browser");
+					browserClosed += 1;
+				},
 				stopRuntime: async (_runtime: any, options: any) => {
-					assert.equal(options.token, token, "cleanup must retain the live credential");
+					cleanupOrder.push("gateway");
+					assert.equal(options.token, token, "cleanup must retain the exact live credential");
 					gatewayStopped += 1;
 				},
 			},
@@ -1254,6 +1335,7 @@ describe("session-open bounded sample lifecycle", () => {
 		});
 		assert.equal(browserClosed, 1);
 		assert.equal(gatewayStopped, 1);
+		assert.deepEqual(cleanupOrder, ["browser", "gateway"]);
 	});
 
 	it("retains cleanup ownership, aggregates failures, and lets the backstop retry browser before gateway", async () => {

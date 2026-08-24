@@ -447,7 +447,10 @@ test.describe("durable Bobbit browser benchmarks", () => {
 	test("forced tokenized navigation failure is sanitized before browser cleanup", async ({ page }) => {
 		const token = "d0".repeat(32);
 		const browserRuntime = { page };
+		const gatewayRuntime = { id: "gateway", diagnosticRedactions: [token] };
+		const cleanupOrder: string[] = [];
 		let closeCount = 0;
+		let stopCount = 0;
 		await page.route("**/forced-benchmark-navigation**", route => route.abort("failed"));
 		try {
 			let failure: any;
@@ -457,18 +460,28 @@ test.describe("durable Bobbit browser benchmarks", () => {
 					{ case: "browser", phase: "measured", cycle: 0, caseOrder: 0, order: 0 },
 					{ directory: "browser-fixture", manifest: {} },
 					{
-						prepare: async () => ({
-							invocation: { baseUrl: base(), token },
-							runtime: null,
-							sessionId: "forced-session",
-						}),
+						prepare: async (_context: any, _root: any, watchdog: any) => {
+							watchdog.registerGateway(gatewayRuntime);
+							return {
+								invocation: { baseUrl: base(), token },
+								runtime: gatewayRuntime,
+								sessionId: "forced-session",
+							};
+						},
 						measure: async (_restored: any, _manifest: any, watchdog: any) => {
 							watchdog.registerBrowser(browserRuntime);
 							await page.goto(`${base()}/forced-benchmark-navigation?token=${encodeURIComponent(token)}#/session/forced-session`);
 						},
 						closeBrowser: async (runtime: any) => {
 							expect(runtime).toBe(browserRuntime);
+							cleanupOrder.push("browser");
 							closeCount += 1;
+						},
+						stopRuntime: async (runtime: any, options: any) => {
+							expect(runtime).toBe(gatewayRuntime);
+							expect(options.token).toBe(token);
+							cleanupOrder.push("gateway");
+							stopCount += 1;
 						},
 					},
 				);
@@ -490,6 +503,8 @@ test.describe("durable Bobbit browser benchmarks", () => {
 			expect(serialized).not.toContain(token);
 			expect(serialized).not.toContain("forced-session");
 			expect(closeCount).toBe(1);
+			expect(stopCount).toBe(1);
+			expect(cleanupOrder).toEqual(["browser", "gateway"]);
 		} finally {
 			await page.unroute("**/forced-benchmark-navigation**");
 		}

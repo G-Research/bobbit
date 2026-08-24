@@ -261,21 +261,27 @@ describe("Bobbit journey benchmark production boundaries", () => {
 	it("sanitizes forced post-spawn child failures and still closes the owned process", async () => {
 		const paths = await createBenchmarkRunRoot({ repoRoot: REPO_ROOT });
 		const token = "c9".repeat(32);
+		const metadataSecret = "MetaSignal";
 		const runtime = spawnGateway({
 			command: process.execPath,
 			args: ["-e", `console.log(${JSON.stringify(`token=${token}`)}); console.error(${JSON.stringify(`Authorization: Bearer ${token}`)}); setTimeout(() => process.exit(1), 20);`],
 			cwd: REPO_ROOT,
 			env: { ...process.env, NODE_ENV: "test" },
-			redactions: [token],
+			redactions: [token, metadataSecret],
 		});
 		let sanitized: any;
 		try {
 			try {
 				await waitForGatewayReady({ runtime, baseUrl: "http://127.0.0.1:1/", token, timeoutMs: 5_000 });
 			} catch (error) {
+				(error as any).name = `Error${metadataSecret}`;
+				(error as any).benchmarkDiagnostic.sample = {
+					order: 0, phase: "measured", cycle: 0, case: `child-${metadataSecret}`, caseOrder: 0,
+				};
+				(error as any).benchmarkDiagnostic.childExit.signal = metadataSecret;
 				sanitized = sanitizeBenchmarkError(
 					new AggregateError([error], `forced post-spawn failure ${token}`, { cause: error }),
-					{ runtime, redactions: [token] },
+					{ runtime, redactions: [token, metadataSecret] },
 				);
 			}
 			expect(sanitized).toBeInstanceOf(AggregateError);
@@ -288,6 +294,10 @@ describe("Bobbit journey benchmark production boundaries", () => {
 				cause: sanitized.cause?.message,
 			});
 			expect(projection).not.toContain(token);
+			expect(projection).not.toContain(metadataSecret);
+			expect(sanitized.errors[0].name).toBe("Error");
+			expect(sanitized.errors[0].benchmarkDiagnostic.sample.case).toBe("child-[redacted]");
+			expect(sanitized.errors[0].benchmarkDiagnostic.childExit.signal).toBeNull();
 			expect(projection).toContain("[redacted]");
 		} finally {
 			await stopGateway(runtime).catch(() => {});

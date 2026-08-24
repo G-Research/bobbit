@@ -413,15 +413,54 @@ function capDiagnosticTail(value, maximumBytes) {
 	return { text: `${marker}${suffix}`, truncated: true };
 }
 
+function safeReadField(value, key) {
+	try {
+		return value?.[key];
+	} catch {
+		return undefined;
+	}
+}
+
+function safeIsArray(value) {
+	try {
+		return Array.isArray(value);
+	} catch {
+		return false;
+	}
+}
+
+function safeOwnStringKeys(value) {
+	try {
+		return Object.keys(value);
+	} catch {
+		return [];
+	}
+}
+
+function safeDiagnosticString(value, fallback = "") {
+	if (typeof value === "string") return value;
+	if (value == null) return "";
+	if (typeof value === "object" || typeof value === "function") return fallback;
+	try {
+		return String(value);
+	} catch {
+		return fallback;
+	}
+}
+
 /** Redact credentials, absolute paths, and command-line dumps from bounded child diagnostics. */
 export function sanitizeBenchmarkDiagnosticText(value, {
 	maximumBytes = DIAGNOSTIC_TAIL_BYTES,
 	redactions = [],
 } = {}) {
-	let text = String(value ?? "").replace(/\r\n?/g, "\n");
-	for (const redaction of redactions) {
-		const secret = String(redaction ?? "");
-		if (secret.length >= 4) text = text.split(secret).join("[redacted]");
+	let text = safeDiagnosticString(value).replace(/\r\n?/g, "\n");
+	const rawRedactionCount = safeReadField(redactions, "length");
+	const redactionCount = safeIsArray(redactions) && Number.isInteger(rawRedactionCount)
+		? Math.min(rawRedactionCount, 64)
+		: 0;
+	for (let index = 0; index < redactionCount; index += 1) {
+		const secret = safeReadField(redactions, index);
+		if (typeof secret === "string" && secret.length >= 4) text = text.split(secret).join("[redacted]");
 	}
 	text = text
 		.replace(/\b(authorization\s*[:=]\s*)[^\r\n]+/gi, "$1[redacted]")
@@ -436,38 +475,74 @@ export function sanitizeBenchmarkDiagnosticText(value, {
 }
 
 function benchmarkErrorRedactions(runtime, redactions) {
-	return [...new Set([...(runtime?.diagnosticRedactions ?? []), ...(redactions ?? [])]
-		.filter(value => typeof value === "string" && value.length >= 4))]
+	const values = [];
+	for (const source of [safeReadField(runtime, "diagnosticRedactions"), redactions]) {
+		const rawLength = safeReadField(source, "length");
+		const length = safeIsArray(source) && Number.isInteger(rawLength) ? Math.min(rawLength, 64) : 0;
+		for (let index = 0; index < length; index += 1) {
+			const value = safeReadField(source, index);
+			if (typeof value === "string" && value.length >= 4) values.push(value);
+		}
+	}
+	return [...new Set(values)]
 		.sort((left, right) => right.length - left.length)
 		.slice(0, 64);
 }
 
+function sanitizeScheduledSampleIdentity(sample, redactions) {
+	if (!sample || (typeof sample !== "object" && typeof sample !== "function") || safeIsArray(sample)) return null;
+	const sanitizeIdentityText = (value, maximumBytes) => typeof value === "string"
+		? sanitizeBenchmarkDiagnosticText(value, { maximumBytes, redactions }).text
+		: null;
+	const order = safeReadField(sample, "order");
+	const phase = sanitizeIdentityText(safeReadField(sample, "phase"), 32);
+	const cycle = safeReadField(sample, "cycle");
+	const sampleCase = sanitizeIdentityText(safeReadField(sample, "case"), 160);
+	const caseOrder = safeReadField(sample, "caseOrder");
+	const identity = {
+		order: Number.isInteger(order) && order >= 0 ? order : null,
+		phase,
+		cycle: Number.isInteger(cycle) && cycle >= 0 ? cycle : null,
+		case: sampleCase,
+		caseOrder: Number.isInteger(caseOrder) && caseOrder >= 0 ? caseOrder : null,
+	};
+	return identity.order === null ? null : identity;
+}
+
 function sanitizeErrorChildExit(childExit, redactions) {
-	if (!childExit || typeof childExit !== "object" || Array.isArray(childExit)) return null;
-	const output = sanitizeBenchmarkDiagnosticText(childExit.output?.tail ?? "", { redactions });
-	const error = sanitizeBenchmarkDiagnosticText(childExit.error?.tail ?? "", { redactions });
-	const spawnFailure = childExit.spawnFailure == null
+	if (!childExit || (typeof childExit !== "object" && typeof childExit !== "function") || safeIsArray(childExit)) return null;
+	const outputValue = safeReadField(childExit, "output");
+	const errorValue = safeReadField(childExit, "error");
+	const output = sanitizeBenchmarkDiagnosticText(safeReadField(outputValue, "tail") ?? "", { redactions });
+	const error = sanitizeBenchmarkDiagnosticText(safeReadField(errorValue, "tail") ?? "", { redactions });
+	const rawSpawnFailure = safeReadField(childExit, "spawnFailure");
+	const spawnFailure = rawSpawnFailure == null
 		? null
-		: sanitizeBenchmarkDiagnosticText(childExit.spawnFailure, { maximumBytes: 512, redactions }).text;
+		: sanitizeBenchmarkDiagnosticText(rawSpawnFailure, { maximumBytes: 512, redactions }).text;
+	const rawExitCode = safeReadField(childExit, "exitCode");
+	const rawSignal = safeReadField(childExit, "signal");
+	const signal = typeof rawSignal === "string"
+		? sanitizeBenchmarkDiagnosticText(rawSignal, { maximumBytes: 32, redactions }).text
+		: null;
 	return {
-		exitCode: Number.isInteger(childExit.exitCode) ? childExit.exitCode : null,
-		signal: typeof childExit.signal === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(childExit.signal) ? childExit.signal : null,
+		exitCode: Number.isInteger(rawExitCode) ? rawExitCode : null,
+		signal: signal !== null && /^[A-Za-z0-9_-]{1,32}$/.test(signal) ? signal : null,
 		spawnFailure,
-		pipesClosed: childExit.pipesClosed === true,
+		pipesClosed: safeReadField(childExit, "pipesClosed") === true,
 		output: {
 			tail: output.text,
-			truncated: childExit.output?.truncated === true || output.truncated,
+			truncated: safeReadField(outputValue, "truncated") === true || output.truncated,
 		},
 		error: {
 			tail: error.text,
-			truncated: childExit.error?.truncated === true || error.truncated,
+			truncated: safeReadField(errorValue, "truncated") === true || error.truncated,
 		},
 	};
 }
 
 /**
  * Rebuild an Error/AggregateError graph from bounded, redacted fields only.
- * Raw causes, stacks, and arbitrary custom properties never cross the boundary.
+ * Every graph field is read fail-closed so hostile accessors cannot escape it.
  */
 export function sanitizeBenchmarkError(error, {
 	runtime,
@@ -501,30 +576,56 @@ export function sanitizeBenchmarkError(error, {
 		}
 		if (seen.has(value)) return new Error("Benchmark error graph cycle omitted");
 		seen.add(value);
-		const message = sanitizedText(value.message ?? value ?? "Unknown benchmark error");
-		const rawErrors = Array.isArray(value.errors) ? value.errors : [];
-		const children = rawErrors.slice(0, maximumChildren).map(child => visit(child, depth + 1));
-		if (rawErrors.length > maximumChildren) {
-			children.push(new Error(`${rawErrors.length - maximumChildren} benchmark error children omitted`));
+
+		const rawMessage = safeReadField(value, "message");
+		const message = typeof rawMessage === "string"
+			? sanitizedText(rawMessage)
+			: "Unknown benchmark error";
+		const rawErrors = safeReadField(value, "errors");
+		const rawErrorLength = safeReadField(rawErrors, "length");
+		const rawErrorCount = safeIsArray(rawErrors) && Number.isInteger(rawErrorLength) ? rawErrorLength : 0;
+		const childCount = Math.min(rawErrorCount, maximumChildren);
+		const children = [];
+		for (let index = 0; index < childCount; index += 1) {
+			children.push(visit(safeReadField(rawErrors, index), depth + 1));
 		}
-		const cause = value.cause === undefined ? undefined : visit(value.cause, depth + 1);
-		const sanitized = value instanceof AggregateError || rawErrors.length > 0
+		if (rawErrorCount > maximumChildren) {
+			children.push(new Error(`${rawErrorCount - maximumChildren} benchmark error children omitted`));
+		}
+		const rawCause = safeReadField(value, "cause");
+		const cause = rawCause === undefined ? undefined : visit(rawCause, depth + 1);
+		let isAggregate = rawErrorCount > 0;
+		try {
+			isAggregate ||= value instanceof AggregateError;
+		} catch {
+			// Revoked proxies and hostile prototypes are treated as ordinary errors.
+		}
+		const sanitized = isAggregate
 			? new AggregateError(children, message, cause === undefined ? undefined : { cause })
 			: new Error(message, cause === undefined ? undefined : { cause });
-		const name = typeof value.name === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value.name)
-			? value.name
-			: (sanitized instanceof AggregateError ? "AggregateError" : "Error");
-		sanitized.name = name;
-		if (typeof value.phase === "string") sanitized.phase = sanitizedText(value.phase, 64);
-		if (value.phaseDurationsMs && typeof value.phaseDurationsMs === "object" && !Array.isArray(value.phaseDurationsMs)) {
-			sanitized.phaseDurationsMs = Object.fromEntries(Object.entries(value.phaseDurationsMs)
-				.filter(([key, duration]) => /^[A-Za-z][A-Za-z0-9]*Ms$/.test(key) && Number.isFinite(duration))
-				.slice(0, 32));
+		const fallbackName = isAggregate ? "AggregateError" : "Error";
+		const rawName = safeReadField(value, "name");
+		const candidateName = typeof rawName === "string" ? sanitizedText(rawName, 64) : "";
+		sanitized.name = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(candidateName) ? candidateName : fallbackName;
+
+		const rawPhase = safeReadField(value, "phase");
+		if (typeof rawPhase === "string") sanitized.phase = sanitizedText(rawPhase, 64);
+		const rawDurations = safeReadField(value, "phaseDurationsMs");
+		if (rawDurations && (typeof rawDurations === "object" || typeof rawDurations === "function") && !safeIsArray(rawDurations)) {
+			const durations = {};
+			for (const rawKey of safeOwnStringKeys(rawDurations)) {
+				if (Object.keys(durations).length >= 32) break;
+				const key = sanitizedText(rawKey, 64);
+				const duration = safeReadField(rawDurations, rawKey);
+				if (/^[A-Za-z][A-Za-z0-9]*Ms$/.test(key) && Number.isFinite(duration)) durations[key] = duration;
+			}
+			sanitized.phaseDurationsMs = durations;
 		}
-		if (value.benchmarkDiagnostic && typeof value.benchmarkDiagnostic === "object") {
+		const diagnostic = safeReadField(value, "benchmarkDiagnostic");
+		if (diagnostic && (typeof diagnostic === "object" || typeof diagnostic === "function") && !safeIsArray(diagnostic)) {
 			sanitized.benchmarkDiagnostic = {
-				sample: scheduledSampleIdentity(value.benchmarkDiagnostic.sample),
-				childExit: sanitizeErrorChildExit(value.benchmarkDiagnostic.childExit, exactRedactions),
+				sample: sanitizeScheduledSampleIdentity(safeReadField(diagnostic, "sample"), exactRedactions),
+				childExit: sanitizeErrorChildExit(safeReadField(diagnostic, "childExit"), exactRedactions),
 			};
 		}
 		return sanitized;
@@ -654,16 +755,8 @@ function releaseStdio(runtime) {
 	try { runtime.child.unref(); } catch { /* already exited */ }
 }
 
-function scheduledSampleIdentity(sample) {
-	if (!sample || typeof sample !== "object") return null;
-	const identity = {
-		order: Number.isInteger(sample.order) && sample.order >= 0 ? sample.order : null,
-		phase: typeof sample.phase === "string" ? sample.phase.slice(0, 32) : null,
-		cycle: Number.isInteger(sample.cycle) && sample.cycle >= 0 ? sample.cycle : null,
-		case: typeof sample.case === "string" ? sample.case.slice(0, 160) : null,
-		caseOrder: Number.isInteger(sample.caseOrder) && sample.caseOrder >= 0 ? sample.caseOrder : null,
-	};
-	return identity.order === null ? null : identity;
+function scheduledSampleIdentity(sample, redactions = []) {
+	return sanitizeScheduledSampleIdentity(sample, redactions);
 }
 
 /**
@@ -675,12 +768,12 @@ export async function captureGatewayFailureDiagnostic(runtime, {
 	closeTimeoutMs = 8_000,
 	redactions = [],
 } = {}) {
-	const identity = scheduledSampleIdentity(sample);
+	const allRedactions = benchmarkErrorRedactions(runtime, redactions);
+	const identity = scheduledSampleIdentity(sample, allRedactions);
 	if (!runtime || (!runtime.spawnError && !rootExited(runtime))) {
 		return { sample: identity, childExit: null };
 	}
 	const pipesClosed = runtime.closed || await waitForClose(runtime, closeTimeoutMs);
-	const allRedactions = [...(runtime.diagnosticRedactions ?? []), ...redactions];
 	const output = sanitizeBenchmarkDiagnosticText(runtime.stdout?.text?.() ?? "", { redactions: allRedactions });
 	const error = sanitizeBenchmarkDiagnosticText(runtime.stderr?.text?.() ?? "", { redactions: allRedactions });
 	const spawnFailure = runtime.spawnError
@@ -689,11 +782,15 @@ export async function captureGatewayFailureDiagnostic(runtime, {
 			redactions: allRedactions,
 		}).text
 		: null;
+	const rawSignal = runtime.child?.signalCode;
+	const signal = typeof rawSignal === "string"
+		? sanitizeBenchmarkDiagnosticText(rawSignal, { maximumBytes: 32, redactions: allRedactions }).text
+		: null;
 	return {
 		sample: identity,
 		childExit: {
 			exitCode: Number.isInteger(runtime.child?.exitCode) ? runtime.child.exitCode : null,
-			signal: typeof runtime.child?.signalCode === "string" ? runtime.child.signalCode.slice(0, 32) : null,
+			signal: signal !== null && /^[A-Za-z0-9_-]{1,32}$/.test(signal) ? signal : null,
 			spawnFailure,
 			pipesClosed,
 			output: {

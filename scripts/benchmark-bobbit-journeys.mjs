@@ -19,6 +19,7 @@ import {
 	createBenchmarkRunRoot,
 	createSampleRoot,
 	sanitizeBenchmarkDiagnosticText,
+	sanitizeBenchmarkError,
 } from "./benchmarks/runtime.mjs";
 
 export const BENCHMARKS = Object.freeze({
@@ -462,7 +463,7 @@ export async function runBenchmark(options, {
 	const failureReport = error => boundReport(makeFailureReport({
 		benchmark: options.journey,
 		options,
-		error,
+		error: sanitizeBenchmarkError(error),
 		cleanup,
 		repoRoot,
 		schedule: usedSchedule,
