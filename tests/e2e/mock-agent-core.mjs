@@ -3007,6 +3007,15 @@ export class MockAgentCore {
 				],
 			};
 			this.emit({ type: "message_update", message: assistantMsg });
+			// Hold after a valid, non-terminal delta so browser tests can inspect
+			// the real streaming projection instead of racing the fixture cadence.
+			if (i === 1 && n > 2) {
+				await this._crossBarrier(`proposal-stream:${type}:intermediate-delta`, {
+					proposalType: type,
+					delta: i + 1,
+					total: n,
+				});
+			}
 			await this.tick(intervalMs);
 		}
 
