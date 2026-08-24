@@ -129,6 +129,7 @@ import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-pro
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
+import { normalizeConfigProjectId } from "./config-cascade.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy, Role } from "./role-store.js";
@@ -11292,23 +11293,50 @@ export class SessionManager {
 			resultTools = session.allowedTools;
 
 		} else {
-			// Persistent grant (default): update toolPolicies on role YAML when the
-			// role is locally writable. Pack roles are read-only through RoleManager,
-			// so keep the grant effective for this session without writing to the pack.
+			// Persistent grants must be written at the role winner's mutable config
+			// scope. A normal project never mutates the injected server RoleManager:
+			// server/builtin/global-user winners are copied into the project's user
+			// role pack, while immutable market-pack winners remain session-only.
 			const updatedPolicies = { ...role.toolPolicies };
 			for (const t of approvedGrantTools) {
 				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
-			const writableRole = this.roleManager.getRole(role.name);
 			let effectiveRole: Role = { ...role, toolPolicies: updatedPolicies };
-			if (writableRole) {
-				this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
-				effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+			let persistedGrant = false;
+			const configProjectId = normalizeConfigProjectId(session.projectId);
+			if (configProjectId) {
+				const projectRoleStore = this.projectContextManager?.getOrCreate(configProjectId)?.roleStore;
+				let resolvedEntry: ReturnType<NonNullable<typeof this.configCascade>["resolveRolesEntries"]>[number] | undefined;
+				if (projectRoleStore && this.configCascade) {
+					try {
+						resolvedEntry = this.configCascade.resolveRolesEntries(configProjectId).find(entry => entry.item.name === role.name);
+					} catch { /* fail closed to a session-only grant */ }
+				}
+				const immutableWinner = resolvedEntry?.origin.kind === "market"
+					|| (resolvedEntry?.origin.readOnly === true && resolvedEntry.origin.kind !== "builtin");
+				if (projectRoleStore && resolvedEntry && !immutableWinner) {
+					projectRoleStore.put({
+						...resolvedEntry.item,
+						toolPolicies: updatedPolicies,
+						updatedAt: Date.now(),
+					});
+					persistedGrant = true;
+					effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+				}
 			} else {
+				const writableRole = this.roleManager.getRole(role.name);
+				if (writableRole) {
+					persistedGrant = this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
+					if (persistedGrant) {
+						effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+					}
+				}
+			}
+			if (!persistedGrant) {
 				session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
 			}
 			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole, session.projectId, session.cwd).map(e => e.name);
-			session.allowedTools = this.mergeToolNames(updatedEffective, writableRole ? undefined : approvedGrantTools) ?? updatedEffective;
+			session.allowedTools = this.mergeToolNames(updatedEffective, persistedGrant ? undefined : approvedGrantTools) ?? updatedEffective;
 			resultTools = session.allowedTools;
 		}
 
