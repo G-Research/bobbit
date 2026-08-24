@@ -233,15 +233,20 @@ export class ReliableTurnRuntime {
 		return this.core.barrierJournal;
 	}
 
-	/** Snapshot the server-owned status revision without creating another event. */
-	statusRevision(): RemoteStatusRevision {
+	/**
+	 * Snapshot the server-owned lifecycle revision without creating another event.
+	 * Status frames and buffered Pi events use independent ordered lanes, so both
+	 * high-water marks are required before a later lifecycle transition is safe.
+	 */
+	statusRevision(): RemoteLifecycleRevision {
 		const session = this.sessionManager?.getSession(this.sessionId);
-		if (!session || !Number.isFinite(session.statusVersion)) {
-			throw new Error("Cannot read an authoritative mock session status revision");
+		if (!session || !Number.isFinite(session.statusVersion) || !Number.isFinite(session.eventBuffer?.lastSeq)) {
+			throw new Error("Cannot read an authoritative mock session lifecycle revision");
 		}
 		return {
 			status: session.status,
 			statusVersion: session.statusVersion,
+			eventSeq: session.eventBuffer.lastSeq,
 			activeRun: session.status === "streaming" && Number.isFinite(session.streamingStartedAt),
 		};
 	}
@@ -249,10 +254,10 @@ export class ReliableTurnRuntime {
 	/**
 	 * Admit the already active held mock run after compaction overwrote its status.
 	 * The accepted agent_start is the sole owner of the canonical status revision;
-	 * emitting an observation-only duplicate can let a later idle revision satisfy
-	 * a loose version wait without ever rendering this run as active.
+	 * waiting for its buffered event revision also fences the preceding terminal
+	 * lifecycle before the Stop control is exercised.
 	 */
-	surfaceActiveRun(): RemoteStatusRevision {
+	surfaceActiveRun(): RemoteLifecycleRevision {
 		if (!this.core.currentAbortController) {
 			throw new Error("Cannot surface a mock run without an active abort controller");
 		}
@@ -414,15 +419,16 @@ export async function openSessionPage(page: Page, sessionId: string): Promise<vo
 	await expect(editor(page)).toBeVisible({ timeout: 20_000 });
 }
 
-export interface RemoteStatusRevision {
+export interface RemoteLifecycleRevision {
 	status: string;
 	statusVersion: number;
+	eventSeq: number;
 	activeRun: boolean;
 }
 
 export async function waitForRemoteStatus(
 	page: Page,
-	expected: RemoteStatusRevision,
+	expected: RemoteLifecycleRevision,
 ): Promise<void> {
 	await expect.poll(() => page.evaluate(() => {
 		const remote = (window as any).bobbitState?.remoteAgent ?? (window as any).__bobbitState?.remoteAgent;
@@ -430,11 +436,12 @@ export async function waitForRemoteStatus(
 		return {
 			status: state?.status,
 			statusVersion: Number(remote?._lastStatusVersion ?? -1),
+			eventSeq: Number(remote?._highestSeq ?? -1),
 			activeRun: state?.status === "streaming" && Number.isFinite(state?.turnStartTime),
 		};
 	}), {
 		timeout: 15_000,
-		message: "the remote must accept the exact authoritative active-run status revision",
+		message: "the remote must accept the exact authoritative lifecycle revision",
 	}).toEqual(expected);
 }
 
