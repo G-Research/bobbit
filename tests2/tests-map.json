@@ -8101,7 +8101,7 @@
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - behavioral assertions (API error modal + stack trace + page.route interception) need a dedicated journey test; covered by legacy suite until switchover.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/proposal-controls.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8263,7 +8263,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8273,7 +8273,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8293,7 +8293,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8404,7 +8404,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8626,7 +8626,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dynamic-panels.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/proposal-controls.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8672,7 +8672,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8844,7 +8844,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -9020,7 +9020,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -9092,7 +9092,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -9246,7 +9246,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-review-commenting.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -10083,7 +10083,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -10093,7 +10093,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
