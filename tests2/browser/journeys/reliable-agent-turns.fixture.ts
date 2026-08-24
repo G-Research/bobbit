@@ -128,6 +128,12 @@ export class ReliableTurnRuntime {
 		return this.push(this.echoHolds, text, new TurnBarrier(label));
 	}
 
+	/** Hold the next prompt after its complete terminal idle lifecycle was emitted. */
+	holdNextPromptTerminalIdle(): CoreBarrierHold {
+		const occurrence = Number(this.core._commandSequence?.prompt ?? 0) + 1;
+		return this.holdCoreBarrier(`prompt:${occurrence}:after-terminal-idle`, occurrence);
+	}
+
 	/** Hold the next steer after MockAgentCore has installed its abort controller. */
 	holdNextSteerUserStart(): CoreBarrierHold {
 		const occurrence = Math.max(
@@ -249,6 +255,22 @@ export class ReliableTurnRuntime {
 			eventSeq: session.eventBuffer.lastSeq,
 			activeRun: session.status === "streaming" && Number.isFinite(session.streamingStartedAt),
 		};
+	}
+
+	/**
+	 * Join the server-owned compaction refresh while the serial mock prompt chain
+	 * holds the replacement steer before its user start. The refresh broadcasts
+	 * its final messages/state projection asynchronously after compaction_end; a
+	 * later synthetic agent_start must not race that authoritative idle state.
+	 */
+	async joinCompactionTerminalProjection(): Promise<RemoteLifecycleRevision> {
+		const session = this.sessionManager?.getSession(this.sessionId);
+		const finalization = session?._compactionFinalization;
+		if (!finalization || typeof finalization.then !== "function") {
+			throw new Error("Cannot join the authoritative mock compaction finalization");
+		}
+		await finalization;
+		return this.statusRevision();
 	}
 
 	/**

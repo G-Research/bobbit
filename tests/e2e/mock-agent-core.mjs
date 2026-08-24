@@ -1204,12 +1204,16 @@ export class MockAgentCore {
 				}
 			}
 			const completed = await this._handleAutoCompaction(3, reason);
+			const terminalIdleBoundary = `${delivery.kind || "prompt"}:${delivery.occurrence}:after-terminal-idle`;
 			if (!completed || !this.currentAbortController || this.currentAbortController.signal.aborted) {
 				this._reliableOverflowRetryActive = false;
 				this.currentAbortController = null;
 				this.emit({ type: "agent_end", willRetry: false });
 				this.emit({ type: "agent_settled" });
 				this.emit({ type: "session_status", status: "idle" });
+				if (this._barriers.get(terminalIdleBoundary)?.armed === true) {
+					await this._crossBarrier(terminalIdleBoundary, { ...delivery, reason });
+				}
 				return;
 			}
 			if (reason === "overflow") {
@@ -1223,6 +1227,9 @@ export class MockAgentCore {
 			this.emit({ type: "agent_settled" });
 			this._reliableOverflowRetryActive = false;
 			this.emit({ type: "session_status", status: "idle" });
+			if (this._barriers.get(terminalIdleBoundary)?.armed === true) {
+				await this._crossBarrier(terminalIdleBoundary, { ...delivery, reason });
+			}
 			return;
 		}
 

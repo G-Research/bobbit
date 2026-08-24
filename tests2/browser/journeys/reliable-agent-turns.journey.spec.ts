@@ -352,6 +352,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 	test("Stop near compaction completion leaves every accepted occurrence in one deterministic visible channel", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);
 		try {
+			const terminalIdle = scenario.runtime.holdNextPromptTerminalIdle();
 			const compaction = scenario.runtime.holdNextCompaction({ reason: "threshold" });
 			await submit(page, "RELIABLE_COMPACTION:threshold RAT_STOP_THRESHOLD");
 			await compaction.compaction.entered;
@@ -364,8 +365,11 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			await expectOneCarrier(page, id, "outbox");
 
 			compaction.compaction.release();
+			await terminalIdle.entered;
+			const terminalRevision = await scenario.runtime.joinCompactionTerminalProjection();
+			terminalIdle.release();
 			await steerStart.entered;
-			await waitForRemoteStatus(page, scenario.runtime.statusRevision());
+			await waitForRemoteStatus(page, terminalRevision);
 			const activeRunRevision = scenario.runtime.surfaceActiveRun();
 			await waitForRemoteStatus(page, activeRunRevision);
 			const abort = scenario.runtime.holdNextAbort();
