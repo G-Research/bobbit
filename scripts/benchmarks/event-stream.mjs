@@ -11,6 +11,8 @@ import {
 	createInterruptingSampleWatchdog,
 	getFreePort,
 	launchBenchmarkBrowser,
+	sanitizeBenchmarkDiagnosticText,
+	sanitizeBenchmarkError,
 	spawnGateway,
 	stopGateway,
 	waitForGatewayReady,
@@ -556,12 +558,14 @@ export async function cleanupEventStreamSample({ browser, gateway, baseUrl, toke
 	try {
 		await closeBrowser(browser);
 	} catch (error) {
-		errors.push(new Error(`Browser cleanup failed: ${boundedErrorMessage(error)}`, { cause: error }));
+		const cause = sanitizeBenchmarkError(error, { runtime: gateway, redactions: [token] });
+		errors.push(new Error(`Browser cleanup failed: ${cause.message}`, { cause }));
 	}
 	try {
 		await stopRuntime(gateway, { baseUrl, token });
 	} catch (error) {
-		errors.push(new Error(`Gateway cleanup failed: ${boundedErrorMessage(error)}`, { cause: error }));
+		const cause = sanitizeBenchmarkError(error, { runtime: gateway, redactions: [token] });
+		errors.push(new Error(`Gateway cleanup failed: ${cause.message}`, { cause }));
 	}
 	if (errors.length === 1) throw errors[0];
 	if (errors.length > 1) {
@@ -603,13 +607,17 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			try {
 				await closeBrowser(resources.browserRuntime);
 				watchdog.registerBrowser(null);
-			} catch (error) { errors.push(error); }
+			} catch (error) {
+				errors.push(sanitizeBenchmarkError(error, { runtime: resources.gatewayRuntime, redactions: [token] }));
+			}
 		}
 		if (resources.gatewayRuntime) {
 			try {
 				await stopRuntime(resources.gatewayRuntime, { baseUrl, token });
 				watchdog.registerGateway(null);
-			} catch (error) { errors.push(error); }
+			} catch (error) {
+				errors.push(sanitizeBenchmarkError(error, { runtime: resources.gatewayRuntime, redactions: [token] }));
+			}
 		}
 		if (errors.length === 1) throw errors[0];
 		if (errors.length > 1) throw new AggregateError(errors, "Event-stream browser and gateway cleanup failed");
@@ -804,11 +812,22 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			},
 		};
 	} catch (error) {
-		const detail = gateway ? gateway.stderr.text() || gateway.stdout.text() : "";
-		const reported = watchdog.timedOut ? watchdog.error : error;
-		sampleError = new Error(`${reported.message ?? reported}${detail ? `; gateway log tail: ${normalizedText(detail).slice(-2_000)}` : ""}`, { cause: error });
+		const redactions = [token];
+		const sanitizedError = sanitizeBenchmarkError(error, { runtime: gateway, redactions });
+		const reported = watchdog.timedOut
+			? sanitizeBenchmarkError(watchdog.error, { runtime: gateway, redactions })
+			: sanitizedError;
+		const rawDetail = gateway ? gateway.stderr.text() || gateway.stdout.text() : "";
+		const detail = sanitizeBenchmarkDiagnosticText(rawDetail, {
+			maximumBytes: 2_000,
+			redactions: [...(gateway?.diagnosticRedactions ?? []), token],
+		}).text.replace(/\s+/g, " ").trim();
+		sampleError = new Error(`${reported.message}${detail ? `; gateway log tail: ${detail}` : ""}`, { cause: sanitizedError });
 		if (watchdog.timedOut && error !== watchdog.error) {
-			sampleError = new AggregateError([sampleError, error], `Event-stream sample timed out and the active operation also failed: ${boundedErrorMessage(error)}`);
+			sampleError = new AggregateError(
+				[sampleError, sanitizedError],
+				`Event-stream sample timed out and the active operation also failed: ${sanitizedError.message}`,
+			);
 		}
 	} finally {
 		watchdog.setPhase("teardown");
@@ -820,17 +839,20 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 		try {
 			await watchdog.finish();
 		} catch (error) {
-			cleanupError = cleanupError ? new AggregateError([cleanupError, error], "Event-stream watchdog cleanup failed") : error;
+			const sanitized = sanitizeBenchmarkError(error, { runtime: gateway, redactions: [token] });
+			cleanupError = cleanupError ? new AggregateError([cleanupError, sanitized], "Event-stream watchdog cleanup failed") : sanitized;
 		}
 	}
+	let failure = null;
 	if (sampleError && cleanupError) {
-		throw new AggregateError(
+		failure = new AggregateError(
 			[sampleError, cleanupError],
 			`Event-stream sample and cleanup failed: ${boundedErrorMessage(sampleError)}; ${boundedErrorMessage(cleanupError)}`,
 		);
+	} else {
+		failure = sampleError ?? cleanupError;
 	}
-	if (sampleError) throw sampleError;
-	if (cleanupError) throw cleanupError;
+	if (failure) throw sanitizeBenchmarkError(failure, { runtime: gateway, redactions: [token] });
 	sampleResult.sample.phaseDurationsMs = watchdog.phaseDurationsMs();
 	return sampleResult;
 }

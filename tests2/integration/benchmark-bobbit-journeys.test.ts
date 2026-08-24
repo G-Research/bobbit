@@ -21,6 +21,7 @@ import {
 	cleanupBenchmarkRunRoot,
 	createBenchmarkGatewayToken,
 	createBenchmarkRunRoot,
+	sanitizeBenchmarkError,
 	spawnGateway,
 	stopGateway,
 	waitForGatewayReady,
@@ -257,6 +258,45 @@ function semanticHash(records: ReturnType<typeof buildGatewayStartupFixtureRecor
 }
 
 describe("Bobbit journey benchmark production boundaries", () => {
+	it("sanitizes forced post-spawn child failures and still closes the owned process", async () => {
+		const paths = await createBenchmarkRunRoot({ repoRoot: REPO_ROOT });
+		const token = "c9".repeat(32);
+		const runtime = spawnGateway({
+			command: process.execPath,
+			args: ["-e", `console.log(${JSON.stringify(`token=${token}`)}); console.error(${JSON.stringify(`Authorization: Bearer ${token}`)}); setTimeout(() => process.exit(1), 20);`],
+			cwd: REPO_ROOT,
+			env: { ...process.env, NODE_ENV: "test" },
+			redactions: [token],
+		});
+		let sanitized: any;
+		try {
+			try {
+				await waitForGatewayReady({ runtime, baseUrl: "http://127.0.0.1:1/", token, timeoutMs: 5_000 });
+			} catch (error) {
+				sanitized = sanitizeBenchmarkError(
+					new AggregateError([error], `forced post-spawn failure ${token}`, { cause: error }),
+					{ runtime, redactions: [token] },
+				);
+			}
+			expect(sanitized).toBeInstanceOf(AggregateError);
+			const projection = JSON.stringify({
+				message: sanitized.message,
+				children: sanitized.errors.map((error: any) => ({
+					message: error.message,
+					diagnostic: error.benchmarkDiagnostic,
+				})),
+				cause: sanitized.cause?.message,
+			});
+			expect(projection).not.toContain(token);
+			expect(projection).toContain("[redacted]");
+		} finally {
+			await stopGateway(runtime).catch(() => {});
+			await cleanupBenchmarkRunRoot(paths);
+		}
+		expect(runtime.closed).toBe(true);
+		expect(existsSync(paths.root)).toBe(false);
+	});
+
 	it("restores a reduced deterministic store and validates readiness, APIs, search, relationships, and WS snapshot parity", async () => {
 		const paths = await createBenchmarkRunRoot({ repoRoot: REPO_ROOT });
 		let runtime: GatewayRuntime | undefined;

@@ -55,6 +55,7 @@ import {
 	createBenchmarkRunRoot,
 	createTailBuffer,
 	readProcessMetrics,
+	sanitizeBenchmarkError,
 	waitForGatewayReady,
 } from "../../scripts/benchmarks/runtime.mjs";
 import {
@@ -100,6 +101,19 @@ afterEach(async () => {
 
 function sha256(value: unknown): string {
 	return createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
+}
+
+function projectErrorGraph(error: any, depth = 0): any {
+	if (!error || depth > 16) return null;
+	return {
+		name: error.name,
+		message: error.message,
+		phase: error.phase,
+		phaseDurationsMs: error.phaseDurationsMs,
+		benchmarkDiagnostic: error.benchmarkDiagnostic,
+		errors: Array.isArray(error.errors) ? error.errors.map((child: any) => projectErrorGraph(child, depth + 1)) : [],
+		cause: error.cause ? projectErrorGraph(error.cause, depth + 1) : null,
+	};
 }
 
 function passingJourney(cases = ["alpha", "beta"]) {
@@ -790,6 +804,79 @@ failed command: node evil.js
 	});
 });
 
+describe("bounded recursive benchmark error sanitization", () => {
+	it("rebuilds nested AggregateError and cause graphs without tokenized URLs or raw causes", () => {
+		const token = "a7".repeat(32);
+		const navigation = new Error(`page.goto failed at http://127.0.0.1:4321/?token=${token}#/session/private`);
+		(navigation as any).phase = "navigate";
+		(navigation as any).phaseDurationsMs = { prepareMs: 12, navigateMs: 3, unsafe: token };
+		(navigation as any).benchmarkDiagnostic = {
+			sample: { phase: "measured", cycle: 1, case: "1mb", caseOrder: 0, order: 3, token },
+			childExit: {
+				exitCode: 1,
+				signal: "SIGTERM",
+				spawnFailure: `spawn token=${token}`,
+				pipesClosed: true,
+				output: { tail: `stdout ${token}`, truncated: false },
+				error: { tail: `Authorization: Bearer ${token}`, truncated: false },
+			},
+		};
+		const cleanup = new Error(`cleanup retained credential ${token}`, { cause: navigation });
+		const root: any = new AggregateError([navigation, cleanup], `sample failed ${token}`, { cause: cleanup });
+		navigation.cause = root;
+
+		const sanitized: any = sanitizeBenchmarkError(root, {
+			redactions: [token],
+			runtime: { diagnosticRedactions: [token] },
+		});
+		const projection = projectErrorGraph(sanitized);
+		const serialized = JSON.stringify(projection);
+		assert.ok(sanitized instanceof AggregateError);
+		assert.notEqual(sanitized, root);
+		assert.notEqual(sanitized.errors[0], navigation);
+		assert.equal(serialized.includes(token), false);
+		assert.equal(serialized.includes("#/session/private"), false);
+		assert.equal(sanitized.errors[0].phase, "navigate");
+		assert.deepEqual(sanitized.errors[0].phaseDurationsMs, { prepareMs: 12, navigateMs: 3 });
+		assert.deepEqual(sanitized.errors[0].benchmarkDiagnostic.sample, {
+			order: 3, phase: "measured", cycle: 1, case: "1mb", caseOrder: 0,
+		});
+		assert.match(sanitized.errors[0].benchmarkDiagnostic.childExit.output.tail, /\[redacted\]/);
+		assert.match(serialized, /graph cycle omitted/);
+		assert.ok(Buffer.byteLength(serialized) < 20_000);
+	});
+
+	it("keeps recursively sanitized journey failures credential-free in the failed report", async () => {
+		const repoRoot = await temporaryRoot();
+		const token = "ef".repeat(32);
+		const options = parseArgs(["--journey", "event-stream", "--warmups", "2", "--repetitions", "1"]);
+		const result = await runBenchmark(options, {
+			repoRoot,
+			importer: async () => ({
+				runJourney: async (context: any) => {
+					const [entry] = context.scheduleFor(["only"]);
+					const leaf: any = new Error(`navigation http://127.0.0.1/?token=${token}#/private`);
+					leaf.benchmarkDiagnostic = {
+						sample: entry,
+						childExit: {
+							exitCode: 1, signal: null, spawnFailure: null, pipesClosed: true,
+							output: { tail: token, truncated: false },
+							error: { tail: `Bearer ${token}`, truncated: false },
+						},
+					};
+					throw sanitizeBenchmarkError(new AggregateError([leaf], `failed ${token}`, { cause: leaf }), {
+						redactions: [token],
+					});
+				},
+			}),
+		});
+		assert.equal(result.exitCode, 1);
+		const serialized = JSON.stringify(result.report);
+		assert.equal(serialized.includes(token), false);
+		assert.match(serialized, /\[redacted\]/);
+	});
+});
+
 describe("process metrics and reliability aggregation", () => {
 	it("does not fabricate Linux CPU time and preserves independently valid RSS", async () => {
 		const stat = `123 (benchmark) S ${Array.from({ length: 10 }, () => 0).join(" ")} 10 20`;
@@ -1127,6 +1214,46 @@ describe("session-open bounded sample lifecycle", () => {
 			assert.doesNotMatch((error as Error).message, /cleanup (?:was incomplete|failed)/i);
 			return true;
 		});
+	});
+
+	it("sanitizes tokenized post-navigation failures before cleanup completes", async () => {
+		const token = "b8".repeat(32);
+		const browserRuntime = { id: "browser" };
+		const gatewayRuntime = { id: "gateway", diagnosticRedactions: [token] };
+		let browserClosed = 0;
+		let gatewayStopped = 0;
+		await assert.rejects(runSessionOpenSample(
+			{ createSampleRoot: async () => "sample-root" },
+			{ case: "tiny", phase: "measured", cycle: 0, order: 0, caseOrder: 0 },
+			{ directory: "fixture", manifest: {} },
+			{
+				prepare: async (_context: any, _root: any, watchdog: any) => {
+					watchdog.registerGateway(gatewayRuntime);
+					return {
+						invocation: { baseUrl: "http://127.0.0.1:4321/", token },
+						sessionId: "fixture-session",
+					};
+				},
+				measure: async (_restored: any, _manifest: any, watchdog: any) => {
+					watchdog.registerBrowser(browserRuntime);
+					throw new AggregateError([
+						new Error(`page.goto: http://127.0.0.1:4321/?token=${token}#/session/fixture-session`),
+					], `navigation failed ${token}`);
+				},
+				closeBrowser: async () => { browserClosed += 1; },
+				stopRuntime: async (_runtime: any, options: any) => {
+					assert.equal(options.token, token, "cleanup must retain the live credential");
+					gatewayStopped += 1;
+				},
+			},
+		), error => {
+			const serialized = JSON.stringify(projectErrorGraph(error));
+			assert.equal(serialized.includes(token), false);
+			assert.equal(serialized.includes("fixture-session"), false);
+			return true;
+		});
+		assert.equal(browserClosed, 1);
+		assert.equal(gatewayStopped, 1);
 	});
 
 	it("retains cleanup ownership, aggregates failures, and lets the backstop retry browser before gateway", async () => {

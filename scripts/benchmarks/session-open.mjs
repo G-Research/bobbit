@@ -9,6 +9,7 @@ import {
 	createInterruptingSampleWatchdog,
 	getFreePort,
 	launchBenchmarkBrowser,
+	sanitizeBenchmarkError,
 	spawnGateway,
 	stopGateway,
 	waitForGatewayReady,
@@ -688,13 +689,17 @@ async function prepareRestoredSession(context, sampleRoot, watchdog, {
 				watchdog.registerGateway(null);
 				runtime = null;
 			} catch (failure) {
-				cleanupError = failure;
+				cleanupError = sanitizeBenchmarkError(failure, { runtime, redactions: [token] });
 			}
 		}
+		const operationError = sanitizeBenchmarkError(error, { runtime, redactions: [token] });
 		if (cleanupError) {
-			throw new AggregateError([error, cleanupError], `Session-open preparation failed and gateway cleanup was incomplete: ${error.message ?? error}`);
+			throw new AggregateError(
+				[operationError, cleanupError],
+				`Session-open preparation failed and gateway cleanup was incomplete: ${operationError.message}`,
+			);
 		}
-		throw error;
+		throw operationError;
 	}
 }
 
@@ -722,9 +727,13 @@ export async function measureBrowserSample(restored, manifest, watchdog, {
 			registerRuntime: runtime => watchdog.registerBrowser(runtime),
 		});
 	} catch (error) {
+		const sanitizedCause = sanitizeBenchmarkError(error, {
+			runtime: watchdog.resources().gatewayRuntime,
+			redactions: [restored?.invocation?.token],
+		});
 		const acquisitionError = new Error(
-			`Session-open browser acquisition failed during browserAcquire phase: ${error?.message ?? error}`,
-			{ cause: error },
+			`Session-open browser acquisition failed during browserAcquire phase: ${sanitizedCause.message}`,
+			{ cause: sanitizedCause },
 		);
 		acquisitionError.phase = "browserAcquire";
 		throw acquisitionError;
@@ -987,7 +996,7 @@ async function cleanupSessionOpenResources(watchdog, {
 			await closeBrowser(browserRuntime);
 			watchdog.registerBrowser(null);
 		} catch (error) {
-			failures.push(error);
+			failures.push(sanitizeBenchmarkError(error, { runtime: gatewayRuntime, redactions: [token] }));
 		}
 	}
 	if (gatewayRuntime) {
@@ -995,7 +1004,7 @@ async function cleanupSessionOpenResources(watchdog, {
 			await stopRuntime(gatewayRuntime, { baseUrl, token });
 			watchdog.registerGateway(null);
 		} catch (error) {
-			failures.push(error);
+			failures.push(sanitizeBenchmarkError(error, { runtime: gatewayRuntime, redactions: [token] }));
 		}
 	}
 	if (failures.length === 1) throw failures[0];
@@ -1068,9 +1077,15 @@ export async function runSessionOpenSample(context, entry, fixture, {
 		watchdog.throwIfExpired();
 		measured = await measure(restored, fixture.manifest, watchdog, { parityBatchSize, launchBrowser, closeBrowser });
 	} catch (error) {
+		const runtime = watchdog.resources().gatewayRuntime;
+		const redactions = [restored?.invocation?.token];
+		const sanitizedError = sanitizeBenchmarkError(error, { runtime, redactions });
+		const sanitizedWatchdogError = watchdog.timedOut
+			? sanitizeBenchmarkError(watchdog.error, { runtime, redactions })
+			: null;
 		operationError = watchdog.timedOut && error !== watchdog.error
-			? combineSessionOpenOperationErrors(watchdog.error, error)
-			: (watchdog.timedOut ? watchdog.error : error);
+			? combineSessionOpenOperationErrors(sanitizedWatchdogError, sanitizedError)
+			: (watchdog.timedOut ? sanitizedWatchdogError : sanitizedError);
 	} finally {
 		watchdog.setPhase("teardown");
 		try {
@@ -1081,12 +1096,22 @@ export async function runSessionOpenSample(context, entry, fixture, {
 		try {
 			await watchdog.finish();
 		} catch (error) {
-			cleanupError = combineSessionOpenCleanupErrors(cleanupError, error);
+			const sanitized = sanitizeBenchmarkError(error, {
+				runtime: watchdog.resources().gatewayRuntime,
+				redactions: [restored?.invocation?.token],
+			});
+			cleanupError = combineSessionOpenCleanupErrors(cleanupError, sanitized);
 		}
 	}
-	operationError ??= watchdog.timedOut ? watchdog.error : null;
+	operationError ??= watchdog.timedOut ? sanitizeBenchmarkError(watchdog.error, {
+		runtime: watchdog.resources().gatewayRuntime,
+		redactions: [restored?.invocation?.token],
+	}) : null;
 	const failure = combineSessionOpenErrors(operationError, cleanupError);
-	if (failure) throw failure;
+	if (failure) throw sanitizeBenchmarkError(failure, {
+		runtime: watchdog.resources().gatewayRuntime,
+		redactions: [restored?.invocation?.token],
+	});
 	return {
 		case: entry.case,
 		phase: entry.phase,

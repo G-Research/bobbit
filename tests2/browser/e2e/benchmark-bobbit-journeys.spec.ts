@@ -12,6 +12,7 @@ import {
 	waitForSessionStatus,
 } from "../e2e-setup.js";
 import { openApp, sendMessage } from "./ui-helpers.js";
+import { runSessionOpenSample } from "../../../scripts/benchmarks/session-open.mjs";
 import {
 	EVENT_STREAM_DONE_MARKER,
 	EVENT_STREAM_MARKER_PREFIX,
@@ -442,6 +443,57 @@ function expectEventMetricContract(metrics: EventMetrics): void {
 test.describe("durable Bobbit browser benchmarks", () => {
 	test.describe.configure({ retries: 0 });
 	test.setTimeout(90_000);
+
+	test("forced tokenized navigation failure is sanitized before browser cleanup", async ({ page }) => {
+		const token = "d0".repeat(32);
+		const browserRuntime = { page };
+		let closeCount = 0;
+		await page.route("**/forced-benchmark-navigation**", route => route.abort("failed"));
+		try {
+			let failure: any;
+			try {
+				await runSessionOpenSample(
+					{ createSampleRoot: async () => "browser-sample-root" },
+					{ case: "browser", phase: "measured", cycle: 0, caseOrder: 0, order: 0 },
+					{ directory: "browser-fixture", manifest: {} },
+					{
+						prepare: async () => ({
+							invocation: { baseUrl: base(), token },
+							runtime: null,
+							sessionId: "forced-session",
+						}),
+						measure: async (_restored: any, _manifest: any, watchdog: any) => {
+							watchdog.registerBrowser(browserRuntime);
+							await page.goto(`${base()}/forced-benchmark-navigation?token=${encodeURIComponent(token)}#/session/forced-session`);
+						},
+						closeBrowser: async (runtime: any) => {
+							expect(runtime).toBe(browserRuntime);
+							closeCount += 1;
+						},
+					},
+				);
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toBeTruthy();
+			const seen = new Set<any>();
+			const messages: string[] = [];
+			const visit = (current: any) => {
+				if (!current || seen.has(current)) return;
+				seen.add(current);
+				messages.push(String(current.message ?? current));
+				for (const child of Array.isArray(current.errors) ? current.errors : []) visit(child);
+				visit(current.cause);
+			};
+			visit(failure);
+			const serialized = messages.join("\n");
+			expect(serialized).not.toContain(token);
+			expect(serialized).not.toContain("forced-session");
+			expect(closeCount).toBe(1);
+		} finally {
+			await page.unroute("**/forced-benchmark-navigation**");
+		}
+	});
 
 	test("reduced session-open traverses get_messages, preserves exact parity, and reloads", async ({ page, gateway }) => {
 		const sessionId = await createSession();

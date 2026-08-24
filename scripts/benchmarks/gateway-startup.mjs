@@ -7,6 +7,8 @@ import {
 	captureGatewayFailureDiagnostic,
 	createBenchmarkGatewayToken,
 	readProcessMetrics,
+	sanitizeBenchmarkDiagnosticText,
+	sanitizeBenchmarkError,
 	spawnGateway,
 	stopGateway,
 	waitForGatewayReady,
@@ -463,10 +465,11 @@ async function validateSearch(baseUrl, token, manifest) {
 	throw new Error(`search index did not expose its expected sentinel (last HTTP ${latestStatus ?? "unknown"})`);
 }
 
-function restoreDiagnostics(session, runtime) {
+function restoreDiagnostics(session, runtime, token) {
+	const redactions = [...(runtime?.diagnosticRedactions ?? []), token];
 	const boundedValue = (value, maximum = 160) => value == null
 		? null
-		: boundedErrorMessage(value, maximum);
+		: sanitizeBenchmarkDiagnosticText(value, { maximumBytes: maximum, redactions }).text;
 	return JSON.stringify({
 		id: boundedValue(session?.id),
 		status: boundedValue(session?.status),
@@ -516,7 +519,7 @@ async function validateReadyGateway(baseUrl, token, manifest, runtime) {
 			&& result.body?.modelId === GATEWAY_STARTUP_MODEL.id
 			&& result.body?.spawnPinnedModel === GATEWAY_STARTUP_MODEL.pref
 			&& result.body?.spawnPinnedThinkingLevel === GATEWAY_STARTUP_MODEL.thinkingLevel;
-		assertion(liveStateValid, `restored session state/model mismatch ${restoreDiagnostics(result.body, runtime)}`);
+		assertion(liveStateValid, `restored session state/model mismatch ${restoreDiagnostics(result.body, runtime, token)}`);
 		liveStates.push({
 			id,
 			status: result.body.status,
@@ -550,7 +553,8 @@ export async function stopTrackedGateway(active, activeGateways, stopGatewayImpl
 			token: active.token,
 		});
 	} catch (error) {
-		throw new Error(`Gateway cleanup failed: ${boundedErrorMessage(error)}`, { cause: error });
+		const cause = sanitizeBenchmarkError(error, { runtime: active.runtime, redactions: [active.token] });
+		throw new Error(`Gateway cleanup failed: ${cause.message}`, { cause });
 	}
 	const verifiedClosed = result?.closed === true
 		|| (result?.closed !== false && active.runtime?.closed === true);
@@ -591,13 +595,14 @@ async function scheduledSampleError(error, runtime, entry, token) {
 		sample: entry,
 		redactions: [token],
 	});
-	const inheritedChildExit = error?.benchmarkDiagnostic?.childExit ?? null;
-	const wrapped = new Error(boundedErrorMessage(error), { cause: error });
+	const sanitized = sanitizeBenchmarkError(error, { runtime, redactions: [token] });
+	const inheritedChildExit = sanitized?.benchmarkDiagnostic?.childExit ?? null;
+	const wrapped = new Error(sanitized.message, { cause: sanitized });
 	wrapped.benchmarkDiagnostic = {
 		sample: captured.sample,
 		childExit: inheritedChildExit ?? captured.childExit,
 	};
-	return wrapped;
+	return sanitizeBenchmarkError(wrapped, { runtime, redactions: [token] });
 }
 
 export function gatewayStartupGatewayArgs(repoRoot, projectRoot) {
@@ -679,7 +684,7 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 	}
 	if (operationError) operationError = await scheduledSampleError(operationError, runtime, entry, sample.token);
 	const failure = combineGatewayStartupSampleFailures(operationError, cleanupError);
-	if (failure) throw failure;
+	if (failure) throw sanitizeBenchmarkError(failure, { runtime, redactions: [sample.token] });
 	return result;
 }
 

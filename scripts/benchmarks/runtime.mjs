@@ -435,6 +435,103 @@ export function sanitizeBenchmarkDiagnosticText(value, {
 	return capDiagnosticTail(text, maximumBytes);
 }
 
+function benchmarkErrorRedactions(runtime, redactions) {
+	return [...new Set([...(runtime?.diagnosticRedactions ?? []), ...(redactions ?? [])]
+		.filter(value => typeof value === "string" && value.length >= 4))]
+		.sort((left, right) => right.length - left.length)
+		.slice(0, 64);
+}
+
+function sanitizeErrorChildExit(childExit, redactions) {
+	if (!childExit || typeof childExit !== "object" || Array.isArray(childExit)) return null;
+	const output = sanitizeBenchmarkDiagnosticText(childExit.output?.tail ?? "", { redactions });
+	const error = sanitizeBenchmarkDiagnosticText(childExit.error?.tail ?? "", { redactions });
+	const spawnFailure = childExit.spawnFailure == null
+		? null
+		: sanitizeBenchmarkDiagnosticText(childExit.spawnFailure, { maximumBytes: 512, redactions }).text;
+	return {
+		exitCode: Number.isInteger(childExit.exitCode) ? childExit.exitCode : null,
+		signal: typeof childExit.signal === "string" && /^[A-Za-z0-9_-]{1,32}$/.test(childExit.signal) ? childExit.signal : null,
+		spawnFailure,
+		pipesClosed: childExit.pipesClosed === true,
+		output: {
+			tail: output.text,
+			truncated: childExit.output?.truncated === true || output.truncated,
+		},
+		error: {
+			tail: error.text,
+			truncated: childExit.error?.truncated === true || error.truncated,
+		},
+	};
+}
+
+/**
+ * Rebuild an Error/AggregateError graph from bounded, redacted fields only.
+ * Raw causes, stacks, and arbitrary custom properties never cross the boundary.
+ */
+export function sanitizeBenchmarkError(error, {
+	runtime,
+	redactions = [],
+	maximumDepth = 8,
+	maximumChildren = 8,
+	maximumNodes = 64,
+} = {}) {
+	if (!Number.isInteger(maximumDepth) || maximumDepth < 1 || maximumDepth > 16) {
+		throw new RangeError("Benchmark error maximumDepth must be an integer from 1 to 16");
+	}
+	if (!Number.isInteger(maximumChildren) || maximumChildren < 1 || maximumChildren > 32) {
+		throw new RangeError("Benchmark error maximumChildren must be an integer from 1 to 32");
+	}
+	if (!Number.isInteger(maximumNodes) || maximumNodes < 1 || maximumNodes > 256) {
+		throw new RangeError("Benchmark error maximumNodes must be an integer from 1 to 256");
+	}
+	const exactRedactions = benchmarkErrorRedactions(runtime, redactions);
+	const seen = new WeakSet();
+	let visitedNodes = 0;
+	const sanitizedText = (value, maximumBytes = 1_000) => sanitizeBenchmarkDiagnosticText(value, {
+		maximumBytes,
+		redactions: exactRedactions,
+	}).text;
+	const visit = (value, depth) => {
+		if (depth > maximumDepth) return new Error("Benchmark error graph depth omitted");
+		if (visitedNodes >= maximumNodes) return new Error("Benchmark error graph nodes omitted");
+		visitedNodes += 1;
+		if (!value || (typeof value !== "object" && typeof value !== "function")) {
+			return new Error(sanitizedText(value ?? "Unknown benchmark error"));
+		}
+		if (seen.has(value)) return new Error("Benchmark error graph cycle omitted");
+		seen.add(value);
+		const message = sanitizedText(value.message ?? value ?? "Unknown benchmark error");
+		const rawErrors = Array.isArray(value.errors) ? value.errors : [];
+		const children = rawErrors.slice(0, maximumChildren).map(child => visit(child, depth + 1));
+		if (rawErrors.length > maximumChildren) {
+			children.push(new Error(`${rawErrors.length - maximumChildren} benchmark error children omitted`));
+		}
+		const cause = value.cause === undefined ? undefined : visit(value.cause, depth + 1);
+		const sanitized = value instanceof AggregateError || rawErrors.length > 0
+			? new AggregateError(children, message, cause === undefined ? undefined : { cause })
+			: new Error(message, cause === undefined ? undefined : { cause });
+		const name = typeof value.name === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value.name)
+			? value.name
+			: (sanitized instanceof AggregateError ? "AggregateError" : "Error");
+		sanitized.name = name;
+		if (typeof value.phase === "string") sanitized.phase = sanitizedText(value.phase, 64);
+		if (value.phaseDurationsMs && typeof value.phaseDurationsMs === "object" && !Array.isArray(value.phaseDurationsMs)) {
+			sanitized.phaseDurationsMs = Object.fromEntries(Object.entries(value.phaseDurationsMs)
+				.filter(([key, duration]) => /^[A-Za-z][A-Za-z0-9]*Ms$/.test(key) && Number.isFinite(duration))
+				.slice(0, 32));
+		}
+		if (value.benchmarkDiagnostic && typeof value.benchmarkDiagnostic === "object") {
+			sanitized.benchmarkDiagnostic = {
+				sample: scheduledSampleIdentity(value.benchmarkDiagnostic.sample),
+				childExit: sanitizeErrorChildExit(value.benchmarkDiagnostic.childExit, exactRedactions),
+			};
+		}
+		return sanitized;
+	};
+	return visit(error, 1);
+}
+
 /** Create one unguessable credential in a sample-owned gateway secrets directory. */
 export async function createBenchmarkGatewayToken(secretsDir) {
 	if (typeof secretsDir !== "string" || !path.isAbsolute(secretsDir)) {
