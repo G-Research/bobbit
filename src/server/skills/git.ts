@@ -7,6 +7,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnosti
 import {
 	hasStableFileIdentity,
 	RECOVERY_IO_CONCURRENCY,
+	sameFileIdentity,
 	removeTree,
 	type AsyncTreeFs,
 	type AsyncTreeStats,
@@ -558,6 +559,20 @@ async function existingWorktreeCleanupSnapshot(
 		|| (process.platform === "win32" && segments.some(segment => /~\d/i.test(segment)));
 
 	if (!aliasCandidate) {
+		let rootStats: AsyncTreeStats;
+		try {
+			rootStats = await fs.promises.lstat(path.resolve(requestedPath));
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
+		}
+		if (!rootStats.isDirectory()
+			|| rootStats.isSymbolicLink()
+			|| !hasStableFileIdentity(rootStats)) {
+			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}`);
+		}
+
 		let marker: string;
 		try {
 			marker = await fs.promises.readFile(path.join(requestedPath, ".git"), "utf8");
@@ -571,16 +586,17 @@ async function existingWorktreeCleanupSnapshot(
 		const gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
 		if (!gitDir) return undefined;
 
-		let rootStats: AsyncTreeStats;
+		let verifiedRootStats: AsyncTreeStats;
 		try {
-			rootStats = await fs.promises.lstat(path.resolve(requestedPath));
+			verifiedRootStats = await fs.promises.lstat(path.resolve(requestedPath));
 		} catch (err) {
-			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
+			throw new Error(`Cannot revalidate linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
 		}
-		if (!rootStats.isDirectory()
-			|| rootStats.isSymbolicLink()
-			|| !hasStableFileIdentity(rootStats)) {
-			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}`);
+		if (!verifiedRootStats.isDirectory()
+			|| verifiedRootStats.isSymbolicLink()
+			|| !hasStableFileIdentity(verifiedRootStats)
+			|| !sameFileIdentity(rootStats, verifiedRootStats)) {
+			throw new Error(`Linked-worktree filesystem generation changed while reading marker for ${requestedPath}`);
 		}
 		return {
 			requestedPath,

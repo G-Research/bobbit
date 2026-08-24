@@ -424,6 +424,103 @@ describe("cleanupWorktree filesystem aliases", () => {
 		}
 	});
 
+	it("rejects an ordinary root replacement interposed after marker read", async () => {
+		const fixture = await createFixture("ordinary-marker-read-aba", "lexical");
+		const originalRoot = `${fixture.worktree}-generation-a`;
+		const replacementAdmin = path.join(fixture.root, "replacement-admin");
+		const markerPath = path.join(fixture.worktree, ".git");
+		const realReadFile = fs.promises.readFile.bind(fs.promises);
+		const gitCalls: string[][] = [];
+		let replacementGeneration: AsyncTreeStats | undefined;
+		let interposed = false;
+		const readFileSpy = vi.spyOn(fs.promises, "readFile").mockImplementation((async (filePath: any, options?: any) => {
+			const result = await realReadFile(filePath, options);
+			if (!interposed && path.resolve(String(filePath)) === path.resolve(markerPath)) {
+				interposed = true;
+				const generationA = await fs.promises.lstat(fixture.worktree);
+				await fs.promises.rename(fixture.worktree, originalRoot);
+				await fs.promises.mkdir(fixture.worktree);
+				replacementGeneration = await fs.promises.lstat(fixture.worktree);
+				expect(sameFileIdentity(generationA, replacementGeneration)).toBe(false);
+				await fs.promises.mkdir(replacementAdmin);
+				await fs.promises.writeFile(markerPath, `gitdir: ${replacementAdmin}\n`);
+				await fs.promises.writeFile(path.join(fixture.worktree, "replacement.txt"), "replacement generation\n");
+			}
+			return result;
+		}) as any);
+		const runner: CommandRunner = {
+			execFile: async (_file, args) => {
+				gitCalls.push([...args]);
+				return { stdout: "", stderr: "" };
+			},
+		};
+		try {
+			try {
+				await expect(cleanupWorktree(
+					fixture.repo,
+					fixture.worktree,
+					fixture.branch,
+					true,
+					runner,
+					{ skipRemotePush: true },
+				)).rejects.toThrow(/filesystem generation changed while reading marker/i);
+			} finally {
+				readFileSpy.mockRestore();
+			}
+
+			expect(interposed).toBe(true);
+			expect(replacementGeneration).toBeDefined();
+			expect(gitCalls).toEqual([]);
+			expect(await fs.promises.readFile(markerPath, "utf8")).toBe(`gitdir: ${replacementAdmin}\n`);
+			expect(await fs.promises.readFile(path.join(fixture.worktree, "replacement.txt"), "utf8")).toBe("replacement generation\n");
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			readFileSpy.mockRestore();
+			await removeFixture(fixture.root);
+		}
+	});
+
+	it("rejects ordinary successful removal when captured admin metadata remains", async () => {
+		const fixture = await createFixture("ordinary-stale-admin", "lexical");
+		try {
+			const capturedGeneration = await fs.promises.lstat(fixture.worktree);
+			let listCalls = 0;
+			let branchDeleteCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (args[0] === "worktree" && args[1] === "list") listCalls += 1;
+					if (args[0] === "worktree" && args[1] === "remove") {
+						expect(String(args[2])).toBe(fixture.worktree);
+						expect(sameFileIdentity(capturedGeneration, await fs.promises.lstat(fixture.worktree))).toBe(true);
+						await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "same generation\n");
+						// Git reports success while both the original checkout generation
+						// and its captured admin registration remain as residue.
+						return { stdout: "", stderr: "" };
+					}
+					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await expect(cleanupWorktree(
+				fixture.repo,
+				fixture.worktree,
+				fixture.branch,
+				true,
+				runner,
+				{ skipRemotePush: true },
+			)).rejects.toThrow(/admin directory remains/i);
+
+			expect(listCalls).toBe(0);
+			expect(branchDeleteCalls).toBe(0);
+			await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
+			expect((await fs.promises.lstat(fixture.adminPath)).isDirectory()).toBe(true);
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
 	it("preserves an ordinary ABA replacement and branch without porcelain", async () => {
 		const fixture = await createFixture("ordinary-aba-replacement", "lexical");
 		try {
