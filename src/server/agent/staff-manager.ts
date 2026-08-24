@@ -16,7 +16,7 @@ import { resolveWorktreeSupport } from "./worktree-support.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import { validateNotificationFilter, type HostNotificationName, type HostNotificationPayload } from "../../shared/extension-host/host-hooks.js";
 import type { PersistedSession } from "./session-store.js";
-import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { isWorktreePathReferencedByLiveSessionForCleanup, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 
 type StaffFactName = "staffCreated" | "staffConfigChanged" | "staffRetired" | "staffSessionChanged";
 type StaffFactPublisher = {
@@ -387,12 +387,16 @@ export class StaffManager {
 		const entries = this.staffWorktreeEntries(staff, projectId);
 		if (entries.length === 0) return;
 		const liveSessionSnapshot = Array.from(liveSessions);
-		const cleanupEntries = entries.filter((entry) => {
-			const referenced = isWorktreePathReferencedByLiveSession(entry.worktreePath, liveSessionSnapshot);
+		const guardedEntries = await Promise.all(entries.map(async entry => ({
+			entry,
+			referenced: await isWorktreePathReferencedByLiveSessionForCleanup(entry.worktreePath, liveSessionSnapshot),
+		})));
+		const cleanupEntries = guardedEntries.flatMap(({ entry, referenced }) => {
 			if (referenced) {
 				console.warn(`[staff-manager] Preserving worktree ${entry.worktreePath}; a live session still references it`);
+				return [];
 			}
-			return !referenced;
+			return [entry];
 		});
 		const results = await Promise.allSettled(cleanupEntries.map(entry => cleanupWorktree(entry.repoPath, entry.worktreePath, staff.branch, true, this.commandRunner, this.remotePolicy)));
 		for (const result of results) {
@@ -403,9 +407,9 @@ export class StaffManager {
 		if (
 			staff.repoWorktrees
 			&& staff.worktreePath
-			&& !isWorktreePathReferencedByLiveSession(staff.worktreePath, liveSessionSnapshot)
+			&& !await isWorktreePathReferencedByLiveSessionForCleanup(staff.worktreePath, liveSessionSnapshot)
 		) {
-			try { fs.rmSync(staff.worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
+			try { await fs.promises.rm(staff.worktreePath, { recursive: true, force: true }); } catch { /* best-effort */ }
 		}
 	}
 

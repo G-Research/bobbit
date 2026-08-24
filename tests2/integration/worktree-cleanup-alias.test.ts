@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.js";
+import { isWorktreePathReferencedByLiveSessionForCleanup } from "../../src/server/agent/worktree-reference-guard.js";
 import { cleanupWorktree } from "../../src/server/skills/git.js";
 
 const nativeRealpath = promisify(fs.realpath.native);
@@ -76,6 +77,18 @@ async function removeFixture(root: string): Promise<void> {
 }
 
 describe("cleanupWorktree filesystem aliases", () => {
+	it.runIf(process.platform === "win32")("protects a live worktree referenced through its true native 8.3 alias", async () => {
+		const fixture = await createFixture("live-reference-native", "native");
+		try {
+			expect(await isWorktreePathReferencedByLiveSessionForCleanup(
+				fixture.worktree,
+				[{ worktreePath: fixture.alias }],
+			)).toBe(true);
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
 	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
 		"passes Git its registered spelling for a %s alias and removes the exact directory, admin entry, and branch",
 		async (aliasKind) => {
