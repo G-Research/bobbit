@@ -281,17 +281,48 @@ test.describe("Journey: Proposals — API error handling", () => {
 	});
 
 	test("page.route() session list 500 still lets app load gracefully", async ({ page }) => {
-		let firstCallDone = false;
-		await page.route("**/api/sessions", async (route) => {
-			if (route.request().method() === "GET" && !firstCallDone) {
-				firstCallDone = true;
-				await route.fulfill({ status: 500, body: "Internal Server Error" });
-				return;
-			}
-			return route.continue();
+		const sessionListRoute = /\/api\/sessions(?:\?.*)?$/;
+		let failedRequestUrl: string | undefined;
+		const failedListResponse = page.waitForResponse((response) => {
+			const request = response.request();
+			return request.method() === "GET"
+				&& new URL(response.url()).pathname === "/api/sessions"
+				&& response.status() === 500;
 		});
-		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 15_000 });
+		await page.route(sessionListRoute, async (route) => {
+			const request = route.request();
+			const pathname = new URL(request.url()).pathname;
+			if (request.method() !== "GET" || pathname !== "/api/sessions" || failedRequestUrl) {
+				return route.fallback();
+			}
+			failedRequestUrl = request.url();
+			await route.fulfill({
+				status: 500,
+				contentType: "text/plain",
+				body: "Internal Server Error",
+			});
+		});
+
+		const appReady = openApp(page);
+		const failedResponse = await failedListResponse;
+		expect(failedResponse.url()).toBe(failedRequestUrl);
+		await appReady;
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible();
+		const mountedState = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return {
+				appView: state?.appView,
+				sessionsError: state?.sessionsError,
+				sessionsGeneration: state?.sessionsGeneration,
+				sessionsLoading: state?.sessionsLoading,
+			};
+		});
+		expect(mountedState).toMatchObject({
+			appView: "authenticated",
+			sessionsError: "",
+			sessionsLoading: false,
+		});
+		expect(mountedState.sessionsGeneration).toBeGreaterThanOrEqual(0);
 	});
 
 	// Keep the related goal-assistant proposal lifecycle in one session. Besides
