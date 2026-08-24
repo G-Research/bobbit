@@ -135,10 +135,13 @@ function normalizeCredentialAuthority(host: string): string | undefined {
 
 function ambientTokenFor(host: string, env: Readonly<Record<string, string | undefined>>): string | undefined {
 	const hostname = host.replace(/:\d+$/, "");
-	const names = hostname === "github.com" || hostname.endsWith(".ghe.com")
-		? GITHUB_COM_CLASS_TOKENS
-		: ENTERPRISE_SERVER_CLASS_TOKENS;
-	return names.find(name => (env[name] ?? "").trim() !== "");
+	const usesGithubClassToken = hostname === "github.com"
+		|| hostname.endsWith(".github.com")
+		|| hostname === "github.localhost"
+		|| hostname.endsWith(".github.localhost")
+		|| hostname.endsWith(".ghe.com");
+	const names = usesGithubClassToken ? GITHUB_COM_CLASS_TOKENS : ENTERPRISE_SERVER_CLASS_TOKENS;
+	return names.find(name => env[name] !== undefined && env[name] !== "");
 }
 
 function probeEnvironment(root: string): NodeJS.ProcessEnv {
@@ -155,6 +158,11 @@ function probeEnvironment(root: string): NodeJS.ProcessEnv {
 		GIT_CEILING_DIRECTORIES: root,
 	};
 	delete env.DISPLAY;
+	// A neutral cwd is not sufficient when Git's repository-selection variables
+	// point back to a repository with local credential configuration.
+	delete env.GIT_DIR;
+	delete env.GIT_WORK_TREE;
+	delete env.GIT_COMMON_DIR;
 	return env;
 }
 

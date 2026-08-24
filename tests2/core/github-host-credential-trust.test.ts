@@ -144,10 +144,16 @@ describe("Git credential probe", () => {
 			GIT_ASKPASS: process.env.GIT_ASKPASS,
 			SSH_ASKPASS: process.env.SSH_ASKPASS,
 			DISPLAY: process.env.DISPLAY,
+			GIT_DIR: process.env.GIT_DIR,
+			GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+			GIT_COMMON_DIR: process.env.GIT_COMMON_DIR,
 		};
 		process.env.GIT_ASKPASS = "configured-core-askpass-sentinel";
 		process.env.SSH_ASKPASS = "configured-ssh-askpass-sentinel";
 		process.env.DISPLAY = "gui-prompt-sentinel";
+		process.env.GIT_DIR = "/repository/.git";
+		process.env.GIT_WORK_TREE = "/repository";
+		process.env.GIT_COMMON_DIR = "/repository/.git";
 		try {
 			const helper = fakeHelper(credential());
 			await expect(subject(helper).isTrusted("git.example.com")).resolves.toBe(true);
@@ -169,6 +175,9 @@ describe("Git credential probe", () => {
 			expect(env.GIT_ASKPASS).toBe("");
 			expect(env.SSH_ASKPASS).toBe("");
 			expect(env.DISPLAY).toBeUndefined();
+			expect(env.GIT_DIR).toBeUndefined();
+			expect(env.GIT_WORK_TREE).toBeUndefined();
+			expect(env.GIT_COMMON_DIR).toBeUndefined();
 			expect(helper.requests.join("")).toBe("url=https://git.example.com\n\n");
 			expect(helper.kills).toEqual([]);
 		} finally {
@@ -295,12 +304,18 @@ describe("ambient gh token refusal", () => {
 		await expect(trust.isTrusted("git.example.com")).resolves.toBe(true);
 	});
 
-	it("uses GitHub-class tokens only for github.com and proper ghe.com subdomains", async () => {
+	it("matches gh GitHub-token host classes without admitting near-misses", async () => {
 		for (const [host, variable] of [
 			["github.com", "GH_TOKEN"],
+			["pages.github.com", "GH_TOKEN"],
+			["github.localhost", "GITHUB_TOKEN"],
+			["api.github.localhost", "GH_TOKEN"],
+			["api.github.localhost:8443", "GITHUB_TOKEN"],
 			["tenant.ghe.com", "GITHUB_TOKEN"],
 			["tenant.ghe.com:8443", "GH_TOKEN"],
 			["ghe.com", "GH_ENTERPRISE_TOKEN"],
+			["notgithub.com", "GITHUB_ENTERPRISE_TOKEN"],
+			["github.com.evil.test", "GH_ENTERPRISE_TOKEN"],
 			["notghe.com", "GITHUB_ENTERPRISE_TOKEN"],
 			["ghe.com.evil.test", "GH_ENTERPRISE_TOKEN"],
 		] as const) {
@@ -313,6 +328,24 @@ describe("ambient gh token refusal", () => {
 			await expect(trust.isTrusted(host), host).resolves.toBe(false);
 			expect(probe, host).not.toHaveBeenCalled();
 		}
+	});
+
+	it("treats a whitespace-only gh token as set and redacts its value", async () => {
+		const warnings: string[] = [];
+		const probe = vi.fn(async () => true);
+		const trust = new GithubHostCredentialTrust({
+			probe,
+			getEnv: () => ({ GH_ENTERPRISE_TOKEN: " \t" }),
+			warn: line => warnings.push(line),
+		});
+
+		await expect(trust.isTrusted("git.example.com")).resolves.toBe(false);
+		expect(probe).not.toHaveBeenCalled();
+		expect(warnings).toEqual([
+			"[github-trust] Not trusting git.example.com from the local Git credential configuration because GH_ENTERPRISE_TOKEN is set. "
+			+ "Trust git.example.com explicitly with githubTrustedHosts or unset GH_ENTERPRISE_TOKEN.",
+		]);
+		expect(warnings[0]).not.toContain("\t");
 	});
 
 	it("keeps token classes independent and honors variable precedence", async () => {
