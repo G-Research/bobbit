@@ -232,10 +232,10 @@ export class MockAgentCore {
 	/** Override the event emitter (used by child-process mode). */
 	setEventEmitter(fn) { this._onEvent = fn; }
 
-	/** Arm a named deterministic barrier. Safe to call repeatedly. */
+	/** Arm a named deterministic barrier. Safe to call repeatedly or after release. */
 	armBarrier(name) {
 		let barrier = this._barriers.get(name);
-		if (!barrier) {
+		if (!barrier || barrier.released) {
 			barrier = { entered: deferred(), release: deferred(), armed: true, released: false };
 			this._barriers.set(name, barrier);
 		} else {
@@ -2997,6 +2997,7 @@ export class MockAgentCore {
 			}
 		};
 
+		const intermediateBoundary = `proposal-stream:${type}:intermediate-delta`;
 		for (let i = 0; i < n; i++) {
 			if (this.currentAbortController?.signal.aborted) return;
 			const input = buildInput(i);
@@ -3007,11 +3008,13 @@ export class MockAgentCore {
 				],
 			};
 			this.emit({ type: "message_update", message: assistantMsg });
-			// Hold after a valid, non-terminal delta so browser tests can inspect
-			// the real streaming projection instead of racing the fixture cadence.
-			if (i === 1 && n > 2) {
-				await this._crossBarrier(`proposal-stream:${type}:intermediate-delta`, {
+			// An explicitly armed browser fixture holds the first valid,
+			// non-terminal delta immediately. Unarmed streams retain their normal
+			// cadence and do not allocate an observational barrier.
+			if (i === 0 && n > 1 && this._barriers.get(intermediateBoundary)?.armed === true) {
+				await this._crossBarrier(intermediateBoundary, {
 					proposalType: type,
+					toolId,
 					delta: i + 1,
 					total: n,
 				});
