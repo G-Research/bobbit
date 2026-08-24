@@ -17,7 +17,10 @@ const {
 } = await import("../../src/server/mcp/mcp-manager.ts");
 const { parseMcpToolName } = await import("../../src/server/mcp/mcp-meta.ts");
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { ConfigCascade } = await import("../../src/server/agent/config-cascade.ts");
 const { ToolManager, __resetToolScanCache } = await import("../../src/server/agent/tool-manager.ts");
+const { ToolGroupPolicyStore } = await import("../../src/server/agent/tool-group-policy-store.ts");
+const { computeEffectiveAllowedTools } = await import("../../src/server/agent/tool-activation.ts");
 const { scopedToolContext } = await import("../../src/server/agent/session-setup.ts");
 const { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } = await import("../../src/server/agent/mcp-gateway-runtime-identity.ts");
 const { ProjectConfigStore } = await import("../../src/server/agent/project-config-store.ts");
@@ -939,29 +942,91 @@ describe("SessionManager scoped MCP manager creation", () => {
       gatePersistence: "json",
     });
     const serverToolManager = new ToolManager(serverConfigDir);
+    const serverGroupPolicyStore = new ToolGroupPolicyStore(serverConfigDir);
+    serverGroupPolicyStore.setSubgoalsEnabledGetter(() => true);
+    serverGroupPolicyStore.setGroupPolicy("Project Scanner", "never");
+    const builtinPolicies = { "Project Scanner": "ask" as const };
+    const configCascade = new ConfigCascade({
+      getRoles: () => [],
+      getTools: () => [],
+      getToolGroupPolicies: () => builtinPolicies,
+    } as any, {
+      getRoles: () => [],
+      getTools: () => serverToolManager.getLocalTools(),
+      getToolGroupPolicies: () => serverGroupPolicyStore.getAllLocal(),
+    }, pcm);
     const sessionManager = new SessionManager({
       projectContextManager: pcm,
       toolManager: serverToolManager,
+      groupPolicyStore: serverGroupPolicyStore,
     });
+    sessionManager.configCascade = configCascade;
 
     try {
       const projectContext = pcm.getOrCreate(projectId);
       assert.ok(projectContext);
       const projectToolManager = projectContext.toolManager;
       projectToolManager.setMarketToolRootsProvider(() => [marketToolsDir]);
-      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "allow");
       __resetToolScanCache();
 
       const pipeline = sessionManager.buildPipelineContext(projectId, projectRoot);
       assert.equal(pipeline.toolManager, projectToolManager);
-      assert.equal(pipeline.groupPolicyStore, projectContext.toolGroupPolicyStore);
+      assert.ok(pipeline.groupPolicyStore);
+      assert.notEqual(pipeline.groupPolicyStore, projectContext.toolGroupPolicyStore,
+        "the pipeline must use the live ConfigCascade policy provider");
+      assert.equal(pipeline.groupPolicyStore.getSubgoalsEnabled?.(), true,
+        "project policy cascading must retain the server-owned subgoals feature flag");
       assert.notEqual(projectToolManager, serverToolManager);
       assert.equal((sessionManager as any).getToolManagerForProject(undefined), serverToolManager,
         "projectless sessions retain the server ToolManager");
       assert.equal(serverToolManager.getToolByName("project_scan_reconcile"), undefined);
       assert.ok(projectToolManager.getToolByName("project_scan_reconcile"));
 
-      const role = { name: "scanner", toolPolicies: { "Project Scanner": "allow" } };
+      const role = { name: "scanner", toolPolicies: {} };
+      const effectiveNames = () => (sessionManager as any)
+        .resolveEffectiveAllowedTools(role, projectId, projectRoot)
+        .map((tool: { name: string }) => tool.name);
+      const pipelineEffectiveNames = () => computeEffectiveAllowedTools(
+        projectToolManager,
+        role,
+        pipeline.groupPolicyStore ?? undefined,
+        undefined,
+        scopedToolContext(projectId, projectRoot),
+      ).map((tool: { name: string }) => tool.name);
+
+      assert.deepEqual(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"], {
+        policy: "never",
+        origin: "server",
+        overrides: "builtin",
+      });
+      assert.ok(!effectiveNames().includes("project_scan_reconcile"),
+        "a server never policy must exclude a project tool when no project override exists");
+      assert.ok(!pipelineEffectiveNames().includes("project_scan_reconcile"));
+
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "allow");
+      assert.deepEqual(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"], {
+        policy: "allow",
+        origin: "project",
+        overrides: "server",
+      });
+      assert.ok(effectiveNames().includes("project_scan_reconcile"),
+        "a project allow override must restore the project tool");
+      assert.ok(pipelineEffectiveNames().includes("project_scan_reconcile"),
+        "the already-built pipeline provider must observe live project policy updates");
+
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "never");
+      assert.ok(!pipelineEffectiveNames().includes("project_scan_reconcile"),
+        "live project policy changes must not be cached by the pipeline provider");
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", null);
+      assert.equal(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"].origin, "server");
+      serverGroupPolicyStore.setGroupPolicy("Project Scanner", null);
+      assert.deepEqual(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"], {
+        policy: "ask",
+        origin: "builtin",
+      });
+      serverGroupPolicyStore.setGroupPolicy("Project Scanner", "never");
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "allow");
+
       const effective = (sessionManager as any).resolveEffectiveAllowedTools(role, projectId, projectRoot);
       assert.ok(effective.some((tool: { name: string }) => tool.name === "project_scan_reconcile"));
 
