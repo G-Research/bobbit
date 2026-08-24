@@ -8,7 +8,7 @@ import { test, expect } from "./gateway-harness.js";
 import { pollUntil } from "./test-utils/cleanup.js";
 import { createServer as createTcpServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -80,22 +80,80 @@ function startHelper(env: Record<string, string>): { child: ChildProcess; output
 	return { child, output };
 }
 
-/** Wait for the gateway to respond on the given port (any HTTP response means it's up). */
-async function waitForGateway(port: number, timeoutMs = 15_000): Promise<boolean> {
-	try {
-		await pollUntil(async () => {
-			try {
-				await fetch(`http://127.0.0.1:${port}/api/health`);
-				// Any response (even 401) means the server is listening
-				return true;
-			} catch {
-				return false;
+type GatewayReadiness =
+	| { kind: "ready" }
+	| { kind: "failed"; message: string };
+
+function isConnectionRefusal(error: unknown): boolean {
+	if (!error || typeof error !== "object") return false;
+	const candidate = error as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+	if (candidate.code === "ECONNREFUSED" || /ECONNREFUSED/i.test(String(candidate.message ?? ""))) return true;
+	if (isConnectionRefusal(candidate.cause)) return true;
+	if (Array.isArray(candidate.errors) && candidate.errors.some(isConnectionRefusal)) return true;
+	// Undici can expose a loopback refusal only as its outer TypeError in a test
+	// worker. With a fixed http://127.0.0.1 target, this exact error is the
+	// connection-level refusal before the child listener binds.
+	return error instanceof TypeError && error.message === "fetch failed";
+}
+
+function childExitDescription(child: ChildProcess): string | null {
+	if (child.exitCode === null && child.signalCode === null) return null;
+	return String(child.exitCode ?? child.signalCode);
+}
+
+/** Wait for the live helper gateway to report its authoritative ready health. */
+async function waitForGateway(
+	child: ChildProcess,
+	output: string[],
+	port: number,
+	authToken: string,
+	timeoutMs = 15_000,
+): Promise<void> {
+	const result = await pollUntil<GatewayReadiness | null>(async () => {
+		const exit = childExitDescription(child);
+		if (exit !== null) {
+			return { kind: "failed", message: `gateway helper exited before :${port} became healthy (${exit})\n${output.join("")}` };
+		}
+
+		let response: Response;
+		let bodyText: string;
+		try {
+			response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+				headers: { Authorization: `Bearer ${authToken}` },
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+			bodyText = await response.text();
+		} catch (error) {
+			const requestExit = childExitDescription(child);
+			if (requestExit !== null) {
+				return { kind: "failed", message: `gateway helper exited before :${port} became healthy (${requestExit})\n${output.join("")}` };
 			}
-		}, { timeoutMs, intervalMs: 100, label: `gateway up on :${port}` });
-		return true;
-	} catch {
-		return false;
-	}
+			if (isConnectionRefusal(error)) return null;
+			return { kind: "failed", message: `gateway health request on :${port} failed unexpectedly: ${String(error)}` };
+		}
+
+		const responseExit = childExitDescription(child);
+		if (responseExit !== null) {
+			return { kind: "failed", message: `gateway helper exited while :${port} reported health (${responseExit})\n${output.join("")}` };
+		}
+		if (response.status === 503) return null;
+		if (response.status !== 200) {
+			return { kind: "failed", message: `gateway health on :${port} returned unexpected ${response.status}: ${bodyText}` };
+		}
+
+		let health: { status?: unknown };
+		try {
+			health = JSON.parse(bodyText) as { status?: unknown };
+		} catch {
+			return { kind: "failed", message: `gateway health on :${port} returned invalid JSON: ${bodyText}` };
+		}
+		if (health.status !== "ok") {
+			return { kind: "failed", message: `gateway health on :${port} returned 200 without status ok: ${bodyText}` };
+		}
+		return { kind: "ready" };
+	}, { timeoutMs, intervalMs: 100, label: `gateway healthy on :${port}` });
+
+	if (result.kind === "failed") throw new Error(result.message);
 }
 
 /** Kill a child process and wait for it to exit. */
@@ -112,11 +170,16 @@ test.describe("Port auto-increment", () => {
 	test("auto-increments to next port when default port is occupied", async () => {
 		const basePort = await findFreePort();
 		const bobbitDir = makeBobbitDir("auto-inc");
+		const secretsDir = join(bobbitDir, "secrets");
+		const authToken = "port-readiness-test-token".padEnd(64, "0");
+		mkdirSync(secretsDir, { recursive: true });
+		writeFileSync(join(secretsDir, "token"), authToken, "utf8");
 		const blocker = await occupyPort(basePort);
 
 		try {
 			const { child, output } = startHelper({
 				BOBBIT_DIR: bobbitDir,
+				BOBBIT_SECRETS_DIR: secretsDir,
 				TEST_PORT: String(basePort),
 				TEST_MODE: "bind-and-serve",
 				TEST_EXPLICIT: "false",
@@ -124,9 +187,9 @@ test.describe("Port auto-increment", () => {
 			});
 
 			try {
-				// Wait for the gateway to bind on next port
-				const healthy = await waitForGateway(basePort + 1, 15_000);
-				expect(healthy).toBe(true);
+				// The listener can answer 503 before start() returns and writes the
+				// port files. Wait until the live child reports status ok.
+				await waitForGateway(child, output, basePort + 1, authToken, 15_000);
 
 				// Verify actual-port file
 				const actualPort = parseInt(readFileSync(join(bobbitDir, "state", "actual-port"), "utf-8").trim(), 10);
