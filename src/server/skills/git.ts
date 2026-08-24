@@ -545,12 +545,12 @@ async function existingWorktreeCleanupSnapshot(
 	commandRunner: CommandRunner,
 ): Promise<ExistingWorktreeCleanupSnapshot | undefined> {
 	const segments = requestedPath.split(/[\\/]+/);
-	const nativeAliasCandidate = segments.includes(".")
-		|| segments.includes("..")
+	const lexicalAlias = segments.includes(".") || segments.includes("..");
+	const aliasCandidate = lexicalAlias
 		|| (process.platform === "win32" && segments.some(segment => /~\d/i.test(segment)));
 	// Ordinary coordinates retain cleanup's established single Git command and
 	// scheduling. Native canonicalization is reserved for alias spellings.
-	if (!nativeAliasCandidate) return undefined;
+	if (!aliasCandidate) return undefined;
 
 	let requestedIdentity: string;
 	try {
@@ -561,8 +561,12 @@ async function existingWorktreeCleanupSnapshot(
 	}
 	const comparableIdentity = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
 	requestedIdentity = comparableIdentity(requestedIdentity);
-	const nativeAlias = requestedIdentity !== comparableIdentity(path.resolve(requestedPath));
-	if (!nativeAlias) return undefined;
+	// path.resolve() necessarily removes dot segments before realpath. Preserve
+	// that lexical proof instead of mistaking the normalized result for an
+	// ordinary coordinate; Windows 8.3 aliases still require native expansion.
+	const aliased = lexicalAlias
+		|| requestedIdentity !== comparableIdentity(path.resolve(requestedPath));
+	if (!aliased) return undefined;
 
 	let registeredPaths: string[];
 	try {
@@ -593,7 +597,7 @@ async function existingWorktreeCleanupSnapshot(
 			requestedPath,
 			removalPath,
 			adminPath,
-			aliased: nativeAlias,
+			aliased,
 		};
 	}
 	throw new Error(`Cannot resolve Git worktree registration for aliased path ${requestedPath}`);
