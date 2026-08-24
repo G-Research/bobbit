@@ -25,6 +25,7 @@ type FakeWorktree = { path: string; branch: string; adminPath?: string };
 const fakeGitState = {
 	commands: [] as Array<{ args: string[]; cwd?: string }>,
 	registrations: new Map<string, Map<string, FakeWorktree>>(),
+	branchDeletionWaiters: new Map<string, () => void>(),
 };
 
 function fakePathKey(filePath: string): string {
@@ -51,6 +52,16 @@ function registeredWorktrees(repoPath: string): Map<string, FakeWorktree> {
 	return worktrees;
 }
 
+function branchDeletionKey(repoPath: string, branch: string): string {
+	return `${fakePathKey(repoPath)}\0${branch}`;
+}
+
+function waitForFakeBranchDeletion(repoPath: string, branch: string): Promise<void> {
+	return new Promise(resolve => {
+		fakeGitState.branchDeletionWaiters.set(branchDeletionKey(repoPath, branch), resolve);
+	});
+}
+
 function nulPorcelain(worktrees: Iterable<FakeWorktree>): string {
 	return [...worktrees]
 		.map(worktree => `worktree ${worktree.path}\0HEAD ${"0".repeat(40)}\0branch refs/heads/${worktree.branch}\0\0`)
@@ -67,13 +78,23 @@ const fakeGitRunner: CommandRunner = {
 			return { stdout: nulPorcelain(registeredWorktrees(cwd ?? stateRoot).values()), stderr: "" };
 		}
 		if (args[0] === "worktree" && args[1] === "remove") {
-			const worktreePath = path.resolve(String(args[2]));
+			const requestedPath = path.resolve(String(args[2]));
 			const worktrees = registeredWorktrees(cwd ?? stateRoot);
-			const worktreeKey = fakePathKey(worktreePath);
+			// Resolve identity before removal: once the directory disappears, a
+			// RUNNER~1 coordinate can no longer expand to Git's long spelling.
+			const worktreeKey = fakePathKey(requestedPath);
 			const registered = worktrees.get(worktreeKey);
-			fs.rmSync(worktreePath, { recursive: true, force: true });
+			// Git removes its registered coordinate even when cleanup invoked it via
+			// an equivalent short/long alias. Model that transition using the exact
+			// spelling captured by the registration rather than the caller's alias.
+			fs.rmSync(registered?.path ?? requestedPath, { recursive: true, force: true });
 			if (registered?.adminPath) fs.rmSync(registered.adminPath, { recursive: true, force: true });
 			worktrees.delete(worktreeKey);
+		}
+		if (args[0] === "branch" && args[1] === "-D" && cwd) {
+			const key = branchDeletionKey(cwd, String(args[2]));
+			fakeGitState.branchDeletionWaiters.get(key)?.();
+			fakeGitState.branchDeletionWaiters.delete(key);
 		}
 		return { stdout: "", stderr: "" };
 	},
@@ -170,6 +191,7 @@ describe("shared worktree guard reproductions", () => {
 	beforeEach(() => {
 		fakeGitState.commands.length = 0;
 		fakeGitState.registrations.clear();
+		fakeGitState.branchDeletionWaiters.clear();
 		stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-state-"));
 		prevBobbitDir = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
@@ -340,8 +362,12 @@ describe("shared worktree guard reproductions", () => {
 				repoWorktrees: { api: apiWorktree, web: webWorktree },
 			});
 
+			// Goal cleanup is deliberately best-effort background work. Arm the
+			// terminal fake-Git event before archive so native short/long alias
+			// resolution cannot race the assertions or the next fixture reset.
+			const webCleanupFinished = waitForFakeBranchDeletion(web, branch);
 			const archived = await goalManager.archiveGoal("goal-archive");
-			await Promise.resolve();
+			await webCleanupFinished;
 			assert.equal(archived, true, "goal should be archived by the test setup");
 			assert.ok(
 				fs.existsSync(apiWorktree),
