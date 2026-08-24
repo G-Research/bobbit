@@ -454,6 +454,64 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 		}
 	});
 
+	it("keeps full role/text parity independent from exact marker parity", () => {
+		const fixture: any = createEventStreamFixture();
+		const renderedMarkers = [
+			...fixture.markers,
+			EVENT_STREAM_PROPOSAL_TITLE,
+			EVENT_STREAM_TOOL_OUTPUT,
+			EVENT_STREAM_ERROR_OUTPUT,
+			EVENT_STREAM_ERROR_OUTPUT,
+			`${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`,
+			EVENT_STREAM_PROPOSAL_SPEC,
+		].join(" | ");
+		const liveMessages = [
+			{ role: "user-message", text: "benchmark request" },
+			{ role: "assistant-message", text: `proposal before ${EVENT_STREAM_PROPOSAL_SPEC} proposal after` },
+			{ role: "tool-message", text: "tool details" },
+		];
+		const relocatedMessages = [
+			{ role: "user-message", text: "benchmark request" },
+			{ role: "assistant-message", text: "proposal before proposal after" },
+			{ role: "tool-message", text: `${EVENT_STREAM_PROPOSAL_SPEC} tool details` },
+		];
+		const live = eventStreamBenchmark.fingerprintEventStreamDom(liveMessages, renderedMarkers, fixture);
+		const relocated = eventStreamBenchmark.fingerprintEventStreamDom(relocatedMessages, renderedMarkers, fixture);
+		eventStreamBenchmark.assertEventStreamLiveReloadParity(live, relocated);
+		assert.equal(live.fullDomHash, relocated.fullDomHash, "exact proposal spec host relocation must canonicalize");
+		assert.equal(live.markerHash, relocated.markerHash, "marker parity remains an independent exact surface");
+
+		const mutations = [
+			(messages: any[]) => messages.splice(2, 0, { role: "assistant-message", text: "non-marker insertion" }),
+			(messages: any[]) => { messages[2].text = "changed non-marker details"; },
+			(messages: any[]) => messages.splice(0, 2, messages[1], messages[0]),
+		];
+		for (const mutate of mutations) {
+			const messages = structuredClone(relocatedMessages);
+			mutate(messages);
+			const changed = eventStreamBenchmark.fingerprintEventStreamDom(messages, renderedMarkers, fixture);
+			assert.throws(
+				() => eventStreamBenchmark.assertEventStreamLiveReloadParity(live, changed),
+				/full DOM fingerprint/i,
+			);
+		}
+
+		for (const changedText of [
+			renderedMarkers.replace(EVENT_STREAM_PROPOSAL_TITLE, ""),
+			`${renderedMarkers} ${EVENT_STREAM_PROPOSAL_SPEC}`,
+			renderedMarkers.replace(
+				`${EVENT_STREAM_PROPOSAL_TITLE} | ${EVENT_STREAM_TOOL_OUTPUT}`,
+				`${EVENT_STREAM_TOOL_OUTPUT} | ${EVENT_STREAM_PROPOSAL_TITLE}`,
+			),
+		]) {
+			const changed = eventStreamBenchmark.fingerprintEventStreamDom(relocatedMessages, changedText, fixture);
+			assert.throws(
+				() => eventStreamBenchmark.assertEventStreamLiveReloadParity(live, changed),
+				/marker fingerprint/i,
+			);
+		}
+	});
+
 	it("rejects event semantic omission, duplication, reordering, and tool mutation", () => {
 		const assertSemantic = (eventStreamBenchmark as any).assertExpectedFinalSemanticState;
 		if (typeof assertSemantic !== "function") return; // Repair branch supplies this pure seam before integration.
@@ -647,6 +705,71 @@ describe("session-open bounded sample lifecycle", () => {
 		await watchdog.finish();
 		assert.equal(watchdog.error.name, "EventStreamSampleTimeoutError");
 		assert.equal(watchdog.error.phase, "stream");
+	});
+
+	it("interrupts a browser registered after pre-acquisition expiry and retains it through verified cleanup", async () => {
+		const clock = injectedClock();
+		const calls: string[] = [];
+		const browserRuntime = { cdp: {}, browser: {} };
+		const watchdog = eventStreamBenchmark.createEventStreamSampleWatchdog({
+			timeoutMs: 40,
+			graceMs: 5,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			terminateExecution: async (runtime: any) => { assert.equal(runtime, browserRuntime); calls.push("terminate"); },
+			closeBrowser: async (runtime: any) => { assert.equal(runtime, browserRuntime); calls.push("fallback-close"); },
+		});
+		clock.advanceTo(40);
+		clock.timers.find(timer => timer.delay === 40)!.callback();
+		assert.equal(watchdog.signal.aborted, true);
+		assert.deepEqual(watchdog.resources(), { browserRuntime: null, gatewayRuntime: null });
+
+		watchdog.registerBrowser(browserRuntime);
+		watchdog.registerBrowser(browserRuntime);
+		assert.deepEqual(calls, ["terminate"], "late registration must interrupt exactly once");
+		assert.equal(watchdog.resources().browserRuntime, browserRuntime, "watchdog retains ownership until verified cleanup");
+		clock.advanceTo(45);
+		clock.timers.find(timer => timer.delay === 5)!.callback();
+		await Promise.resolve();
+		assert.deepEqual(calls, ["terminate", "fallback-close"]);
+		assert.equal(watchdog.resources().browserRuntime, browserRuntime, "fallback does not claim verified cleanup");
+
+		calls.push("ordinary-close");
+		watchdog.registerBrowser(null);
+		await watchdog.finish();
+		calls.push("next-sample");
+		assert.deepEqual(calls, ["terminate", "fallback-close", "ordinary-close", "next-sample"]);
+		assert.equal(watchdog.error.phase, "prepare");
+	});
+
+	it("starts grace close independently and bounds finish when interruption never settles", async () => {
+		const clock = injectedClock();
+		const calls: string[] = [];
+		const browserRuntime = { cdp: {}, browser: {} };
+		const never = new Promise<void>(() => {});
+		const watchdog = eventStreamBenchmark.createEventStreamSampleWatchdog({
+			timeoutMs: 40,
+			graceMs: 5,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			terminateExecution: async () => { calls.push("terminate-start"); await never; },
+			closeBrowser: async () => { calls.push("close-start"); await never; },
+		});
+		watchdog.registerBrowser(browserRuntime);
+		clock.advanceTo(40);
+		clock.timers.find(timer => timer.delay === 40)!.callback();
+		assert.deepEqual(calls, ["terminate-start"]);
+		clock.advanceTo(45);
+		clock.timers.find(timer => timer.delay === 5)!.callback();
+		assert.deepEqual(calls, ["terminate-start", "close-start"], "grace close must not await hung CDP termination");
+
+		const finish = watchdog.finish();
+		clock.advanceTo(55);
+		clock.timers.find(timer => timer.delay === 10)!.callback();
+		await assert.rejects(finish, /interruption did not settle within 10ms/);
+		assert.equal(watchdog.resources().browserRuntime, browserRuntime, "unverified cleanup remains owned for deferred retry");
 	});
 
 	it("propagates an injected watchdog expiry through the sample orchestrator", async () => {

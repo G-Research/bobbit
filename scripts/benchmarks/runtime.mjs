@@ -71,9 +71,7 @@ export function createInterruptingSampleWatchdog({
 	let expired = false;
 	let workSettled = false;
 	let timeoutError = null;
-	let fallbackTimer = null;
-	let terminatePromise = Promise.resolve();
-	let fallbackPromise = Promise.resolve();
+	const browserInterruptions = new Map();
 
 	const snapshotDurations = () => {
 		const result = { ...durations };
@@ -83,6 +81,33 @@ export function createInterruptingSampleWatchdog({
 	const captureInterrupt = async operation => {
 		try { await operation(); } catch (error) { interruptErrors.push(error); }
 	};
+	const interruptBrowser = runtime => {
+		if (!runtime || browserInterruptions.has(runtime)) return;
+		let resolveFallback;
+		const interruption = {
+			terminatePromise: null,
+			terminateSettled: false,
+			fallbackPromise: new Promise(resolve => { resolveFallback = resolve; }),
+			fallbackTimer: null,
+			fallbackSettled: false,
+			cancelFallback() {
+				if (this.fallbackSettled) return;
+				this.fallbackSettled = true;
+				if (this.fallbackTimer !== null) clearTimer(this.fallbackTimer);
+				resolveFallback();
+			},
+		};
+		interruption.terminatePromise = captureInterrupt(() => terminateExecution(runtime))
+			.finally(() => { interruption.terminateSettled = true; });
+		interruption.fallbackTimer = setTimer(() => {
+			if (interruption.fallbackSettled) return;
+			captureInterrupt(() => closeBrowser(runtime)).finally(() => {
+				interruption.fallbackSettled = true;
+				resolveFallback();
+			});
+		}, graceMs);
+		browserInterruptions.set(runtime, interruption);
+	};
 	const expire = () => {
 		if (expired || workSettled) return;
 		expired = true;
@@ -91,15 +116,10 @@ export function createInterruptingSampleWatchdog({
 		timeoutError.phase = phase;
 		timeoutError.phaseDurationsMs = snapshotDurations();
 		abortController.abort(timeoutError);
-		const acquiredBrowser = browserRuntime;
-		terminatePromise = captureInterrupt(() => terminateExecution(acquiredBrowser));
-		fallbackTimer = setTimer(() => {
-			if (workSettled || !acquiredBrowser) return;
-			fallbackPromise = captureInterrupt(async () => {
-				await terminatePromise;
-				await closeBrowser(acquiredBrowser);
-			});
-		}, graceMs);
+		interruptBrowser(browserRuntime);
+	};
+	const expireIfPastDeadline = () => {
+		if (!expired && !workSettled && now() >= deadline) expire();
 	};
 	const deadlineTimer = setTimer(expire, timeoutMs);
 
@@ -114,21 +134,54 @@ export function createInterruptingSampleWatchdog({
 			phaseStartedAt = timestamp;
 		},
 		registerGateway(runtime) { gatewayRuntime = runtime ?? null; },
-		registerBrowser(runtime) { browserRuntime = runtime ?? null; },
+		registerBrowser(runtime) {
+			browserRuntime = runtime ?? null;
+			expireIfPastDeadline();
+			if (expired && browserRuntime) interruptBrowser(browserRuntime);
+		},
 		resources() { return { browserRuntime, gatewayRuntime }; },
-		remainingMs() { return Math.max(1, Math.ceil(deadline - now())); },
-		throwIfExpired() { if (expired) throw timeoutError; },
+		remainingMs() {
+			expireIfPastDeadline();
+			return Math.max(1, Math.ceil(deadline - now()));
+		},
+		throwIfExpired() {
+			expireIfPastDeadline();
+			if (expired) throw timeoutError;
+		},
 		markWorkSettled() {
 			if (workSettled) return;
 			const timestamp = now();
 			durations[phase] += Math.max(0, timestamp - phaseStartedAt);
 			workSettled = true;
 			clearTimer(deadlineTimer);
-			if (fallbackTimer !== null) clearTimer(fallbackTimer);
+			for (const interruption of browserInterruptions.values()) {
+				if (!expired || interruption.terminateSettled) interruption.cancelFallback();
+			}
 		},
 		async finish() {
 			this.markWorkSettled();
-			await Promise.allSettled([terminatePromise, fallbackPromise]);
+			const interruptions = [...browserInterruptions.values()];
+			const allSettled = Promise.all(interruptions.flatMap(interruption => [
+				interruption.terminatePromise,
+				interruption.fallbackPromise,
+			]));
+			if (interruptions.length > 0) {
+				let finishTimer;
+				const settledWithinBound = await new Promise(resolve => {
+					let settled = false;
+					const finishWait = value => {
+						if (settled) return;
+						settled = true;
+						if (finishTimer !== undefined) clearTimer(finishTimer);
+						resolve(value);
+					};
+					allSettled.then(() => finishWait(true));
+					finishTimer = setTimer(() => finishWait(false), Math.max(1, graceMs * 2));
+				});
+				if (!settledWithinBound) {
+					interruptErrors.push(new Error(`${label} watchdog interruption did not settle within ${Math.max(1, graceMs * 2)}ms`));
+				}
+			}
 			if (interruptErrors.length === 1) throw interruptErrors[0];
 			if (interruptErrors.length > 1) throw new AggregateError(interruptErrors, `${label} watchdog interruption failed`);
 		},
@@ -448,26 +501,43 @@ export async function waitForGatewayReady({
 	timeoutMs = DEFAULT_GATEWAY_TIMEOUT_MS,
 	pollIntervalMs = 50,
 	fetchImpl = fetch,
+	signal,
 }) {
 	const deadline = performance.now() + timeoutMs;
 	let lastStatus = null;
 	let lastError = null;
 	while (performance.now() < deadline) {
+		signal?.throwIfAborted();
 		if (runtime.spawnError) throw new Error(`Gateway failed to spawn: ${runtime.spawnError.message}`, { cause: runtime.spawnError });
 		if (rootExited(runtime)) {
 			throw new Error(`Gateway exited before readiness (code ${runtime.child.exitCode ?? "unknown"})`);
 		}
 		try {
+			const probeSignal = AbortSignal.timeout(Math.min(2_000, Math.max(1, Math.ceil(deadline - performance.now()))));
 			const response = await fetchImpl(new URL("api/health", baseUrl), {
 				headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-				signal: AbortSignal.timeout(Math.min(2_000, Math.max(1, Math.ceil(deadline - performance.now())))),
+				signal: signal ? AbortSignal.any([signal, probeSignal]) : probeSignal,
 			});
 			lastStatus = response.status;
 			if (response.ok) return { readyMs: performance.now() - runtime.startedAt, status: response.status };
 		} catch (error) {
+			if (signal?.aborted) throw signal.reason;
 			lastError = error;
 		}
-		await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+		await new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = callback => value => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", abort);
+				callback(value);
+			};
+			const abort = finish(reject);
+			const timer = setTimeout(finish(resolve), Math.min(pollIntervalMs, Math.max(1, Math.ceil(deadline - performance.now()))));
+			if (signal?.aborted) abort(signal.reason);
+			else signal?.addEventListener("abort", abort, { once: true });
+		});
 	}
 	const detail = lastStatus === null ? String(lastError?.message ?? lastError ?? "no response") : `HTTP ${lastStatus}`;
 	throw new Error(`Gateway readiness timed out after ${timeoutMs}ms (${detail})`);
@@ -547,18 +617,24 @@ export async function launchBenchmarkBrowser({
 	viewport = { width: 1280, height: 800 },
 	launchOptions = {},
 	playwrightLoader = () => import("playwright"),
+	registerRuntime,
 } = {}) {
 	const partial = { browser: null, context: null, page: null, cdp: null, viewport };
 	try {
 		const { chromium } = await playwrightLoader();
 		partial.browser = await chromium.launch({ headless: true, ...launchOptions });
+		registerRuntime?.(partial);
 		partial.context = await partial.browser.newContext({ viewport });
+		registerRuntime?.(partial);
 		partial.page = await partial.context.newPage();
+		registerRuntime?.(partial);
 		try { partial.cdp = await partial.context.newCDPSession(partial.page); } catch { /* optional Chromium metrics unsupported */ }
+		registerRuntime?.(partial);
 		return partial;
 	} catch (error) {
 		try {
 			await closeBenchmarkBrowser(partial);
+			registerRuntime?.(null);
 		} catch (cleanupError) {
 			throw new AggregateError([error, cleanupError], `Browser acquisition failed and rollback was incomplete: ${error?.message ?? error}; ${cleanupError?.message ?? cleanupError}`);
 		}

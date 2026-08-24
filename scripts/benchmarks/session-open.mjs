@@ -658,9 +658,13 @@ async function measureBrowserSample(restored, manifest, watchdog, {
 	watchdog.throwIfExpired();
 	const browserRuntime = await launchBenchmarkBrowser({
 		viewport: SESSION_OPEN_VIEWPORT,
-		launchOptions: { args: ["--enable-precise-memory-info"] },
+		launchOptions: {
+			args: ["--enable-precise-memory-info"],
+			timeout: watchdog.remainingMs(),
+		},
+		registerRuntime: runtime => watchdog.registerBrowser(runtime),
 	});
-	watchdog.registerBrowser(browserRuntime);
+	watchdog.throwIfExpired();
 	let snapshotFrameBytes = 0;
 	try {
 		await browserRuntime.context.addInitScript(() => {

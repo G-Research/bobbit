@@ -57,30 +57,58 @@ export function createEventStreamSampleWatchdog(options = {}) {
 	});
 }
 
-async function waitForValue(read, label, timeoutMs = 30_000, intervalMs = 50) {
+function remainingTimeout(watchdog, capMs = Number.POSITIVE_INFINITY) {
+	watchdog.throwIfExpired();
+	return Math.max(1, Math.min(capMs, watchdog.remainingMs()));
+}
+
+function abortableDelay(delayMs, signal) {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const finish = callback => value => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			callback(value);
+		};
+		const onAbort = finish(reject);
+		const timer = setTimeout(finish(resolve), delayMs);
+		if (signal?.aborted) onAbort(signal.reason);
+		else signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+async function waitForValue(read, label, watchdog, maxTimeoutMs = 30_000, intervalMs = 50) {
+	const timeoutMs = remainingTimeout(watchdog, maxTimeoutMs);
 	const deadline = performance.now() + timeoutMs;
 	let lastError;
 	while (performance.now() < deadline) {
+		watchdog.throwIfExpired();
 		try {
-			const value = await read();
+			const value = await read(watchdog.signal);
 			if (value) return value;
 		} catch (error) {
+			if (watchdog.signal.aborted) throw watchdog.signal.reason;
 			lastError = error;
 		}
-		await new Promise(resolve => setTimeout(resolve, intervalMs));
+		await abortableDelay(Math.min(intervalMs, remainingTimeout(watchdog, deadline - performance.now())), watchdog.signal);
 	}
+	watchdog.throwIfExpired();
 	throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message ?? lastError}` : ""}`);
 }
 
 async function apiJson(baseUrl, token, apiPath, init = {}) {
+	const { timeoutMs = 30_000, signal, ...requestInit } = init;
+	const timeoutSignal = AbortSignal.timeout(Math.max(1, timeoutMs));
 	const response = await fetch(new URL(apiPath.replace(/^\//, ""), baseUrl), {
-		...init,
+		...requestInit,
 		headers: {
 			Authorization: `Bearer ${token}`,
-			...(init.body ? { "Content-Type": "application/json" } : {}),
-			...(init.headers ?? {}),
+			...(requestInit.body ? { "Content-Type": "application/json" } : {}),
+			...(requestInit.headers ?? {}),
 		},
-		signal: init.signal ?? AbortSignal.timeout(30_000),
+		signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
 	});
 	const text = await response.text();
 	let body = null;
@@ -91,8 +119,10 @@ async function apiJson(baseUrl, token, apiPath, init = {}) {
 	return body;
 }
 
-async function seedGateway(baseUrl, token, workspace) {
+async function seedGateway(baseUrl, token, workspace, watchdog) {
+	const deadlineInit = () => ({ signal: watchdog.signal, timeoutMs: remainingTimeout(watchdog, 30_000) });
 	await apiJson(baseUrl, token, "/api/preferences", {
+		...deadlineInit(),
 		method: "PUT",
 		body: JSON.stringify({
 			customProviders: [{
@@ -105,6 +135,7 @@ async function seedGateway(baseUrl, token, workspace) {
 		}),
 	});
 	await apiJson(baseUrl, token, "/api/preferences", {
+		...deadlineInit(),
 		method: "PUT",
 		body: JSON.stringify({
 			"default.sessionModel": "mock/mock-model",
@@ -112,6 +143,7 @@ async function seedGateway(baseUrl, token, workspace) {
 		}),
 	});
 	const project = await apiJson(baseUrl, token, "/api/projects", {
+		...deadlineInit(),
 		method: "POST",
 		body: JSON.stringify({
 			name: "event-stream-benchmark",
@@ -123,6 +155,7 @@ async function seedGateway(baseUrl, token, workspace) {
 	});
 	assert(typeof project?.id === "string", "Benchmark project creation returned no id");
 	const session = await apiJson(baseUrl, token, "/api/sessions", {
+		...deadlineInit(),
 		method: "POST",
 		body: JSON.stringify({ projectId: project.id, cwd: workspace, worktree: false }),
 	});
@@ -269,9 +302,71 @@ function normalizedText(value) {
 		.trim();
 }
 
-async function settleAndFingerprint(page, fixture, capturedRenderedText) {
+export function projectEventStreamFullDom(messages, proposalSpec = EVENT_STREAM_PROPOSAL_SPEC) {
+	return (Array.isArray(messages) ? messages : []).map(message => ({
+		role: String(message?.role ?? ""),
+		text: normalizedText(String(message?.text ?? "").split(proposalSpec).join("")),
+	}));
+}
+
+function orderedMarkerOccurrences(renderedText, markers) {
+	const occurrences = [];
+	for (const [markerOrder, marker] of [...new Set(markers)].entries()) {
+		let from = 0;
+		while (from <= renderedText.length) {
+			const index = renderedText.indexOf(marker, from);
+			if (index < 0) break;
+			occurrences.push({ index, markerOrder, marker });
+			from = index + marker.length;
+		}
+	}
+	return occurrences
+		.sort((left, right) => left.index - right.index || left.markerOrder - right.markerOrder)
+		.map(({ marker }) => marker);
+}
+
+export function projectEventStreamMarkers(renderedText, fixture) {
+	const primaryMarkers = [
+		...fixture.markers,
+		...fixture.finalMarkers.flatMap(marker => marker === EVENT_STREAM_ERROR_OUTPUT ? [marker, marker] : [marker]),
+	];
+	const settlementMarkers = [...fixture.settlementMarkers];
+	const allMarkers = [...new Set([...primaryMarkers, ...settlementMarkers])];
+	return {
+		primary: orderedMarkerOccurrences(renderedText, primaryMarkers),
+		settlement: orderedMarkerOccurrences(renderedText, settlementMarkers),
+		counts: allMarkers.map(marker => ({ marker, count: renderedText.split(marker).length - 1 })),
+	};
+}
+
+export function fingerprintEventStreamDom(messages, renderedText, fixture) {
+	const fullDomProjection = projectEventStreamFullDom(messages);
+	const markerProjection = projectEventStreamMarkers(renderedText, fixture);
+	return {
+		fullDomProjection,
+		markerProjection,
+		fullDomHash: sha256(fullDomProjection),
+		markerHash: sha256(markerProjection),
+	};
+}
+
+export function assertEventStreamLiveReloadParity(live, refreshed) {
+	if (live.fullDomHash !== refreshed.fullDomHash) {
+		const mismatch = Array.from({ length: Math.max(live.fullDomProjection.length, refreshed.fullDomProjection.length) }, (_, index) => ({
+			index,
+			live: live.fullDomProjection[index] ?? null,
+			refreshed: refreshed.fullDomProjection[index] ?? null,
+		})).find(row => !isDeepStrictEqual(row.live, row.refreshed));
+		throw new Error(`Live full DOM fingerprint ${live.fullDomHash} did not match refresh ${refreshed.fullDomHash}; first mismatch ${JSON.stringify(mismatch)}`);
+	}
+	assert(live.markerHash === refreshed.markerHash, `Live marker fingerprint ${live.markerHash} did not match refresh ${refreshed.markerHash}`);
+}
+
+async function settleAndFingerprint(page, fixture, capturedRenderedText, watchdog) {
 	const { trigger } = fixture;
+	watchdog?.throwIfExpired();
 	const renderedText = capturedRenderedText ?? normalizedText(await page.evaluate(() => document.body?.textContent ?? ""));
+	watchdog?.throwIfExpired();
 	await page.evaluate(async () => {
 		const deferred = window.DeferredBlock;
 		if (deferred?.forceResolveAll) {
@@ -280,6 +375,7 @@ async function settleAndFingerprint(page, fixture, capturedRenderedText) {
 		}
 		await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 	});
+	watchdog?.throwIfExpired();
 	const result = await page.evaluate(({ selector, trigger }) => {
 		const normalize = value => String(value ?? "")
 			.replace(/\b\d+(?:\.\d+)?s\b/g, "Xs")
@@ -332,13 +428,11 @@ async function settleAndFingerprint(page, fixture, capturedRenderedText) {
 			editorEnabled: textarea instanceof HTMLTextAreaElement && !textarea.disabled,
 		};
 	}, { selector: MESSAGE_SELECTOR, trigger });
-	const markerProjection = [...new Set([...fixture.markers, ...fixture.finalMarkers, ...fixture.settlementMarkers])]
-		.map(marker => ({ marker, count: renderedText.split(marker).length - 1 }));
+	const fingerprints = fingerprintEventStreamDom(result.messages, renderedText, fixture);
 	return {
 		...result,
+		...fingerprints,
 		renderedText,
-		markerProjection,
-		domHash: sha256(markerProjection),
 		semanticHash: sha256(result.semanticProjection),
 	};
 }
@@ -416,24 +510,24 @@ export function assertFinalState(snapshot, fixture, label = "Final") {
 	assert(!snapshot.streamingActive, `${label} streaming container remained active after agent settlement`);
 	assert(!snapshot.streamingTimerVisible, `${label} UI retained a live streaming timer after agent settlement`);
 	assert(snapshot.editorEnabled, `${label} message editor was not enabled`);
-	const renderedMarkers = [
+	const expectedRenderedMarkers = [
 		...fixture.markers,
 		...fixture.finalMarkers.flatMap(marker => marker === EVENT_STREAM_ERROR_OUTPUT ? [marker, marker] : [marker]),
 	];
-	const expectedCounts = new Map();
-	let previous = -1;
-	for (const marker of renderedMarkers) {
-		const occurrence = (expectedCounts.get(marker) ?? 0) + 1;
-		expectedCounts.set(marker, occurrence);
-		const index = snapshot.renderedText.indexOf(marker, previous + 1);
-		assert(index > previous, `${label} UI omitted or reordered rendered marker ${marker} occurrence ${occurrence}`);
-		previous = index;
-	}
-	for (const marker of fixture.settlementMarkers) expectedCounts.set(marker, 1);
-	for (const [marker, expected] of expectedCounts) {
-		const count = snapshot.renderedText.split(marker).length - 1;
-		assert(count === expected, `Expected rendered marker ${marker} ${expected} time(s) in the ${label.toLowerCase()} UI, found ${count}`);
-	}
+	const expectedMarkerProjection = {
+		primary: expectedRenderedMarkers,
+		settlement: [...fixture.settlementMarkers],
+		counts: [...new Set([...expectedRenderedMarkers, ...fixture.settlementMarkers])].map(marker => ({
+			marker,
+			count: expectedRenderedMarkers.filter(value => value === marker).length
+				+ fixture.settlementMarkers.filter(value => value === marker).length,
+		})),
+	};
+	const actualMarkerProjection = snapshot.markerProjection ?? projectEventStreamMarkers(snapshot.renderedText, fixture);
+	assert(
+		isDeepStrictEqual(actualMarkerProjection, expectedMarkerProjection),
+		`${label} UI marker projection omitted, duplicated, or reordered fixture markers`,
+	);
 	assertExpectedFinalSemanticState(snapshot, fixture, label);
 }
 
@@ -462,11 +556,14 @@ export async function cleanupEventStreamSample({ browser, gateway, baseUrl, toke
 	}
 }
 
-async function waitForSessionIdle(baseUrl, token, sessionId) {
-	return waitForValue(async () => {
-		const session = await apiJson(baseUrl, token, `/api/sessions/${encodeURIComponent(sessionId)}`);
+async function waitForSessionIdle(baseUrl, token, sessionId, watchdog) {
+	return waitForValue(async signal => {
+		const session = await apiJson(baseUrl, token, `/api/sessions/${encodeURIComponent(sessionId)}`, {
+			signal,
+			timeoutMs: remainingTimeout(watchdog, 30_000),
+		});
 		return session?.status === "idle" ? session : null;
-	}, `session ${sessionId} to become idle`, 30_000, 100);
+	}, `session ${sessionId} to become idle`, watchdog, 30_000, 100);
 }
 
 export async function runEventStreamSample(context, entry, fixture, fixtureRoot, {
@@ -546,33 +643,43 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			},
 		});
 		watchdog.registerGateway(gateway);
-		token = await waitForValue(async () => {
-			const value = (await readFile(path.join(secretsDir, "token"), "utf8")).trim();
+		token = await waitForValue(async signal => {
+			const value = (await readFile(path.join(secretsDir, "token"), { encoding: "utf8", signal })).trim();
 			return value.length >= 64 ? value : null;
-		}, "gateway token", 30_000);
-		await waitForGatewayReady({ runtime: gateway, baseUrl, token, timeoutMs: watchdog.remainingMs() });
-		const { sessionId } = await seedGateway(baseUrl, token, workspace);
-		await waitForSessionIdle(baseUrl, token, sessionId);
+		}, "gateway token", watchdog, 30_000);
+		await waitForGatewayReady({
+			runtime: gateway,
+			baseUrl,
+			token,
+			timeoutMs: remainingTimeout(watchdog),
+			signal: watchdog.signal,
+		});
+		const { sessionId } = await seedGateway(baseUrl, token, workspace, watchdog);
+		await waitForSessionIdle(baseUrl, token, sessionId, watchdog);
 
 		browser = await launchBenchmarkBrowser({
 			viewport: EVENT_STREAM_VIEWPORT,
-			launchOptions: { args: ["--enable-precise-memory-info"] },
+			launchOptions: {
+				args: ["--enable-precise-memory-info"],
+				timeout: remainingTimeout(watchdog),
+			},
+			registerRuntime: runtime => watchdog.registerBrowser(runtime),
 		});
-		watchdog.registerBrowser(browser);
+		watchdog.throwIfExpired();
 		await browser.page.addInitScript(installBrowserObserver, {
 			updateCount: fixture.updateCount,
 			markerPrefix: EVENT_STREAM_MARKER_PREFIX,
 		});
 		await browser.page.goto(`${baseUrl}?token=${encodeURIComponent(token)}#/session/${encodeURIComponent(sessionId)}`, {
 			waitUntil: "domcontentloaded",
-			timeout: 30_000,
+			timeout: remainingTimeout(watchdog, 30_000),
 		});
-		await browser.page.locator("body[data-shortcuts-ready='1']").waitFor({ state: "visible", timeout: 30_000 });
-		await browser.page.locator("message-editor textarea").first().waitFor({ state: "visible", timeout: 20_000 });
+		await browser.page.locator("body[data-shortcuts-ready='1']").waitFor({ state: "visible", timeout: remainingTimeout(watchdog, 30_000) });
+		await browser.page.locator("message-editor textarea").first().waitFor({ state: "visible", timeout: remainingTimeout(watchdog, 20_000) });
 		await browser.page.waitForFunction(id => {
 			const app = window.bobbitState ?? window.__bobbitState;
 			return app?.selectedSessionId === id && app?.remoteAgent?.state?.status === "idle";
-		}, sessionId, { timeout: 20_000 });
+		}, sessionId, { timeout: remainingTimeout(watchdog, 20_000) });
 
 		watchdog.setPhase("stream");
 		watchdog.throwIfExpired();
@@ -584,23 +691,23 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			return app.remoteAgent.prompt(trigger);
 		}, fixture.trigger);
 		await browser.page.waitForFunction(done => document.body?.textContent?.includes(done), `${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`, {
-			timeout: 30_000,
+			timeout: remainingTimeout(watchdog, 30_000),
 		});
-		await waitForSessionIdle(baseUrl, token, sessionId);
+		await waitForSessionIdle(baseUrl, token, sessionId, watchdog);
 		await browser.page.waitForFunction(() => {
 			const app = window.bobbitState ?? window.__bobbitState;
 			const remote = app?.remoteAgent?.state;
 			return remote?.status === "idle" && remote?.isStreaming !== true;
-		}, undefined, { timeout: 20_000 });
+		}, undefined, { timeout: remainingTimeout(watchdog, 20_000) });
 		const liveMarkerSnapshot = await browser.page.waitForFunction(markers => {
 			const text = document.body?.textContent ?? "";
 			return markers.every(marker => text.includes(marker)) ? text : false;
-		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: 20_000 });
+		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: remainingTimeout(watchdog, 20_000) });
 		const liveRenderedText = normalizedText(await liveMarkerSnapshot.jsonValue());
 		await browser.page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 		const observed = await browser.page.evaluate(() => window.__bobbitEventStreamBenchmark.finish());
 		const elapsedMs = performance.now() - sampleStartedAt;
-		const live = await settleAndFingerprint(browser.page, fixture, liveRenderedText);
+		const live = await settleAndFingerprint(browser.page, fixture, liveRenderedText, watchdog);
 
 		watchdog.setPhase("oracle");
 		watchdog.throwIfExpired();
@@ -616,28 +723,19 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			committedLatencies.push(rendered - arrival);
 		}
 
-		await browser.page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-		await browser.page.locator("message-editor textarea").first().waitFor({ state: "visible", timeout: 20_000 });
+		await browser.page.reload({ waitUntil: "domcontentloaded", timeout: remainingTimeout(watchdog, 30_000) });
+		await browser.page.locator("message-editor textarea").first().waitFor({ state: "visible", timeout: remainingTimeout(watchdog, 20_000) });
 		await browser.page.waitForFunction(done => document.body?.textContent?.includes(done), `${EVENT_STREAM_DONE_MARKER}:${fixture.updateCount}`, {
-			timeout: 20_000,
+			timeout: remainingTimeout(watchdog, 20_000),
 		});
 		const refreshedMarkerSnapshot = await browser.page.waitForFunction(markers => {
 			const text = document.body?.textContent ?? "";
 			return markers.every(marker => text.includes(marker)) ? text : false;
-		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: 20_000 });
+		}, [...fixture.finalMarkers, ...fixture.settlementMarkers], { timeout: remainingTimeout(watchdog, 20_000) });
 		const refreshedRenderedText = normalizedText(await refreshedMarkerSnapshot.jsonValue());
-		const refreshed = await settleAndFingerprint(browser.page, fixture, refreshedRenderedText);
+		const refreshed = await settleAndFingerprint(browser.page, fixture, refreshedRenderedText, watchdog);
 		assertFinalState(refreshed, fixture, "Refreshed final");
-		if (live.domHash !== refreshed.domHash) {
-			const mismatch = Math.max(live.messages.length, refreshed.messages.length) > 0
-				? Array.from({ length: Math.max(live.messages.length, refreshed.messages.length) }, (_, index) => ({
-					index,
-					live: live.messages[index] ?? null,
-					refreshed: refreshed.messages[index] ?? null,
-				})).find(row => JSON.stringify(row.live) !== JSON.stringify(row.refreshed))
-				: null;
-			throw new Error(`Live DOM fingerprint ${live.domHash} did not match refresh ${refreshed.domHash}; first mismatch ${JSON.stringify(mismatch)}`);
-		}
+		assertEventStreamLiveReloadParity(live, refreshed);
 		assert(live.semanticHash === refreshed.semanticHash, `Live semantic fingerprint ${live.semanticHash} did not match refresh ${refreshed.semanticHash}`);
 
 		const firstArrival = observed.frames[0]?.arrivalMs;
@@ -677,8 +775,10 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 					committedOrdinalCount: committedLatencies.length,
 					firstSeq: observed.frames[0]?.seq ?? null,
 					lastSeq: observed.frames.at(-1)?.seq ?? null,
-					liveDomHash: live.domHash,
-					refreshDomHash: refreshed.domHash,
+					liveFullDomHash: live.fullDomHash,
+					refreshFullDomHash: refreshed.fullDomHash,
+					liveMarkerHash: live.markerHash,
+					refreshMarkerHash: refreshed.markerHash,
 					liveSemanticHash: live.semanticHash,
 					refreshSemanticHash: refreshed.semanticHash,
 					expectedSemanticHash: fixture.expectedFinalSemanticHash,
