@@ -19,8 +19,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { isWorktreePathReferencedByLiveSessionForCleanup } from "../../src/server/agent/worktree-reference-guard.ts";
+
+const nativeRealpath = promisify(fs.realpath.native) as (value: string) => Promise<string>;
 
 type FakeWorktree = { path: string; branch: string; adminPath?: string };
 const fakeGitState = {
@@ -158,6 +161,18 @@ function explicitDotAlias(worktreePath: string): string {
 	return `${path.dirname(worktreePath)}${path.sep}hop${path.sep}..${path.sep}${path.basename(worktreePath)}`;
 }
 
+async function traversableDotAlias(worktreePath: string): Promise<string> {
+	const alias = explicitDotAlias(worktreePath);
+	await fs.promises.mkdir(path.join(path.dirname(worktreePath), "hop"), { recursive: true });
+	const comparable = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+	assert.equal(
+		comparable(await nativeRealpath(alias)),
+		comparable(await nativeRealpath(worktreePath)),
+		`fixture alias must resolve through a real sibling hop to ${worktreePath}`,
+	);
+	return alias;
+}
+
 function makeSession(id: string, extra: Record<string, any>): any {
 	return {
 		id,
@@ -227,9 +242,11 @@ describe("shared worktree guard reproductions", () => {
 	it("resolves only explicit aliases and fails closed when their identity is unavailable", async () => {
 		const candidate = path.join(stateRoot, "worktrees", "shared");
 		const child = path.join(candidate, "packages", "api");
+		const distinct = path.join(stateRoot, "different");
 		fs.mkdirSync(child, { recursive: true });
-		const candidateAlias = explicitDotAlias(candidate);
-		const childAlias = explicitDotAlias(child);
+		fs.mkdirSync(distinct, { recursive: true });
+		const candidateAlias = await traversableDotAlias(candidate);
+		const childAlias = await traversableDotAlias(child);
 		const realpathNative = vi.fn(async (value: string) => fs.promises.realpath(value));
 
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: candidate }], { realpathNative }), true);
@@ -241,7 +258,7 @@ describe("shared worktree guard reproductions", () => {
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ cwd: childAlias }], { realpathNative }), true);
 		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: explicitDotAlias(path.join(stateRoot, "other")) }], { realpathNative }), true,
 			"an unresolved explicit alias must conservatively preserve cleanup candidates");
-		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: explicitDotAlias(stateRoot) }], { realpathNative }), false,
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: await traversableDotAlias(distinct) }], { realpathNative }), false,
 			"proven-distinct alias identities remain cleanable");
 	});
 
@@ -263,7 +280,7 @@ describe("shared worktree guard reproductions", () => {
 				cwd: sharedWorktree,
 			}));
 			store.put(makeSession("live-b", {
-				cwd: explicitDotAlias(sharedWorktree),
+				cwd: await traversableDotAlias(sharedWorktree),
 				worktreePath: undefined,
 				branch: "session/live-different-branch",
 			}));
@@ -307,9 +324,9 @@ describe("shared worktree guard reproductions", () => {
 				repoWorktrees: { api: apiWorktree, web: webWorktree },
 			}));
 			store.put(makeSession("live-api-owner", {
-				cwd: apiWorktree,
+				cwd: path.join(tmp, "unrelated-live-cwd"),
 				branch: "session/live-api-owner",
-				repoWorktrees: { api: explicitDotAlias(apiWorktree) },
+				repoWorktrees: { api: await traversableDotAlias(apiWorktree) },
 			}));
 
 			const manager = makeManager(store);
@@ -324,6 +341,11 @@ describe("shared worktree guard reproductions", () => {
 			assert.deepEqual(
 				fakeGitState.commands.filter(call => call.args[0] === "worktree" && call.args[1] === "remove").map(call => call.args[2]),
 				[webWorktree],
+			);
+			assert.deepEqual(
+				fakeGitState.commands.filter(call => call.args[0] === "branch" && call.args[1] === "-D").map(call => call.cwd),
+				[web],
+				"the shared API component must issue no branch deletion while unshared web deletes exactly once",
 			);
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
@@ -358,7 +380,7 @@ describe("shared worktree guard reproductions", () => {
 			});
 			store.put(owner);
 			store.put(makeSession("live-borrower", {
-				cwd: explicitDotAlias(apiWorktree),
+				cwd: await traversableDotAlias(apiWorktree),
 				branch: "session/live-borrower",
 			}));
 			const manager = makeManager(store);
@@ -391,7 +413,7 @@ describe("shared worktree guard reproductions", () => {
 			const branch = `session/${path.basename(sharedWorktree)}`;
 			const store = makeStore();
 			store.put(makeSession("live-owner", {
-				cwd: explicitDotAlias(sharedWorktree),
+				cwd: await traversableDotAlias(sharedWorktree),
 				branch: "session/unrelated-branch",
 			}));
 			const porcelain = `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${sharedWorktree}\nbranch refs/heads/${branch}\n`;
@@ -418,7 +440,7 @@ describe("shared worktree guard reproductions", () => {
 			fs.mkdirSync(candidate, { recursive: true });
 			const store = makeStore();
 			store.put(makeSession("archived-owner", { archived: true, archivedAt: Date.now(), worktreePath: candidate }));
-			store.put(makeSession("new-live-owner", { cwd: explicitDotAlias(candidate) }));
+			store.put(makeSession("new-live-owner", { cwd: await traversableDotAlias(candidate) }));
 			const manager = makeManager(store);
 			const item = {
 				key: "archived-owner:.:candidate",
@@ -475,7 +497,7 @@ describe("shared worktree guard reproductions", () => {
 				repoWorktrees: { api: apiWorktree, web: webWorktree },
 			};
 
-			await (staffManager as any).cleanupStaffWorktree(staff, staff.projectId, [{ cwd: explicitDotAlias(apiWorktree) }]);
+			await (staffManager as any).cleanupStaffWorktree(staff, staff.projectId, [{ cwd: await traversableDotAlias(apiWorktree) }]);
 
 			assert.ok(fs.existsSync(apiWorktree));
 			assert.ok(fs.existsSync(container), "shared component must also preserve its container");
@@ -538,8 +560,9 @@ describe("shared worktree guard reproductions", () => {
 				commandRunner: fakeGitRunner,
 				remotePolicy: { skipRemotePush: true },
 			});
+			const apiAlias = await traversableDotAlias(apiWorktree);
 			goalManager.setLiveSessionResolver(() => [makeSession("live-api-owner", {
-				cwd: explicitDotAlias(apiWorktree),
+				cwd: apiAlias,
 				branch: "session/live-api-owner",
 			})]);
 			goalStore.put({
@@ -785,7 +808,7 @@ describe("shared worktree guard reproductions", () => {
 			});
 			store.put(failedSession);
 			store.put(makeSession("live-owner", {
-				cwd: explicitDotAlias(sharedWorktree),
+				cwd: await traversableDotAlias(sharedWorktree),
 				branch: "session/live-owner",
 				worktreePath: undefined,
 			}));
