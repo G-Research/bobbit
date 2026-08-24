@@ -11546,7 +11546,9 @@ export class SessionManager {
 		// children, explicit createSession overrides, incl. an explicit empty `[]`).
 		// Preserve them exactly, with any live grants layered on top.
 		if (persistedAllowedTools) {
-			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
+			// mergeToolNames treats two empty inputs as absent. Here the base is an
+			// explicit session constraint, so preserve [] when there are no grants.
+			return this.mergeToolNames(persistedAllowedTools, sessionGrants) ?? persistedAllowedTools;
 		}
 
 		// Normal sessions derive their tool surface from the current role/group/MCP
