@@ -413,6 +413,84 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		}
 	});
 
+	it("rejects when the repository vanishes after Git removal fails", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-repo-vanished-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-repo-vanished");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/repo-vanished", wt, "HEAD"]);
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (file === "git" && args[0] === "worktree" && args[1] === "remove") {
+						fs.rmSync(repo, { recursive: true, force: true });
+						throw new Error("synthetic Git removal failure after repository vanished");
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await assert.rejects(
+				cleanupWorktree(repo, wt, undefined, false, runner),
+				/failed to verify worktree cleanup/i,
+			);
+			assert.equal(fs.existsSync(repo), false, "fixture must remove the repository before postcondition verification");
+			assert.equal(fs.existsSync(wt), false, "the exact worktree fallback should still run before verification rejects");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects when the directory vanishes but its exact admin entry remains", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-admin-remains-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-admin-remains");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/admin-remains", wt, "HEAD"]);
+			let adminPath = "";
+			let listingCount = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (file === "git" && args[0] === "worktree" && args[1] === "list") {
+						listingCount++;
+						if (listingCount > 1) return { stdout: `worktree ${repo}\0`, stderr: "" };
+					}
+					if (file === "git" && args[0] === "rev-parse" && args[1] === "--absolute-git-dir") {
+						const result = await realCommandRunner.execFile(file, args, options);
+						adminPath = result.stdout.toString().trim();
+						return result;
+					}
+					if (file === "git" && args[0] === "worktree" && args[1] === "remove") {
+						return { stdout: "", stderr: "" };
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await assert.rejects(
+				cleanupWorktree(repo, wt, undefined, false, runner),
+				/admin directory remains/i,
+			);
+			assert.equal(fs.existsSync(wt), false, "the exact worktree directory fallback must run");
+			assert.equal(fs.existsSync(adminPath), true, "the fixture must retain the proven admin entry");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("fails when the authoritative postcondition listing cannot be read", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-postcondition-"));
 		const repo = path.join(tmp, "repo");
