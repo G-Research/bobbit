@@ -615,25 +615,56 @@ async function proveCleanupWorktreeOwnership(
 		throw new Error(`Refusing to clean up main worktree: ${requestedPath}`);
 	}
 
-	let adminPath: string | undefined;
-	if (await pathExists(removalPath)) {
-		try {
-			const { stdout } = await execGit(
-				["rev-parse", "--absolute-git-dir"],
-				{ cwd: removalPath, timeout: 5_000 },
-				commandRunner,
-			);
-			const candidate = stdout.toString().trim();
-			const adminParent = path.join(commonDir, "worktrees");
-			if (candidate
-				&& await canonicalizePath(path.dirname(candidate)) === await canonicalizePath(adminParent)
-				&& await canonicalizePath(candidate) !== await canonicalizePath(commonDir)) {
-				adminPath = candidate;
-			}
-		} catch {
-			// Registration still proves the directory target. Without a validated
-			// direct admin child, leave metadata for the postcondition to report.
+	let removalPathExists: boolean;
+	try {
+		await fs.promises.lstat(removalPath);
+		removalPathExists = true;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") {
+			removalPathExists = false;
+		} else {
+			throw new Error(`Failed to inspect registered worktree ${removalPath}: ${gitErrorText(err)}`);
 		}
+	}
+
+	let adminPath: string | undefined;
+	if (removalPathExists) {
+		const { stdout } = await execGit(
+			["rev-parse", "--absolute-git-dir"],
+			{ cwd: removalPath, timeout: 5_000 },
+			commandRunner,
+		);
+		const candidate = stdout.toString().trim();
+		if (!candidate) {
+			throw new Error(`Git returned an empty linked-worktree admin directory for ${removalPath}`);
+		}
+		const adminParent = path.join(commonDir, "worktrees");
+		const candidateIdentity = await canonicalizePath(candidate);
+		const adminParentIdentity = await canonicalizePath(adminParent);
+		const commonDirIdentity = await canonicalizePath(commonDir);
+		if (path.dirname(candidateIdentity) !== adminParentIdentity || candidateIdentity === commonDirIdentity) {
+			throw new Error(`Invalid linked-worktree admin directory for ${removalPath}: ${candidate}`);
+		}
+
+		const adminBacklinkPath = path.join(candidate, "gitdir");
+		let adminBacklink: string;
+		try {
+			adminBacklink = (await fs.promises.readFile(adminBacklinkPath, "utf8")).trim();
+		} catch (err) {
+			throw new Error(`Failed to read linked-worktree admin backlink ${adminBacklinkPath}: ${gitErrorText(err)}`);
+		}
+		if (!adminBacklink) {
+			throw new Error(`Invalid empty linked-worktree admin backlink at ${adminBacklinkPath}`);
+		}
+		const resolvedBacklink = path.isAbsolute(adminBacklink)
+			? adminBacklink
+			: path.resolve(candidate, adminBacklink);
+		const expectedBacklink = path.join(removalPath, ".git");
+		if (await canonicalizePath(resolvedBacklink) !== await canonicalizePath(expectedBacklink)) {
+			throw new Error(`Invalid linked-worktree admin backlink for ${removalPath}: ${adminBacklink}`);
+		}
+		adminPath = candidate;
 	}
 	return { removalPath, adminPath };
 }
