@@ -1,5 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
+import { PassThrough } from "node:stream";
 import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -70,6 +72,18 @@ function standardSingleRepositoryProbe(
 
 function commandName(file: string): string {
 	return basename(file).toLowerCase().replace(/\.(?:cmd|exe)$/, "");
+}
+
+function credentialHelperResult(output: string): any {
+	const child: any = new EventEmitter();
+	child.stdout = new PassThrough();
+	child.stdin = new PassThrough();
+	child.kill = () => true;
+	setImmediate(() => {
+		child.stdout.end(output);
+		child.emit("close", 0, null);
+	});
+	return child;
 }
 
 function ownedHeadEvidence(owner: string, repository: string): Record<string, unknown> {
@@ -289,6 +303,145 @@ test.describe("remote-state coordinator routes", () => {
 				}).catch(() => {});
 				const cleanup = await awaitableRm(ghConfigDir, { maxAttempts: 5, backoffMs: 50 });
 				expect(cleanup.removed, `GH_CONFIG_DIR fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+			}
+		}
+	});
+
+	test("admits only credential-vouched unlisted enterprise hosts to exact-bound PR lookup", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const vouchedHost = `credential-vouched-${Date.now()}.invalid`;
+		const unvouchedHost = `credential-unvouched-${Date.now()}.invalid`;
+		const branch = `fixture/credential-vouched-${Date.now()}`;
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const originalSpawn = runner.spawn;
+		const previousEnterpriseTokens = new Map<string, string | undefined>(
+			["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].map(name => [name, process.env[name]] as const),
+		);
+		let remoteHost = vouchedHost;
+		let sessionId: string | undefined;
+		let originalTrustedHosts: unknown = [];
+		const ghCalls: string[][] = [];
+		const probes: Array<{ file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; request: string }> = [];
+
+		try {
+			// The production trust object reads the environment at admission time. Clear
+			// host-class ambient tokens for this fixture only, then restore them exactly.
+			delete process.env.GH_ENTERPRISE_TOKEN;
+			delete process.env.GITHUB_ENTERPRISE_TOKEN;
+			sessionId = await createRemoteStateSession(gateway, gitCwd());
+			gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+
+			runner.spawn = (file: string, args: readonly string[], options?: any) => {
+				const child = credentialHelperResult(remoteHost === vouchedHost
+					? `protocol=https\nhost=${vouchedHost}\nusername=route-fixture\npassword=fixture-secret\n`
+					: `protocol=https\nhost=${unvouchedHost}\nusername=route-fixture\n`);
+				const probe = {
+					file: commandName(file),
+					args: [...args],
+					cwd: String(options?.cwd ?? ""),
+					env: options?.env ?? {},
+					request: "",
+				};
+				probes.push(probe);
+				child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
+				return child;
+			};
+			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+				const command = commandName(file);
+				if (command === "git" && args.join(" ") === "remote get-url origin") {
+					return { stdout: `https://${remoteHost}/acme/widget.git\n`, stderr: "" };
+				}
+				if (command === "gh") {
+					ghCalls.push([...args]);
+					if (args[0] === "pr" && args[1] === "list") {
+						return {
+							stdout: JSON.stringify([{
+								number: 91,
+								url: `https://${vouchedHost}/acme/widget/pull/91`,
+								title: "Credential-vouched enterprise host",
+								state: "OPEN",
+								mergeable: "MERGEABLE",
+								headRefName: branch,
+								baseRefName: "main",
+								...ownedHeadEvidence("acme", "widget"),
+							}]),
+							stderr: "",
+						};
+					}
+					if (args[0] === "api") throw new Error("fixture GraphQL unavailable");
+					if (args[0] === "repo" && args[1] === "view") {
+						return { stdout: JSON.stringify({ viewerPermission: "ADMIN" }), stderr: "" };
+					}
+				}
+				const standard = standardSingleRepositoryProbe(file, args, gitCwd());
+				if (standard) return standard;
+				return unexpectedRunnerCommand(file, args, options);
+			};
+
+			const originalPreferences = await apiFetch("/api/preferences");
+			if (originalPreferences.ok) originalTrustedHosts = (await originalPreferences.json()).githubTrustedHosts ?? [];
+			expect((await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: [] }),
+			})).status).toBe(200);
+			gateway.clock.advance(60_000);
+			expect(await (await apiFetch(`/api/github/trusted-hosts/check?host=${vouchedHost}`)).json())
+				.toEqual({ host: vouchedHost, trusted: false });
+
+			const vouched = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(vouched.status).toBe(200);
+			expect(await vouched.json()).toMatchObject({
+				source: "pr",
+				stale: false,
+				data: { number: 91, viewerIsAdmin: true },
+			});
+			expect(ghCalls.find(args => args[0] === "pr" && args[1] === "list")?.slice(0, 6)).toEqual([
+				"pr", "list", "--repo", `${vouchedHost}/acme/widget`, "--head", branch,
+			]);
+			expect(ghCalls.filter(args => args[0] === "api").every(args => (
+				args[1] === "--hostname" && args[2] === vouchedHost
+			))).toBe(true);
+			expect(ghCalls.find(args => args[0] === "repo" && args[1] === "view")).toEqual([
+				"repo", "view", "--repo", `${vouchedHost}/acme/widget`, "--json", "viewerPermission",
+			]);
+			expect(probes).toHaveLength(1);
+			expect(probes[0]).toMatchObject({
+				file: "git",
+				args: ["credential", "fill"],
+				request: `url=https://${vouchedHost}\n\n`,
+			});
+			expect(probes[0].cwd).not.toBe(gitCwd());
+			expect(probes[0].cwd.startsWith(tmpdir())).toBe(true);
+			expect(probes[0].env.GIT_TERMINAL_PROMPT).toBe("0");
+			expect(probes[0].env.GCM_INTERACTIVE).toBe("never");
+
+			crossForceCoalescingWindow();
+			expect((await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`)).status).toBe(200);
+			expect(probes).toHaveLength(1);
+
+			remoteHost = unvouchedHost;
+			const ghCallsBeforeUnvouched = ghCalls.length;
+			const unavailable = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
+			expect(unavailable.status).toBe(204);
+			expect(probes).toHaveLength(2);
+			expect(probes[1].request).toBe(`url=https://${unvouchedHost}\n\n`);
+			expect(ghCalls).toHaveLength(ghCallsBeforeUnvouched);
+		} finally {
+			runner.execFile = originalExecFile;
+			runner.spawn = originalSpawn;
+			for (const [name, value] of previousEnterpriseTokens) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			gateway.clock.advance(60_000);
+			try {
+				if (sessionId) await deleteSession(sessionId);
+			} finally {
+				await apiFetch("/api/preferences", {
+					method: "PUT",
+					body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
+				}).catch(() => {});
 			}
 		}
 	});
