@@ -84,10 +84,14 @@ export class GithubHostCredentialTrust {
 		if (verdict?.kind === "positive") return true;
 		if (verdict?.kind === "negative") return false;
 
+		const generation = this.generation;
 		const active = this.activeFlights.get(key);
-		if (!active) return this.startFlight(key, this.generation);
-		if (active.generation === this.generation) return active.promise;
-		return this.queueLatestSuccessor(key, active);
+		const promise = !active
+			? this.startFlight(key, generation)
+			: active.generation === generation
+				? active.promise
+				: this.queueLatestSuccessor(key, active, generation);
+		return this.viewForGeneration(promise, generation);
 	}
 
 	/**
@@ -105,9 +109,9 @@ export class GithubHostCredentialTrust {
 	private startFlight(host: string, generation: number): Promise<boolean> {
 		const existing = this.activeFlights.get(host);
 		if (existing) {
-			return existing.generation === this.generation
+			return existing.generation === generation
 				? existing.promise
-				: this.queueLatestSuccessor(host, existing);
+				: this.queueLatestSuccessor(host, existing, generation);
 		}
 
 		let complete!: (trusted: boolean) => void;
@@ -123,10 +127,10 @@ export class GithubHostCredentialTrust {
 		return promise;
 	}
 
-	private queueLatestSuccessor(host: string, active: ActiveFlight): Promise<boolean> {
+	private queueLatestSuccessor(host: string, active: ActiveFlight, generation: number): Promise<boolean> {
 		const existing = this.queuedFlights.get(host);
 		if (existing) {
-			existing.generation = this.generation;
+			existing.generation = generation;
 			return existing.promise;
 		}
 
@@ -140,9 +144,18 @@ export class GithubHostCredentialTrust {
 			if (queued.generation !== this.generation) return false;
 			return this.startFlight(host, queued.generation);
 		})();
-		queued = { generation: this.generation, promise };
+		queued = { generation, promise };
 		this.queuedFlights.set(host, queued);
 		return promise;
+	}
+
+	// Flights and successors are shared for tree ownership, but authorization is
+	// not: every caller observes false once a newer explicit refresh supersedes it.
+	private viewForGeneration(promise: Promise<boolean>, generation: number): Promise<boolean> {
+		return promise.then(
+			trusted => trusted === true && generation === this.generation,
+			() => false,
+		);
 	}
 
 	private async resolveFlight(host: string, flight: ActiveFlight): Promise<boolean> {

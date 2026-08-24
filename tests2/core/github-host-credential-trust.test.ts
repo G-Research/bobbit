@@ -144,9 +144,10 @@ describe("GithubHostCredentialTrust cache", () => {
 		const trust = new GithubHostCredentialTrust({ probe, getEnv: () => ({}) });
 
 		const first = trust.isTrusted("git.example.com");
+		const queuedCallers: Promise<boolean>[] = [];
 		for (let refresh = 0; refresh < 4; refresh++) {
 			trust.forgetUnverified();
-			void trust.isTrusted("git.example.com");
+			queuedCallers.push(trust.isTrusted("git.example.com"));
 			expect(probe, `refresh ${refresh} must join one queued successor`).toHaveBeenCalledTimes(1);
 		}
 
@@ -163,7 +164,9 @@ describe("GithubHostCredentialTrust cache", () => {
 		const latest = trust.isTrusted("git.example.com");
 		expect(probe).toHaveBeenCalledTimes(2);
 		releases[1](true);
-		await expect(beforeLatestRefresh).resolves.toBe(false);
+		await expect(Promise.all([...queuedCallers, beforeLatestRefresh])).resolves.toEqual([
+			false, false, false, false, false,
+		]);
 		await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(3));
 		expect(active).toBe(1);
 		expect(maxActive).toBe(1);

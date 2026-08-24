@@ -635,7 +635,9 @@ test.describe("remote-state coordinator routes", () => {
 
 			probes[1].complete(true);
 			const responses = await Promise.all(routeRequests);
-			expect(responses.map(response => response.status).sort()).toEqual([200, 200, 204]);
+			// Each route keeps its own refresh-generation view even though G1 and G2
+			// share one successor internally. Only the latest caller may authorize.
+			expect(responses.map(response => response.status)).toEqual([204, 204, 200]);
 			expect(activeTrees).toBe(0);
 			expect(maxActiveTrees).toBe(1);
 			expect(probes).toHaveLength(2);
