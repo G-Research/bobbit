@@ -53,6 +53,10 @@ jobs:
 
       - name: Unit gate
         run: npm run test:unit
+        # Hosted Windows can heavily starve three concurrent Vitest workers; an
+        # empty value on other runners preserves the suite's normal fixed cap.
+        env:
+          VITEST_MAX_WORKERS: ${{ runner.os == 'Windows' && '2' || '' }}
 
   browser:
     name: Browser (${{ matrix.os }}, Node 22.19.0)
