@@ -1,4 +1,4 @@
-import type { Page, Request as PlaywrightRequest, WebSocket as PlaywrightWebSocket } from "@playwright/test";
+import type { Page, Request as PlaywrightRequest, Response as PlaywrightResponse, WebSocket as PlaywrightWebSocket } from "@playwright/test";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import QRCode from "qrcode";
@@ -179,7 +179,24 @@ async function clickSessionAction(page: Page, actionId: string): Promise<void> {
 	await action.click();
 }
 
-async function waitForMountedSessionRoute(page: Page, sessionId: string): Promise<void> {
+function isMountedApiResponse(
+	response: PlaywrightResponse,
+	gateway: GatewayInfo,
+	path: string,
+	status: number,
+	authorization: string | undefined,
+): boolean {
+	const actual = new URL(response.url());
+	const expected = new URL(`${gateway.baseURL}${path}`);
+	return response.request().method() === "GET"
+		&& actual.origin === expected.origin
+		&& actual.pathname === expected.pathname
+		&& actual.search === expected.search
+		&& response.status() === status
+		&& response.request().headers().authorization === authorization;
+}
+
+async function waitForMountedSessionRoute(page: Page, gateway: GatewayInfo, sessionId: string): Promise<void> {
 	await page.waitForFunction((id) => {
 		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
 		const editor = document.querySelector<HTMLTextAreaElement>("message-editor textarea");
@@ -187,6 +204,7 @@ async function waitForMountedSessionRoute(page: Page, sessionId: string): Promis
 		const bounds = editor.getBoundingClientRect();
 		return window.location.hash === `#/session/${id}`
 			&& state?.selectedSessionId === id
+			&& state?.gatewaySessions?.some((session: any) => session?.id === id)
 			&& state?.connectingSessionId === null
 			&& state?.connectionStatus === "connected"
 			&& state?.remoteAgent?.gatewaySessionId === id
@@ -195,6 +213,10 @@ async function waitForMountedSessionRoute(page: Page, sessionId: string): Promis
 			&& bounds.width > 0
 			&& bounds.height > 0;
 	}, sessionId, { timeout: 20_000 });
+
+	const mounted = await adminRequest(gateway, `/api/sessions/${sessionId}`);
+	expect(mounted.response.status, mounted.text).toBe(200);
+	expect(mounted.body?.id).toBe(sessionId);
 }
 
 function assertBuiltChunksAreRuntimeMounted(): void {
@@ -269,13 +291,13 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 
 			sessionId = await createHarnessSession(gateway);
 			await page.goto(`${gateway.baseURL}/session/${sessionId}`, { waitUntil: "domcontentloaded" });
-			await waitForMountedSessionRoute(page, sessionId);
+			await waitForMountedSessionRoute(page, gateway, sessionId);
 			await expect.poll(() => sockets.find(socket => new URL(socket.url).pathname === `${BASE_PATH}/ws/${sessionId}`)?.received ?? 0, {
 				timeout: 20_000,
 				message: "session WebSocket should authenticate below the mount",
 			}).toBeGreaterThan(0);
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await waitForMountedSessionRoute(page, sessionId);
+			await waitForMountedSessionRoute(page, gateway, sessionId);
 
 			const scriptsBeforeLazyNavigation = requests.filter(record => record.resourceType === "script").length;
 			await page.evaluate(() => { window.location.hash = "#/market"; });
@@ -288,7 +310,7 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			expect(marketApi, "lazy API-backed marketplace screen should call the mounted gateway").toBeTruthy();
 
 			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-			await waitForMountedSessionRoute(page, sessionId);
+			await waitForMountedSessionRoute(page, gateway, sessionId);
 			const previewEnabled = await adminRequest(gateway, `/api/sessions/${sessionId}`, {
 				method: "PATCH",
 				body: JSON.stringify({ preview: true }),
@@ -357,19 +379,40 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 				localStorage.setItem("gateway.token", "localhost");
 			}, { baseURL: gateway.baseURL });
 			const sentinelRequestStart = requests.length;
+			const sentinelHealth = page.waitForResponse((response) => isMountedApiResponse(
+				response,
+				gateway,
+				"/api/health",
+				200,
+				undefined,
+			), { timeout: 15_000 });
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await expect.poll(() => requests.slice(sentinelRequestStart).filter(record => new URL(record.url).pathname.startsWith(`${BASE_PATH}/api/`)).length, {
-				timeout: 15_000,
-			}).toBeGreaterThan(0);
+			const healthResponse = await sentinelHealth;
+			await healthResponse.finished();
+			await page.waitForFunction(() => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return state?.appView === "authenticated";
+			}, undefined, { timeout: 20_000 });
 			const sentinelApiRequests = requests.slice(sentinelRequestStart).filter(record => new URL(record.url).pathname.startsWith(`${BASE_PATH}/api/`));
+			expect(sentinelApiRequests.length, "cookie-authenticated sentinel reload should reach the mounted API").toBeGreaterThan(0);
 			expect(sentinelApiRequests.some(record => record.authorization === "Bearer localhost"), "localhost sentinel must never be sent as Bearer").toBe(false);
 			expect(sentinelApiRequests.every(record => !new URL(record.url).pathname.includes(`${BASE_PATH}${BASE_PATH}`))).toBe(true);
-			// This fixture enforces Bobbit token auth, so its WebSockets correctly reject
-			// the localhost first-frame sentinel. Restore the real token after proving the
-			// cookie-authenticated HTTP request omitted the meaningless Bearer header.
+			// Authentication commits the sentinel only after the health body is consumed.
+			// Wait for that authoritative app state before replacing storage, otherwise
+			// the late commit can overwrite the real token and leave both mounted sockets
+			// retrying invalid authentication until the shared IP limiter returns 429.
 			await page.evaluate((realToken) => localStorage.setItem("gateway.token", realToken), token);
+			const restoredSession = page.waitForResponse((response) => isMountedApiResponse(
+				response,
+				gateway,
+				`/api/sessions/${sessionId}`,
+				200,
+				`Bearer ${token}`,
+			), { timeout: 20_000 });
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await waitForMountedSessionRoute(page, sessionId);
+			const restoredResponse = await restoredSession;
+			await restoredResponse.finished();
+			await waitForMountedSessionRoute(page, gateway, sessionId);
 
 			await page.evaluate(() => {
 				(window as any).__copiedBasePathLinks = [];
