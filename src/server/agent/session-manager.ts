@@ -1141,6 +1141,8 @@ export interface SessionInfo {
 	lifecycleFenced?: boolean;
 	/** Terminal teardown has closed metadata admission and cancelled RPC retry authority. */
 	terminalMetadataFenced?: boolean;
+	/** Existing metadata retry delays cancelled by the terminal admission fence. */
+	pendingMetadataRetryCancellations?: Set<() => void>;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -15239,6 +15241,28 @@ export class SessionManager {
 		return verifiedTuple;
 	}
 
+	private waitForSessionMetadataRetry(session: SessionInfo, delayMs: number): Promise<boolean> {
+		if (session.terminalMetadataFenced) return Promise.resolve(false);
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			let timer!: ReturnType<Clock["setTimeout"]>;
+			const finish = (retry: boolean) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				session.pendingMetadataRetryCancellations?.delete(cancel);
+				resolve(retry);
+			};
+			const cancel = () => finish(false);
+			session.pendingMetadataRetryCancellations ??= new Set();
+			session.pendingMetadataRetryCancellations.add(cancel);
+			timer = this.clock.setTimeout(() => finish(true), delayMs);
+			// No asynchronous work can interleave with registration, but keep the
+			// terminal predicate authoritative if a custom Clock invokes inline.
+			if (session.terminalMetadataFenced) cancel();
+		});
+	}
+
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
 		const maxRetries = 3;
 		const delays = [500, 1000, 2000];
@@ -15253,7 +15277,8 @@ export class SessionManager {
 					if (session.terminalMetadataFenced) return;
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
-						await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
+						if (!await this.waitForSessionMetadataRetry(session, delays[attempt])
+							|| session.terminalMetadataFenced) return;
 						continue;
 					}
 					console.error(
@@ -15323,7 +15348,8 @@ export class SessionManager {
 				if (session.terminalMetadataFenced) return;
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
-					await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
+					if (!await this.waitForSessionMetadataRetry(session, delays[attempt])
+						|| session.terminalMetadataFenced) return;
 				} else {
 					console.error(
 						`[session-manager] CRITICAL: persistSessionMetadata failed for ${session.id} after ${maxRetries + 1} attempts: ${err}\n` +
@@ -16901,6 +16927,8 @@ export class SessionManager {
 	private fenceTerminalMetadataAdmission(session: SessionInfo): Promise<void> | undefined {
 		session.terminalMetadataFenced = true;
 		session.lifecycleFenced = true;
+		for (const cancel of [...(session.pendingMetadataRetryCancellations ?? [])]) cancel();
+		session.pendingMetadataRetryCancellations?.clear();
 		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
 		return session.pendingMetadataPersist;
 	}
@@ -19271,6 +19299,10 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
+			// Recovery failure makes the stopped old process permanently terminal. Close
+			// metadata admission and cancel any retry delay that process exit already
+			// made futile; later DELETE still joins the real admitted lane and store flush.
+			this.fenceTerminalMetadataAdmission(session);
 			// Without a complete closed-generation replay, neither delivery nor
 			// non-delivery is proven. Preserve the durable uncertain carrier and forbid
 			// automatic replay; explicit dismissal remains available through removeQueued.

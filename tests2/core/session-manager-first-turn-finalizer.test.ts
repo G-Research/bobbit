@@ -6,6 +6,7 @@ import { it } from "vitest";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { SessionStore } from "../../src/server/agent/session-store.ts";
+import { createManualClock } from "../harness/clock.js";
 
 function deferred() {
 	let resolve!: () => void;
@@ -205,6 +206,66 @@ it("fences late first-turn metadata and uses process stop to settle terminate, q
 			const durable = store.get(id);
 			assert.equal(durable?.agentSessionFile, preIdleSessionFile, "terminal cancellation must preserve pre-idle metadata");
 			assert.equal(durable?.archived === true, terminal === "terminate");
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+it("rechecks the terminal fence after a metadata retry timer fires but before its await continues", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-metadata-retry-fence-"));
+	try {
+		for (const failure of ["missing-session-file", "exception"] as const) {
+			const store = new SessionStore(path.join(root, failure));
+			const manager = lifecycleManager(store);
+			const clock = createManualClock(10);
+			const events: string[] = [];
+			const id = `metadata-retry-${failure}`;
+			const originalSessionFile = path.join(root, `${id}.jsonl`);
+			const session = liveSession(id, root, events);
+			let stateCalls = 0;
+			manager.clock = clock;
+			manager._events = events;
+			session.rpcClient = {
+				getState: async () => {
+					stateCalls += 1;
+					events.push(`${id}:get-state-${stateCalls}`);
+					if (stateCalls === 1 && failure === "exception") throw new Error("metadata state failed");
+					return { success: false, error: "no session file" };
+				},
+				stop: async () => { events.push(`${id}:stop`); },
+			};
+			store.put({ ...persisted(id, root), agentSessionFile: originalSessionFile });
+			await store.flushAsync();
+			manager.sessions.set(id, session);
+
+			const owner = manager.trackSessionMetadataWork(session, () => manager.persistSessionMetadata(session));
+			void owner.then(() => { events.push(`${id}:owner-settled`); });
+			await advanceMicrotasks();
+			assert.equal(stateCalls, 1);
+			assert.equal(clock.pending(), 1, "the first failure must enter the existing 500ms live retry delay");
+
+			// Fire the timer synchronously, but do not yield to its promise continuation.
+			// The timer has already removed its cancellation callback at this point, so
+			// only the post-await terminal predicate can prevent the second metadata RPC.
+			clock.advance(500);
+			assert.equal(session.pendingMetadataRetryCancellations?.size, 0);
+			manager.fenceTerminalMetadataAdmission(session);
+			await owner;
+
+			assert.equal(stateCalls, 1, "the fired retry must not issue another metadata getState after the terminal fence");
+			assert.equal(session.pendingMetadataPersist, undefined, "the cancelled metadata owner must settle without another clock advance");
+			assert.equal(clock.pending(), 0);
+
+			const cleaned = await manager.terminateSession(id);
+			assert.equal(cleaned, true);
+			assert.equal(stateCalls, 2, "terminal cleanup keeps its one final best-effort state request");
+			assert.ok(events.indexOf(`${id}:owner-settled`) < events.indexOf(`${id}:get-state-2`));
+			assert.ok(events.indexOf(`${id}:get-state-2`) < events.indexOf(`${id}:stop`));
+			assert.ok(events.indexOf(`${id}:stop`) < events.indexOf(`${id}:archive`));
+			assert.equal(manager.sessions.has(id), false);
+			assert.equal(store.get(id)?.agentSessionFile, originalSessionFile);
+			assert.equal(store.get(id)?.archived, true);
 		}
 	} finally {
 		fs.rmSync(root, { recursive: true, force: true });
