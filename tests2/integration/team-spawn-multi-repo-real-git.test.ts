@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 import { vi } from "vitest";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
@@ -54,14 +54,20 @@ async function waitForGoalReady(goalId: string): Promise<any> {
 	);
 }
 
-/** Native filesystem identity, with a lexical fallback for missing paths. */
+/** Native filesystem identity, retaining a missing suffix below its longest existing prefix. */
 function normalized(filePath: string): string {
 	const lexical = resolve(filePath);
-	let identity: string;
-	try {
-		identity = realpathSync.native(lexical);
-	} catch {
-		identity = lexical;
+	let existingPrefix = lexical;
+	let identity = lexical;
+	while (true) {
+		try {
+			identity = resolve(realpathSync.native(existingPrefix), relative(existingPrefix, lexical));
+			break;
+		} catch {
+			const parent = dirname(existingPrefix);
+			if (parent === existingPrefix) break;
+			existingPrefix = parent;
+		}
 	}
 	return process.platform === "win32" ? identity.toLowerCase() : identity;
 }
