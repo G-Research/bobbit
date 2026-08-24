@@ -63,6 +63,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # Hosted Windows showed event-loop starvation at two concurrent Browser
+        # workers; keep the less constrained Linux and macOS runners at two.
+        include:
+          - os: ubuntu-latest
+            workers: 2
+          - os: windows-latest
+            workers: 1
+          - os: macos-latest
+            workers: 2
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -89,7 +98,7 @@ jobs:
       - name: Browser gate
         run: npm run test:browser
         env:
-          BOBBIT_V2_PLAYWRIGHT_WORKERS: '2'
+          BOBBIT_V2_PLAYWRIGHT_WORKERS: ${{ matrix.workers }}
 
   e2e:
     name: E2E (${{ matrix.os }}, Node 22.19.0)
