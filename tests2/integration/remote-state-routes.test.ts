@@ -320,6 +320,7 @@ test.describe("remote-state coordinator routes", () => {
 		);
 		let remoteHost = vouchedHost;
 		let sessionId: string | undefined;
+		let goalId: string | undefined;
 		let originalTrustedHosts: unknown = [];
 		const ghCalls: string[][] = [];
 		const probes: Array<{ file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; request: string }> = [];
@@ -331,6 +332,21 @@ test.describe("remote-state coordinator routes", () => {
 			delete process.env.GITHUB_ENTERPRISE_TOKEN;
 			sessionId = await createRemoteStateSession(gateway, gitCwd());
 			gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+			const goal = await createGoal({
+				title: `credential trust merge boundary ${Date.now()}`,
+				cwd: gitCwd(),
+				worktree: false,
+				autoStartTeam: false,
+			});
+			goalId = String(goal.id);
+			if (typeof goal.projectId !== "string") throw new Error("fixture goal project unavailable");
+			gateway.sessionManager.getGoalStoreForProject(goal.projectId).update(goalId, {
+				cwd: gitCwd(),
+				repoPath: gitCwd(),
+				worktreePath: gitCwd(),
+				branch,
+				setupStatus: "ready",
+			});
 
 			runner.spawn = (file: string, args: readonly string[], options?: any) => {
 				const child = credentialHelperResult(remoteHost === vouchedHost
@@ -420,6 +436,24 @@ test.describe("remote-state coordinator routes", () => {
 			expect((await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`)).status).toBe(200);
 			expect(probes).toHaveLength(1);
 
+			// Credential-derived trust is status-only. Both destructive routes must use
+			// listed-host admission and fail before another probe or any gh operation.
+			const probesBeforeMerge = probes.length;
+			const ghCallsBeforeMerge = ghCalls.length;
+			for (const mergeUrl of [
+				`/api/sessions/${sessionId}/pr-merge`,
+				`/api/goals/${goalId}/pr-merge`,
+			]) {
+				const merge = await apiFetch(mergeUrl, {
+					method: "POST",
+					body: JSON.stringify({ method: "squash", branch }),
+				});
+				expect(merge.status, mergeUrl).toBe(409);
+				expect(await merge.json()).toEqual({ error: "PR repository unavailable" });
+			}
+			expect(probes).toHaveLength(probesBeforeMerge);
+			expect(ghCalls).toHaveLength(ghCallsBeforeMerge);
+
 			remoteHost = unvouchedHost;
 			const ghCallsBeforeUnvouched = ghCalls.length;
 			const unavailable = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
@@ -436,7 +470,10 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			gateway.clock.advance(60_000);
 			try {
-				if (sessionId) await deleteSession(sessionId);
+				await Promise.all([
+					sessionId ? deleteSession(sessionId) : Promise.resolve(),
+					goalId ? deleteGoal(goalId) : Promise.resolve(),
+				]);
 			} finally {
 				await apiFetch("/api/preferences", {
 					method: "PUT",
