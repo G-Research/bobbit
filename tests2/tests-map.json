@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/integration/worktree-cleanup-alias.test.ts",
+      "reason": "Focused real-Git coverage proving linked-worktree cleanup resolves an existing filesystem alias to Git's registered spelling, verifies exact directory and admin absence before branch deletion, rejects swallowed removal failures, and preserves nonexistent injected-coordinate compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/context-capacity.journey.spec.ts",
       "reason": "Browser journey covering capacity-scaled context meter zones, dual and single-limit popover fallbacks, themed track visibility, post-compaction stale state, responsive geometry, reload, and cleanup.",
       "execution": {
