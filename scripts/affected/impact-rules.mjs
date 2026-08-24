@@ -2271,6 +2271,18 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/benchmark-bobbit-journeys.test.ts",
+		allowReason: "test-owned benchmark fixtures and reports generated beneath per-test temporary roots",
+		reads: frozen([
+			{ expression: "baseline", count: 2 },
+			{ expression: "destination", count: 2 },
+			{ expression: "transcriptPath", count: 1 },
+			{ expression: "path.join(fixture.directory, \"transcript.jsonl\")", count: 1 },
+			{ expression: "preferencesPath", count: 1 },
+			{ expression: "path.join(outputRoot, \"baseline.failed.json\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/base-path-vite-proxy.test.ts",
 		allowReason: "generated build or content-addressed cache output",
 		reads: frozen([

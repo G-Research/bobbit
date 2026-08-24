@@ -467,6 +467,21 @@ describe("affected repository reader inventory", () => {
 			expect(graph.testDeps.get(staffGoalTriggers)?.has(read.expression),
 				`${read.expression} remains test-owned fixture content`).toBe(false);
 		}
+
+		const benchmarkCore = "tests2/core/benchmark-bobbit-journeys.test.ts";
+		const benchmarkFixtureAudit = audit.find((entry) => entry.consumer === benchmarkCore);
+		expect(benchmarkFixtureAudit).toEqual({
+			consumer: benchmarkCore,
+			allowReason: "test-owned benchmark fixtures and reports generated beneath per-test temporary roots",
+			reads: [
+				{ expression: "baseline", count: 2 },
+				{ expression: "destination", count: 2 },
+				{ expression: "transcriptPath", count: 1 },
+				{ expression: "path.join(fixture.directory, \"transcript.jsonl\")", count: 1 },
+				{ expression: "preferencesPath", count: 1 },
+				{ expression: "path.join(outputRoot, \"baseline.failed.json\")", count: 1 },
+			],
+		});
 	});
 
 	it("rejects a new unresolved read and a declaration that no longer supplies edges", () => {
