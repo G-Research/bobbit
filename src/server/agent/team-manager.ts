@@ -2696,14 +2696,11 @@ export class TeamManager {
 		// scoped activation, so using the server manager here would leak a second,
 		// conflicting provider path into every project team lead.
 		let teamLeadExtPath: string;
-		if (this.config.projectContextManager) {
-			const projectContext = this.config.projectContextManager.getContextForGoal(goalId);
-			if (!projectContext) {
-				throw new Error(`Cannot resolve project tool scope for team goal "${goalId}"`);
-			}
-			teamLeadExtPath = projectContext.toolManager.getExtensionPath("team", "extension.ts");
-		} else if (this.config.toolManager) {
-			teamLeadExtPath = this.config.toolManager.getExtensionPath("team", "extension.ts");
+		const projectToolManager = this.config.projectContextManager
+			?.getContextForGoal(goalId)?.toolManager;
+		const extensionToolManager = projectToolManager ?? this.config.toolManager;
+		if (extensionToolManager) {
+			teamLeadExtPath = extensionToolManager.getExtensionPath("team", "extension.ts");
 		} else {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
 			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");
