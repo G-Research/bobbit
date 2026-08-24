@@ -210,6 +210,44 @@ test.describe("source Vite inline HTML theme runtime", () => {
 		}
 	});
 
+	test("teardown falls back to the grace deadline when its pre-armed IPC receipt is lost", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["--input-type=module", "--eval", [
+			'process.on("SIGTERM", () => {});',
+			'process.send?.({ type: "handler-ready" });',
+			"setInterval(() => {}, 1_000);",
+		].join("")], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+			windowsHide: true,
+		});
+		const handlerReady = waitForFixtureMessage(child, "handler-ready");
+		const runtime = captureSourceProcess(child, "lost graceful receipt fixture");
+		try {
+			await handlerReady;
+			const lostReceipt = waitForFixtureMessage(child, "sigterm-received");
+
+			await stopSourceProcess(runtime, {
+				gracefulStopTimeoutMs: 100,
+				gracefulSignalReceipt: lostReceipt,
+				forceStopTimeoutMs: 2_000,
+			});
+
+			expect(runtime.closed, "the grace deadline must still lead to an awaited close").toBe(true);
+			await expect(lostReceipt).rejects.toThrow("fixture closed before sigterm-received");
+			expect(child.listenerCount("message"), "the lost IPC receipt listener must be removed").toBe(0);
+			expect(child.listenerCount("error"), "the lost IPC error listener must be removed").toBe(0);
+			expect(child.listenerCount("close"), "temporary close listeners must be removed").toBe(0);
+			if (process.platform !== "win32") {
+				expect(child.signalCode, "the detached POSIX process must be force-killed after the deadline").toBe("SIGKILL");
+			}
+		} finally {
+			if (!runtime.closed) {
+				await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 2_000 });
+			}
+		}
+	});
+
 	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
 		test.setTimeout(5_000);
 		const child = spawn(process.execPath, ["-e", [

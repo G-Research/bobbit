@@ -343,9 +343,38 @@ function waitForProcessClose(runtime: RunningSourceProcess, timeoutMs: number): 
 	});
 }
 
-function waitForProcessCloseEvent(runtime: RunningSourceProcess): Promise<true> {
-	if (runtime.closed) return Promise.resolve(true);
-	return new Promise(resolveClosed => runtime.child.once("close", () => resolveClosed(true)));
+type GracefulStopBoundary = "closed" | "receipt" | "deadline";
+
+function waitForGracefulStopBoundary(
+	runtime: RunningSourceProcess,
+	receipt: Promise<void>,
+	timeoutMs: number,
+): Promise<GracefulStopBoundary> {
+	if (runtime.closed) return Promise.resolve("closed");
+	return new Promise((resolveBoundary, rejectBoundary) => {
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timeout) clearTimeout(timeout);
+			runtime.child.removeListener("close", onClose);
+		};
+		const finish = (boundary: GracefulStopBoundary) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolveBoundary(boundary);
+		};
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			rejectBoundary(error);
+		};
+		const onClose = () => finish("closed");
+		runtime.child.once("close", onClose);
+		timeout = setTimeout(() => finish("deadline"), timeoutMs);
+		void receipt.then(() => finish("receipt"), fail);
+	});
 }
 
 function releaseProcessStdio(child: ChildProcess): void {
@@ -378,12 +407,14 @@ export async function stopSourceProcess(
 	runtime.shutdownStarted = signalOwnedProcessTree(runtime, "SIGTERM");
 	if (options.gracefulSignalReceipt) {
 		// A fixture that proves its handler is installed can fence escalation on the
-		// actual signal receipt. This avoids sampling buffered stdio after SIGKILL.
-		const closedBeforeReceipt = await Promise.race([
-			waitForProcessCloseEvent(runtime),
-			options.gracefulSignalReceipt.then(() => false as const),
-		]);
-		if (closedBeforeReceipt) return;
+		// actual signal receipt. A lost IPC receipt still yields at the same bounded
+		// grace deadline, and every losing close/deadline listener is removed.
+		const boundary = await waitForGracefulStopBoundary(
+			runtime,
+			options.gracefulSignalReceipt,
+			gracefulStopTimeoutMs,
+		);
+		if (boundary === "closed") return;
 	} else if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) {
 		return;
 	}
