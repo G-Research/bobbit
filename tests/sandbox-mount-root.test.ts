@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { executionPathIdentity } from "../src/server/agent/resolve-project.ts";
 import { resolveSandboxMountRoot } from "../src/server/skills/git.ts";
 
 const tmpDirs: string[] = [];
@@ -60,7 +61,7 @@ describe("resolveSandboxMountRoot", () => {
 	it("returns realpath(repoRoot) for a normal (main) repo", async () => {
 		const root = makeTempRepo();
 		const result = await resolveSandboxMountRoot(root);
-		assert.equal(result, realpath(root));
+		assert.equal(executionPathIdentity(result), executionPathIdentity(realpath(root)));
 	});
 
 	it("returns the MAIN repo root for a linked worktree (origin-less regression)", async () => {
@@ -73,17 +74,18 @@ describe("resolveSandboxMountRoot", () => {
 		git(main, "worktree", "add", "-q", "-b", "feature/x", wtPath);
 
 		const result = await resolveSandboxMountRoot(wtPath);
-		// Must resolve to the MAIN working tree, NOT the worktree path.
-		assert.equal(result, realpath(main));
-		assert.notEqual(result, realpath(wtPath));
+		// Must resolve to the MAIN working tree, NOT the worktree path. Git can
+		// publish a long Windows path even when TMPDIR supplied its 8.3 alias.
+		assert.equal(executionPathIdentity(result), executionPathIdentity(realpath(main)));
+		assert.notEqual(executionPathIdentity(result), executionPathIdentity(realpath(wtPath)));
 	});
 
 	it("falls back to a canonicalized path for a non-git directory", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mount-nongit-"));
 		tmpDirs.push(dir);
 		const result = await resolveSandboxMountRoot(dir);
-		// Non-git → fallback canonicalizePath(repoPath). On win32 canonicalizePath
-		// lowercases; compare case-insensitively to stay cross-platform.
-		assert.equal(result.toLowerCase(), realpath(dir).toLowerCase());
+		// Non-git → fallback canonicalizePath(repoPath). Compare filesystem
+		// identity rather than one spelling or case projection.
+		assert.equal(executionPathIdentity(result), executionPathIdentity(realpath(dir)));
 	});
 });
