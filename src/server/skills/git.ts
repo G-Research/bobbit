@@ -277,6 +277,17 @@ async function pathExists(filePath: string): Promise<boolean> {
 	}
 }
 
+async function pathExistsStrict(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.lstat(filePath);
+		return true;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return false;
+		throw err;
+	}
+}
+
 // Targeted worktree removals share one small process-wide I/O ceiling. Keeping
 // the limiter here prevents a bounded outer cleanup (pool drain, purge, or
 // inventory) from multiplying concurrency while walking a partial worktree.
@@ -617,15 +628,9 @@ async function proveCleanupWorktreeOwnership(
 
 	let removalPathExists: boolean;
 	try {
-		await fs.promises.lstat(removalPath);
-		removalPathExists = true;
+		removalPathExists = await pathExistsStrict(removalPath);
 	} catch (err) {
-		const code = (err as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR") {
-			removalPathExists = false;
-		} else {
-			throw new Error(`Failed to inspect registered worktree ${removalPath}: ${gitErrorText(err)}`);
-		}
+		throw new Error(`Failed to inspect registered worktree ${removalPath}: ${gitErrorText(err)}`);
 	}
 
 	let adminPath: string | undefined;
@@ -1470,10 +1475,6 @@ export async function cleanupWorktree(
 		});
 	} catch (err) {
 		removalError = err;
-		if (!await pathExists(repoPath)) {
-			console.warn(`[git] Cannot finish worktree cleanup: repoPath disappeared: ${repoPath}`);
-			return;
-		}
 		// Only metadata resolved from this exact registered linked worktree is a
 		// safe recursive fallback target. Never derive an admin child by basename.
 		if (ownership.adminPath) {
@@ -1484,9 +1485,17 @@ export async function cleanupWorktree(
 	// Ownership was proven before Git mutation, so the filesystem fallback may
 	// remove only Git's matched spelling. Never substitute a caller spelling,
 	// root-containment guess, or blanket worktree prune.
-	if (await pathExists(removalPath)) {
-		try { await removeTargetedTree(removalPath); } catch { /* verified below */ }
+	try { await removeTargetedTree(removalPath); } catch { /* verified below */ }
+
+	let directoryRemains: boolean;
+	let adminRemains: boolean;
+	try {
+		directoryRemains = await pathExistsStrict(removalPath);
+		adminRemains = ownership.adminPath ? await pathExistsStrict(ownership.adminPath) : false;
+	} catch (err) {
+		throw new Error(`Failed to verify worktree cleanup for ${worktreePath}: ${gitErrorText(err)}`);
 	}
+
 	let remainingRegisteredPath: string | undefined;
 	try {
 		remainingRegisteredPath = await findRegisteredWorktreePath(
@@ -1496,11 +1505,11 @@ export async function cleanupWorktree(
 	} catch (err) {
 		throw new Error(`Failed to verify worktree cleanup for ${worktreePath}: ${gitErrorText(err)}`);
 	}
-	const directoryRemains = await pathExists(removalPath);
-	if (remainingRegisteredPath || directoryRemains) {
+	if (remainingRegisteredPath || directoryRemains || adminRemains) {
 		const detail = [
 			remainingRegisteredPath ? `Git registration remains at ${remainingRegisteredPath}` : "",
 			directoryRemains ? `directory remains at ${removalPath}` : "",
+			adminRemains ? `admin directory remains at ${ownership.adminPath}` : "",
 			removalError ? `git remove failed: ${gitErrorText(removalError)}` : "",
 		].filter(Boolean).join("; ");
 		throw new Error(`Failed to clean up worktree ${worktreePath}: ${detail}`);
