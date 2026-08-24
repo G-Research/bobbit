@@ -104,7 +104,7 @@ import {
 	type PersistedSession,
 } from "./session-store.js";
 import { activeTranscriptBranch, parseTranscript } from "./transcript-tree.js";
-import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { isWorktreePathReferencedByLiveSession, isWorktreePathReferencedByLiveSessionForCleanup, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -5801,13 +5801,16 @@ export class SessionManager {
 		return isNonSandboxedPolyrepoTeamLead(ps) && !this.isCanonicalAdoptedWorkspaceOwner(ps);
 	}
 
-	private adoptedWorkspaceHasLiveReference(ps: PersistedSession): boolean {
+	private async adoptedWorkspaceHasLiveReference(ps: PersistedSession): Promise<boolean> {
 		if (!this.isCanonicalAdoptedWorkspaceOwner(ps)) return false;
 		const records = this.getAllPersistedSessionsForWorktreeGuard();
 		const paths = ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0
 			? Object.values(ps.repoWorktrees)
 			: [ps.worktreePath];
-		return paths.some(candidate => isWorktreePathReferencedByLiveSession(candidate, records, { ignoreSessionId: ps.id }));
+		for (const candidate of paths) {
+			if (await isWorktreePathReferencedByLiveSessionForCleanup(candidate, records, { ignoreSessionId: ps.id })) return true;
+		}
+		return false;
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
@@ -17643,6 +17646,22 @@ export class SessionManager {
 			}
 
 			try {
+				const freshSessions: WorktreeReferenceRecord[] = [
+					...this.getAllPersistedSessionsForWorktreeGuard(),
+					...[...this.sessions.values()].map(session => ({
+						id: session.id,
+						worktreePath: session.worktreePath,
+						cwd: session.cwd,
+						repoWorktrees: session.repoWorktrees
+							? Object.fromEntries(session.repoWorktrees.map(worktree => [worktree.repo, worktree.worktreePath]))
+							: undefined,
+					})),
+				];
+				if (await isWorktreePathReferencedByLiveSessionForCleanup(item.path, freshSessions, { ignoreSessionId: item.sessionId })) {
+					recordResult({ ...base, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session now references this worktree.", worktreeRemoved: false, branchDeleted: false });
+					response.counts.skipped++;
+					continue;
+				}
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
 
@@ -18024,7 +18043,7 @@ export class SessionManager {
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
-		const sessionReferenced = isWorktreePathReferencedByLiveSession(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
+		const sessionReferenced = await isWorktreePathReferencedByLiveSessionForCleanup(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
 		if (sessionReferenced) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
 		}
@@ -18278,7 +18297,7 @@ export class SessionManager {
 		// Adopted multi-repo cleanup is all-or-nothing. If any component is still
 		// referenced, retain the archived owner record so a later purge can clean
 		// every component and the shared container exactly once.
-		if (this.adoptedWorkspaceHasLiveReference(ps)) {
+		if (await this.adoptedWorkspaceHasLiveReference(ps)) {
 			console.warn(`[session-manager] Refusing to purge adopted workspace owner ${ps.id}: another live session still references a component`);
 			return;
 		}
@@ -18369,7 +18388,7 @@ export class SessionManager {
 				// ceiling + delete the shared branch from each repo's remote (Phase 4a).
 				if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
 					await mapWithConcurrency(Object.entries(ps.repoWorktrees), BACKGROUND_IO_CONCURRENCY, async ([repo, wt]) => {
-						if (isWorktreePathReferencedByLiveSession(wt, allPersisted, { ignoreSessionId: ps.id })) {
+						if (await isWorktreePathReferencedByLiveSessionForCleanup(wt, allPersisted, { ignoreSessionId: ps.id })) {
 							console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${wt}`);
 							return;
 						}
@@ -18389,7 +18408,7 @@ export class SessionManager {
 					} catch (err) {
 						console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
 					}
-				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
+				} else if (!await isWorktreePathReferencedByLiveSessionForCleanup(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
@@ -18589,7 +18608,7 @@ export class SessionManager {
 				if (!pathMatch) continue;
 				const wtPath = pathMatch[1];
 				// Check if any active session uses this worktree (by path or branch)
-				const isActive = isWorktreePathReferencedByLiveSession(wtPath, allPathRecords) || persistedBranches.has(branch);
+				const isActive = await isWorktreePathReferencedByLiveSessionForCleanup(wtPath, allPathRecords) || persistedBranches.has(branch);
 				if (!isActive) {
 					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
 					const { cleanupWorktree } = await import("../skills/git.js");
