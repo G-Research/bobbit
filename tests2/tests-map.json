@@ -2085,6 +2085,15 @@
       }
     },
     {
+      "path": "tests2/core/gateway-url-publication.test.ts",
+      "reason": "Injected filesystem coverage pinning single-owner gateway URL publication, the Windows existing-target fallback, unrelated-error preservation, temporary cleanup, and the CLI callback-only boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/verification-command-runner-contract.test.ts",
       "reason": "DI seam contract: fake verification command-step runner is observably equivalent to the real durable runner; seam defaults to real; cli wires no fake.",
       "execution": {

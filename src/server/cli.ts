@@ -115,17 +115,6 @@ export function formatStartupBanner(input: {
 	return lines.join("\n");
 }
 
-function writeFileAtomic(filePath: string, content: string): void {
-	const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-	fs.writeFileSync(tempPath, content, "utf-8");
-	try {
-		fs.renameSync(tempPath, filePath);
-	} catch (error) {
-		try { fs.unlinkSync(tempPath); } catch { /* best-effort temp cleanup */ }
-		throw error;
-	}
-}
-
 /** Find the NordLynx (NordVPN mesh) interface IPv4 address, or null if not found. */
 function findNordLynxIp(): string | null {
 	const interfaces = os.networkInterfaces();
@@ -314,7 +303,6 @@ async function main() {
 	bootLog(`[boot] prologue (binaries/token/tls) in ${Date.now() - bootWallT0}ms`);
 	const protocol = args.tls ? "https" as const : "http" as const;
 	let startupUrls: StartupUrls | undefined;
-	const gatewayUrlPath = path.join(bobbitStateDir(), "gateway-url");
 	const ctorT0 = Date.now();
 	const gateway = createGateway({
 		host: args.host,
@@ -333,7 +321,6 @@ async function main() {
 				token: authToken,
 				forceAuth: args.forceAuth,
 			});
-			writeFileAtomic(gatewayUrlPath, startupUrls.peerUrl);
 			return startupUrls.peerUrl;
 		},
 		agentCliPath: args.agentCliPath,
