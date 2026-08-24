@@ -294,10 +294,10 @@ function validateScheduledSamples(journeyResult, schedule) {
 	if (measuredSamples === 0) throw new Error("runJourney() returned no measured samples");
 }
 
-function aggregateErrors(label, errors) {
+export function aggregateErrors(label, errors) {
 	if (errors.length === 0) return undefined;
 	if (errors.length === 1) return errors[0];
-	return new AggregateError(errors, `${label}: ${errors.map(error => error?.message ?? String(error)).join("; ")}`);
+	return new AggregateError(errors, label);
 }
 
 function findFailureDiagnostic(error) {

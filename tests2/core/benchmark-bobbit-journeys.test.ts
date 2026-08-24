@@ -20,6 +20,7 @@ import { afterEach, describe, it } from "vitest";
 import {
 	DEFAULT_REPETITIONS,
 	DEFAULT_WARMUPS,
+	aggregateErrors,
 	parseArgs,
 	resolveBenchmarkOutputPath,
 	runBenchmark,
@@ -951,6 +952,52 @@ describe("bounded recursive benchmark error sanitization", () => {
 		assert.doesNotThrow(() => JSON.stringify(result.report));
 		assert.ok(Buffer.byteLength(JSON.stringify(result.report)) < 100_000);
 	});
+
+	it("keeps hostile run and deferred cleanup failures opaque until ordered sanitization", async () => {
+		const repoRoot = await temporaryRoot();
+		const token = "HostileMixedFailureToken";
+		const hostile: any = new Error("placeholder");
+		for (const field of ["message", "errors", "cause", "benchmarkDiagnostic"]) {
+			Object.defineProperty(hostile, field, {
+				configurable: true,
+				get() { throw new Error(`accessor escaped ${token}`); },
+			});
+		}
+		const cleanupFailure = new Error(`deferred cleanup token=${token}`);
+		const combined: any = aggregateErrors("Benchmark run and cleanup failed", [hostile, cleanupFailure]);
+		assert.deepEqual(combined.errors, [hostile, cleanupFailure]);
+		const sanitized: any = sanitizeBenchmarkError(combined, { redactions: [token] });
+		assert.deepEqual(sanitized.errors.map((error: Error) => error.message), [
+			"Unknown benchmark error",
+			"deferred cleanup token=[redacted]",
+		]);
+
+		let cleanupAttempts = 0;
+		const result = await runBenchmark(
+			parseArgs(["--journey", "event-stream", "--warmups", "2", "--repetitions", "1"]),
+			{
+				repoRoot,
+				importer: async () => ({
+					runJourney: async (context: any) => {
+						context.scheduleFor(["only"]);
+						context.deferCleanup(async () => {
+							cleanupAttempts += 1;
+							throw cleanupFailure;
+						});
+						throw hostile;
+					},
+				}),
+			},
+		);
+		const serialized = JSON.stringify(result.report);
+		assert.equal(cleanupAttempts, 1);
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.report.cleanup.status, "failed");
+		assert.equal(result.report.correctness.error, "Benchmark run and cleanup failed");
+		assert.equal(serialized.includes(token), false);
+		assert.equal(serialized.includes("accessor escaped"), false);
+		assert.ok(Buffer.byteLength(serialized) < 100_000);
+	});
 });
 
 describe("process metrics and reliability aggregation", () => {
@@ -1693,18 +1740,22 @@ describe("filesystem containment and aggregated cleanup", () => {
 		await mkdir(outputRoot);
 		const baseline = path.join(outputRoot, "baseline.json");
 		await writeFile(baseline, "known-good\n");
+		const cleanupAttempts: string[] = [];
+		const firstCleanup = new Error("first cleanup failure");
+		const secondCleanup = new Error("second cleanup failure");
 		const options = parseArgs(["--journey", "event-stream", "--warmups", "2", "--repetitions", "1", "--output", "baseline.json"]);
 		const result = await runBenchmark(options, {
 			repoRoot,
 			outputRoot,
 			importer: async () => ({ runJourney: async (context: any) => {
-				context.deferCleanup(async () => { throw new Error("first cleanup failure"); });
-				context.deferCleanup(async () => { throw new Error("second cleanup failure"); });
+				context.deferCleanup(async () => { cleanupAttempts.push("first"); throw firstCleanup; });
+				context.deferCleanup(async () => { cleanupAttempts.push("second"); throw secondCleanup; });
 				return passingJourney(["only"])(context);
 			} }),
 		});
 		assert.equal(result.exitCode, 1);
-		assert.match(result.report.correctness.error, /second cleanup failure.*first cleanup failure/);
+		assert.equal(result.report.correctness.error, "Benchmark cleanup failed");
+		assert.deepEqual(cleanupAttempts, ["second", "first"]);
 		assert.equal(await readFile(baseline, "utf8"), "known-good\n");
 		const failed = JSON.parse(await readFile(path.join(outputRoot, "baseline.failed.json"), "utf8"));
 		assert.equal(failed.correctness.status, "failed");
