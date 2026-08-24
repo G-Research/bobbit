@@ -1,3 +1,4 @@
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -95,6 +96,42 @@ describe("fenced command runner", () => {
 		expect(() => runnerWithoutSpawn.spawn!("git.cmd", ["--no-pager", "credential", "fill"])).toThrow(expected);
 	});
 
+	it("blocks alias and config-include injection on every runner path without delegation", async () => {
+		const delegations: string[] = [];
+		const delegate: CommandRunner = {
+			execFile: async () => { delegations.push("async"); return { stdout: "", stderr: "" }; },
+			execFileSync: () => { delegations.push("sync"); return ""; },
+			spawn: () => { delegations.push("spawn"); return {} as any; },
+		};
+		const runner = createFencedCommandRunner(delegate);
+		const expected = new Error("[fenced-command-runner] blocked unsafe git configuration");
+		const bypasses: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = [
+			{ args: ["-c", "alias.readcreds=!git credential fill", "readcreds"] },
+			{ args: ["-cALIAS.readcreds=!git credential fill", "readcreds"] },
+			{ args: ["--config-env", "alias.readcreds=FIXTURE_ALIAS", "readcreds"], env: { FIXTURE_ALIAS: "!git credential fill" } },
+			{ args: ["--config-env=Alias.readcreds=FIXTURE_ALIAS", "readcreds"], env: { FIXTURE_ALIAS: "!git credential fill" } },
+			{ args: ["-c", "include.path=/developer/.gitconfig", "status"] },
+			{ args: ["-cIncludeIf.gitdir:/fixture/.path=/developer/.gitconfig", "status"] },
+			{ args: ["--config-env=includeIf.onbranch:main.path=INCLUDE_FILE", "status"], env: { INCLUDE_FILE: "/developer/.gitconfig" } },
+			{
+				args: ["readcreds"],
+				env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "alias.readcreds", GIT_CONFIG_VALUE_0: "!git credential fill" },
+			},
+			{
+				args: ["status"],
+				env: { git_config_count: "1", git_config_key_0: "INCLUDE.path", git_config_value_0: "/developer/.gitconfig" },
+			},
+			{ args: ["status"], env: { GIT_CONFIG_PARAMETERS: "'alias.readcreds'='!git credential fill'" } },
+		];
+
+		for (const { args, env } of bypasses) {
+			await expect(runner.execFile("git", args, { env })).rejects.toThrow(expected);
+			expect(() => runner.execFileSync!("git.cmd", args, { env })).toThrow(expected);
+			expect(() => runner.spawn!("git.exe", args, { env })).toThrow(expected);
+		}
+		expect(delegations).toEqual([]);
+	});
+
 	it("fails closed on unknown or malformed Git global options before delegation", async () => {
 		const delegations: string[] = [];
 		const delegate: CommandRunner = {
@@ -104,49 +141,83 @@ describe("fenced command runner", () => {
 		};
 		const runner = createFencedCommandRunner(delegate);
 		const expected = new Error("[fenced-command-runner] blocked unclassified git invocation");
-		for (const args of [
-			[],
-			["--unknown-global", "credential", "fill"],
-			["-C"],
-			["--config-env"],
-			["--git-dir=", "status"],
-			["--", "--not-a-command"],
-		]) {
-			await expect(runner.execFile("git", args)).rejects.toThrow(expected);
-			expect(() => runner.execFileSync!("git.cmd", args)).toThrow(expected);
-			expect(() => runner.spawn!("git.bat", args)).toThrow(expected);
+		for (const { args, env } of [
+			{ args: [] },
+			{ args: ["--unknown-global", "credential", "fill"] },
+			{ args: ["-C"] },
+			{ args: ["--config-env"] },
+			{ args: ["--config-env=core.filemode="] },
+			{ args: ["--config-env=core.filemode=INVALID-NAME", "status"] },
+			{ args: ["--git-dir=", "status"] },
+			{ args: ["--", "--not-a-command"] },
+			{ args: ["status"], env: { GIT_CONFIG_COUNT: "one" } },
+			{ args: ["status"], env: { GIT_CONFIG_KEY_0: "user.name", GIT_CONFIG_VALUE_0: "Fixture" } },
+			{ args: ["status"], env: { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "user.name" } },
+			{ args: ["status"], env: { GIT_CONFIG_COUNT: "0", GIT_CONFIG_KEY_extra: "user.name" } },
+		] as Array<{ args: string[]; env?: NodeJS.ProcessEnv }>) {
+			await expect(runner.execFile("git", args, { env })).rejects.toThrow(expected);
+			expect(() => runner.execFileSync!("git.cmd", args, { env })).toThrow(expected);
+			expect(() => runner.spawn!("git.bat", args, { env })).toThrow(expected);
 		}
 		expect(delegations).toEqual([]);
 	});
 
-	it("allows classified non-credential global options through every runner path", async () => {
+	it("delegates safe config while isolating global and system Git configuration", async () => {
 		const { repo } = makeRepositoryMetadata(makeFixtureRoot("bobbit-fenced-global-options-"));
 		const calls: string[] = [];
+		const environments: NodeJS.ProcessEnv[] = [];
 		const fakeChild = { pid: 4321 };
 		const delegate: CommandRunner = {
-			execFile: async (file, args) => {
+			execFile: async (file, args, options) => {
 				calls.push(`async ${file} ${args.join(" ")}`);
+				environments.push(options?.env ?? {});
 				return { stdout: "clean", stderr: "" };
 			},
-			execFileSync: (file, args) => {
+			execFileSync: (file, args, options) => {
 				calls.push(`sync ${file} ${args.join(" ")}`);
+				environments.push(options?.env ?? {});
 				return "clean";
 			},
-			spawn: (file, args) => {
+			spawn: (file, args, options) => {
 				calls.push(`spawn ${file} ${args.join(" ")}`);
+				environments.push(options?.env ?? {});
 				return fakeChild as any;
 			},
 		};
 		const runner = createFencedCommandRunner(delegate);
+		const developerConfig = {
+			GIT_CONFIG: "/developer/selected.gitconfig",
+			GIT_CONFIG_GLOBAL: "/developer/.gitconfig",
+			GIT_CONFIG_SYSTEM: "/etc/gitconfig",
+			GIT_CONFIG_NOSYSTEM: "0",
+		};
 
-		await expect(runner.execFile("git.cmd", ["--no-pager", "status", "--short"], { cwd: repo })).resolves.toEqual({ stdout: "clean", stderr: "" });
-		expect(runner.execFileSync!("git.bat", ["-c", "color.ui=false", "status", "--short"], { cwd: repo })).toBe("clean");
-		expect(runner.spawn!("git.exe", [`--git-dir=${path.join(repo, ".git")}`, "status", "--short"], { cwd: repo })).toBe(fakeChild);
+		await expect(runner.execFile("git.cmd", ["-c", "user.name=Fixture", "status", "--short"], { cwd: repo, env: developerConfig })).resolves.toEqual({ stdout: "clean", stderr: "" });
+		expect(runner.execFileSync!("git.bat", ["-ccore.filemode=false", "status", "--short"], {
+			cwd: repo,
+			env: { ...developerConfig, GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "user.email", GIT_CONFIG_VALUE_0: "fixture@example.test" },
+		})).toBe("clean");
+		expect(runner.spawn!("git.exe", ["--config-env=core.filemode=FIXTURE_FILEMODE", "status", "--short"], {
+			cwd: repo,
+			env: { ...developerConfig, FIXTURE_FILEMODE: "false" },
+		})).toBe(fakeChild);
 		expect(calls).toEqual([
-			"async git.cmd --no-pager status --short",
-			"sync git.bat -c color.ui=false status --short",
-			`spawn git.exe --git-dir=${path.join(repo, ".git")} status --short`,
+			"async git.cmd -c user.name=Fixture status --short",
+			"sync git.bat -ccore.filemode=false status --short",
+			"spawn git.exe --config-env=core.filemode=FIXTURE_FILEMODE status --short",
 		]);
+		for (const env of environments) {
+			expect(env.GIT_CONFIG).toBeUndefined();
+			expect(env.GIT_CONFIG_GLOBAL).toBe(os.devNull);
+			expect(env.GIT_CONFIG_SYSTEM).toBe(os.devNull);
+			expect(env.GIT_CONFIG_NOSYSTEM).toBe("1");
+		}
+		expect(environments[1]).toMatchObject({
+			GIT_CONFIG_COUNT: "1",
+			GIT_CONFIG_KEY_0: "user.email",
+			GIT_CONFIG_VALUE_0: "fixture@example.test",
+		});
+		expect(environments[2]?.FIXTURE_FILEMODE).toBe("false");
 	});
 
 	it("allows explicit async fakes to stand in for fenced Git credential forms", async () => {
@@ -155,12 +226,14 @@ describe("fenced command runner", () => {
 			fakes: {
 				"git credential fill": response,
 				"git --no-pager credential fill": response,
+				"git -c alias.readcreds=!git credential fill readcreds": response,
 			},
 		});
 
 		for (const [file, args] of [
 			["git", ["credential", "fill"]],
 			["git.cmd", ["--no-pager", "credential", "fill"]],
+			["git.exe", ["-c", "alias.readcreds=!git credential fill", "readcreds"]],
 		] as const) {
 			await expect(runner.execFile(file, args)).resolves.toEqual({
 				stdout: response.stdout,
