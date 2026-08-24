@@ -7,10 +7,23 @@ type BranchTrigger = { branches: string[] };
 type NoInputDispatch = Record<string, never>;
 type WorkflowStep = {
 	name: string;
+	if?: string;
 	run?: string;
 	uses?: string;
 	env?: Record<string, string>;
 	with?: Record<string, unknown>;
+};
+
+type CrossOsGateJob = {
+	name: string;
+	if: string;
+	"runs-on": string;
+	"timeout-minutes": number;
+	strategy: {
+		"fail-fast": boolean;
+		matrix: { os: string[] };
+	};
+	steps: WorkflowStep[];
 };
 
 type BuildUnitGateWorkflow = {
@@ -33,6 +46,8 @@ type BuildUnitGateWorkflow = {
 			};
 			steps: WorkflowStep[];
 		};
+		browser: CrossOsGateJob;
+		e2e: CrossOsGateJob;
 	};
 };
 
@@ -65,7 +80,7 @@ function readWorkflow<T>(path: URL): T {
 	return YAML.parse(workflowSource(path)) as T;
 }
 
-function stepByName(steps: Array<{ name: string }>, name: string): { name: string; uses?: string } {
+function stepByName(steps: WorkflowStep[], name: string): WorkflowStep {
 	const step = steps.find((candidate) => candidate.name === name);
 	assert.ok(step, `workflow must include ${name}`);
 	return step;
@@ -113,6 +128,82 @@ describe("native CI qualification workflows", () => {
 			false,
 			"affected feedback must not replace the authoritative full-suite job",
 		);
+	});
+
+	it("runs complete Browser and E2E suites as PR-only native matrices", () => {
+		const jobs = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs;
+		const expectedOs = ["ubuntu-latest", "windows-latest", "macos-latest"];
+		const expectedCheckout = "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd";
+		const expectedSetupNode = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
+
+		for (const [jobId, job, expectedName, gateName, command] of [
+			["browser", jobs.browser, "Browser (${{ matrix.os }}, Node 22.19.0)", "Browser gate", "npm run test:browser"],
+			["e2e", jobs.e2e, "E2E (${{ matrix.os }}, Node 22.19.0)", "E2E gate", "npm run test:e2e"],
+		] as const) {
+			assert.equal(job.name, expectedName, `${jobId} check name must identify the runner and exact Node version`);
+			assert.equal(job.if, "github.event_name == 'pull_request'", `${jobId} must not run on push or manual dispatch`);
+			assert.equal(job["runs-on"], "${{ matrix.os }}");
+			assert.equal(job["timeout-minutes"], 40);
+			assert.equal(job.strategy["fail-fast"], false);
+			assert.deepEqual(job.strategy.matrix.os, expectedOs);
+			assert.equal(stepByName(job.steps, "Checkout").uses, expectedCheckout);
+			assert.deepEqual(stepByName(job.steps, "Checkout").with, { "persist-credentials": false });
+			assert.equal(stepByName(job.steps, "Set up Node").uses, expectedSetupNode);
+			assert.deepEqual(stepByName(job.steps, "Set up Node").with, { "node-version": "22.19.0", cache: "npm" });
+			assert.equal(stepByName(job.steps, "Install").run, "npm ci");
+			assert.deepEqual(stepByName(job.steps, "Install Chromium with dependencies"), {
+				name: "Install Chromium with dependencies",
+				if: "runner.os == 'Linux'",
+				run: "npx playwright install --with-deps chromium",
+			});
+			assert.deepEqual(stepByName(job.steps, "Install Chromium"), {
+				name: "Install Chromium",
+				if: "runner.os != 'Linux'",
+				run: "npx playwright install chromium",
+			});
+			assert.equal(
+				job.steps.filter((step) => step.name === gateName).length,
+				1,
+				`${jobId} must expose one authoritative gate step`,
+			);
+			assert.equal(
+				job.steps.filter((step) => step.run === command).length,
+				1,
+				`${jobId} must invoke its complete suite exactly once`,
+			);
+			assert.equal(stepByName(job.steps, gateName).run, command, `${jobId} must use the standard retry-enabled command`);
+		}
+
+		assert.deepEqual(stepByName(jobs.browser.steps, "Browser gate").env, {
+			BOBBIT_V2_PLAYWRIGHT_WORKERS: "2",
+		});
+		assert.equal(stepByName(jobs.e2e.steps, "E2E gate").env, undefined);
+	});
+
+	it("builds the version-matched sandbox image only for Linux E2E coverage", () => {
+		const e2eSteps = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs.e2e.steps;
+		const sandboxBuild = stepByName(e2eSteps, "Build sandbox image");
+		const e2eGateIndex = e2eSteps.findIndex((step) => step.name === "E2E gate");
+		const browserSteps = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs.browser.steps;
+
+		assert.equal(e2eSteps.filter((step) => step.name === "Build sandbox image").length, 1);
+		assert.equal(browserSteps.some((step) => step.name === "Build sandbox image"), false);
+		assert.equal(sandboxBuild.if, "runner.os == 'Linux'", "other runners must retain non-Docker E2E coverage");
+		assert.equal(
+			sandboxBuild.run?.trim(),
+			[
+				"PI_AGENT_VERSION=$(node -p \"require('./package.json').dependencies['@earendil-works/pi-coding-agent']\")",
+				'docker build --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" -t bobbit-agent docker/',
+			].join("\n"),
+			"the Linux image must use the repository's exact Pi agent dependency version",
+		);
+		assert.ok(e2eSteps.indexOf(sandboxBuild) < e2eGateIndex, "the image must exist before image-backed E2E cases run");
+	});
+
+	it("preserves normal retry and failure policy in Browser and E2E PR checks", () => {
+		const source = workflowSource(BUILD_UNIT_GATE_WORKFLOW_PATH);
+		assert.doesNotMatch(source, /BOBBIT_V2_RETRY_FREE/, "PR checks must retain the repository's normal retry policy");
+		assert.doesNotMatch(source, /continue-on-error/, "every Browser and E2E matrix failure must fail its check");
 	});
 
 	it("keeps affected testing out of CI", () => {
