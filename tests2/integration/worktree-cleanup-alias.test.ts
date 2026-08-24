@@ -480,6 +480,66 @@ describe("cleanupWorktree filesystem aliases", () => {
 		}
 	});
 
+	it.each([
+		{ label: "ENOENT marker read", outcome: "enoent" as const },
+		{ label: "malformed marker", outcome: "malformed" as const },
+	])("rejects an ordinary root replacement after a $label fallback", async ({ outcome }) => {
+		const fixture = await createFixture(`ordinary-marker-fallback-${outcome}`, "lexical");
+		const originalRoot = `${fixture.worktree}-generation-a`;
+		const markerPath = path.join(fixture.worktree, ".git");
+		const sentinelPath = path.join(fixture.worktree, "replacement.txt");
+		const replacementMarker = `replacement ${outcome} marker\n`;
+		const realReadFile = fs.promises.readFile.bind(fs.promises);
+		const gitCalls: string[][] = [];
+		let interposed = false;
+		let replacementGeneration: AsyncTreeStats | undefined;
+		const readFileSpy = vi.spyOn(fs.promises, "readFile").mockImplementation((async (filePath: any, options?: any) => {
+			if (!interposed && path.resolve(String(filePath)) === path.resolve(markerPath)) {
+				interposed = true;
+				const generationA = await fs.promises.lstat(fixture.worktree);
+				await fs.promises.rename(fixture.worktree, originalRoot);
+				replacementGeneration = await recreateWithDistinctGeneration(fixture.worktree, generationA);
+				await fs.promises.writeFile(markerPath, replacementMarker);
+				await fs.promises.writeFile(sentinelPath, "replacement generation\n");
+				if (outcome === "enoent") {
+					throw Object.assign(new Error("synthetic missing marker"), { code: "ENOENT" });
+				}
+				return "ordinary coordinate without gitdir metadata\n";
+			}
+			return realReadFile(filePath, options);
+		}) as any);
+		const runner: CommandRunner = {
+			execFile: async (_file, args) => {
+				gitCalls.push([...args]);
+				return { stdout: "", stderr: "" };
+			},
+		};
+		try {
+			try {
+				await expect(cleanupWorktree(
+					fixture.repo,
+					fixture.worktree,
+					fixture.branch,
+					true,
+					runner,
+					{ skipRemotePush: true },
+				)).rejects.toThrow(/filesystem generation changed while reading marker/i);
+			} finally {
+				readFileSpy.mockRestore();
+			}
+
+			expect(interposed).toBe(true);
+			expect(replacementGeneration).toBeDefined();
+			expect(gitCalls).toEqual([]);
+			expect(await fs.promises.readFile(markerPath, "utf8")).toBe(replacementMarker);
+			expect(await fs.promises.readFile(sentinelPath, "utf8")).toBe("replacement generation\n");
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			readFileSpy.mockRestore();
+			await removeFixture(fixture.root);
+		}
+	});
+
 	it("rejects ordinary successful removal when captured admin metadata remains", async () => {
 		const fixture = await createFixture("ordinary-stale-admin", "lexical");
 		try {

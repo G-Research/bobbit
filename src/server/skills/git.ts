@@ -573,18 +573,19 @@ async function existingWorktreeCleanupSnapshot(
 			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}`);
 		}
 
-		let marker: string;
+		let gitDir: string | undefined;
 		try {
-			marker = await fs.promises.readFile(path.join(requestedPath, ".git"), "utf8");
+			const marker = await fs.promises.readFile(path.join(requestedPath, ".git"), "utf8");
+			gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
 		} catch (err) {
 			const code = (err as NodeJS.ErrnoException).code;
-			// Missing/fake and primary-worktree coordinates retain operation-first
-			// behavior instead of gaining a preflight Git command or hard failure.
-			if (code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR") return undefined;
-			throw new Error(`Cannot snapshot linked-worktree admin path for ${requestedPath}: ${gitErrorText(err)}`);
+			// Missing/fake and primary-worktree markers remain ordinary coordinates,
+			// but only after the root generation spanning this marker outcome is
+			// revalidated below. Unexpected marker I/O remains terminal.
+			if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EISDIR") {
+				throw new Error(`Cannot snapshot linked-worktree admin path for ${requestedPath}: ${gitErrorText(err)}`);
+			}
 		}
-		const gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
-		if (!gitDir) return undefined;
 
 		let verifiedRootStats: AsyncTreeStats;
 		try {
@@ -598,6 +599,9 @@ async function existingWorktreeCleanupSnapshot(
 			|| !sameFileIdentity(rootStats, verifiedRootStats)) {
 			throw new Error(`Linked-worktree filesystem generation changed while reading marker for ${requestedPath}`);
 		}
+		// Missing, directory, or malformed markers preserve operation-first
+		// behavior only after proving they describe the same root generation.
+		if (!gitDir) return undefined;
 		return {
 			requestedPath,
 			removalPath: requestedPath,
