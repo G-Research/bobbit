@@ -284,6 +284,92 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		}
 	});
 
+	it("rejects before mutation when existing-worktree metadata proof fails", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-proof-error-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-proof-error");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/proof-error", wt, "HEAD"]);
+			let removeCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (file === "git" && args[0] === "rev-parse" && args[1] === "--absolute-git-dir") {
+						throw new Error("synthetic metadata proof failure");
+					}
+					if (file === "git" && args[0] === "worktree" && args[1] === "remove") {
+						removeCalls++;
+						throw new Error("worktree remove must not run after proof failure");
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await assert.rejects(
+				cleanupWorktree(repo, wt, undefined, false, runner),
+				/synthetic metadata proof failure/i,
+			);
+			assert.equal(removeCalls, 0, "Git removal must not start without complete ownership proof");
+			assert.equal(fs.existsSync(wt), true, "proof failure must not delete the worktree directory");
+			assert.equal(
+				registeredWorktreePaths(repo).some(candidate => executionPathIdentity(candidate) === executionPathIdentity(wt)),
+				true,
+				"proof failure must not remove the Git registration",
+			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an invalid worktree admin backlink before mutation", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-invalid-backlink-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-invalid-backlink");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/invalid-backlink", wt, "HEAD"]);
+			let removeCalls = 0;
+			let adminPath = "";
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (file === "git" && args[0] === "rev-parse" && args[1] === "--absolute-git-dir") {
+						const result = await realCommandRunner.execFile(file, args, options);
+						adminPath = result.stdout.toString().trim();
+						fs.writeFileSync(path.join(adminPath, "gitdir"), `${path.join(tmp, "unrelated", ".git")}\n`);
+						return result;
+					}
+					if (file === "git" && args[0] === "worktree" && args[1] === "remove") {
+						removeCalls++;
+						throw new Error("worktree remove must not run with an invalid backlink");
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await assert.rejects(
+				cleanupWorktree(repo, wt, undefined, false, runner),
+				/admin backlink/i,
+			);
+			assert.equal(removeCalls, 0, "Git removal must not start with an invalid admin backlink");
+			assert.equal(fs.existsSync(wt), true, "invalid metadata must not delete the worktree directory");
+			assert.equal(fs.existsSync(adminPath), true, "invalid metadata must not delete the Git admin entry");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("removes a registered worktree alias through Git's spelling and the exact fallback", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-alias-"));
 		const repo = path.join(tmp, "repo");
