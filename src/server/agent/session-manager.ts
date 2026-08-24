@@ -15277,7 +15277,8 @@ export class SessionManager {
 					if (session.terminalMetadataFenced) return;
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
-						if (!await this.waitForSessionMetadataRetry(session, delays[attempt])) return;
+						if (!await this.waitForSessionMetadataRetry(session, delays[attempt])
+							|| session.terminalMetadataFenced) return;
 						continue;
 					}
 					console.error(
@@ -15347,7 +15348,8 @@ export class SessionManager {
 				if (session.terminalMetadataFenced) return;
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
-					if (!await this.waitForSessionMetadataRetry(session, delays[attempt])) return;
+					if (!await this.waitForSessionMetadataRetry(session, delays[attempt])
+						|| session.terminalMetadataFenced) return;
 				} else {
 					console.error(
 						`[session-manager] CRITICAL: persistSessionMetadata failed for ${session.id} after ${maxRetries + 1} attempts: ${err}\n` +
