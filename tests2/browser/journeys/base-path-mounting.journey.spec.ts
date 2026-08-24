@@ -179,6 +179,24 @@ async function clickSessionAction(page: Page, actionId: string): Promise<void> {
 	await action.click();
 }
 
+async function waitForMountedSessionRoute(page: Page, sessionId: string): Promise<void> {
+	await page.waitForFunction((id) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const editor = document.querySelector<HTMLTextAreaElement>("message-editor textarea");
+		if (!editor) return false;
+		const bounds = editor.getBoundingClientRect();
+		return window.location.hash === `#/session/${id}`
+			&& state?.selectedSessionId === id
+			&& state?.connectingSessionId === null
+			&& state?.connectionStatus === "connected"
+			&& state?.remoteAgent?.gatewaySessionId === id
+			&& editor.isConnected
+			&& getComputedStyle(editor).visibility !== "hidden"
+			&& bounds.width > 0
+			&& bounds.height > 0;
+	}, sessionId, { timeout: 20_000 });
+}
+
 function assertBuiltChunksAreRuntimeMounted(): void {
 	const assetsDir = join(process.cwd(), "dist", "ui", "assets");
 	const chunks = readdirSync(assetsDir).filter(file => file.endsWith(".js"));
@@ -251,15 +269,13 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 
 			sessionId = await createHarnessSession(gateway);
 			await page.goto(`${gateway.baseURL}/session/${sessionId}`, { waitUntil: "domcontentloaded" });
-			await expect.poll(() => page.url(), { timeout: 20_000 }).toBe(`${gateway.baseURL}/#/session/${sessionId}`);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForMountedSessionRoute(page, sessionId);
 			await expect.poll(() => sockets.find(socket => new URL(socket.url).pathname === `${BASE_PATH}/ws/${sessionId}`)?.received ?? 0, {
 				timeout: 20_000,
 				message: "session WebSocket should authenticate below the mount",
 			}).toBeGreaterThan(0);
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-			expect(page.url()).toBe(`${gateway.baseURL}/#/session/${sessionId}`);
+			await waitForMountedSessionRoute(page, sessionId);
 
 			const scriptsBeforeLazyNavigation = requests.filter(record => record.resourceType === "script").length;
 			await page.evaluate(() => { window.location.hash = "#/market"; });
@@ -272,7 +288,7 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			expect(marketApi, "lazy API-backed marketplace screen should call the mounted gateway").toBeTruthy();
 
 			await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForMountedSessionRoute(page, sessionId);
 			const previewEnabled = await adminRequest(gateway, `/api/sessions/${sessionId}`, {
 				method: "PATCH",
 				body: JSON.stringify({ preview: true }),
@@ -353,7 +369,7 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			// cookie-authenticated HTTP request omitted the meaningless Bearer header.
 			await page.evaluate((realToken) => localStorage.setItem("gateway.token", realToken), token);
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForMountedSessionRoute(page, sessionId);
 
 			await page.evaluate(() => {
 				(window as any).__copiedBasePathLinks = [];
