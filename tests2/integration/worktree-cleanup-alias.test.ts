@@ -112,23 +112,32 @@ describe("cleanupWorktree filesystem aliases", () => {
 	);
 
 	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
-		"recovers residue left after successful Git removal through a %s alias before deleting the branch",
+		"recovers only the captured directory generation after successful Git removal through a %s alias",
 		async (aliasKind) => {
 			const fixture = await createFixture(`alias-residue-${aliasKind}`, aliasKind);
 			try {
 				let branchDeleteCalls = 0;
 				let branchDeleteObservedAbsent = false;
+				let branchDeleteObservedAdminAbsent = false;
 				const runner: CommandRunner = {
 					execFile: async (file, args, options) => {
 						if (args[0] === "worktree" && args[1] === "remove") {
-							const result = await realCommandRunner.execFile(file, args, options);
-							await fs.promises.mkdir(fixture.worktree, { recursive: true });
+							// Model Git dropping its admin registration while a hosted-runner
+							// filesystem leaves the original checkout generation behind.
+							await fs.promises.rm(fixture.adminPath, { recursive: true, force: true });
 							await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "residue\n");
-							return result;
+							return { stdout: "", stderr: "" };
 						}
 						if (args[0] === "branch" && args[1] === "-D") {
 							branchDeleteCalls += 1;
 							branchDeleteObservedAbsent = !await fs.promises.lstat(fixture.worktree).then(
+								() => true,
+								(err: NodeJS.ErrnoException) => {
+									if (err.code === "ENOENT") return false;
+									throw err;
+								},
+							);
+							branchDeleteObservedAdminAbsent = !await fs.promises.lstat(fixture.adminPath).then(
 								() => true,
 								(err: NodeJS.ErrnoException) => {
 									if (err.code === "ENOENT") return false;
@@ -144,6 +153,7 @@ describe("cleanupWorktree filesystem aliases", () => {
 
 				expect(branchDeleteCalls).toBe(1);
 				expect(branchDeleteObservedAbsent).toBe(true);
+				expect(branchDeleteObservedAdminAbsent).toBe(true);
 				await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
 				await expect(fs.promises.lstat(fixture.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
 				await expect(git(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${fixture.branch}`])).rejects.toBeTruthy();
@@ -152,6 +162,128 @@ describe("cleanupWorktree filesystem aliases", () => {
 			}
 		},
 	);
+
+	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
+		"preserves a replacement directory generation and branch after a %s alias removal",
+		async (aliasKind) => {
+			const fixture = await createFixture(`alias-replacement-${aliasKind}`, aliasKind);
+			try {
+				let branchDeleteCalls = 0;
+				const runner: CommandRunner = {
+					execFile: async (file, args, options) => {
+						if (args[0] === "worktree" && args[1] === "remove") {
+							const result = await realCommandRunner.execFile(file, args, options);
+							await fs.promises.mkdir(fixture.worktree, { recursive: true });
+							await fs.promises.writeFile(path.join(fixture.worktree, "replacement.txt"), "replacement\n");
+							return result;
+						}
+						if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
+						return realCommandRunner.execFile(file, args, options);
+					},
+				};
+
+				await expect(cleanupWorktree(
+					fixture.repo,
+					fixture.alias,
+					fixture.branch,
+					true,
+					runner,
+					{ skipRemotePush: true },
+				)).rejects.toThrow(/directory changed during traversal/i);
+
+				expect((await fs.promises.lstat(fixture.worktree)).isDirectory()).toBe(true);
+				expect(await fs.promises.readFile(path.join(fixture.worktree, "replacement.txt"), "utf8")).toBe("replacement\n");
+				expect(branchDeleteCalls).toBe(0);
+				expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+			} finally {
+				await removeFixture(fixture.root);
+			}
+		},
+	);
+
+	it("fails closed before Git removal when the alias root has no stable filesystem identity", async () => {
+		const fixture = await createFixture("alias-identity-unavailable", "lexical");
+		const realLstat = fs.promises.lstat.bind(fs.promises);
+		let removeCalls = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(async (filePath) => {
+			const stats = await realLstat(filePath);
+			if (path.resolve(String(filePath)) === path.resolve(fixture.worktree)) {
+				Object.defineProperty(stats, "ino", { value: 0 });
+			}
+			return stats;
+		});
+		const runner: CommandRunner = {
+			execFile: async (file, args, options) => {
+				if (args[0] === "worktree" && args[1] === "remove") removeCalls += 1;
+				return realCommandRunner.execFile(file, args, options);
+			},
+		};
+		try {
+			await expect(cleanupWorktree(
+				fixture.repo,
+				fixture.alias,
+				fixture.branch,
+				true,
+				runner,
+				{ skipRemotePush: true },
+			)).rejects.toThrow(/cannot snapshot linked-worktree filesystem generation/i);
+
+			expect(removeCalls).toBe(0);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+		try {
+			expect((await fs.promises.lstat(fixture.worktree)).isDirectory()).toBe(true);
+			expect((await fs.promises.lstat(fixture.adminPath)).isDirectory()).toBe(true);
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
+	it("fails closed when the captured alias generation cannot be revalidated after Git succeeds", async () => {
+		const fixture = await createFixture("alias-identity-error", "lexical");
+		const realLstat = fs.promises.lstat.bind(fs.promises);
+		let targetLstatCalls = 0;
+		let branchDeleteCalls = 0;
+		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(async (filePath) => {
+			if (path.resolve(String(filePath)) === path.resolve(fixture.worktree)
+				&& ++targetLstatCalls > 1) {
+				throw new Error("synthetic generation revalidation failure");
+			}
+			return realLstat(filePath);
+		});
+		const runner: CommandRunner = {
+			execFile: async (file, args, options) => {
+				if (args[0] === "worktree" && args[1] === "remove") {
+					await fs.promises.rm(fixture.adminPath, { recursive: true, force: true });
+					return { stdout: "", stderr: "" };
+				}
+				if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
+				return realCommandRunner.execFile(file, args, options);
+			},
+		};
+		try {
+			await expect(cleanupWorktree(
+				fixture.repo,
+				fixture.alias,
+				fixture.branch,
+				true,
+				runner,
+				{ skipRemotePush: true },
+			)).rejects.toThrow(/synthetic generation revalidation failure/i);
+
+			expect(branchDeleteCalls).toBe(0);
+		} finally {
+			lstatSpy.mockRestore();
+		}
+		try {
+			expect((await fs.promises.lstat(fixture.worktree)).isDirectory()).toBe(true);
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
 
 	it("fails closed when porcelain omits the proven alias registration", async () => {
 		const fixture = await createFixture("alias-unregistered");
