@@ -1,6 +1,5 @@
 import type { BrowserContext, Locator, Page } from "@playwright/test";
 import type { GatewayInfo } from "../gateway-harness.js";
-import { broadcastStatus } from "../../../src/server/agent/session-status.js";
 import { expect, navigateToHash, openApp } from "../_helpers/journey-fixture.js";
 
 /** A deterministic test seam: arrival is observable separately from release. */
@@ -234,16 +233,35 @@ export class ReliableTurnRuntime {
 		return this.core.barrierJournal;
 	}
 
-	/** Project an already active held mock run after compaction overwrote its status. */
-	surfaceActiveRun(): number {
+	/** Snapshot the server-owned status revision without creating another event. */
+	statusRevision(): RemoteStatusRevision {
+		const session = this.sessionManager?.getSession(this.sessionId);
+		if (!session || !Number.isFinite(session.statusVersion)) {
+			throw new Error("Cannot read an authoritative mock session status revision");
+		}
+		return {
+			status: session.status,
+			statusVersion: session.statusVersion,
+			activeRun: session.status === "streaming" && Number.isFinite(session.streamingStartedAt),
+		};
+	}
+
+	/**
+	 * Admit the already active held mock run after compaction overwrote its status.
+	 * The accepted agent_start is the sole owner of the canonical status revision;
+	 * emitting an observation-only duplicate can let a later idle revision satisfy
+	 * a loose version wait without ever rendering this run as active.
+	 */
+	surfaceActiveRun(): RemoteStatusRevision {
 		if (!this.core.currentAbortController) {
 			throw new Error("Cannot surface a mock run without an active abort controller");
 		}
 		this.core.emit({ type: "agent_start" });
-		const session = this.sessionManager?.getSession(this.sessionId);
-		if (!session) throw new Error("Cannot surface a missing mock session");
-		broadcastStatus(session, "streaming", { streamingStartedAt: Date.now() });
-		return session.statusVersion;
+		const revision = this.statusRevision();
+		if (revision.status !== "streaming" || !revision.activeRun) {
+			throw new Error("Accepted mock run did not publish an authoritative streaming revision");
+		}
+		return revision;
 	}
 
 	restore(): void {
@@ -396,24 +414,28 @@ export async function openSessionPage(page: Page, sessionId: string): Promise<vo
 	await expect(editor(page)).toBeVisible({ timeout: 20_000 });
 }
 
+export interface RemoteStatusRevision {
+	status: string;
+	statusVersion: number;
+	activeRun: boolean;
+}
+
 export async function waitForRemoteStatus(
 	page: Page,
-	minimumVersion: number,
-	status?: string,
+	expected: RemoteStatusRevision,
 ): Promise<void> {
 	await expect.poll(() => page.evaluate(() => {
 		const remote = (window as any).bobbitState?.remoteAgent ?? (window as any).__bobbitState?.remoteAgent;
+		const state = remote?.state ?? remote?._state;
 		return {
-			status: remote?.state?.status ?? remote?._state?.status,
-			version: Number(remote?._lastStatusVersion ?? -1),
+			status: state?.status,
+			statusVersion: Number(remote?._lastStatusVersion ?? -1),
+			activeRun: state?.status === "streaming" && Number.isFinite(state?.turnStartTime),
 		};
-	}), { timeout: 15_000 }).toEqual(status
-		? { status, version: expect.any(Number) }
-		: expect.objectContaining({ version: expect.any(Number) }));
-	await expect.poll(() => page.evaluate(() => {
-		const remote = (window as any).bobbitState?.remoteAgent ?? (window as any).__bobbitState?.remoteAgent;
-		return Number(remote?._lastStatusVersion ?? -1);
-	}), { timeout: 15_000 }).toBeGreaterThanOrEqual(minimumVersion);
+	}), {
+		timeout: 15_000,
+		message: "the remote must accept the exact authoritative active-run status revision",
+	}).toEqual(expected);
 }
 
 export async function closeActiveSessionSocket(page: Page): Promise<void> {
