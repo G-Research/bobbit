@@ -400,13 +400,18 @@ test.describe("Journey: Current-session goal promotion", () => {
 
 			const purged = await apiFetch(`/api/sessions/${source.id}?purge=true`, { method: "DELETE" });
 			expect(purged.status, await purged.clone().text()).toBe(200);
-			await expect.poll(async () => ({
+			// The purge route awaits its lifecycle owner through worktree cleanup and
+			// durable store removal. Its response is the completion barrier: polling
+			// after 200 would hide a leaked checkout as a timing race.
+			expect({
+				persistedSession: gateway.sessionManager?.getPersistedSession(source.id),
 				sessionStatus: (await apiFetch(`/api/sessions/${source.id}?include=archived`)).status,
 				canonicalWorktreeExists: existsSync(canonicalWorktreePath),
-			}), {
-				timeout: 20_000,
-				message: "final source purge must remove both the archived row and canonical adopted worktree",
-			}).toEqual({ sessionStatus: 404, canonicalWorktreeExists: false });
+			}, "final source purge must remove both authoritative session state and the canonical adopted worktree").toEqual({
+				persistedSession: undefined,
+				sessionStatus: 404,
+				canonicalWorktreeExists: false,
+			});
 			expect((await apiFetch(`/api/goals/${goal.id}/team`)).status).toBe(404);
 			expect((await responseJson(await apiFetch(`/api/goals/${goal.id}`))).archived).toBe(true);
 		} finally {
