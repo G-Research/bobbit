@@ -232,7 +232,59 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		}
 	});
 
-	it("removes a worktree through Git's registered spelling when the caller supplies a filesystem alias", async () => {
+	it("rejects the primary repository and Git common roots without deleting them", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-primary-"));
+		const repo = path.join(tmp, "repo");
+		const sentinel = path.join(repo, "keep.txt");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(sentinel, "must survive\n");
+			git(repo, ["add", "keep.txt"]);
+			git(repo, ["commit", "-m", "initial"]);
+
+			for (const protectedPath of [repo, path.join(repo, ".git")]) {
+				await assert.rejects(
+					cleanupWorktree(repo, protectedPath),
+					/protected repository|common-root|main worktree/i,
+				);
+			}
+			assert.equal(fs.readFileSync(sentinel, "utf8"), "must survive\n");
+			assert.equal(fs.existsSync(path.join(repo, ".git")), true, "primary Git metadata must remain");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an unregistered directory without deleting it", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-unregistered-"));
+		const repo = path.join(tmp, "repo");
+		const unregistered = path.join(tmp, "unregistered");
+		const sentinel = path.join(unregistered, "keep.txt");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			fs.mkdirSync(unregistered);
+			fs.writeFileSync(sentinel, "must survive\n");
+
+			await assert.rejects(
+				cleanupWorktree(repo, unregistered),
+				/exact registered linked worktree/i,
+			);
+			assert.equal(fs.readFileSync(sentinel, "utf8"), "must survive\n");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("removes a registered worktree alias through Git's spelling and the exact fallback", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-alias-"));
 		const repo = path.join(tmp, "repo");
 		const wt = path.join(tmp, "repo-wt", "session-alias");
@@ -252,6 +304,7 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 				execFile: async (file, args, options) => {
 					if (file === "git" && args[0] === "worktree" && args[1] === "remove") {
 						removeTargets.push(String(args[2]));
+						throw new Error("synthetic Git removal failure");
 					}
 					return realCommandRunner.execFile(file, args, options);
 				},
@@ -269,6 +322,39 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 				false,
 				"cleanup must remove the exact Git registration",
 			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("fails when the authoritative postcondition listing cannot be read", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-worktree-postcondition-"));
+		const repo = path.join(tmp, "repo");
+		const wt = path.join(tmp, "repo-wt", "session-postcondition");
+		try {
+			fs.mkdirSync(repo, { recursive: true });
+			git(repo, ["init"]);
+			git(repo, ["config", "user.email", "test@example.com"]);
+			git(repo, ["config", "user.name", "Test User"]);
+			fs.writeFileSync(path.join(repo, "README.md"), "test\n");
+			git(repo, ["add", "README.md"]);
+			git(repo, ["commit", "-m", "initial"]);
+			git(repo, ["worktree", "add", "-b", "session/postcondition", wt, "HEAD"]);
+			let listingCount = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (file === "git" && args[0] === "worktree" && args[1] === "list" && ++listingCount > 1) {
+						throw new Error("synthetic postcondition listing failure");
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await assert.rejects(
+				cleanupWorktree(repo, wt, undefined, false, runner),
+				/failed to verify worktree cleanup.*synthetic postcondition listing failure/i,
+			);
+			assert.equal(fs.existsSync(wt), false, "Git removal may finish, but verification failure must still reject");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
