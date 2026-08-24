@@ -5,9 +5,11 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import {
+	hasStableFileIdentity,
 	RECOVERY_IO_CONCURRENCY,
 	removeTree,
 	type AsyncTreeFs,
+	type AsyncTreeStats,
 } from "../agent/bounded-async-work.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "../agent/project-config-store.js";
@@ -308,15 +310,18 @@ async function withTargetedRemovalSlot<T>(operation: () => Promise<T>): Promise<
  *
  * The operation owns one process-wide slot for its lifetime. Concurrent
  * worktree/pool cleanup therefore retains the shared recovery I/O ceiling
- * without multiplying it at nested tree levels.
+ * without multiplying it at nested tree levels. When supplied, the expected
+ * root stats bind deletion to that exact pre-operation filesystem identity.
  */
 export async function removeTargetedTree(
 	targetPath: string,
 	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">,
+	expectedRootStats?: AsyncTreeStats,
 ): Promise<void> {
 	await withTargetedRemovalSlot(() => removeTree(targetPath, {
 		fs: treeFs,
 		force: true,
+		expectedRootStats,
 	}));
 }
 
@@ -525,6 +530,8 @@ interface ExistingWorktreeCleanupSnapshot {
 	removalPath: string;
 	adminPath: string;
 	aliased: boolean;
+	/** Exact no-follow identity of the linked-worktree root before Git acts. */
+	rootStats: AsyncTreeStats;
 }
 
 function porcelainWorktreePaths(output: string): string[] {
@@ -559,6 +566,18 @@ async function existingWorktreeCleanupSnapshot(
 	} catch {
 		return undefined;
 	}
+	let rootStats: AsyncTreeStats;
+	try {
+		rootStats = await fs.promises.lstat(path.resolve(requestedPath));
+	} catch (err) {
+		throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
+	}
+	if (!rootStats.isDirectory()
+		|| rootStats.isSymbolicLink()
+		|| !hasStableFileIdentity(rootStats)) {
+		throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}`);
+	}
+
 	const comparableIdentity = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
 	requestedIdentity = comparableIdentity(requestedIdentity);
 	// path.resolve() necessarily removes dot segments before realpath. Preserve
@@ -598,6 +617,7 @@ async function existingWorktreeCleanupSnapshot(
 			removalPath,
 			adminPath,
 			aliased,
+			rootStats,
 		};
 	}
 	throw new Error(`Cannot resolve Git worktree registration for aliased path ${requestedPath}`);
@@ -1435,13 +1455,18 @@ export async function cleanupWorktree(
 	}
 
 	// Git can report a successful removal before the checkout directory has fully
-	// disappeared (notably on hosted Windows runners). This applies equally when
-	// the caller's short/lexical alias was resolved to Git's authoritative spelling.
-	// Preserve one Git remove command, then recover only that exact coordinate
-	// through the bounded async remover before any absence fence or branch deletion.
+	// disappeared (notably on hosted Windows runners). Preserve one Git remove
+	// command, then recover only the root generation captured before Git acted.
+	// A replacement at the same aliased pathname is not worktree residue: the
+	// bounded remover's expected-root fence rejects it without deleting anything.
+	// Ordinary coordinates retain their established operation-first recovery.
 	if (!removalError) {
 		try {
-			await removeTargetedTree(removalPath);
+			await removeTargetedTree(
+				removalPath,
+				undefined,
+				snapshot?.aliased ? snapshot.rootStats : undefined,
+			);
 			if (await pathRemainsStrict(removalPath)) {
 				throw new Error(`directory remains at ${removalPath}`);
 			}
