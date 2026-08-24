@@ -379,6 +379,7 @@ test.describe("Journey: Project Assistant", () => {
 	test("Add Project (non-.bobbit dir) creates a provisional '(setting up)' project", async ({ page }) => {
 		test.setTimeout(120_000);
 		const dir = uniqueProjectDir();
+		let provisionalProjectId = "";
 		writeFileSync(join(dir, "package.json"), `{"name":"v2-provisional-${Date.now()}"}`);
 		try {
 			await openApp(page);
@@ -391,21 +392,30 @@ test.describe("Journey: Project Assistant", () => {
 			// Dialog closes and we land in the assistant session.
 			await expect(pathInput).not.toBeVisible({ timeout: 15_000 });
 			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 15_000 }).toMatch(/^#\/session\//);
+			const sessionId = (await page.evaluate(() => window.location.hash)).replace(/^#\/session\//, "");
+			const sessionResponse = await apiFetch(`/api/sessions/${sessionId}`);
+			expect(sessionResponse.ok).toBe(true);
+			provisionalProjectId = String((await sessionResponse.json()).projectId ?? "");
+			expect(provisionalProjectId).not.toBe("");
 
 			// The provisional project shows the "(setting up)" indicator in the sidebar.
 			const sidebar = page.locator(".sidebar-edge");
 			await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 20_000 });
 		} finally {
-			// Best-effort cleanup of any provisional project bound to this dir.
-			try {
-				const res = await apiFetch("/api/projects");
-				const data = await res.json();
-				for (const p of (data.projects || data || [])) {
-					if (p.name === "default") continue;
-					if (p.rootPath === dir || p.provisional) await apiFetch(`/api/projects/${p.id}`, { method: "DELETE" }).catch(() => {});
-				}
-			} catch { /* best-effort */ }
-			try { rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			// Project DELETE is the authoritative writer-drain barrier. Never remove
+			// the fixture root until the server confirms its session and context are gone.
+			if (!provisionalProjectId) {
+				const projectsResponse = await apiFetch("/api/projects");
+				expect(projectsResponse.ok).toBe(true);
+				const projectsBody = await projectsResponse.json();
+				const projects = projectsBody.projects || projectsBody || [];
+				provisionalProjectId = String(projects.find((project: any) => project.rootPath === dir)?.id ?? "");
+			}
+			if (provisionalProjectId) {
+				const cleanup = await apiFetch(`/api/projects/${provisionalProjectId}`, { method: "DELETE" });
+				expect(cleanup.ok).toBe(true);
+			}
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 

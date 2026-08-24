@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-manager-first-turn-finalizer.test.ts",
+      "reason": "Focused SessionManager lifecycle coverage proving the first-turn setup finalizer is synchronously registered in the serialized session-owned metadata lane and that both terminate and graceful shutdown join it before bridge and project-store teardown.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/worktree-cleanup-alias.test.ts",
       "reason": "Focused real-Git coverage proving linked-worktree cleanup resolves lexical dot-segment aliases and Windows native short paths to Git's registered spelling, verifies exact directory and admin absence before branch deletion, rejects swallowed removal failures, and preserves nonexistent injected-coordinate compatibility.",
       "execution": {

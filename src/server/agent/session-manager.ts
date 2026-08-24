@@ -10074,12 +10074,9 @@ export class SessionManager {
 					const persisted = this.resolveStoreForSession(session.id).get(session.id);
 					if (latestContextClearBoundary(persisted?.contextClearBoundaries)?.activatedTranscriptMaterialized === false
 						&& !session.pendingMetadataPersist) {
-						const pending = this.persistSessionMetadata(session).catch((error) => {
+						this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((error) => {
 							console.warn(`[session-manager] Failed to mark cleared transcript materialized for ${session.id}:`, error);
-						}).finally(() => {
-							if (session.pendingMetadataPersist === pending) session.pendingMetadataPersist = undefined;
-						});
-						session.pendingMetadataPersist = pending;
+						}));
 					}
 				} catch { /* a later lifecycle pass can retry metadata healing */ }
 			}
@@ -10290,14 +10287,16 @@ export class SessionManager {
 				if (!this.maybeAutoRetryTransient(session)) this.surfaceManualRetryRequired(session);
 			}
 
-			// Trigger deferred setup after the first agent turn completes.
-			// This runs model selection, thinking level, and metadata persistence
-			// without blocking the user's first prompt.
+			// Trigger deferred setup after the first agent turn completes. Register the
+			// finalizer synchronously in the session-owned metadata lane: project
+			// deletion and gateway shutdown must be able to join it before removing the
+			// store directory, and it must not race an earlier creation-time metadata
+			// write over the same SessionStore snapshot.
 			if (!session.setupComplete) {
 				session.setupComplete = true;
-				this._finishSessionSetup(session).catch((err) => {
+				this.trackSessionMetadataWork(session, () => this._finishSessionSetup(session).catch((err) => {
 					console.error(`[session-manager] Deferred setup error for session ${session.id}:`, err);
-				});
+				}));
 			}
 		} else if (event.type === "agent_settled") {
 			// Pi settling its run is not an echo. Any handoff without a correlated
@@ -13743,9 +13742,9 @@ export class SessionManager {
 				// already adopted a cloned transcript and may have sanitized runtime-only
 				// metadata in that file; avoid a redundant get_state that can drop it.
 				if (plan.preExistingAgentSessionFile) return;
-				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
-				}).finally(() => { session.pendingMetadataPersist = undefined; });
+				}));
 			}).finally(releaseSetupThinkingAuthority);
 
 			if (opts?.awaitWorktreeSetup) {
@@ -13844,9 +13843,9 @@ export class SessionManager {
 			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
 			// avoid a redundant get_state that can rewrite runtime-only metadata.
 			if (!plan.preExistingAgentSessionFile) {
-				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-				}).finally(() => { session.pendingMetadataPersist = undefined; });
+				}));
 			}
 
 			return session;
@@ -14100,9 +14099,9 @@ export class SessionManager {
 		}
 
 		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+		this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
+		}));
 
 		// Preserve an authenticated owner's identity for orchestration-created
 		// delegates. Direct/server-created delegates omit provenance and remain
@@ -14458,12 +14457,33 @@ export class SessionManager {
 	}
 
 	/**
+	 * Serialize metadata work owned by one live session. Registration happens
+	 * synchronously, before the work starts, so terminal lifecycle barriers can
+	 * join the complete lane. Promise identity prevents an older finalizer from
+	 * clearing a newer queued owner.
+	 */
+	private trackSessionMetadataWork(session: SessionInfo, work: () => Promise<void>): Promise<void> {
+		const predecessor = session.pendingMetadataPersist ?? Promise.resolve();
+		let tracked!: Promise<void>;
+		tracked = predecessor.then(work).finally(() => {
+			if (session.pendingMetadataPersist === tracked) session.pendingMetadataPersist = undefined;
+		});
+		session.pendingMetadataPersist = tracked;
+		return tracked;
+	}
+
+	/**
 	 * Runs metadata persistence (and retries model/thinking if early setup missed).
 	 * Called after the first agent turn completes.
 	 */
 	private async _finishSessionSetup(session: SessionInfo): Promise<void> {
 		try {
 			await this.persistSessionMetadata(session);
+			// persistSessionMetadata mutates SessionStore through its normal coalesced
+			// path. Keep the first-turn owner alive through the atomic publication so
+			// a terminal lifecycle caller cannot observe the metadata task settled
+			// while its tmp+rename still owns the project directory.
+			await this.resolveStoreForSession(session.id).flushAsync();
 		} catch (err) {
 			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
 		}
@@ -15436,9 +15456,9 @@ export class SessionManager {
 		this.sessions.set(id, session);
 
 		// Then update with agentSessionFile (tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+		this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist external session ${id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
+		}));
 
 		console.log(`[session-manager] Registered external session ${id}: ${opts.title}`);
 
@@ -19272,7 +19292,13 @@ export class SessionManager {
 			// closing in shutdown so suppress the cancellation broadcast.
 			this.cancelPendingAutoRetry(session, "shutdown");
 
+			// Stop admitting first-turn lifecycle work, then join the session-owned
+			// metadata lane before the bridge or its project store can be torn down.
 			session.unsubscribe();
+			if (session.pendingMetadataPersist) {
+				try { await session.pendingMetadataPersist; }
+				catch { /* the metadata owner already logged the actionable failure */ }
+			}
 			await session.rpcClient.stop();
 			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
 			// Status mutation here is the documented exception to the broadcastStatus rule.
