@@ -1434,6 +1434,22 @@ export async function cleanupWorktree(
 		}
 	}
 
+	// Git can report a successful ordinary removal before the checkout directory
+	// has fully disappeared (notably on hosted Windows runners). Preserve the
+	// operation-first single-command surface, then remove only the exact requested
+	// path through the bounded async remover and fence its absence before branch
+	// deletion. Alias snapshots keep their stricter directory + admin proof below.
+	if (!snapshot && !removalError) {
+		try {
+			await removeTargetedTree(removalPath);
+			if (await pathRemainsStrict(removalPath)) {
+				throw new Error(`directory remains at ${removalPath}`);
+			}
+		} catch (err) {
+			throw new Error(`Failed to clean up worktree ${worktreePath}: ${gitErrorText(err)}`);
+		}
+	}
+
 	// Alias cleanup and failed removal are not complete until the exact linked
 	// directory and admin entry captured while live are both absent. This fence
 	// runs before branch deletion so a failed removal cannot be swallowed.

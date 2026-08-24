@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.js";
 import { cleanupWorktree } from "../../src/server/skills/git.js";
 
@@ -170,6 +170,93 @@ describe("cleanupWorktree filesystem aliases", () => {
 			expect((await fs.promises.lstat(fixture.adminPath)).isDirectory()).toBe(true);
 			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
 		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
+	it("removes ordinary residue after Git succeeds and fences absence before branch deletion", async () => {
+		const fixture = await createFixture("ordinary-residue-success", "lexical");
+		try {
+			let listCalls = 0;
+			let branchDeleteCalls = 0;
+			let branchDeleteObservedAbsent = false;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (args[0] === "worktree" && args[1] === "list") listCalls += 1;
+					if (args[0] === "worktree" && args[1] === "remove") {
+						const result = await realCommandRunner.execFile(file, args, options);
+						await fs.promises.mkdir(fixture.worktree, { recursive: true });
+						await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "residue\n");
+						return result;
+					}
+					if (args[0] === "branch" && args[1] === "-D") {
+						branchDeleteCalls += 1;
+						branchDeleteObservedAbsent = !await fs.promises.lstat(fixture.worktree).then(
+							() => true,
+							(err: NodeJS.ErrnoException) => {
+								if (err.code === "ENOENT") return false;
+								throw err;
+							},
+						);
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await cleanupWorktree(fixture.repo, fixture.worktree, fixture.branch, true, runner, { skipRemotePush: true });
+
+			expect(listCalls).toBe(0);
+			expect(branchDeleteCalls).toBe(1);
+			expect(branchDeleteObservedAbsent).toBe(true);
+			await expect(fs.promises.lstat(fixture.worktree)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(fs.promises.lstat(fixture.adminPath)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(git(fixture.repo, ["show-ref", "--verify", "--quiet", `refs/heads/${fixture.branch}`])).rejects.toBeTruthy();
+		} finally {
+			await removeFixture(fixture.root);
+		}
+	});
+
+	it("retains the branch when ordinary residual recovery fails", async () => {
+		const fixture = await createFixture("ordinary-residue-failure", "lexical");
+		const realRename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (oldPath, newPath) => {
+			if (typeof oldPath === "string" && path.resolve(oldPath) === path.resolve(fixture.worktree)) {
+				throw new Error("synthetic residual recovery failure");
+			}
+			return realRename(oldPath, newPath);
+		});
+		try {
+			let listCalls = 0;
+			let branchDeleteCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if (args[0] === "worktree" && args[1] === "list") listCalls += 1;
+					if (args[0] === "worktree" && args[1] === "remove") {
+						const result = await realCommandRunner.execFile(file, args, options);
+						await fs.promises.mkdir(fixture.worktree, { recursive: true });
+						await fs.promises.writeFile(path.join(fixture.worktree, "residual.txt"), "residue\n");
+						return result;
+					}
+					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls += 1;
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+
+			await expect(cleanupWorktree(
+				fixture.repo,
+				fixture.worktree,
+				fixture.branch,
+				true,
+				runner,
+				{ skipRemotePush: true },
+			)).rejects.toThrow(/synthetic residual recovery failure/i);
+
+			expect(listCalls).toBe(0);
+			expect(branchDeleteCalls).toBe(0);
+			expect((await fs.promises.lstat(fixture.worktree)).isDirectory()).toBe(true);
+			expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+		} finally {
+			renameSpy.mockRestore();
 			await removeFixture(fixture.root);
 		}
 	});
