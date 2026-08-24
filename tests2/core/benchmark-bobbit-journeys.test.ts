@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import {
+	cp,
 	lstat,
 	mkdir,
 	mkdtemp,
@@ -40,7 +41,9 @@ import {
 	combineGatewayStartupSampleFailures,
 	GATEWAY_STARTUP_CASES,
 	GATEWAY_STARTUP_FIXTURE_VERSION,
+	gatewayStartupGatewayArgs,
 	generateGatewayStartupFixture,
+	relocateSampleFixture,
 	validateGatewayStartupSemanticProjection,
 } from "../../scripts/benchmarks/gateway-startup.mjs";
 import { bfsEnrichArchivedIndexed } from "../../src/server/agent/archived-session-bfs.js";
@@ -48,6 +51,7 @@ import {
 	aggregateMeasuredReliability,
 	cleanupBenchmarkRunRoot,
 	closeBenchmarkBrowser,
+	createBenchmarkGatewayToken,
 	createBenchmarkRunRoot,
 	createTailBuffer,
 	readProcessMetrics,
@@ -61,6 +65,8 @@ import {
 	projectSessionOpenMessages,
 	projectSessionOpenRenderedText,
 	runSessionOpenSample,
+	sessionOpenGatewayArgs,
+	sessionOpenMetricFields,
 	SESSION_OPEN_BALLAST_BLOCK_MAX_BYTES,
 	SESSION_OPEN_BROWSER_ACQUISITION_TIMEOUT_MS,
 	SESSION_OPEN_CASES,
@@ -175,6 +181,40 @@ describe("benchmark journey CLI and scheduling contract", () => {
 		});
 		assert.equal(twice.exitCode, 1);
 		assert.match(twice.report.correctness.error, /exactly once/);
+	});
+
+	it("requires every declared raw metric while accepting explicit null and finite zero", async () => {
+		const repoRoot = await temporaryRoot();
+		const options = parseArgs(["--journey", "session-open", "--warmups", "2", "--repetitions", "1"]);
+		const journey = (metricValue: number | null | undefined, includeMetric = true) => async (context: any) => {
+			const schedule = context.scheduleFor(["only"]);
+			return {
+				samples: schedule.map((entry: any) => ({
+					...entry,
+					metrics: includeMetric ? { latencyMs: metricValue, supportedMs: 0 } : { supportedMs: 0 },
+				})),
+				metricDefinitions: {
+					latencyMs: { unit: "ms", direction: "lower" },
+					supportedMs: { unit: "ms", direction: "lower" },
+				},
+				correctness: { status: "passed" },
+			};
+		};
+
+		const explicitNull = await runBenchmark(options, {
+			repoRoot,
+			importer: async () => ({ runJourney: journey(null) }),
+		});
+		assert.equal(explicitNull.exitCode, 0);
+		assert.equal(explicitNull.report.samples[0].metrics.latencyMs, null);
+		assert.equal(explicitNull.report.samples[0].metrics.supportedMs, 0);
+
+		const missing = await runBenchmark(options, {
+			repoRoot,
+			importer: async () => ({ runJourney: journey(undefined, false) }),
+		});
+		assert.equal(missing.exitCode, 1);
+		assert.match(missing.report.correctness.error, /must declare metric latencyMs/i);
 	});
 
 	it("retains the runner schedule and exact safe failing-sample diagnostic", async () => {
@@ -414,7 +454,7 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 		assert.notEqual(sha256(projectSessionOpenMessages(messages)), sha256(projectSessionOpenMessages([...messages].reverse())));
 	});
 
-	it("preserves unsupported session-open Long Task keys as null and supported zeroes", () => {
+	it("preserves every unsupported session-open metric as null and supported zeroes", () => {
 		assert.deepEqual(sessionOpenLongTaskMetricFields(null), {
 			longTaskCount: null,
 			longTaskTotalMs: null,
@@ -425,6 +465,69 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 			longTaskTotalMs: 0,
 			longTaskMaxMs: 0,
 		});
+		const unsupported = sessionOpenMetricFields({
+			timing: { now: 15, sent: 10, received: 12, snapshotChars: 0, heap: [], serverTiming: {} },
+			snapshotFrameBytes: 0,
+			heapBefore: null,
+			heapAfterInteractive: null,
+			longTaskMetrics: null,
+		});
+		assert.deepEqual(unsupported, {
+			timeToInteractiveMs: 5,
+			serverResponseLatencyMs: 2,
+			transferredBytes: 0,
+			longTaskCount: null,
+			longTaskTotalMs: null,
+			longTaskMaxMs: null,
+			heapGrowthBytes: null,
+			heapPeakBytes: null,
+			rpcMs: null,
+			pipelineMs: null,
+			stampMs: null,
+			stringifyMs: null,
+		});
+		const supportedZero = sessionOpenMetricFields({
+			timing: {
+				now: 0, sent: 0, received: 0, snapshotChars: 0, heap: [0],
+				serverTiming: { rpcMs: 0, pipelineMs: 0, stampMs: 0, stringifyMs: 0 },
+			},
+			snapshotFrameBytes: 0,
+			heapBefore: 0,
+			heapAfterInteractive: 0,
+			longTaskMetrics: { count: 0, totalMs: 0, maxMs: 0 },
+		});
+		assert.ok(Object.values(supportedZero).every(value => value === 0));
+	});
+
+	it("requires authentication in every benchmark gateway invocation", () => {
+		const repoRoot = path.resolve("benchmark-repo");
+		const workspace = path.resolve("benchmark-workspace");
+		const invocations = [
+			sessionOpenGatewayArgs(repoRoot, workspace, 1234),
+			eventStreamBenchmark.eventStreamGatewayArgs(repoRoot, workspace, 1234),
+			gatewayStartupGatewayArgs(repoRoot, workspace),
+		];
+		for (const args of invocations) {
+			assert.equal(args.filter((arg: string) => arg === "--auth").length, 1);
+			assert.deepEqual(args.slice(args.indexOf("--host"), args.indexOf("--host") + 2), ["--host", "127.0.0.1"]);
+		}
+	});
+
+	it("creates distinct high-entropy sample credentials without putting them in report data", async () => {
+		const root = await temporaryRoot();
+		const first = await createBenchmarkGatewayToken(path.join(root, "sample-a", "secrets"));
+		const second = await createBenchmarkGatewayToken(path.join(root, "sample-b", "secrets"));
+		assert.match(first, /^[a-f0-9]{64}$/);
+		assert.match(second, /^[a-f0-9]{64}$/);
+		assert.notEqual(first, second);
+		assert.equal(await readFile(path.join(root, "sample-a", "secrets", "token"), "utf8"), first);
+		const reportMaterial = JSON.stringify(boundReport({
+			fixtureDimensions: { fixtureVersion: GATEWAY_STARTUP_FIXTURE_VERSION },
+			fixtureHashes: { semantic: "fixture-hash" },
+			correctness: { status: "passed" },
+		}));
+		assert.equal(reportMaterial.includes(first), false);
+		assert.equal(reportMaterial.includes(second), false);
 	});
 
 	it("pins store counts and detects observed relationship mutations independently", () => {
@@ -1192,6 +1295,8 @@ describe("gateway-startup generated preferences and containment regression", () 
 		class SessionStore {
 			constructor(directory: string) { dependencyPaths.push(directory); }
 			put(session: any) { persistedSessions.push(structuredClone(session)); }
+			update(id: string, patch: any) { Object.assign(persistedSessions.find(session => session.id === id), patch); }
+			get(id: string) { return persistedSessions.find(session => session.id === id); }
 			async flushAsync() {}
 		}
 		class ProjectRegistry {
@@ -1237,6 +1342,21 @@ describe("gateway-startup generated preferences and containment regression", () 
 			assert.equal(generated.manifest.fixtureVersion, 4);
 			assert.equal(GATEWAY_STARTUP_FIXTURE_VERSION, 4);
 			assert.equal(persistedSessions.length, 100);
+			assert.equal(existsSync(path.join(fixtureRoot, "secrets", "token")), false, "canonical fixture must not contain credentials");
+			assert.doesNotMatch(JSON.stringify(generated.manifest), /"(?:token|auth)[^"]*"/i);
+			const sampleRoots = [path.join(paths.samples, "sample-a"), path.join(paths.samples, "sample-b")];
+			await Promise.all(sampleRoots.map(sampleRoot => cp(fixtureRoot, sampleRoot, { recursive: true })));
+			const relocated = [];
+			for (const sampleRoot of sampleRoots) {
+				relocated.push(await relocateSampleFixture(sampleRoot, { SessionStore }));
+			}
+			assert.match(relocated[0].token, /^[a-f0-9]{64}$/);
+			assert.match(relocated[1].token, /^[a-f0-9]{64}$/);
+			assert.notEqual(relocated[0].token, relocated[1].token);
+			for (const sample of relocated) {
+				assert.equal(JSON.stringify(sample.manifest).includes(sample.token), false);
+				assert.equal(await readFile(path.join(sample.secretsRoot, "token"), "utf8"), sample.token);
+			}
 
 			const generatedPaths = [
 				fixtureRoot,

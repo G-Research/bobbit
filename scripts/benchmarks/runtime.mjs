@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -435,10 +435,22 @@ export function sanitizeBenchmarkDiagnosticText(value, {
 	return capDiagnosticTail(text, maximumBytes);
 }
 
+/** Create one unguessable credential in a sample-owned gateway secrets directory. */
+export async function createBenchmarkGatewayToken(secretsDir) {
+	if (typeof secretsDir !== "string" || !path.isAbsolute(secretsDir)) {
+		throw new TypeError("Benchmark gateway secrets directory must be absolute");
+	}
+	await mkdir(secretsDir, { recursive: true, mode: 0o700 });
+	const token = randomBytes(32).toString("hex");
+	await writeFile(path.join(secretsDir, "token"), token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+	return token;
+}
+
 /** Spawn a fixed journey-owned gateway invocation without a shell. */
-export function spawnGateway({ command = process.execPath, args, cwd, env, maxLogBytes = DEFAULT_LOG_TAIL_BYTES }) {
+export function spawnGateway({ command = process.execPath, args, cwd, env, maxLogBytes = DEFAULT_LOG_TAIL_BYTES, redactions = [] }) {
 	if (!Array.isArray(args) || args.some(value => typeof value !== "string")) throw new TypeError("Gateway args must be strings");
 	if (!cwd || !env || typeof env !== "object") throw new Error("Gateway spawn requires explicit cwd and env");
+	if (!Array.isArray(redactions)) throw new TypeError("Gateway diagnostic redactions must be an array");
 	const stdout = createTailBuffer(maxLogBytes);
 	const stderr = createTailBuffer(maxLogBytes);
 	const startedAt = performance.now();
@@ -461,7 +473,10 @@ export function spawnGateway({ command = process.execPath, args, cwd, env, maxLo
 		shutdownStarted: false,
 		posixGroupOwned: false,
 		finalGroupSignalSent: false,
-		diagnosticRedactions: diagnosticRedactions(cwd, env),
+		diagnosticRedactions: [...new Set([...diagnosticRedactions(cwd, env), ...redactions]
+			.filter(value => typeof value === "string" && value.length >= 4))]
+			.sort((left, right) => right.length - left.length)
+			.slice(0, 64),
 	};
 	child.stdout?.on("data", chunk => stdout.push(chunk));
 	child.stderr?.on("data", chunk => stderr.push(chunk));

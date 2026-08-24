@@ -13,13 +13,13 @@ import { SessionStore, type PersistedSession } from "../../src/server/agent/sess
 import {
 	GATEWAY_STARTUP_PROJECT_ID,
 	GATEWAY_STARTUP_SEARCH_SENTINEL,
-	GATEWAY_STARTUP_TOKEN,
 	buildGatewayStartupFixtureRecords,
 	cleanupTrackedGateways,
 	validateGatewayStartupSemanticProjection,
 } from "../../scripts/benchmarks/gateway-startup.mjs";
 import {
 	cleanupBenchmarkRunRoot,
+	createBenchmarkGatewayToken,
 	createBenchmarkRunRoot,
 	spawnGateway,
 	stopGateway,
@@ -71,7 +71,7 @@ function transcriptRows(projectRoot: string): string {
 	return `${rows.map(row => JSON.stringify(row)).join("\n")}\n`;
 }
 
-async function seedReducedStartupStore(paths: BenchmarkPaths): Promise<{ stateDir: string; secretsDir: string }> {
+async function seedReducedStartupStore(paths: BenchmarkPaths): Promise<{ stateDir: string; secretsDir: string; token: string }> {
 	const stateDir = path.join(paths.gateway, "state");
 	const configDir = path.join(paths.gateway, "config");
 	const secretsDir = path.join(paths.root, "secrets");
@@ -90,8 +90,8 @@ async function seedReducedStartupStore(paths: BenchmarkPaths): Promise<{ stateDi
 			"default.sessionModel": "mock/mock-model",
 			"default.sessionThinkingLevel": "medium",
 		}, null, 2), "utf8"),
-		writeFile(path.join(secretsDir, "token"), GATEWAY_STARTUP_TOKEN, "utf8"),
 	]);
+	const token = await createBenchmarkGatewayToken(secretsDir);
 
 	new ProjectRegistry(stateDir).ensureHeadquartersProject(paths.gateway, { stateDir, configDir });
 	const transcript = path.join(sessionsDir, `${LIVE_ID}.jsonl`);
@@ -136,7 +136,7 @@ async function seedReducedStartupStore(paths: BenchmarkPaths): Promise<{ stateDi
 		success: true,
 		firstKeptEntryId: null,
 	})}\n`, "utf8");
-	return { stateDir, secretsDir };
+	return { stateDir, secretsDir, token };
 }
 
 async function readPublishedUrl(runtime: GatewayRuntime, stateDir: string): Promise<string> {
@@ -155,19 +155,35 @@ async function readPublishedUrl(runtime: GatewayRuntime, stateDir: string): Prom
 	throw new Error(`Gateway did not publish its URL: ${runtime.stderr.text()}`);
 }
 
-async function apiJson(baseUrl: string, route: string): Promise<{ response: Response; body: any }> {
+async function apiJson(baseUrl: string, token: string, route: string): Promise<{ response: Response; body: any }> {
 	const response = await fetch(new URL(route, baseUrl), {
-		headers: { Authorization: `Bearer ${GATEWAY_STARTUP_TOKEN}` },
+		headers: { Authorization: `Bearer ${token}` },
 		signal: AbortSignal.timeout(10_000),
 	});
 	const text = await response.text();
 	return { response, body: text ? JSON.parse(text) : null };
 }
 
-async function waitForSearchSentinel(baseUrl: string): Promise<any> {
+async function apiRequest(
+	baseUrl: string,
+	route: string,
+	{ token, method = "GET", body }: { token?: string; method?: string; body?: unknown } = {},
+): Promise<Response> {
+	return fetch(new URL(route, baseUrl), {
+		method,
+		headers: {
+			...(token ? { Authorization: `Bearer ${token}` } : {}),
+			...(body === undefined ? {} : { "Content-Type": "application/json" }),
+		},
+		body: body === undefined ? undefined : JSON.stringify(body),
+		signal: AbortSignal.timeout(10_000),
+	});
+}
+
+async function waitForSearchSentinel(baseUrl: string, token: string): Promise<any> {
 	const route = `api/search?q=${encodeURIComponent(GATEWAY_STARTUP_SEARCH_SENTINEL)}&type=sessions&includeArchived=true&projectId=${GATEWAY_STARTUP_PROJECT_ID}`;
 	for (let attempt = 0; attempt < 400; attempt += 1) {
-		const result = await apiJson(baseUrl, route);
+		const result = await apiJson(baseUrl, token, route);
 		if (result.response.ok && result.body?.results?.some((row: any) => (row.sessionId ?? row.id) === DIRECT_ARCHIVED_ID)) {
 			return result.body;
 		}
@@ -176,7 +192,7 @@ async function waitForSearchSentinel(baseUrl: string): Promise<any> {
 	throw new Error("Search index did not expose the reduced fixture sentinel");
 }
 
-async function getMessagesOverProductionSocket(baseUrl: string): Promise<any[]> {
+async function getMessagesOverProductionSocket(baseUrl: string, token: string): Promise<any[]> {
 	const target = new URL(`ws/${LIVE_ID}`, baseUrl);
 	target.protocol = "ws:";
 	const socket = new WebSocket(target);
@@ -184,7 +200,7 @@ async function getMessagesOverProductionSocket(baseUrl: string): Promise<any[]> 
 	try {
 		await new Promise<void>((resolve, reject) => {
 			const timer = setTimeout(() => reject(new Error("WebSocket auth timed out")), 10_000);
-			socket.on("open", () => socket.send(JSON.stringify({ type: "auth", token: GATEWAY_STARTUP_TOKEN })));
+			socket.on("open", () => socket.send(JSON.stringify({ type: "auth", token })));
 			socket.on("error", reject);
 			socket.on("message", raw => {
 				const frame = JSON.parse(raw.toString());
@@ -245,8 +261,10 @@ describe("Bobbit journey benchmark production boundaries", () => {
 		const paths = await createBenchmarkRunRoot({ repoRoot: REPO_ROOT });
 		let runtime: GatewayRuntime | undefined;
 		let baseUrl: string | undefined;
+		let token: string | undefined;
 		try {
 			const seeded = await seedReducedStartupStore(paths);
+			token = seeded.token;
 			runtime = spawnGateway({
 				args: [
 					"--import", "tsx", path.join(REPO_ROOT, "src", "server", "cli.ts"),
@@ -255,6 +273,7 @@ describe("Bobbit journey benchmark production boundaries", () => {
 					"--no-ui", "--no-tls", "--auth",
 				],
 				cwd: REPO_ROOT,
+				redactions: [token],
 				env: {
 					...process.env,
 					NODE_ENV: "test",
@@ -279,7 +298,7 @@ describe("Bobbit journey benchmark production boundaries", () => {
 			const readiness = await waitForGatewayReady({
 				runtime,
 				baseUrl,
-				token: GATEWAY_STARTUP_TOKEN,
+				token,
 				fetchImpl: async (...args: Parameters<typeof fetch>) => {
 					if (injectStartingResponse) {
 						injectStartingResponse = false;
@@ -295,12 +314,12 @@ describe("Bobbit journey benchmark production boundaries", () => {
 			expect(readinessStatuses[0]).toBe(503);
 			expect(readinessStatuses.at(-1)).toBe(200);
 
-			const projects = await apiJson(baseUrl, "api/projects");
+			const projects = await apiJson(baseUrl, token, "api/projects");
 			expect(projects.response.status).toBe(200);
 			expect((Array.isArray(projects.body) ? projects.body : projects.body.projects).map((project: any) => project.id))
 				.toEqual([GATEWAY_STARTUP_PROJECT_ID]);
 
-			const listed = await apiJson(baseUrl, `api/sessions?include=archived&projectId=${GATEWAY_STARTUP_PROJECT_ID}`);
+			const listed = await apiJson(baseUrl, token, `api/sessions?include=archived&projectId=${GATEWAY_STARTUP_PROJECT_ID}`);
 			expect(listed.response.status).toBe(200);
 			expect(listed.body.sessions.map((session: any) => session.id).sort()).toEqual([
 				LIVE_ID, DIRECT_ARCHIVED_ID, CHILD_ARCHIVED_ID, CONTROL_ARCHIVED_ID,
@@ -311,15 +330,15 @@ describe("Bobbit journey benchmark production boundaries", () => {
 			]);
 			expect(listed.body.archivedDelegates.map((session: any) => session.id)).not.toContain(CONTROL_ARCHIVED_ID);
 
-			const restored = await apiJson(baseUrl, `api/sessions/${LIVE_ID}`);
+			const restored = await apiJson(baseUrl, token, `api/sessions/${LIVE_ID}`);
 			expect(restored.response.status).toBe(200);
 			expect(restored.body).toMatchObject({ id: LIVE_ID, status: "idle" });
 			expect(restored.body.restoreError).toBeFalsy();
 
-			const search = await waitForSearchSentinel(baseUrl);
+			const search = await waitForSearchSentinel(baseUrl, token);
 			expect(search.results.map((row: any) => row.sessionId ?? row.id)).toContain(DIRECT_ARCHIVED_ID);
 
-			const messages = await getMessagesOverProductionSocket(baseUrl);
+			const messages = await getMessagesOverProductionSocket(baseUrl, token);
 			const rawIds = messages.map(message => message.id).filter(Boolean);
 			expect(new Set(rawIds).size).toBe(rawIds.length);
 			const orders = messages.map(message => message._order);
@@ -331,8 +350,43 @@ describe("Bobbit journey benchmark production boundaries", () => {
 			const compaction = messages.find(message => message.id === COMPACTION_ID);
 			expect(compaction?.content?.[0]).toMatchObject({ type: "toolCall", name: "__compaction_summary" });
 			expect(messages.filter(message => message.id === COMPACTION_ID)).toHaveLength(1);
+
+			const abuseSecretPath = path.join(paths.root, "mock-agent-abuse-secret.txt");
+			const abuseSecret = "BENCHMARK_AUTH_ABUSE_SECRET";
+			await writeFile(abuseSecretPath, abuseSecret, "utf8");
+			const unauthenticatedRequests = [
+				apiRequest(baseUrl, "api/sessions"),
+				apiRequest(baseUrl, "api/sessions", {
+					method: "POST",
+					body: { cwd: paths.project, projectId: GATEWAY_STARTUP_PROJECT_ID, worktree: false },
+				}),
+				apiRequest(baseUrl, `api/sessions/${LIVE_ID}/prompt`, {
+					method: "POST",
+					body: { message: `use read tool ${abuseSecretPath}` },
+				}),
+				apiRequest(baseUrl, "api/shutdown", { method: "POST" }),
+			];
+			const rejected = await Promise.all(unauthenticatedRequests);
+			expect(rejected.map(response => response.status)).toEqual([401, 401, 401, 401]);
+			const rejectedBodies = await Promise.all(rejected.map(response => response.text()));
+			expect(rejectedBodies.join("\n")).not.toContain(abuseSecret);
+			expect(await readFile(abuseSecretPath, "utf8")).toBe(abuseSecret);
+			expect(await readFile(path.join(paths.agent, "sessions", `${LIVE_ID}.jsonl`), "utf8"))
+				.not.toContain(abuseSecret);
+			expect(runtime.exited).toBe(false);
+
+			const authenticatedCreate = await apiRequest(baseUrl, "api/sessions", {
+				token,
+				method: "POST",
+				body: { cwd: paths.gateway, projectId: GATEWAY_STARTUP_PROJECT_ID, roleId: "assistant", worktree: false },
+			});
+			const createResult = await authenticatedCreate.json();
+			expect(authenticatedCreate.status).not.toBe(401);
+			expect(createResult.error).toMatch(/Role .* not found/);
+			const authenticatedList = await apiRequest(baseUrl, "api/sessions", { token });
+			expect(authenticatedList.status).toBe(200);
 		} finally {
-			if (runtime) await stopGateway(runtime, { baseUrl, token: GATEWAY_STARTUP_TOKEN }).catch(() => {});
+			if (runtime) await stopGateway(runtime, { baseUrl, token }).catch(() => {});
 			await cleanupBenchmarkRunRoot(paths);
 		}
 	}, 90_000);

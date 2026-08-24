@@ -7,6 +7,7 @@ import { p95 } from "./contract.mjs";
 import {
 	aggregateMeasuredReliability,
 	closeBenchmarkBrowser,
+	createBenchmarkGatewayToken,
 	createInterruptingSampleWatchdog,
 	getFreePort,
 	launchBenchmarkBrowser,
@@ -35,6 +36,18 @@ const EVENT_STREAM_PHASES = Object.freeze(["prepare", "stream", "oracle", "teard
 const CLI_RELATIVE = path.join("dist", "server", "cli.js");
 const MOCK_AGENT_RELATIVE = path.join("tests", "e2e", "mock-agent.mjs");
 const MESSAGE_SELECTOR = "user-message, assistant-message, tool-message";
+
+export function eventStreamGatewayArgs(repoRoot, workspace, port) {
+	return [
+		path.join(repoRoot, CLI_RELATIVE),
+		"--cwd", workspace,
+		"--host", "127.0.0.1",
+		"--port", String(port),
+		"--no-tls",
+		"--auth",
+		"--agent-cli", path.join(repoRoot, MOCK_AGENT_RELATIVE),
+	];
+}
 
 function sha256(value) {
 	return createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -613,16 +626,11 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 
 		const port = await getFreePort();
 		baseUrl = `http://127.0.0.1:${port}/`;
+		token = await createBenchmarkGatewayToken(secretsDir);
 		gateway = spawnGateway({
-			args: [
-				path.join(context.repoRoot, CLI_RELATIVE),
-				"--cwd", workspace,
-				"--host", "127.0.0.1",
-				"--port", String(port),
-				"--no-tls",
-				"--agent-cli", path.join(context.repoRoot, MOCK_AGENT_RELATIVE),
-			],
+			args: eventStreamGatewayArgs(context.repoRoot, workspace, port),
 			cwd: context.repoRoot,
+			redactions: [token],
 			env: {
 				...process.env,
 				NODE_ENV: "test",
@@ -643,10 +651,6 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			},
 		});
 		watchdog.registerGateway(gateway);
-		token = await waitForValue(async signal => {
-			const value = (await readFile(path.join(secretsDir, "token"), { encoding: "utf8", signal })).trim();
-			return value.length >= 64 ? value : null;
-		}, "gateway token", watchdog, 30_000);
 		await waitForGatewayReady({
 			runtime: gateway,
 			baseUrl,

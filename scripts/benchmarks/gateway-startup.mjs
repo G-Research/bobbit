@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import {
 	aggregateMeasuredReliability,
 	captureGatewayFailureDiagnostic,
+	createBenchmarkGatewayToken,
 	readProcessMetrics,
 	spawnGateway,
 	stopGateway,
@@ -19,7 +20,6 @@ export const GATEWAY_STARTUP_CASES = Object.freeze([
 
 export const GATEWAY_STARTUP_FIXTURE_VERSION = 4;
 export const GATEWAY_STARTUP_PROJECT_ID = "headquarters";
-export const GATEWAY_STARTUP_TOKEN = "b0bb17".repeat(10) + "b0bb";
 export const GATEWAY_STARTUP_SEARCH_SENTINEL = "gateway-startup-search-sentinel";
 
 const GATEWAY_STARTUP_MODEL = Object.freeze({
@@ -327,7 +327,6 @@ export async function generateGatewayStartupFixture({ caseName, fixtureRoot, pro
 			"default.sessionModel": GATEWAY_STARTUP_MODEL.pref,
 			"default.sessionThinkingLevel": GATEWAY_STARTUP_MODEL.thinkingLevel,
 		}, null, 2), "utf8"),
-		writeFile(path.join(secretsRoot, "token"), GATEWAY_STARTUP_TOKEN, "utf8"),
 	]);
 
 	const records = buildGatewayStartupFixtureRecords(caseName, { projectRoot, transcriptRoot });
@@ -356,7 +355,7 @@ export async function generateGatewayStartupFixture({ caseName, fixtureRoot, pro
 	return { fixtureRoot, manifest: records.manifest };
 }
 
-async function relocateSampleFixture(sampleFixtureRoot, productionModules) {
+export async function relocateSampleFixture(sampleFixtureRoot, productionModules) {
 	const gatewayRoot = path.join(sampleFixtureRoot, "gateway");
 	const stateDir = path.join(gatewayRoot, "state");
 	const projectRoot = path.join(sampleFixtureRoot, "project");
@@ -371,12 +370,15 @@ async function relocateSampleFixture(sampleFixtureRoot, productionModules) {
 		await writeFile(transcript, transcriptContents(session, projectRoot), "utf8");
 	}
 	await store.flushAsync();
+	const secretsRoot = path.join(sampleFixtureRoot, "secrets");
+	const token = await createBenchmarkGatewayToken(secretsRoot);
 	return {
 		gatewayRoot,
 		stateDir,
 		projectRoot,
 		agentRoot: path.join(sampleFixtureRoot, "agent"),
-		secretsRoot: path.join(sampleFixtureRoot, "secrets"),
+		secretsRoot,
+		token,
 		manifest,
 	};
 }
@@ -402,21 +404,21 @@ function gatewayEnvironment(sample) {
 	};
 }
 
-async function publishedUrlExitError(message, runtime) {
+async function publishedUrlExitError(message, runtime, token) {
 	const error = new Error(message);
 	error.benchmarkDiagnostic = await captureGatewayFailureDiagnostic(runtime, {
-		redactions: [GATEWAY_STARTUP_TOKEN],
+		redactions: [token],
 	});
 	return error;
 }
 
-async function waitForPublishedGatewayUrl(runtime, stateDir, timeoutMs = URL_TIMEOUT_MS) {
+async function waitForPublishedGatewayUrl(runtime, stateDir, token, timeoutMs = URL_TIMEOUT_MS) {
 	const gatewayUrlPath = path.join(stateDir, "gateway-url");
 	const deadline = performance.now() + timeoutMs;
 	while (performance.now() < deadline) {
-		if (runtime.spawnError) throw await publishedUrlExitError("Gateway failed to spawn before publishing its URL", runtime);
+		if (runtime.spawnError) throw await publishedUrlExitError("Gateway failed to spawn before publishing its URL", runtime, token);
 		if (runtime.exited || runtime.child.exitCode !== null || runtime.child.signalCode !== null) {
-			throw await publishedUrlExitError(`Gateway exited before publishing its URL (code ${runtime.child.exitCode ?? "unknown"})`, runtime);
+			throw await publishedUrlExitError(`Gateway exited before publishing its URL (code ${runtime.child.exitCode ?? "unknown"})`, runtime, token);
 		}
 		try {
 			const raw = (await readFile(gatewayUrlPath, "utf8")).trim();
@@ -427,13 +429,13 @@ async function waitForPublishedGatewayUrl(runtime, stateDir, timeoutMs = URL_TIM
 	throw new Error(`Gateway did not publish its port-zero URL within ${timeoutMs}ms`);
 }
 
-function authorizedHeaders() {
-	return { Authorization: `Bearer ${GATEWAY_STARTUP_TOKEN}` };
+function authorizedHeaders(token) {
+	return { Authorization: `Bearer ${token}` };
 }
 
-async function fetchJson(baseUrl, route, { timeoutMs = 10_000 } = {}) {
+async function fetchJson(baseUrl, token, route, { timeoutMs = 10_000 } = {}) {
 	const response = await fetch(new URL(route, baseUrl), {
-		headers: authorizedHeaders(),
+		headers: authorizedHeaders(token),
 		signal: AbortSignal.timeout(timeoutMs),
 	});
 	const text = await response.text();
@@ -443,14 +445,14 @@ async function fetchJson(baseUrl, route, { timeoutMs = 10_000 } = {}) {
 	return { response, body };
 }
 
-async function validateSearch(baseUrl, manifest) {
+async function validateSearch(baseUrl, token, manifest) {
 	const route = manifest.searchSentinel
 		? `api/search?q=${encodeURIComponent(manifest.searchSentinel)}&type=sessions&includeArchived=true&projectId=${GATEWAY_STARTUP_PROJECT_ID}`
 		: `api/search?q=${encodeURIComponent("gateway-startup-no-match")}&type=sessions&includeArchived=true&projectId=${GATEWAY_STARTUP_PROJECT_ID}`;
 	const deadline = performance.now() + VALIDATION_TIMEOUT_MS;
 	let latestStatus = null;
 	while (performance.now() < deadline) {
-		const { response, body } = await fetchJson(baseUrl, route);
+		const { response, body } = await fetchJson(baseUrl, token, route);
 		latestStatus = response.status;
 		if (response.ok) {
 			const ids = Array.isArray(body?.results) ? body.results.map(result => result.sessionId ?? result.id) : [];
@@ -477,14 +479,14 @@ function restoreDiagnostics(session, runtime) {
 	});
 }
 
-async function validateReadyGateway(baseUrl, manifest, runtime) {
-	const projectsResult = await fetchJson(baseUrl, "api/projects");
+async function validateReadyGateway(baseUrl, token, manifest, runtime) {
+	const projectsResult = await fetchJson(baseUrl, token, "api/projects");
 	assertion(projectsResult.response.ok, `projects endpoint returned HTTP ${projectsResult.response.status}`);
 	const projects = Array.isArray(projectsResult.body) ? projectsResult.body : projectsResult.body?.projects;
 	assertion(Array.isArray(projects), "projects endpoint omitted its list");
 	assertion(sameStrings(projects.map(project => project.id), [GATEWAY_STARTUP_PROJECT_ID]), "visible project registry did not contain exactly Headquarters");
 
-	const sessionsResult = await fetchJson(baseUrl, `api/sessions?include=archived&projectId=${GATEWAY_STARTUP_PROJECT_ID}`);
+	const sessionsResult = await fetchJson(baseUrl, token, `api/sessions?include=archived&projectId=${GATEWAY_STARTUP_PROJECT_ID}`);
 	assertion(sessionsResult.response.ok, `sessions endpoint returned HTTP ${sessionsResult.response.status}`);
 	const sessions = sessionsResult.body?.sessions;
 	assertion(Array.isArray(sessions), "sessions endpoint omitted its list");
@@ -506,7 +508,7 @@ async function validateReadyGateway(baseUrl, manifest, runtime) {
 
 	const liveStates = [];
 	for (const id of manifest.liveIds) {
-		const result = await fetchJson(baseUrl, `api/sessions/${encodeURIComponent(id)}`);
+		const result = await fetchJson(baseUrl, token, `api/sessions/${encodeURIComponent(id)}`);
 		assertion(result.response.ok, `restored session ${id} returned HTTP ${result.response.status}`);
 		const liveStateValid = result.body?.status === "idle"
 			&& !result.body?.restoreError
@@ -526,7 +528,7 @@ async function validateReadyGateway(baseUrl, manifest, runtime) {
 	}
 
 	const observedSemantics = validateGatewayStartupSemanticProjection(manifest, sessions);
-	const search = await validateSearch(baseUrl, manifest);
+	const search = await validateSearch(baseUrl, token, manifest);
 	return {
 		projectCount: projects.length,
 		sessionCount: sessions.length,
@@ -545,7 +547,7 @@ export async function stopTrackedGateway(active, activeGateways, stopGatewayImpl
 	try {
 		result = await stopGatewayImpl(active.runtime, {
 			baseUrl: active.baseUrl,
-			token: GATEWAY_STARTUP_TOKEN,
+			token: active.token,
 		});
 	} catch (error) {
 		throw new Error(`Gateway cleanup failed: ${boundedErrorMessage(error)}`, { cause: error });
@@ -584,10 +586,10 @@ export function combineGatewayStartupSampleFailures(operationError, cleanupError
 	return operationError ?? cleanupError ?? null;
 }
 
-async function scheduledSampleError(error, runtime, entry) {
+async function scheduledSampleError(error, runtime, entry, token) {
 	const captured = await captureGatewayFailureDiagnostic(runtime, {
 		sample: entry,
-		redactions: [GATEWAY_STARTUP_TOKEN],
+		redactions: [token],
 	});
 	const inheritedChildExit = error?.benchmarkDiagnostic?.childExit ?? null;
 	const wrapped = new Error(boundedErrorMessage(error), { cause: error });
@@ -598,35 +600,40 @@ async function scheduledSampleError(error, runtime, entry) {
 	return wrapped;
 }
 
+export function gatewayStartupGatewayArgs(repoRoot, projectRoot) {
+	return [
+		path.join(repoRoot, "dist", "server", "cli.js"),
+		"--host", "127.0.0.1",
+		"--port", "0",
+		"--cwd", projectRoot,
+		"--agent-cli", path.join(repoRoot, "tests", "e2e", "mock-agent.mjs"),
+		"--no-ui",
+		"--no-tls",
+		"--auth",
+	];
+}
+
 async function runSample(context, entry, canonicalFixture, productionModules, activeGateways) {
 	const sampleRoot = await context.createSampleRoot(entry, { fixtureRoot: canonicalFixture.fixtureRoot });
 	const sample = await relocateSampleFixture(path.join(sampleRoot, "fixture"), productionModules);
 	const runtime = spawnGateway({
-		args: [
-			path.join(context.repoRoot, "dist", "server", "cli.js"),
-			"--host", "127.0.0.1",
-			"--port", "0",
-			"--cwd", sample.projectRoot,
-			"--agent-cli", path.join(context.repoRoot, "tests", "e2e", "mock-agent.mjs"),
-			"--no-ui",
-			"--no-tls",
-			"--auth",
-		],
+		args: gatewayStartupGatewayArgs(context.repoRoot, sample.projectRoot),
 		cwd: context.repoRoot,
 		env: gatewayEnvironment(sample),
+		redactions: [sample.token],
 	});
-	const active = { runtime, baseUrl: null };
+	const active = { runtime, baseUrl: null, token: sample.token };
 	activeGateways.add(active);
 	const readinessStatuses = [];
 	let result;
 	let operationError = null;
 	let cleanupError = null;
 	try {
-		active.baseUrl = await waitForPublishedGatewayUrl(runtime, sample.stateDir);
+		active.baseUrl = await waitForPublishedGatewayUrl(runtime, sample.stateDir, sample.token);
 		const readiness = await waitForGatewayReady({
 			runtime,
 			baseUrl: active.baseUrl,
-			token: GATEWAY_STARTUP_TOKEN,
+			token: sample.token,
 			timeoutMs: READY_TIMEOUT_MS,
 			pollIntervalMs: 10,
 			fetchImpl: async (...args) => {
@@ -636,7 +643,7 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 			},
 		});
 		const processMetrics = await readProcessMetrics(runtime.child.pid);
-		const correctness = await validateReadyGateway(active.baseUrl, sample.manifest, runtime);
+		const correctness = await validateReadyGateway(active.baseUrl, sample.token, sample.manifest, runtime);
 		const cpuTimeMs = Number.isFinite(processMetrics.cpuTimeMs) ? processMetrics.cpuTimeMs : null;
 		const peakRssBytes = Number.isFinite(processMetrics.peakRssBytes) ? processMetrics.peakRssBytes : null;
 		result = {
@@ -670,7 +677,7 @@ async function runSample(context, entry, canonicalFixture, productionModules, ac
 	} catch (error) {
 		cleanupError = error;
 	}
-	if (operationError) operationError = await scheduledSampleError(operationError, runtime, entry);
+	if (operationError) operationError = await scheduledSampleError(operationError, runtime, entry, sample.token);
 	const failure = combineGatewayStartupSampleFailures(operationError, cleanupError);
 	if (failure) throw failure;
 	return result;

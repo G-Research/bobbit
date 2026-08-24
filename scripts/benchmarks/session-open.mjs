@@ -5,6 +5,7 @@ import { performance } from "node:perf_hooks";
 import {
 	aggregateMeasuredReliability,
 	closeBenchmarkBrowser,
+	createBenchmarkGatewayToken,
 	createInterruptingSampleWatchdog,
 	getFreePort,
 	launchBenchmarkBrowser,
@@ -108,6 +109,34 @@ export function sessionOpenLongTaskMetricFields(measurement) {
 		longTaskCount: measurement?.count ?? null,
 		longTaskTotalMs: measurement?.totalMs ?? null,
 		longTaskMaxMs: measurement?.maxMs ?? null,
+	};
+}
+
+/** Construct every declared session-open metric, retaining unsupported values as null. */
+export function sessionOpenMetricFields({
+	timing,
+	snapshotFrameBytes,
+	heapBefore,
+	heapAfterInteractive,
+	longTaskMetrics,
+}) {
+	const heapSamples = [heapBefore, heapAfterInteractive, ...(timing?.heap ?? [])].filter(Number.isFinite);
+	const serverTiming = timing?.serverTiming ?? {};
+	return {
+		timeToInteractiveMs: Number.isFinite(timing?.now) && Number.isFinite(timing?.sent) ? timing.now - timing.sent : null,
+		serverResponseLatencyMs: Number.isFinite(timing?.received) && Number.isFinite(timing?.sent) ? timing.received - timing.sent : null,
+		transferredBytes: Number.isFinite(snapshotFrameBytes) && snapshotFrameBytes > 0
+			? snapshotFrameBytes
+			: (Number.isFinite(timing?.snapshotChars) ? timing.snapshotChars : null),
+		...sessionOpenLongTaskMetricFields(longTaskMetrics),
+		heapGrowthBytes: Number.isFinite(heapBefore) && Number.isFinite(heapAfterInteractive)
+			? heapAfterInteractive - heapBefore
+			: null,
+		heapPeakBytes: heapSamples.length ? Math.max(...heapSamples) : null,
+		rpcMs: Number.isFinite(serverTiming.rpcMs) ? serverTiming.rpcMs : null,
+		pipelineMs: Number.isFinite(serverTiming.pipelineMs) ? serverTiming.pipelineMs : null,
+		stampMs: Number.isFinite(serverTiming.stampMs) ? serverTiming.stampMs : null,
+		stringifyMs: Number.isFinite(serverTiming.stringifyMs) ? serverTiming.stringifyMs : null,
 	};
 }
 
@@ -484,10 +513,14 @@ function requestSignal(signal, timeoutMs = 30_000) {
 	return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
-async function apiJson(baseUrl, pathname, init = {}, signal) {
+async function apiJson(baseUrl, token, pathname, init = {}, signal) {
 	const response = await fetch(new URL(pathname.replace(/^\//, ""), baseUrl), {
 		...init,
-		headers: { "content-type": "application/json", ...(init.headers ?? {}) },
+		headers: {
+			Authorization: `Bearer ${token}`,
+			"content-type": "application/json",
+			...(init.headers ?? {}),
+		},
 		signal: requestSignal(signal),
 	});
 	const body = await response.text();
@@ -512,7 +545,20 @@ async function waitFor(predicate, description, timeoutMs = 30_000, signal) {
 	throw new Error(`Timed out waiting for ${description}${lastError ? `: ${lastError.message}` : ""}`);
 }
 
-function gatewayInvocation(context, sampleRoot, port) {
+export function sessionOpenGatewayArgs(repoRoot, workspace, port) {
+	return [
+		path.join(repoRoot, "dist", "server", "cli.js"),
+		"--cwd", workspace,
+		"--host", "127.0.0.1",
+		"--port", String(port),
+		"--no-tls",
+		"--auth",
+		"--static", path.join(repoRoot, "dist", "ui"),
+		"--agent-cli", path.join(repoRoot, "tests", "e2e", "mock-agent.mjs"),
+	];
+}
+
+function gatewayInvocation(context, sampleRoot, port, token) {
 	const workspace = path.join(sampleRoot, "workspace");
 	const gatewayDir = path.join(sampleRoot, "gateway");
 	const agentDir = path.join(sampleRoot, "agent");
@@ -526,18 +572,12 @@ function gatewayInvocation(context, sampleRoot, port) {
 		homeDir,
 		secretsDir,
 		baseUrl,
+		token,
 		spawn() {
 			return spawnGateway({
-				args: [
-					path.join(context.repoRoot, "dist", "server", "cli.js"),
-					"--cwd", workspace,
-					"--host", "127.0.0.1",
-					"--port", String(port),
-					"--no-tls",
-					"--static", path.join(context.repoRoot, "dist", "ui"),
-					"--agent-cli", path.join(context.repoRoot, "tests", "e2e", "mock-agent.mjs"),
-				],
+				args: sessionOpenGatewayArgs(context.repoRoot, workspace, port),
 				cwd: context.repoRoot,
+				redactions: [token],
 				env: {
 					...process.env,
 					NODE_ENV: "test",
@@ -564,14 +604,17 @@ async function prepareRestoredSession(context, sampleRoot, watchdog, {
 	stopRuntime = stopGateway,
 } = {}) {
 	watchdog.throwIfExpired();
-	const invocation = gatewayInvocation(context, sampleRoot, await getFreePort());
+	const port = await getFreePort();
+	const preliminary = gatewayInvocation(context, sampleRoot, port, null);
 	await Promise.all([
-		invocation.workspace,
-		invocation.gatewayDir,
-		invocation.agentDir,
-		invocation.homeDir,
-		invocation.secretsDir,
+		preliminary.workspace,
+		preliminary.gatewayDir,
+		preliminary.agentDir,
+		preliminary.homeDir,
+		preliminary.secretsDir,
 	].map(directory => mkdir(directory, { recursive: true })));
+	const token = await createBenchmarkGatewayToken(preliminary.secretsDir);
+	const invocation = gatewayInvocation(context, sampleRoot, port, token);
 	const gatewayStateDir = path.join(invocation.gatewayDir, "state");
 	await mkdir(gatewayStateDir, { recursive: true });
 	await Promise.all([
@@ -591,22 +634,22 @@ async function prepareRestoredSession(context, sampleRoot, watchdog, {
 	let runtime = invocation.spawn();
 	watchdog.registerGateway(runtime);
 	try {
-		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, timeoutMs: watchdog.remainingMs() });
+		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, token, timeoutMs: watchdog.remainingMs() });
 		watchdog.throwIfExpired();
-		let projects = await apiJson(invocation.baseUrl, "/api/projects", {}, watchdog.signal);
+		let projects = await apiJson(invocation.baseUrl, token, "/api/projects", {}, watchdog.signal);
 		let project = projects.find(candidate => candidate.rootPath && path.resolve(candidate.rootPath) === path.resolve(invocation.workspace));
 		if (!project) {
-			project = await apiJson(invocation.baseUrl, "/api/projects", {
+			project = await apiJson(invocation.baseUrl, token, "/api/projects", {
 				method: "POST",
 				body: JSON.stringify({ name: "benchmark", rootPath: invocation.workspace, acceptCanonical: true }),
 			}, watchdog.signal);
 		}
-		const session = await apiJson(invocation.baseUrl, "/api/sessions", {
+		const session = await apiJson(invocation.baseUrl, token, "/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: invocation.workspace, projectId: project.id, worktree: false }),
 		}, watchdog.signal);
 		await waitFor(async () => {
-			const current = await apiJson(invocation.baseUrl, `/api/sessions/${session.id}`, {}, watchdog.signal);
+			const current = await apiJson(invocation.baseUrl, token, `/api/sessions/${session.id}`, {}, watchdog.signal);
 			return current.status === "idle" ? current : null;
 		}, "new benchmark session to become idle", Math.min(60_000, watchdog.remainingMs()), watchdog.signal);
 		const storeFile = path.join(invocation.workspace, ".bobbit", "state", "sessions.json");
@@ -615,7 +658,7 @@ async function prepareRestoredSession(context, sampleRoot, watchdog, {
 			const rows = Array.isArray(store) ? store : store.sessions;
 			return rows?.find(row => row.id === session.id && typeof row.agentSessionFile === "string") ?? null;
 		}, "session transcript path to persist", Math.min(30_000, watchdog.remainingMs()), watchdog.signal);
-		await stopRuntime(runtime, { baseUrl: invocation.baseUrl });
+		await stopRuntime(runtime, { baseUrl: invocation.baseUrl, token });
 		watchdog.registerGateway(null);
 		runtime = null;
 		watchdog.throwIfExpired();
@@ -630,10 +673,10 @@ async function prepareRestoredSession(context, sampleRoot, watchdog, {
 
 		runtime = invocation.spawn();
 		watchdog.registerGateway(runtime);
-		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, timeoutMs: watchdog.remainingMs() });
+		await waitForGatewayReady({ runtime, baseUrl: invocation.baseUrl, token, timeoutMs: watchdog.remainingMs() });
 		watchdog.throwIfExpired();
 		await waitFor(async () => {
-			const current = await apiJson(invocation.baseUrl, `/api/sessions/${session.id}`, {}, watchdog.signal);
+			const current = await apiJson(invocation.baseUrl, token, `/api/sessions/${session.id}`, {}, watchdog.signal);
 			return current.status === "idle" ? current : null;
 		}, "restored benchmark session to become interactive", Math.min(60_000, watchdog.remainingMs()), watchdog.signal);
 		return { invocation, runtime, sessionId: session.id };
@@ -641,7 +684,7 @@ async function prepareRestoredSession(context, sampleRoot, watchdog, {
 		let cleanupError = null;
 		if (runtime) {
 			try {
-				await stopRuntime(runtime, { baseUrl: invocation.baseUrl });
+				await stopRuntime(runtime, { baseUrl: invocation.baseUrl, token });
 				watchdog.registerGateway(null);
 				runtime = null;
 			} catch (failure) {
@@ -728,7 +771,7 @@ export async function measureBrowserSample(restored, manifest, watchdog, {
 
 		watchdog.setPhase("navigate");
 		watchdog.throwIfExpired();
-		await browserRuntime.page.goto(`${restored.invocation.baseUrl}#/session/${restored.sessionId}`, {
+		await browserRuntime.page.goto(`${restored.invocation.baseUrl}?token=${encodeURIComponent(restored.invocation.token)}#/session/${restored.sessionId}`, {
 			waitUntil: "domcontentloaded",
 			timeout: watchdog.remainingMs(),
 		});
@@ -907,21 +950,13 @@ export async function measureBrowserSample(restored, manifest, watchdog, {
 			? measureLongTasksInWindow(timing.longTasks, timing.sent, timing.now)
 			: null;
 		const heapSamples = [heapBefore, heapAfterInteractive, ...timing.heap].filter(Number.isFinite);
-		const serverTiming = timing.serverTiming ?? {};
-		const metrics = {
-			...Object.fromEntries(Object.entries({
-				timeToInteractiveMs: timing.now - timing.sent,
-				serverResponseLatencyMs: timing.received - timing.sent,
-				transferredBytes: snapshotFrameBytes || timing.snapshotChars,
-				heapGrowthBytes: Number.isFinite(heapBefore) && Number.isFinite(heapAfterInteractive) ? heapAfterInteractive - heapBefore : null,
-				heapPeakBytes: heapSamples.length ? Math.max(...heapSamples) : null,
-				rpcMs: serverTiming.rpcMs ?? null,
-				pipelineMs: serverTiming.pipelineMs ?? null,
-				stampMs: serverTiming.stampMs ?? null,
-				stringifyMs: serverTiming.stringifyMs ?? null,
-			}).filter(([, value]) => Number.isFinite(value))),
-			...sessionOpenLongTaskMetricFields(longTaskMetrics),
-		};
+		const metrics = sessionOpenMetricFields({
+			timing,
+			snapshotFrameBytes,
+			heapBefore,
+			heapAfterInteractive,
+			longTaskMetrics,
+		});
 		return {
 			metrics,
 			correctness: oracle,
@@ -943,6 +978,7 @@ async function cleanupSessionOpenResources(watchdog, {
 	closeBrowser = closeBenchmarkBrowser,
 	stopRuntime = stopGateway,
 	baseUrl,
+	token,
 } = {}) {
 	const failures = [];
 	const { browserRuntime, gatewayRuntime } = watchdog.resources();
@@ -956,7 +992,7 @@ async function cleanupSessionOpenResources(watchdog, {
 	}
 	if (gatewayRuntime) {
 		try {
-			await stopRuntime(gatewayRuntime, { baseUrl });
+			await stopRuntime(gatewayRuntime, { baseUrl, token });
 			watchdog.registerGateway(null);
 		} catch (error) {
 			failures.push(error);
@@ -1021,6 +1057,7 @@ export async function runSessionOpenSample(context, entry, fixture, {
 		closeBrowser,
 		stopRuntime,
 		baseUrl: restored?.invocation?.baseUrl,
+		token: restored?.invocation?.token,
 	});
 	context.deferCleanup?.(cleanupOwnedResources);
 	try {

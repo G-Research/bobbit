@@ -276,8 +276,11 @@ function validateScheduledSamples(journeyResult, schedule) {
 		}
 		let numericMetrics = 0;
 		for (const metric of metrics) {
+			if (!Object.hasOwn(sample.metrics, metric)) {
+				throw new TypeError(`Sample ${index} must declare metric ${metric} as a finite number or null`);
+			}
 			const value = sample.metrics[metric];
-			if (value !== null && value !== undefined && !Number.isFinite(value)) {
+			if (value !== null && !Number.isFinite(value)) {
 				throw new TypeError(`Sample ${index} metric ${metric} must be a finite number or null`);
 			}
 			if (Number.isFinite(value)) numericMetrics += 1;
