@@ -1321,7 +1321,7 @@
     },
     {
       "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
-      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path; deterministic lifecycle pins require spawn-time Windows Job ownership before readiness, one coalesced tree close joined within existing bounds, no synchronous process-tree utility, and registry cleanup without changing raw POSIX fixtures.",
+      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path; deterministic lifecycle pins require spawn-time Windows Job ownership before readiness, coalesced tree closes joined within existing bounds, all-attempted two-runtime stop/report/temp cleanup with exact aggregate failures, no synchronous process-tree utility, and registry cleanup without changing raw POSIX fixtures.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
