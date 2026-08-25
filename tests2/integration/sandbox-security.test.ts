@@ -242,25 +242,36 @@ test.describe("Sandbox Security Boundaries", () => {
 
 	// ── ALLOWED endpoints ──────────────────────────────────────────────
 
-	test("a pooled sandbox cannot read uploaded bytes with the owning session secret", async ({ gateway }) => {
-		const marker = `POOLED_ATTACHMENT_SECRET_${sessionId}`;
+	test("an exactly attested isolated session can read its uploaded bytes", async ({ gateway }) => {
+		const marker = `ISOLATED_ATTACHMENT_SECRET_${sessionId}`;
+		const bytes = Buffer.from(marker);
 		const manager = gateway.sessionManager as any;
 		const live = manager.getSession(sessionId);
 		const originalSandboxed = live.sandboxed;
 		const originalContainerId = live.containerId;
 		const originalAllowedTools = live.allowedTools;
+		const isolatedContainerId = `bobbit-session-${sessionId}-isolated`;
 		Object.assign(live, {
 			sandboxed: true,
-			containerId: "shared-project-pool",
+			containerId: isolatedContainerId,
 			allowedTools: ["session_attachment"],
 		});
-		const saved = await persistUploadedAttachmentOccurrence(sessionId, "pooled-sandbox-occurrence", [{
+		const sandboxManager = manager.getSandboxManager();
+		const attestation = vi.spyOn(sandboxManager, "isSessionRuntimeIsolated").mockImplementation(
+			async (...args: unknown[]) => {
+				const [projectId, candidateSessionId, containerId] = args as [string, string, string];
+				return projectId === live.projectId
+					&& candidateSessionId === sessionId
+					&& containerId === isolatedContainerId;
+			},
+		);
+		const saved = await persistUploadedAttachmentOccurrence(sessionId, "isolated-sandbox-occurrence", [{
 			id: "private-upload",
 			type: "document",
 			fileName: "private.opaque",
 			mimeType: "application/octet-stream",
-			size: Buffer.byteLength(marker),
-			content: Buffer.from(marker).toString("base64"),
+			size: bytes.length,
+			content: bytes.toString("base64"),
 		}]);
 		const secret = manager.sessionSecretStore.getOrCreateSecret(sessionId);
 		try {
@@ -274,20 +285,21 @@ test.describe("Sandbox Security Boundaries", () => {
 					body: JSON.stringify({
 						operation: "read",
 						pointer: saved.attachments[0].pointer,
-						offset: 0,
-						length: 64 * 1024,
+						offset: 2,
+						length: 8,
 					}),
 				},
 			);
 			const responseText = await response.text();
-			expect(response.status).toBe(403);
-			expect(JSON.parse(responseText)).toMatchObject({
-				code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
-				retryable: false,
-			});
+			expect(response.status).toBe(200);
+			const body = JSON.parse(responseText);
+			expect(body).toMatchObject({ operation: "read", encoding: "base64", offset: 2, bytesRead: 8 });
+			expect(Buffer.from(body.data, "base64")).toEqual(bytes.subarray(2, 10));
+			expect(attestation).toHaveBeenCalledWith(live.projectId, sessionId, isolatedContainerId);
 			expect(responseText).not.toContain(marker);
-			expect(responseText).not.toContain(Buffer.from(marker).toString("base64"));
+			expect(responseText).not.toContain(nonGitCwd());
 		} finally {
+			attestation.mockRestore();
 			await purgeUploadedAttachments(sessionId);
 			live.sandboxed = originalSandboxed;
 			live.containerId = originalContainerId;

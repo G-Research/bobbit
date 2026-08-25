@@ -66,18 +66,41 @@ export async function handleUploadedAttachmentToolRoute(
 		json(res, 403, { error: "Uploaded attachment access is forbidden", code: "UPLOADED_ATTACHMENT_FORBIDDEN", retryable: false });
 		return true;
 	}
-	// Today's Docker sandbox is a same-UID, per-project pool: another session in
-	// the container can read both this capability secret and the transcript-held
-	// pointer. Reject before parsing the body or consulting the attachment store;
-	// possession of those values is not an isolation attestation. Direct agents
-	// remain supported because they do not share this pooled sandbox boundary.
+	// A session secret and transcript pointer can both be observed by code in a
+	// sandbox. Before parsing caller-controlled input or consulting the store,
+	// require the server-owned runtime registry and Docker Engine to attest the
+	// exact live project/session/container tuple. Re-check the canonical session
+	// after the async attestation so a replaced or terminated runtime cannot win a
+	// time-of-check/time-of-use race. Direct agents have no container to attest.
 	if (liveSession.sandboxed === true) {
-		json(res, 403, {
-			error: "Uploaded attachment reads are unavailable in shared sandbox sessions",
-			code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
-			retryable: false,
-		});
-		return true;
+		const projectId = typeof liveSession.projectId === "string" && liveSession.projectId.trim()
+			? liveSession.projectId
+			: undefined;
+		const containerId = typeof liveSession.containerId === "string" && liveSession.containerId.trim()
+			? liveSession.containerId
+			: undefined;
+		const sandboxManager = deps.sessionManager.getSandboxManager();
+		let attested = false;
+		if (projectId && containerId && sandboxManager) {
+			try {
+				attested = await sandboxManager.isSessionRuntimeIsolated(projectId, sessionId, containerId);
+			} catch {
+				attested = false;
+			}
+		}
+		const currentSession = deps.sessionManager.getSession(sessionId);
+		if (!attested
+			|| currentSession !== liveSession
+			|| currentSession.sandboxed !== true
+			|| currentSession.projectId !== projectId
+			|| currentSession.containerId !== containerId) {
+			json(res, 403, {
+				error: "Uploaded attachment sandbox runtime is unavailable",
+				code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
+				retryable: false,
+			});
+			return true;
+		}
 	}
 	if (liveSession.allowedTools !== undefined
 		&& !liveSession.allowedTools.some((tool) => tool.toLowerCase() === UPLOADED_ATTACHMENT_TOOL_NAME)) {

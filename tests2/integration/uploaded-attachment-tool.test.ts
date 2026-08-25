@@ -88,25 +88,61 @@ describe("uploaded attachment remote-agent tool integration", () => {
 		expect(JSON.stringify(captured[3])).not.toContain("gateway-token");
 	});
 
-	it("rejects a shared pooled sandbox before request-body or attachment-store access", async () => {
-		const marker = "POOLED_SANDBOX_PRIVATE_MARKER";
+	it("attests the exact live isolated runtime and denies foreign, dead, control, and forged runtimes", async () => {
+		const projectId = "attachment-project";
+		const siblingId = "22222222-2222-4222-8222-222222222222";
+		const ownerContainer = "bobbit-session-owner-live";
+		const siblingContainer = "bobbit-session-sibling-live";
+		const marker = "ISOLATED_SANDBOX_PRIVATE_MARKER";
+		const bytes = Buffer.from(marker);
 		const saved = await persistUploadedAttachmentOccurrence(SESSION_ID, "sandbox-occurrence", [{
 			id: "sandbox-file",
 			type: "document",
 			fileName: "private.bin",
 			mimeType: "application/octet-stream",
-			size: Buffer.byteLength(marker),
-			content: Buffer.from(marker).toString("base64"),
+			size: bytes.length,
+			content: bytes.toString("base64"),
 		}]);
 		const pointer = saved.attachments[0].pointer;
+		const sessions = new Map<string, any>([
+			[SESSION_ID, {
+				id: SESSION_ID,
+				projectId,
+				sandboxed: true,
+				containerId: ownerContainer,
+				allowedTools: ["session_attachment"],
+			}],
+			[siblingId, {
+				id: siblingId,
+				projectId,
+				sandboxed: true,
+				containerId: siblingContainer,
+				allowedTools: ["session_attachment"],
+			}],
+		]);
+		const attestationCalls: Array<[string, string, string]> = [];
+		const sandboxManager = {
+			isSessionRuntimeIsolated: async (candidateProjectId: string, sessionId: string, containerId: string) => {
+				attestationCalls.push([candidateProjectId, sessionId, containerId]);
+				await Promise.resolve();
+				return candidateProjectId === projectId
+					&& ((sessionId === SESSION_ID && containerId === ownerContainer)
+						|| (sessionId === siblingId && containerId === siblingContainer));
+			},
+		};
+		let activeSandboxManager: typeof sandboxManager | undefined = sandboxManager;
 		let readBodyCalls = 0;
+		let rejectBodyReads = false;
 		const sessionManager = {
 			sessionSecretStore: {
-				resolveSessionIdBySecret: (secret: string | undefined) => secret === "session-secret" ? SESSION_ID : undefined,
+				resolveSessionIdBySecret: (secret: string | undefined) => {
+					if (secret === "session-secret") return SESSION_ID;
+					if (secret === "sibling-secret") return siblingId;
+					return undefined;
+				},
 			},
-			getSession: (sessionId: string) => sessionId === SESSION_ID
-				? { id: SESSION_ID, sandboxed: true, containerId: "shared-project-pool", allowedTools: ["session_attachment"] }
-				: undefined,
+			getSession: (sessionId: string) => sessions.get(sessionId),
+			getSandboxManager: () => activeSandboxManager,
 		};
 		const server = http.createServer(async (req, res) => {
 			const handled = await handleUploadedAttachmentToolRoute(
@@ -115,9 +151,18 @@ describe("uploaded attachment remote-agent tool integration", () => {
 				res,
 				{
 					sessionManager: sessionManager as any,
-					readBody: async () => {
+					readBody: async (request, maxBytes = 16 * 1024) => {
 						readBodyCalls += 1;
-						throw new Error("sandbox rejection must precede body parsing");
+						if (rejectBodyReads) throw new Error("runtime rejection must precede body parsing");
+						const chunks: Buffer[] = [];
+						let total = 0;
+						for await (const chunk of request) {
+							const buffer = Buffer.from(chunk);
+							total += buffer.length;
+							if (total > maxBytes) throw new Error("too large");
+							chunks.push(buffer);
+						}
+						return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 					},
 				},
 			);
@@ -130,24 +175,92 @@ describe("uploaded attachment remote-agent tool integration", () => {
 		try {
 			const address = server.address();
 			if (!address || typeof address === "string") throw new Error("missing test server address");
-			const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${SESSION_ID}/uploaded-attachments/query`, {
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					"X-Bobbit-Session-Secret": "session-secret",
+			const query = async (sessionId: string, secret: string, body: unknown) => {
+				const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${sessionId}/uploaded-attachments/query`, {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Bobbit-Session-Secret": secret,
+					},
+					body: JSON.stringify(body),
+				});
+				return { response, text: await response.text() };
+			};
+
+			const listed = await query(SESSION_ID, "session-secret", { operation: "list", pointer });
+			expect(listed.response.status).toBe(200);
+			expect(JSON.parse(listed.text).attachments).toEqual([
+				expect.objectContaining({ pointer, fileName: "private.bin", size: bytes.length }),
+			]);
+			const ranged = await query(SESSION_ID, "session-secret", { operation: "read", pointer, offset: 3, length: 7 });
+			expect(ranged.response.status).toBe(200);
+			const range = JSON.parse(ranged.text);
+			expect(range).toMatchObject({ operation: "read", encoding: "base64", offset: 3, bytesRead: 7 });
+			expect(Buffer.from(range.data, "base64")).toEqual(bytes.subarray(3, 10));
+			expect(attestationCalls.slice(0, 2)).toEqual([
+				[projectId, SESSION_ID, ownerContainer],
+				[projectId, SESSION_ID, ownerContainer],
+			]);
+
+			// A correctly attested sibling still cannot reuse the owner's pointer.
+			const sibling = await query(siblingId, "sibling-secret", { operation: "read", pointer, offset: 0, length: 1 });
+			expect(sibling.response.status).toBe(404);
+			expect(JSON.parse(sibling.text)).toMatchObject({ code: "UPLOADED_ATTACHMENT_NOT_FOUND", retryable: false });
+			expect(sibling.text).not.toContain(marker);
+			expect(attestationCalls.at(-1)).toEqual([projectId, siblingId, siblingContainer]);
+
+			rejectBodyReads = true;
+			const owner = sessions.get(SESSION_ID);
+			const expectUnavailable = async (label: string) => {
+				const bodyCallsBefore = readBodyCalls;
+				const denied = await query(SESSION_ID, "session-secret", { operation: "read", pointer, offset: 0, length: 1 });
+				expect(denied.response.status, label).toBe(403);
+				expect(JSON.parse(denied.text)).toEqual({
+					error: "Uploaded attachment sandbox runtime is unavailable",
+					code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
+					retryable: false,
+				});
+				expect(readBodyCalls, label).toBe(bodyCallsBefore);
+				expect(denied.text).not.toContain(marker);
+				expect(denied.text).not.toContain(bytes.toString("base64"));
+				expect(denied.text).not.toContain(temp);
+			};
+			for (const containerId of [
+				"wrong-runtime",
+				siblingContainer,
+				"dead-runtime",
+				"bobbit-project-control",
+				"forged-client-runtime",
+			]) {
+				owner.containerId = containerId;
+				await expectUnavailable(containerId);
+				expect(attestationCalls.at(-1), containerId).toEqual([projectId, SESSION_ID, containerId]);
+			}
+
+			owner.containerId = ownerContainer;
+			owner.projectId = undefined;
+			await expectUnavailable("missing project identity");
+			owner.projectId = projectId;
+			owner.containerId = undefined;
+			await expectUnavailable("missing container identity");
+			owner.containerId = ownerContainer;
+			activeSandboxManager = undefined;
+			await expectUnavailable("missing sandbox manager");
+			activeSandboxManager = {
+				isSessionRuntimeIsolated: async () => { throw new Error(`attestation failed at ${temp}`); },
+			};
+			await expectUnavailable("attestation error");
+
+			// Even a positive async result cannot authorize a runtime replaced while
+			// the attestation was in flight.
+			activeSandboxManager = {
+				isSessionRuntimeIsolated: async () => {
+					await Promise.resolve();
+					sessions.set(SESSION_ID, { ...owner });
+					return true;
 				},
-				body: JSON.stringify({ operation: "read", pointer, offset: 0, length: 64 * 1024 }),
-			});
-			const responseText = await response.text();
-			expect(response.status).toBe(403);
-			expect(JSON.parse(responseText)).toEqual({
-				error: "Uploaded attachment reads are unavailable in shared sandbox sessions",
-				code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
-				retryable: false,
-			});
-			expect(readBodyCalls).toBe(0);
-			expect(responseText).not.toContain(marker);
-			expect(responseText).not.toContain(Buffer.from(marker).toString("base64"));
+			};
+			await expectUnavailable("replaced live session");
 		} finally {
 			await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 		}
