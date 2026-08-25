@@ -62,6 +62,8 @@ test.beforeAll(() => {
 		'import { clearArchivedSessionsState } from "../../../src/app/api.ts";',
 		'(window as any).__clearRevealArchivedState = clearArchivedSessionsState;',
 		'// Keep fixture-only canonical data/connecting state stable across async fixture fetches and transaction renders.',
+		'let revealProjectionOccurrence = 0;',
+		'const revealProjectionBarriers = new Map<number, { expected: boolean; archivedSessionId?: string; settled: boolean; joined: boolean; promise: Promise<void>; resolve: () => void }>();',
 		'const renderRevealFixture = () => {',
 		'  const fixtureSessions = (window as any).__revealCanonicalSessions;',
 		'  const fixtureGoals = (window as any).__revealCanonicalGoals;',
@@ -71,11 +73,29 @@ test.beforeAll(() => {
 		'  if (fixtureArchivedSessions) state.archivedSessions = fixtureArchivedSessions.map((value: any) => ({ ...value }));',
 		'  if (state.selectedSessionId && !state.remoteAgent) state.connectingSessionId = state.selectedSessionId;',
 		'  doRenderApp();',
+		'  for (const barrier of revealProjectionBarriers.values()) {',
+		'    const hasRequiredArchive = !barrier.archivedSessionId || state.archivedSessions.some((session: any) => session.id === barrier.archivedSessionId);',
+		'    if (!barrier.settled && state.showArchived === barrier.expected && hasRequiredArchive) { barrier.settled = true; barrier.resolve(); }',
+		'  }',
 		'};',
 		'setRenderApp(renderRevealFixture);',
 		'// file:// cannot fetch the control\'s lazy chunk; expose that same production action to the fixture driver.',
 		'(window as any).__revealCurrentSidebarSessionFixture = revealCurrentSidebarSession;',
 		'(window as any).__renderRevealFixture = renderRevealFixture;',
+		'(window as any).__armRevealArchivedProjection = (expected: boolean, archivedSessionId?: string) => {',
+		'  const occurrence = ++revealProjectionOccurrence;',
+		'  let resolve!: () => void;',
+		'  const promise = new Promise<void>((done) => { resolve = done; });',
+		'  revealProjectionBarriers.set(occurrence, { expected, archivedSessionId, settled: false, joined: false, promise, resolve });',
+		'  return occurrence;',
+		'};',
+		'(window as any).__joinRevealArchivedProjection = async (occurrence: number) => {',
+		'  const barrier = revealProjectionBarriers.get(occurrence);',
+		'  if (!barrier) throw new Error(`Unknown reveal projection occurrence ${occurrence}`);',
+		'  if (barrier.joined) throw new Error(`Reveal projection occurrence ${occurrence} was already joined`);',
+		'  barrier.joined = true;',
+		'  try { await barrier.promise; } finally { revealProjectionBarriers.delete(occurrence); }',
+		'};',
 		'(window as any).__revealTreeAncestors = (sessionId: string) => {',
 		'  const model = buildSidebarTreeModel();',
 		'  let node = model.flatByKey.get(sidebarTreeKey({ kind: "session", sessionId }));',
@@ -492,6 +512,17 @@ async function expectFilters(page: Page, values: Partial<Record<"archived" | "bu
 	for (const [id, checked] of Object.entries(values)) expect(actual[id as keyof typeof actual], `${MARK}: ${id} reset`).toBe(checked);
 }
 
+async function armArchivedProjection(page: Page, expected: boolean, archivedSessionId?: string): Promise<number> {
+	return page.evaluate(
+		({ value, sessionId }) => (window as any).__armRevealArchivedProjection(value, sessionId),
+		{ value: expected, sessionId: archivedSessionId },
+	);
+}
+
+async function joinArchivedProjection(page: Page, occurrence: number): Promise<void> {
+	await page.evaluate((value) => (window as any).__joinRevealArchivedProjection(value), occurrence);
+}
+
 async function storedExpansion(page: Page, key: string): Promise<string | undefined> {
 	return page.evaluate(({ storageKey, key }) => {
 		try { return JSON.parse(localStorage.getItem(storageKey) || "{}").expansion?.[key]; }
@@ -808,7 +839,9 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		// state: after Show archived is toggled on then off, the explicit one-shot
 		// inclusion is gone and the default filter hides the active archive again.
 		await page.getByTestId("sidebar-filters-button").click();
-		await page.getByTestId("sidebar-filter-archived").locator("input").check();
+		const archivedCheckbox = page.getByTestId("sidebar-filter-archived").locator("input");
+		const shownProjection = await armArchivedProjection(page, true, IDS.unrelatedArchived);
+		await archivedCheckbox.check();
 		const archivedFilterState = await page.evaluate((unrelatedArchivedId) => {
 			const state = (window as any).__bobbitState;
 			return {
@@ -820,11 +853,13 @@ test.describe("Journey: Reveal current sidebar session", () => {
 			showArchived: true,
 			cachedUnrelatedArchived: true,
 		});
-		// The handler schedules renderApp in rAF. Queueing behind it joins that
-		// authoritative DOM publication before asserting the newly eligible row.
-		await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+		// Join the exact fixture render occurrence that committed the handler's
+		// true-state projection before inspecting the newly eligible DOM row.
+		await joinArchivedProjection(page, shownProjection);
 		await expect(navRow(page, IDS.unrelatedArchived)).toBeVisible();
-		await page.getByTestId("sidebar-filter-archived").locator("input").uncheck();
+		const hiddenProjection = await armArchivedProjection(page, false);
+		await archivedCheckbox.uncheck();
+		await joinArchivedProjection(page, hiddenProjection);
 		await expect(navRow(page, IDS.archived), `${MARK}: manual archive interaction restores default filter authority`).toHaveCount(0);
 		await expect(navRow(page, IDS.unrelatedArchived)).toHaveCount(0);
 		await page.keyboard.press("Escape");
