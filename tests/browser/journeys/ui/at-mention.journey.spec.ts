@@ -10,10 +10,9 @@
  *   3. image routing — an `@image` reference renders an image chip whose
  *                      disclosure shows an <img> (kind "image", base64 data) —
  *                      i.e. routed as an attachment, not inlined as text.
- *   4. degradation   — an unresolvable `@nope.txt` is captured as a kind
- *                      "unresolved" mention: it renders a chip labelled with the
- *                      literal `@path` (design §2: ALL kinds drive chips) and
- *                      never crashes the send.
+ *   4. degradation   — when every `@path` is missing, the resolver safely leaves
+ *                      the prompt as visible plain text without creating a
+ *                      misleading resolved-file chip or crashing the send.
  *
  * Setup: each test registers a project rooted at the fixture dir and binds the
  * session to it (the `skill-expansion.spec.ts` pattern). The file-mentions
@@ -166,7 +165,7 @@ test.describe("@-mention file references UI", () => {
 	// alongside `skillExpansions`, so the rewritten user message restores both).
 	// Text mentions are the case where `modelText !== originalText` (content is
 	// inlined for the model), so this guards the rewrite-carries-metadata path
-	// that image/unresolved mentions don't depend on.
+	// that image and all-missing plain-text references don't depend on.
 	test("@text-file persists as a chip across reload; click expands the snapshot", async ({ page }) => {
 		const cwd = uniqueCwd();
 		writeFixtures(cwd);
@@ -208,21 +207,18 @@ test.describe("@-mention file references UI", () => {
 		await expect(userBubble(page)).toContainText(`@${IMAGE_FILE}`);
 	});
 
-	test("unresolvable @nope.txt is captured as an unresolved chip without crashing", async ({ page }) => {
+	test("an all-missing @path remains plain text without a false resolution or crash", async ({ page }) => {
 		const cwd = uniqueCwd();
 		writeFixtures(cwd);
 		await openSession(page, cwd);
 
 		await sendMessage(page, "this references @nope.txt which does not exist");
 
-		// The send never tears down; the message renders with the literal @path.
+		// The safety fallback keeps the literal prompt visible rather than
+		// presenting a missing target as though it resolved to a file.
 		await expect(userBubble(page)).toBeVisible({ timeout: 15_000 });
 		await expect(userBubble(page)).toContainText("@nope.txt");
-		// Per design §2 ALL kinds drive chips: an unresolved reference renders a
-		// chip labelled with the literal path (the disclosure shows the reason).
-		const chip = fileChip(page);
-		await expect(chip).toBeVisible({ timeout: 15_000 });
-		await expect(chip).toContainText("@nope.txt");
+		await expect(userBubble(page).locator(".file-mention-chip-pill")).toHaveCount(0);
 		// No crash — the composer is still usable.
 		await expect(page.locator("textarea").first()).toBeVisible();
 	});
