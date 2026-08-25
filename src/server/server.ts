@@ -4950,7 +4950,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	sessionManager.setOnSessionQuestionStateChanged((sessionId) => {
 		const projectId = sessionManager.getPersistedSession(sessionId)?.projectId;
-		broadcastToAll({ type: "sessions_changed", sessionId, projectId });
+		broadcastToUi({ type: "sessions_changed", sessionId, projectId });
 	});
 
 	sessionManager.setOnPrCreationDetected((session) => {
@@ -20758,7 +20758,12 @@ async function handleApiRoute(
 					sessionId,
 					toolUseId,
 				};
-				_broadcastToSession?.(sessionId, event);
+				const data = JSON.stringify(event);
+				for (const client of session.clients) {
+					if ((client as any).authenticated === true
+						&& hasUiWebSocketPrincipal(client)
+						&& isSocketSendable(client)) client.send(data);
+				}
 			}
 			json(result.alreadyDismissed ? { ok: true, alreadyDismissed: true } : { ok: true });
 		} catch (e: any) {
