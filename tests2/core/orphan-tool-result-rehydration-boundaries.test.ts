@@ -153,13 +153,19 @@ function containerTranscript(name: string): { containerFile: string; hostFile: s
 	return { containerFile, hostFile };
 }
 
-function realSandboxFixture(containerFile: string, containerId = "container-boundary"): {
+function realSandboxFixture(containerFile: string, runtimeContainerId = "container-boundary"): {
 	projectConfigStore: any;
 	sandboxManager: any;
 	sandbox: any;
 } {
+	const controlContainerId = `control-${runtimeContainerId}`;
 	const sandbox = {
-		getContainerId: vi.fn(async () => containerId),
+		getContainerId: vi.fn(async () => controlContainerId),
+		getStatus: vi.fn(() => ({
+			status: "ready",
+			containerId: controlContainerId,
+			projectId: "project-boundary",
+		})),
 		exec: vi.fn(async (args: string[]) => {
 			if (args[0] === "test" && args[1] === "-f" && args[2] === containerFile) return "";
 			if (args[0] === "cat" && args[1] === containerFile) {
@@ -177,6 +183,15 @@ function realSandboxFixture(containerFile: string, containerId = "container-boun
 		sandboxManager: {
 			ensureForProject: vi.fn(async () => sandbox),
 			get: vi.fn(() => sandbox),
+			ensureSessionRuntime: vi.fn(async (_projectId: string, _sessionId: string, expectedId?: string) => {
+				if (expectedId && expectedId !== runtimeContainerId) {
+					throw new Error("fixture session runtime identity mismatch");
+				}
+				return runtimeContainerId;
+			}),
+			isSessionRuntimeIsolated: vi.fn(async (_projectId: string, _sessionId: string, candidateId: string) =>
+				candidateId === runtimeContainerId),
+			releaseSessionRuntime: vi.fn(async () => {}),
 		},
 		sandbox,
 	};
@@ -317,6 +332,7 @@ function makeManager(ps: any, bridge: any): any {
 		put: vi.fn(() => {}),
 		archive: vi.fn(() => {}),
 		archiveAsync: vi.fn(async (id: string) => { manager._testStore.archive(id); }),
+		flushAsync: vi.fn(async () => {}),
 	};
 	managers.push(manager);
 	return manager;
@@ -2898,6 +2914,16 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		expect(sandboxFx.sandboxManager.ensureForProject).toHaveBeenCalledWith("project-boundary");
 		expect(sandboxFx.sandbox.getContainerId).toHaveBeenCalledTimes(1);
+		expect(sandboxFx.sandboxManager.ensureSessionRuntime).toHaveBeenCalledWith(
+			"project-boundary",
+			ps.id,
+			undefined,
+		);
+		expect(sandboxFx.sandboxManager.isSessionRuntimeIsolated).toHaveBeenCalledWith(
+			"project-boundary",
+			ps.id,
+			"container-role-boundary",
+		);
 		expect(replacementOptions).toMatchObject({
 			containerId: "container-role-boundary",
 			sandboxed: true,
@@ -3515,6 +3541,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(original.spawnPinnedModel).toBe("fixture/previous-model");
 		expect(original.spawnPinnedThinkingLevel).toBe("high");
 		expect(original.status).toBe("idle");
+		if (sandboxed) expect(manager._testStore.flushAsync).toHaveBeenCalledTimes(1);
+		else expect(manager._testStore.flushAsync).not.toHaveBeenCalled();
 		assertOrphanRewritten(fs.readFileSync(file, "utf8"));
 	});
 
