@@ -2247,6 +2247,15 @@
       }
     },
     {
+      "path": "tests2/core/pi-packed-consumer-offline.test.ts",
+      "reason": "Pins the real clean-consumer tarball install to strict npm offline mode using the workflow-restored cache populated by npm ci, while retaining the unchanged safety timeout, normal retries, generated lockfile, dependency-owned shrinkwrap and tree/binary security assertions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/release-publish-boundary-mutations.test.ts",
       "reason": "Mutation-tests the npm publishing privilege boundary by proving checkout, dependency installation, repository scripts, workspace publication, lifecycle scripts, premature artifact download, and OIDC-enabled verification are all rejected.",
       "execution": {
