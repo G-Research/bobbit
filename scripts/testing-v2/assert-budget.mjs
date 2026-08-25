@@ -46,7 +46,7 @@ import { cpus } from "node:os";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
-const BUDGETS_PATH = join(REPO_ROOT, "tests2", "budgets.json");
+const BUDGETS_PATH = join(REPO_ROOT, "tests", "support", "data", "shared", "budgets.json");
 const ARTIFACT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "budgets");
 const SAMPLE_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "samples");
 
@@ -101,7 +101,7 @@ export function resolveCaps(scope, pilot = false, underLoadOverride = undefined)
 	if (!tier) throw new Error(`assert-budget: unknown scope "${scope}" (allowed: ${Object.keys(SCOPE_TIER).join(", ")})`);
 	const budgets = readBudgets();
 	const caps = budgets.tiers[tier];
-	if (!caps) throw new Error(`assert-budget: tests2/budgets.json has no tier "${tier}"`);
+	if (!caps) throw new Error(`assert-budget: tests/support/data/shared/budgets.json has no tier "${tier}"`);
 
 	// Under-load budget switch (D7): a `test:v2` run (and its vitest/playwright
 	// tiers) under N-way concurrent contention legitimately runs longer than the
@@ -389,7 +389,7 @@ export function assertBudget({ scope, wallMs = null, cpuMs = null, rawCpuMs = nu
 	if (Number.isFinite(wallMs) && wallMs > caps.maxWallMs) {
 		violations.push(`wall ${(wallMs / 1000).toFixed(1)}s > cap ${(caps.maxWallMs / 1000).toFixed(1)}s`);
 	}
-	// CPU-min is OBSERVABILITY ONLY — it NEVER gates (design §D7 + tests2/budgets.json:
+	// CPU-min is OBSERVABILITY ONLY — it NEVER gates (tests/support/data/shared/budgets.json:
 	// WALL is the hard gate). The process-tree sampler sums per-PID cumulative CPU
 	// across the whole run; on a shared, busy box it demonstrably over-counts past
 	// the physical ceiling (cores × wall) via PID churn / ppid misattribution, and

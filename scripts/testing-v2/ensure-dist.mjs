@@ -2,7 +2,7 @@
  * Content-addressed `npm run build` skip for the e2e/browser test tiers.
  *
  * `npm run test:e2e:v2` used to run `npm run build` unconditionally (~26s warm,
- * minutes cold) while tests2/browser-global-setup.ts only built dist when it was
+ * minutes cold) while the browser global setup only built dist when it was
  * MISSING — silently testing a stale build. Both now funnel through
  * ensureDistBuild(): a sha256 key over the full build input set is compared
  * against dist/.build-manifest.json; each reader validates only while holding
@@ -23,7 +23,7 @@
  *
  * Pattern mirrors scripts/testing-v2/server-prebundle.mjs
  * (computeServerPrebundleKey / validateServerPrebundle).
- * Pinned by tests2/core/ensure-dist-build-key.test.ts.
+ * Pinned by tests/unit/core/ensure-dist-build-key.unit.test.ts.
  */
 import { execSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";

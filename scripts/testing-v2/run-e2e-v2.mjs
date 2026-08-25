@@ -1,46 +1,24 @@
 #!/usr/bin/env node
 /**
- * run-e2e-v2.mjs — the v2 "e2e" real-fidelity tier (task 7862db76).
+ * Deterministic real-fidelity E2E coordinator.
  *
- * This is the per-workflow real-fidelity remainder that stays out of tier-1/2
- * (`test:v2`): the real-fidelity specs from tests2/tests-map.json (carried under
- * the tests-map `daily` bucket string — an internal taxonomy label, NOT a
- * scheduled lane; there is no `test:daily` script), MINUS
- *   - manual-integration specs (real-agent / real-LLM / real-Docker — that
- *     is the tier-3 `test:manual` lane, never here).
+ * Canonical paths independently own the four execution groups:
+ *   A — recursive `.node-e2e.test.ts` files under `tests/e2e/node/` (`tsx --test`)
+ *   B — recursive `.api-e2e.spec.ts` files under `tests/e2e/api/` (Playwright API/process)
+ *   C — recursive `.browser-e2e.spec.ts` files under `tests/e2e/browser/` (Playwright browser)
+ *   D — recursive `.vitest-e2e.test.ts` files under `tests/e2e/vitest/` (isolated Vitest)
  *
- * Everything else in that bucket normally runs at retries:3 for developer
- * workflow resilience. Set BOBBIT_V2_RETRY_FREE=1 to qualify Groups B/C/D with
- * retries disabled; Group A completes through its owning fixture teardowns and
- * has no retry knob wired here. The groups are derived mechanically from tests-map.json (so this is reusable, not
- * hand-assembled — it tracks the map, not a frozen list):
- *
- *   Group A — node relocate specs (tests node .test.ts): real git worktree /
- *             sweeper / sandbox-mount / spawn-tree fidelity. Run via `tsx --test`.
- *   Group B — playwright e2e relocate specs (tests/e2e .spec.ts): real
- *             worktree pool / MCP subprocess / port / restart. Run via the legacy
- *             playwright-e2e config at retries:3 (or 0 when qualifying).
- *   Group C — adapter browser specs: the geometry/journey specs migrated into
- *             tests2/browser/e2e/. Run via playwright-v2 config, project
- *             `browser-v2-e2e` (retries:3 normally, 0 when qualifying).
- *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
- *             run in the isolated `v2-e2e-vitest` project.
- *
- * External-service-free guarantee: every group runs with BOBBIT_TEST_NO_EXTERNAL
- * / BOBBIT_TEST_NO_REMOTE set (fail-closed on non-loopback fetch + no real git
- * remote / gh), and uses the in-process mock agent bridge. Docker specs are
- * detected and, if the daemon is down, reported (never silently dropped).
- *
- * CPU is sampled over this process' subtree (createCpuSampler), matching the
- * head-to-head methodology, and reported per group + total.
+ * The gateway/worktree/browser-heavy A → B → C chain remains serialized. The
+ * isolated one-worker D group runs concurrently. Every group is fenced from
+ * external services; Docker-dependent paths are reported rather than omitted.
  *
  * Usage:
  *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createReadStream, createWriteStream, readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, dirname, resolve, basename } from "node:path";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { finished } from "node:stream/promises";
@@ -55,8 +33,8 @@ const PERFORMANCE_REPORT_DIR = join(REPO_ROOT, ".profiles", "testing-v2", "sampl
 
 /**
  * Give the top-level E2E coordinator its own environment before it starts any
- * group. Group B's legacy wrapper receives this environment and allocates a
- * nested root; Groups A/C/D share only this coordinator-owned root.
+ * group. Each Playwright group receives this environment and allocates a nested
+ * root; Groups A/D share only this coordinator-owned root.
  */
 export function createE2EV2CoordinatorEnvironment(paths, inheritedEnv = process.env, platform = process.platform) {
 	const env = createIsolatedE2EEnvironment(paths, inheritedEnv, platform);
@@ -91,7 +69,7 @@ export function composeE2EChildEnvironment(environment, additions = {}, platform
 	return copyEnvironment(environment, additions, platform);
 }
 
-/** Remove coordinator cache settings before invoking the nested legacy runner. */
+/** Remove coordinator cache settings before invoking a nested Playwright runner. */
 export function createNestedE2EEnvironment(coordinatorEnv, platform = process.platform) {
 	const nestedEnv = { ...coordinatorEnv };
 	for (const key of [
@@ -122,52 +100,29 @@ function parseArgs(argv) {
 	return out;
 }
 
-/** Categorize daily-bucket entries and native real-fidelity owners (excluding manual-integration). */
-function classifyDaily() {
-	const map = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "tests-map.json"), "utf8"));
-	const daily = (map.entries || []).filter((e) => (e.tier || e.bucket) === "daily");
-	const A = []; // node relocate .test.ts
-	const B = []; // playwright e2e relocate .spec.ts
-	const C = []; // adapter browser specs -> tests2/browser/e2e/<basename>
-	const D = []; // isolated Vitest real-fidelity suites
-	const excluded = { manualIntegration: [], missing: [] };
-	for (const e of daily) {
-		const f = e.file;
-		if (f.startsWith("tests/manual-integration/")) {
-			excluded.manualIntegration.push(f);
-			continue;
+function listCanonicalTests(root, suffix) {
+	const absoluteRoot = join(REPO_ROOT, ...root.split("/"));
+	if (!existsSync(absoluteRoot)) return [];
+	const files = [];
+	const visit = (directory) => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = join(directory, entry.name);
+			if (entry.isDirectory()) visit(path);
+			else if (entry.name.endsWith(suffix)) files.push(relative(REPO_ROOT, path).replace(/\\/g, "/"));
 		}
-		if (e.method === "vitest-e2e") {
-			const dest = e.v2Path || f;
-			if (existsSync(join(REPO_ROOT, dest))) D.push(dest.replace(/\\/g, "/"));
-			else excluded.missing.push(dest.replace(/\\/g, "/"));
-			continue;
-		}
-		if (e.method === "adapter") {
-			// The physical migrated spec lives in tests2/browser/e2e/<basename>.
-			const dest = join("tests2", "browser", "e2e", basename(f));
-			if (existsSync(join(REPO_ROOT, dest))) C.push(dest.replace(/\\/g, "/"));
-			else excluded.missing.push(dest.replace(/\\/g, "/"));
-			continue;
-		}
-		// relocate
-		if (f.startsWith("tests/e2e/") && f.endsWith(".spec.ts")) B.push(f);
-		else if (f.endsWith(".test.ts")) A.push(f);
-		else excluded.missing.push(f); // unexpected shape
-	}
-	// Native tests do not have legacy daily-bucket records. Their explicit path
-	// and execution ownership place browser/e2e specs in Group C and approved
-	// Vitest real-filesystem suites in Group D.
-	for (const entry of map.v2Native || []) {
-		const dest = String(entry.path || "").replace(/\\/g, "/");
-		if (!dest || !existsSync(join(REPO_ROOT, dest))) {
-			if (dest) excluded.missing.push(dest);
-			continue;
-		}
-		if (dest.startsWith("tests2/browser/e2e/") && entry.execution?.runner === "playwright") C.push(dest);
-		if (entry.execution?.runner === "vitest" && entry.execution?.tier === "e2e" && entry.execution?.project === "e2e") D.push(dest);
-	}
-	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], D: [...new Set(D)], excluded };
+	};
+	visit(absoluteRoot);
+	return files.sort();
+}
+
+/** Derive every E2E group from its canonical directory and semantic suffix. */
+export function classifyCanonicalE2E() {
+	return {
+		A: listCanonicalTests("tests/e2e/node", ".node-e2e.test.ts"),
+		B: listCanonicalTests("tests/e2e/api", ".api-e2e.spec.ts"),
+		C: listCanonicalTests("tests/e2e/browser", ".browser-e2e.spec.ts"),
+		D: listCanonicalTests("tests/e2e/vitest", ".vitest-e2e.test.ts"),
+	};
 }
 
 function dockerAvailable() {
@@ -180,7 +135,7 @@ function dockerAvailable() {
 }
 
 /** Specs known to require a live Docker daemon (their Docker paths skip otherwise). */
-const DOCKER_GATED = ["tests/e2e/sandbox-recovery.spec.ts"];
+const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 
 function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
@@ -273,7 +228,7 @@ async function replayCapturedOutput(capturedOutput) {
 }
 
 // Fail-closed external-service env for ALL groups (belt-and-braces on top of the
-// e2e config's own defaults; the browser-v2-e2e config does not set them itself).
+// Playwright config's own defaults).
 //
 // NO_EXTERNAL + NO_REMOTE => skipNonLocalRemoteGit: any git op against a
 // NON-local remote (real origin / GitHub) and all outbound non-loopback HTTP are
@@ -317,43 +272,29 @@ function isRetryFreeQualification(env = process.env) {
 }
 
 async function runGroupB(specs, coordinatorEnv) {
-	if (specs.length === 0) return { label: "B/e2e", code: 0, wallMs: 0, skipped: true };
-	// The legacy wrapper must allocate its own nested Playwright cache rather
-	// than inheriting this coordinator's cache settings. It still inherits the
-	// owned temp directory, so its `createE2ERunPaths()` child is contained here.
+	if (specs.length === 0) return { label: "B/api", code: 0, wallMs: 0, skipped: true };
+	// The Playwright wrapper must allocate its own nested cache rather than
+	// inheriting this coordinator's cache settings. Its run root remains nested
+	// beneath the coordinator-owned temporary directory.
 	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
 	const retries = resolveE2ERetryCount(coordinatorEnv);
 	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
 	// explicitly passes 0 so no first-attempt failure can be hidden.
 	const pwWorkers = resolveE2ePlaywrightWorkers();
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, `--retries=${retries}`], {
+	return run(npmCmd(), ["run", "test:e2e:run", "--", "--project=api", ...specs, `--workers=${pwWorkers}`, `--retries=${retries}`], {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
-		label: "B/e2e-relocate",
+		label: "B/api-process",
 	});
 }
 
 async function runGroupC(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-e2e project. The config's retry-free
-	// override is inherited through coordinatorEnv when qualifying.
-	// We run the WHOLE project (its testDir IS tests2/browser/e2e — the physical
-	// real-fidelity browser bucket) rather than passing individual spec paths:
-	// Playwright's `--project` is variadic and would swallow trailing positional
-	// file filters as extra project names. The e2e dir is the source of truth for
-	// this bucket (it also carries crash-restart.journey, which tier-2 `test:v2`
-	// ignores).
-	const localCli = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
-	const usesLocal = existsSync(localCli);
-	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
-	const pre = usesLocal ? [localCli] : ["playwright"];
-	const pwWorkersC = resolveE2ePlaywrightWorkers();
-	const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`, ...retryArgs], {
-		env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
-		label: "C/adapter-browser",
-		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
-		// directly without a shell so the path isn't word-split.
-		shell: usesLocal ? false : (process.platform === "win32"),
+	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
+	const retries = resolveE2ERetryCount(coordinatorEnv);
+	const playwrightWorkers = resolveE2ePlaywrightWorkers();
+	return run(npmCmd(), ["run", "test:e2e:run", "--", "--project=browser", ...specs, `--workers=${playwrightWorkers}`, `--retries=${retries}`], {
+		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
+		label: "C/browser-fidelity",
 	});
 }
 
@@ -384,15 +325,14 @@ async function runGroupD(specs, { captureOutputDir, coordinatorEnv } = {}) {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const { A, B, C, D, excluded } = classifyDaily();
+	const { A, B, C, D } = classifyCanonicalE2E();
 
 	if (args.list) {
-		console.log(JSON.stringify({ A, B, C, D, excluded }, null, 2));
+		console.log(JSON.stringify({ A, B, C, D }, null, 2));
 		return;
 	}
 
-	console.log(`[e2e-v2] e2e:v2 real-fidelity tier — A(node)=${A.length} B(e2e)=${B.length} C(browser)=${C.length} D(vitest)=${D.length}`);
-	console.log(`[e2e-v2] excluded: manual-integration=${excluded.manualIntegration.length}${excluded.missing.length ? `, MISSING=${excluded.missing.length} (${excluded.missing.join(", ")})` : ""}`);
+	console.log(`[e2e-v2] canonical real-fidelity tier — A(node)=${A.length} B(api)=${B.length} C(browser)=${C.length} D(vitest)=${D.length}`);
 
 	const docker = dockerAvailable();
 	const dockerGatedPresent = DOCKER_GATED.filter((f) => B.includes(f));
@@ -458,7 +398,6 @@ async function main() {
 		docker,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
 		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
-		excluded,
 		createdAt: new Date().toISOString(),
 	};
 	writeFileSync(samplePath, `${JSON.stringify(report, null, 2)}\n`);
