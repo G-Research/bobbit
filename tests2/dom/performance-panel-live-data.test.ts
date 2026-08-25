@@ -56,7 +56,7 @@ function fakeHost() {
 				{ id: "unit-2", label: "src/app", kind: "Structural", state: "stale", covered: 0, total: 3, children: [] },
 			],
 			benchmarks: [{ id: "bench-1", name: "Session startup", component: "server", commandName: "benchmark:startup", metric: "p95", unit: "ms", direction: "lower", scanUnitIds: ["unit-1"], fileGlobs: ["src/server/**"], tags: ["startup"], warmup: 2, repetitions: 10 }],
-			benchmarkRuns: [{ id: "run-1", hypothesisId: "hyp-1", benchmarkId: "bench-1", kind: "candidate", commit: "abc123", metrics: { p95: 640 }, variability: { sd: 11 }, interpretation: "Repeatable improvement", createdAt: "2024-02-01T00:00:00Z" }],
+			benchmarkRuns: [{ id: "run-1", hypothesisId: "hyp-1", benchmarkId: "bench-1", kind: "candidate", commit: "abc123", metrics: { p95: 640, operationsPerSecond: 1_000 }, variability: { sd: 11 }, interpretation: "Repeatable improvement", createdAt: "2024-02-01T00:00:00Z" }],
 			outcomes: [{ hypothesisId: "hyp-1", outcome: "Recommend merging", measurementSummary: "p95 improved", recordedAt: "2024-02-02T00:00:00Z" }],
 			activity: [
 				{ id: "old", at: "2024-01-01T00:00:00Z", kind: "info", actor: "Scanner", message: "Older" },
@@ -195,7 +195,9 @@ describe("Performance panel live data", () => {
 		expect(root.textContent).toContain("registered references");
 		expect(root.textContent).toContain("Named command reference");
 		expect(root.textContent).toContain("benchmark:startup");
-		expect(root.textContent).toContain("640 ms");
+		expect(root.textContent).toContain("p95: 640 ms");
+		expect(root.textContent).toContain("operationsPerSecond: 1,000");
+		expect(root.textContent).not.toContain("operationsPerSecond: 1,000 ms");
 		expect(root.textContent).toContain("Recommend merging");
 		const search = root.querySelector<HTMLInputElement>('[aria-label="Search benchmark store"]')!;
 		search.value = "missing";

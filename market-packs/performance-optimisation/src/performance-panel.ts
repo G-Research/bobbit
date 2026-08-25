@@ -1621,10 +1621,10 @@ function renderRegistry(state: PaneState): HTMLElement {
 	return wrapper;
 }
 
-function metricEntries(values: Record<string, number>, unit?: string): string {
+function metricEntries(values: Record<string, number>, primaryMetric?: string, primaryUnit?: string): string {
 	const entries = Object.entries(values);
 	if (!entries.length) return "No metrics recorded";
-	return entries.map(([name, value]) => `${name}: ${value.toLocaleString()}${unit ? ` ${unit}` : ""}`).join(" · ");
+	return entries.map(([name, value]) => `${name}: ${value.toLocaleString()}${primaryUnit && name === primaryMetric ? ` ${primaryUnit}` : ""}`).join(" · ");
 }
 
 function renderBenchmarks(state: PaneState): HTMLElement {
@@ -1724,7 +1724,7 @@ function renderBenchmarks(state: PaneState): HTMLElement {
 			const runCard = node("article", `po-run-card is-${run.kind ?? "unknown"}`);
 			const runTitle = node("div", "po-run-head");
 			runTitle.append(node("strong", "", run.kind ? run.kind[0].toUpperCase() + run.kind.slice(1) : "Run"), node("time", "", activityTime(run.createdAt)));
-			runCard.append(runTitle, node("p", "po-run-metric", metricEntries(run.metrics, selected.unit)));
+			runCard.append(runTitle, node("p", "po-run-metric", metricEntries(run.metrics, selected.metric, selected.unit)));
 			if (run.commit) runCard.append(node("code", "po-commit", run.commit));
 			if (run.interpretation) runCard.append(node("p", "po-detail-copy", run.interpretation));
 			const outcome = outcomes.find((item) => item.hypothesisId === run.hypothesisId);
