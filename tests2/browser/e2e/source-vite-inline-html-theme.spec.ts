@@ -1,7 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -20,7 +20,9 @@ import {
 	waitForSourceVite,
 	writeSourceViteAgent,
 	type RunningSourceProcess,
+	type SourceProcessTreeAuthority,
 } from "./source-vite-runtime-helpers.js";
+import { _trackedCount, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const SOURCE_MODULE_PATHS = {
@@ -171,6 +173,161 @@ function waitForFixtureMessage(child: ChildProcess, expectedType: string): Promi
 // processes rather than relying on Playwright's compiled-dist gateway fixture.
 test.describe("source Vite inline HTML theme runtime", () => {
 	test.describe.configure({ retries: 0 });
+	let trackedBaseline = 0;
+
+	test.beforeEach(() => { trackedBaseline = _trackedCount(); });
+	test.afterEach(() => {
+		expect(_trackedCount(), "source-runtime teardown must release every spawnTracked registry owner").toBe(trackedBaseline);
+	});
+
+	test("Windows source ownership gates readiness before the first health response", async () => {
+		test.setTimeout(10_000);
+		let resolveOwnership!: () => void;
+		const ownershipReady = new Promise<void>(resolve => { resolveOwnership = resolve; });
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		let killRequests = 0;
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady,
+			killTree: () => {
+				killRequests++;
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: async () => {
+				await childClosed;
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "ownership-gated source fixture", authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response('{"status":"ok"}', { status: 200 });
+		}) as typeof fetch;
+		try {
+			const readiness = waitForSourceGateway("http://source.invalid", runtime, 1_000);
+			await new Promise<void>(resolveTurn => setImmediate(resolveTurn));
+			expect(fetchCalls, "health must remain behind spawn-time Job ownership").toBe(0);
+			resolveOwnership();
+			await readiness;
+			expect(fetchCalls).toBe(1);
+		} finally {
+			globalThis.fetch = originalFetch;
+			await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 1_000 });
+		}
+		expect(killRequests, "owned teardown must request one Job close").toBe(1);
+	});
+
+	test("Windows source ownership failure is diagnostic and prevents health publication", async () => {
+		test.setTimeout(10_000);
+		let rejectOwnership!: (error: Error) => void;
+		const ownershipReady = new Promise<void>((_resolve, reject) => { rejectOwnership = reject; });
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady,
+			killTree: () => { child.kill("SIGKILL"); },
+			waitForTreeExit: async () => {
+				await childClosed;
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "ownership-failed source fixture", authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response('{"status":"ok"}', { status: 200 });
+		}) as typeof fetch;
+		try {
+			const readiness = waitForSourceGateway("http://source.invalid", runtime, 1_000);
+			rejectOwnership(new Error("fixture Job assignment failed"));
+			await expect(readiness).rejects.toThrow("ownership-failed source fixture failed before ownership readiness");
+			expect(fetchCalls, "failed Job ownership must never publish health readiness").toBe(0);
+		} finally {
+			globalThis.fetch = originalFetch;
+			await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 1_000 });
+		}
+	});
+
+	test("tracked teardown coalesces repeated stops and joins the exact tree-completion bound", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		const signals: string[] = [];
+		const waitBounds: number[] = [];
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				signals.push(signal ?? "SIGTERM");
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: async timeoutMs => {
+				waitBounds.push(timeoutMs ?? -1);
+				await childClosed;
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "coalesced tracked source fixture", authority);
+		const options = { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 2_000 };
+		await Promise.all([stopSourceProcess(runtime, options), stopSourceProcess(runtime, options)]);
+		await stopSourceProcess(runtime, options);
+
+		expect(signals, "the Windows Job authority must receive one close request").toEqual(["SIGKILL"]);
+		expect(waitBounds, "tree completion must use the existing grace plus force lifecycle bound").toEqual([2_100]);
+		expect(runtime.closed).toBe(true);
+	});
+
+	test("an unverified tracked completion stays event-loop bounded and preserves its failure across repeated stop", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		let killRequests = 0;
+		let waitRequests = 0;
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: () => {
+				killRequests++;
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: () => {
+				waitRequests++;
+				return new Promise<boolean>(() => {});
+			},
+		};
+		const runtime = captureSourceProcess(child, "unverified tracked source fixture", authority);
+		const options = { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 };
+		const firstStop = stopSourceProcess(runtime, options);
+		await new Promise<void>(resolveTurn => setImmediate(resolveTurn));
+		await expect(firstStop).rejects.toThrow("tree completion was not verified within 50ms");
+		await childClosed;
+		await expect(stopSourceProcess(runtime, options)).rejects.toThrow("tree completion was not verified within 50ms");
+		expect(killRequests, "a failed completion proof must not retarget the process").toBe(1);
+		expect(waitRequests, "repeated stop must join the original completion attempt").toBe(1);
+		expect(runtime.child.stdout?.destroyed).toBe(true);
+		expect(runtime.child.stderr?.destroyed).toBe(true);
+	});
+
+	test("source-runtime cleanup contains no synchronous Windows process-tree utility", async () => {
+		const source = await readFile(new URL("./source-vite-runtime-helpers.ts", import.meta.url), "utf8");
+		expect(source).not.toMatch(/spawnSync|taskkill/i);
+		expect(source).toContain("spawnTracked(file, args, options)");
+		expect(source.match(/return startOwnedSourceProcess\(/g)).toHaveLength(2);
+		expect(source).toContain('process.platform === "win32"');
+	});
 
 	test("teardown escalates a SIGTERM-ignoring detached source process and awaits close", async () => {
 		test.setTimeout(10_000);
@@ -250,19 +407,24 @@ test.describe("source Vite inline HTML theme runtime", () => {
 
 	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
 		test.setTimeout(5_000);
-		const child = spawn(process.execPath, ["-e", [
+		const fixtureArgs = ["-e", [
 			'const { spawn } = require("node:child_process");',
 			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
 			'process.stdout.write("ready\\n");',
 			'process.on("SIGTERM", () => process.exit(0));',
-		].join("")], {
-			detached: process.platform !== "win32",
+		].join("")];
+		const tracked = process.platform === "win32"
+			? spawnTracked(process.execPath, fixtureArgs, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
+			: undefined;
+		const child = tracked?.child ?? spawn(process.execPath, fixtureArgs, {
+			detached: true,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		const runtime = captureSourceProcess(child, "root-exit boundary fixture");
+		const runtime = captureSourceProcess(child, "root-exit boundary fixture", tracked);
 		const actualExit = once(child, "exit");
 		const actualClose = once(child, "close");
+		await tracked?.ownershipReady;
 		await once(child.stdout!, "data");
 
 		try {
