@@ -124,9 +124,9 @@ async function runQuestionStateTransition<T>(
 	}
 }
 
-async function postAsk(conn: TestWsConnection): Promise<string> {
+async function postAsk(conn: TestWsConnection, prompt = "please use ask_user_choices"): Promise<string> {
 	const cursor = conn.messageCount();
-	conn.send({ type: "prompt", text: "please use ask_user_choices" });
+	conn.send({ type: "prompt", text: prompt });
 	await conn.waitForFrom(cursor, toolStartPredicate("ask_user_choices"), 10_000);
 	const stubResult = await conn.waitForFrom(
 		cursor,
@@ -800,6 +800,75 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 				const second = await postSubmit(sessionId, toolUseId, answers);
 				expect(second.status).toBe(200);
 				expect(await second.json()).toEqual({ ok: true, alreadySubmitted: true });
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("queued answer evidence survives terminal-guard loss before transcript echo", async () => {
+		const sessionId = await createSession();
+		try {
+			const conn = await connectWs(sessionId);
+			try {
+				const submitToolUseId = await postAsk(conn, "please use ask_user_choices_composite");
+				const dismissToolUseId = await postAsk(conn, "please use ask_user_choices_composite");
+				expect(submitToolUseId).toContain("|");
+				expect(dismissToolUseId).toContain("|");
+
+				const answers = [
+					{ question: "Favorite color?", selected: "red", other_text: null },
+					{ question: "Team size?", selected: "small", other_text: null },
+				];
+				const manager = gatewaySync().sessionManager;
+				const session = manager.getSession(sessionId)!;
+				const queuedEnvelopes = [submitToolUseId, dismissToolUseId].map(toolUseId =>
+					`[ask_user_choices_response tool_use_id=${toolUseId}]\n${JSON.stringify({ answers })}`
+				);
+				// Model a restored durable queue without touching the fresh process-local
+				// terminal guard: neither envelope has reached the transcript yet.
+				for (const envelope of queuedEnvelopes) session.promptQueue.enqueue(envelope);
+				(manager as any).broadcastQueue(session);
+				await manager.resolveStoreForId(sessionId)!.flushAsync();
+				const setupCursor = conn.messageCount();
+				await manager.recomputeHasUnansweredQuestion(sessionId);
+				conn.send({ type: "ping" });
+				await conn.waitForFrom(setupCursor, message => message.type === "pong", 10_000);
+				expect(manager.getPersistedSession(sessionId)?.messageQueue?.map((row: { text: string }) => row.text)).toEqual(queuedEnvelopes);
+
+				const rpcClient = session.rpcClient as any;
+				const promptSpy = vi.spyOn(rpcClient, "prompt");
+				const steerSpy = vi.spyOn(rpcClient, "steer");
+				const eventCursor = conn.messageCount();
+				const beforeTranscript = await rpcClient.getMessages();
+				const beforeMessages = beforeTranscript.data?.messages || beforeTranscript.data;
+
+				const duplicate = await postSubmit(sessionId, submitToolUseId, answers);
+				expect(duplicate.status).toBe(200);
+				expect(await duplicate.json()).toEqual({ ok: true, alreadySubmitted: true });
+				const dismissed = await postDismiss(sessionId, dismissToolUseId);
+				expect(dismissed.status).toBe(409);
+				expect(await dismissed.json()).toEqual({ error: "Question was already answered" });
+
+				conn.send({ type: "ping" });
+				await conn.waitForFrom(eventCursor, message => message.type === "pong", 10_000);
+				expect(conn.messages.slice(eventCursor).filter(message =>
+					message.type === "ask_question_dismissed"
+					|| message.type === "queue_update"
+					|| message.type === "sessions_changed"
+					|| message.type === "session_status"
+					|| message.type === "event"
+				)).toEqual([]);
+				expect(promptSpy).not.toHaveBeenCalled();
+				expect(steerSpy).not.toHaveBeenCalled();
+				expect(session.status).toBe("idle");
+				expect(session.promptQueue.toArray().map((row: { text: string }) => row.text)).toEqual(queuedEnvelopes);
+				expect(await getDismissals(sessionId).then(response => response.json())).toEqual({ dismissedToolUseIds: [] });
+				const afterTranscript = await rpcClient.getMessages();
+				const afterMessages = afterTranscript.data?.messages || afterTranscript.data;
+				expect(afterMessages).toEqual(beforeMessages);
 			} finally {
 				conn.close();
 			}

@@ -15916,7 +15916,8 @@ export class SessionManager {
 		return ids;
 	}
 
-	private durableQueuedAskResponseIds(id: string): Set<string> {
+	/** Exact ask response IDs still owned by the durable delivery queue or in-flight ledger. */
+	durableQueuedAskResponseIds(id: string): Set<string> {
 		const session = this.sessions.get(id);
 		return this.askResponseIdsFromRows([
 			...(session?.promptQueue.toArray() ?? []),

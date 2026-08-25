@@ -20731,7 +20731,8 @@ async function handleApiRoute(
 			json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
 			return;
 		}
-		if (findAskResponseAnswers(messages as any[], toolUseId)) {
+		if (sessionManager.durableQueuedAskResponseIds(sessionId).has(toolUseId)
+			|| findAskResponseAnswers(messages as any[], toolUseId)) {
 			askQuestionTerminalGuard.observeAnswered(sessionId, toolUseId);
 			json({ error: "Question was already answered" }, 409);
 			return;
@@ -20832,8 +20833,9 @@ async function handleApiRoute(
 			return;
 		}
 
+		const queuedResponse = sessionManager.durableQueuedAskResponseIds(sessionId).has(toolUseId);
 		const existing = findAskResponseAnswers(messages, toolUseId);
-		if (existing) {
+		if (queuedResponse || existing) {
 			askQuestionTerminalGuard.observeAnswered(sessionId, toolUseId);
 			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
 			json({ ok: true, alreadySubmitted: true });
