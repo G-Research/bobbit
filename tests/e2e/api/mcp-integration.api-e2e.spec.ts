@@ -39,7 +39,7 @@ async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response>
 
 // Resolve paths for the mock MCP server
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const MOCK_SERVER_PATH = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
+const MOCK_SERVER_PATH = resolve(__dirname, "..", "..", "support", "fixtures", "shared", "mock-mcp-server.mjs");
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const hqQuery = `projectId=${encodeURIComponent(HEADQUARTERS_PROJECT_ID)}`;
 const hqMcpServersPath = `/api/mcp-servers?${hqQuery}`;
