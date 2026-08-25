@@ -353,7 +353,7 @@ describe("consolidated implementation review defaults", () => {
 	it("limits documentation-only implementation findings to workflows with a downstream Documentation stage", () => {
 		assertDownstreamDocumentationStageScope(buildDefaultWorkflows("myproj"), "seeded defaults");
 
-		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
+		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
 			workflows?: Record<string, Workflow>;
 		};
 		assert.ok(project.workflows, "project.yaml must define workflows");
@@ -363,7 +363,7 @@ describe("consolidated implementation review defaults", () => {
 	it("keeps every review at its owning gate and mirrors that boundary in project.yaml", () => {
 		assertCompleteGateStageOwnership(buildDefaultWorkflows("myproj"), "seeded defaults");
 
-		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
+		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
 			workflows?: Record<string, Workflow>;
 		};
 		assert.ok(project.workflows, "project.yaml must define workflows");
@@ -398,7 +398,7 @@ describe("consolidated implementation review defaults", () => {
 	it("unconditionally excludes documentation-only gaps from every phase-2 spec review", () => {
 		assertUnconditionalSpecDocumentationScope(buildDefaultWorkflows("myproj"), "seeded defaults");
 
-		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
+		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
 			workflows?: Record<string, Workflow>;
 		};
 		assert.ok(project.workflows, "project.yaml must define workflows");

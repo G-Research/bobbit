@@ -18,7 +18,7 @@ import YAML from "yaml";
 const { getAssistantDef, assistantRoleForType, composeAssistantTitle } = await import("../../../src/server/agent/assistant-registry.ts");
 const { SUPPORT_ASSISTANT_PROMPT } = await import("../../../src/server/agent/support-assistant.ts");
 
-const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults");
+const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "..", "defaults");
 const SUPPORT_ROLE_FILE = path.join(DEFAULTS_DIR, "roles", "support.yaml");
 
 describe("support assistant type", () => {

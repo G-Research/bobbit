@@ -1,6 +1,6 @@
 /**
  * Pins the content-addressed dist build cache (scripts/testing-v2/ensure-dist.mjs)
- * used by test:e2e:v2 and tests2/browser-global-setup.ts: changed build inputs
+ * used by test:e2e and tests/e2e/_helpers/e2e-global-setup.ts: changed build inputs
  * must change the key, and validation must fail closed on a missing/stale
  * manifest or missing build artifacts so a stale dist can never be silently
  * tested. Modeled on tests/unit/core/server-prebundle-cache.unit.test.ts; uses an owned
@@ -295,7 +295,7 @@ afterAll(() => {
 
 describe("dist build callers", () => {
 	it("routes E2E setup and packed-consumer builds through the mutex entrypoint", () => {
-		const e2eGlobalSetup = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "e2e-global-setup.ts"), "utf8");
+		const e2eGlobalSetup = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "_helpers", "e2e-global-setup.ts"), "utf8");
 		assert.match(
 			e2eGlobalSetup,
 			/const ensureDistScript = join\(projectRoot, "scripts", "testing-v2", "ensure-dist\.mjs"\);/,
@@ -312,7 +312,7 @@ describe("dist build callers", () => {
 			"E2E global setup must not bypass the dist mutex with a direct build",
 		);
 
-		const packedConsumer = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "pi-packed-consumer.spec.ts"), "utf8");
+		const packedConsumer = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "api", "pi-packed-consumer.api-e2e.spec.ts"), "utf8");
 		assert.match(
 			packedConsumer,
 			/const ENSURE_DIST_SCRIPT = join\(PROJECT_ROOT, "scripts", "testing-v2", "ensure-dist\.mjs"\);/,

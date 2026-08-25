@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { ACCESSORIES, ACCESSORY_IDS, ACCESSORY_HEADSET } from "../../../src/ui/bobbit-sprite-data.ts";
 import { normalizeStaffAccessory } from "../../../src/server/agent/staff-store.ts";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
 const has = (x: number, y: number, c: string) =>
 	ACCESSORY_HEADSET.pixels.some(([px, py, pc]) => px === x && py === y && pc === c);

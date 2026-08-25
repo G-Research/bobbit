@@ -31,7 +31,7 @@ import {
 } from "../../../src/ui/bobbit-sprite-data.ts";
 import { normalizeStaffAccessory } from "../../../src/server/agent/staff-store.ts";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
 const px = ACCESSORY_PONYTAIL.pixels;
 const at = (x: number, y: number) => px.find(([ax, ay]) => ax === x && ay === y);

@@ -55,7 +55,7 @@ const EXTENSION_MODULES = import.meta.glob<{
 	default: ExtensionFactory;
 	installBrowserTools?: (pi: any, backend: { ensurePage(): Promise<never>; cleanup(): Promise<void> }) => void;
 }>(
-	"../../defaults/tools/*/extension.ts",
+	"../../../defaults/tools/*/extension.ts",
 	{ eager: true },
 );
 
@@ -110,7 +110,7 @@ beforeAll(() => {
 	if (!process.env.BOBBIT_GATEWAY_URL) process.env.BOBBIT_GATEWAY_URL = "https://127.0.0.1:0";
 
 	for (const group of EXTENSION_GROUPS) {
-		const modulePath = `../../defaults/tools/${group}/extension.ts`;
+		const modulePath = `../../../defaults/tools/${group}/extension.ts`;
 		const factory = EXTENSION_MODULES[modulePath]?.default;
 		assert.ok(typeof factory === "function", `${group}/extension.ts has no callable default export`);
 

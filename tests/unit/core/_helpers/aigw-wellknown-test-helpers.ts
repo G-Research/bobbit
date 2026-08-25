@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURE_PATH = path.join(HERE, "..", "fixtures", "wellknown-opencode.json");
+const FIXTURE_PATH = path.join(HERE, "fixtures", "wellknown-opencode.json");
 
 export const {
 	translateWellKnown,

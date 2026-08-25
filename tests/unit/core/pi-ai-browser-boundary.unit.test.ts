@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const lazyBoundaryPath = path.join(repoRoot, "src", "app", "pi-ai-lazy.ts");
 const source = fs.readFileSync(lazyBoundaryPath, "utf-8");
-const browserFixtureRoot = path.join(repoRoot, "tests", "fixtures");
+const browserFixtureRoot = path.join(repoRoot, "tests", "browser");
 
 function stripTypeOnlyImportExpressions(text: string): string {
 	return text.replace(/\btypeof\s+import\s*\(\s*["'][^"']+["']\s*\)/g, "unknown");
