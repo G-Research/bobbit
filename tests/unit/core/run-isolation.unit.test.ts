@@ -413,7 +413,8 @@ describe("unit run isolation", () => {
     expect(resolveE2ERetryCount({ BOBBIT_V2_RETRY_FREE: "1" })).toBe(0);
     expect(groupB).toContain("const retries = resolveE2ERetryCount(coordinatorEnv);");
     expect(groupB).toContain("`--retries=${retries}`");
-    expect(groupC).toContain('const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];');
+    expect(groupC).toContain("const retries = resolveE2ERetryCount(coordinatorEnv);");
+    expect(groupC).toContain("`--retries=${retries}`");
     expect(groupDVitestArgs({})).not.toContain("--retry=0");
     expect(groupDVitestArgs({ BOBBIT_V2_RETRY_FREE: "1" })).toContain("--retry=0");
     for (const config of ["playwright-e2e.config.ts", "playwright-v2.config.ts"])
