@@ -258,18 +258,31 @@ export class ReliableTurnRuntime {
 	}
 
 	/**
-	 * Join the server-owned compaction refresh while the serial mock prompt chain
-	 * holds the replacement steer before its user start. The refresh broadcasts
-	 * its final messages/state projection asynchronously after compaction_end; a
-	 * later synthetic agent_start must not race that authoritative idle state.
+	 * Join both server-owned idle state publications while the serial mock prompt
+	 * chain holds the replacement steer before its user start. Compaction refresh
+	 * and first-turn setup each finish with an unversioned `state` broadcast. The
+	 * terminal barrier is after agent_end synchronously registers the metadata
+	 * tail, so capturing both promises here covers every eligible state writer.
+	 * Their broadcasts happen before the promises resolve; the later agent_start
+	 * therefore follows them on the same WebSocket.
 	 */
 	async joinCompactionTerminalProjection(): Promise<RemoteLifecycleRevision> {
 		const session = this.sessionManager?.getSession(this.sessionId);
-		const finalization = session?._compactionFinalization;
-		if (!finalization || typeof finalization.then !== "function") {
+		const compactionFinalization = session?._compactionFinalization;
+		if (!compactionFinalization || typeof compactionFinalization.then !== "function") {
 			throw new Error("Cannot join the authoritative mock compaction finalization");
 		}
-		await finalization;
+		if (session?.setupComplete !== true) {
+			throw new Error("First-turn setup did not register before terminal idle");
+		}
+		const firstTurnStatePublication = session.pendingMetadataPersist;
+		if (firstTurnStatePublication !== undefined && typeof firstTurnStatePublication.then !== "function") {
+			throw new Error("Cannot join the authoritative first-turn state publication");
+		}
+		await Promise.all([compactionFinalization, firstTurnStatePublication]);
+		if (session.pendingMetadataPersist && session.pendingMetadataPersist !== firstTurnStatePublication) {
+			throw new Error("A later metadata state publication entered the held terminal boundary");
+		}
 		return this.statusRevision();
 	}
 
