@@ -1348,6 +1348,8 @@ interface PendingSkillTranscriptBinding {
 interface PromptDisplayRetryCarrier {
 	modelText: string;
 	originalText: string;
+	skillExpansions: SkillExpansion[];
+	fileMentions?: FileMention[];
 	attachments?: AttachmentDisplayMetadata[];
 }
 
@@ -3119,7 +3121,10 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
  * the un-spliced (modelText) message — that is what the model has seen.
  */
 function spliceSkillExpansionsIntoEvent(
-	session: { pendingSkillExpansions?: PendingSkillSidecarEnvelope[] },
+	session: {
+		pendingSkillExpansions?: PendingSkillSidecarEnvelope[];
+		pendingPromptAuthors?: PendingPromptAuthorRecord[];
+	},
 	event: unknown,
 ): unknown {
 	const ev = event as any;
@@ -3131,9 +3136,25 @@ function spliceSkillExpansionsIntoEvent(
 	if (!pending || pending.length === 0) return event;
 	const body = extractUserMessageText(msg);
 	const binding = ev[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
-	const idx = binding
+	let idx = binding
 		? pending.findIndex((candidate) => candidate.promptId === binding.promptId && candidate.modelText === body)
 		: pending.findIndex((candidate) => candidate.promptId === undefined && candidate.modelText === body);
+	if (idx === -1 && !binding) {
+		// Legacy/raw emitters do not carry the author binding that normally proves
+		// occurrence identity. A poison-history respawn can nevertheless have bound
+		// its restored display envelope before that raw echo reaches this boundary.
+		// Recover it only when one active author occurrence proves an unambiguous
+		// prompt ID; equal-text or replay ambiguity deliberately fails closed.
+		const matchingAuthors = session.pendingPromptAuthors?.filter((candidate) =>
+			promptAuthorBindingMatchesText(candidate, body),
+		) ?? [];
+		if (matchingAuthors.length === 1) {
+			idx = pending.findIndex((candidate) =>
+				candidate.promptId === matchingAuthors[0].promptId
+				&& candidate.modelText === body,
+			);
+		}
+	}
 	if (idx === -1) return event;
 	const envelope = pending.splice(idx, 1)[0];
 	const rewrittenMsg = projectPromptDisplayMessage(msg, {
@@ -7777,6 +7798,8 @@ export class SessionManager {
 			? {
 				modelText,
 				originalText: envelope.originalText,
+				skillExpansions: envelope.skillExpansions,
+				...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
 				...(envelope.attachments?.length ? { attachments: envelope.attachments.map((attachment) => ({ ...attachment })) } : {}),
 			}
 			: undefined;
@@ -7794,6 +7817,8 @@ export class SessionManager {
 		}
 		this.appendPromptDisplayEnvelope(session, carrier.originalText, modelText, {
 			modelText,
+			skillExpansions: carrier.skillExpansions,
+			fileMentions: carrier.fileMentions,
 			attachments: carrier.attachments,
 			intentId: promptId,
 		});
