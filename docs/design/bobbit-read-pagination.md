@@ -14,8 +14,8 @@ Status: **implemented** · Goal: Page Bobbit Tools · Author: coder-861a
 - The tool forwards REST paging only for `list_sessions`, `list_goals`, and `search`. These are the high-volume endpoints where the gateway returns page fields such as `total`, `hasMore`, `nextOffset`, or `nextCursor`.
 - When a gateway response already includes REST paging fields or a `pagination` object, the tool adds normalized `pagination` metadata and marks `pagedBy: "rest"`; it does **not** re-slice the returned array. This matters for responses such as `include=archived` sessions, where the REST payload can include live sessions plus an archived page.
 - Other list-style operations use tool-side fallback paging after the endpoint has applied semantic filters (`projectId`, `goalId`, `view`, `q`, `include`, or `archived` as applicable). Fallback responses are marked `pagedBy: "tool"`.
-- Tool-side fallback preserves ancillary fields such as `generation`, diagnostics, summary counts, and maintenance probe counts — **except** the archive-only auxiliary arrays, which follow the archive-visibility rule below.
-- **Archive visibility (hidden by default).** `list_sessions`, `list_goals`, and `search` are live-only by default. A per-operation `postProcess` step drops any `archived: true` rows from the primary array and strips the archive-only auxiliary arrays before pagination: `archivedDelegates` for `list_sessions` and `archivedSessions` for `list_goals`. These arrays are preserved (and archived rows returned) **only** on the explicit archive path — `include=archived` for `list_sessions`, `archived=true` for `list_goals`, and `include=archived` / `includeArchived=true` for `search`. UI clients that need archived search results explicitly opt REST `/api/search` into that mode with `includeArchived=true`; `bobbit_read.search` remains live-only unless its caller opts in. So the general “ancillary fields are always preserved” rule does not apply to archived side payloads on default calls; they are intentionally removed so archived entities never leak into agent context.
+- Tool-side fallback preserves ancillary fields such as `generation`, diagnostics, summary counts, and maintenance probe counts — **except** archive-only auxiliary arrays, which follow the agent-facing rules below.
+- **Archive visibility (hidden by default).** `list_sessions`, `list_goals`, and `search` are live-only by default. A per-operation `postProcess` step drops any `archived: true` rows from the primary array. Explicit archive paths preserve requested primary rows: `include=archived` for `list_sessions`, `archived=true` for `list_goals`, and `include=archived` / `includeArchived=true` for `search`. `list_sessions` also preserves `archivedDelegates` on its explicit archive path. `list_goals` always strips the REST-only `archivedSessions` side payload; agents retrieve archived sessions through `list_sessions` instead. UI clients retain the unchanged REST behaviour.
 - Cursor inputs use `cursor` as the generic alias and `after` as the gateway query name for archived session/goal paths. Cursor mode wins over offset mode only when the operation is cursor-backed and a cursor value is supplied.
 
 ## 2. Scope
@@ -162,7 +162,7 @@ async function dispatch(ops: Record<string, OpSpec>, params: Params, opts?: { pa
 | operation | primary array | semantic filters | paging behaviour |
 |---|---:|---|---|
 | `list_sessions` | `sessions` | `include`, `q`, `projectId` | Forwards filters plus `limit`; forwards `offset` for offset mode and `after` for archived cursor mode. REST-paged results are not re-sliced. Live-only by default: archived rows + `archivedDelegates` stripped unless `include=archived`. |
-| `list_goals` | `goals` | `archived`, `q`, `projectId` | Forwards filters plus `limit`; forwards `offset` for live/offset mode and `after` for archived cursor mode. REST-paged results are not re-sliced. Live-only by default: archived rows + `archivedSessions` stripped unless `archived=true`. |
+| `list_goals` | `goals` | `archived`, `q`, `projectId` | Forwards filters plus `limit`; forwards `offset` for live/offset mode and `after` for archived cursor mode. REST-paged results are not re-sliced. Live-only by default; `archived=true` returns archived goals. The tool always strips the REST-only `archivedSessions` side payload. |
 | `list_projects` | `projects` or bare array | hidden/system/HQ preference filter inside `listProjectsForApi()` | Tool fallback pages the filtered response and normalizes tool output to `{ projects, pagination }` when needed. |
 | `list_workflows` | `workflows` | `projectId` required | Forwards `projectId`; tool fallback pages after workflow resolution. |
 | `list_roles` | `roles` | `projectId` config scope | Forwards `projectId`; tool fallback pages after config-scope resolution. |
@@ -223,7 +223,7 @@ If a probe returns a bare array, normalize it to `{ items: [...], pagination: { 
 - `include`
   - `include=archived` is the archive opt-in for `list_sessions` **and** `search`. For `list_sessions` it includes live sessions plus the archived page/delegates and preserves the `archivedDelegates` enrichment. For `search` it forwards `includeArchived=true` to `/api/search`; the full search UI uses that REST opt-in deliberately, while `bobbit_read.search` defaults to live-only. Without `include=archived`, both operations are live-only: archived rows are stripped from their primary arrays, and `list_sessions` also strips `archivedDelegates`.
 - `archived`
-  - Only `list_goals`; `archived=true` selects the archived path. Without it, `list_goals` is live-only and archived goal rows / `archivedSessions` are stripped in `postProcess`.
+  - Only `list_goals`; `archived=true` selects the archived-goal path. Without it, archived goal rows are filtered. The `archivedSessions` side payload is stripped in both modes.
 - `view`
   - Only `list_gates`/`list_tasks`; compute summary/full projection first, then page the displayed list.
 
@@ -251,7 +251,7 @@ Backward compatibility rule: REST endpoints must keep their existing response sh
 - Invalid `limit`/`offset` should be clamped, not surfaced as validation errors, matching existing REST style.
 - If a caller asks for `limit` larger than max, return the clamped `limit` in metadata.
 - Cursor and offset should not both drive the same request. If both are supplied for a cursor operation, cursor wins and metadata uses `mode: "cursor"`.
-- Tool-side fallback must preserve ancillary fields (`generation`, diagnostics, counts, summaries). The archive-only auxiliary arrays (`archivedDelegates`, `archivedSessions`) are the exception: they are stripped on default (live-only) calls and preserved only on the explicit archive opt-in (`include=archived` / `archived=true`).
+- Tool-side fallback must preserve ancillary fields (`generation`, diagnostics, counts, summaries). Archive-only auxiliary arrays are exceptions: `archivedDelegates` is stripped from default session calls and preserved with `include=archived`; `archivedSessions` is always stripped from `list_goals` because archived sessions have their own tool path.
 - Avoid exposing `cwd`/`ensure` on `list_mcp_servers` in this goal; `ensure=true` has initialization side effects and `bobbit_read` should stay read-only.
 
 ## 11. Focused test plan

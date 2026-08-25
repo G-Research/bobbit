@@ -2,6 +2,7 @@
 //
 // Archive visibility contract: agent-facing bobbit_read list/search operations
 // hide archived rows by default, while preserving explicit archive opt-ins.
+// list_goals never exposes the REST-only archivedSessions enrichment.
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
@@ -110,7 +111,7 @@ describe("bobbit_read — archive-hidden list defaults", () => {
 		expect.soft("archivedSessions" in data).toBe(false);
 	});
 
-	it("list_goals preserves archived goals and archivedSessions when archived=true is explicit", async () => {
+	it("list_goals preserves archived goals but strips archivedSessions when archived=true is explicit", async () => {
 		stubFetch((url) => {
 			expect(new URL(url).searchParams.get("archived")).toBe("true");
 			return {
@@ -129,7 +130,8 @@ describe("bobbit_read — archive-hidden list defaults", () => {
 		const data = json(result);
 
 		expect(ids(data.goals)).toEqual(["archived-goal-explicit"]);
-		expect(ids(data.archivedSessions)).toEqual(["archived-session"]);
+		expect.soft(data.archivedSessions).toBeUndefined();
+		expect.soft("archivedSessions" in data).toBe(false);
 	});
 });
 

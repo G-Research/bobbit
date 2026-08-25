@@ -309,6 +309,13 @@ function filterArchivedRows(data: unknown, itemKey: string, stripKeys: string[] 
 	return out;
 }
 
+function stripResponseKeys(data: unknown, keys: string[]): unknown {
+	if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+	const out = { ...(data as Record<string, unknown>) };
+	for (const key of keys) delete out[key];
+	return out;
+}
+
 // GET-only maintenance probes for bobbit_read.maintenance_inspect.
 const PROBE_PATHS: Record<string, string> = {
 	orphaned_worktrees: "/api/maintenance/orphaned-worktrees",
@@ -355,7 +362,10 @@ const READ_OPS: Record<string, OpSpec> = {
 			cursor: (params) => isTruthyFlag(params.archived),
 		}),
 		required: [],
-		postProcess: (data, p) => isTruthyFlag(p.archived) ? data : filterArchivedRows(data, "goals", ["archivedSessions"]),
+		postProcess: (data, p) => stripResponseKeys(
+			isTruthyFlag(p.archived) ? data : filterArchivedRows(data, "goals"),
+			["archivedSessions"],
+		),
 		page: (p) => ({ itemKey: "goals", cursor: isTruthyFlag(p.archived) }),
 	},
 	get_goal: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}`, required: ["goalId"] },
