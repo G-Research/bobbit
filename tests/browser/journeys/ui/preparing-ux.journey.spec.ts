@@ -1,8 +1,8 @@
 /**
- * Preparing UX â€” reproducing test for the "Setting up worktreeâ€¦" banner bug.
+ * Preparing UX — reproducing test for the "Setting up worktree…" banner bug.
  *
  * Bug: when a brand-new worktree-backed session is created via the UI, the
- * "Setting up worktreeâ€¦" banner does NOT appear in the chat panel and the
+ * "Setting up worktree…" banner does NOT appear in the chat panel and the
  * message editor stays enabled. Reload masks the bug because the status frame
  * lands before <agent-interface> is constructed.
  *
@@ -71,21 +71,21 @@ test.describe("Preparing UX (worktree-backed session)", () => {
 		// carries a timestamp suffix; match by prefix.
 		await page.locator(`button[title^="New session in prep-ux-"]`).first().click();
 
-		// PRIMARY ASSERTION â€” fails pre-fix. The banner must appear within ~1s
+		// PRIMARY ASSERTION — fails pre-fix. The banner must appear within ~1s
 		// of session creation. Generous timeout so a slow CI doesn't false-fail
 		// on infra latency, but well under PREPARING_DELAY_MS so we're still
 		// inside the preparing window.
-		const banner = page.getByText("Setting up worktreeâ€¦");
+		const banner = page.getByText("Setting up worktree…");
 		await expect(banner).toBeVisible({ timeout: 2000 });
 
 		// While preparing, the sidebar row replaces the transient "New session"
-		// title with "preparingâ€¦" instead of appending a suffix that can wrap.
-		const preparingRow = page.locator("[data-session-id]").filter({ has: page.getByTestId("sidebar-session-title-text").filter({ hasText: "preparingâ€¦" }) }).first();
+		// title with "preparing…" instead of appending a suffix that can wrap.
+		const preparingRow = page.locator("[data-session-id]").filter({ has: page.getByTestId("sidebar-session-title-text").filter({ hasText: "preparing…" }) }).first();
 		await expect(preparingRow).toBeVisible({ timeout: 2000 });
-		await expect(preparingRow.getByTestId("sidebar-session-title-text")).toHaveText("preparingâ€¦");
+		await expect(preparingRow.getByTestId("sidebar-session-title-text")).toHaveText("preparing…");
 		await expect(preparingRow).not.toContainText("New session");
 
-		// Editor is hidden while preparing â€” the AgentInterface gate at line
+		// Editor is hidden while preparing — the AgentInterface gate at line
 		// 1642 hides <message-editor> when state.isPreparing.
 		await expect(page.locator("message-editor")).toHaveCount(0);
 
