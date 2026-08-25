@@ -49,7 +49,7 @@ function fakeHost() {
 			registry: [{ id: "hyp-1", title: "Avoid repeated parsing", status: "active", confidence: 0.9, sessionId: "scanner-session" }],
 			goals: [
 				{ id: "goal-1", label: "Stored title", detail: "active" },
-				{ id: "goal-no-longer-live", label: "Stale linked goal", detail: "active" },
+				{ id: "goal-no-longer-live", label: "Concluded linked goal", detail: "concluded" },
 			],
 			coverage: [
 				{ id: "unit-1", label: "src/server", kind: "Structural", state: "scanned", covered: 2, total: 2, children: [] },
@@ -166,6 +166,16 @@ describe("Performance panel live data", () => {
 		expect(root.querySelector(".po-map-layout"), "the fully routed map stays mounted while refresh data is in flight").toBe(routedLayout);
 		resolveRefresh?.(routeResult);
 		await vi.waitFor(() => expect(root.querySelector(".po-map-layout")).not.toBe(routedLayout));
+	});
+
+	it("does not count concluded registry goals as in flight when the host snapshot is unavailable", async () => {
+		const fake = fakeHost();
+		fake.host.capabilities.projectSnapshot = false;
+		const root = createPerformancePanel().render(undefined, fake.host as any);
+		await vi.waitFor(() => expect(fake.callRoute).toHaveBeenCalledTimes(1));
+		expect(fake.host.project.snapshot).not.toHaveBeenCalled();
+		expect(root.querySelector('[data-flow-node="goals"] .po-map-metric strong')?.textContent).toBe("1");
+		expect(Array.from(root.querySelectorAll(".po-headline-copy strong")).map(item => item.textContent)).toContain("1");
 	});
 
 	it("renders four working equal tabs and a searchable benchmark store from the live snapshot", async () => {

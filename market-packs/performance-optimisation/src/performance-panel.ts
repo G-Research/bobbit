@@ -1441,7 +1441,7 @@ function renderFlow(state: PaneState): HTMLElement {
 	const coverageUnits = flattenCoverage(coverage, "").length;
 	const coverageTotals = coverage.reduce((totals, item) => ({ covered: totals.covered + (item.covered ?? 0), total: totals.total + (item.total ?? 0) }), { covered: 0, total: 0 });
 	const coveragePercent = coverageTotals.total ? Math.round((coverageTotals.covered / coverageTotals.total) * 100) : undefined;
-	const activeGoals = (snapshot?.goals ?? []).filter((goal) => !/complete|merged|closed/i.test(goal.detail ?? "")).length;
+	const activeGoals = (snapshot?.goals ?? []).filter((goal) => /^(?:active|in-progress)(?:\s|·|$)/i.test(goal.detail ?? "")).length;
 	const canvas = node("div", "po-map-canvas");
 	const layout = node("div", "po-map-layout");
 	layout.append(renderFlowEdges(), renderFlowTooltips());
