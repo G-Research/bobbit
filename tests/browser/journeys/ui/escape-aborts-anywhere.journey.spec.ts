@@ -9,10 +9,11 @@
 import { test, expect } from "../../../support/harnesses/browser/legacy-ui/fixtures.js";
 import {
 	createSession,
+	deleteSession,
 	waitForHealth,
 	waitForSessionStatus,
 } from "../../_helpers/e2e-setup.js";
-import { openApp, sendMessage } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
+import { navigateToHash, openApp, sendMessage } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Escape aborts agent globally", () => {
 	test.beforeAll(async () => {
@@ -22,43 +23,50 @@ test.describe("Escape aborts agent globally", () => {
 	test("Escape outside textarea aborts the streaming agent", async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 
-		await openApp(page);
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "STAY_BUSY:30000 working");
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 
-		await sendMessage(page, "STAY_BUSY:30000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			// Blur the textarea so focus is NOT on an editable element.
+			await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur?.(); });
+			const focusedTag = await page.evaluate(() => document.activeElement?.tagName || "");
+			expect(["TEXTAREA", "INPUT"].includes(focusedTag)).toBe(false);
 
-		// Blur the textarea so focus is NOT on an editable element.
-		await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur?.(); });
-		const focusedTag = await page.evaluate(() => document.activeElement?.tagName || "");
-		expect(["TEXTAREA", "INPUT"].includes(focusedTag)).toBe(false);
+			// Confirm the agent thinks it's streaming, then dispatch Escape at
+			// document level (capture-phase listener picks it up).
+			// Press Escape via the page's keyboard — by default Playwright sends
+			// it to the focused element; with no focus it dispatches to body.
+			await page.keyboard.press("Escape");
 
-		// Confirm the agent thinks it's streaming, then dispatch Escape at
-		// document level (capture-phase listener picks it up).
-		// Press Escape via the page's keyboard — by default Playwright sends
-		// it to the focused element; with no focus it dispatches to body.
-		await page.keyboard.press("Escape");
-
-		await expect(page.locator("button[title='Stop streaming']")).toHaveCount(0, { timeout: 10_000 });
-		await waitForSessionStatus(sessionId, "idle", 10_000);
+			await expect(page.locator(".stop-current-turn")).toHaveCount(0, { timeout: 10_000 });
+			await waitForSessionStatus(sessionId, "idle", 10_000);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
 	});
 
 	test("Escape inside textarea still aborts (existing path)", async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const textarea = page.locator("message-editor textarea").first();
+			await expect(textarea).toBeVisible({ timeout: 15_000 });
 
-		await openApp(page);
-		await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await sendMessage(page, "STAY_BUSY:30000 working");
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 
-		await sendMessage(page, "STAY_BUSY:30000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await textarea.focus();
+			await textarea.press("Escape");
 
-		await page.locator("textarea").first().focus();
-		await page.keyboard.press("Escape");
-
-		await expect(page.locator("button[title='Stop streaming']")).toHaveCount(0, { timeout: 10_000 });
+			await expect(page.locator(".stop-current-turn")).toHaveCount(0, { timeout: 10_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
 	});
 });

@@ -14,7 +14,7 @@
  *      flips back to Customise.
  *   4. Sync — the Workflow-tab select mirrors the Goal-tab select value.
  */
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../../_helpers/journey-fixture.js";
 import { apiFetch, deleteGoal } from "../../_helpers/e2e-setup.js";
 import { openApp, sendMessage, createSessionViaUI, createGoalAssistantViaUI } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
@@ -85,63 +85,63 @@ async function selectedOptionText(locator: Locator): Promise<string> {
 	});
 }
 
-async function seedInlineWorkflowGoalProposal(sessionId: string): Promise<void> {
-	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
-		method: "POST",
-		body: JSON.stringify({
-			args: {
-				title: "Inline Workflow Label Goal",
-				workflow: "general",
-				spec: "A goal proposal whose workflow is replaced with an inline workflow draft.",
-			},
-		}),
-	});
-	const seedText = await seedResp.text();
-	expect(seedResp.status, `seed initial goal proposal: ${seedText}`).toBe(200);
-
-	const editResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/edit`, {
-		method: "POST",
-		body: JSON.stringify({
-			old_text: "workflow: general",
-			new_text: `workflow: ${INLINE_WORKFLOW_ID}\n${INLINE_WORKFLOW_FRONTMATTER}`,
-		}),
-	});
-	const editText = await editResp.text();
-	expect(editResp.status, `replace library workflow with inline workflow: ${editText}`).toBe(200);
+async function postProposalMutation(
+	page: Page,
+	sessionId: string,
+	action: "seed" | "edit",
+	body: Record<string, unknown>,
+): Promise<{ status: number; text: string }> {
+	return page.evaluate(async ({ sid, mutationAction, mutationBody }) => {
+		const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposal/goal/${mutationAction}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(mutationBody),
+		});
+		return { status: response.status, text: await response.text() };
+	}, { sid: sessionId, mutationAction: action, mutationBody: body });
 }
 
-async function seedInlineOnlyWorkflowGoalProposal(sessionId: string): Promise<void> {
-	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
-		method: "POST",
-		body: JSON.stringify({
-			args: {
-				title: "Inline Workflow Seed Only Goal",
-				inlineWorkflow: INLINE_WORKFLOW,
-				spec: "A goal proposal seeded with only an inline workflow and no registered workflow id.",
-			},
-		}),
+async function seedInlineWorkflowGoalProposal(page: Page, sessionId: string): Promise<void> {
+	const seedResp = await postProposalMutation(page, sessionId, "seed", {
+		args: {
+			title: "Inline Workflow Label Goal",
+			workflow: "general",
+			spec: "A goal proposal whose workflow is replaced with an inline workflow draft.",
+		},
 	});
-	const seedText = await seedResp.text();
+	expect(seedResp.status, `seed initial goal proposal: ${seedResp.text}`).toBe(200);
+
+	const editResp = await postProposalMutation(page, sessionId, "edit", {
+		old_text: "workflow: general",
+		new_text: `workflow: ${INLINE_WORKFLOW_ID}\n${INLINE_WORKFLOW_FRONTMATTER}`,
+	});
+	expect(editResp.status, `replace library workflow with inline workflow: ${editResp.text}`).toBe(200);
+}
+
+async function seedInlineOnlyWorkflowGoalProposal(page: Page, sessionId: string): Promise<void> {
+	const seedResp = await postProposalMutation(page, sessionId, "seed", {
+		args: {
+			title: "Inline Workflow Seed Only Goal",
+			inlineWorkflow: INLINE_WORKFLOW,
+			spec: "A goal proposal seeded with only an inline workflow and no registered workflow id.",
+		},
+	});
 	expect(
 		seedResp.status,
-		`BESPOKE_INLINE_UI_SEED_ONLY: inlineWorkflow-only seed should create a normal proposal, not fail workflow validation: ${seedText}`,
+		`BESPOKE_INLINE_UI_SEED_ONLY: inlineWorkflow-only seed should create a normal proposal, not fail workflow validation: ${seedResp.text}`,
 	).toBe(200);
 }
 
-async function seedConflictingInlineWorkflowGoalProposal(sessionId: string): Promise<void> {
-	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
-		method: "POST",
-		body: JSON.stringify({
-			args: {
-				title: "Inline Workflow Precedence Goal",
-				workflow: "general",
-				inlineWorkflow: INLINE_WORKFLOW,
-				spec: "A live assistant proposal with a library workflow id and a distinct inline workflow draft.",
-			},
-		}),
+async function seedConflictingInlineWorkflowGoalProposal(page: Page, sessionId: string): Promise<void> {
+	const seedResp = await postProposalMutation(page, sessionId, "seed", {
+		args: {
+			title: "Inline Workflow Precedence Goal",
+			workflow: "general",
+			inlineWorkflow: INLINE_WORKFLOW,
+			spec: "A live assistant proposal with a library workflow id and a distinct inline workflow draft.",
+		},
 	});
-	const seedText = await seedResp.text();
-	expect(seedResp.status, `seed goal proposal with both workflow id and inline workflow: ${seedText}`).toBe(200);
+	expect(seedResp.status, `seed goal proposal with both workflow id and inline workflow: ${seedResp.text}`).toBe(200);
 }
 
 async function openNewGoalAssistantSession(page: import("@playwright/test").Page): Promise<string> {
@@ -171,7 +171,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 		await ensureSubgoals(true);
 		await openApp(page);
 		const sessionId = await createSessionViaUI(page);
-		await seedInlineOnlyWorkflowGoalProposal(sessionId);
+		await seedInlineOnlyWorkflowGoalProposal(page, sessionId);
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 
@@ -268,7 +268,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 			{ timeout: 10_000, message: "project workflow cache should be loaded before hydrating the inline proposal" },
 		).toContain("general");
 
-		await seedConflictingInlineWorkflowGoalProposal(sessionId);
+		await seedConflictingInlineWorkflowGoalProposal(page, sessionId);
 
 		await expect(titleInput).toHaveValue("Inline Workflow Precedence Goal", { timeout: 10_000 });
 		await expect.poll(
@@ -318,7 +318,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 		await ensureSubgoals(true);
 		await openApp(page);
 		const sessionId = await createSessionViaUI(page);
-		await seedInlineWorkflowGoalProposal(sessionId);
+		await seedInlineWorkflowGoalProposal(page, sessionId);
 		// Reload so the UI rehydrates from the server-side draft after the edit;
 		// otherwise the live proposal merge may preserve the initial library workflow id.
 		await page.reload({ waitUntil: "domcontentloaded" });
@@ -406,7 +406,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 		await ensureSubgoals(true);
 		await openApp(page);
 		const sessionId = await createSessionViaUI(page);
-		await seedInlineWorkflowGoalProposal(sessionId);
+		await seedInlineWorkflowGoalProposal(page, sessionId);
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 

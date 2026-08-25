@@ -11,12 +11,29 @@ import { openApp, createSessionViaUI, sendMessage } from "../../../support/harne
 
 const WORKFLOW_ERROR_RE = /Workflow is required for this project/i;
 
+function authenticateMockProposalTools(gateway: any, sessionId: string): void {
+	const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("failed proposal journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("failed proposal journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
+
 async function assertMissingWorkflowPanel(page: Page, reason: string) {
 	const titleInput = page.locator('input[placeholder="Goal title"]').first();
 	await expect(titleInput, `${reason}: failed card must reopen its own draft, not the later successful retry`)
 		.toHaveValue("Missing Workflow Goal", { timeout: 10_000 });
 
-	const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]');
+	const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]').last();
 	await expect(workflowError, `${reason}: workflow validation error must be surfaced in the proposal footer/status area`)
 		.toContainText(WORKFLOW_ERROR_RE, { timeout: 10_000 });
 	await expect(workflowError).toContainText(/general/i);
@@ -34,10 +51,11 @@ async function assertMissingWorkflowPanel(page: Page, reason: string) {
 }
 
 test.describe("Failed goal proposal workflow validation", () => {
-	test("missing-workflow failure stays inspectable after corrected retry and transcript replay", async ({ page }) => {
+	test("missing-workflow failure stays inspectable after corrected retry and transcript replay", async ({ page, gateway }) => {
 		test.setTimeout(150_000);
 		await openApp(page);
-		await createSessionViaUI(page);
+		const sessionId = await createSessionViaUI(page);
+		authenticateMockProposalTools(gateway, sessionId);
 
 		await sendMessage(page, "Please run GOAL_PROPOSAL_MISSING_WORKFLOW now");
 

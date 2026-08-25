@@ -37,12 +37,21 @@ const INITIAL_SPEC_HEAD = "This is a test goal created via the assistant flow.";
 const REV2_SPEC_BODY = "Revised body for revision two.";
 const EDITED_SPEC_BODY = "EDITED SPEC BODY for Mode A repro.";
 
-async function activeSessionId(page: Page): Promise<string> {
-	const sid = await page.evaluate(
-		() => (window as any).bobbitState?.selectedSessionId ?? null,
+function authenticateMockProposalTools(gateway: any, sessionId: string): void {
+	const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("proposal revision journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("proposal revision journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
 	);
-	if (!sid) throw new Error("no active session id");
-	return sid;
 }
 
 /**
@@ -69,10 +78,11 @@ async function slotSpec(page: Page): Promise<string> {
 }
 
 /** Open a goal-assistant session and drive the initial GOAL_PROPOSAL. */
-async function openGoalAssistant(page: Page): Promise<string> {
+async function openGoalAssistant(page: Page, gateway: any): Promise<string> {
 	test.setTimeout(120_000);
 	await openApp(page);
-	await createGoalAssistantViaUI(page, { timeout: 60_000 });
+	const sessionId = await createGoalAssistantViaUI(page, { timeout: 60_000 });
+	authenticateMockProposalTools(gateway, sessionId);
 
 	const textarea = page.locator("textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 30_000 });
@@ -88,12 +98,12 @@ async function openGoalAssistant(page: Page): Promise<string> {
 		expect(await previewSpec(page)).toContain(INITIAL_SPEC_TAIL);
 	}).toPass({ timeout: 15_000, intervals: [250, 500, 1000] });
 
-	return activeSessionId(page);
+	return sessionId;
 }
 
 test.describe("Goal proposal revision auto-update @repro", () => {
-	test("2nd propose_goal + edit_proposal auto-update the panel in place (no Open-proposal click)", async ({ page }) => {
-		await openGoalAssistant(page);
+	test("2nd propose_goal + edit_proposal auto-update the panel in place (no Open-proposal click)", async ({ page, gateway }) => {
+		await openGoalAssistant(page, gateway);
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
 
 		// ── 2nd propose_goal (a full revision with a different title/spec) ──
@@ -148,8 +158,8 @@ test.describe("Goal proposal revision auto-update @repro", () => {
 		await expect(titleInput).toHaveValue("Revised Goal Title");
 	});
 
-	test("edited goal spec persists across reload (rehydrate restores newest content)", async ({ page }) => {
-		const sid = await openGoalAssistant(page);
+	test("edited goal spec persists across reload (rehydrate restores newest content)", async ({ page, gateway }) => {
+		const sid = await openGoalAssistant(page, gateway);
 
 		// Edit the (initial) proposal spec via edit_proposal type=goal.
 		await sendMessage(page, "Apply GOAL_EDITABLE_EDIT to the spec");
@@ -203,8 +213,8 @@ test.describe("Goal proposal revision auto-update @repro", () => {
 	// FAILS on the first-impl HEAD (no content guard); PASSES once a no-serverRev
 	// non-streaming rescan can no longer regress content past a server-stamped
 	// rev (the unified + legacy guards).
-	test("fresh-context reload (cleared sessionStorage) must not let a stale rescan revert the edited spec", async ({ page }) => {
-		const sid = await openGoalAssistant(page);
+	test("fresh-context reload (cleared sessionStorage) must not let a stale rescan revert the edited spec", async ({ page, gateway }) => {
+		const sid = await openGoalAssistant(page, gateway);
 
 		// Edit the initial proposal spec → server proposal now holds the edited
 		// body at rev > 0.

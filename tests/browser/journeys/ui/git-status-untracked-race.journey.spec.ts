@@ -48,6 +48,8 @@ function createGitRoot(label: string): string {
 	createdDirs.add(dir);
 	writeFileSync(join(dir, "README.md"), "# git status E2E repo\n");
 	execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
+	execFileSync("git", ["config", "user.name", "Git Status Journey"], { cwd: dir, stdio: "pipe" });
+	execFileSync("git", ["config", "user.email", "git-status-journey@example.invalid"], { cwd: dir, stdio: "pipe" });
 	execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
 	execFileSync("git", ["commit", "-m", "init"], { cwd: dir, stdio: "pipe" });
 	return dir;
@@ -74,7 +76,7 @@ test.describe("git status dropdown untracked refresh", () => {
 		test.setTimeout(60_000);
 		const project = await createGitProject("session");
 		const sessionId = await createSession({ cwd: project.rootPath, projectId: project.id });
-		let sawFetchUntracked = false;
+		let sawVisibleUntracked = false;
 		let forceLateSummary = false;
 		let resolveLateSummary: (() => void) | undefined;
 		const lateSummarySeen = new Promise<void>((resolve) => { resolveLateSummary = resolve; });
@@ -84,7 +86,9 @@ test.describe("git status dropdown untracked refresh", () => {
 			if (route.request().method() !== "GET") return route.fallback();
 			const url = new URL(route.request().url());
 			const wantsUntracked = url.searchParams.get("untracked") === "1";
-			if (wantsUntracked && url.searchParams.get("fetch") === "true") sawFetchUntracked = true;
+			if (wantsUntracked && url.searchParams.get("intent") === "visible" && !url.searchParams.has("fetch")) {
+				sawVisibleUntracked = true;
+			}
 			const body = wantsUntracked
 				? gitStatus([
 					{ file: "src/tracked-race.ts", status: "M" },
@@ -110,9 +114,9 @@ test.describe("git status dropdown untracked refresh", () => {
 			await expect(dropdown).toBeVisible({ timeout: 5_000 });
 			await expect(dropdown).toContainText("untracked-race.txt", { timeout: 5_000 });
 
-			await expect.poll(() => sawFetchUntracked, {
+			await expect.poll(() => sawVisibleUntracked, {
 				timeout: 2_000,
-				message: "session git widget did not request ?fetch=true&untracked=1 on open",
+				message: "session git widget did not request visible untracked status without forcing a remote fetch",
 			}).toBe(true);
 
 			forceLateSummary = true;
@@ -142,14 +146,16 @@ test.describe("git status dropdown untracked refresh", () => {
 			team: false,
 			autoStartTeam: false,
 		});
-		let sawFetchUntracked = false;
+		let sawVisibleUntracked = false;
 		const statusRe = new RegExp(`/api/goals/${goal.id}/git-status(?:\\?.*)?$`);
 
 		await page.route(statusRe, async (route: Route) => {
 			if (route.request().method() !== "GET") return route.fallback();
 			const url = new URL(route.request().url());
 			const wantsUntracked = url.searchParams.get("untracked") === "1";
-			if (wantsUntracked && url.searchParams.get("fetch") === "true") sawFetchUntracked = true;
+			if (wantsUntracked && url.searchParams.get("intent") === "visible" && !url.searchParams.has("fetch")) {
+				sawVisibleUntracked = true;
+			}
 			await route.fulfill({
 				status: 200,
 				contentType: "application/json",
@@ -170,9 +176,9 @@ test.describe("git status dropdown untracked refresh", () => {
 			await pill.click();
 			await expect(page.locator("#git-status-dropdown")).toBeVisible({ timeout: 5_000 });
 
-			await expect.poll(() => sawFetchUntracked, {
+			await expect.poll(() => sawVisibleUntracked, {
 				timeout: 2_000,
-				message: "dashboard git widget did not request ?fetch=true&untracked=1 on open",
+				message: "dashboard git widget did not request visible untracked status without forcing a remote fetch",
 			}).toBe(true);
 		} finally {
 			await deleteGoal(goal.id).catch(() => { /* best-effort cleanup */ });

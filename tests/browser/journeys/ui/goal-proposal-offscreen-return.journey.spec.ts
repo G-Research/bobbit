@@ -42,6 +42,23 @@ import {
 const GOAL_TITLE = "E2E Test Goal";
 const GOAL_SPEC_TAIL = "It validates the goal creation UI.";
 
+function authenticateMockProposalTools(gateway: any, sessionId: string): void {
+	const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("off-screen proposal journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("off-screen proposal journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
+
 async function activeSessionId(page: Page): Promise<string> {
 	const sid = await page.evaluate(
 		() => (window as any).bobbitState?.selectedSessionId ?? null,
@@ -122,12 +139,13 @@ async function waitForServerGoalProposal(sid: string): Promise<Record<string, un
  * raise an off-screen propose_goal on S1 while focused on S2.
  * Returns { sidA, sidB }.
  */
-async function setupOffscreen(page: Page): Promise<{ sidA: string; sidB: string }> {
+async function setupOffscreen(page: Page, gateway: any): Promise<{ sidA: string; sidB: string }> {
 	test.setTimeout(150_000);
 	await openApp(page);
 
 	// S1 — goal assistant.
 	const sidA = await openGoalAssistantSession(page);
+	authenticateMockProposalTools(gateway, sidA);
 
 	// S2 — a plain session. This focuses S2 and caches S1.
 	// createSessionViaUI only waits for the textarea, NOT for the client to
@@ -203,8 +221,8 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await waitForHealth();
 	});
 
-	test("(a) fast-path switch-back surfaces the off-screen proposal", async ({ page }) => {
-		const { sidA } = await setupOffscreen(page);
+	test("(a) fast-path switch-back surfaces the off-screen proposal", async ({ page, gateway }) => {
+		const { sidA } = await setupOffscreen(page, gateway);
 
 		// Fast path: S1 is cached → navigate back reuses the chat panel and
 		// rehydrates via REST. CURRENTLY FAILS on master: panel stays empty.
@@ -213,8 +231,8 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await expectGoalPanelPopulated(page, sidA);
 	});
 
-	test("(b) slow-path fresh WS connect surfaces the off-screen proposal", async ({ page }) => {
-		const { sidA } = await setupOffscreen(page);
+	test("(b) slow-path fresh WS connect surfaces the off-screen proposal", async ({ page, gateway }) => {
+		const { sidA } = await setupOffscreen(page, gateway);
 
 		// Slow path: wipe the in-memory session cache by reloading to the
 		// landing page, then connect to S1 fresh (cache miss → new WebSocket →
@@ -225,8 +243,8 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await expectGoalPanelPopulated(page, sidA);
 	});
 
-	test("(c) reload directly into the session surfaces the off-screen proposal", async ({ page }) => {
-		const { sidA } = await setupOffscreen(page);
+	test("(c) reload directly into the session surfaces the off-screen proposal", async ({ page, gateway }) => {
+		const { sidA } = await setupOffscreen(page, gateway);
 
 		// Reload straight into S1 — boot connect + snapshot replay +
 		// _processedProposalIds dedup path. CURRENTLY FAILS on master.
@@ -253,8 +271,8 @@ test.describe("Goal proposal off-screen return @repro", () => {
 	// is the final writer → slot deleted + form blank (FAILS). After the fix, the
 	// fast path waits for BOTH then re-reconciles the slot into the form (and
 	// restore() never deletes a current-session slot), so the proposal survives.
-	test("(d) fast-path switch-back with a stale/empty client draft must not drop the proposal", async ({ page }) => {
-		const { sidA } = await setupOffscreen(page);
+	test("(d) fast-path switch-back with a stale/empty client draft must not drop the proposal", async ({ page, gateway }) => {
+		const { sidA } = await setupOffscreen(page, gateway);
 
 		// Deterministically place an EMPTY goal draft (no activeGoalProposal) on
 		// disk for S1 — the exact state an off-screen proposal leaves behind.
@@ -318,8 +336,8 @@ test.describe("Goal proposal off-screen return @repro", () => {
 		await page.unroute(`**/api/sessions/${sidA}/proposals`);
 	});
 
-	test("regression: a dismissed off-screen proposal stays hidden on return", async ({ page }) => {
-		const { sidA } = await setupOffscreen(page);
+	test("regression: a dismissed off-screen proposal stays hidden on return", async ({ page, gateway }) => {
+		const { sidA } = await setupOffscreen(page, gateway);
 		const fields = await waitForServerGoalProposal(sidA);
 
 		// Pre-write the dismissal fingerprint for S1 exactly as production does
