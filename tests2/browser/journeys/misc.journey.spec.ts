@@ -188,7 +188,7 @@ test.describe("Journey: File Attachments", () => {
 		}
 	});
 
-	test("picker accepts an arbitrary file extension and sends its attachment tile", async ({ page }) => {
+	test("picker accepts text and binary files with arbitrary extensions and preserves their sent tiles", async ({ page }) => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
 		try {
@@ -199,14 +199,26 @@ test.describe("Journey: File Attachments", () => {
 			await navigateToHash(page, `#/session/${sessionId}`);
 			const input = page.locator('message-editor input[type="file"]');
 			await expect(input).toHaveAttribute("accept", "");
-			await input.setInputFiles({
-				name: "notes.custom", mimeType: "application/x-custom", buffer: Buffer.from("ARBITRARY_ATTACHMENT_MARKER"),
-			});
-			await expect(page.locator("message-editor attachment-tile").first()).toBeVisible({ timeout: 10_000 });
+			await input.setInputFiles([
+				{
+					name: "notes.custom",
+					mimeType: "application/x-custom",
+					buffer: Buffer.from("ARBITRARY_ATTACHMENT_MARKER"),
+				},
+				{
+					name: "payload.opaque",
+					mimeType: "application/x-opaque",
+					buffer: Buffer.from([0x00, 0xff, 0x01, 0x02]),
+				},
+			]);
+			await expect(page.locator("message-editor attachment-tile")).toHaveCount(2, { timeout: 10_000 });
 			const textarea = page.locator("message-editor textarea").first();
 			await textarea.fill("What have I attached?");
 			await textarea.press("Enter");
-			await expect(page.locator("user-message attachment-tile").first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.locator("user-message attachment-tile")).toHaveCount(2, { timeout: 15_000 });
+
+			await page.reload();
+			await expect(page.locator("user-message attachment-tile")).toHaveCount(2, { timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
 		}

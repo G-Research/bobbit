@@ -160,28 +160,10 @@ export async function loadAttachment(
 		};
 	}
 
-	// Check if it's a text document. MIME metadata is frequently absent for
-	// source, log, and extensionless files, so unknown files also get a bounded
-	// UTF-8/text-likeness probe instead of relying on an extension allowlist.
-	const textExtensions = [
-		".txt",
-		".md",
-		".json",
-		".xml",
-		".html",
-		".css",
-		".js",
-		".ts",
-		".jsx",
-		".tsx",
-		".yml",
-		".yaml",
-	];
-	const declaredText =
-		mimeType.startsWith("text/") || textExtensions.some((ext) => detectedFileName.toLowerCase().endsWith(ext));
-	const extractedText = declaredText
-		? new TextDecoder().decode(arrayBuffer)
-		: decodeLikelyUtf8Text(arrayBuffer);
+	// Classify every ordinary file from its bytes. Filename extensions and MIME
+	// metadata are untrusted hints: a file claiming text/plain can still contain
+	// binary data, while an extensionless octet-stream can be readable UTF-8.
+	const extractedText = decodeLikelyUtf8Text(arrayBuffer);
 
 	if (extractedText !== undefined) {
 		return {
@@ -214,14 +196,19 @@ function decodeLikelyUtf8Text(arrayBuffer: ArrayBuffer): string | undefined {
 	} catch {
 		return undefined;
 	}
-	if (text.includes("\0")) return undefined;
 
-	let controlCharacters = 0;
+	let suspiciousControls = 0;
 	for (let i = 0; i < text.length; i++) {
 		const code = text.charCodeAt(i);
-		if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) controlCharacters++;
+		// Preserve the whitespace controls used by ordinary text. NUL is a strong
+		// binary signal; the remaining C0/DEL controls are judged by density so an
+		// occasional form-feed does not make an otherwise readable file opaque.
+		if (code === 0) return undefined;
+		if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f) {
+			suspiciousControls++;
+		}
 	}
-	return controlCharacters > Math.max(1, Math.floor(text.length * 0.01))
+	return text.length > 0 && suspiciousControls / text.length > 0.01
 		? undefined
 		: text;
 }
