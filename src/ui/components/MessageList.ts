@@ -18,6 +18,7 @@ import "./ToolPermissionCard.js";
 // neither, so keeping the history element out of entry saves cold load. Lit
 // upgrades the unknown tag once the chunk's customElement landing fires.
 import { ensurePreCompactionHistory } from "../../app/lazy-widgets.js";
+import type { DeferredBlock } from "./DeferredBlock.js";
 import "./DeferredBlock.js";
 import { COMPACTION_TOOL_NAME } from "../../app/compaction-types.js";
 import {
@@ -35,6 +36,7 @@ import type {
 	SidebarActionsPopoverItem,
 } from "./SidebarActionsPopover.js";
 import type { ToolCapabilityMode } from "../tools/types.js";
+import { transcriptMessageIdentity, transcriptMessageTargetId } from "../transcript-history.js";
 
 const HISTORY_ENTRY_ID_MAX_LENGTH = 256;
 const HISTORY_FORK_HELP_TEXT = "The new session will include the conversation up to, but not including, this prompt.";
@@ -178,15 +180,6 @@ function isLiveCompactionSummary(msg: any): boolean {
 	return !!(block && block.type === "toolCall" && block.name === COMPACTION_TOOL_NAME);
 }
 
-/** Build a stable render key for a message — id-based with a synthetic
- *  fallback that includes reducer metadata when available. */
-function keyFor(msg: any, group?: string): string {
-	const id = typeof msg.id === "string" && msg.id.length > 0
-		? msg.id
-		: `synth:${msg._origin ?? "unknown"}:${msg._order ?? 0}:${msg._insertionTick ?? 0}`;
-	return group ? `${group}:${id}` : id;
-}
-
 /** Tool names eligible for cross-message grouping */
 const GROUPABLE_TOOLS = new Set(["read", "edit", "write", "bash", "ls", "find", "grep", "team_delegate"]);
 
@@ -253,6 +246,10 @@ export class MessageList extends LitElement {
 		compactionId: string,
 		messages: readonly unknown[] | undefined,
 	) => void;
+	/** Authoritative transcript ordinals for visible message objects. The list
+	 * filters relationship-only rows, so local array indexes are not sufficient
+	 * for stable synthetic history targets. */
+	@property({ attribute: false }) messageOrdinals?: ReadonlyMap<object, number>;
 
 	private _openPromptActions: OpenPromptActions | null = null;
 	private _promptActionsRequestId = 0;
@@ -388,6 +385,42 @@ export class MessageList extends LitElement {
 		this.requestUpdate();
 	};
 
+	private _messageOrdinal(message: BobbitMessage<AgentMessage>, fallback: number): number {
+		return this.messageOrdinals?.get(message as object) ?? fallback;
+	}
+
+	private _messageKey(message: BobbitMessage<AgentMessage>, fallback: number, group?: string): string {
+		const identity = transcriptMessageIdentity(message, this._messageOrdinal(message, fallback));
+		return group ? `${group}:${identity}` : identity;
+	}
+
+	private _messageTargetId(message: BobbitMessage<AgentMessage>, fallback: number): string {
+		return transcriptMessageTargetId(message, this._messageOrdinal(message, fallback));
+	}
+
+	/** Resolve only the deferred row that owns a requested transcript target. */
+	public async resolveTranscriptTarget(targetId: string): Promise<HTMLElement | null> {
+		const existing = this._findResolvedTranscriptTarget(targetId);
+		if (existing) return existing;
+		const blocks = this.querySelectorAll<DeferredBlock>("deferred-block[data-transcript-target]");
+		for (const block of blocks) {
+			if (block.dataset.transcriptTarget !== targetId) continue;
+			block.forceResolve();
+			await block.updateComplete;
+			return this._findResolvedTranscriptTarget(targetId);
+		}
+		return null;
+	}
+
+	private _findResolvedTranscriptTarget(targetId: string): HTMLElement | null {
+		const candidates = this.querySelectorAll<HTMLElement>("[data-transcript-target]");
+		for (const candidate of candidates) {
+			if (candidate.localName !== "deferred-block"
+				&& candidate.dataset.transcriptTarget === targetId) return candidate;
+		}
+		return null;
+	}
+
 	private buildRenderItems() {
 		// Map tool results by call id for quick lookup
 		const resultByCallId = new Map<string, BobbitMessage<ToolResultMessageType>>();
@@ -404,12 +437,13 @@ export class MessageList extends LitElement {
 			}
 		}
 
-		const items: Array<{ key: string; template: TemplateResult; eager?: boolean }> = [];
+		const items: Array<{ key: string; template: TemplateResult; eager?: boolean; targetId?: string }> = [];
 		let i = 0;
 		const msgs = this.messages;
 
 		while (i < msgs.length) {
 			const msg = msgs[i];
+			const targetId = this._messageTargetId(msg, i);
 
 			// Skip artifact messages
 			if (msg.role === "artifact") { i++; continue; }
@@ -460,7 +494,9 @@ export class MessageList extends LitElement {
 				const errMsg = msg as any;
 				items.push({
 					key: `err:${errMsg.id}`,
+					targetId,
 					template: html`<error-message
+						data-transcript-target=${targetId}
 						.message=${errMsg}
 						.onDismiss=${this.onDismissError}
 						.onRestartAgent=${this.onRestartAgent}
@@ -506,7 +542,11 @@ export class MessageList extends LitElement {
 			// Try custom renderer first
 			const customTemplate = renderMessage(msg);
 			if (customTemplate) {
-				items.push({ key: keyFor(msg), template: customTemplate });
+				items.push({
+					key: this._messageKey(msg, i),
+					targetId,
+					template: html`<div data-transcript-target=${targetId}>${customTemplate}</div>`,
+				});
 				i++;
 				continue;
 			}
@@ -518,8 +558,10 @@ export class MessageList extends LitElement {
 					canForkSource: this.canForkSource,
 				});
 				items.push({
-					key: keyFor(msg),
+					key: this._messageKey(msg, i),
+					targetId,
 					template: html`<user-message
+						data-transcript-target=${targetId}
 						data-intent-id=${correlatedDeliveryIntentId(msg) ?? nothing}
 						.message=${msg}
 						.showAuthorLabel=${this.promptAuthorDisplayMode.showLabels && isAccountablePrompt}
@@ -563,7 +605,7 @@ export class MessageList extends LitElement {
 
 					if (groupCalls.length >= 2) {
 						items.push({
-							key: keyFor(msg, "group"),
+							key: this._messageKey(msg, i, "group"),
 							template: html`<div class="px-4">
 								<tool-group
 									.toolName=${toolName}
@@ -604,8 +646,10 @@ export class MessageList extends LitElement {
 					}
 				}
 				items.push({
-					key: keyFor(msg),
+					key: this._messageKey(msg, i),
+					targetId,
 					template: html`<assistant-message
+						data-transcript-target=${targetId}
 						.message=${amsg}
 						.sessionId=${this.sessionId}
 						.tools=${this.tools}
@@ -670,6 +714,7 @@ export class MessageList extends LitElement {
 					);
 					const estHeight = estimateMessageHeight(msgs[srcIdx]);
 					return html`<deferred-block
+						data-transcript-target=${it.targetId ?? nothing}
 						.template=${it.template}
 						.eager=${eager}
 						est-height=${estHeight}
