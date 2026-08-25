@@ -115,6 +115,39 @@ describe("TranscriptHistoryPopover", () => {
 		expect(popover.querySelector("kbd")).toBeNull();
 	});
 
+	it("opens with the chronological list scrolled to its newest match", async () => {
+		const originalScrollTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTop");
+		const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+		const positions = new WeakMap<HTMLElement, number>();
+		const writes: number[] = [];
+		Object.defineProperties(HTMLElement.prototype, {
+			scrollTop: {
+				configurable: true,
+				get(this: HTMLElement) { return positions.get(this) ?? 0; },
+				set(this: HTMLElement, value: number) {
+					positions.set(this, value);
+					if (this.classList.contains("transcript-history-list")) writes.push(value);
+				},
+			},
+			scrollHeight: {
+				configurable: true,
+				get(this: HTMLElement) {
+					return this.classList.contains("transcript-history-list") ? 640 : 0;
+				},
+			},
+		});
+		try {
+			const popover = await mount();
+			expect(popover.querySelector(".transcript-history-list")?.scrollTop).toBe(640);
+			expect(writes).toContain(640);
+		} finally {
+			if (originalScrollTop) Object.defineProperty(HTMLElement.prototype, "scrollTop", originalScrollTop);
+			else Reflect.deleteProperty(HTMLElement.prototype, "scrollTop");
+			if (originalScrollHeight) Object.defineProperty(HTMLElement.prototype, "scrollHeight", originalScrollHeight);
+			else Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
+		}
+	});
+
 	it("composes author/type filters with search and renders the empty state", async () => {
 		const popover = await mount();
 		clickFilter(popover, "Agents");
@@ -195,13 +228,21 @@ describe("TranscriptHistoryPopover", () => {
 		await settle(popover);
 		expect(list.scrollTop).toBe(500);
 
-		const selected = vi.fn<(event: CustomEvent<TranscriptHistorySelectDetail>) => void>();
-		popover.addEventListener("transcript-entry-select", selected as EventListener);
+		list.scrollTop = 25;
+		clickFilter(popover, "Questions");
+		await settle(popover);
+		expect(list.scrollTop).toBe(100);
+		clickFilter(popover, "All");
+		await settle(popover);
+
+		const selected = vi.fn((event: Event) =>
+			(event as CustomEvent<TranscriptHistorySelectDetail>).detail);
+		popover.addEventListener("transcript-entry-select", selected);
 		rows(popover)[0].click();
 		await settle(popover);
 		expect(popover.open).toBe(false);
 		expect(selected).toHaveBeenCalledTimes(1);
-		expect(selected.mock.calls[0][0].detail).toEqual({
+		expect(selected.mock.results[0].value).toEqual({
 			entry: popover.entries[0],
 			targetId: "target-user",
 		});
