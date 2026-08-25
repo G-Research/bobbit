@@ -28,6 +28,7 @@ import {
 } from "../../../scripts/benchmarks/runtime.mjs";
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const MOCK_AGENT_ENTRY = path.join(REPO_ROOT, "tests", "e2e", "_helpers", "mock-agent.mjs");
 const FIXTURE_TIME = 1_700_000_000_000;
 const LIVE_ID = "benchmark-smoke-live";
 const DIRECT_ARCHIVED_ID = "benchmark-smoke-archived-direct";
@@ -315,11 +316,12 @@ describe("Bobbit journey benchmark production boundaries", () => {
 		try {
 			const seeded = await seedReducedStartupStore(paths);
 			token = seeded.token;
+			expect(existsSync(MOCK_AGENT_ENTRY), "the production-boundary fixture must use the canonical shared E2E mock agent").toBe(true);
 			runtime = spawnGateway({
 				args: [
 					"--import", "tsx", path.join(REPO_ROOT, "src", "server", "cli.ts"),
 					"--host", "127.0.0.1", "--port", "0", "--cwd", paths.project,
-					"--agent-cli", path.join(REPO_ROOT, "tests", "e2e", "mock-agent.mjs"),
+					"--agent-cli", MOCK_AGENT_ENTRY,
 					"--no-ui", "--no-tls", "--auth",
 				],
 				cwd: REPO_ROOT,
