@@ -129,11 +129,16 @@ describe("uploaded attachment prompt admission", () => {
 		});
 		expect(delivery.status).toBe("queued");
 
+		const [internal] = session.promptQueue.toArray().filter((row: any) => row.id === "binary-occurrence");
+		expect(internal.text).toMatch(STABLE_POINTER);
+		expect(internal.text).toContain("Binary content is not embedded in the prompt");
+		expect(internal.text).not.toContain(BINARY_ATTACHMENT.content);
+		expect(internal.text).not.toContain(BINARY_ATTACHMENT.extractedText);
+		expect(internal.displayText).toBe(TYPED_TEXT);
+
 		const [queued] = manager.projectDeliveryOutbox(session.id).filter((row: any) => row.id === "binary-occurrence");
-		expect(queued.text).toMatch(STABLE_POINTER);
-		expect(queued.text).toContain("Binary content is not embedded in the prompt");
-		expect(queued.text).not.toContain(BINARY_ATTACHMENT.content);
-		expect(queued.text).not.toContain(BINARY_ATTACHMENT.extractedText);
+		expect(queued.text).toBe(TYPED_TEXT);
+		expect(queued).not.toHaveProperty("displayText");
 		expect(queued.attachments).toEqual([{
 			id: BINARY_ATTACHMENT.id,
 			type: "document",
@@ -142,18 +147,124 @@ describe("uploaded attachment prompt admission", () => {
 			size: BINARY_ATTACHMENT.size,
 		}]);
 
+		const persistedQueue = JSON.parse(JSON.stringify(session.promptQueue.toArray()));
+		session.promptQueue = new PromptQueue(persistedQueue);
+		expect(manager.projectDeliveryOutbox(session.id).find((row: any) => row.id === "binary-occurrence"))
+			.toMatchObject({ text: TYPED_TEXT });
+
 		const firstModelText = prompt.mock.calls[0][0] as string;
 		// The synthetic raw snapshot below represents Pi having persisted the first
 		// prompt, so clear the fixture's unacknowledged direct-dispatch recovery row.
 		session.inFlightSteerTexts = [];
 		const visible = manager.buildVisibleMessageSnapshot(session.id, [
 			{ role: "user", content: firstModelText },
-			{ role: "user", content: queued.text },
+			{ role: "user", content: internal.text },
 		]) as any[];
 		expect(visible.map(visibleText)).toEqual([TYPED_TEXT, TYPED_TEXT]);
 		expect(visible[0].attachments[0].fileName).toBe(ATTACHMENT.fileName);
 		expect(visible[1].attachments[0].fileName).toBe(BINARY_ATTACHMENT.fileName);
-		expect(firstModelText.match(STABLE_POINTER)?.[0]).not.toBe(queued.text.match(STABLE_POINTER)?.[0]);
+		expect(firstModelText.match(STABLE_POINTER)?.[0]).not.toBe(internal.text.match(STABLE_POINTER)?.[0]);
+	});
+
+	it("uses occurrence display text for queued title generation while dispatch retains model context", async () => {
+		const queuedManager: any = new SessionManager({ skipTitleGeneration: true });
+		clearInterval(queuedManager._statusHeartbeatTimer);
+		queuedManager._statusHeartbeatTimer = null;
+		const queuedPrompt = vi.fn(async (_text: string) => ({ success: true }));
+		const queuedSession: any = {
+			...session,
+			id: "83749600-0000-4000-8000-000000000002",
+			title: "Queued attachment admission",
+			titleGenerated: false,
+			status: "streaming",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			pendingSkillExpansions: undefined,
+			pendingSkillTranscriptBindings: undefined,
+			pendingPromptAuthors: undefined,
+			promptAuthorMessageBindings: undefined,
+			promptAuthorReplayBindings: undefined,
+			promptAuthorAmbiguityFences: undefined,
+			inFlightSteerTexts: undefined,
+			lastPromptDisplay: undefined,
+			rpcClient: { ...session.rpcClient, prompt: queuedPrompt },
+		};
+		queuedManager.sessions.set(queuedSession.id, queuedSession);
+		const titleGeneration = vi.spyOn(queuedManager, "tryGenerateTitleFromPrompt").mockImplementation(() => {});
+		try {
+			const delivery = await queuedManager.enqueuePrompt(queuedSession.id, TYPED_TEXT, {
+				attachments: [ATTACHMENT],
+				intentId: "queued-title-occurrence",
+			});
+			expect(delivery.status).toBe("queued");
+
+			const [internal] = queuedSession.promptQueue.toArray();
+			expect(internal.text).toMatch(STABLE_POINTER);
+			expect(internal.displayText).toBe(TYPED_TEXT);
+			expect(queuedManager.projectDeliveryOutbox(queuedSession.id)).toEqual([
+				expect.objectContaining({ id: internal.id, text: TYPED_TEXT }),
+			]);
+			expect(queuedManager.projectDeliveryOutbox(queuedSession.id)[0]).not.toHaveProperty("displayText");
+
+			queuedSession.promptQueue = new PromptQueue(JSON.parse(JSON.stringify(queuedSession.promptQueue.toArray())));
+			queuedSession.status = "idle";
+			queuedSession._piAgentRunSettled = true;
+			queuedManager.drainQueue(queuedSession);
+			await vi.waitFor(() => expect(queuedPrompt).toHaveBeenCalledTimes(1));
+
+			expect(titleGeneration).toHaveBeenCalledWith(queuedSession.id, TYPED_TEXT);
+			const dispatchedText = queuedPrompt.mock.calls[0][0] as string;
+			expect(dispatchedText).toMatch(STABLE_POINTER);
+			expect(dispatchedText).toContain(EXTRACTED_MARKER);
+			queuedSession.inFlightSteerTexts = JSON.parse(JSON.stringify(queuedSession.inFlightSteerTexts));
+			expect(queuedManager.projectDeliveryOutbox(queuedSession.id)).toEqual([
+				expect.objectContaining({ id: internal.id, text: TYPED_TEXT, deliveryState: "dispatching" }),
+			]);
+			expect(queuedManager.projectDeliveryOutbox(queuedSession.id)[0]).not.toHaveProperty("displayText");
+		} finally {
+			queuedManager.sessions.clear();
+		}
+	});
+
+	it("keeps ordinary restored attachment rows outward-only while titles use typed text", async () => {
+		const ordinaryManager: any = new SessionManager({ skipTitleGeneration: true });
+		clearInterval(ordinaryManager._statusHeartbeatTimer);
+		ordinaryManager._statusHeartbeatTimer = null;
+		const modelText = `${TYPED_TEXT}\n\n[Uploaded attachment]\nPointer: bobbit-attachment:v1:ordinary:restored`;
+		const ordinaryPrompt = vi.fn(async (_text: string) => ({ success: true }));
+		const ordinarySession: any = {
+			...session,
+			id: "83749600-0000-4000-8000-000000000004",
+			titleGenerated: false,
+			status: "idle",
+			clients: new Set(),
+			promptQueue: new PromptQueue([{
+				id: "ordinary-restored-attachment",
+				text: modelText,
+				displayText: TYPED_TEXT,
+				attachments: [{ id: ATTACHMENT.id, type: "document", fileName: ATTACHMENT.fileName, mimeType: ATTACHMENT.mimeType, size: ATTACHMENT.size }],
+				isSteered: false,
+				createdAt: Date.now(),
+			}]),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: undefined,
+			rpcClient: { ...session.rpcClient, prompt: ordinaryPrompt },
+		};
+		ordinaryManager.sessions.set(ordinarySession.id, ordinarySession);
+		const titleGeneration = vi.spyOn(ordinaryManager, "tryGenerateTitleFromPrompt").mockImplementation(() => {});
+		try {
+			const [projected] = ordinaryManager.projectDeliveryOutbox(ordinarySession.id);
+			expect(projected.text).toBe(TYPED_TEXT);
+			expect(projected).not.toHaveProperty("displayText");
+
+			ordinaryManager.drainQueue(ordinarySession);
+			await vi.waitFor(() => expect(ordinaryPrompt).toHaveBeenCalledTimes(1));
+			expect(titleGeneration).toHaveBeenCalledWith(ordinarySession.id, TYPED_TEXT);
+			expect(ordinaryPrompt).toHaveBeenCalledWith(modelText, undefined);
+		} finally {
+			ordinaryManager.sessions.clear();
+		}
 	});
 
 	it("rejects malformed documents before queue or model dispatch", async () => {
