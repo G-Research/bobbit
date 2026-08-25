@@ -8,10 +8,19 @@ import { test, expect } from "../../_helpers/journey-fixture.js";
 import { createSession, deleteSession, waitForSessionStatus } from "../../_helpers/e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
-const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
+const REVIEW_TITLE = "Test Document";
+const REVIEW_PANEL_TAB_SELECTOR = `.goal-tab-pill[data-panel-tab-kind='review'][data-panel-tab-title='Review: ${REVIEW_TITLE}']`;
 
 function reviewTab(page: Page) {
-	return page.locator(REVIEW_PANEL_TAB_SELECTOR).filter({ hasText: /^Review:\s*Test Document$/ });
+	return page.locator(REVIEW_PANEL_TAB_SELECTOR);
+}
+
+async function reviewGroupId(page: Page): Promise<string | null> {
+	return page.evaluate((title) => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		const groups = state?.reviewGroups instanceof Map ? [...state.reviewGroups.values()] : [];
+		return groups.find((group: any) => group?.title === title)?.reviewId ?? null;
+	}, REVIEW_TITLE);
 }
 
 async function goToSession(page: Page, sessionId: string) {
@@ -25,12 +34,21 @@ async function openReviewDocument(page: Page) {
 
 	const tab = reviewTab(page);
 	await expect(tab).toHaveCount(1, { timeout: 10_000 });
+	await expect.poll(() => reviewGroupId(page), { timeout: 10_000 }).not.toBeNull();
+	const groupId = await reviewGroupId(page);
 	await tab.click();
+	await expect.poll(
+		() => page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.reviewActiveReviewId ?? null;
+		}),
+		{ timeout: 5_000 },
+	).toBe(groupId);
 
 	const pane = page.locator("review-pane");
 	await expect(pane).toBeVisible({ timeout: 5_000 });
 	await expect(page.locator("review-document").getByText("Section One").first()).toBeVisible({ timeout: 5_000 });
-	return pane;
+	return { pane, groupId: groupId! };
 }
 
 test.describe("Review Pane", () => {
@@ -40,7 +58,7 @@ test.describe("Review Pane", () => {
 			await waitForSessionStatus(sessionId, "idle");
 			await openApp(page);
 			await goToSession(page, sessionId);
-			const pane = await openReviewDocument(page);
+			const { pane } = await openReviewDocument(page);
 
 			await pane.getByRole("button", { name: "Approve", exact: true }).click();
 			await expect(
@@ -48,7 +66,8 @@ test.describe("Review Pane", () => {
 				"Approve should send review feedback through the existing agent chat flow",
 			).toBeVisible({ timeout: 10_000 });
 			await waitForAgentResponse(page, { text: "OK", timeout: 15_000 });
-			await expect(reviewTab(page), "submitted review_open document should close its review tab").toHaveCount(0, { timeout: 5_000 });
+			await expect(reviewTab(page), "submitted review_open document should close its grouped review tab").toHaveCount(0, { timeout: 5_000 });
+			await expect.poll(() => reviewGroupId(page), { timeout: 5_000 }).toBeNull();
 		} finally {
 			await deleteSession(sessionId);
 		}
@@ -60,7 +79,7 @@ test.describe("Review Pane", () => {
 			await waitForSessionStatus(sessionId, "idle");
 			await openApp(page);
 			await goToSession(page, sessionId);
-			const pane = await openReviewDocument(page);
+			const { pane, groupId: rejectedGroupId } = await openReviewDocument(page);
 
 			await pane.getByRole("textbox", { name: /final comment/i }).fill("Needs revised markdown before merge.");
 			await pane.getByRole("button", { name: "Reject" }).click();
@@ -69,7 +88,8 @@ test.describe("Review Pane", () => {
 				"Reject should send review feedback through the existing agent chat flow",
 			).toBeVisible({ timeout: 10_000 });
 			await waitForAgentResponse(page, { text: "OK", timeout: 15_000 });
-			await expect(reviewTab(page), "rejected review_open document should close its review tab").toHaveCount(0, { timeout: 5_000 });
+			await expect(reviewTab(page), "rejected review_open document should close its grouped review tab").toHaveCount(0, { timeout: 5_000 });
+			await expect.poll(() => reviewGroupId(page), { timeout: 5_000 }).toBeNull();
 
 			await sendMessage(page, "REVIEW_OPEN_REVISED");
 			await expect(page.getByText("Done. Used review_open tool.", { exact: true })).toHaveCount(2, { timeout: 15_000 });
@@ -79,6 +99,9 @@ test.describe("Review Pane", () => {
 				reopenedTab,
 				"fresh live review_open after rejected submission should reopen Review: Test Document tab",
 			).toHaveCount(1, { timeout: 10_000 });
+			await expect.poll(() => reviewGroupId(page), { timeout: 10_000 }).not.toBeNull();
+			const revisedGroupId = await reviewGroupId(page);
+			expect(revisedGroupId, "a revised live review_open should create a fresh grouped review identity").not.toBe(rejectedGroupId);
 			await reopenedTab.click();
 			await expect(page.locator("review-pane"), "reopened review pane should be visible").toBeVisible({ timeout: 5_000 });
 			await expect(
