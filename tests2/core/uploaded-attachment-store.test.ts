@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import JSZip from "jszip";
+import { MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES } from "../../src/server/agent/uploaded-specialized-document-extractor.js";
 import {
 	MAX_UPLOADED_ATTACHMENT_READ_BYTES,
 	listUploadedAttachments,
@@ -23,6 +25,36 @@ function document(id: string, fileName: string, mimeType: string, bytes: Buffer)
 		size: bytes.length,
 		content: bytes.toString("base64"),
 	};
+}
+
+async function ooxml(entries: Record<string, string>): Promise<Buffer> {
+	const zip = new JSZip();
+	for (const [name, content] of Object.entries(entries)) zip.file(name, content);
+	return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+
+function minimalPdf(text: string): Buffer {
+	const objects: Array<string | undefined> = [
+		undefined,
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+		undefined,
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	];
+	const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;
+	objects[4] = `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`;
+	let output = "%PDF-1.4\n";
+	const offsets = [0];
+	for (let index = 1; index < objects.length; index++) {
+		offsets[index] = Buffer.byteLength(output);
+		output += `${index} 0 obj\n${objects[index]}\nendobj\n`;
+	}
+	const xrefOffset = Buffer.byteLength(output);
+	output += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+	for (let index = 1; index < objects.length; index++) output += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+	output += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+	return Buffer.from(output);
 }
 
 async function expectCode(promise: Promise<unknown>, code: string): Promise<void> {
@@ -100,7 +132,56 @@ describe("immutable uploaded attachment store", () => {
 		);
 	});
 
-	it("keeps binary, malformed UTF-8, and specialized documents pointer-only despite forged text", async () => {
+	it("derives bounded PDF, DOCX, and PPTX text from immutable bytes and stores it for idempotent admission", async () => {
+		const pdf = minimalPdf("SERVER_PDF_MARKER");
+		const docx = await ooxml({
+			"word/document.xml": "<w:document xmlns:w=\"urn:w\"><w:body><w:p><w:r><w:t>SERVER_DOCX_MARKER</w:t></w:r></w:p></w:body></w:document>",
+		});
+		const pptx = await ooxml({
+			"ppt/slides/slide1.xml": "<p:sld xmlns:p=\"urn:p\" xmlns:a=\"urn:a\"><a:t>SERVER_PPTX_MARKER</a:t></p:sld>",
+		});
+		const originals = [
+			{ ...document("pdf", "marker.pdf", "application/pdf", pdf), extractedText: "FORGED PDF" },
+			{ ...document("docx", "marker.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", docx), extractedText: "FORGED DOCX" },
+			{ ...document("pptx", "marker.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", pptx), extractedText: "FORGED PPTX" },
+		];
+		const first = await persistUploadedAttachmentOccurrence(SESSION_A, "specialized", originals);
+		const restored = await persistUploadedAttachmentOccurrence(SESSION_A, "specialized", originals.map((item) => ({
+			...item,
+			extractedText: "DIFFERENT FORGED RETRY TEXT",
+		})));
+
+		expect(restored).toEqual(first);
+		expect(first.attachments.map((item) => item.trustedExtractedText)).toEqual([
+			expect.stringContaining("SERVER_PDF_MARKER"),
+			expect.stringContaining("SERVER_DOCX_MARKER"),
+			expect.stringContaining("SERVER_PPTX_MARKER"),
+		]);
+		expect(JSON.stringify(first)).not.toMatch(/FORGED/);
+		for (const attachment of first.attachments) {
+			const listed = await listUploadedAttachments(SESSION_A, attachment.pointer);
+			expect(JSON.stringify(listed)).not.toMatch(/SERVER_(?:PDF|DOCX|PPTX)_MARKER/);
+			expect(listed[0]).not.toHaveProperty("trustedExtractedText");
+		}
+	});
+
+	it("bounds specialized output and rejects oversized OOXML entries to pointer-only", async () => {
+		const boundedDocx = await ooxml({
+			"word/document.xml": `<w:document xmlns:w="urn:w"><w:t>BOUNDED_MARKER_${"x".repeat(20_000)}</w:t></w:document>`,
+		});
+		const suspiciousDocx = await ooxml({
+			"word/document.xml": `<w:document xmlns:w="urn:w"><w:t>${"z".repeat(1024 * 1024)}</w:t></w:document>`,
+		});
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "bounded-specialized", [
+			document("bounded", "bounded.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", boundedDocx),
+			document("suspicious", "suspicious.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", suspiciousDocx),
+		]);
+		expect(saved.attachments[0].trustedExtractedText).toContain("BOUNDED_MARKER");
+		expect(Buffer.byteLength(saved.attachments[0].trustedExtractedText!, "utf8")).toBe(MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES);
+		expect(saved.attachments[1]).not.toHaveProperty("trustedExtractedText");
+	});
+
+	it("keeps binary, malformed UTF-8, and malformed specialized documents pointer-only despite forged text", async () => {
 		const inputs = [
 			{ ...document("nul", "nul.bin", "text/plain", Buffer.from([0x41, 0x00, 0x42])), extractedText: "FORGED NUL" },
 			{ ...document("utf8", "bad.custom", "text/plain", Buffer.from([0xc3, 0x28])), extractedText: "FORGED UTF8" },

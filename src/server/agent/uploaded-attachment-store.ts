@@ -3,6 +3,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeLikelyUtf8Text } from "../../shared/uploaded-attachment-text.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import {
+	boundServerDerivedDocumentText,
+	deriveSpecializedDocumentText,
+	MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES,
+} from "./uploaded-specialized-document-extractor.js";
 
 export const MAX_UPLOADED_ATTACHMENTS_PER_OCCURRENCE = 10;
 export const MAX_UPLOADED_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -61,6 +66,7 @@ export interface UploadedAttachmentRange {
 interface ManifestAttachment extends StoredUploadedAttachmentMetadata {
 	id: string;
 	fileKey: string;
+	trustedExtractedText?: string;
 }
 
 interface Manifest {
@@ -210,30 +216,15 @@ export function assertUploadedAttachmentSerializedSendWithinLimit(input: {
 	}
 }
 
-function isSpecializedDocument(fileName: string, mimeType: string, bytes: Uint8Array): boolean {
-	const lowerName = fileName.toLowerCase();
-	const lowerMime = mimeType.toLowerCase();
-	return lowerName.endsWith(".pdf")
-		|| lowerName.endsWith(".docx")
-		|| lowerName.endsWith(".pptx")
-		|| lowerMime === "application/pdf"
-		|| lowerMime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-		|| lowerMime === "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-		|| (bytes.length >= 5
-			&& bytes[0] === 0x25
-			&& bytes[1] === 0x50
-			&& bytes[2] === 0x44
-			&& bytes[3] === 0x46
-			&& bytes[4] === 0x2d);
-}
-
-function canonicalInputs(raw: unknown): CanonicalInput[] {
+async function canonicalInputs(raw: unknown): Promise<CanonicalInput[]> {
 	if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_UPLOADED_ATTACHMENTS_PER_OCCURRENCE) {
 		invalid(`Uploaded attachment occurrence must contain 1-${MAX_UPLOADED_ATTACHMENTS_PER_OCCURRENCE} documents`);
 	}
 	const seenIds = new Set<string>();
+	const inputs: CanonicalInput[] = [];
 	let totalBytes = 0;
-	return raw.map((candidate, index) => {
+	for (let index = 0; index < raw.length; index++) {
+		const candidate = raw[index];
 		if (!isPlainObject(candidate)) invalid(`Invalid uploaded attachment ${index + 1}`);
 		const allowed = new Set(["id", "type", "fileName", "mimeType", "size", "content", "extractedText", "preview"]);
 		if (Object.keys(candidate).some((key) => !allowed.has(key))) invalid(`Invalid uploaded attachment ${index + 1} fields`);
@@ -248,10 +239,11 @@ function canonicalInputs(raw: unknown): CanonicalInput[] {
 		const bytes = decodeBase64(candidate.content, candidate.size);
 		totalBytes += bytes.length;
 		if (totalBytes > MAX_UPLOADED_ATTACHMENT_AGGREGATE_BYTES) invalid("Uploaded attachments exceed the aggregate byte limit");
-		const trustedExtractedText = isSpecializedDocument(fileName, mimeType, bytes)
-			? undefined
-			: decodeLikelyUtf8Text(bytes);
-		return {
+
+		const specialized = await deriveSpecializedDocumentText({ fileName, mimeType, bytes });
+		const decodedText = specialized.recognized ? specialized.text : decodeLikelyUtf8Text(bytes);
+		const trustedExtractedText = decodedText === undefined ? undefined : boundServerDerivedDocumentText(decodedText);
+		inputs.push({
 			id,
 			fileName,
 			mimeType,
@@ -259,8 +251,9 @@ function canonicalInputs(raw: unknown): CanonicalInput[] {
 			bytes,
 			sha256: createHash("sha256").update(bytes).digest("hex"),
 			...(trustedExtractedText === undefined ? {} : { trustedExtractedText }),
-		};
-	});
+		});
+	}
+	return inputs;
 }
 
 function contentDigest(sessionId: string, occurrenceId: string, attachments: CanonicalInput[]): string {
@@ -310,6 +303,10 @@ function coerceManifest(value: unknown): Manifest | null {
 			|| typeof candidate.mimeType !== "string"
 			|| typeof candidate.size !== "number" || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || candidate.size > MAX_UPLOADED_ATTACHMENT_BYTES
 			|| typeof candidate.sha256 !== "string" || !VALID_HASH.test(candidate.sha256)
+			|| (candidate.trustedExtractedText !== undefined
+				&& (typeof candidate.trustedExtractedText !== "string"
+					|| Buffer.byteLength(candidate.trustedExtractedText, "utf8") > MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES
+					|| boundServerDerivedDocumentText(candidate.trustedExtractedText) !== candidate.trustedExtractedText))
 			|| seenKeys.has(candidate.fileKey) || seenPointers.has(candidate.pointer)
 			|| candidate.pointer !== pointerFor(value.sessionKey, value.occurrenceKey, candidate.fileKey)) return null;
 		try {
@@ -363,15 +360,15 @@ function publicOccurrence(manifest: Manifest): {
 	};
 }
 
-function admittedOccurrence(manifest: Manifest, inputs: CanonicalInput[]): StoredUploadedAttachmentOccurrence {
+function admittedOccurrence(manifest: Manifest): StoredUploadedAttachmentOccurrence {
 	const occurrence = publicOccurrence(manifest);
 	return {
 		...occurrence,
 		attachments: occurrence.attachments.map((attachment, index) => ({
 			...attachment,
-			...(inputs[index].trustedExtractedText === undefined
+			...(manifest.attachments[index].trustedExtractedText === undefined
 				? {}
-				: { trustedExtractedText: inputs[index].trustedExtractedText }),
+				: { trustedExtractedText: manifest.attachments[index].trustedExtractedText }),
 		})),
 	};
 }
@@ -383,7 +380,7 @@ export async function persistUploadedAttachmentOccurrence(
 ): Promise<StoredUploadedAttachmentOccurrence> {
 	validateSessionId(sessionId);
 	validateOccurrenceId(occurrenceId);
-	const inputs = canonicalInputs(rawAttachments);
+	const inputs = await canonicalInputs(rawAttachments);
 	const { sessionKey, occurrenceKey } = keys(sessionId, occurrenceId);
 	const digest = contentDigest(sessionId, occurrenceId, inputs);
 	const finalDir = occurrenceDir(sessionKey, occurrenceKey);
@@ -394,7 +391,7 @@ export async function persistUploadedAttachmentOccurrence(
 		if (existing.contentDigest !== digest) {
 			throw new UploadedAttachmentStoreError(409, "UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT", "Attachment occurrence was already accepted with different content");
 		}
-		return admittedOccurrence(existing, inputs);
+		return admittedOccurrence(existing);
 	};
 
 	try {
@@ -427,17 +424,28 @@ export async function persistUploadedAttachmentOccurrence(
 			mimeType: input.mimeType,
 			size: input.size,
 			sha256: input.sha256,
+			...(input.trustedExtractedText === undefined ? {} : { trustedExtractedText: input.trustedExtractedText }),
 		})),
 	};
+	// Excerpts are best-effort context, while exact bytes and their pointer are
+	// authoritative. Extremely escape-heavy metadata must never produce a
+	// manifest the loader will reject, so shed excerpts from the end if needed.
+	let serializedManifest = JSON.stringify(manifest);
+	for (let index = manifest.attachments.length - 1; Buffer.byteLength(serializedManifest, "utf8") > MAX_MANIFEST_BYTES && index >= 0; index--) {
+		delete manifest.attachments[index].trustedExtractedText;
+		serializedManifest = JSON.stringify(manifest);
+	}
+	if (Buffer.byteLength(serializedManifest, "utf8") > MAX_MANIFEST_BYTES) invalid("Uploaded attachment metadata exceeds the manifest limit");
+
 	const tmpDir = path.join(ownerDir, `.tmp-${occurrenceKey}-${process.pid}-${randomBytes(8).toString("hex")}`);
 	try {
 		await fs.promises.mkdir(tmpDir, { recursive: false, mode: 0o700 });
 		for (let index = 0; index < inputs.length; index++) {
 			await fs.promises.writeFile(path.join(tmpDir, `${fileKeys[index]}.bin`), inputs[index].bytes, { flag: "wx", mode: 0o600 });
 		}
-		await fs.promises.writeFile(path.join(tmpDir, MANIFEST_FILE), JSON.stringify(manifest), { encoding: "utf8", flag: "wx", mode: 0o600 });
+		await fs.promises.writeFile(path.join(tmpDir, MANIFEST_FILE), serializedManifest, { encoding: "utf8", flag: "wx", mode: 0o600 });
 		await fs.promises.rename(tmpDir, finalDir);
-		return admittedOccurrence(manifest, inputs);
+		return admittedOccurrence(manifest);
 	} catch (error) {
 		await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
 		if ((error as NodeJS.ErrnoException)?.code === "EEXIST" || (error as NodeJS.ErrnoException)?.code === "ENOTEMPTY") return loadExisting();
