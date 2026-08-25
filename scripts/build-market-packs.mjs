@@ -77,7 +77,16 @@ export const PACKS = [
 			{ in: "performance-tool-extension.ts", out: "tools/performance-optimisation/extension.js", platform: "node" },
 		],
 		nativeAssets: [
-			{ package: "better-sqlite3", fromEntry: "../build/Release/better_sqlite3.node", out: "lib/better_sqlite3.node" },
+			...[
+				"darwin-arm64", "darwin-x64",
+				"linux-arm64", "linux-x64",
+				"linuxmusl-arm64", "linuxmusl-x64",
+				"win32-arm64", "win32-x64",
+			].map(target => ({
+				package: "better-sqlite3",
+				fromEntry: `../prebuilds/${target}.node`,
+				out: `lib/native/${target}.node`,
+			})),
 		],
 	},
 	{

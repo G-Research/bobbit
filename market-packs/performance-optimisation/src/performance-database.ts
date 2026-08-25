@@ -483,12 +483,26 @@ SET scheduling_state = 'open', proposal_session_id = NULL, updated_at = CURRENT_
 WHERE scheduling_state = 'proposal-pending';
 `;
 
+function nativeBindingTarget(): string | undefined {
+	const architecture = process.arch === "x64" || process.arch === "arm64" ? process.arch : undefined;
+	if (!architecture) return undefined;
+	let platform: string = process.platform;
+	if (platform === "linux") {
+		const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
+		if (!report?.header?.glibcVersionRuntime) platform = "linuxmusl";
+	}
+	if (platform !== "darwin" && platform !== "linux" && platform !== "linuxmusl" && platform !== "win32") return undefined;
+	return `${platform}-${architecture}`;
+}
+
 function bundledNativeBinding(): string | undefined {
-	// Server routes run in confined fresh workers, so better-sqlite3 cannot load a
-	// native addon from Bobbit's ancestor node_modules. The pack build places the
-	// platform binding inside the pack root; cover each bundle location plus direct
-	// source imports used by tests.
-	for (const relative of ["./better_sqlite3.node", "../lib/better_sqlite3.node", "../../lib/better_sqlite3.node"]) {
+	// Confined fresh workers cannot load an addon from Bobbit's ancestor
+	// node_modules. Ship every better-sqlite3 prebuild in the universal pack and
+	// select only the current OS/libc/architecture asset. The known relative roots
+	// cover route bundles, tool bundles, and direct source imports used by tests.
+	const target = nativeBindingTarget();
+	if (!target) return undefined;
+	for (const relative of [`./native/${target}.node`, `../lib/native/${target}.node`, `../../lib/native/${target}.node`]) {
 		try {
 			const candidate = fileURLToPath(new URL(relative, import.meta.url));
 			if (fs.existsSync(candidate)) return candidate;

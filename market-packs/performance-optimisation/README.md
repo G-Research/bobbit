@@ -16,7 +16,7 @@ The normal panel starts honestly empty. For layout development only, open the co
 
 ## Persistence and snapshot contract
 
-The pack owns `<canonical-project-root>/.performance-optimisation/performance.sqlite` through Pack Local Data. Model-facing tools and the server route use Bobbit's shared `better-sqlite3` runtime dependency; browser code reads this versioned projection through `host.callRoute("performance-snapshot")`:
+The pack owns `<canonical-project-root>/.performance-optimisation/performance.sqlite` through Pack Local Data. Model-facing tools and the server route use Bobbit's shared `better-sqlite3` runtime dependency. The universal pack carries confined-worker prebuilds for supported macOS, Linux/glibc, Linux/musl, and Windows x64/arm64 targets, then selects only the current runtime target. Browser code reads this versioned projection through `host.callRoute("performance-snapshot")`:
 
 ```ts
 type PerformanceSnapshot = {
