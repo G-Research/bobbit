@@ -1,7 +1,6 @@
 name: session_attachment
 description: "List metadata or read a bounded byte range from an immutable uploaded attachment"
-summary: "Read immutable uploaded attachment bytes"
-params: [operation, pointer, offset?, length?]
+summary: "Read bounded range by pointer"
 provider:
   type: bobbit-extension
   extension: extension.ts
