@@ -6,7 +6,7 @@ import {
 	deleteSession,
 	waitForSessionStatus,
 } from "../../e2e/_helpers/e2e-setup.js";
-import { navigateToHash, openApp } from "../fixtures/ui-helpers.js";
+import { navigateToHash, openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const MUTATING_TOOLS = ["write", "edit", "bash", "bash_bg"] as const;
 

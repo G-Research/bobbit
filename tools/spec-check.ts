@@ -14,8 +14,8 @@
  */
 
 // Import registries — these populate on import via defineContract/defineStory calls
-import "../tests/e2e/browser/_helpers/spec-contracts.js";
-import "../tests/e2e/browser/_helpers/story-registry.js";
+import "../tests/support/harnesses/browser/legacy-ui/spec-contracts.js";
+import "../tests/support/harnesses/browser/legacy-ui/story-registry.js";
 
 import {
 	getContractRegistry,
@@ -24,7 +24,7 @@ import {
 	contractCompleteness,
 	storiesForRegion,
 	findRelatedStories,
-} from "../tests/e2e/browser/_helpers/spec-framework.js";
+} from "../tests/support/harnesses/browser/legacy-ui/spec-framework.js";
 
 const args = process.argv.slice(2);
 const flags = new Set(args.filter(a => a.startsWith("--")));

@@ -8,7 +8,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../_helpers/gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./_helpers/ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const GATE_ID = "slow-gate";
 const VERIFY_TITLE = "0 of 1 gates passed — verifying 1";

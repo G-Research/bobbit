@@ -18,7 +18,7 @@ import type { Page } from "@playwright/test";
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { MockAgentCore } from "../../e2e/_helpers/mock-agent-core.mjs";
 import { apiFetch, bobbitDir, nonGitCwd, defaultProjectId } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
 	const projectId = await defaultProjectId();

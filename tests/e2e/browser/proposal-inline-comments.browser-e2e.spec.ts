@@ -16,7 +16,7 @@
  */
 import { test, expect } from "../_helpers/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./_helpers/ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 /**
  * Open the goal-assistant panel (which is the commentable goal preview

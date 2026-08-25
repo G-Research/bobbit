@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
-import { sendMessage, createSessionViaUI } from "../../e2e/browser/_helpers/ui-helpers.js";
+import { sendMessage, createSessionViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Journey: Prompt Interaction", () => {
 	test("message editor textarea is visible", async ({ page }) => {

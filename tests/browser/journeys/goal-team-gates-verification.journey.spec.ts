@@ -13,7 +13,7 @@ import {
   deleteSession,
 } from "../_helpers/journey-fixture.js";
 import { connectWs, signalAndWaitForGate } from "../../e2e/_helpers/e2e-setup.js";
-import { navigateToGoalDashboard } from "../fixtures/ui-helpers.js";
+import { navigateToGoalDashboard } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // ── Behavioral assertions ported from the master gate-verification-UX specs ──
 // Sources: tests/e2e/ui/gate-list-slim-projection.spec.ts (Issue #1) and

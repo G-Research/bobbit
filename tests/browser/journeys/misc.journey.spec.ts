@@ -8,7 +8,7 @@
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { sendMessage, apiFetch, defaultProject, createGoal, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
-import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 import { rawApiFetch } from "../../e2e/_helpers/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";

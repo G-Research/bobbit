@@ -9,7 +9,7 @@ import {
 	deleteSession,
 	waitForSessionStatus,
 } from "../../e2e/_helpers/e2e-setup.js";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToHash, openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });
 test.describe.configure({ mode: "serial" });

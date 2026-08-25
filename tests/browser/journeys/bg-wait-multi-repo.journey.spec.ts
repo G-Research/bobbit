@@ -4,7 +4,7 @@
  * Consolidated from: bg-wait-*, multi-repo-*, etc.
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
-import { sendMessage } from "../../e2e/browser/_helpers/ui-helpers.js";
+import { sendMessage } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Journey: BG Wait Steer", () => {
 	test("session loads for bg-wait interaction", async ({ page }) => {

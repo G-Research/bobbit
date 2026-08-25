@@ -7,8 +7,8 @@
  * capture trick. Centralising those here keeps individual specs focused on what
  * they verify.
  */
-import { expect, type Page } from "../../_helpers/gateway-harness.js";
-import { apiFetch } from "../../_helpers/e2e-setup.js";
+import type { Page } from "@playwright/test";
+import { apiFetch, expect } from "../../../../browser/_helpers/journey-fixture.js";
 import { openApp } from "./ui-helpers.js";
 import { mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";

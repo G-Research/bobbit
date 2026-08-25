@@ -18,7 +18,7 @@
  *
  * See `docs/testing-tier-2-5.md` for the full opt-in guide.
  */
-import { test as baseTest } from "../../_helpers/gateway-harness.js";
+import { test as baseTest } from "../../../../browser/_helpers/journey-fixture.js";
 import { BeatRecorder } from "./beat-recorder.js";
 import { CURSOR_OVERLAY_SCRIPT } from "./cursor-overlay.js";
 

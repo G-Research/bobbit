@@ -83,7 +83,7 @@ test.describe("Journey: Headquarters", () => {
 // ═══════════════════════════════════════════════════════════════
 // Story-registry contract coverage (CT-02 / CT-03 / CT-05)
 //
-// Each test maps to a CT-* story from tests/e2e/ui/story-registry.ts
+// Each test maps to a CT-* story from the canonical legacy UI harness.
 // and exercises the behavioral guarantee named by that contract.
 // ═══════════════════════════════════════════════════════════════
 

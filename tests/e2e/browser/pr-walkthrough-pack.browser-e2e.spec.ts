@@ -47,7 +47,7 @@ import { execFileSync } from "node:child_process";
 import { test, expect } from "../_helpers/gateway-harness.js";
 import type { Page, Response } from "@playwright/test";
 import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../_helpers/e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./_helpers/ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // Within-file serial: a single end-to-end lifecycle test in describe 1; the
 // child-pane describe seeds its own state per test.

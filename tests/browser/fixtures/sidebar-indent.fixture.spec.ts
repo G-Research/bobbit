@@ -3,7 +3,7 @@
  */
 import { test, expect, type Page } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const INDENT_KEY = "bobbit:sidebar-tree-indent";
 const DEFAULT_PX = 6;

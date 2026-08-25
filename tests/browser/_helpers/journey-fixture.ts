@@ -25,4 +25,4 @@ export {
 	sendMessage,
 	waitForAgentResponse,
 	createSessionViaUI,
-} from "../fixtures/ui-helpers.js";
+} from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";

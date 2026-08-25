@@ -21,7 +21,7 @@ import {
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
 import { agentEndPredicate, connectWs } from "../../e2e/_helpers/e2e-setup.js";
-import { sendMessage } from "../../e2e/browser/_helpers/ui-helpers.js";
+import { sendMessage } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const RETAINED = "HISTORY_FORK_RETAINED_ALPHA";
 const SELECTED = [

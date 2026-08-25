@@ -9,7 +9,7 @@ import {
 	nonGitCwd,
 	waitForSessionStatus,
 } from "../_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./_helpers/ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // Sidebar copy actions exercise the real Clipboard API on the success path.
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });

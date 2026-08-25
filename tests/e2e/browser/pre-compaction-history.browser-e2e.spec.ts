@@ -14,7 +14,7 @@ import {
 	waitForSessionStatus,
 	readE2EToken,
 } from "../_helpers/e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "./_helpers/ui-helpers.js";
+import { openApp, navigateToHash, sendMessage } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 import fs from "node:fs";
 import path from "node:path";
 

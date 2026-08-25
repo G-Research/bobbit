@@ -5,7 +5,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, createSession, nonGitCwd } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 

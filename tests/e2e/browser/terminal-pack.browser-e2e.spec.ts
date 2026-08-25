@@ -1,6 +1,6 @@
 import { test, expect } from "../_helpers/gateway-harness.js";
 import { apiFetch, deleteSession, waitForHealth } from "../_helpers/e2e-setup.js";
-import { createSessionViaUI, openApp } from "./_helpers/ui-helpers.js";
+import { createSessionViaUI, openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // Browser E2E for the first-party terminal pack. The WebSocket send spy is a
 // test-only observer: it does not feed data back into the app or expose transport

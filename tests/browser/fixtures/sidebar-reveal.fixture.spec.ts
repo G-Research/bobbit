@@ -28,7 +28,7 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";
 const SPEC = "Sidebar reveal-on-nav fixture goal with enough detail to satisfy validation.";

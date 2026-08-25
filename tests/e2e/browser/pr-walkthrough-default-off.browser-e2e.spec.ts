@@ -31,7 +31,7 @@
  */
 import { test, expect } from "../_helpers/gateway-harness.js";
 import { apiFetch, base, readE2ETokenAsync, waitForSessionStatus } from "../_helpers/e2e-setup.js";
-import { openApp, createSessionViaUI, navigateToHash } from "./_helpers/ui-helpers.js";
+import { openApp, createSessionViaUI, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // Within-file serial: the single journey below mutates shared server-scope
 // activation state; keep it isolated from any sibling test that may be added.

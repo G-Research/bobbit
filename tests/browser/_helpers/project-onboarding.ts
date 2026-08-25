@@ -5,7 +5,7 @@ import type { Page } from "@playwright/test";
 import { createRunChild } from "../../support/harnesses/shared/run-isolation.js";
 import { apiFetch, expect } from "./journey-fixture.js";
 
-/** Stable selectors from tests/e2e/ui/add-project-helpers.ts */
+/** Stable selectors shared with the canonical legacy UI harness. */
 export const ADD_PROJECT = {
 	dialog:       '[data-testid="add-project-dialog"]',
 	picker:       '[data-testid="add-project-picker"]',

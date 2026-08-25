@@ -4,7 +4,7 @@
 import { type Locator } from "@playwright/test";
 import { test, expect, type Page } from "../_helpers/gateway-harness.js";
 import { apiFetch, createGoal, defaultProject, deleteGoal, deleteSession } from "../_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./_helpers/ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const SCALE_KEY = "bobbit:sidebar-font-scale";
 const BASE_PX = 12;
