@@ -776,11 +776,10 @@ export class AgentInterface extends LitElement {
 		return this._springScrollTo(() => this._targetScrollTop());
 	}
 
-	/** Shared spring scroll animation. Used by the explicit jump-to-bottom
-	 * click (re-reading `_targetScrollTop()` each tick to chase RO growth)
-	 * and by the prompt-nav clicks (fixed target — pre-computed scrollTop
-	 * for the target <user-message>). Same damping/stiffness/mass constants for
-	 * both so the feel is identical.
+	/** Shared spring scroll animation. Used by explicit transcript jumps.
+	 * Moving goalposts (the transcript tail or a target shifted by deferred
+	 * materialization) are re-read each tick. Same damping/stiffness/mass
+	 * constants for every jump so the feel is identical.
 	 *
 	 * `targetGetter` can be a number (fixed target) or a function (re-read
 	 * each tick).
@@ -1821,7 +1820,8 @@ export class AgentInterface extends LitElement {
 	};
 
 	/** Spring-scroll the given transcript target so its top edge lands below
-	 * visible top chrome. Cancels any in-flight spring before starting. */
+	 * visible top chrome. Cancels any in-flight spring before starting and
+	 * re-reads geometry while deferred rows materialize above the target. */
 	private async _scrollTranscriptElementIntoView(
 		targetEl: HTMLElement,
 		highlight = false,
@@ -1829,18 +1829,16 @@ export class AgentInterface extends LitElement {
 		if (!this._scrollContainer) return;
 		this._cancelAnimation();
 		const container = this._scrollContainer;
-		const containerRect = container.getBoundingClientRect();
-		const targetRect = targetEl.getBoundingClientRect();
-		const topMargin = this._getTopPromptNavOffsetPx(); // matches the button's top offset
-		const targetScrollTop = Math.max(
-			0,
-			Math.round(container.scrollTop + (targetRect.top - containerRect.top) - topMargin),
-		);
-		// Echo-latch: classify the resulting scroll event as programmatic so
-		// the deferred handler doesn't flip `_escapedFromLock = true`
-		// (the click handler already set it).
-		this._ignoreScrollToTop = targetScrollTop;
-		await this._springScrollTo(targetScrollTop);
+		const readTargetScrollTop = (): number => {
+			const containerRect = container.getBoundingClientRect();
+			const targetRect = targetEl.getBoundingClientRect();
+			const topMargin = this._getTopPromptNavOffsetPx(); // matches the button's top offset
+			return Math.max(
+				0,
+				Math.round(container.scrollTop + (targetRect.top - containerRect.top) - topMargin),
+			);
+		};
+		await this._springScrollTo(readTargetScrollTop);
 		if (highlight && targetEl.isConnected) this._highlightTranscriptTarget(targetEl);
 		this._refreshJumpButton();
 	}

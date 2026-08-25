@@ -10,6 +10,7 @@ import {
 	waitForAgentResponse,
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
+import { waitForStableScroll } from "../_helpers/stable-wait.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 360, height: 720 };
@@ -72,6 +73,71 @@ async function completeQuestion(page: Page): Promise<void> {
 }
 
 test.describe("Journey: Transcript history navigation", () => {
+	test("keeps a downward history target visible while earlier tall turns materialize", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		const sessionId = await createSession();
+		const marker = "DOWNWARD_LATER_MARKER";
+		const scrollSelector = "agent-interface [data-messages-area] > .overflow-y-auto";
+		try {
+			await waitForSessionStatus(sessionId, "idle");
+			for (let turn = 0; turn < 10; turn += 1) {
+				const heading = turn === 7 ? marker : `TALL_TRANSCRIPT_TURN_${turn + 1}`;
+				const prompt = [
+					heading,
+					...Array.from({ length: 55 }, (_, line) => `Turn ${turn + 1} detail line ${line + 1}`),
+				].join("\n\n");
+				const result = await gateway.sessionManager.enqueuePrompt(sessionId, prompt);
+				expect(result.status).toBe("dispatched");
+				await waitForSessionStatus(sessionId, "idle");
+			}
+
+			await page.setViewportSize(DESKTOP);
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForStableScroll(page, scrollSelector, { timeout: 20_000, sampleMs: 200 });
+
+			await openHistory(page);
+			const targetRow = rows(page).filter({ hasText: marker });
+			await expect(targetRow).toHaveCount(1);
+			const targetId = await targetRow.getAttribute("data-target-id");
+			if (!targetId) throw new Error("History row has no transcript target ID");
+
+			const beforeScrollTop = await page.locator(scrollSelector).evaluate((container) => {
+				container.scrollTop = 0;
+				container.dispatchEvent(new Event("scroll"));
+				return container.scrollTop;
+			});
+			expect(beforeScrollTop).toBe(0);
+
+			await targetRow.click();
+			await expect(dialog(page)).toHaveCount(0);
+			const highlightedTarget = page.locator(
+				`[data-transcript-target="${targetId}"].transcript-navigation-highlight`,
+			);
+			await expect(highlightedTarget).toHaveCount(1, { timeout: 20_000 });
+			await waitForStableScroll(page, scrollSelector, { timeout: 20_000, sampleMs: 200 });
+
+			const settled = await page.evaluate(({ selector, selectedTargetId }) => {
+				const container = document.querySelector<HTMLElement>(selector);
+				const target = [...document.querySelectorAll<HTMLElement>("[data-transcript-target]")]
+					.find((candidate) => candidate.dataset.transcriptTarget === selectedTargetId
+						&& candidate.localName !== "deferred-block");
+				if (!container || !target) throw new Error("Selected transcript target is unavailable");
+				const viewportRect = container.getBoundingClientRect();
+				const targetRect = target.getBoundingClientRect();
+				return {
+					scrollTop: container.scrollTop,
+					intersects: targetRect.bottom > viewportRect.top && targetRect.top < viewportRect.bottom,
+				};
+			}, { selector: scrollSelector, selectedTargetId: targetId });
+			expect(settled.scrollTop).toBeGreaterThan(beforeScrollTop);
+			expect(settled.intersects).toBe(true);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+
 	test("searches, filters, jumps, resolves unanswered questions, reloads, and stays usable on narrow screens", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const sessionId = await createSession();
