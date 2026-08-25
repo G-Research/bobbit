@@ -38,6 +38,14 @@ export interface Attachment {
 	preview?: string; // base64 image preview (first page for PDFs, or same as content for images)
 }
 
+/** Mint an opaque client identity that remains valid at strict server admission. */
+function createAttachmentId(): string {
+	if (typeof globalThis.crypto?.randomUUID === "function") {
+		return globalThis.crypto.randomUUID();
+	}
+	return `attachment_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 18)}`;
+}
+
 /**
  * Load an attachment from various sources
  * @param source - URL string, File, Blob, or ArrayBuffer
@@ -96,8 +104,9 @@ export async function loadAttachment(
 	}
 	const base64Content = btoa(binary);
 
-	// Detect type and process accordingly
-	const id = `${detectedFileName}_${Date.now()}_${Math.random()}`;
+	// Identity is deliberately independent of the untrusted filename. Every
+	// return path below shares this bounded server-safe opaque identifier.
+	const id = createAttachmentId();
 
 	const genericDocument = (): Attachment => ({
 		id,

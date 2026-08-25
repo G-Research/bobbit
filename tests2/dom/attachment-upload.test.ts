@@ -11,6 +11,12 @@ if (!customElements.get("message-editor")) customElements.define("message-editor
 afterEach(() => { document.body.innerHTML = ""; });
 beforeEach(() => { document.body.innerHTML = ""; });
 
+const SAFE_ATTACHMENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+function expectSafeAttachmentId(id: string): void {
+	expect(id).toMatch(SAFE_ATTACHMENT_ID);
+}
+
 describe("composer file attachments", () => {
 	it("leaves the native picker unrestricted by default but honors a host restriction", async () => {
 		const editor = document.createElement("message-editor") as MessageEditor;
@@ -25,14 +31,18 @@ describe("composer file attachments", () => {
 		expect(input.accept).toBe(".txt,application/json");
 	});
 
-	it("extracts UTF-8 text even when the extension and MIME type are unknown", async () => {
-		const file = new File(["UNKNOWN_EXTENSION_MARKER ©"], "notes.custom", { type: "" });
+	it("keeps a special filename exact while minting a safe opaque ID", async () => {
+		const fileName = "notes with spaces & unicode-©.custom";
+		const file = new File(["UNKNOWN_EXTENSION_MARKER ©"], fileName, { type: "" });
 		const attachment = await loadAttachment(file);
 
 		expect(attachment.type).toBe("document");
-		expect(attachment.fileName).toBe("notes.custom");
+		expect(attachment.fileName).toBe(fileName);
 		expect(attachment.mimeType).toBe("text/plain");
+		expect(attachment.content).toBe("VU5LTk9XTl9FWFRFTlNJT05fTUFSS0VSIMKp");
 		expect(attachment.extractedText).toBe("UNKNOWN_EXTENSION_MARKER ©");
+		expectSafeAttachmentId(attachment.id);
+		expect(attachment.id).not.toContain(fileName);
 	});
 
 	it("uses readable UTF-8 bytes instead of a misleading binary MIME type", async () => {
@@ -42,6 +52,7 @@ describe("composer file attachments", () => {
 		expect(attachment.type).toBe("document");
 		expect(attachment.content).toBe("TUlNRV9JU19PTkxZX0FfSElOVA==");
 		expect(attachment.extractedText).toBe("MIME_IS_ONLY_A_HINT");
+		expectSafeAttachmentId(attachment.id);
 	});
 
 	const malformedSpecialFiles = [
@@ -79,6 +90,7 @@ describe("composer file attachments", () => {
 				});
 				expect(attachment.extractedText).toBeUndefined();
 				expect(attachment.preview).toBeUndefined();
+				expectSafeAttachmentId(attachment.id);
 			} finally {
 				errorSpy.mockRestore();
 			}
@@ -101,6 +113,18 @@ describe("composer file attachments", () => {
 		);
 		expect(attachment.extractedText).toContain("<slide number=\"1\">");
 		expect(attachment.extractedText).toContain("VALID_PPTX_MARKER");
+		expectSafeAttachmentId(attachment.id);
+	});
+
+	it("uses the same safe opaque ID path for images", async () => {
+		const attachment = await loadAttachment(
+			new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "image with spaces & ©.png", { type: "image/png" }),
+		);
+
+		expect(attachment.type).toBe("image");
+		expect(attachment.fileName).toBe("image with spaces & ©.png");
+		expect(attachment.content).toBe("iVBORw==");
+		expectSafeAttachmentId(attachment.id);
 	});
 
 	it("keeps arbitrary binary bytes instead of rejecting the file type", async () => {
@@ -111,5 +135,6 @@ describe("composer file attachments", () => {
 		expect(attachment.mimeType).toBe("application/x-custom");
 		expect(attachment.content).toBe("AP8BAg==");
 		expect(attachment.extractedText).toBeUndefined();
+		expectSafeAttachmentId(attachment.id);
 	});
 });

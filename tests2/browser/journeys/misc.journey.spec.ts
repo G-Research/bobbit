@@ -193,6 +193,8 @@ test.describe("Journey: File Attachments", () => {
 		test.setTimeout(120_000);
 		const sessionId = await createSession();
 		const typedPrompt = "What have I attached?";
+		const textFileName = "notes with spaces & unicode-©.custom";
+		const escapedTextFileName = "notes with spaces &amp; unicode-©.custom";
 		const textBytes = Buffer.from("ARBITRARY_ATTACHMENT_MARKER");
 		const binaryBytes = Buffer.from([0x00, 0xff, 0x01, 0x02]);
 		const pointerPattern = "bobbit-attachment:v1:[a-f0-9]{64}:[a-f0-9]{64}:[A-Za-z0-9_-]{24}";
@@ -238,12 +240,13 @@ test.describe("Journey: File Attachments", () => {
 			const input = page.locator('message-editor input[type="file"]');
 			await expect(input).toHaveAttribute("accept", "");
 			await input.setInputFiles([
-				{ name: "notes.custom", mimeType: "application/x-custom", buffer: textBytes },
+				{ name: textFileName, mimeType: "application/x-custom", buffer: textBytes },
 				{ name: "payload.opaque", mimeType: "application/x-opaque", buffer: binaryBytes },
 			]);
 			const composerTiles = page.locator("message-editor attachment-tile");
 			await expect(composerTiles).toHaveCount(2, { timeout: 10_000 });
-			expect(await composerTiles.nth(0).evaluate((element: any) => element.attachment.fileName)).toBe("notes.custom");
+			expect(await composerTiles.nth(0).evaluate((element: any) => element.attachment.fileName)).toBe(textFileName);
+			expect(await composerTiles.nth(0).evaluate((element: any) => element.attachment.id)).toMatch(/^[A-Za-z0-9._:-]{1,128}$/);
 			expect(await composerTiles.nth(1).evaluate((element: any) => element.attachment.fileName)).toBe("payload.opaque");
 
 			const textarea = page.locator("message-editor textarea").first();
@@ -267,12 +270,12 @@ test.describe("Journey: File Attachments", () => {
 				.find((text: string) => text.startsWith(typedPrompt));
 			expect(dispatchedText, "mock agent must receive the model-only attachment context").toBeTruthy();
 			expect(dispatchedText).toContain("ARBITRARY_ATTACHMENT_MARKER");
-			expect(dispatchedText).toContain('filename="notes.custom"');
+			expect(dispatchedText).toContain(`filename="${escapedTextFileName}"`);
 			expect(dispatchedText).toContain('filename="payload.opaque"');
 			expect(dispatchedText).toContain("Binary content is not embedded in the prompt");
 			expect(dispatchedText).not.toContain(binaryBytes.toString("base64"));
 
-			const notesPointer = new RegExp(`filename="notes\\.custom"[^>]*pointer="(${pointerPattern})"`).exec(dispatchedText!)?.[1];
+			const notesPointer = new RegExp(`filename="notes with spaces &amp; unicode-©\\.custom"[^>]*pointer="(${pointerPattern})"`).exec(dispatchedText!)?.[1];
 			const binaryPointer = new RegExp(`filename="payload\\.opaque"[^>]*pointer="(${pointerPattern})"`).exec(dispatchedText!)?.[1];
 			expect(notesPointer).toBeTruthy();
 			expect(binaryPointer).toBeTruthy();
@@ -284,7 +287,7 @@ test.describe("Journey: File Attachments", () => {
 				fileName: attachment.fileName,
 				size: attachment.size,
 			}))).toEqual([
-				{ pointer: notesPointer, fileName: "notes.custom", size: textBytes.length },
+				{ pointer: notesPointer, fileName: textFileName, size: textBytes.length },
 				{ pointer: binaryPointer, fileName: "payload.opaque", size: binaryBytes.length },
 			]);
 			const textRange = resultBody(await executeAttachmentTool({ operation: "read", pointer: notesPointer, offset: 10, length: 10 }));
@@ -299,7 +302,7 @@ test.describe("Journey: File Attachments", () => {
 			await expect(reloadedPrompt).toBeVisible({ timeout: 15_000 });
 			const reloadedTiles = reloadedPrompt.locator("attachment-tile");
 			await expect(reloadedTiles).toHaveCount(2);
-			expect(await reloadedTiles.nth(0).evaluate((element: any) => element.attachment.fileName)).toBe("notes.custom");
+			expect(await reloadedTiles.nth(0).evaluate((element: any) => element.attachment.fileName)).toBe(textFileName);
 			expect(await reloadedTiles.nth(1).evaluate((element: any) => element.attachment.fileName)).toBe("payload.opaque");
 			expect(await reloadedPrompt.locator("markdown-block").evaluate((element: any) => element.content)).toBe(typedPrompt);
 			const reloadedList = resultBody(await executeAttachmentTool({ operation: "list", pointer: binaryPointer }));
@@ -320,7 +323,7 @@ test.describe("Journey: File Attachments", () => {
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.locator(`[data-session-id="${sessionId}"]`)).toHaveCount(0, { timeout: 15_000 });
 			await expect(page.locator("user-message attachment-tile")).toHaveCount(0);
-			expect(await page.locator("body").innerText()).not.toContain("notes.custom");
+			expect(await page.locator("body").innerText()).not.toContain(textFileName);
 			expect(await page.locator("body").innerText()).not.toContain("payload.opaque");
 		} finally {
 			if (!deleted) await deleteSession(sessionId).catch(() => {});
