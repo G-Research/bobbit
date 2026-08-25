@@ -4,6 +4,10 @@ import path from "node:path";
 import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
+import {
+	MAX_PROMPT_ATTACHMENT_BYTES,
+	validateUploadedPromptAttachments,
+} from "../../src/server/agent/attachment-display.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import {
@@ -112,6 +116,58 @@ afterAll(() => {
 	manager?.sessions.clear();
 	setUploadedAttachmentRootForTesting(undefined);
 	fs.rmSync(stateDir, { recursive: true, force: true });
+});
+
+describe("uploaded image validation", () => {
+	const imageData = Buffer.from("image").toString("base64");
+	const image = { type: "image", data: imageData, mimeType: "image/png" };
+	const presentation = {
+		id: "image-one",
+		type: "image",
+		fileName: "one.png",
+		mimeType: "image/png",
+		size: 5,
+		content: imageData,
+		preview: imageData,
+	};
+
+	it("accepts canonical image-only and server-mention inputs while pairing browser presentation once", () => {
+		expect(validateUploadedPromptAttachments([image], undefined)).toEqual({ images: [image], documents: [] });
+		expect(validateUploadedPromptAttachments([image], [presentation])).toEqual({
+			images: [image],
+			attachments: [{
+				id: "image-one", type: "image", fileName: "one.png", mimeType: "image/png", size: 5,
+			}],
+			documents: [],
+		});
+	});
+
+	it("rejects non-arrays, non-canonical bytes, unsafe MIME, and presentation mismatch", () => {
+		expect(validateUploadedPromptAttachments({ 0: image }, undefined)).toBeUndefined();
+		expect(validateUploadedPromptAttachments([image], "not-an-array")).toBeUndefined();
+		expect(validateUploadedPromptAttachments([{ ...image, data: "AB==" }], undefined)).toBeUndefined();
+		expect(validateUploadedPromptAttachments([{ ...image, mimeType: "image/png; charset=utf-8" }], undefined)).toBeUndefined();
+		expect(validateUploadedPromptAttachments([image], [{ ...presentation, size: 4 }])).toBeUndefined();
+		expect(validateUploadedPromptAttachments([image], [{ ...presentation, content: "AAAA" }])).toBeUndefined();
+	});
+
+	it("enforces actual decoded size and the combined distinct-file count", () => {
+		const oversized = Buffer.alloc(MAX_PROMPT_ATTACHMENT_BYTES + 1, 0x41).toString("base64");
+		expect(validateUploadedPromptAttachments([
+			{ type: "image", data: oversized, mimeType: "image/png" },
+		], undefined)).toBeUndefined();
+
+		const images = Array.from({ length: 9 }, () => image);
+		const documents = [0, 1].map((index) => ({
+			id: `doc-${index}`,
+			type: "document",
+			fileName: `${index}.bin`,
+			mimeType: "application/octet-stream",
+			size: 1,
+			content: "AA==",
+		}));
+		expect(validateUploadedPromptAttachments(images, documents)).toBeUndefined();
+	});
 });
 
 describe("uploaded attachment prompt admission", () => {
@@ -294,6 +350,58 @@ describe("uploaded attachment prompt admission", () => {
 		})).rejects.toMatchObject({ code: "UPLOADED_ATTACHMENT_INVALID" });
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(manager.projectDeliveryOutbox(session.id)).toHaveLength(queueLength);
+	});
+
+	it("rejects malformed image admission with zero queue, sidecar, event, store, or RPC effects", async () => {
+		const imageManager: any = new SessionManager({ skipTitleGeneration: true });
+		clearInterval(imageManager._statusHeartbeatTimer);
+		imageManager._statusHeartbeatTimer = null;
+		const imagePrompt = vi.fn(async () => ({ success: true }));
+		const imageSession: any = {
+			...session,
+			id: "83749600-0000-4000-8000-000000000007",
+			status: "idle",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			pendingSkillExpansions: undefined,
+			pendingSkillTranscriptBindings: undefined,
+			pendingPromptAuthors: undefined,
+			promptAuthorMessageBindings: undefined,
+			promptAuthorReplayBindings: undefined,
+			promptAuthorAmbiguityFences: undefined,
+			inFlightSteerTexts: undefined,
+			lastPromptDisplay: undefined,
+			rpcClient: { ...session.rpcClient, prompt: imagePrompt },
+		};
+		imageManager.sessions.set(imageSession.id, imageSession);
+		const storeBefore = fs.readdirSync(path.join(stateDir, "uploaded-attachments"), { recursive: true });
+		const validImage = { type: "image", data: "AAAA", mimeType: "image/png" };
+		try {
+			for (const opts of [
+				{ images: { nope: true } },
+				{ attachments: { nope: true } },
+				{ images: [{ ...validImage, data: "AB==" }] },
+				{ images: Array.from({ length: 11 }, () => validImage) },
+			] as any[]) {
+				await expect(imageManager.enqueuePrompt(imageSession.id, "reject", opts))
+					.rejects.toMatchObject({ code: "UPLOADED_ATTACHMENT_INVALID", retryable: false });
+				expect(imagePrompt).not.toHaveBeenCalled();
+				expect(imageSession.promptQueue.toArray()).toEqual([]);
+				expect(imageSession.pendingSkillExpansions).toBeUndefined();
+				expect(imageSession.inFlightSteerTexts).toBeUndefined();
+				expect(imageSession.eventBuffer.getAll()).toEqual([]);
+				expect(readSkillSidecarEntries(imageSession.id)).toEqual([]);
+				expect(readAuthorSidecar(imageSession.id)).toEqual([]);
+				expect(fs.readdirSync(path.join(stateDir, "uploaded-attachments"), { recursive: true })).toEqual(storeBefore);
+			}
+
+			await expect(imageManager.enqueuePrompt(imageSession.id, "", { images: [validImage] }))
+				.resolves.toEqual({ status: "dispatched" });
+			expect(imagePrompt).toHaveBeenCalledWith("Attachments:", [validImage]);
+		} finally {
+			imageManager.sessions.clear();
+		}
 	});
 
 	it("rejects session quota overflow before bridge, outbox, or sidecar admission", async () => {
