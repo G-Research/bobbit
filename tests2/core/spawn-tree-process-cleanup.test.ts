@@ -234,8 +234,98 @@ const IDENTITY_FAILURE_PROBE = String.raw`
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+
+const SENTINEL_ARG = "bobbit-posix-sentinel:write-fail";
+const SNAPSHOT_TIMEOUT_MS = 1_000;
+const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
+
+function handleIsClosed(handle) {
+  return !handle || handle.destroyed === true || handle.closed === true
+    || handle.readableEnded === true || handle.writableFinished === true;
+}
+
+// Subscribe and then recheck the terminal predicate. The first check handles an
+// event delivered before this probe obtained the handle; the second closes the
+// check-to-listener gap without treating a missed data event as acknowledgement.
+function joinTerminalClose(target, isTerminal, label) {
+  return new Promise((resolve, reject) => {
+    if (isTerminal()) return resolve();
+    let settled = false;
+    const cleanup = () => {
+      target.off("close", onClose);
+      target.off("error", onError);
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error); else resolve();
+    };
+    const onClose = () => finish();
+    const onError = (error) => finish(new Error(label + " failed: " + (error?.message ?? String(error))));
+    target.once("close", onClose);
+    target.once("error", onError);
+    if (isTerminal()) finish();
+  });
+}
+
+function readProcessSnapshot() {
+  return new Promise((resolve, reject) => {
+    execFile("ps", ["-axww", "-o", "pid=,pgid=,state=,args="], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C" },
+      timeout: SNAPSHOT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      maxBuffer: SNAPSHOT_MAX_BYTES,
+    }, (error, stdout, stderr) => {
+      if (error) return reject(new Error("bounded process snapshot failed: " + error.message));
+      if (stderr.trim()) return reject(new Error("bounded process snapshot wrote stderr: " + stderr.trim()));
+      resolve(stdout);
+    });
+  });
+}
+
+// Only the process-held nonce identifies this fixture incarnation. A reused
+// numeric PGID without that nonce is unrelated. Missing/malformed/ambiguous
+// evidence fails closed; one absent or zombie nonce row proves no executable
+// sentinel remains after the root ChildProcess has physically closed.
+function nonceBoundSentinelExecutable(snapshot, targetPgid) {
+  if (typeof snapshot !== "string" || snapshot.length === 0 || snapshot.length >= SNAPSHOT_MAX_BYTES) {
+    throw new Error("bounded process snapshot was empty or truncated");
+  }
+  const rows = snapshot.split(/\r?\n/).filter((row) => row.trim().length > 0);
+  if (rows.length === 0) throw new Error("bounded process snapshot contained no rows");
+  const nonceRows = [];
+  for (const row of rows) {
+    const parsed = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(row);
+    if (!parsed) {
+      if (row.includes(SENTINEL_ARG)) throw new Error("nonce-bound process snapshot row was malformed");
+      continue;
+    }
+    const pid = Number(parsed[1]);
+    const pgid = Number(parsed[2]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(pgid) || pgid <= 0) {
+      if (row.includes(SENTINEL_ARG)) throw new Error("nonce-bound process snapshot identity was malformed");
+      continue;
+    }
+    if (pgid !== targetPgid) continue;
+    const state = parsed[3];
+    const argv = parsed[4];
+    const exactMatches = argv.match(new RegExp("(?:^|\\s)" + SENTINEL_ARG + "(?=\\s|$)", "g")) ?? [];
+    if (exactMatches.length === 0) {
+      if (argv.includes(SENTINEL_ARG)) throw new Error("nonce-bound process snapshot argv was ambiguous");
+      continue;
+    }
+    if (exactMatches.length !== 1) throw new Error("nonce-bound process snapshot contained ambiguous nonce evidence");
+    if (!/^\S+$/.test(state)) throw new Error("nonce-bound process snapshot state was malformed");
+    nonceRows.push({ pid, state });
+  }
+  if (nonceRows.length > 1) throw new Error("bounded process snapshot contained duplicate nonce evidence");
+  return nonceRows.some((row) => row.state[0] !== "Z");
+}
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sentinel-write-fail-"));
 const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
   stdio: ["ignore", "ignore", "ignore", "pipe"],
@@ -244,41 +334,26 @@ const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
 });
 const rootPid = tracked.child.pid;
 if (!Number.isSafeInteger(rootPid) || rootPid <= 0) throw new Error("missing root PID");
-// Arm the physical lifecycle join before the sentinel can report failure. This
-// is intentionally separate from waitForTreeExit(), whose false result is the
-// fail-closed verification verdict after an unacknowledged ownership barrier.
-const childClosed = new Promise((resolve, reject) => {
-  tracked.child.once("close", resolve);
-  tracked.child.once("error", reject);
-});
+// Arm the direct root lifecycle join first. The already-terminal fallback still
+// proves an observed exit/signal plus closed stdio if even close was earlier.
+const childClosed = joinTerminalClose(tracked.child, () => {
+  const exited = tracked.child.exitCode !== null || tracked.child.signalCode !== null;
+  return exited && tracked.child.stdio.every(handleIsClosed);
+}, "root child");
 const ready = tracked.child.stdio[3];
-let acknowledged = false;
-const readyClosed = new Promise((resolve, reject) => {
-  if (!ready) return reject(new Error("missing readiness pipe"));
-  ready.on("data", () => { acknowledged = true; });
-  ready.once("close", resolve);
-  ready.once("error", reject);
-});
+if (!ready) throw new Error("missing readiness pipe");
+// FD3 may already be destroyed/ended/closed by the time spawnTracked returns.
+const readyClosed = joinTerminalClose(ready, () => handleIsClosed(ready), "readiness pipe");
 let ownershipError;
 try { await tracked.ownershipReady; }
 catch (error) { ownershipError = error?.message; }
+const ownershipNotAcknowledged = ownershipError === "POSIX sentinel ownership was not established";
 await readyClosed;
 await childClosed;
 const completionVerified = await tracked.waitForTreeExit(0);
-const rootAlive = (() => { try { process.kill(rootPid, 0); return true; } catch (error) { return error?.code === "EPERM"; } })();
-const groupAlive = (() => { try { process.kill(-rootPid, 0); return true; } catch (error) { return error?.code === "EPERM"; } })();
-// Darwin may retain non-executable zombies after the physical kill. Inspect the
-// exact original PGID once so those are distinguished from a leaked process;
-// Linux must report the group itself absent.
-let executableGroupMember = groupAlive;
-if (process.platform === "darwin" && groupAlive) {
-  const snapshot = execFileSync("ps", ["-axo", "pgid=,state="], { encoding: "utf8" });
-  executableGroupMember = snapshot.split(/\r?\n/).some((row) => {
-    const match = /^\s*(\d+)\s+(\S+)\s*$/.exec(row);
-    return Number(match?.[1]) === rootPid && match?.[2]?.[0] !== "Z";
-  });
-}
-process.stdout.write(JSON.stringify({ acknowledged, ownershipError, completionVerified, rootAlive, groupAlive, executableGroupMember }) + "\n", () => {
+const snapshot = await readProcessSnapshot();
+const nonceBoundSentinelLive = nonceBoundSentinelExecutable(snapshot, rootPid);
+process.stdout.write(JSON.stringify({ ownershipNotAcknowledged, ownershipError, completionVerified, rootChildClosed: true, nonceBoundSentinelLive }) + "\n", () => {
   fs.rmSync(dir, { recursive: true, force: true });
   process.exit(0);
 });
@@ -766,14 +841,13 @@ describe("spawnTracked timeout cleanup", () => {
 			return;
 		}
 		const result = await runNativeJsonProbe(IDENTITY_FAILURE_PROBE);
-		expect(result).toMatchObject({
-			acknowledged: false,
+		expect(result).toEqual({
+			ownershipNotAcknowledged: true,
 			ownershipError: "POSIX sentinel ownership was not established",
 			completionVerified: false,
-			rootAlive: false,
-			executableGroupMember: false,
+			rootChildClosed: true,
+			nonceBoundSentinelLive: false,
 		});
-		if (process.platform === "linux") expect(result.groupAlive).toBe(false);
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
