@@ -675,6 +675,22 @@ async function existingWorktreeCleanupSnapshot(
 	throw new Error(`Cannot resolve Git worktree registration for aliased path ${requestedPath}`);
 }
 
+/** Fail closed unless the registered removal coordinate is still the captured root generation. */
+async function assertWorktreeCleanupSnapshotCurrent(snapshot: ExistingWorktreeCleanupSnapshot): Promise<void> {
+	let currentRootStats: AsyncTreeStats;
+	try {
+		currentRootStats = await fs.promises.lstat(snapshot.removalPath);
+	} catch (err) {
+		throw new Error(`Cannot revalidate linked-worktree filesystem generation before Git removal for ${snapshot.requestedPath}: ${gitErrorText(err)}`);
+	}
+	if (!currentRootStats.isDirectory()
+		|| currentRootStats.isSymbolicLink()
+		|| !hasStableFileIdentity(currentRootStats)
+		|| !sameFileIdentity(snapshot.rootStats, currentRootStats)) {
+		throw new Error(`Linked-worktree filesystem generation changed before Git removal for ${snapshot.requestedPath}`);
+	}
+}
+
 async function pathRemainsStrict(filePath: string): Promise<boolean> {
 	try {
 		await fs.promises.lstat(filePath);
@@ -1474,6 +1490,11 @@ export async function cleanupWorktree(
 	const snapshot = await existingWorktreeCleanupSnapshot(repoPath, worktreePath, commandRunner);
 	const removalPath = snapshot?.removalPath ?? worktreePath;
 	let removalError: unknown;
+
+	// Snapshot construction performs native alias, porcelain, and marker I/O.
+	// Revalidate after all of it, immediately before Git can recursively remove
+	// the registered path, so a replacement generation never reaches Git.
+	if (snapshot) await assertWorktreeCleanupSnapshotCurrent(snapshot);
 
 	try {
 		// Existing aliases use Git's authoritative porcelain spelling. Missing
