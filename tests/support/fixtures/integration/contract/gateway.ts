@@ -19,14 +19,27 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import { makeTmpDir } from "../../../helpers/shared/tmp.ts";
 
-let serverModules: any = null;
-async function getServerModules() {
+interface ServerModules {
+	setProjectRoot: typeof import("../../../../../src/server/bobbit-dir.js").setProjectRoot;
+	scaffoldBobbitDir: typeof import("../../../../../src/server/scaffold.js").scaffoldBobbitDir;
+	loadOrCreateToken: typeof import("../../../../../src/server/auth/token.js").loadOrCreateToken;
+	createGateway: typeof import("../../../../../src/server/server.js").createGateway;
+}
+
+// Keep runtime imports pointed at the built server while deriving their types
+// from source, so type-checking this fixture does not require dist/.
+function importBuiltServerModule<T>(specifier: string): Promise<T> {
+	return import(specifier) as Promise<T>;
+}
+
+let serverModules: ServerModules | null = null;
+async function getServerModules(): Promise<ServerModules> {
 	if (serverModules) return serverModules;
 	const [bd, sc, tok, srv] = await Promise.all([
-		import("../../../../../dist/server/bobbit-dir.js"),
-		import("../../../../../dist/server/scaffold.js"),
-		import("../../../../../dist/server/auth/token.js"),
-		import("../../../../../dist/server/server.js"),
+		importBuiltServerModule<typeof import("../../../../../src/server/bobbit-dir.js")>("../../../../../dist/server/bobbit-dir.js"),
+		importBuiltServerModule<typeof import("../../../../../src/server/scaffold.js")>("../../../../../dist/server/scaffold.js"),
+		importBuiltServerModule<typeof import("../../../../../src/server/auth/token.js")>("../../../../../dist/server/auth/token.js"),
+		importBuiltServerModule<typeof import("../../../../../src/server/server.js")>("../../../../../dist/server/server.js"),
 	]);
 	serverModules = {
 		setProjectRoot: bd.setProjectRoot,

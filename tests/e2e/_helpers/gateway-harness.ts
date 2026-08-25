@@ -58,6 +58,12 @@ function loadLedger(): Promise<any> {
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const STATIC_DIR = resolve(PROJECT_ROOT, "dist", "ui");
 
+// Keep runtime imports pointed at the built server while deriving their types
+// from source, so type-checking this test harness does not require dist/.
+function importBuiltServerModule<T>(specifier: string): Promise<T> {
+	return import(specifier) as Promise<T>;
+}
+
 const STATIC_MIME_TYPES: Record<string, string> = {
 	".css": "text/css; charset=utf-8",
 	".html": "text/html; charset=utf-8",
@@ -496,11 +502,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			createGateway,
 			registerRpcBridgeFactory,
 		} = await withDistServerImportLock(async () => {
-			const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
-			const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-			const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-			const { createGateway } = await import("../../../dist/server/server.js");
-			const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+			const { setProjectRoot } = await importBuiltServerModule<typeof import("../../../src/server/bobbit-dir.js")>("../../../dist/server/bobbit-dir.js");
+			const { scaffoldBobbitDir } = await importBuiltServerModule<typeof import("../../../src/server/scaffold.js")>("../../../dist/server/scaffold.js");
+			const { loadOrCreateToken } = await importBuiltServerModule<typeof import("../../../src/server/auth/token.js")>("../../../dist/server/auth/token.js");
+			const { createGateway } = await importBuiltServerModule<typeof import("../../../src/server/server.js")>("../../../dist/server/server.js");
+			const { registerRpcBridgeFactory } = await importBuiltServerModule<typeof import("../../../src/server/agent/rpc-bridge.js")>("../../../dist/server/agent/rpc-bridge.js");
 			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
 		});
 		// Register the in-process mock bridge factory before any sessions are
