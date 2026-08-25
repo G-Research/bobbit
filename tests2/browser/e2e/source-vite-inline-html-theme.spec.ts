@@ -21,6 +21,7 @@ import {
 	writeSourceViteAgent,
 	type RunningSourceProcess,
 	type SourceProcessTreeAuthority,
+	type StopSourceProcessOptions,
 } from "./source-vite-runtime-helpers.js";
 import { _trackedCount, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 
@@ -141,6 +142,53 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 		body: Buffer.from(`${JSON.stringify(report, null, 2)}\n`),
 		contentType: "application/json",
 	});
+}
+
+interface SourceRuntimeFinalizationOptions {
+	vite?: RunningSourceProcess;
+	gateway?: RunningSourceProcess;
+	stopOptions?: StopSourceProcessOptions;
+	bodyFailure?: { reason: unknown };
+	report: () => Promise<void>;
+	removeTemp: () => Promise<void>;
+}
+
+function cleanupStageFailure(label: string, reason: unknown): Error {
+	const detail = reason instanceof Error ? reason.message : String(reason);
+	return new Error(`${label} failed: ${detail}`, { cause: reason });
+}
+
+/**
+ * Stop every owned source runtime before diagnostics and temporary files are
+ * finalized. No stage may prevent the next one from being attempted.
+ */
+async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationOptions): Promise<void> {
+	const failures: unknown[] = options.bodyFailure ? [options.bodyFailure.reason] : [];
+	const runtimes = [
+		options.vite ? { label: `${options.vite.label} stop`, runtime: options.vite } : undefined,
+		options.gateway ? { label: `${options.gateway.label} stop`, runtime: options.gateway } : undefined,
+	].filter((entry): entry is { label: string; runtime: RunningSourceProcess } => entry !== undefined);
+	const stopResults = await Promise.allSettled(
+		runtimes.map(({ runtime }) => stopSourceProcess(runtime, options.stopOptions)),
+	);
+	for (const [index, result] of stopResults.entries()) {
+		if (result.status === "rejected") failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+	}
+
+	try {
+		await options.report();
+	} catch (error) {
+		failures.push(cleanupStageFailure("source runtime report", error));
+	} finally {
+		try {
+			await options.removeTemp();
+		} catch (error) {
+			failures.push(cleanupStageFailure("source runtime temporary-root removal", error));
+		}
+	}
+
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "source runtime finalization failed");
 }
 
 function waitForFixtureMessage(child: ChildProcess, expectedType: string): Promise<void> {
@@ -321,6 +369,100 @@ test.describe("source Vite inline HTML theme runtime", () => {
 		expect(runtime.child.stderr?.destroyed).toBe(true);
 	});
 
+	test("source finalization attempts both tracked stops, reporting, and removal before surfacing exact failures", async () => {
+		test.setTimeout(10_000);
+		const firstChild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const secondChild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const firstClosed = once(firstChild, "close");
+		const secondClosed = once(secondChild, "close");
+		const events: string[] = [];
+		let firstKills = 0;
+		let firstWaits = 0;
+		let secondKills = 0;
+		let secondWaits = 0;
+		const firstAuthority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				firstKills++;
+				events.push(`first-stop:${signal}`);
+				firstChild.kill("SIGKILL");
+			},
+			waitForTreeExit: () => {
+				firstWaits++;
+				return new Promise<boolean>(() => {});
+			},
+		};
+		const secondAuthority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				secondKills++;
+				events.push(`second-stop:${signal}`);
+				secondChild.kill("SIGKILL");
+			},
+			waitForTreeExit: async () => {
+				secondWaits++;
+				await secondClosed;
+				return true;
+			},
+		};
+		const firstRuntime = captureSourceProcess(firstChild, "unverified first source runtime", firstAuthority);
+		const secondRuntime = captureSourceProcess(secondChild, "verified second source runtime", secondAuthority);
+		const bodyFailure = new Error("fixture body assertion failed");
+		const reportFailure = new Error("fixture report attachment failed");
+		const removalFailure = new Error("fixture temporary removal failed");
+		const baseline = _trackedCount();
+
+		let finalizationFailure: unknown;
+		try {
+			await finalizeSourceRuntimes({
+				vite: firstRuntime,
+				gateway: secondRuntime,
+				stopOptions: { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 },
+				bodyFailure: { reason: bodyFailure },
+				report: async () => {
+					events.push("report");
+					expect(firstRuntime.stdout.join("")).toBe("");
+					expect(secondRuntime.stderr.join("")).toBe("");
+					throw reportFailure;
+				},
+				removeTemp: async () => {
+					events.push("remove-temp");
+					throw removalFailure;
+				},
+			});
+		} catch (error) {
+			finalizationFailure = error;
+		}
+
+		await Promise.all([firstClosed, secondClosed]);
+		await expect(stopSourceProcess(firstRuntime, { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 }))
+			.rejects.toThrow("tree completion was not verified within 50ms");
+		await stopSourceProcess(secondRuntime, { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 });
+		expect(firstKills).toBe(1);
+		expect(firstWaits).toBe(1);
+		expect(secondKills).toBe(1);
+		expect(secondWaits).toBe(1);
+		expect(firstRuntime.closed).toBe(true);
+		expect(secondRuntime.closed).toBe(true);
+		expect(events).toEqual(["first-stop:SIGKILL", "second-stop:SIGKILL", "report", "remove-temp"]);
+		expect(_trackedCount()).toBe(baseline);
+		expect(finalizationFailure).toBeInstanceOf(AggregateError);
+		const failures = (finalizationFailure as AggregateError).errors as Error[];
+		expect(failures).toHaveLength(4);
+		expect(failures[0]).toBe(bodyFailure);
+		expect(failures[1].message).toContain("unverified first source runtime stop failed");
+		expect(failures[1].message).toContain("tree completion was not verified within 50ms");
+		expect((failures[1].cause as Error).message).toContain("unverified first source runtime");
+		expect(failures[2].cause).toBe(reportFailure);
+		expect(failures[3].cause).toBe(removalFailure);
+	});
+
 	test("source-runtime cleanup contains no synchronous Windows process-tree utility", async () => {
 		const source = await readFile(new URL("./source-vite-runtime-helpers.ts", import.meta.url), "utf8");
 		expect(source).not.toMatch(/spawnSync|taskkill/i);
@@ -449,6 +591,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 		const report: RuntimeReport = { requests: [], responses: [] };
 		let gateway: RunningSourceProcess | undefined;
 		let vite: RunningSourceProcess | undefined;
+		let bodyFailure: { reason: unknown } | undefined;
 
 		try {
 			await mkdir(workspaceDir, { recursive: true });
@@ -635,21 +778,30 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				for (const response of sourceResponses) expect(response.status, `${response.path} must be served by Vite`).toBe(200);
 			}
 		} catch (error) {
-			if (gateway && gateway.child.exitCode !== null) throw processFailure(gateway, `failed during test: ${String(error)}`);
-			if (vite && vite.child.exitCode !== null) throw processFailure(vite, `failed during test: ${String(error)}`);
-			throw error;
+			if (gateway && gateway.child.exitCode !== null) {
+				bodyFailure = { reason: processFailure(gateway, `failed during test: ${String(error)}`) };
+			} else if (vite && vite.child.exitCode !== null) {
+				bodyFailure = { reason: processFailure(vite, `failed during test: ${String(error)}`) };
+			} else {
+				bodyFailure = { reason: error };
+			}
 		} finally {
 			await page.close().catch(() => undefined);
-			if (vite) await stopSourceProcess(vite);
-			if (gateway) await stopSourceProcess(gateway);
-			const gatewayLog = processLog(gateway);
-			const viteLog = processLog(vite);
-			report.gatewayStdout = gatewayLog.stdout;
-			report.gatewayStderr = gatewayLog.stderr;
-			report.viteStdout = viteLog.stdout;
-			report.viteStderr = viteLog.stderr;
-			await attachReport(testInfo, report);
-			await rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+			await finalizeSourceRuntimes({
+				vite,
+				gateway,
+				bodyFailure,
+				report: async () => {
+					const gatewayLog = processLog(gateway);
+					const viteLog = processLog(vite);
+					report.gatewayStdout = gatewayLog.stdout;
+					report.gatewayStderr = gatewayLog.stderr;
+					report.viteStdout = viteLog.stdout;
+					report.viteStderr = viteLog.stderr;
+					await attachReport(testInfo, report);
+				},
+				removeTemp: () => rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }),
+			});
 		}
 	});
 });
