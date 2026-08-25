@@ -2,7 +2,7 @@ import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, defaultProject, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
 import { fileURLToPath } from "node:url";
 
-const SOURCE_DIR = fileURLToPath(new URL("../../support/fixtures/market-sources/market-role-fixture-src", import.meta.url));
+const SOURCE_DIR = fileURLToPath(new URL("../../support/fixtures/shared/market-sources/market-role-fixture-src", import.meta.url));
 const PACK_NAME = "market-role-fixture";
 const ROLE_ID = "fixture-pack-nurse";
 const UNKNOWN_ROLE_ID = "definitely-not-a-role-market-pack-regression";
