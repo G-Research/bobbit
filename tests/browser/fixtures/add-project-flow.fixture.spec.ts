@@ -6,8 +6,8 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
-import { ADD_PROJECT } from "./add-project-helpers.js";
+import { openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
+import { ADD_PROJECT } from "../../support/harnesses/browser/legacy-ui/add-project-helpers.js";
 import { existsSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

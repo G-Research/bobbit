@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, createGoal, deleteGoal, waitForSessionStatus, apiFetch, defaultProjectId, registerProject } from "../_helpers/journey-fixture.js";
 import { createSessionViaUI, sendMessage } from "../_helpers/journey-fixture.js";
 import { nonGitCwd } from "../../e2e/_helpers/e2e-setup.js";
-import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 async function authenticateMockProposalTools(
 	page: import("@playwright/test").Page,

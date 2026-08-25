@@ -20,7 +20,7 @@ import {
 	clearProjects,
 	waitForPreflight,
 	preflightAvailable,
-} from "./add-project-helpers.js";
+} from "../../support/harnesses/browser/legacy-ui/add-project-helpers.js";
 
 interface Rect { x: number; y: number; width: number; height: number }
 const TOL = 1; // sub-pixel rendering tolerance

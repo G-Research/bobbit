@@ -3,9 +3,9 @@
  * streaming scroll path and the live-DOM-vs-refresh transcript invariant.
  * Pure DOM reflow and jump-button contracts live in tests/support/fixtures/browser/ui/chat-scroll.spec.ts.
  */
-import { test, expect } from "./_helpers/fixtures.js";
+import { test, expect } from "../../support/harnesses/browser/legacy-ui/fixtures.js";
 import { waitForHealth, waitForSessionStatus, createSession } from "../_helpers/e2e-setup.js";
-import { sendMessage } from "./_helpers/ui-helpers.js";
+import { sendMessage } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 import {
 	TAIL_PX,
 	disableScrollAnchoring,
@@ -20,7 +20,7 @@ import {
 	startTailSampler,
 	stopTailSampler,
 	waitForBurstDone,
-} from "./_helpers/tail-chat-helpers.js";
+} from "../../support/harnesses/browser/legacy-ui/tail-chat-helpers.js";
 
 test.describe("tail-chat: full-stack streaming and transcript fidelity", () => {
 	test.beforeAll(async () => {

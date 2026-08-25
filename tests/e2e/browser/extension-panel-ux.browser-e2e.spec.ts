@@ -14,7 +14,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "../_helpers/gateway-harness.js";
 import { apiFetch, createSession, nonGitCwd } from "../_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./_helpers/ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const FEEDBACK = '[data-testid="launcher-feedback"]';
 const DISMISS = '[data-testid="launcher-feedback-dismiss"]';

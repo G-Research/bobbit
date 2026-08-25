@@ -4,8 +4,8 @@
  * Consolidated from: sidebar-navigation.spec.ts, sidebar-filters.spec.ts
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
-import { filtersButton, clickShowArchivedToggle, openFiltersPopover } from "../../e2e/browser/_helpers/utils/sidebar-filters.js";
-import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle, openFiltersPopover } from "../../support/harnesses/browser/legacy-ui/utils/sidebar-filters.js";
+import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {

@@ -5,7 +5,7 @@
  */
 import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, sendMessage, createSessionViaUI } from "../_helpers/journey-fixture.js";
 import { nonGitCwd } from "../../e2e/_helpers/e2e-setup.js";
-import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Journey: Goal Editing", () => {
 	test("goal dashboard renders goal title", async ({ page }) => {

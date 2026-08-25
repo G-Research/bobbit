@@ -17,7 +17,7 @@
  * navigation and the read-only Location object.
  */
 import { test, expect, type Page } from "../../e2e/_helpers/gateway-harness.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 /** Inject a standalone-display signal + a reload observer before any app JS. */
 async function injectStandaloneAndReloadSeam(page: Page): Promise<void> {

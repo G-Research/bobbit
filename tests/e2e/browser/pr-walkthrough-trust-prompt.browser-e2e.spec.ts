@@ -27,7 +27,7 @@
 import { test, expect } from "../_helpers/gateway-harness.js";
 import type { Page, Route } from "@playwright/test";
 import { apiFetch, waitForSessionStatus } from "../_helpers/e2e-setup.js";
-import { openApp, createSessionViaUI } from "./_helpers/ui-helpers.js";
+import { openApp, createSessionViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const RUN_ROUTE_RE = /\/api\/ext\/route\/run\b/;
 const TRUST_CHECK_ROUTE_RE = /\/api\/github\/trusted-hosts\/check\b/;

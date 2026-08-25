@@ -2,7 +2,7 @@
  * Mobile review commenting E2E — full mobile annotation flow with persistence.
  */
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
-import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { openApp, sendMessage, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 import { apiFetch, createSession } from "../../e2e/_helpers/e2e-setup.js";
 
 async function setupMobileEmulation(page: import("@playwright/test").Page) {

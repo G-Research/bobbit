@@ -25,7 +25,7 @@ import {
 	deleteSession,
 	waitForSessionStatus,
 } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const MARKER_1 = "FORK_HISTORY_MARKER_ALPHA";
 const MARKER_2 = "FORK_HISTORY_MARKER_BRAVO";

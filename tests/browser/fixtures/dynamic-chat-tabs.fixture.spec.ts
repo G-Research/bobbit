@@ -4,7 +4,7 @@
  */
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;

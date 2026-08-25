@@ -13,7 +13,7 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { agentEndPredicate, base, connectWs, readE2ETokenAsync, waitForSessionStatus } from "../../_helpers/e2e-setup.js";
+import { agentEndPredicate, base, connectWs, readE2ETokenAsync, waitForSessionStatus } from "../../../../e2e/_helpers/e2e-setup.js";
 
 export const SCROLL_SEL = "agent-interface .overflow-y-auto";
 

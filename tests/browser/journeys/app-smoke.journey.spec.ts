@@ -4,7 +4,7 @@
  * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, draft-loss-*, etc.
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
-import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Journey: App Smoke", () => {
 	test("app loads and sidebar is visible", async ({ page }) => {

@@ -1,6 +1,6 @@
 import { test, expect } from "../_helpers/gateway-harness.js";
 import { base } from "../_helpers/e2e-setup.js";
-import { openApp } from "./_helpers/ui-helpers.js";
+import { openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // A retry would hide an initialization ordering regression: token-query boot
 // must leave the startup shell on its first attempt.

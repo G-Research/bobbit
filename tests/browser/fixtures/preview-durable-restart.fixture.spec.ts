@@ -9,7 +9,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect, type GatewayInfo } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, base, createSession, nonGitCwd, readE2ETokenAsync } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const ENTRY = "durable-preview.html";
 const BODY_TEXT = "DURABLE_PREVIEW_RESTART";

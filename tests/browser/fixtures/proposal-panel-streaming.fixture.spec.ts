@@ -5,7 +5,7 @@
  * Drives the mock agent's `STAY_BUSY:propose_<type>:<n>` prompt prefix.
  */
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 /** Trigger a streaming proposal in a fresh regular (non-assistant) session. */
 async function startStreamingProposal(

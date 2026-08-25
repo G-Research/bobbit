@@ -22,7 +22,7 @@
  */
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, defaultProject } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Staff inbox panel", () => {
 	const cleanup: string[] = [];

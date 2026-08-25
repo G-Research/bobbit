@@ -1,6 +1,6 @@
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
+import { openApp, navigateToGoalDashboard } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 async function openGoalEditDialog(page: import("@playwright/test").Page) {
 	const editButton = page.locator('[data-testid="goal-dashboard"] button[title="Edit goal"]').first();

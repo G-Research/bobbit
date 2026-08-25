@@ -20,8 +20,8 @@ import {
 	contractCompleteness,
 	clearStoryRegistry,
 	clearContractRegistry,
-} from "../../e2e/browser/_helpers/spec-framework.ts";
-import { CT_03, CT_04, CT_13 } from "../../e2e/browser/_helpers/spec-contracts.ts";
+} from "../../support/harnesses/browser/legacy-ui/spec-framework.ts";
+import { CT_03, CT_04, CT_13 } from "../../support/harnesses/browser/legacy-ui/spec-contracts.ts";
 
 // ── From stories-drafts.spec.ts ──
 

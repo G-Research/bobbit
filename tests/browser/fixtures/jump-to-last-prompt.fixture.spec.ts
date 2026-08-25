@@ -3,7 +3,7 @@
  * mobile header geometry. The prompt-classification/action matrix lives in
  * `tests/browser/fixtures/chat-scroll.fixture.spec.ts` where geometry is deterministic.
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../../support/harnesses/browser/legacy-ui/fixtures.js";
 import type { Page } from "@playwright/test";
 import { waitForHealth, waitForSessionStatus, createSession } from "../../e2e/_helpers/e2e-setup.js";
 import {
@@ -11,7 +11,7 @@ import {
 	disableScrollAnchoring,
 	openTailSession,
 	settleFrames,
-} from "./tail-chat-helpers.js";
+} from "../../support/harnesses/browser/legacy-ui/tail-chat-helpers.js";
 
 const UP_SEL = '[data-testid="jump-to-previous-prompt"]';
 const BOTTOM_SEL = '[data-testid="jump-to-bottom"]';

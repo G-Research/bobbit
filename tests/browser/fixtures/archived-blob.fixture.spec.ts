@@ -5,7 +5,7 @@
  */
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, sendMessage, waitForAgentResponse } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 test.describe("Archived session blob", () => {
 	test("blob has archived class, grayscale filter, and no animations", async ({ page }) => {

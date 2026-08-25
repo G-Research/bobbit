@@ -16,7 +16,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, defaultProjectId } from "../../e2e/_helpers/e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";

@@ -15,7 +15,7 @@ import { test, expect } from "../_helpers/gateway-harness.js";
 import { waitForHealth, createGoal, deleteGoal } from "../_helpers/e2e-setup.js";
 import {
 	SpecContext,
-} from "./_helpers/spec-framework.js";
+} from "../../support/harnesses/browser/legacy-ui/spec-framework.js";
 import {
 	STORY_N01,
 	STORY_N02,
@@ -26,8 +26,8 @@ import {
 	STORY_N08,
 	STORY_N09,
 	STORY_N10,
-} from "./_helpers/story-registry.js";
-import { navigateToHash } from "./_helpers/ui-helpers.js";
+} from "../../support/harnesses/browser/legacy-ui/story-registry.js";
+import { navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 async function waitForSessionRouteSettlement(page: Page, sessionId: string): Promise<void> {
 	await page.waitForFunction((id) => {

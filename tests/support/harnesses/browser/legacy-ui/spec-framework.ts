@@ -12,10 +12,16 @@
  */
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
-import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../_helpers/e2e-setup.js";
-import type { GatewayInfo } from "../../_helpers/gateway-harness.js";
-import { pollUntil } from "../../_helpers/test-utils/cleanup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import {
+	apiFetch,
+	createSession,
+	deleteSession,
+	navigateToHash,
+	openApp,
+	waitForSessionStatus,
+} from "../../../../browser/_helpers/journey-fixture.js";
+import type { GatewayInfo } from "../../../../browser/_helpers/gateway-harness.js";
+import { pollUntil } from "../../../../e2e/_helpers/test-utils/cleanup.js";
 
 // ============================================================
 // STORY METADATA & SPEC GRAPH

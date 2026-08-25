@@ -9,7 +9,7 @@
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import type { Page } from "@playwright/test";
 import { MockAgentCore } from "../../e2e/_helpers/mock-agent-core.mjs";
-import { openApp, createSessionViaUI, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const GOAL_TAB = "[data-testid='goal-proposal-tab-goal']";
 const GOAL_PANEL = "[data-testid='goal-proposal-panel-goal']";

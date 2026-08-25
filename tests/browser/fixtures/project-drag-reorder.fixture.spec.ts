@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { apiFetch, createSession, deleteSession, registerProject, waitForHealth } from "../../e2e/_helpers/e2e-setup.js";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToHash, openApp } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 375, height: 667 };
