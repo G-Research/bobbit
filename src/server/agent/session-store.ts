@@ -36,6 +36,8 @@ export type InFlightAttemptState = Extract<DeliveryState, "dispatching" | "recei
 export interface InFlightSteerRecord {
 	/** Unprefixed durable base model text. The author sidecar proves any per-RPC decoration. */
 	text: string;
+	/** Occurrence-owned typed text for outward projection; absent on legacy/model-equal attempts. */
+	displayText?: string;
 	/** Legacy-compatible sidecar correlation id. Modern dispatches keep it attempt-unique. */
 	promptId: string;
 	/** Stable accepted occurrence identity, shared with QueuedMessage.id and WS projections. */
@@ -145,6 +147,7 @@ export function normalizePersistedInFlightSteers(
 					: index;
 		const record: InFlightSteerRecord = {
 			text: entry.text,
+			...(typeof entry.displayText === "string" ? { displayText: entry.displayText } : {}),
 			promptId,
 			intentId,
 			attemptId: modernAttempt ? entry.attemptId : `attempt:legacy-inflight:${intentId}`,

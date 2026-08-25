@@ -114,7 +114,10 @@ export type DeliveryState = "queued" | "dispatching" | "received" | "uncertain" 
  */
 export interface QueuedMessage {
 	id: string;
+	/** Internal model-facing text while durable; outward projections replace it with displayText. */
 	text: string;
+	/** Occurrence-owned typed text. Internal persistence only; never include this field in a wire projection. */
+	displayText?: string;
 	images?: Array<{ type: "image"; data: string; mimeType: string }>;
 	attachments?: unknown[];
 	isSteered: boolean;

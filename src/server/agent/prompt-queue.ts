@@ -9,6 +9,8 @@ import type {
 } from "../ws/protocol.js";
 
 interface PromptQueueEnqueueOptions {
+	/** Occurrence-owned outward text when `text` contains model-only context. */
+	displayText?: string;
 	images?: Array<{ type: "image"; data: string; mimeType: string }>;
 	attachments?: unknown[];
 	isSteered?: boolean;
@@ -70,6 +72,9 @@ function normalizeQueuedMessage(
 ): QueuedMessage {
 	const normalized = { ...message };
 	if (!validKey(normalized.id)) normalized.id = randomUUID();
+	if (normalized.displayText !== undefined && typeof normalized.displayText !== "string") {
+		delete normalized.displayText;
+	}
 	if (normalized.author !== undefined && !isMessageAuthor(normalized.author)) {
 		delete normalized.author;
 	}
@@ -168,6 +173,7 @@ export class PromptQueue {
 			isSteered,
 			createdAt: Date.now(),
 		};
+		if (typeof opts?.displayText === "string") msg.displayText = opts.displayText;
 		if (reliable) {
 			const kind = opts?.kind ?? (isSteered ? "steer" : "prompt");
 			const targetTurn = opts?.targetTurn ?? (kind === "steer" ? "continuation" : "next-turn");

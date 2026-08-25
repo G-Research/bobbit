@@ -1932,6 +1932,7 @@ export function reconcilePersistedIntentRestore(
 			const recovered = row as ReliableQueuedMessage;
 			normalizedLedger.push({
 				text: row.text,
+				displayText: recovered.displayText,
 				promptId: latest.promptId,
 				intentId: latest.intentId,
 				attemptId: latest.attemptId,
@@ -2000,16 +2001,28 @@ export function reconcilePersistedIntentRestore(
  * explicit queue reorder and in-flight dispatch order must survive projection.
  * Accepted time is used only to merge the two already-ordered streams.
  */
+function displayTextForDelivery(row: Pick<QueuedMessage, "text" | "displayText">): string {
+	return row.displayText ?? row.text;
+}
+
+function outwardQueuedMessage(row: ReliableQueuedMessage): ReliableQueuedMessage {
+	const outward = { ...row };
+	delete outward.displayText;
+	outward.text = displayTextForDelivery(row);
+	return outward;
+}
+
 function projectReliableDeliveryOutbox(
 	queued: ReliableQueuedMessage[],
 	ledger: ReliableInFlightRecord[],
 ): ReliableQueuedMessage[] {
-	const ids = new Set(queued.map((row) => row.id));
+	const outwardQueued = queued.map(outwardQueuedMessage);
+	const ids = new Set(outwardQueued.map((row) => row.id));
 	const inFlight = ledger
 		.filter((record) => record.intentId && !ids.has(record.intentId))
 		.map((record): ReliableQueuedMessage => ({
 			id: record.intentId!,
-			text: record.text,
+			text: displayTextForDelivery(record),
 			isSteered: (record.kind ?? "steer") === "steer",
 			createdAt: record.createdAt ?? record.dispatchEpoch ?? 0,
 			kind: record.kind ?? "steer",
@@ -2035,8 +2048,8 @@ function projectReliableDeliveryOutbox(
 	const projection: ReliableQueuedMessage[] = [];
 	let queuedIndex = 0;
 	let inFlightIndex = 0;
-	while (queuedIndex < queued.length && inFlightIndex < inFlight.length) {
-		const queuedRow = queued[queuedIndex];
+	while (queuedIndex < outwardQueued.length && inFlightIndex < inFlight.length) {
+		const queuedRow = outwardQueued[queuedIndex];
 		const inFlightRow = inFlight[inFlightIndex];
 		if ((queuedRow.createdAt ?? 0) <= (inFlightRow.createdAt ?? 0)) {
 			projection.push(queuedRow);
@@ -2046,7 +2059,7 @@ function projectReliableDeliveryOutbox(
 			inFlightIndex += 1;
 		}
 	}
-	projection.push(...queued.slice(queuedIndex), ...inFlight.slice(inFlightIndex));
+	projection.push(...outwardQueued.slice(queuedIndex), ...inFlight.slice(inFlightIndex));
 	return projection;
 }
 
@@ -2230,8 +2243,11 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		const text = entry.modelPrefix && entry.modelText.startsWith(entry.modelPrefix)
 			? entry.modelText.slice(entry.modelPrefix.length)
 			: entry.modelText;
+		const displayText = session.pendingSkillExpansions?.find((envelope) =>
+			envelope.promptId === entry.intentId)?.originalText;
 		(session.inFlightSteerTexts ??= []).push({
 			text,
+			...(displayText === undefined ? {} : { displayText }),
 			promptId: entry.promptId,
 			intentId: entry.intentId,
 			attemptId: entry.attemptId,
@@ -7615,6 +7631,7 @@ export class SessionManager {
 		kind: "prompt" | "steer",
 		targetTurn: DeliveryTargetTurn,
 		opts: {
+			displayText?: string;
 			images?: Array<{ type: "image"; data: string; mimeType: string }>;
 			attachments?: unknown[];
 			suppressTitleGen?: boolean;
@@ -7628,6 +7645,7 @@ export class SessionManager {
 		return {
 			id: intentId,
 			text,
+			...(typeof opts.displayText === "string" ? { displayText: opts.displayText } : {}),
 			isSteered: kind === "steer",
 			createdAt: this.nextIntentAcceptedAt(session),
 			kind,
@@ -7912,6 +7930,7 @@ export class SessionManager {
 				opts?.isSteered ? "steer" : "prompt",
 				"next-turn",
 				{
+					displayText: dispatchText === text ? undefined : text,
 					images: opts?.images,
 					attachments: opts?.attachments,
 					suppressTitleGen: opts?.suppressTitleGen,
@@ -7924,6 +7943,7 @@ export class SessionManager {
 			));
 		} else {
 			session.promptQueue.enqueue(dispatchText, {
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				isSteered: opts?.isSteered,
@@ -8129,6 +8149,7 @@ export class SessionManager {
 						opts.isSteered ? "steer" : "prompt",
 						"next-turn",
 						{
+							displayText: dispatchText === text ? undefined : text,
 							images: opts.images,
 							attachments: opts.attachments,
 							suppressTitleGen: opts.suppressTitleGen,
@@ -8141,6 +8162,7 @@ export class SessionManager {
 					));
 				} else {
 					rollback.promptQueue.enqueue(dispatchText, {
+						displayText: dispatchText === text ? undefined : text,
 						images: opts?.images,
 						attachments: opts?.attachments,
 						isSteered: opts?.isSteered,
@@ -8293,6 +8315,7 @@ export class SessionManager {
 				? "continuation"
 				: "next-turn";
 			const accepted = this.makeReliableIntentRow(session, reliableIntentId, dispatchText, kind, targetTurn, {
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				suppressTitleGen: opts?.suppressTitleGen,
@@ -8439,6 +8462,7 @@ export class SessionManager {
 				this.consumeRecoveredPromptDispatchRows(session);
 			}
 			const accepted = session.promptQueue.enqueue(dispatchText, {
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				isSteered: opts?.isSteered,
@@ -8502,6 +8526,7 @@ export class SessionManager {
 				// order even if startup fails. On success only this exact row is removed and
 				// dispatched ahead of older parked work.
 				const accepted = session.promptQueue.enqueue(dispatchText, {
+					displayText: dispatchText === text ? undefined : text,
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -8552,6 +8577,7 @@ export class SessionManager {
 					`[session-manager] Session ${session.id} has ${consec} consecutive errored turns; parking incoming prompt. Human action required (click Retry or fix upstream issue).`
 				);
 				session.promptQueue.enqueue(dispatchText, {
+					displayText: dispatchText === text ? undefined : text,
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -8638,6 +8664,7 @@ export class SessionManager {
 		// expanded text to the agent later. The chip metadata is already
 		// in the sidecar/broadcast; the queued row is purely for delivery.
 		session.promptQueue.enqueue(dispatchText, {
+			displayText: dispatchText === text ? undefined : text,
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
@@ -8928,6 +8955,7 @@ export class SessionManager {
 				const prepared = this.preparePromptAuthorDispatch(session, row.id, row.text, source, author, row.id);
 				const ledgerRecord: ReliableInFlightRecord = {
 					text: row.text,
+					displayText: row.displayText,
 					promptId: row.id,
 					intentId: row.id,
 					attemptId: prepared.attemptId,
@@ -9114,7 +9142,7 @@ export class SessionManager {
 			if (legacy.length > 0) {
 				for (const record of [...legacy].reverse()) {
 					this.cancelRestoredPromptAuthorDispatch(session, record.promptId);
-					session.promptQueue.enqueueAtFront(record.text, { isSteered: true, source: record.source, author: record.author });
+					session.promptQueue.enqueueAtFront(record.text, { displayText: record.displayText, isSteered: true, source: record.source, author: record.author });
 				}
 				session.inFlightSteerTexts = ledger.filter((record) => !!record.intentId);
 				changed = true;
@@ -9140,6 +9168,7 @@ export class SessionManager {
 			return {
 				id: intentId,
 				text: record.text,
+				displayText: record.displayText,
 				isSteered: kind === "steer",
 				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
 				kind,
@@ -9200,6 +9229,7 @@ export class SessionManager {
 			const row: ReliableQueuedMessage = {
 				id: record.intentId,
 				text: record.text,
+				displayText: record.displayText,
 				isSteered: (record.kind ?? "steer") === "steer",
 				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
 				kind: record.kind ?? "steer",
@@ -9436,6 +9466,7 @@ export class SessionManager {
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		id?: string;
 		text: string;
+		displayText?: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
@@ -9482,6 +9513,7 @@ export class SessionManager {
 				? session.promptQueue.restoreAtFront({
 					id: r.id,
 					text: r.text,
+					displayText: r.displayText,
 					images: r.images,
 					attachments: r.attachments,
 					isSteered: r.isSteered ?? false,
@@ -9495,6 +9527,7 @@ export class SessionManager {
 					goalDispatchGuardId: r.goalDispatchGuardId,
 				})
 				: session.promptQueue.enqueueAtFront(r.text, {
+					displayText: r.displayText,
 					images: r.images,
 					attachments: r.attachments,
 					isSteered: r.isSteered,
@@ -9635,6 +9668,7 @@ export class SessionManager {
 				// model-facing payload and dispatch metadata that settlement must replay.
 				Object.assign(existing, {
 					text,
+					displayText: reliableRow?.displayText,
 					images,
 					attachments,
 					isSteered: isSteered ?? false,
@@ -9650,6 +9684,7 @@ export class SessionManager {
 				const deferred = {
 					id: durableQueueRowId ?? randomUUID(),
 					text,
+					displayText: reliableRow?.displayText,
 					images,
 					attachments,
 					isSteered: isSteered ?? false,
@@ -9690,6 +9725,7 @@ export class SessionManager {
 			);
 			const attempt: ReliableInFlightRecord = {
 				text,
+				displayText: reliableRow.displayText,
 				promptId: reliableRow.id,
 				intentId: reliableRow.id,
 				attemptId: prepared.attemptId,
@@ -9792,6 +9828,7 @@ export class SessionManager {
 							[{
 								id: reliableRow.id,
 								text: reliableRow.text,
+								displayText: reliableRow.displayText,
 								images: reliableRow.images,
 								attachments: reliableRow.attachments,
 								isSteered: reliableRow.isSteered,
@@ -9851,7 +9888,19 @@ export class SessionManager {
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, verifierOwned, author, streamingBehavior, coldStart, suppressTitleGen }];
+		const dispatchedRowsForRecovery = [{
+			text,
+			displayText: session.lastPromptDisplay?.originalText,
+			images,
+			attachments,
+			isSteered,
+			source,
+			verifierOwned,
+			author,
+			streamingBehavior,
+			coldStart,
+			suppressTitleGen,
+		}];
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
@@ -9942,7 +9991,7 @@ export class SessionManager {
 			}, undefined);
 		if (reliableNext) {
 			if (!this.goalDispatchGuardAllows(session, reliableNext)) return;
-			if (!reliableNext.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, reliableNext.text);
+			if (!reliableNext.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, displayTextForDelivery(reliableNext));
 			const promptSource = reliableNext.source ?? "user";
 			const promptAuthor = resolveAcceptedPromptAuthor(promptSource, reliableNext.author);
 			if (session.poisonRecoveryPromptDispatchQueueIds?.includes(reliableNext.id)) {
@@ -9992,13 +10041,20 @@ export class SessionManager {
 
 		if (steered.length > 0) {
 			const batchText = steered.map(m => m.text).join('\n');
+			const batchDisplayText = steered.map(displayTextForDelivery).join('\n');
 			const batchAuthor = authorForSteerRows(steered);
 			const batchSource: PromptSource = batchAuthor === BATCH_SYSTEM_AUTHOR
 				? "system"
 				: steered.every((row) => (row.source ?? "user") === (steered[0].source ?? "user"))
 					? (steered[0].source ?? "user")
 					: "system";
-			next = { ...steered[0], text: batchText, source: batchSource, author: batchAuthor };
+			next = {
+				...steered[0],
+				text: batchText,
+				...(batchDisplayText === batchText ? { displayText: undefined } : { displayText: batchDisplayText }),
+				source: batchSource,
+				author: batchAuthor,
+			};
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
 			next = session.promptQueue.dequeue();
@@ -10010,7 +10066,7 @@ export class SessionManager {
 		// Title generation for the first real prompt. Suppressed kickoff prompts
 		// (assistant auto-kickoff) never seed the title — naming fires on the
 		// first genuine user message.
-		if (!next.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, next.text);
+		if (!next.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, displayTextForDelivery(next));
 
 		// Track for retry and nudge provenance from the row being dispatched.
 		const promptSource = next.source ?? "user";
@@ -10028,8 +10084,8 @@ export class SessionManager {
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
 		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
-			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart, suppressTitleGen: r.suppressTitleGen }))
-			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart, suppressTitleGen: next.suppressTitleGen }];
+			? steered.map(r => ({ id: r.id, text: r.text, displayText: r.displayText, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart, suppressTitleGen: r.suppressTitleGen }))
+			: [{ id: next.id, text: next.text, displayText: next.displayText, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart, suppressTitleGen: next.suppressTitleGen }];
 		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
@@ -11151,6 +11207,7 @@ export class SessionManager {
 			opts?.isSteered ? "steer" : "prompt",
 			"next-turn",
 			{
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				suppressTitleGen: opts?.suppressTitleGen,
