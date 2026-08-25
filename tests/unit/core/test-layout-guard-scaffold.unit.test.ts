@@ -57,6 +57,24 @@ describe("test layout repository guard", () => {
 		expect(diagnostics.map(({ code }: Diagnostic) => code)).toEqual(expect.arrayContaining(["wrong-suffix", "case-collision"]));
 		expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/dom/**/*.dom.test.ts");
 	});
+
+	it("rejects API-lane browser bypasses from the repository source scan", () => {
+		const sources = [
+			'import { test } from "@playwright/test"; test("bad", async function ({ page }) { await page.goto("/"); });',
+			'import { test } from "@playwright/test"; test("bad", async ({ context }: Fixtures) => context.close());',
+			'import * as playwright from "@playwright/test"; playwright.chromium.launch();',
+		] as const;
+		for (const source of sources) {
+			const diagnostics = collectLayoutDiagnostics({
+				root: "synthetic-root",
+				listFiles: () => ["tests/e2e/api/browser-bypass.api-e2e.spec.ts"],
+				fileExists: () => true,
+				readSource: () => source,
+			});
+			expect(diagnostics.map(({ code }: Diagnostic) => code)).toContainEqual(expect.stringMatching(/^api-browser-(?:fixture|import)$/));
+			expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/e2e/browser/**/*.browser-e2e.spec.ts");
+		}
+	});
 });
 
 describe("canonical test scaffold", () => {

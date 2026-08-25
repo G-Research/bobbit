@@ -58,16 +58,47 @@ describe("test layout diagnostics", () => {
 		expect(validateTestPath("tests/unit/core/examples.unit.test.ts", source)).toEqual([]);
 	});
 
-	it("keeps browser fixtures out of API/process E2E tests", () => {
-		const fixtureSource = [
-			'import { test } from "@playwright/test";',
-			'test("bad", async ({ request, page }) => request.get(String(page)));',
+	it("keeps browser fixtures out of API/process E2E test callbacks", () => {
+		const fixtureCases = [
+			'test("arrow", async ({ request, page }) => request.get(String(page)));',
+			'test("function", function ({ browser }) { return browser.version(); });',
+			'test("async function", async function ({ page }) { await page.goto("/"); });',
+			'test("typed", async ({ context }: { context: BrowserContext }) => context.close());',
+			'async function misuse({ page }: Fixtures) { await page.goto("/"); }\ntest("named", misuse);',
+		] as const;
+		for (const callback of fixtureCases) {
+			const source = `import { test } from "@playwright/test";\n${callback}`;
+			expect(validateTestPath("tests/e2e/api/restart.api-e2e.spec.ts", source).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
+		}
+
+		const helperFixture = 'import { test as apiTest } from "../_helpers/gateway-harness.js";\napiTest("bad", async ({ page }) => page.close());';
+		expect(validateTestPath("tests/e2e/api/helper.api-e2e.spec.ts", helperFixture).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
+	});
+
+	it("rejects direct, namespace, default, and require access to Playwright browser primitives", () => {
+		const primitiveCases = [
+			'import { test, chromium as engine } from "@playwright/test";',
+			'import * as playwright from "@playwright/test"; playwright.chromium.launch();',
+			'import * as playwright from "@playwright/test"; const { firefox: engine } = playwright;',
+			'import playwright from "@playwright/test"; playwright["firefox"].launch();',
+			'const playwright = require("@playwright/test"); playwright.webkit.launch();',
+		] as const;
+		for (const source of primitiveCases) {
+			expect(validateTestPath("tests/e2e/api/browser.api-e2e.spec.ts", source).map(({ code }: Diagnostic) => code)).toContain("api-browser-import");
+		}
+	});
+
+	it("allows API request fixtures and ignores browser examples in comments and strings", () => {
+		const source = [
+			'import * as playwright from "@playwright/test";',
+			'playwright.test("api", async ({ request }) => request.get("/health"));',
+			'// playwright.test("example", async function ({ page }) { await page.goto("/"); });',
+			'const example = `playwright.chromium.launch(); async ({ browser }) => browser.close()`;',
 		].join("\n");
-		expect(validateTestPath("tests/e2e/api/restart.api-e2e.spec.ts", fixtureSource).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
+		expect(validateTestPath("tests/e2e/api/request.api-e2e.spec.ts", source)).toEqual([]);
+	});
 
-		const primitiveSource = 'import { test, chromium } from "@playwright/test";';
-		expect(validateTestPath("tests/e2e/api/browser.api-e2e.spec.ts", primitiveSource).map(({ code }: Diagnostic) => code)).toContain("api-browser-import");
-
+	it("keeps browser-only helper imports out of API/process E2E tests", () => {
 		const boundarySource = 'import { test } from "../../support/harnesses/shared/e2e/browser/fixture.js";';
 		expect(validateTestPath("tests/e2e/api/helper.api-e2e.spec.ts", boundarySource).map(({ code }: Diagnostic) => code)).toContain("api-browser-boundary");
 	});
