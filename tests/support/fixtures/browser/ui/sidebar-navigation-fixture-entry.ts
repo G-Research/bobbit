@@ -34,6 +34,8 @@ const PROJECT_BETA: Project = {
 };
 
 const NOW = 1_700_000_000_000;
+const FIXTURE_GATEWAY_URL = "http://fixture.localhost";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 
 const IDS = {
 	projectAlpha: PROJECT_ALPHA.id,
@@ -230,6 +232,10 @@ function expandDefaults(): void {
 
 async function resetFixture(opts?: { showArchived?: boolean; mobile?: boolean }): Promise<void> {
 	installFixtureStyle();
+	// Install a valid gateway pair before rendering reaches the strict browser
+	// URL boundary; the file:// fixture's origin is not a gateway URL.
+	localStorage.setItem("gateway.url", FIXTURE_GATEWAY_URL);
+	localStorage.setItem("gateway.token", FIXTURE_GATEWAY_TOKEN);
 	document.documentElement.dataset.subgoalsEnabled = "true";
 	document.documentElement.dataset.maxNestingDepth = "5";
 	localStorage.setItem("bobbit-show-archived", opts?.showArchived ? "true" : "false");
