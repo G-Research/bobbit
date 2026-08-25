@@ -33,7 +33,7 @@ import {
 } from "../_helpers/e2e-setup.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const MOCK_MCP_SERVER = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
+const MOCK_MCP_SERVER = resolve(__dirname, "..", "..", "support", "fixtures", "shared", "mock-mcp-server.mjs");
 const mcpRestartPath = (projectId: string, name = "mock") => `/api/mcp-servers/${encodeURIComponent(name)}/restart?projectId=${encodeURIComponent(projectId)}`;
 
 test.setTimeout(60_000);

@@ -47,7 +47,7 @@ import { setupMultiRepoFixture } from "../support/fixtures/shared/multi-repo/set
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
-const FIXTURE_SRC = join(PROJECT_ROOT, "tests", "fixtures", "multi-repo");
+const FIXTURE_SRC = join(PROJECT_ROOT, "tests", "support", "fixtures", "shared", "multi-repo");
 
 function hasDocker(): boolean {
 	try { execFileSync("docker", ["info"], { stdio: "ignore", timeout: 10_000 }); return true; }

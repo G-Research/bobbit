@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
+const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "..", "support", "fixtures", "shared", "mock-mcp-server.mjs");
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const projectQuery = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
 const mcpServersPath = (projectId: string) => `/api/mcp-servers?${projectQuery(projectId)}`;
