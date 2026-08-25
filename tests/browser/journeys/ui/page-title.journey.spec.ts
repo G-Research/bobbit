@@ -12,9 +12,9 @@ test.describe("Dynamic page title", () => {
 		// Wait for the title to update after projects load and render cycle runs.
 		await expect(async () => {
 			const title = await page.evaluate(() => document.title);
-			expect(title).toContain("Â·");
+			expect(title).toContain("·");
 			expect(title).toContain("Bobbit");
-			expect(title).toMatch(/.+ Â· Bobbit$/);
+			expect(title).toMatch(/.+ · Bobbit$/);
 		}).toPass({ timeout: 5000 });
 	});
 });
