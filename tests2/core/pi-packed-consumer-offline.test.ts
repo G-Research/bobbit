@@ -72,6 +72,21 @@ function commandResult(command: string, args: string[], overrides: Partial<{
 	};
 }
 
+function deferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+function invokeTimer(callback: (() => void) | undefined, message: string): void {
+	assert.ok(callback, message);
+	callback();
+}
+
 describe("packed-consumer offline install contract", () => {
 	it("prewarms the restored cache on every E2E OS before the normal gate", () => {
 		const workflow = YAML.parse(WORKFLOW_SOURCE) as Workflow;
@@ -112,7 +127,9 @@ describe("packed-consumer offline install contract", () => {
 			"prewarm must not seed or copy an installed dependency graph");
 		assert.match(source, /const PACK_TIMEOUT_MS = 3 \* 60_000;/);
 		assert.match(source, /const INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
-		assert.match(source, /await tracked\.ownershipReady;/);
+		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 10_000;/);
+		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
+			"spawn-time ownership must have a separate setup deadline before execution timing");
 		assert.match(source, /tracked\.killTree\("SIGKILL"\);/);
 		assert.match(source, /await tracked\.waitForTreeExit\(treeExitTimeoutMs\)/);
 		assert.match(source, /await rm\(tempRoot, \{ recursive: true, force: true, maxRetries: 6, retryDelay: 250 \}\);/,
@@ -259,22 +276,25 @@ describe("packed-consumer offline install contract", () => {
 		assert.equal(completionJoins, 1, "failure must join verified tree completion");
 	});
 
-	it("kills a timed-out owned process once and joins verified completion", async () => {
+	it("starts the unchanged execution timeout only after prompt ownership readiness", async () => {
 		const child = Object.assign(new EventEmitter(), {
 			stdout: new PassThrough(),
 			stderr: new PassThrough(),
 		});
-		let fireTimeout: (() => void) | undefined;
+		const ownership = deferred<void>();
+		let fireExecutionTimeout: (() => void) | undefined;
 		let killCount = 0;
 		let completionJoins = 0;
-		let timerCleared = false;
-		const timerToken = Symbol("timer");
+		const clearedTimers: symbol[] = [];
+		const ownershipTimerToken = Symbol("ownership-timer");
+		const executionTimerToken = Symbol("execution-timer");
 		const running = runOwnedCommand("node", ["npm-cli.js", "install"], {
 			cwd: REPO_ROOT,
 			timeoutMs: 321,
+			ownershipEstablishmentTimeoutMs: 17,
 			spawnOwned: async () => ({
 				child,
-				ownershipReady: Promise.resolve(),
+				ownershipReady: ownership.promise,
 				killTree: () => {
 					killCount++;
 					child.emit("close", null, "SIGKILL");
@@ -285,22 +305,145 @@ describe("packed-consumer offline install contract", () => {
 				},
 			}),
 			setTimer: (callback: () => void, timeoutMs: number) => {
-				assert.equal(timeoutMs, 321);
-				fireTimeout = callback;
-				return timerToken;
+				if (timeoutMs === 17) return ownershipTimerToken;
+				assert.equal(timeoutMs, 321, "execution must retain its full configured budget");
+				fireExecutionTimeout = callback;
+				return executionTimerToken;
 			},
-			clearTimer: (token: symbol) => {
-				assert.equal(token, timerToken);
-				timerCleared = true;
-			},
+			clearTimer: (token: symbol) => { clearedTimers.push(token); },
 		});
 		await new Promise<void>(resolve => setImmediate(resolve));
-		assert.ok(fireTimeout, "execution timer must arm after ownership readiness");
-		fireTimeout();
+		assert.equal(fireExecutionTimeout, undefined, "execution timer must remain disarmed during ownership setup");
+		ownership.resolve(undefined);
+		await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(clearedTimers, [ownershipTimerToken], "prompt readiness must clear its losing setup timer");
+		invokeTimer(fireExecutionTimeout, "execution timer must arm after ownership readiness");
 		await assert.rejects(running, /timed out after 321ms/);
 		assert.equal(killCount, 1, "timeout must request one owned kill");
 		assert.equal(completionJoins, 1, "timeout must join verified tree completion");
-		assert.equal(timerCleared, true);
+		assert.deepEqual(clearedTimers, [ownershipTimerToken, executionTimerToken]);
+	});
+
+	it("clears the setup timer when deferred ownership rejects", async () => {
+		const child = Object.assign(new EventEmitter(), {
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+		});
+		const ownership = deferred<void>();
+		const timerToken = Symbol("ownership-timer");
+		const timerDurations: number[] = [];
+		const clearedTimers: symbol[] = [];
+		let killCount = 0;
+		const running = runOwnedCommand("node", ["npm-cli.js", "pack"], {
+			cwd: REPO_ROOT,
+			timeoutMs: 321,
+			ownershipEstablishmentTimeoutMs: 17,
+			spawnOwned: async () => ({
+				child,
+				ownershipReady: ownership.promise,
+				killTree: () => {
+					killCount++;
+					child.emit("close", null, "SIGKILL");
+				},
+				waitForTreeExit: async () => true,
+			}),
+			setTimer: (_callback: () => void, timeoutMs: number) => {
+				timerDurations.push(timeoutMs);
+				return timerToken;
+			},
+			clearTimer: (token: symbol) => { clearedTimers.push(token); },
+		});
+		await new Promise<void>(resolve => setImmediate(resolve));
+		ownership.reject(new Error("injected ownership failure"));
+		await assert.rejects(running, /did not establish process-tree ownership/);
+		assert.equal(killCount, 1);
+		assert.deepEqual(timerDurations, [17], "execution timer must not arm after rejected ownership");
+		assert.deepEqual(clearedTimers, [timerToken], "rejected ownership must clear its losing setup timer");
+	});
+
+	it.each(["resolve", "reject"] as const)(
+		"bounds deferred ownership setup, joins cleanup, and ignores late %s",
+		async lateSettlement => {
+			const child = Object.assign(new EventEmitter(), {
+				stdout: new PassThrough(),
+				stderr: new PassThrough(),
+			});
+			const ownership = deferred<void>();
+			const treeExit = deferred<boolean>();
+			const timerToken = Symbol("ownership-timer");
+			let fireOwnershipTimeout: (() => void) | undefined;
+			let killCount = 0;
+			let completionJoins = 0;
+			let settled = false;
+			const clearedTimers: symbol[] = [];
+			const timerDurations: number[] = [];
+			const running = runOwnedCommand("node", ["npm-cli.js", "install"], {
+				cwd: REPO_ROOT,
+				timeoutMs: 321,
+				ownershipEstablishmentTimeoutMs: 17,
+				treeExitTimeoutMs: 43,
+				spawnOwned: async () => ({
+					child,
+					ownershipReady: ownership.promise,
+					killTree: () => { killCount++; },
+					waitForTreeExit: async (timeoutMs: number) => {
+						assert.equal(timeoutMs, 43);
+						completionJoins++;
+						return treeExit.promise;
+					},
+				}),
+				setTimer: (callback: () => void, timeoutMs: number) => {
+					timerDurations.push(timeoutMs);
+					fireOwnershipTimeout = callback;
+					return timerToken;
+				},
+				clearTimer: (token: symbol) => { clearedTimers.push(token); },
+			});
+			const observed = running.then(
+				(value: unknown) => { settled = true; return { value }; },
+				(error: unknown) => { settled = true; return { error }; },
+			);
+
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.deepEqual(timerDurations, [17], "setup must use only its exact separate bound");
+			invokeTimer(fireOwnershipTimeout, "ownership setup timer must arm with the injected bound");
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(killCount, 1, "setup expiry must request exactly one owned kill");
+			assert.deepEqual(timerDurations, [17], "execution timer must never arm after setup expiry");
+			assert.deepEqual(clearedTimers, [timerToken], "expired setup timer must be cleared");
+			assert.equal(settled, false, "rejection must wait for the child close boundary");
+
+			child.emit("close", null, "SIGKILL");
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(completionJoins, 1, "close must be followed by bounded tree verification");
+			assert.equal(settled, false, "rejection must wait for verified tree completion");
+			assert.equal(child.listenerCount("error"), 0);
+			assert.equal(child.listenerCount("close"), 0);
+			assert.equal(child.stdout.listenerCount("data"), 0);
+			assert.equal(child.stderr.listenerCount("data"), 0);
+
+			treeExit.resolve(true);
+			const result = await observed;
+			assert.ok("error" in result);
+			assert.match(String(result.error), /ownership readiness timed out after 17ms/);
+
+			if (lateSettlement === "resolve") ownership.resolve(undefined);
+			else ownership.reject(new Error("late injected ownership rejection"));
+			await new Promise<void>(resolve => setImmediate(resolve));
+			assert.equal(killCount, 1, "late ownership settlement must not reverse the terminal result");
+			assert.deepEqual(timerDurations, [17], "late ownership settlement must not arm a timer");
+		},
+	);
+
+	it("rejects a non-positive ownership-establishment bound before spawning", async () => {
+		let spawned = false;
+		await assert.rejects(runOwnedCommand("node", [], {
+			cwd: REPO_ROOT,
+			timeoutMs: 1,
+			ownershipEstablishmentTimeoutMs: 0,
+			spawnOwned: async () => { spawned = true; throw new Error("must not spawn"); },
+		}), /ownershipEstablishmentTimeoutMs must be a positive number/);
+		assert.equal(spawned, false);
 	});
 
 	it("returns normal success only after verified owned-tree completion", async () => {

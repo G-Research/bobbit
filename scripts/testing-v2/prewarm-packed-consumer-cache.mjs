@@ -20,6 +20,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PACK_TIMEOUT_MS = 3 * 60_000;
 const INSTALL_TIMEOUT_MS = 10 * 60_000;
+export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 10_000;
 const TREE_EXIT_TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
 
@@ -91,15 +92,16 @@ async function defaultSpawnOwned(command, args, options) {
 
 /**
  * Run a shell-free command whose whole process tree is owned. The ownership
- * handshake is joined before the execution deadline starts. Timeout/overflow
- * requests one final owned kill, and every outcome requires verified tree
- * completion before it can be returned or thrown.
+ * handshake has its own setup deadline and is joined before the execution
+ * deadline starts. Timeout/overflow requests one final owned kill, and every
+ * outcome requires verified tree completion before it can be returned or thrown.
  */
 export async function runOwnedCommand(command, args, {
 	cwd,
 	env = process.env,
 	timeoutMs,
 	maxOutputBytes = MAX_OUTPUT_BYTES,
+	ownershipEstablishmentTimeoutMs = OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS,
 	treeExitTimeoutMs = TREE_EXIT_TIMEOUT_MS,
 	repoRoot = REPO_ROOT,
 	spawnOwned = defaultSpawnOwned,
@@ -108,6 +110,9 @@ export async function runOwnedCommand(command, args, {
 } = {}) {
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("timeoutMs must be a positive number");
 	if (!Number.isFinite(maxOutputBytes) || maxOutputBytes <= 0) throw new Error("maxOutputBytes must be a positive number");
+	if (!Number.isFinite(ownershipEstablishmentTimeoutMs) || ownershipEstablishmentTimeoutMs <= 0) {
+		throw new Error("ownershipEstablishmentTimeoutMs must be a positive number");
+	}
 	if (!Number.isFinite(treeExitTimeoutMs) || treeExitTimeoutMs <= 0) throw new Error("treeExitTimeoutMs must be a positive number");
 
 	const rendered = displayCommand(command, args);
@@ -118,7 +123,8 @@ export async function runOwnedCommand(command, args, {
 	let outputBytes = 0;
 	let terminalError;
 	let killRequested = false;
-	let timer;
+	let ownershipTimer;
+	let executionTimer;
 
 	const requestOwnedKill = (error) => {
 		if (!terminalError) terminalError = error;
@@ -136,36 +142,53 @@ export async function runOwnedCommand(command, args, {
 		}
 		target.push(buffer);
 	};
-	child.stdout?.on("data", chunk => collect(stdout, chunk));
-	child.stderr?.on("data", chunk => collect(stderr, chunk));
+	const collectStdout = chunk => collect(stdout, chunk);
+	const collectStderr = chunk => collect(stderr, chunk);
+	child.stdout?.on("data", collectStdout);
+	child.stderr?.on("data", collectStderr);
 
 	let closeSettled = false;
 	const closeResult = new Promise(resolveClose => {
-		child.once("error", error => {
+		const finishClose = result => {
 			if (closeSettled) return;
 			closeSettled = true;
-			resolveClose({ spawnError: error, code: null, signal: null });
-		});
-		child.once("close", (code, signal) => {
-			if (closeSettled) return;
-			closeSettled = true;
-			resolveClose({ code, signal });
-		});
+			child.off("error", onError);
+			child.off("close", onClose);
+			resolveClose(result);
+		};
+		const onError = error => finishClose({ spawnError: error, code: null, signal: null });
+		const onClose = (code, signal) => finishClose({ code, signal });
+		child.once("error", onError);
+		child.once("close", onClose);
 	});
 
+	const ownershipTimeoutError = new Error(
+		`${rendered} ownership readiness timed out after ${ownershipEstablishmentTimeoutMs}ms`,
+	);
 	try {
-		await tracked.ownershipReady;
+		await Promise.race([
+			tracked.ownershipReady,
+			new Promise((_, reject) => {
+				ownershipTimer = setTimer(() => reject(ownershipTimeoutError), ownershipEstablishmentTimeoutMs);
+			}),
+		]);
 	} catch (error) {
-		requestOwnedKill(new Error(`${rendered} did not establish process-tree ownership`, { cause: error }));
+		requestOwnedKill(error === ownershipTimeoutError
+			? ownershipTimeoutError
+			: new Error(`${rendered} did not establish process-tree ownership`, { cause: error }));
+	} finally {
+		if (ownershipTimer !== undefined) clearTimer(ownershipTimer);
 	}
 	if (!terminalError) {
-		timer = setTimer(() => {
+		executionTimer = setTimer(() => {
 			requestOwnedKill(new Error(`${rendered} timed out after ${timeoutMs}ms`));
 		}, timeoutMs);
 	}
 
 	const closed = await closeResult;
-	if (timer !== undefined) clearTimer(timer);
+	child.stdout?.off("data", collectStdout);
+	child.stderr?.off("data", collectStderr);
+	if (executionTimer !== undefined) clearTimer(executionTimer);
 	const treeExited = await tracked.waitForTreeExit(treeExitTimeoutMs);
 	if (!treeExited) {
 		throw new Error(`${rendered} closed without verified process-tree completion`, {
