@@ -15,6 +15,23 @@ const ROLES_PANEL = "[data-testid='goal-proposal-panel-roles']";
 const ROLE_CUSTOMIZE = "[data-testid='goal-proposal-role-customize']";
 const ROLE_RESET = "[data-testid='goal-proposal-role-reset']";
 
+function authenticateMockProposalTools(gateway: any, sessionId: string): void {
+	const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("goal roles journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("goal roles journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
+
 async function sendChatMessage(page: Page, text: string) {
 	const textarea = page.locator("message-editor textarea").first();
 	await expect(textarea).toBeVisible({ timeout: 10_000 });
@@ -33,10 +50,11 @@ async function waitForGoalTitle(page: Page, title: string) {
 	await expect(titleInput).toHaveValue(title, { timeout: 20_000 });
 }
 
-async function openNewGoalAssistantProposal(page: Page) {
+async function openNewGoalAssistantProposal(page: Page, gateway: any) {
 	test.setTimeout(90_000);
 	await openApp(page);
-	await createGoalAssistantViaUI(page, { timeout: 60_000 });
+	const sessionId = await createGoalAssistantViaUI(page, { timeout: 60_000 });
+	authenticateMockProposalTools(gateway, sessionId);
 	await sendChatMessage(page, "Please create a GOAL_PROPOSAL for testing");
 	await waitForGoalTitle(page, "E2E Test Goal");
 }
@@ -65,8 +83,8 @@ async function deleteGoal(goalId: string) {
 }
 
 test.describe("Goal proposal — Roles tab wiring", () => {
-	test("+ New Goal role customization persists inlineRoles", async ({ page }) => {
-		await openNewGoalAssistantProposal(page);
+	test("+ New Goal role customization persists inlineRoles", async ({ page, gateway }) => {
+		await openNewGoalAssistantProposal(page, gateway);
 
 		await page.locator(ROLES_TAB).click();
 		await expect(page.locator(ROLES_PANEL)).toBeVisible({ timeout: 10_000 });
@@ -94,8 +112,8 @@ test.describe("Goal proposal — Roles tab wiring", () => {
 		}
 	});
 
-	test("Roles Customize works in a second proposal after roles are cached", async ({ page }) => {
-		await openNewGoalAssistantProposal(page);
+	test("Roles Customize works in a second proposal after roles are cached", async ({ page, gateway }) => {
+		await openNewGoalAssistantProposal(page, gateway);
 
 		await page.locator(ROLES_TAB).click();
 		await expect(page.locator(ROLES_PANEL)).toBeVisible({ timeout: 10_000 });

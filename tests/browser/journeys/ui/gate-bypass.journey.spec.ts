@@ -55,6 +55,8 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 	const bypassCalls: Array<Record<string, unknown>> = [];
 	const resetCalls: string[] = [];
 	const completeCalls: Array<Record<string, unknown>> = [];
+	let completed = false;
+	let cachedGoals: Array<Record<string, unknown>> = [];
 
 	const summaryBody = () => {
 		const passed = state.gates.filter(g => g.status === "passed").length;
@@ -99,6 +101,29 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 	const bypassRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/bypass$`);
 	const resetRe = new RegExp(`/api/goals/${goalId}/gates/[^/]+/reset$`);
 	const completeRe = new RegExp(`/api/goals/${goalId}/(?:team|swarm)/complete$`);
+	const goalsRe = /\/api\/goals(?:\?.*)?$/;
+
+	// Completion is mocked below, so mirror the authoritative goal-list change
+	// that the real endpoint would publish. This keeps completeTeam()'s refresh
+	// and the widget's reversible app-state watcher on their production path.
+	await page.route(goalsRe, async (route: Route) => {
+		if (route.request().method() !== "GET") return route.fallback();
+		const response = await route.fetch();
+		const body = await response.json() as { changed?: boolean; generation?: number; goals?: Array<Record<string, unknown>> };
+		if (Array.isArray(body.goals)) cachedGoals = body.goals;
+		if (!completed || cachedGoals.length === 0) {
+			await route.fulfill({ response, json: body });
+			return;
+		}
+		await route.fulfill({
+			response,
+			json: {
+				...body,
+				changed: true,
+				goals: cachedGoals.map(goal => goal.id === goalId ? { ...goal, state: "complete" } : goal),
+			},
+		});
+	});
 
 	await page.route(gatesRe, async (route: Route) => {
 		if (route.request().method() !== "GET") return route.fallback();
@@ -156,6 +181,7 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 			return;
 		}
 		resetCalls.push(gateId);
+		completed = false;
 		gate.status = "pending";
 		delete gate.whyBypassed;
 		delete gate.whoAmI;
@@ -163,7 +189,15 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		await route.fulfill({
 			status: 200,
 			contentType: "application/json",
-			body: JSON.stringify({ ok: true, gateId, affectedGateIds: [gateId], changedGateIds: [gateId], unchangedGateIds: [], teamLeadNotified: true }),
+			body: JSON.stringify({
+				ok: true,
+				gateId,
+				affectedGateIds: [gateId],
+				changedGateIds: [gateId],
+				unchangedGateIds: [],
+				teamLeadNotified: true,
+				reopen: { state: "in-progress" },
+			}),
 		});
 	});
 
@@ -172,6 +206,7 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		let body: Record<string, unknown> = {};
 		try { body = JSON.parse(route.request().postData() || "{}"); } catch { /* ignore */ }
 		completeCalls.push(body);
+		completed = true;
 		await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
 	});
 
