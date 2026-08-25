@@ -7,6 +7,7 @@ import {
 	isPiTranscriptEntryId,
 } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
+import { parseAskResponseEnvelope } from "../../shared/ask-envelope.js";
 import type {
 	HostInterceptorName,
 	HostInterceptorRequest,
@@ -3525,8 +3526,8 @@ export class SessionManager {
 	private _taskIdCache = new Map<string, { gen: number; taskId: string | undefined }>();
 	/** Per-session durable tag mutation queue. Preserves request admission order. */
 	private _pinMutationQueues = new Map<string, Promise<string[]>>();
-	/** Per-session ask-card dismissal queue. Prevents concurrent IDs from losing updates. */
-	private _askDismissalMutationQueues = new Map<string, Promise<{ dismissedToolUseIds: string[]; alreadyDismissed: boolean }>>();
+	/** Per-session ask terminal-mutation queue. Keeps dismissal persistence and unanswered-state projection linearized. */
+	private _askTerminalMutationQueues = new Map<string, Promise<void>>();
 	/** Injected boot lag sampler. When absent, restoreSessions owns a temporary
 	 * real event-loop delay histogram for the duration of eager restoration. */
 	private readonly _bootRestoreLagSampler?: () => number;
@@ -15824,16 +15825,57 @@ export class SessionManager {
 		return persisted ? normalizeDismissedAskToolUseIds(persisted.dismissedAskToolUseIds) : undefined;
 	}
 
+	private async withAskTerminalMutation<T>(id: string, mutation: () => Promise<T>): Promise<T> {
+		const predecessor = this._askTerminalMutationQueues.get(id) ?? Promise.resolve();
+		const operation = predecessor.catch(() => {}).then(mutation);
+		const tail = operation.then(() => {}, () => {});
+		this._askTerminalMutationQueues.set(id, tail);
+		try {
+			return await operation;
+		} finally {
+			if (this._askTerminalMutationQueues.get(id) === tail) this._askTerminalMutationQueues.delete(id);
+		}
+	}
+
+	private async currentAskTranscript(id: string): Promise<unknown[]> {
+		const session = this.sessions.get(id);
+		if (!session) throw new Error(`Session is not active: ${id}`);
+		const response = await session.rpcClient.getMessages();
+		const raw = response.data?.messages ?? response.data;
+		if (!Array.isArray(raw)) throw new Error(`Could not load transcript for session: ${id}`);
+		return raw;
+	}
+
+	private durableQueuedAskResponseIds(id: string): Set<string> {
+		const session = this.sessions.get(id);
+		const rows = [
+			...(session?.promptQueue.toArray() ?? []),
+			...(session?.inFlightSteerTexts ?? []),
+		];
+		const ids = new Set<string>();
+		for (const row of rows) {
+			const parsed = parseAskResponseEnvelope(row.text);
+			if (parsed) ids.add(parsed.toolUseId);
+		}
+		return ids;
+	}
+
 	/** Durably dismiss one ask card without touching the prompt queue or agent runtime. */
-	async dismissAskToolUse(id: string, toolUseId: string, messages: unknown[]): Promise<{ dismissedToolUseIds: string[]; alreadyDismissed: boolean }> {
-		const predecessor = this._askDismissalMutationQueues.get(id) ?? Promise.resolve({ dismissedToolUseIds: [], alreadyDismissed: false });
-		let operation!: Promise<{ dismissedToolUseIds: string[]; alreadyDismissed: boolean }>;
-		operation = predecessor.catch(() => ({ dismissedToolUseIds: [], alreadyDismissed: false })).then(async () => {
+	async dismissAskToolUse(id: string, toolUseId: string): Promise<{ dismissedToolUseIds: string[]; alreadyDismissed: boolean }> {
+		return this.withAskTerminalMutation(id, async () => {
 			const store = this.resolveStoreForId(id);
-			const persisted = store?.get(id);
+			let persisted = store?.get(id);
 			if (!store || !persisted) throw new Error(`Unknown session: ${id}`);
 
-			const dismissedToolUseIds = normalizeDismissedAskToolUseIds(persisted.dismissedAskToolUseIds);
+			let dismissedToolUseIds = normalizeDismissedAskToolUseIds(persisted.dismissedAskToolUseIds);
+			if (dismissedToolUseIds.includes(toolUseId)) {
+				return { dismissedToolUseIds, alreadyDismissed: true };
+			}
+
+			const messages = await this.currentAskTranscript(id);
+			persisted = store.get(id);
+			if (!persisted) throw new Error(`Unknown session: ${id}`);
+			dismissedToolUseIds = normalizeDismissedAskToolUseIds(persisted.dismissedAskToolUseIds);
 			if (dismissedToolUseIds.includes(toolUseId)) {
 				return { dismissedToolUseIds, alreadyDismissed: true };
 			}
@@ -15843,7 +15885,11 @@ export class SessionManager {
 			const questionStateWasPresent = Object.prototype.hasOwnProperty.call(persisted, "hasUnansweredQuestion");
 			const previousQuestionState = (persisted as PersistedSession & { hasUnansweredQuestion?: unknown }).hasUnansweredQuestion;
 			const next = [...dismissedToolUseIds, toolUseId];
-			const hasUnansweredQuestion = hasUnansweredAskUserChoices(messages, new Set(next));
+			const hasUnansweredQuestion = hasUnansweredAskUserChoices(
+				messages,
+				new Set(next),
+				this.durableQueuedAskResponseIds(id),
+			);
 			store.update(id, { dismissedAskToolUseIds: next, hasUnansweredQuestion });
 			try {
 				await store.flushAsync();
@@ -15862,24 +15908,28 @@ export class SessionManager {
 			}
 			return { dismissedToolUseIds: next, alreadyDismissed: false };
 		});
-		this._askDismissalMutationQueues.set(id, operation);
-		try {
-			return await operation;
-		} finally {
-			if (this._askDismissalMutationQueues.get(id) === operation) this._askDismissalMutationQueues.delete(id);
-		}
 	}
 
-	/** Durably publish recomputed unresolved-question state after answer submission. */
-	async setHasUnansweredQuestion(id: string, hasUnansweredQuestion: boolean): Promise<boolean> {
-		const store = this.resolveStoreForId(id);
-		const persisted = store?.get(id);
-		if (!store || !persisted) return false;
-		const changed = persisted.hasUnansweredQuestion !== hasUnansweredQuestion;
-		store.update(id, { hasUnansweredQuestion });
-		await store.flushAsync();
-		if (changed) this._onSessionQuestionStateChanged?.(id, hasUnansweredQuestion);
-		return true;
+	/** Recompute unresolved-question state from current durable terminal evidence. */
+	async recomputeHasUnansweredQuestion(id: string, resolvedToolUseId?: string): Promise<boolean> {
+		return this.withAskTerminalMutation(id, async () => {
+			const messages = await this.currentAskTranscript(id);
+			const store = this.resolveStoreForId(id);
+			const persisted = store?.get(id);
+			if (!store || !persisted) throw new Error(`Unknown session: ${id}`);
+			const resolvedToolUseIds = this.durableQueuedAskResponseIds(id);
+			if (resolvedToolUseId) resolvedToolUseIds.add(resolvedToolUseId);
+			const hasUnansweredQuestion = hasUnansweredAskUserChoices(
+				messages,
+				new Set(normalizeDismissedAskToolUseIds(persisted.dismissedAskToolUseIds)),
+				resolvedToolUseIds,
+			);
+			const changed = persisted.hasUnansweredQuestion !== hasUnansweredQuestion;
+			store.update(id, { hasUnansweredQuestion });
+			await store.flushAsync();
+			if (changed) this._onSessionQuestionStateChanged?.(id, hasUnansweredQuestion);
+			return hasUnansweredQuestion;
+		});
 	}
 
 	/** Durably set the narrow pinned tag for live, dormant, terminated, or archived sessions. */

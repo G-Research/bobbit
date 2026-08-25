@@ -71,7 +71,7 @@ import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
-import { applyAskQuestionDismissed, clearAskQuestionDismissals } from "./ask-dismissals.js";
+import { applyAskQuestionDismissed, clearAskQuestionDismissals, loadAskQuestionDismissals } from "./ask-dismissals.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
 import {
@@ -1162,6 +1162,9 @@ export class RemoteAgent {
 						// (each carrying their original seq so we dedupe naturally).
 						// Otherwise it replies with resume_gap and we fall back below.
 						if (!initial) {
+							// Dismissal events are intentionally not retained in the session
+							// event buffer, so refresh the durable monotonic cache on reconnect.
+							void loadAskQuestionDismissals(this._sessionId, true).catch(() => {});
 							this._pendingReconnectNotif = true;
 							if (this._highestSeq > 0) {
 								this.send({ type: "resume", fromSeq: this._highestSeq });

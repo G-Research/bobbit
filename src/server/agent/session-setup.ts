@@ -1254,6 +1254,10 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		agentSessionFile: plan.preExistingAgentSessionFile || "",
 		createdAt: session.createdAt,
 		lastActivity: session.lastActivity,
+		// Fresh transcripts cannot contain an unanswered ask. Persist the known
+		// baseline so in-place respawns skip legacy transcript backfill; cloned
+		// transcripts remain unset and are projected from their imported history.
+		...(plan.preExistingAgentSessionFile ? {} : { hasUnansweredQuestion: false }),
 		goalId: plan.goalId,
 		teamGoalId: plan.teamGoalId,
 		teamLeadSessionId: plan.teamLeadSessionId,

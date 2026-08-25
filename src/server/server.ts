@@ -586,7 +586,7 @@ import {
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate } from "./agent/ask-user-choices-validation.js";
-import { AskQuestionTerminalGuard, findAskUserChoicesQuestions, hasUnansweredAskUserChoices } from "./agent/ask-user-choices-dismissal.js";
+import { AskQuestionTerminalGuard, findAskUserChoicesQuestions } from "./agent/ask-user-choices-dismissal.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
 import { normalizeBasePath, stripBasePath } from "../shared/base-path.js";
@@ -20750,7 +20750,7 @@ async function handleApiRoute(
 		}
 
 		try {
-			const result = await sessionManager.dismissAskToolUse(sessionId, toolUseId, messages);
+			const result = await sessionManager.dismissAskToolUse(sessionId, toolUseId);
 			askQuestionTerminalGuard.completeDismiss(sessionId, toolUseId);
 			if (!result.alreadyDismissed) {
 				const event: Extract<ServerMessage, { type: "ask_question_dismissed" }> = {
@@ -20814,9 +20814,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (terminalState === "answered") {
-			const dismissed = new Set(sessionManager.getDismissedAskToolUseIds(sessionId) ?? []);
-			const hasUnansweredQuestion = hasUnansweredAskUserChoices(messages, dismissed, new Set([toolUseId]));
-			await sessionManager.setHasUnansweredQuestion(sessionId, hasUnansweredQuestion);
+			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
 			json({ ok: true, alreadySubmitted: true });
 			return;
 		}
@@ -20830,9 +20828,7 @@ async function handleApiRoute(
 		const existing = findAskResponseAnswers(messages, toolUseId);
 		if (existing) {
 			askQuestionTerminalGuard.observeAnswered(sessionId, toolUseId);
-			const dismissed = new Set(sessionManager.getDismissedAskToolUseIds(sessionId) ?? []);
-			const hasUnansweredQuestion = hasUnansweredAskUserChoices(messages, dismissed, new Set([toolUseId]));
-			await sessionManager.setHasUnansweredQuestion(sessionId, hasUnansweredQuestion);
+			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
 			json({ ok: true, alreadySubmitted: true });
 			return;
 		}
@@ -20873,9 +20869,7 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const dismissed = new Set(sessionManager.getDismissedAskToolUseIds(sessionId) ?? []);
-			const hasUnansweredQuestion = hasUnansweredAskUserChoices(messages, dismissed, new Set([toolUseId]));
-			await sessionManager.setHasUnansweredQuestion(sessionId, hasUnansweredQuestion);
+			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
 		} catch (e: any) {
 			// The answer is already in the transcript. Keep the dedup reservation; a
 			// retry takes the idempotent path and heals this projected metadata.

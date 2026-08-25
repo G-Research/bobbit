@@ -10,6 +10,7 @@ export interface AskDismissalsChangedDetail {
 
 const dismissalsBySession = new Map<string, ReadonlySet<string>>();
 const loadsBySession = new Map<string, Promise<ReadonlySet<string>>>();
+const clearEpochBySession = new Map<string, number>();
 
 function validIds(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -23,10 +24,11 @@ function publish(sessionId: string, toolUseId?: string): void {
 	}));
 }
 
-function replaceDismissals(sessionId: string, ids: readonly string[]): ReadonlySet<string> {
-	const next = new Set(validIds(ids));
+function mergeDismissals(sessionId: string, ids: readonly string[]): ReadonlySet<string> {
 	const current = dismissalsBySession.get(sessionId);
-	if (current && current.size === next.size && [...current].every((id) => next.has(id))) return current;
+	const next = new Set(current);
+	for (const id of validIds(ids)) next.add(id);
+	if (current && current.size === next.size) return current;
 	dismissalsBySession.set(sessionId, next);
 	publish(sessionId);
 	return next;
@@ -59,13 +61,17 @@ export async function loadAskQuestionDismissals(sessionId: string, force = false
 		const pending = loadsBySession.get(sessionId);
 		if (pending) return pending;
 	}
+	const clearEpoch = clearEpochBySession.get(sessionId) ?? 0;
 	const load = (async () => {
 		const response = await gatewayFetch(gatewayRoute(
 			`/api/internal/user-question/dismissals?sessionId=${encodeURIComponent(sessionId)}`,
 		));
 		if (!response.ok) throw new Error(`Failed to load dismissed questions (HTTP ${response.status})`);
 		const body = await response.json();
-		return replaceDismissals(sessionId, validIds(body?.dismissedToolUseIds));
+		if ((clearEpochBySession.get(sessionId) ?? 0) !== clearEpoch) {
+			return dismissedAskToolUseIds(sessionId);
+		}
+		return mergeDismissals(sessionId, validIds(body?.dismissedToolUseIds));
 	})().finally(() => {
 		if (loadsBySession.get(sessionId) === load) loadsBySession.delete(sessionId);
 	});
@@ -76,6 +82,7 @@ export async function loadAskQuestionDismissals(sessionId: string, force = false
 export function clearAskQuestionDismissals(sessionId: string): void {
 	dismissalsBySession.delete(sessionId);
 	loadsBySession.delete(sessionId);
+	clearEpochBySession.set(sessionId, (clearEpochBySession.get(sessionId) ?? 0) + 1);
 }
 
 export async function dismissAskQuestion(sessionId: string, toolUseId: string): Promise<void> {
@@ -99,4 +106,5 @@ export async function dismissAskQuestion(sessionId: string, toolUseId: string): 
 export function resetAskDismissalsForTests(): void {
 	dismissalsBySession.clear();
 	loadsBySession.clear();
+	clearEpochBySession.clear();
 }
