@@ -89,13 +89,19 @@ function makeSession(id: string, modelId: string): any {
 	app.innerHTML = "";
 
 	const projectId = opts.projectId === null ? undefined : (opts.projectId || "fixture-project");
+	// Each render models a newly selected archived session. Clear session caches
+	// so a prior render cannot override the element's current scope fields.
+	state.gatewaySessions = [];
+	state.archivedSessions = [];
 	state.projects = opts.knownProject === false || !projectId
 		? []
 		: [{ id: projectId, name: "Fixture Project", rootPath: "/tmp/fixture-project" } as any];
 
 	const el = document.createElement("agent-interface") as any;
 	el.session = makeSession(opts.sessionId || "archived-session-id", opts.modelId || "claude-sonnet-4-20250514");
-	el.readOnly = true;
+	// Archived lifecycle presentation is independent from GatewaySession.readOnly.
+	// AgentInterface gates both the editor and Continue footer on this property.
+	el.archived = true;
 	el.projectId = projectId;
 	el.goalId = opts.goalId || "";
 	el.delegateOf = opts.delegateOf || "";
