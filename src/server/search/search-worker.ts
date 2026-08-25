@@ -13,6 +13,7 @@ import { formatSessionSearchTitle } from "./sources/session-title.js";
 import { CONTENT_POLICY_VERSION, extractForIndexing } from "./content-policy.js";
 import { buildCurrentMeta, needsRebuild } from "./meta.js";
 import { isMessageAuthor } from "../../shared/message-author.js";
+import { initAuthorSidecarDir } from "../agent/author-sidecar.js";
 import type { Indexable, SearchQuery } from "./types.js";
 
 const port = parentPort!;
@@ -58,6 +59,10 @@ async function handle({ command, payload }: Request): Promise<unknown> {
 		// Existing native indexes are cache data. Remove them only in this worker
 		// so migration cleanup cannot contend with gateway WS/auth handling.
 		const stateDir = path.dirname(payload.dataDir);
+		// Worker isolates do not share the gateway module's digest key. Initialize
+		// the private ledger with the same stable server-owned key before any source
+		// can read v2 digest-only bindings. Migration/security failures stay fatal.
+		initAuthorSidecarDir(stateDir);
 		await Promise.all(["search.lance", "search.db", "search.db-wal", "search.db-shm"].map((name) => fs.promises.rm(path.join(stateDir, name), { recursive: name === "search.lance", force: true }).catch(() => undefined)));
 		store = await FlexSearchStore.open({
 			dataDir: payload.dataDir,
