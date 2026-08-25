@@ -67,7 +67,7 @@ import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extensi
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
-import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { isWorktreePathReferencedByLiveSessionForCleanup, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { installSessionActivityAttribution, recordSessionEventActivity } from "./session-activity.js";
 
 import { TOOLS_DIR } from "./tool-manager.js";
@@ -2016,7 +2016,7 @@ export function handleSetupFailure(
 	plan: SessionSetupPlan,
 	error: Error,
 	ctx: PipelineContext,
-): void {
+): Promise<void> {
 	const safeErrorMessage = sanitizeModelErrorText(error);
 	console.error(
 		`[session-setup] Session ${session.id} setup failed ` +
@@ -2057,16 +2057,25 @@ export function handleSetupFailure(
 	// 5. Notify connected clients (single writer + version bump).
 	broadcastStatus(session, "terminated");
 
-	// 6. Background worktree cleanup (slow, non-blocking)
+	// 6. Background worktree cleanup (slow, non-blocking). The returned, already
+	// caught promise is an observability seam for tests; production callers need
+	// not await it and all status/archive side effects above remain synchronous.
+	let cleanupPromise = Promise.resolve();
 	// Pre-provisioned multi-repo workers are cleaned component-by-component by
 	// TeamManager after createSession rejects; their flat paths are non-Git containers.
 	if ((!plan.repoWorktrees || Object.keys(plan.repoWorktrees).length === 0) && plan.worktreePath && plan.repoPath && plan.branch) {
 		const persistedSessions = ctx.listPersistedSessionsForWorktreeGuard?.() ?? ctx.store.getAll();
-		if (!isWorktreePathReferencedByLiveSession(plan.worktreePath, persistedSessions, { ignoreSessionId: session.id })) {
-			cleanupWorktree(plan.repoPath, plan.worktreePath, plan.branch, true, ctx.commandRunner, ctx.remoteGitPolicy).catch(() => {});
-		} else {
-			console.log(`[session-setup] Skipping setup-failure cleanup for shared worktree ${plan.worktreePath} (session ${session.id})`);
-		}
+		cleanupPromise = isWorktreePathReferencedByLiveSessionForCleanup(
+			plan.worktreePath,
+			persistedSessions,
+			{ ignoreSessionId: session.id },
+		).then((referenced) => {
+			if (referenced) {
+				console.log(`[session-setup] Skipping setup-failure cleanup for shared worktree ${plan.worktreePath} (session ${session.id})`);
+				return;
+			}
+			return cleanupWorktree(plan.repoPath!, plan.worktreePath!, plan.branch!, true, ctx.commandRunner, ctx.remoteGitPolicy);
+		}).catch(() => {});
 	}
 
 	// 7. Clean up sandbox token for this session
@@ -2076,4 +2085,5 @@ export function handleSetupFailure(
 
 	// 8. S1: drop the per-session capability secret.
 	ctx.sessionSecretStore.remove(session.id);
+	return cleanupPromise;
 }

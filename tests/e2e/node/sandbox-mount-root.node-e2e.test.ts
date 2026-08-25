@@ -43,13 +43,16 @@ function makeTempRepo(): string {
 	return root;
 }
 
-/** realpath, falling back to resolve when the path doesn't exist. */
-function realpath(p: string): string {
+/** Native filesystem identity, with a lexical fallback for missing paths. */
+function pathIdentity(filePath: string): string {
+	const lexical = path.resolve(filePath);
+	let identity: string;
 	try {
-		return fs.realpathSync(p);
+		identity = fs.realpathSync.native(lexical);
 	} catch {
-		return path.resolve(p);
+		identity = lexical;
 	}
+	return process.platform === "win32" ? identity.toLowerCase() : identity;
 }
 
 after(() => {
@@ -60,7 +63,7 @@ describe("resolveSandboxMountRoot", () => {
 	it("returns realpath(repoRoot) for a normal (main) repo", async () => {
 		const root = makeTempRepo();
 		const result = await resolveSandboxMountRoot(root);
-		assert.equal(result, realpath(root));
+		assert.equal(pathIdentity(result), pathIdentity(root));
 	});
 
 	it("returns the MAIN repo root for a linked worktree (origin-less regression)", async () => {
@@ -73,17 +76,18 @@ describe("resolveSandboxMountRoot", () => {
 		git(main, "worktree", "add", "-q", "-b", "feature/x", wtPath);
 
 		const result = await resolveSandboxMountRoot(wtPath);
-		// Must resolve to the MAIN working tree, NOT the worktree path.
-		assert.equal(result, realpath(main));
-		assert.notEqual(result, realpath(wtPath));
+		// Must resolve to the MAIN working tree, NOT the worktree path. Git can
+		// publish a long Windows path even when TMPDIR supplied its 8.3 alias.
+		assert.equal(pathIdentity(result), pathIdentity(main));
+		assert.notEqual(pathIdentity(result), pathIdentity(wtPath));
 	});
 
 	it("falls back to a canonicalized path for a non-git directory", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-mount-nongit-"));
 		tmpDirs.push(dir);
 		const result = await resolveSandboxMountRoot(dir);
-		// Non-git → fallback canonicalizePath(repoPath). On win32 canonicalizePath
-		// lowercases; compare case-insensitively to stay cross-platform.
-		assert.equal(result.toLowerCase(), realpath(dir).toLowerCase());
+		// Non-git → fallback canonicalizePath(repoPath). Compare filesystem
+		// identity rather than one spelling or case projection.
+		assert.equal(pathIdentity(result), pathIdentity(dir));
 	});
 });

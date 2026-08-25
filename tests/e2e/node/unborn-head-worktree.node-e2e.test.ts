@@ -12,6 +12,18 @@ import { makeTmpDir } from "../../support/helpers/shared/tmp.js";
 
 const execFile = promisify(execFileCb);
 
+/** Native filesystem identity, with a lexical fallback for missing paths. */
+function pathIdentity(filePath: string): string {
+	const lexical = path.resolve(filePath);
+	let identity: string;
+	try {
+		identity = fs.realpathSync.native(lexical);
+	} catch {
+		identity = lexical;
+	}
+	return process.platform === "win32" ? identity.toLowerCase() : identity;
+}
+
 async function initRepo(repo: string): Promise<void> {
 	fs.mkdirSync(repo, { recursive: true });
 	await execFile("git", ["init", "--initial-branch=master"], { cwd: repo });
@@ -135,7 +147,7 @@ describe("unborn HEAD worktree fallback regressions", () => {
 		try {
 			const support = await resolveWorktreeSupport([{ name: "root", repo: "." }], repo, repo, undefined, { configuredBaseRef: "origin/main" });
 			assert.equal(support.supported, true);
-			assert.equal(path.normalize(support.repoPath ?? ""), path.normalize(repo));
+			assert.equal(pathIdentity(support.repoPath ?? ""), pathIdentity(repo));
 
 			const result = await createWorktree(repo, "session/configured-base", { skipPush: true, configuredBaseRef: "origin/main" });
 			const { stdout } = await execFile("git", ["rev-parse", "HEAD"], { cwd: result.worktreePath });
@@ -192,7 +204,7 @@ describe("unborn HEAD worktree fallback regressions", () => {
 		try {
 			const support = await resolveWorktreeSupport([{ name: "root", repo: "." }], repo, repo);
 			assert.equal(support.supported, true);
-			assert.equal(path.normalize(support.repoPath ?? ""), path.normalize(repo));
+			assert.equal(pathIdentity(support.repoPath ?? ""), pathIdentity(repo));
 			assert.equal(support.multiRepo, false);
 
 			const result = await createWorktree(repo, "session/committed-head", { skipPush: true });

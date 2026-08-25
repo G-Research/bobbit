@@ -2,11 +2,15 @@ import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import {
+	hasStableFileIdentity,
 	RECOVERY_IO_CONCURRENCY,
+	sameFileIdentity,
 	removeTree,
 	type AsyncTreeFs,
+	type AsyncTreeStats,
 } from "../agent/bounded-async-work.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { Component } from "../agent/project-config-store.js";
@@ -18,6 +22,7 @@ import {
 } from "./repository-mutation-coordinator.js";
 
 const primaryBranchFallbackWarningCwds = new Set<string>();
+const nativeRealpath = promisify(fs.realpath.native);
 
 export const UNRESOLVED_HEAD_WORKTREE_CODE = "WORKTREE_UNRESOLVED_HEAD";
 
@@ -306,15 +311,18 @@ async function withTargetedRemovalSlot<T>(operation: () => Promise<T>): Promise<
  *
  * The operation owns one process-wide slot for its lifetime. Concurrent
  * worktree/pool cleanup therefore retains the shared recovery I/O ceiling
- * without multiplying it at nested tree levels.
+ * without multiplying it at nested tree levels. When supplied, the expected
+ * root stats bind deletion to that exact pre-operation filesystem identity.
  */
 export async function removeTargetedTree(
 	targetPath: string,
 	treeFs?: Pick<AsyncTreeFs, "lstat" | "opendir" | "rename" | "unlink" | "rmdir">,
+	expectedRootStats?: AsyncTreeStats,
 ): Promise<void> {
 	await withTargetedRemovalSlot(() => removeTree(targetPath, {
 		fs: treeFs,
 		force: true,
+		expectedRootStats,
 	}));
 }
 
@@ -516,6 +524,182 @@ async function canonicalizePath(p: string): Promise<string> {
 		// realpath fails when the path doesn't exist — fall back to resolve().
 	}
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+interface ExistingWorktreeCleanupSnapshot {
+	requestedPath: string;
+	removalPath: string;
+	adminPath: string;
+	aliased: boolean;
+	/** Exact no-follow identity of the linked-worktree root before Git acts. */
+	rootStats: AsyncTreeStats;
+}
+
+function porcelainWorktreePaths(output: string): string[] {
+	return output
+		.split("\0")
+		.filter(field => field.startsWith("worktree "))
+		.map(field => field.slice("worktree ".length));
+}
+
+/**
+ * Snapshot the exact root generation and admin coordinate while a requested
+ * linked worktree still exists. Aliases additionally resolve Git's spelling
+ * through porcelain; ordinary roots issue no list command. Missing/stale or
+ * non-linked ordinary coordinates retain operation-first injected-runner behavior.
+ */
+async function existingWorktreeCleanupSnapshot(
+	repoPath: string,
+	requestedPath: string,
+	commandRunner: CommandRunner,
+): Promise<ExistingWorktreeCleanupSnapshot | undefined> {
+	const segments = requestedPath.split(/[\\/]+/);
+	const lexicalAlias = segments.includes(".") || segments.includes("..");
+	const aliasCandidate = lexicalAlias
+		|| (process.platform === "win32" && segments.some(segment => /~\d/i.test(segment)));
+
+	if (!aliasCandidate) {
+		let rootStats: AsyncTreeStats;
+		try {
+			rootStats = await fs.promises.lstat(path.resolve(requestedPath));
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
+		}
+		if (!rootStats.isDirectory()
+			|| rootStats.isSymbolicLink()
+			|| !hasStableFileIdentity(rootStats)) {
+			throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}`);
+		}
+
+		let gitDir: string | undefined;
+		try {
+			const marker = await fs.promises.readFile(path.join(requestedPath, ".git"), "utf8");
+			gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			// Missing/fake and primary-worktree markers remain ordinary coordinates,
+			// but only after the root generation spanning this marker outcome is
+			// revalidated below. Unexpected marker I/O remains terminal.
+			if (code !== "ENOENT" && code !== "ENOTDIR" && code !== "EISDIR") {
+				throw new Error(`Cannot snapshot linked-worktree admin path for ${requestedPath}: ${gitErrorText(err)}`);
+			}
+		}
+
+		let verifiedRootStats: AsyncTreeStats;
+		try {
+			verifiedRootStats = await fs.promises.lstat(path.resolve(requestedPath));
+		} catch (err) {
+			throw new Error(`Cannot revalidate linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
+		}
+		if (!verifiedRootStats.isDirectory()
+			|| verifiedRootStats.isSymbolicLink()
+			|| !hasStableFileIdentity(verifiedRootStats)
+			|| !sameFileIdentity(rootStats, verifiedRootStats)) {
+			throw new Error(`Linked-worktree filesystem generation changed while reading marker for ${requestedPath}`);
+		}
+		// Missing, directory, or malformed markers preserve operation-first
+		// behavior only after proving they describe the same root generation.
+		if (!gitDir) return undefined;
+		return {
+			requestedPath,
+			removalPath: requestedPath,
+			adminPath: path.isAbsolute(gitDir) ? path.normalize(gitDir) : path.resolve(requestedPath, gitDir),
+			aliased: false,
+			rootStats,
+		};
+	}
+
+	let requestedIdentity: string;
+	try {
+		// The explicit native seam expands Windows 8.3 spellings without blocking.
+		requestedIdentity = await nativeRealpath(path.resolve(requestedPath));
+	} catch {
+		return undefined;
+	}
+	let rootStats: AsyncTreeStats;
+	try {
+		rootStats = await fs.promises.lstat(path.resolve(requestedPath));
+	} catch (err) {
+		throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}: ${gitErrorText(err)}`);
+	}
+	if (!rootStats.isDirectory()
+		|| rootStats.isSymbolicLink()
+		|| !hasStableFileIdentity(rootStats)) {
+		throw new Error(`Cannot snapshot linked-worktree filesystem generation for ${requestedPath}`);
+	}
+
+	const comparableIdentity = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+	requestedIdentity = comparableIdentity(requestedIdentity);
+	// path.resolve() necessarily removes dot segments before realpath. Preserve
+	// that lexical proof instead of mistaking the normalized result for an
+	// ordinary coordinate; Windows 8.3 aliases still require native expansion.
+	const aliased = lexicalAlias
+		|| requestedIdentity !== comparableIdentity(path.resolve(requestedPath));
+	if (!aliased) return undefined;
+
+	let registeredPaths: string[];
+	try {
+		const { stdout } = await execGit(
+			["worktree", "list", "--porcelain", "-z"],
+			{ cwd: repoPath, timeout: 5_000 },
+			commandRunner,
+		);
+		registeredPaths = porcelainWorktreePaths(stdout.toString());
+	} catch (err) {
+		throw new Error(`Cannot resolve Git worktree spelling for ${requestedPath}: ${gitErrorText(err)}`);
+	}
+
+	for (const removalPath of registeredPaths) {
+		let registeredIdentity: string;
+		try {
+			registeredIdentity = comparableIdentity(await nativeRealpath(path.resolve(removalPath)));
+		} catch {
+			continue;
+		}
+		if (registeredIdentity !== requestedIdentity) continue;
+
+		const marker = await fs.promises.readFile(path.join(removalPath, ".git"), "utf8");
+		const gitDir = /^gitdir:\s*(.+)$/m.exec(marker)?.[1]?.trim();
+		if (!gitDir) throw new Error(`Cannot snapshot linked-worktree admin path for ${requestedPath}`);
+		const adminPath = path.isAbsolute(gitDir) ? path.normalize(gitDir) : path.resolve(removalPath, gitDir);
+		return {
+			requestedPath,
+			removalPath,
+			adminPath,
+			aliased,
+			rootStats,
+		};
+	}
+	throw new Error(`Cannot resolve Git worktree registration for aliased path ${requestedPath}`);
+}
+
+/** Fail closed unless the registered removal coordinate is still the captured root generation. */
+async function assertWorktreeCleanupSnapshotCurrent(snapshot: ExistingWorktreeCleanupSnapshot): Promise<void> {
+	let currentRootStats: AsyncTreeStats;
+	try {
+		currentRootStats = await fs.promises.lstat(snapshot.removalPath);
+	} catch (err) {
+		throw new Error(`Cannot revalidate linked-worktree filesystem generation before Git removal for ${snapshot.requestedPath}: ${gitErrorText(err)}`);
+	}
+	if (!currentRootStats.isDirectory()
+		|| currentRootStats.isSymbolicLink()
+		|| !hasStableFileIdentity(currentRootStats)
+		|| !sameFileIdentity(snapshot.rootStats, currentRootStats)) {
+		throw new Error(`Linked-worktree filesystem generation changed before Git removal for ${snapshot.requestedPath}`);
+	}
+}
+
+async function pathRemainsStrict(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.lstat(filePath);
+		return true;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return false;
+		throw err;
+	}
 }
 
 /**
@@ -1303,14 +1487,23 @@ export async function cleanupWorktree(
 	remotePolicy: RemoteGitPolicy = DEFAULT_REMOTE_GIT_POLICY,
 ): Promise<void> {
 	const runGit = (args: readonly string[], options?: any) => execGit(args, options, commandRunner);
+	const snapshot = await existingWorktreeCleanupSnapshot(repoPath, worktreePath, commandRunner);
+	const removalPath = snapshot?.removalPath ?? worktreePath;
+	let removalError: unknown;
+
+	// Snapshot construction performs native alias, porcelain, and marker I/O.
+	// Revalidate after all of it, immediately before Git can recursively remove
+	// the registered path, so a replacement generation never reaches Git.
+	if (snapshot) await assertWorktreeCleanupSnapshotCurrent(snapshot);
 
 	try {
-		// Operation first: a successful Git removal needs no preliminary path
-		// probe, and a missing worktree is handled by the targeted fallback below.
-		await runGit(["worktree", "remove", worktreePath, "--force"], {
+		// Existing aliases use Git's authoritative porcelain spelling. Missing
+		// coordinates retain the established operation-first cleanup behavior.
+		await runGit(["worktree", "remove", removalPath, "--force"], {
 			cwd: repoPath,
 		});
-	} catch {
+	} catch (err) {
+		removalError = err;
 		// Preserve the old missing-repository warning/early return without making
 		// every successful cleanup pay a check-then-act race.
 		if (!await pathExists(repoPath)) {
@@ -1318,17 +1511,62 @@ export async function cleanupWorktree(
 			return;
 		}
 
-		// If remove fails, clean up the admin entry for this specific worktree
-		// (NOT a blanket prune — that could damage other worktrees whose
-		// directories exist but have broken .git metadata). `basename` keeps the
-		// target to one direct admin child; an empty/root basename removes nothing.
-		const trimmedWorktreePath = worktreePath.trim();
-		const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
-			? path.basename(path.resolve(trimmedWorktreePath))
-			: "";
-		if (safeName) {
-			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
-			try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
+		// Keep an exact linked-worktree snapshot intact after a failed Git removal
+		// so the operation stays retryable and the postcondition below can reject.
+		// The basename fallback remains only for legacy missing/fake coordinates
+		// that have no filesystem identity snapshot.
+		if (!snapshot) {
+			const trimmedWorktreePath = worktreePath.trim();
+			const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
+				? path.basename(path.resolve(trimmedWorktreePath))
+				: "";
+			if (safeName) {
+				const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+				try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
+			}
+		}
+	}
+
+	// Git can report a successful removal before the checkout directory has fully
+	// disappeared (notably on hosted Windows runners). Preserve one Git remove
+	// command, then recover only the root generation captured before Git acted.
+	// A replacement at the same linked-worktree pathname is not residue: the
+	// bounded remover's expected-root fence rejects it without deleting anything.
+	// Missing/fake coordinates retain their established operation-first recovery.
+	if (!removalError) {
+		try {
+			await removeTargetedTree(
+				removalPath,
+				undefined,
+				snapshot?.rootStats,
+			);
+			if (await pathRemainsStrict(removalPath)) {
+				throw new Error(`directory remains at ${removalPath}`);
+			}
+		} catch (err) {
+			throw new Error(`Failed to clean up worktree ${worktreePath}: ${gitErrorText(err)}`);
+		}
+	}
+
+	// A snapshotted linked-worktree cleanup is not complete until the exact
+	// directory and admin entry captured while live are both absent. This fence
+	// runs before branch deletion so residue or a failed removal cannot be swallowed.
+	if (snapshot) {
+		let directoryRemains: boolean;
+		let adminRemains: boolean;
+		try {
+			directoryRemains = await pathRemainsStrict(snapshot.removalPath);
+			adminRemains = await pathRemainsStrict(snapshot.adminPath);
+		} catch (err) {
+			throw new Error(`Failed to verify worktree cleanup for ${worktreePath}: ${gitErrorText(err)}`);
+		}
+		if (directoryRemains || adminRemains) {
+			const detail = [
+				directoryRemains ? `directory remains at ${snapshot.removalPath}` : "",
+				adminRemains ? `admin directory remains at ${snapshot.adminPath}` : "",
+				removalError ? `git remove failed: ${gitErrorText(removalError)}` : "",
+			].filter(Boolean).join("; ");
+			throw new Error(`Failed to clean up worktree ${snapshot.requestedPath}: ${detail}`);
 		}
 	}
 
