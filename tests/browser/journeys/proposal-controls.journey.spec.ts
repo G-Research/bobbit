@@ -3,7 +3,7 @@
  */
 import { test, expect, openApp } from "../_helpers/journey-fixture.js";
 import { sendMessage, defaultProjectId } from "../_helpers/journey-fixture.js";
-import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
+import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // Ported from api-error-modal.spec.ts (audit: misc GAP): a createGoal 400 must
 // surface the server error text + stack disclosure in the error modal.

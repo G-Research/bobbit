@@ -13,7 +13,7 @@ import { openApp } from "../../../support/harnesses/browser/legacy-ui/ui-helpers
 
 async function waitForActiveSessionReady(page: Page, sessionId: string): Promise<void> {
 	await expect.poll(
-		() => page.evaluate((id) => {
+		() => page.evaluate(() => {
 			const state = (window as any).__bobbitState;
 			const visibleActiveSessionIds = Array.from(
 				document.querySelectorAll<HTMLElement>("[data-session-id][data-nav-active='true']"),
@@ -30,7 +30,7 @@ async function waitForActiveSessionReady(page: Page, sessionId: string): Promise
 				visibleActiveSessionIds,
 				hasComposer: Boolean(document.querySelector("message-editor textarea, textarea")),
 			};
-		}, sessionId),
+		}),
 		{ timeout: 15_000, intervals: [50, 100, 250, 500] },
 	).toEqual({
 		hash: `#/session/${sessionId}`,

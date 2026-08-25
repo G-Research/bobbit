@@ -49,9 +49,9 @@ function scanResponse(items: Record<string, any>[]): any {
 		needsAttention: items.filter((item) => item.disposition === "needs-attention" || item.disposition === "failed").length,
 		scanErrors: items.filter((item) => item.classification === "scan-error").length,
 		defaultSelected: items.filter((item) => item.defaultSelected !== false && item.disposition === "ready-to-clean").length,
-		byClassification: {},
-		byReason: {},
-		bySource: {},
+		byClassification: {} as Record<string, number>,
+		byReason: {} as Record<string, number>,
+		bySource: {} as Record<string, number>,
 	};
 	for (const item of items) {
 		counts.byClassification[item.classification] = (counts.byClassification[item.classification] || 0) + 1;

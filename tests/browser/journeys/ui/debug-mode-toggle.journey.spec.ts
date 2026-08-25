@@ -15,6 +15,10 @@ async function openSettings(page: Page): Promise<void> {
 
 const toggle = (page: Page) => page.getByTestId("debug-mode-toggle");
 
+const devHarnessTest = test.extend<{}, { enableDevHarnessRestart: boolean }>({
+	enableDevHarnessRestart: [true, { scope: "worker" }],
+});
+
 test.describe("Debug mode toggle without dev harness", () => {
 	test("is hidden when the dev harness is not active", async ({ page }) => {
 		await openSettings(page);
@@ -22,10 +26,8 @@ test.describe("Debug mode toggle without dev harness", () => {
 	});
 });
 
-test.describe("Debug mode toggle with dev harness", () => {
-	test.use({ enableDevHarnessRestart: true });
-
-	test("appears, toggles on (DBG flag + perf), persists across reload, arms instrumentation", async ({ page }) => {
+devHarnessTest.describe("Debug mode toggle with dev harness", () => {
+	devHarnessTest("appears, toggles on (DBG flag + perf), persists across reload, arms instrumentation", async ({ page }) => {
 		// Spy on the sink POST without blocking it — passthrough to the real
 		// harness-gated endpoint so the file actually gets written.
 		let bootTimingPosts = 0;

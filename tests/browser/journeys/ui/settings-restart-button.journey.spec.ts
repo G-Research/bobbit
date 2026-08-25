@@ -2,7 +2,7 @@ import { test, expect, type Page } from "../../_helpers/gateway-harness.js";
 import { openApp, navigateToHash } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const devHarnessTest = test.extend<{}, { enableDevHarnessRestart: boolean }>({
-	enableDevHarnessRestart: [true, { scope: "worker", option: true }],
+	enableDevHarnessRestart: [true, { scope: "worker" }],
 });
 
 async function openSettings(page: Page): Promise<void> {

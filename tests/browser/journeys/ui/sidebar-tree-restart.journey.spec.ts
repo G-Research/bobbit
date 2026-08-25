@@ -57,6 +57,7 @@ async function createChildGoal(projectId: string, parentGoalId: string, title: s
 async function createRestartFixture(): Promise<RestartFixture> {
 	const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 	const projectId = await defaultProjectId();
+	if (!projectId) throw new Error("default project not found");
 	const prefs = await apiFetch("/api/preferences", {
 		method: "PUT",
 		body: JSON.stringify({ subgoalsEnabled: true }),

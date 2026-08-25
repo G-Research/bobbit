@@ -20,7 +20,7 @@ import {
 	SpecContext,
 	defineStory,
 } from "../../../support/harnesses/browser/legacy-ui/spec-framework.js";
-import { CT_02, CT_05, CT_13, CT_15 } from "../../../support/harnesses/browser/legacy-ui/spec-contracts.js";
+import { CT_02, CT_05, CT_15 } from "../../../support/harnesses/browser/legacy-ui/spec-contracts.js";
 import { navigateToHash } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // ---------------------------------------------------------------
