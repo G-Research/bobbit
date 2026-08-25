@@ -457,7 +457,7 @@ export const BOBBIT_COMPACT_PROJECTIONS = {
 	bobbit_read: {
 		health: generic,
 		connection_info: generic,
-		list_goals: { profile: "generic", mode: "list", collections: { goals: "goal", archivedSessions: "session" } },
+		list_goals: { profile: "generic", mode: "list", collections: { goals: "goal" } },
 		get_goal: { profile: "goal", mode: "detail" },
 		goal_cost: identity,
 		goal_git_status: generic,
