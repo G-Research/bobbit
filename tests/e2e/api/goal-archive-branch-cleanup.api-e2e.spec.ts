@@ -16,10 +16,9 @@
  * absent remotely (≤55s). Branches present before archive prove cleanup;
  * branches already absent before archive satisfy the local-only policy.
  *
- * Uses the `realpush` harness variant so BOBBIT_TEST_NO_PUSH is NOT set —
- * push-delete actually executes for any published branches. Registered as
- * the `api-realpush` project in playwright-e2e.config.ts for env isolation
- * from other workers.
+ * Uses the `realpush` harness variant so inherited BOBBIT_TEST_NO_PUSH is
+ * removed before gateway creation and push-delete executes for deliberately
+ * published local-bare-remote branches.
  */
 import { test, expect } from "../_helpers/in-process-harness-realpush.js";
 import { execFile as execFileCb } from "node:child_process";
@@ -31,6 +30,15 @@ import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harn
 import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 import { apiFetch } from "../_helpers/e2e-setup.js";
 import { awaitableRm, pollUntil } from "../_helpers/test-utils/cleanup.js";
+
+// Reproduce the ambient coordinator state that previously disabled this
+// fixture after its dedicated Playwright project was removed. Windows treats
+// environment names case-insensitively, so use a mixed-case spelling there;
+// POSIX requires the exact spelling to exercise the same runtime flag.
+const inheritedNoPushName = process.platform === "win32"
+	? "Bobbit_Test_No_Push"
+	: "BOBBIT_TEST_NO_PUSH";
+process.env[inheritedNoPushName] = "1";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -174,6 +182,50 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		} finally {
 			console.warn = originalWarn;
 		}
+	});
+
+	test("archiving a published non-team goal deletes its remote branch despite inherited NO_PUSH", async () => {
+		const goalResp = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "published-branch-cleanup-test",
+				cwd: workRepo,
+				projectId,
+				team: false,
+				worktree: true,
+			}),
+		});
+		expect(goalResp.status).toBe(201);
+		const created = await goalResp.json();
+		const goalId: string = created.id;
+
+		const readyGoal = await pollUntil(async () => {
+			const response = await apiFetch(`/api/goals/${goalId}`);
+			if (!response.ok) return null;
+			const goal = await response.json();
+			if (goal.setupStatus === "error") throw new Error(`Goal setup errored: ${JSON.stringify(goal)}`);
+			return goal.setupStatus === "ready" && goal.branch ? goal : null;
+		}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready with branch` });
+		const branch: string = readyGoal.branch;
+
+		// Publish explicitly to the local bare origin. The inherited NO_PUSH value
+		// would leave this ref behind if the real-push harness failed to scrub it.
+		await runFixtureCommand("git", ["push", "origin", `${branch}:refs/heads/${branch}`], { cwd: workRepo });
+		const { stdout: beforeArchive } = await execFileAsync(
+			"git", ["ls-remote", "--heads", bareRepo, branch],
+			{ encoding: "utf-8" },
+		);
+		expect(beforeArchive).toContain(`refs/heads/${branch}`);
+
+		const archive = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
+		expect(archive.status).toBe(200);
+		await pollUntil(async () => {
+			const { stdout } = await execFileAsync(
+				"git", ["ls-remote", "--heads", bareRepo, branch],
+				{ encoding: "utf-8" },
+			);
+			return stdout.trim() === "" ? true : null;
+		}, { timeoutMs: 55_000, intervalMs: 500, label: `published branch ${branch} deleted from origin` });
 	});
 
 	test("archiving a team goal deletes all per-role remote branches", async () => {

@@ -3,11 +3,11 @@
  * `in-process-harness.ts` minus the `BOBBIT_TEST_NO_PUSH=1` env line so that
  * `git push --delete` actually executes against the test's local bare-repo
  * origin. Used only by tests that assert real remote-branch lifecycle
- * (e.g. `goal-archive-branch-cleanup.spec.ts`). Registered as its own
- * Playwright project in `playwright-e2e.config.ts` for env isolation.
+ * (e.g. `goal-archive-branch-cleanup.api-e2e.spec.ts`).
  *
  * KEEP IN SYNC with `in-process-harness.ts` — the only intentional delta is
- * the missing BOBBIT_TEST_NO_PUSH line.
+ * that this variant deletes every platform-equivalent BOBBIT_TEST_NO_PUSH
+ * spelling before gateway creation rather than enabling that safety switch.
  *
  * In-process gateway fixture for E2E API tests.
  *
@@ -35,6 +35,7 @@ import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
 import { join, resolve } from "node:path";
 import { createRunChild, installRunIsolation } from "../../../tests/support/harnesses/shared/run-isolation.js";
+import { deleteEnvironmentValue } from "../../../scripts/testing-v2/environment-policy.mjs";
 
 installRunIsolation();
 import { fileURLToPath } from "node:url";
@@ -165,6 +166,13 @@ export const test = base.extend<{}, { enableWorktreePool: boolean; gateway: Gate
 		scaffoldBobbitDir(bobbitDir);
 		const token = loadOrCreateToken();
 
+		// The canonical API project can inherit NO_PUSH from its coordinator or a
+		// preceding harness. Plain `delete process.env.NAME` misses alternate
+		// Windows casing, so clear every platform-equivalent spelling at the last
+		// boundary before createGateway snapshots legacy runtime flags. Keep
+		// NO_REMOTE/NO_EXTERNAL enabled: local bare remotes remain allowed while
+		// non-local Git and HTTP stay fenced.
+		deleteEnvironmentValue(process.env, "BOBBIT_TEST_NO_PUSH");
 		const gw = createGateway({
 			host: "127.0.0.1",
 			port: 0,             // OS-assigned port
