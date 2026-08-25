@@ -1,4 +1,5 @@
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import { decodeLikelyUtf8Text } from "../../shared/uploaded-attachment-text.js";
 import { i18n } from "./i18n.js";
 
 // Lazy-loaded heavy deps. Keep these out of the main bundle by deferring to first use.
@@ -98,53 +99,61 @@ export async function loadAttachment(
 	// Detect type and process accordingly
 	const id = `${detectedFileName}_${Date.now()}_${Math.random()}`;
 
-	// Check if it's a PDF
+	const genericDocument = (): Attachment => ({
+		id,
+		type: "document",
+		fileName: detectedFileName,
+		mimeType,
+		size,
+		content: base64Content,
+	});
+
+	// Keep specialized extraction for valid files, but a matching extension or
+	// claimed MIME type must not make otherwise attachable bytes fatal.
 	if (mimeType === "application/pdf" || detectedFileName.toLowerCase().endsWith(".pdf")) {
-		const { extractedText, preview } = await processPdf(arrayBuffer, detectedFileName);
-		return {
-			id,
-			type: "document",
-			fileName: detectedFileName,
-			mimeType: "application/pdf",
-			size,
-			content: base64Content,
-			extractedText,
-			preview,
-		};
+		try {
+			const { extractedText, preview } = await processPdf(arrayBuffer, detectedFileName);
+			return {
+				...genericDocument(),
+				mimeType: "application/pdf",
+				extractedText,
+				preview,
+			};
+		} catch {
+			return genericDocument();
+		}
 	}
 
-	// Check if it's a DOCX file
 	if (
 		mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
 		detectedFileName.toLowerCase().endsWith(".docx")
 	) {
-		const { extractedText } = await processDocx(arrayBuffer, detectedFileName);
-		return {
-			id,
-			type: "document",
-			fileName: detectedFileName,
-			mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-			size,
-			content: base64Content,
-			extractedText,
-		};
+		try {
+			const { extractedText } = await processDocx(arrayBuffer, detectedFileName);
+			return {
+				...genericDocument(),
+				mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+				extractedText,
+			};
+		} catch {
+			return genericDocument();
+		}
 	}
 
-	// Check if it's a PPTX file
 	if (
 		mimeType === "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
 		detectedFileName.toLowerCase().endsWith(".pptx")
 	) {
-		const { extractedText } = await processPptx(arrayBuffer, detectedFileName);
-		return {
-			id,
-			type: "document",
-			fileName: detectedFileName,
-			mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-			size,
-			content: base64Content,
-			extractedText,
-		};
+		try {
+			const { extractedText } = await processPptx(arrayBuffer, detectedFileName);
+			return {
+				...genericDocument(),
+				mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+				extractedText,
+			};
+		} catch {
+			return genericDocument();
+		}
 	}
 
 	// Check if it's an image
@@ -163,7 +172,7 @@ export async function loadAttachment(
 	// Classify every ordinary file from its bytes. Filename extensions and MIME
 	// metadata are untrusted hints: a file claiming text/plain can still contain
 	// binary data, while an extensionless octet-stream can be readable UTF-8.
-	const extractedText = decodeLikelyUtf8Text(arrayBuffer);
+	const extractedText = decodeLikelyUtf8Text(uint8Array);
 
 	if (extractedText !== undefined) {
 		return {
@@ -179,38 +188,7 @@ export async function loadAttachment(
 
 	// Arbitrary binary files are valid attachments too. They retain their exact
 	// bytes and metadata even when Bobbit cannot produce a text preview.
-	return {
-		id,
-		type: "document",
-		fileName: detectedFileName,
-		mimeType,
-		size,
-		content: base64Content,
-	};
-}
-
-function decodeLikelyUtf8Text(arrayBuffer: ArrayBuffer): string | undefined {
-	let text: string;
-	try {
-		text = new TextDecoder("utf-8", { fatal: true }).decode(arrayBuffer);
-	} catch {
-		return undefined;
-	}
-
-	let suspiciousControls = 0;
-	for (let i = 0; i < text.length; i++) {
-		const code = text.charCodeAt(i);
-		// Preserve the whitespace controls used by ordinary text. NUL is a strong
-		// binary signal; the remaining C0/DEL controls are judged by density so an
-		// occasional form-feed does not make an otherwise readable file opaque.
-		if (code === 0) return undefined;
-		if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f) {
-			suspiciousControls++;
-		}
-	}
-	return text.length > 0 && suspiciousControls / text.length > 0.01
-		? undefined
-		: text;
+	return genericDocument();
 }
 
 async function processPdf(
