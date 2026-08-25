@@ -40,7 +40,7 @@
     },
     {
       "path": "tests2/core/uploaded-attachment-admission-repro.test.ts",
-      "reason": "Focused admission lifecycle coverage proving immutable pointers and bounded excerpts reach model dispatch while visible, title, queue, binary, and equal-text occurrence projections remain isolated.",
+      "reason": "Focused admission lifecycle coverage proving immutable pointers and bounded excerpts reach model dispatch while visible, title, queue, binary, equal-text occurrence, and preview-quota rejection projections remain isolated.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -49,7 +49,7 @@
     },
     {
       "path": "tests2/core/uploaded-attachment-store.test.ts",
-      "reason": "Core coverage for immutable exact-byte attachment persistence, idempotent occurrence ownership, bounded ranges, authorization, validation, and purge.",
+      "reason": "Core coverage for immutable exact-byte and durable-preview quota accounting, idempotent occurrence ownership, bounded ranges, authorization, validation, and purge.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

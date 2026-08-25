@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeLikelyUtf8Text } from "../../shared/uploaded-attachment-text.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
+import { decodeAttachmentDisplayPreview } from "./attachment-display.js";
 import {
 	boundServerDerivedDocumentText,
 	deriveSpecializedDocumentText,
@@ -46,9 +47,20 @@ export interface StoredUploadedAttachmentMetadata {
 	sha256: string;
 }
 
+export interface StoredUploadedDocumentDisplayMetadata {
+	id: string;
+	type: "document";
+	fileName: string;
+	mimeType: string;
+	size: number;
+	preview?: string;
+}
+
 export interface StoredUploadedAttachmentOccurrence {
 	occurrenceId: string;
 	attachments: Array<StoredUploadedAttachmentMetadata & { trustedExtractedText?: string }>;
+	/** Store-validated presentation data whose preview bytes own occurrence quota. */
+	displayAttachments: StoredUploadedDocumentDisplayMetadata[];
 }
 
 export interface UploadedAttachmentRange {
@@ -69,6 +81,8 @@ interface ManifestAttachment extends StoredUploadedAttachmentMetadata {
 	id: string;
 	fileKey: string;
 	trustedExtractedText?: string;
+	previewSize?: number;
+	previewSha256?: string;
 }
 
 interface Manifest {
@@ -90,6 +104,9 @@ interface CanonicalInput {
 	bytes: Buffer;
 	sha256: string;
 	trustedExtractedText?: string;
+	preview?: string;
+	previewSize?: number;
+	previewSha256?: string;
 }
 
 export class UploadedAttachmentStoreError extends Error {
@@ -284,7 +301,10 @@ async function canonicalInputs(raw: unknown): Promise<CanonicalInput[]> {
 		const fileName = boundedMetadata(candidate.fileName, "filename", 1024);
 		const mimeType = boundedMetadata(candidate.mimeType, "MIME type", 512);
 		if (candidate.extractedText !== undefined && typeof candidate.extractedText !== "string") invalid("Invalid extracted attachment text");
-		if (candidate.preview !== undefined && typeof candidate.preview !== "string") invalid("Invalid attachment preview");
+		const previewBytes = candidate.preview === undefined
+			? undefined
+			: decodeAttachmentDisplayPreview(candidate.preview);
+		if (candidate.preview !== undefined && previewBytes === undefined) invalid("Invalid attachment preview");
 		const bytes = decodeBase64(candidate.content, candidate.size);
 		totalBytes += bytes.length;
 		if (totalBytes > MAX_UPLOADED_ATTACHMENT_AGGREGATE_BYTES) invalid("Uploaded attachments exceed the aggregate byte limit");
@@ -300,6 +320,11 @@ async function canonicalInputs(raw: unknown): Promise<CanonicalInput[]> {
 			bytes,
 			sha256: createHash("sha256").update(bytes).digest("hex"),
 			...(trustedExtractedText === undefined ? {} : { trustedExtractedText }),
+			...(previewBytes === undefined ? {} : {
+				preview: candidate.preview as string,
+				previewSize: previewBytes.length,
+				previewSha256: createHash("sha256").update(previewBytes).digest("hex"),
+			}),
 		});
 	}
 	return inputs;
@@ -309,7 +334,14 @@ function contentDigest(sessionId: string, occurrenceId: string, attachments: Can
 	return createHash("sha256").update(JSON.stringify({
 		sessionId,
 		occurrenceId,
-		attachments: attachments.map(({ id, fileName, mimeType, size, sha256 }) => ({ id, fileName, mimeType, size, sha256 })),
+		attachments: attachments.map(({ id, fileName, mimeType, size, sha256, previewSize, previewSha256 }) => ({
+			id,
+			fileName,
+			mimeType,
+			size,
+			sha256,
+			...(previewSize === undefined ? {} : { previewSize, previewSha256 }),
+		})),
 	}), "utf8").digest("hex");
 }
 
@@ -356,6 +388,14 @@ function coerceManifest(value: unknown): Manifest | null {
 			|| typeof candidate.mimeType !== "string"
 			|| typeof candidate.size !== "number" || !Number.isSafeInteger(candidate.size) || candidate.size < 0 || candidate.size > MAX_UPLOADED_ATTACHMENT_BYTES
 			|| typeof candidate.sha256 !== "string" || !VALID_HASH.test(candidate.sha256)
+			|| ((candidate.previewSize === undefined) !== (candidate.previewSha256 === undefined))
+			|| (candidate.previewSize !== undefined
+				&& (typeof candidate.previewSize !== "number"
+					|| !Number.isSafeInteger(candidate.previewSize)
+					|| candidate.previewSize < 0
+					|| candidate.previewSize > MAX_UPLOADED_ATTACHMENT_BYTES
+					|| typeof candidate.previewSha256 !== "string"
+					|| !VALID_HASH.test(candidate.previewSha256)))
 			|| (candidate.trustedExtractedText !== undefined
 				&& (typeof candidate.trustedExtractedText !== "string"
 					|| Buffer.byteLength(candidate.trustedExtractedText, "utf8") > MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES
@@ -417,8 +457,9 @@ async function rebuildSessionUsage(sessionId: string, sessionKey: string): Promi
 		try {
 			const manifest = await loadManifest(sessionId, { sessionKey, occurrenceKey: entry.name });
 			for (const attachment of manifest.attachments) {
-				if (total > Number.MAX_SAFE_INTEGER - attachment.size) return Number.POSITIVE_INFINITY;
-				total += attachment.size;
+				const ownedBytes = attachment.size + (attachment.previewSize ?? 0);
+				if (!Number.isSafeInteger(ownedBytes) || total > Number.MAX_SAFE_INTEGER - ownedBytes) return Number.POSITIVE_INFINITY;
+				total += ownedBytes;
 			}
 		} catch (error) {
 			// Only validated, byte-complete committed manifests own quota. Corrupt
@@ -447,7 +488,7 @@ function publicOccurrence(manifest: Manifest): {
 	};
 }
 
-function admittedOccurrence(manifest: Manifest): StoredUploadedAttachmentOccurrence {
+function admittedOccurrence(manifest: Manifest, inputs: CanonicalInput[]): StoredUploadedAttachmentOccurrence {
 	const occurrence = publicOccurrence(manifest);
 	return {
 		...occurrence,
@@ -456,6 +497,14 @@ function admittedOccurrence(manifest: Manifest): StoredUploadedAttachmentOccurre
 			...(manifest.attachments[index].trustedExtractedText === undefined
 				? {}
 				: { trustedExtractedText: manifest.attachments[index].trustedExtractedText }),
+		})),
+		displayAttachments: inputs.map(({ id, fileName, mimeType, size, preview }) => ({
+			id,
+			type: "document",
+			fileName,
+			mimeType,
+			size,
+			...(preview === undefined ? {} : { preview }),
 		})),
 	};
 }
@@ -471,7 +520,7 @@ export async function persistUploadedAttachmentOccurrence(
 	return withSessionOperation(sessionKey, async () => {
 		if (purgedSessionKeys.has(sessionKey)) unavailable();
 		const inputs = await canonicalInputs(rawAttachments);
-		const occurrenceBytes = inputs.reduce((total, input) => total + input.size, 0);
+		const occurrenceBytes = inputs.reduce((total, input) => total + input.size + (input.previewSize ?? 0), 0);
 		const digest = contentDigest(sessionId, occurrenceId, inputs);
 		const finalDir = occurrenceDir(sessionKey, occurrenceKey);
 		const ownerDir = sessionDir(sessionKey);
@@ -481,7 +530,7 @@ export async function persistUploadedAttachmentOccurrence(
 			if (existing.contentDigest !== digest) {
 				throw new UploadedAttachmentStoreError(409, "UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT", "Attachment occurrence was already accepted with different content");
 			}
-			return admittedOccurrence(existing);
+			return admittedOccurrence(existing, inputs);
 		};
 
 		try {
@@ -527,6 +576,10 @@ export async function persistUploadedAttachmentOccurrence(
 				size: input.size,
 				sha256: input.sha256,
 				...(input.trustedExtractedText === undefined ? {} : { trustedExtractedText: input.trustedExtractedText }),
+				...(input.previewSize === undefined ? {} : {
+					previewSize: input.previewSize,
+					previewSha256: input.previewSha256,
+				}),
 			})),
 		};
 		// Excerpts are best-effort context, while exact bytes and their pointer are
@@ -550,7 +603,7 @@ export async function persistUploadedAttachmentOccurrence(
 			await testHooks?.beforeCommit?.({ sessionId, occurrenceId });
 			await fs.promises.rename(tmpDir, finalDir);
 			sessionUsageBytes.set(sessionKey, committedUsage);
-			return admittedOccurrence(manifest);
+			return admittedOccurrence(manifest, inputs);
 		} catch (error) {
 			await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
 			await fs.promises.rmdir(ownerDir).catch(() => undefined);

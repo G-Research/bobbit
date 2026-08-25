@@ -7785,7 +7785,7 @@ export class SessionManager {
 	}>(sessionId: string, text: string, opts: T | undefined): Promise<T | undefined> {
 		if (!opts?.attachments?.length) return opts;
 
-		const displayAttachments = sanitizeAttachmentDisplayMetadata(opts.attachments);
+		let displayAttachments = sanitizeAttachmentDisplayMetadata(opts.attachments);
 		if (!displayAttachments) {
 			throw new UploadedAttachmentStoreError(
 				400,
@@ -7805,6 +7805,13 @@ export class SessionManager {
 				...attachment,
 				...(trustedExtractedText === undefined ? {} : { extractedText: trustedExtractedText }),
 			}));
+			// Only store-admitted document previews may cross the later durable
+			// display-envelope boundary. Images retain their existing presentation
+			// path and are not duplicated into the immutable document store.
+			let documentIndex = 0;
+			displayAttachments = displayAttachments.map((attachment) => attachment.type === "document"
+				? stored.displayAttachments[documentIndex++]!
+				: attachment);
 		}
 
 		const baseModelText = synthesizeAttachmentText(

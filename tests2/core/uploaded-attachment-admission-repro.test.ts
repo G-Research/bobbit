@@ -348,6 +348,64 @@ describe("uploaded attachment prompt admission", () => {
 		}
 	});
 
+	it("charges document previews before any admission side effect", async () => {
+		const previewSessionId = "83749600-0000-4000-8000-000000000006";
+		const previewManager: any = new SessionManager({ skipTitleGeneration: true });
+		clearInterval(previewManager._statusHeartbeatTimer);
+		previewManager._statusHeartbeatTimer = null;
+		const previewPrompt = vi.fn(async () => ({ success: true }));
+		const previewSteer = vi.fn(async () => ({ success: true }));
+		const previewSession: any = {
+			...session,
+			id: previewSessionId,
+			title: "Attachment preview quota admission",
+			status: "idle",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			pendingSkillExpansions: undefined,
+			pendingSkillTranscriptBindings: undefined,
+			pendingPromptAuthors: undefined,
+			promptAuthorMessageBindings: undefined,
+			promptAuthorReplayBindings: undefined,
+			promptAuthorAmbiguityFences: undefined,
+			inFlightSteerTexts: undefined,
+			lastPromptDisplay: undefined,
+			rpcClient: { ...session.rpcClient, prompt: previewPrompt, steer: previewSteer },
+		};
+		previewManager.sessions.set(previewSessionId, previewSession);
+		const attachment = {
+			...ATTACHMENT,
+			preview: Buffer.from("durable document preview").toString("base64"),
+		};
+		const beforeStoreEntries = fs.readdirSync(path.join(stateDir, "uploaded-attachments"), { recursive: true });
+		setUploadedAttachmentSessionQuotaForTesting(ATTACHMENT.size);
+		try {
+			await expect(previewManager.enqueuePrompt(previewSessionId, "preview over quota", {
+				intentId: "preview-quota-overflow-occurrence",
+				attachments: [attachment],
+			})).rejects.toMatchObject({
+				statusCode: 413,
+				code: "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED",
+				retryable: false,
+			});
+			expect(previewPrompt).not.toHaveBeenCalled();
+			expect(previewSteer).not.toHaveBeenCalled();
+			expect(previewSession.promptQueue.toArray()).toEqual([]);
+			expect(previewManager.projectDeliveryOutbox(previewSessionId)).toEqual([]);
+			expect(previewSession.pendingSkillExpansions).toBeUndefined();
+			expect(previewSession.inFlightSteerTexts).toBeUndefined();
+			expect(previewSession.eventBuffer.getAll()).toEqual([]);
+			expect(previewManager.buildVisibleMessageSnapshot(previewSessionId, [])).toEqual([]);
+			expect(readSkillSidecarEntries(previewSessionId)).toEqual([]);
+			expect(readAuthorSidecar(previewSessionId)).toEqual([]);
+			expect(fs.readdirSync(path.join(stateDir, "uploaded-attachments"), { recursive: true })).toEqual(beforeStoreEntries);
+		} finally {
+			setUploadedAttachmentSessionQuotaForTesting(undefined);
+			previewManager.sessions.clear();
+		}
+	});
+
 	it("keeps recovery and explicit retry envelopes occurrence-safe with a stable pointer", async () => {
 		const recoveryManager: any = new SessionManager({ skipTitleGeneration: true });
 		clearInterval(recoveryManager._statusHeartbeatTimer);

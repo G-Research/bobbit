@@ -234,7 +234,58 @@ describe("immutable uploaded attachment store", () => {
 			...document("a", "../not-a-path", "application/octet-stream", Buffer.from("abc")),
 			unexpected: true,
 		}]), "UPLOADED_ATTACHMENT_INVALID");
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "bad", [{
+			...document("a", "a.pdf", "application/pdf", Buffer.from("abc")),
+			preview: "AB==",
+		}]), "UPLOADED_ATTACHMENT_INVALID");
 		expect(fs.readdirSync(root)).toEqual([]);
+	});
+
+	it("rejects document preview bytes before writes when their occurrence exceeds quota", async () => {
+		setUploadedAttachmentSessionQuotaForTesting(1);
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "preview-quota-no-side-effect", [{
+			...document("preview", "preview.pdf", "application/pdf", Buffer.from("x")),
+			preview: Buffer.from("two preview bytes").toString("base64"),
+		}]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
+		expect(fs.readdirSync(root)).toEqual([]);
+	});
+
+	it("charges preview bytes after accounting rebuild and preserves admitted PDF display data", async () => {
+		const preview = Buffer.from("png!");
+		const accepted = {
+			...document("pdf", "preview.pdf", "application/pdf", Buffer.from("x")),
+			preview: preview.toString("base64"),
+		};
+		setUploadedAttachmentSessionQuotaForTesting(accepted.size + preview.length);
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "preview-before-restart", [accepted]);
+		expect(saved.displayAttachments).toEqual([{
+			id: accepted.id,
+			type: "document",
+			fileName: accepted.fileName,
+			mimeType: accepted.mimeType,
+			size: accepted.size,
+			preview: accepted.preview,
+		}]);
+
+		resetUploadedAttachmentUsageForTesting();
+		const swept = await sweepUploadedAttachments([SESSION_A]);
+		expect(swept).toMatchObject({ removed: [], kept: [expect.stringMatching(/^[a-f0-9]{64}$/)] });
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "preview-after-restart", [
+			document("blocked", "blocked.bin", "application/octet-stream", Buffer.from("x")),
+		]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
+	});
+
+	it("binds exact canonical preview identity into idempotent occurrence admission", async () => {
+		const original = {
+			...document("pdf", "same.pdf", "application/pdf", Buffer.from("x")),
+			preview: Buffer.from("first preview").toString("base64"),
+		};
+		const first = await persistUploadedAttachmentOccurrence(SESSION_A, "preview-idempotence", [original]);
+		expect(await persistUploadedAttachmentOccurrence(SESSION_A, "preview-idempotence", [{ ...original }])).toEqual(first);
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "preview-idempotence", [{
+			...original,
+			preview: Buffer.from("other preview").toString("base64"),
+		}]), "UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT");
 	});
 
 	it("enforces a cumulative per-session quota without charging idempotent retries", async () => {

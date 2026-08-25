@@ -10,7 +10,7 @@ export interface AttachmentDisplayMetadata {
 	fileName: string;
 	mimeType: string;
 	size: number;
-	/** Optional bounded image preview (base64 without a data URL prefix). */
+	/** Optional bounded presentation preview (base64 without a data URL prefix). */
 	preview?: string;
 }
 
@@ -20,6 +20,19 @@ const MAX_PREVIEW_CHARS = Math.ceil(MAX_FILE_BYTES * 4 / 3) + 8;
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const SAFE_MIME = /^[\x20-\x7e]{1,255}$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/**
+ * Decode an untrusted display preview only when it is canonical, bounded base64.
+ * The attachment store reuses this exact validation before charging durable
+ * document previews, while display sanitization applies it before sidecar IO.
+ */
+export function decodeAttachmentDisplayPreview(value: unknown): Buffer | undefined {
+	if (typeof value !== "string" || value.length > MAX_PREVIEW_CHARS
+		|| value.length % 4 !== 0 || !BASE64.test(value)) return undefined;
+	const bytes = Buffer.from(value, "base64");
+	if (bytes.length > MAX_FILE_BYTES || bytes.toString("base64") !== value) return undefined;
+	return bytes;
+}
 
 function safeFileName(value: unknown): string | undefined {
 	if (typeof value !== "string" || value.length === 0 || value.length > 512) return undefined;
@@ -45,8 +58,7 @@ export function sanitizeAttachmentDisplayMetadata(value: unknown): AttachmentDis
 			|| !Number.isSafeInteger(raw.size) || (raw.size as number) < 0 || (raw.size as number) > MAX_FILE_BYTES) {
 			return undefined;
 		}
-		if (raw.preview !== undefined && (typeof raw.preview !== "string"
-			|| raw.preview.length > MAX_PREVIEW_CHARS || !BASE64.test(raw.preview))) return undefined;
+		if (raw.preview !== undefined && decodeAttachmentDisplayPreview(raw.preview) === undefined) return undefined;
 		ids.add(raw.id as string);
 		out.push({
 			id: raw.id as string,
