@@ -88,6 +88,8 @@ import {
 } from "./attachment-display.js";
 import { appendUploadedAttachmentContext } from "../../shared/uploaded-attachment-context.js";
 import {
+	assertUploadedAttachmentSerializedSendWithinLimit,
+	MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES,
 	persistUploadedAttachmentOccurrence,
 	UploadedAttachmentStoreError,
 } from "./uploaded-attachment-store.js";
@@ -1176,6 +1178,8 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
+	/** Occurrence-owned outward projection retained for a fresh-response retry. */
+	lastPromptDisplay?: PromptDisplayRetryCarrier;
 	/** Provenance of the last prompt enqueued to this session. Set by
 	 *  enqueuePrompt / deliverLiveSteer. Defaults to "user" when callers
 	 *  don't supply a source. Read by TeamManager.subscribeTeamLeadEvents. */
@@ -1339,6 +1343,12 @@ interface PendingSkillTranscriptBinding {
 	promptId: string;
 	modelText: string;
 	messageIdentity: { id: string } | { timestamp: number };
+}
+
+interface PromptDisplayRetryCarrier {
+	modelText: string;
+	originalText: string;
+	attachments?: AttachmentDisplayMetadata[];
 }
 
 /** Exact canonical bridge identity required by ownership-sensitive respawns. */
@@ -2684,10 +2694,11 @@ export function prepareVisibleAgentEvent(
 	}
 	const eventBinding = (prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
 	if (raw.type === "message_end" && eventBinding && !eventBinding.alreadySettled) {
+		const displayModelText = extractUserMessageText((prepared as any).message);
 		const envelope = session.pendingSkillExpansions?.find((entry) =>
 			entry.promptId === eventBinding.promptId
 			&& entry.recordId !== undefined
-			&& entry.modelText === modelText,
+			&& entry.modelText === displayModelText,
 		);
 		const rawMessageId = typeof message.id === "string" && message.id.length > 0
 			? message.id
@@ -2703,7 +2714,7 @@ export function prepareVisibleAgentEvent(
 				session.pendingSkillTranscriptBindings.push({
 					recordId: envelope.recordId,
 					promptId: eventBinding.promptId,
-					modelText,
+					modelText: displayModelText,
 					messageIdentity,
 				});
 			}
@@ -3119,7 +3130,10 @@ function spliceSkillExpansionsIntoEvent(
 	const pending = session.pendingSkillExpansions;
 	if (!pending || pending.length === 0) return event;
 	const body = extractUserMessageText(msg);
-	const idx = pending.findIndex((p) => p.modelText === body);
+	const binding = ev[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+	const idx = binding
+		? pending.findIndex((candidate) => candidate.promptId === binding.promptId && candidate.modelText === body)
+		: pending.findIndex((candidate) => candidate.promptId === undefined && candidate.modelText === body);
 	if (idx === -1) return event;
 	const envelope = pending.splice(idx, 1)[0];
 	const rewrittenMsg = projectPromptDisplayMessage(msg, {
@@ -3270,6 +3284,8 @@ export interface SessionManagerOptions {
 	promotedSessionLifecycleGuard?: PromotedSessionLifecycleGuard;
 	/** Narrow canonical notification publication seam. */
 	hostNotificationPublisher?: HostSessionNotificationPublisher;
+	/** Test-only override for the browser-compatible serialized attachment guard. */
+	uploadedAttachmentSerializedSendLimitBytes?: number;
 }
 
 type SessionReplacementToken = {
@@ -3388,6 +3404,7 @@ export class SessionManager {
 	private readonly clock: Clock;
 	private readonly commandRunner: CommandRunner;
 	private readonly skipTitleGeneration: boolean;
+	private readonly uploadedAttachmentSerializedSendLimitBytes: number;
 	private readonly remoteGitPolicy: RemoteGitPolicy;
 	private readonly testPreparingDelayMs?: string;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -4447,6 +4464,7 @@ export class SessionManager {
 			session.latestTurnAssistantText = undefined;
 			session.lastPromptText = undefined;
 			session.lastPromptImages = undefined;
+			session.lastPromptDisplay = undefined;
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.manualRetryRequired = false;
@@ -5324,6 +5342,8 @@ export class SessionManager {
 		this.clock = options?.clock ?? realClock;
 		this.commandRunner = options?.commandRunner ?? realCommandRunner;
 		this.skipTitleGeneration = options?.skipTitleGeneration ?? false;
+		this.uploadedAttachmentSerializedSendLimitBytes = options?.uploadedAttachmentSerializedSendLimitBytes
+			?? MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES;
 		this.remoteGitPolicy = options?.remoteGitPolicy ?? {};
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
@@ -7639,6 +7659,11 @@ export class SessionManager {
 	}>(sessionId: string, text: string, opts: T | undefined): Promise<T | undefined> {
 		if (!opts?.attachments?.length) return opts;
 
+		assertUploadedAttachmentSerializedSendWithinLimit({
+			text,
+			images: opts.images,
+			attachments: opts.attachments,
+		}, this.uploadedAttachmentSerializedSendLimitBytes);
 		const displayAttachments = sanitizeAttachmentDisplayMetadata(opts.attachments);
 		if (!displayAttachments) {
 			throw new UploadedAttachmentStoreError(
@@ -7706,12 +7731,12 @@ export class SessionManager {
 			attachments?: unknown[];
 			intentId?: string;
 		} | undefined,
-	): void {
+	): PendingSkillSidecarEnvelope | undefined {
 		const attachments = sanitizeAttachmentDisplayMetadata(opts?.attachments);
 		const hasSkillExpansions = !!opts?.skillExpansions?.length;
 		const hasFileMentions = !!opts?.fileMentions?.length;
 		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
-		if (!hasSkillExpansions && !hasFileMentions && !hasModelTextOverride && !attachments?.length) return;
+		if (!hasSkillExpansions && !hasFileMentions && !hasModelTextOverride && !attachments?.length) return undefined;
 
 		const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
 			ts: this.clock.now(),
@@ -7721,8 +7746,7 @@ export class SessionManager {
 			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 			...(attachments?.length ? { attachments } : {}),
 		});
-		if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
-		session.pendingSkillExpansions.push({
+		const envelope: PendingSkillSidecarEnvelope = {
 			modelText: dispatchText,
 			originalText: text,
 			skillExpansions: opts?.skillExpansions ?? [],
@@ -7730,7 +7754,55 @@ export class SessionManager {
 			...(attachments?.length ? { attachments } : {}),
 			...(recordId ? { recordId } : {}),
 			...(opts?.intentId ? { promptId: opts.intentId } : {}),
+		};
+		if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
+		session.pendingSkillExpansions.push(envelope);
+		return envelope;
+	}
+
+	/** Predict the exact pre-author Pi body for immediate error recovery. */
+	private promptDisplayModelTextAtAdmission(session: SessionInfo, dispatchText: string): string {
+		if (session.status !== "idle" || !session.lastTurnErrored
+			|| (session.consecutiveErrorTurns ?? 0) >= MAX_CONSECUTIVE_ERROR_TURNS
+			|| isOrphanToolResultOrderingError(session.lastTurnErrorMessage)) return dispatchText;
+		if (isBlankContentBlockError(session.lastTurnErrorMessage)) {
+			try {
+				if (this.resolveStoreForSession(session.id).get(session.id)?.agentSessionFile) return dispatchText;
+			} catch { /* no restorable transcript: the normal prefixed path is authoritative */ }
+		}
+		return buildErrorRecoveryPrefix((session.lastTurnErrorMessage || "").slice(0, 200), dispatchText);
+	}
+
+	private rememberLastPromptDisplay(
+		session: SessionInfo,
+		modelText: string,
+		promptId?: string,
+	): void {
+		const envelope = session.pendingSkillExpansions?.find((entry) =>
+			(promptId !== undefined && entry.promptId === promptId && entry.modelText === modelText)
+			|| (entry.promptId === undefined && entry.modelText === modelText));
+		session.lastPromptDisplay = envelope
+			? {
+				modelText,
+				originalText: envelope.originalText,
+				...(envelope.attachments?.length ? { attachments: envelope.attachments.map((attachment) => ({ ...attachment })) } : {}),
+			}
+			: undefined;
+	}
+
+	private appendRetryPromptDisplayEnvelope(
+		session: SessionInfo,
+		carrier: PromptDisplayRetryCarrier | undefined,
+		modelText: string,
+		promptId: string,
+	): AttachmentDisplayMetadata[] | undefined {
+		if (!carrier) return undefined;
+		this.appendPromptDisplayEnvelope(session, carrier.originalText, modelText, {
+			modelText,
+			attachments: carrier.attachments,
+			intentId: promptId,
 		});
+		return carrier.attachments?.map((attachment) => ({ ...attachment }));
 	}
 
 	/** Apply a synchronously persisted exact echo/cancellation that preceded RPC acknowledgement. */
@@ -8162,7 +8234,12 @@ export class SessionManager {
 				return { status: duplicate && (duplicate as ReliableQueuedMessage).deliveryState === "queued" ? "queued" : "dispatched" };
 			}
 		}
-		this.appendPromptDisplayEnvelope(session, text, dispatchText, opts);
+		this.appendPromptDisplayEnvelope(
+			session,
+			text,
+			this.promptDisplayModelTextAtAdmission(session, dispatchText),
+			opts,
+		);
 
 		// Stable-ID admission has one durable boundary: persist the exact occurrence
 		// before any Pi RPC, even when the session currently appears idle.
@@ -9568,6 +9645,7 @@ export class SessionManager {
 			// Re-resolve canonical goal lifecycle at the last synchronous boundary
 			// before status, author-sidecar, queue ownership, or Pi can change.
 			if (!this.goalDispatchGuardAllows(session, reliableRow)) return;
+			this.rememberLastPromptDisplay(session, text, reliableRow.id);
 			session.lastPromptText = text;
 			session.lastPromptImages = images;
 			session.lastPromptSource = source;
@@ -9738,6 +9816,7 @@ export class SessionManager {
 			}
 		}
 
+		this.rememberLastPromptDisplay(session, text, promptId);
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
@@ -9908,6 +9987,7 @@ export class SessionManager {
 		const promptSource = next.source ?? "user";
 		const promptAuthor = resolveAcceptedPromptAuthor(promptSource, next.author);
 		const promptId = steered.length > 0 ? batchPromptId("queue-batch", steered) : next.id;
+		this.rememberLastPromptDisplay(session, next.text, promptId);
 		session.lastPromptText = next.text;
 		session.lastPromptImages = next.images;
 		session.lastPromptSource = promptSource;
@@ -10803,8 +10883,11 @@ export class SessionManager {
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
 		if (!ps?.agentSessionFile) return undefined;
+		const lastPromptDisplay = session.lastPromptDisplay;
 		const restored = await this._respawnAgentInPlace(session, ps, { deferQueueDrain: true });
-		return restored ?? this.sessions.get(session.id);
+		const target = restored ?? this.sessions.get(session.id);
+		if (target && lastPromptDisplay) target.lastPromptDisplay = lastPromptDisplay;
+		return target;
 	}
 
 	/**
@@ -10827,6 +10910,7 @@ export class SessionManager {
 			if (!ps?.agentSessionFile) return undefined;
 
 			const pendingPromptEnvelopes = current.pendingSkillExpansions?.slice();
+			const lastPromptDisplay = current.lastPromptDisplay;
 			const recoveredPromptDispatchQueueIds = current.recoveredPromptDispatchQueueIds?.slice();
 			const poisonRecoveryPromptDispatchQueueIds = current.poisonRecoveryPromptDispatchQueueIds?.slice();
 			const savedSessionOnlyGrantedTools = current.sessionOnlyGrantedTools?.slice();
@@ -10849,6 +10933,7 @@ export class SessionManager {
 			if (target && target !== current) {
 				if (savedSessionOnlyGrantedTools) target.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 				if (savedOneTimeGrantedTools) target.oneTimeGrantedTools = savedOneTimeGrantedTools;
+				if (lastPromptDisplay) target.lastPromptDisplay = lastPromptDisplay;
 				if (pendingPromptEnvelopes?.length) {
 					target.pendingSkillExpansions = [
 						...pendingPromptEnvelopes,
@@ -10960,6 +11045,7 @@ export class SessionManager {
 		session: SessionInfo,
 		text: string,
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		attachments?: AttachmentDisplayMetadata[],
 	): QueuedMessage {
 		const existing = session.explicitRetryQueueRowId
 			? session.promptQueue.toArray().find(row => row.id === session.explicitRetryQueueRowId)
@@ -10976,6 +11062,7 @@ export class SessionManager {
 		}
 		const row = session.promptQueue.enqueueAtFront(text, {
 			images,
+			attachments,
 			source: "system",
 			author: BOBBIT_SYSTEM_AUTHOR,
 		});
@@ -11076,6 +11163,7 @@ export class SessionManager {
 		const poisonedByOrphanResult = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
 		const savedPromptText = session.lastPromptText;
 		const savedPromptImages = session.lastPromptImages;
+		const savedPromptDisplay = session.lastPromptDisplay;
 		const savedPromptSource = session.lastPromptSource;
 
 		if (poisonedByOrphanResult) {
@@ -11092,9 +11180,11 @@ export class SessionManager {
 					: "[SYSTEM: The model API returned an error on your last response. " +
 						"Please review your conversation history and retry what you were doing.]";
 			const retryImages = hadToolCalls ? undefined : savedPromptImages;
+			const retryDisplay = hadToolCalls ? undefined : savedPromptDisplay;
 			// Explicit Retry owns a newly allocated durable row. Equal text/images in
 			// the existing queue are independent accepted intent and must survive.
-			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages);
+			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages, retryDisplay?.attachments);
+			const retryAttachments = this.appendRetryPromptDisplayEnvelope(session, retryDisplay, retryText, acceptedRetry.id);
 			this.markPoisonRecoveryPromptDispatchRow(session, acceptedRetry.id);
 			const recovery = (async () => {
 				const target = await this._recoverPoisonedHistory(session, "retry", async (canonical) => {
@@ -11106,7 +11196,7 @@ export class SessionManager {
 					canonical.lastPromptSource = savedPromptSource;
 					const durableId = this.ensureDurableRetryRow(canonical, acceptedRetry);
 					try {
-						await this.dispatchDirectPrompt(canonical, retryText, retryImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+						await this.dispatchDirectPrompt(canonical, retryText, retryImages, retryAttachments, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
 					} catch (err) {
 						canonical.lastTurnErrored = true;
 						canonical.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -11157,13 +11247,28 @@ export class SessionManager {
 			// synthesizeAttachmentText can still return blank; never resend it.
 			let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
 			if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
-			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, savedPromptImages) : undefined;
+			const acceptedRetry = !isAuto
+				? this.enqueueDurableRetryRow(session, retryText, savedPromptImages, savedPromptDisplay?.attachments)
+				: undefined;
+			const retryPromptId = acceptedRetry?.id ?? promptAttemptId("auto-retry");
+			const retryAttachments = this.appendRetryPromptDisplayEnvelope(session, savedPromptDisplay, retryText, retryPromptId);
 			const target = await this._recoverBlankTextPoison(session);
 			const dispatchTarget = target ?? session;
 			dispatchTarget.lastPromptText = retryText;
 			dispatchTarget.lastPromptImages = savedPromptImages;
 			const durableId = acceptedRetry ? this.ensureDurableRetryRow(dispatchTarget, acceptedRetry) : undefined;
-			await this.dispatchDirectPrompt(dispatchTarget, retryText, savedPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+			await this.dispatchDirectPrompt(
+				dispatchTarget,
+				retryText,
+				savedPromptImages,
+				retryAttachments,
+				false,
+				false,
+				"system",
+				BOBBIT_SYSTEM_AUTHOR,
+				durableId,
+				retryPromptId,
+			);
 			return;
 		}
 

@@ -6,6 +6,7 @@ import { bobbitStateDir } from "../bobbit-dir.js";
 export const MAX_UPLOADED_ATTACHMENTS_PER_OCCURRENCE = 10;
 export const MAX_UPLOADED_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_AGGREGATE_BYTES = 200 * 1024 * 1024;
+export const MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_READ_BYTES = 64 * 1024;
 
 const VERSION = 1 as const;
@@ -172,6 +173,34 @@ function decodeBase64(value: unknown, declaredSize: unknown): Buffer {
 	const bytes = Buffer.from(value, "base64");
 	if (bytes.length !== declaredSize) invalid("Attachment size does not match its exact bytes");
 	return bytes;
+}
+
+/**
+ * Measure the exact browser prompt frame retained by the existing composer
+ * guard. Admission calls this before persistence so direct WS clients cannot
+ * bypass the same serialized payload ceiling. The optional limit is a narrow
+ * test seam that avoids allocating a production-sized fixture.
+ */
+export function assertUploadedAttachmentSerializedSendWithinLimit(input: {
+	text: string;
+	images?: unknown[];
+	attachments: unknown[];
+}, limitBytes = MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES): void {
+	if (!Number.isSafeInteger(limitBytes) || limitBytes < 0) invalid("Invalid serialized attachment send limit");
+	let serialized: string;
+	try {
+		serialized = JSON.stringify({
+			type: "prompt",
+			text: input.text,
+			...(input.images?.length ? { images: input.images } : {}),
+			...(input.attachments.length ? { attachments: input.attachments } : {}),
+		});
+	} catch {
+		invalid("Uploaded attachment prompt frame is not serializable");
+	}
+	if (Buffer.byteLength(serialized, "utf8") > limitBytes) {
+		invalid("Uploaded attachment prompt exceeds the serialized send limit");
+	}
 }
 
 function canonicalInputs(raw: unknown): CanonicalInput[] {
