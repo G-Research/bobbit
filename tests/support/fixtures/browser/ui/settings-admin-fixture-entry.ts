@@ -1,5 +1,6 @@
 import { render } from "lit";
 import { renderSettingsPage } from "../../../../../src/app/settings-page.js";
+import { commitGatewayConnection } from "../../../../../src/app/gateway-fetch.js";
 import { clearRolePageState, loadRolePageData, navigateToRoleEdit, renderRoleManagerPage } from "../../../../../src/app/role-manager-page.js";
 import { clearToolPageState, loadToolPageData, renderToolManagerPage } from "../../../../../src/app/tool-manager-page.js";
 import { setConfigScope } from "../../../../../src/app/config-scope.js";
@@ -15,6 +16,7 @@ const STORE_PREFIX = "bobbit-settings-admin-fixture";
 const PREFS_KEY = `${STORE_PREFIX}:prefs`;
 const ROLES_KEY = `${STORE_PREFIX}:roles`;
 const STRUCTURED_KEY = `${STORE_PREFIX}:structured`;
+const FIXTURE_GATEWAY_BASE_URL = "https://fixture.test";
 
 const DEFAULT_PROJECTS: Project[] = [
 	{ id: "proj-1", name: "Scope UI Project", rootPath: "/fixture/project", colorLight: "#2563eb", colorDark: "#60a5fa", palette: "blue" },
@@ -227,6 +229,7 @@ function projectIdFromPath(pathname: string, suffix: string): string | null {
 
 window.open = (() => null) as typeof window.open;
 window.confirm = (() => true) as typeof window.confirm;
+commitGatewayConnection(FIXTURE_GATEWAY_BASE_URL, "fixture-token");
 
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const url = requestPath(input);
