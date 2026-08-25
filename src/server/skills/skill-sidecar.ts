@@ -25,6 +25,10 @@ import { randomUUID } from "node:crypto";
 import { isPiTranscriptEntryId } from "../../shared/message-author.js";
 import type { SkillExpansion } from "./resolve-skill-expansions.js";
 import type { FileMention } from "./resolve-file-mentions.js";
+import {
+	sanitizeAttachmentDisplayMetadata,
+	type AttachmentDisplayMetadata,
+} from "../agent/attachment-display.js";
 
 const SKILL_RECORD_ID_PREFIX = "skill:v1:";
 
@@ -49,6 +53,8 @@ export interface SkillSidecarEntry {
 	 * carrying only file mentions (no skill expansions) round-trip correctly.
 	 */
 	fileMentions?: FileMention[];
+	/** Safe outward-only tile data. Never contains file bytes or extracted text. */
+	attachments?: AttachmentDisplayMetadata[];
 }
 
 interface SkillSidecarBindingRecord {
@@ -102,8 +108,13 @@ function sidecarPath(sessionId: string): string | undefined {
 export function appendSkillSidecarEntry(sessionId: string, entry: SkillSidecarEntry): boolean {
 	const file = sidecarPath(sessionId);
 	if (!file) return false;
+	const attachments = entry.attachments === undefined
+		? undefined
+		: sanitizeAttachmentDisplayMetadata(entry.attachments);
+	if (entry.attachments !== undefined && !attachments) return false;
+	const storedEntry = attachments ? { ...entry, attachments } : entry;
 	try {
-		fs.appendFileSync(file, JSON.stringify(entry) + "\n", "utf-8");
+		fs.appendFileSync(file, JSON.stringify(storedEntry) + "\n", "utf-8");
 		return true;
 	} catch (err) {
 		console.warn(`[skill-sidecar] Append failed for session ${sessionId}:`, err);
@@ -174,15 +185,20 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 					continue;
 				}
 				const entry = parsed as SkillSidecarEntry;
-				// Accept entries with skillExpansions OR fileMentions (either may be
-				// absent now that file mentions can be persisted without skills).
+				// Accept legacy skill/file records and attachment-only display envelopes.
+				// Attachment fields are client-originated and are validated again on read;
+				// file bytes and extracted text are never projected from this sidecar.
+				const attachments = sanitizeAttachmentDisplayMetadata(entry?.attachments);
 				if (
 					entry &&
+					typeof entry.ts === "number" && Number.isFinite(entry.ts) &&
 					typeof entry.modelText === "string" &&
-					(Array.isArray(entry.skillExpansions) || Array.isArray(entry.fileMentions))
+					typeof entry.originalText === "string" &&
+					(Array.isArray(entry.skillExpansions) || Array.isArray(entry.fileMentions) || attachments)
 				) {
 					const {
 						recordId: candidateRecordId,
+						attachments: _untrustedAttachments,
 						// Inline identity is project-visible, untrusted metadata. Only a
 						// separate append-only binding may project it onto the entry.
 						transcriptEntryId: _untrustedTranscriptEntryId,
@@ -190,6 +206,7 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 					} = entry;
 					const normalized: SkillSidecarEntry = {
 						...legacyFields,
+						...(attachments ? { attachments } : {}),
 						...(isSkillRecordId(candidateRecordId) ? { recordId: candidateRecordId } : {}),
 					};
 					out.push(normalized);
@@ -278,16 +295,38 @@ export function findSkillSidecarEntry(
 	return entries.find((e) => e.modelText === modelText);
 }
 
+/** Project one model-facing prompt into its outward-only display form. */
+export function projectPromptDisplayMessage(msg: any, envelope: SkillSidecarEntry): any {
+	const attachments = sanitizeAttachmentDisplayMetadata(envelope.attachments);
+	let newContent: any;
+	if (typeof msg.content === "string") {
+		newContent = envelope.originalText;
+	} else if (Array.isArray(msg.content)) {
+		// Preserve image blocks and their order; only the model text block changes.
+		newContent = msg.content.map((block: any) =>
+			block?.type === "text" ? { ...block, text: envelope.originalText } : block,
+		);
+		if (!newContent.some((block: any) => block?.type === "text")) {
+			newContent.unshift({ type: "text", text: envelope.originalText });
+		}
+	} else {
+		newContent = envelope.originalText;
+	}
+	return {
+		...msg,
+		...(attachments?.length ? { role: "user-with-attachments" } : {}),
+		content: newContent,
+		skillExpansions: envelope.skillExpansions ?? [],
+		...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
+		...(attachments?.length ? { attachments } : {}),
+	};
+}
+
 /**
- * Pure merge of sidecar entries into a list of agent messages. For each user
- * message whose text body equals an entry's `modelText`, rewrite the body to
- * `originalText` and re-attach BOTH `skillExpansions` and `fileMentions`
- * (when present). This is the restore / authoritative-snapshot counterpart to
- * the live broadcast splice (`spliceSkillExpansionsIntoEvent`); the two MUST
- * stay in sync or chips vanish on reload. Pinned by tests/skill-sidecar.test.ts.
- *
- * Duplicate identical messages are matched in FIFO order. Idempotent for
- * messages without a matching entry. The input array/objects are not mutated.
+ * Pure outward projection for restore, history, title, and Copy Prompt sources.
+ * Proven transcript occurrence identity wins over text matching. Bound records
+ * never enter the legacy text FIFO, preventing equal-text prompts from borrowing
+ * another occurrence's attachment presentation.
  */
 export function mergeSidecarEntriesIntoMessages(
 	entries: SkillSidecarEntry[],
@@ -295,46 +334,54 @@ export function mergeSidecarEntriesIntoMessages(
 ): any[] {
 	if (!Array.isArray(messages) || messages.length === 0) return messages;
 	if (!Array.isArray(entries) || entries.length === 0) return messages;
-	const queues = new Map<string, SkillSidecarEntry[]>();
-	for (const e of entries) {
-		const arr = queues.get(e.modelText) ?? [];
-		arr.push(e);
-		queues.set(e.modelText, arr);
+
+	const boundGroups = new Map<string, SkillSidecarEntry[]>();
+	const legacyQueues = new Map<string, SkillSidecarEntry[]>();
+	for (const entry of entries) {
+		if (isPiTranscriptEntryId(entry.transcriptEntryId)) {
+			const group = boundGroups.get(entry.transcriptEntryId) ?? [];
+			group.push(entry);
+			boundGroups.set(entry.transcriptEntryId, group);
+		} else {
+			const queue = legacyQueues.get(entry.modelText) ?? [];
+			queue.push(entry);
+			legacyQueues.set(entry.modelText, queue);
+		}
 	}
+
 	let changed = false;
 	const out = messages.map((msg: any) => {
 		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
-		let body: string;
+		let body = "";
 		if (typeof msg.content === "string") body = msg.content;
 		else if (Array.isArray(msg.content)) {
-			const block = msg.content.find((c: any) => c?.type === "text");
-			body = block?.text ?? "";
-		} else body = "";
-		const q = queues.get(body);
-		if (!q || q.length === 0) return msg;
-		const envelope = q.shift()!;
-		changed = true;
-		let newContent: any;
-		if (typeof msg.content === "string") {
-			newContent = envelope.originalText;
-		} else if (Array.isArray(msg.content)) {
-			newContent = msg.content.map((c: any) =>
-				c?.type === "text" ? { ...c, text: envelope.originalText } : c,
-			);
-			if (!newContent.some((c: any) => c?.type === "text")) {
-				newContent.unshift({ type: "text", text: envelope.originalText });
-			}
-		} else {
-			newContent = envelope.originalText;
+			body = msg.content.find((block: any) => block?.type === "text")?.text ?? "";
 		}
-		return {
-			...msg,
-			content: newContent,
-			skillExpansions: envelope.skillExpansions,
-			...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
-		};
+
+		let envelope: SkillSidecarEntry | undefined;
+		if (isPiTranscriptEntryId(msg.entryId)) {
+			const exact = boundGroups.get(msg.entryId);
+			// Duplicate/conflicting occurrence bindings fail closed.
+			if (exact?.length === 1 && exact[0].modelText === body) envelope = exact[0];
+		}
+		if (!envelope) {
+			const queue = legacyQueues.get(body);
+			envelope = queue?.shift();
+		}
+		if (!envelope) return msg;
+		changed = true;
+		return projectPromptDisplayMessage(msg, envelope);
 	});
 	return changed ? out : messages;
+}
+
+/** Reusable outward projection boundary for snapshots, titles, and copy sources. */
+export function projectPromptDisplayMessagesForSession<T extends object>(
+	sessionId: string,
+	messages: T[],
+): T[] {
+	const entries = readSkillSidecarEntries(sessionId);
+	return (entries.length > 0 ? mergeSidecarEntriesIntoMessages(entries, messages) : messages) as T[];
 }
 
 /** Delete the sidecar for a session (archive purge / terminate). */

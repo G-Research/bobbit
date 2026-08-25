@@ -4,7 +4,7 @@ import {
 	isPiTranscriptEntryId,
 	type MessageAuthor,
 } from "../../shared/message-author.js";
-import { readSkillSidecarEntries, mergeSidecarEntriesIntoMessages } from "../skills/skill-sidecar.js";
+import { projectPromptDisplayMessagesForSession } from "../skills/skill-sidecar.js";
 import {
 	extractPromptModelText,
 	mergeAuthorSidecarIntoMessages,
@@ -169,6 +169,7 @@ function stripUntrustedSnapshotMetadata(messages: any[]): any[] {
 	const stripped = messages.map((message) => {
 		if (!message || typeof message !== "object" || Array.isArray(message)
 			|| (!("author" in message)
+				&& !("attachments" in message)
 				&& !("_entryIdSource" in message)
 				&& !("_inFlightSteer" in message)
 				&& !("_deliveryRecoveryProjection" in message))) {
@@ -176,6 +177,7 @@ function stripUntrustedSnapshotMetadata(messages: any[]): any[] {
 		}
 		const {
 			author: _untrustedAuthor,
+			attachments: _untrustedAttachments,
 			_entryIdSource: _untrustedEntryIdSource,
 			_inFlightSteer: _untrustedInFlightSteer,
 			_deliveryRecoveryProjection: _untrustedDeliveryRecoveryProjection,
@@ -237,11 +239,8 @@ function transformMessages(messages: any[], context: VisibleMessageSnapshotConte
 		},
 	);
 	const truncated = truncateLargeToolContentInMessages(withAuthors);
-	const skillEntries = readSkillSidecarEntries(context.sessionId);
-	const withSkills = skillEntries.length > 0
-		? mergeSidecarEntriesIntoMessages(skillEntries, truncated)
-		: truncated;
-	return mergeContextClearBoundariesIntoMessages(context.contextClearBoundaries, withSkills);
+	const withPromptDisplay = projectPromptDisplayMessagesForSession(context.sessionId, truncated);
+	return mergeContextClearBoundariesIntoMessages(context.contextClearBoundaries, withPromptDisplay);
 }
 
 /**
