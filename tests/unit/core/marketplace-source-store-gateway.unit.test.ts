@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 import { MarketplaceSourceStore, normalizeMcpGatewaySourceName } from "../../../src/server/agent/marketplace-source-store.js";
 
 let tmpDir: string;

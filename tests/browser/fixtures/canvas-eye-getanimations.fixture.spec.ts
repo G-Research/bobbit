@@ -4,9 +4,9 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const FIXTURE = path.resolve("tests/fixtures/canvas-eye-getanimations.html");
-const BUNDLE = path.resolve("tests/fixtures/canvas-eye-getanimations-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/canvas-eye-getanimations-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/canvas-eye-getanimations.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/canvas-eye-getanimations-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/canvas-eye-getanimations-entry.ts");
 const SOURCES = [ENTRY, path.resolve("src/ui/bobbit-render.ts"), path.resolve("src/ui/bobbit-sprite-data.ts")];
 
 function fileUrl(file: string): string {

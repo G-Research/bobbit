@@ -23,7 +23,7 @@ import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../..
 import { scaffoldBobbitDir } from "../../../../src/server/scaffold.js";
 import { loopbackForBind } from "../../../../src/server/cli-loopback.js";
 import { createGateway, type GatewayConfig } from "../../../../src/server/server.js";
-import { createRunChild, removeOwnedRunChild } from "../../../support/harnesses/run-isolation.js";
+import { createRunChild, removeOwnedRunChild } from "../../../support/harnesses/shared/run-isolation.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../../..", import.meta.url)));
 // This test branch is developed in parallel with the gateway foundation branch.

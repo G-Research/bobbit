@@ -23,20 +23,20 @@
 import fs from "node:fs";
 import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
-import type { Fixture, OwnedSubgoalRunResult as OwnedRunResult } from "../../helpers/run-subgoal-step-fixture.ts";
+import type { Fixture, OwnedSubgoalRunResult as OwnedRunResult } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 import {
 	GOAL_PREFLIGHT_STALE_CODE,
 	GOAL_PREFLIGHT_STALE_MESSAGE,
 	GoalPreflightStaleError,
 } from "../../../src/server/agent/goal-manager.ts";
 
-type RunSubgoalFixtureModule = typeof import("../../helpers/run-subgoal-step-fixture.ts");
+type RunSubgoalFixtureModule = typeof import("../../support/helpers/shared/run-subgoal-step-fixture.ts");
 let buildFixture: RunSubgoalFixtureModule["buildFixture"];
 let buildActive: RunSubgoalFixtureModule["buildActive"];
 let buildSubgoalStep: RunSubgoalFixtureModule["buildSubgoalStep"];
 
 beforeAll(async () => {
-	({ buildFixture, buildActive, buildSubgoalStep } = await import("../../helpers/run-subgoal-step-fixture.ts"));
+	({ buildFixture, buildActive, buildSubgoalStep } = await import("../../support/helpers/shared/run-subgoal-step-fixture.ts"));
 });
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));

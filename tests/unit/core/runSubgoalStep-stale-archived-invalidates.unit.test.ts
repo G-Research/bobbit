@@ -16,7 +16,7 @@
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildFixture, buildActive, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — stale archived non-complete cached pointer is wiped + spawns fresh", () => {
 	it("cached pointer at archived+shelved → wiped + new child spawned", async () => {

@@ -13,7 +13,7 @@ import { completeModelText, testModelPreference, type ModelCompletionDependencie
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "../../../src/server/agent/model-probe-result.js";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, type ApiModel } from "../../../src/server/agent/model-registry.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let agentDir: string | undefined;
 

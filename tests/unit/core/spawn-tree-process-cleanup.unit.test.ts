@@ -7,7 +7,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
-import { createManualClock } from "../../support/harnesses/clock.js";
+import { createManualClock } from "../../support/harnesses/shared/clock.js";
 
 const SPAWN_TREE_SOURCE = readFileSync(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
 
@@ -29,7 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
-import { createManualClock } from ${JSON.stringify(new URL("../../support/harnesses/clock.ts", import.meta.url).href)};
+import { createManualClock } from ${JSON.stringify(new URL("../../support/harnesses/shared/clock.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
 const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";

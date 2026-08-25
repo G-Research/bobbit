@@ -6,9 +6,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
-import { createFakeVerificationCommandRunner } from "../../support/harnesses/fake-verification-command-runner.js";
+import { createFakeVerificationCommandRunner } from "../../support/harnesses/shared/fake-verification-command-runner.js";
 
 const GOAL_ID = "goal-restart-safe-command-lifecycle";
 const GATE_ID = "implementation";

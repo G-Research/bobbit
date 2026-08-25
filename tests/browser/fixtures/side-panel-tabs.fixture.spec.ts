@@ -1,10 +1,10 @@
 /**
  * Retained spawned-gateway side-panel tab smokes.
- * Broad side-panel workspace matrices live in tests/ui-fixtures/dynamic-panel-workspace-fixture.spec.ts.
+ * Broad side-panel workspace matrices live in tests/support/fixtures/browser/ui/dynamic-panel-workspace-fixture.spec.ts.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../e2e/gateway-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "../../e2e/e2e-setup.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
+import { apiFetch, createSession, nonGitCwd } from "../../e2e/_helpers/e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";

@@ -18,7 +18,7 @@ guardProcessEnv();
  */
 import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 const tmpRoot = makeTmpDir("force-abort-grace-test-");
 process.env.BOBBIT_DIR = tmpRoot;

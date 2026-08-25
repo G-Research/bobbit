@@ -14,9 +14,9 @@ import {
 } from "../../../src/server/owned-tree-command-spawn.js";
 import { resolveWorktreeSupport } from "../../../src/server/agent/worktree-support.js";
 import { VerificationHarness } from "../../../src/server/agent/verification-harness.js";
-import { createFencedCommandRunner } from "../../support/harnesses/fenced-command-runner.js";
+import { createFencedCommandRunner } from "../../support/harnesses/shared/fenced-command-runner.js";
 import { installMemoryFs } from "./_helpers/memory-fs-spies.js";
-import type { MemFs } from "../../support/harnesses/mem-fs.js";
+import type { MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const nativeExistsSync = fs.existsSync.bind(fs);
 const nativeMkdtempSync = fs.mkdtempSync.bind(fs);

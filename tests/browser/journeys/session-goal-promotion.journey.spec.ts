@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { GatewayInfo } from "../../e2e/gateway-harness.js";
+import type { GatewayInfo } from "../../e2e/_helpers/gateway-harness.js";
 import {
 	test,
 	expect,
@@ -16,7 +16,7 @@ import {
 	navigateToHash,
 	registerProject,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 
 async function responseJson(response: Response): Promise<any> {
 	const text = await response.text();

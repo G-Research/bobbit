@@ -2,10 +2,10 @@
 // A fresh goal per test is created + tracked through the scope() helper so it is
 // torn down in afterEach; the leak guard asserts no entity residue at file end.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { getGateway, type GatewayFixture } from "../../support/harnesses/gateway.js";
-import { createScope, type TestScope } from "../../support/harnesses/scope.js";
-import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/leak-detector.js";
-import type { EntityCounts } from "../../support/harnesses/gateway.js";
+import { getGateway, type GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { createScope, type TestScope } from "../../support/harnesses/shared/scope.js";
+import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/shared/leak-detector.js";
+import type { EntityCounts } from "../../support/harnesses/shared/gateway.js";
 
 let gw: GatewayFixture;
 let scope: TestScope;

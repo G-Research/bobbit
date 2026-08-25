@@ -23,8 +23,8 @@ import {
 } from "../../../../../src/server/agent/project-registry.js";
 import { resolveProjectForRequest } from "../../../../../src/server/agent/resolve-project.js";
 import { SessionStore, type PersistedSession } from "../../../../../src/server/agent/session-store.js";
-import { createManualClock } from "../../../../support/harnesses/clock.js";
-import { createMemFs, type MemFs } from "../../../../support/harnesses/mem-fs.js";
+import { createManualClock } from "../../../../support/harnesses/shared/clock.js";
+import { createMemFs, type MemFs } from "../../../../support/harnesses/shared/mem-fs.js";
 
 const SAME_ROOT_PROJECT_ID = "same-root-normal-project";
 const SAME_ROOT_PROJECT_NAME = "Original Same Root Project";

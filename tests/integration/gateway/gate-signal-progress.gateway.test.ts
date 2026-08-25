@@ -5,8 +5,8 @@ import { createGoal, deleteGoal } from "./_helpers/e2e/e2e-setup.js";
 import { GateStore, type GateSignal } from "../../../src/server/agent/gate-store.js";
 import type { WorkflowGate } from "../../../src/server/agent/workflow-store.js";
 import { buildGateVerificationSnapshot } from "../../../src/server/gate-verification-snapshot.js";
-import type { GatewayFixture } from "../../support/harnesses/gateway.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 /**
  * Pins the synchronous gate-signal ordering without launching verification work:

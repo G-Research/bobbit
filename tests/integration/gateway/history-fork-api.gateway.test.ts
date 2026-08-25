@@ -26,13 +26,13 @@ import {
 	appendCompactionSidecarEntry,
 	readCompactionSidecarEntries,
 } from "../../../src/server/agent/compaction-sidecar.js";
-import { copyGitTemplate } from "../../support/harnesses/git-template.js";
+import { copyGitTemplate } from "../../support/harnesses/shared/git-template.js";
 import {
 	createSessionTracker,
 	localApiFetch,
 } from "./_helpers/session-fixtures.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
-import { SandboxSessionFilesystem } from "../../support/harnesses/sandbox-session-filesystem.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
+import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.js";
 
 const sessions = createSessionTracker();
 let serverModule: any;

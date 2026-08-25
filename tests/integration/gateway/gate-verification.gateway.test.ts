@@ -8,7 +8,7 @@
 import assert from "node:assert";
 import { test } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal } from "./_helpers/e2e/e2e-setup.js";
-import { createFakeVerificationCommandRunner } from "../../support/harnesses/fake-verification-command-runner.js";
+import { createFakeVerificationCommandRunner } from "../../support/harnesses/shared/fake-verification-command-runner.js";
 
 let originalCommandStepRunner: unknown;
 test.beforeAll(({ gateway }) => {

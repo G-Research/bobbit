@@ -1,6 +1,6 @@
 /**
  * Compatibility shim: reproduces the tests/e2e/e2e-setup.ts helper surface on
- * top of the Test Suite v2 fork-scoped gateway fixture (tests/support/harnesses/gateway.ts).
+ * top of the Test Suite v2 fork-scoped gateway fixture (tests/support/harnesses/shared/gateway.ts).
  *
  * Migrated v2-integration specs import this instead of ../e2e-setup.js so their
  * bodies stay byte-for-byte identical (same apiFetch/createSession/connectWs/…
@@ -18,8 +18,8 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import WebSocket from "ws";
 import { performance } from "node:perf_hooks";
-import { recordProfiledApiCall } from "../../../../support/harnesses/gateway.js";
-import { copyGitTemplate } from "../../../../support/harnesses/git-template.js";
+import { recordProfiledApiCall } from "../../../../support/harnesses/shared/gateway.js";
+import { copyGitTemplate } from "../../../../support/harnesses/shared/git-template.js";
 import { currentScope, ensureGateway, gatewaySync } from "./runtime.js";
 
 export { ensureGateway };
@@ -34,7 +34,7 @@ function token(): string { return gw().token; }
 
 export function harnessDefaultProjectRoot(): string {
 	// The v2 gateway fixture registers its default project at <bobbitDir>/default-project
-	// (see tests/support/harnesses/gateway.ts). nonGitCwd()/gitCwd() live UNDER that root so
+	// (see tests/support/harnesses/shared/gateway.ts). nonGitCwd()/gitCwd() live UNDER that root so
 	// goal/session cwds pass the server's CWD_OUTSIDE_PROJECT containment check.
 	const root = join(bobbitDir(), "default-project");
 	mkdirSync(root, { recursive: true });
@@ -263,7 +263,7 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 	try { projectId = ((await response.clone().json()) as { id?: string })?.id; } catch { return; }
 	if (!projectId) return;
 	try {
-		const { testWorkflows } = await import("../../../../support/fixtures/e2e/seed-workflows.js");
+		const { testWorkflows } = await import("../../../../e2e/_helpers/seed-workflows.js");
 		await fetch(`${base()}/api/projects/${projectId}/config`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },

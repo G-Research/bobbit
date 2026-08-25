@@ -34,7 +34,7 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
 import { join, resolve } from "node:path";
-import { createRunChild, installRunIsolation } from "../../../tests2/harness/run-isolation.js";
+import { createRunChild, installRunIsolation } from "../../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
 import { fileURLToPath } from "node:url";

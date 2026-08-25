@@ -13,14 +13,14 @@
  * Pinned by docs/design/staff-inbox.md §3.2.
  *
  * Runs the real InboxStore over the in-memory fsImpl seam
- * (tests/support/harnesses/mem-fs.ts) — no real temp dir.
+ * (tests/support/harnesses/shared/mem-fs.ts) — no real temp dir.
  */
 import path from "node:path";
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { InboxStore } from "../../../src/server/agent/inbox-store.ts";
 import { InboxManager } from "../../../src/server/agent/inbox-manager.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let dirSeq = 0;
 

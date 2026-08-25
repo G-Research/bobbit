@@ -148,11 +148,11 @@ export function registerGitTemplateHandoffWorker(
 
 function canonicalTestPath(path: string): string | undefined {
 	const normalized = path.replace(/[?#].*$/, "").replace(/\\/g, "/");
-	const marker = "/tests2/";
+	const marker = "/tests/";
 	const markerIndex = normalized.lastIndexOf(marker);
 	const relativePath = markerIndex >= 0
 		? normalized.slice(markerIndex + 1)
-		: normalized.startsWith("tests2/") ? normalized : undefined;
+		: normalized.startsWith("tests/") ? normalized : undefined;
 	return relativePath?.endsWith(".test.ts") ? relativePath : undefined;
 }
 

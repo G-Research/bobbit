@@ -12,7 +12,7 @@ import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
 import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import { VerificationHarness } from "../../../src/server/agent/verification-harness.ts";
-import { createManualClock } from "../../support/harnesses/clock.js";
+import { createManualClock } from "../../support/harnesses/shared/clock.js";
 
 const MARKER = "VERIFIER_BUSY_CONCURRENCY_REPRO";
 const BUSY_ERROR = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";

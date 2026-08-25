@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { test, expect, openApp, navigateToHash } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash } from "../_helpers/journey-fixture.js";
 
 const ACCOUNT_ROUTE = "#/settings/system/account";
 const OAUTH_ROUTE = "**/api/oauth/**";

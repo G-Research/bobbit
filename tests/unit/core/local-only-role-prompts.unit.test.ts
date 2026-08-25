@@ -10,13 +10,13 @@
  * ephemeral branches by default. The team lead must merge those branches from
  * local refs/worktrees instead of remote member refs.
  */
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..", "..");
+const repoRoot = path.resolve(__dirname, "..", "..", "..");
 
 function rolePrompt(role: string): string {
 	const raw = fs.readFileSync(path.join(repoRoot, "defaults", "roles", `${role}.yaml`), "utf8");

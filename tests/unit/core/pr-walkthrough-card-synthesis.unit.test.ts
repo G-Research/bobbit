@@ -14,7 +14,7 @@ import type { CommandRunner, ExecFileResult } from "../../../src/server/gateway-
 import { synthesiseWalkthroughCards, validateSynthesisedCards, type WalkthroughParsedFile } from "../../../src/server/pr-walkthrough/card-synthesis.ts";
 import { normalizeGithubResolvedWalkthrough, resolveWalkthroughForTesting, setPrWalkthroughSynthesisAdapterForTesting } from "../../../src/server/pr-walkthrough/routes.ts";
 import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../../../src/server/pr-walkthrough/walkthrough-store.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 describe("PR walkthrough card synthesis", () => {
 	it("builds deterministic fallback phases and groups multiple diff blocks by path", async () => {

@@ -34,7 +34,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { MAX_GOAL_SPEC_LENGTH, MAX_GOAL_TITLE_LENGTH } from "../../../src/server/agent/goal-candidate-validator.js";
 import { getProposalTypePlugin } from "../../../src/server/proposals/proposal-types.js";
-import { copyGitTemplate } from "../../support/harnesses/git-template.js";
+import { copyGitTemplate } from "../../support/harnesses/shared/git-template.js";
 
 let sessionId: string;
 

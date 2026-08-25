@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { makeTmpDir } from "../../helpers/tmp.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const tmpRoot = makeTmpDir("session-manager-bare-delegate-model-boundary-");
 const stateDir = path.join(tmpRoot, "state");

@@ -10,7 +10,7 @@
 import { it } from "vitest";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

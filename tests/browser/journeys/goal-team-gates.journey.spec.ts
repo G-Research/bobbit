@@ -1,7 +1,7 @@
 /**
  * Journey: Goal → Team → Gates — v2 browser smoke
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
 
 test.describe("Journey: Goal → Team → Gates", () => {
 	test("goal dashboard renders its title and sidebar edge after navigation", async ({ page }) => {
@@ -19,7 +19,7 @@ test.describe("Journey: Goal → Team → Gates", () => {
 	});
 
 	test("goal API returns goal after creation", async () => {
-		const { apiFetch } = await import("../../../tests/e2e/e2e-setup.js");
+		const { apiFetch } = await import("../../e2e/_helpers/e2e-setup.js");
 		const goal = await createGoal({ title: "v2-journey-api-check" });
 		try {
 			const resp = await apiFetch(`/api/goals/${goal.id}`);

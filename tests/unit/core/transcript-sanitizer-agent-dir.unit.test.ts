@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { withEnv } from "../../support/harnesses/with-env.js";
+import { withEnv } from "../../support/harnesses/shared/with-env.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-transcript-agent-dir-"));
 const projectRoot = path.join(tmpRoot, "project");

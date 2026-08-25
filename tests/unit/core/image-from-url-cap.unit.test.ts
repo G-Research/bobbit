@@ -23,7 +23,7 @@ import path from "node:path";
 
 import { generateImage } from "../../../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let tmp: string;
 let prefs: PreferencesStore;

@@ -23,7 +23,7 @@ import path from "node:path";
 import { resetAndInstallFakeCommandStepTestState, trackFakeCommandStepConnection } from "./_helpers/e2e/fake-cmd-setup.js";
 import { GateStore, type GateSignal } from "../../../src/server/agent/gate-store.js";
 import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
-import { createManualClock, type ManualClock } from "../../support/harnesses/clock.js";
+import { createManualClock, type ManualClock } from "../../support/harnesses/shared/clock.js";
 
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "./_helpers/e2e/e2e-setup.js";

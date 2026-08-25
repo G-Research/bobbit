@@ -3,8 +3,8 @@
  * Verifies that the bobbit blob in archived sessions is desaturated (grayscale)
  * and has all CSS animations stopped.
  */
-import { test, expect } from "../../e2e/gateway-harness.js";
-import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
+import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../e2e/_helpers/e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
 
 test.describe("Archived session blob", () => {

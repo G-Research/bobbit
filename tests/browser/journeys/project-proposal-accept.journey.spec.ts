@@ -24,9 +24,9 @@ import {
 	openApp,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { rawApiFetch } from "../../e2e/e2e-setup.js";
-import { awaitableRm } from "../../../tests/e2e/test-utils/cleanup.js";
+} from "../_helpers/journey-fixture.js";
+import { rawApiFetch } from "../../e2e/_helpers/e2e-setup.js";
+import { awaitableRm } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 // Deterministic bug repro — a failure here is the bug, not a flake budget.
 test.describe.configure({ retries: 0 });

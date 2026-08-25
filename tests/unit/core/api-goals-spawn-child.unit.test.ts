@@ -29,7 +29,7 @@ import { GoalStore } from "../../../src/server/agent/goal-store.ts";
 import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
 import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/spawn-child/work");

@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
-import { makeTmpDir } from "../../helpers/tmp.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 
 const tmpRoot = makeTmpDir("runtime-model-zombie-recovery-");

@@ -3,9 +3,9 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const FIXTURE = path.resolve("tests/fixtures/follow-tail.html");
-const BUNDLE = path.resolve("tests/fixtures/follow-tail-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/follow-tail-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/follow-tail.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/follow-tail-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/follow-tail-entry.ts");
 const SOURCE = path.resolve("src/app/follow-tail.ts");
 
 test.beforeAll(() => {

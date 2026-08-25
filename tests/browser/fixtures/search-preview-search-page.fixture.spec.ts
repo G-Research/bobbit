@@ -1,10 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
-const ENTRY = path.resolve("tests/ui-fixtures/search-preview-search-page-entry.ts");
+const SHELL = path.resolve("tests/support/fixtures/browser/ui/fixture-shell.html");
+const ENTRY = path.resolve("tests/support/fixtures/browser/ui/search-preview-search-page-entry.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "search-preview-search-page-bundle.js");
 const SEARCH_PAGE_SRC = path.resolve("src/app/search-page.ts");

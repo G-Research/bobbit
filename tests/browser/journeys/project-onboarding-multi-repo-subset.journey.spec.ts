@@ -5,14 +5,14 @@
  */
 import { rmSync } from "node:fs";
 import { basename } from "node:path";
-import { test, expect, openApp } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp } from "../_helpers/journey-fixture.js";
 import {
 	ADD_PROJECT,
 	clearAddedProjects,
 	makeMultiRepoFixture,
 	openAddProjectDialog,
 	preflightAvailable,
-} from "../../../tests2/browser/_helpers/project-onboarding.js";
+} from "../_helpers/project-onboarding.js";
 
 test.describe("Journey: Project Onboarding — selected repository subset", () => {
 	test.afterEach(async () => {

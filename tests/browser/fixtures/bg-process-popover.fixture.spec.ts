@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/fixtures/bg-process-popover.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/shared/bg-process-popover.html")}`;
 
 test.describe("BgProcessPill inside More popover", () => {
 	test("dropdown should be portaled to body when inside backdrop-filter container", async ({ page }) => {

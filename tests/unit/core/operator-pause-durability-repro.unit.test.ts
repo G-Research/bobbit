@@ -7,7 +7,7 @@ import { GoalStore, type PersistedGoal } from "../../../src/server/agent/goal-st
 import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
 import { ChildTeamScheduler } from "../../../src/server/agent/child-team-scheduler.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../../src/server/agent/nested-goal-routes.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 type GoalWithPauseSource = PersistedGoal & { pauseSource?: "operator" | "legacy-deps" };
 type RouteResult = { handled: boolean; status: number; payload: unknown };

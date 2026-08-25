@@ -10,7 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const lazyBoundaryPath = path.join(repoRoot, "src", "app", "pi-ai-lazy.ts");
 const source = fs.readFileSync(lazyBoundaryPath, "utf-8");
 const browserFixtureRoot = path.join(repoRoot, "tests", "fixtures");

@@ -1,4 +1,4 @@
-import { createManualClock, type ManualClock } from "../../../support/harnesses/clock.js";
+import { createManualClock, type ManualClock } from "../../../support/harnesses/shared/clock.js";
 
 export interface LocalMockAgentClock {
 	readonly clock: ManualClock;

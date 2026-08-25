@@ -7,7 +7,7 @@ import {
 	loadServerTestRuntime,
 	resetServerTestRuntimeForTests,
 	serverRuntimeMode,
-} from "../../support/harnesses/server-runtime.js";
+} from "../../support/harnesses/shared/server-runtime.js";
 
 interface PrebundleManifest {
 	entries: Record<string, string>;
@@ -17,7 +17,7 @@ async function loadDirectServerEntry(): Promise<typeof import("../../../src/serv
 	const bundlePath = process.env.BOBBIT_V2_SERVER_PREBUNDLE;
 	if (!bundlePath) return import("../../../src/server/server.js");
 
-	// The configured umbrella lives at <cache>/entries/tests/support/harnesses/*.mjs.
+	// The configured umbrella lives at <cache>/entries/tests/support/harnesses/shared/*.mjs.
 	// Resolve its sibling direct entry from the manifest instead of relying on a
 	// source import collected before Vitest's resolver has established bundle mode.
 	const cacheDir = resolve(dirname(bundlePath), "..", "..", "..");

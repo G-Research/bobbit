@@ -48,9 +48,9 @@ describe("Windows unit child-process profiler", () => {
 		]);
 
 		assert.deepEqual(parseArgs([]).projects, ["v2-core", "v2-integration", "v2-dom", "v2-isolated"]);
-		const options = parseArgs(["--lane", "integration", "--project=v2-dom", "tests2/dom/example.test.ts"]);
+		const options = parseArgs(["--lane", "integration", "--project=v2-dom", "tests/dom/example.dom.test.ts"]);
 		assert.deepEqual(options.projects, ["v2-integration", "v2-dom"]);
-		assert.deepEqual(options.filters, ["tests2/dom/example.test.ts"]);
+		assert.deepEqual(options.filters, ["tests/dom/example.dom.test.ts"]);
 	});
 
 	it("keeps the fixed worker cap and excludes deleted unit orchestration", () => {

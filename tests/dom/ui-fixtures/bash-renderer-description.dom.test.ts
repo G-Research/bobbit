@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/bash-renderer-description.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/bash-renderer-description.spec.ts (v2-dom tier).
 // Renders the REAL BashRenderer via lit into a happy-dom container (was an
 // esbuild file:// bundle). The <console-block>/<diff-block> output elements are
 // stubbed exactly as the legacy entry did. Same DOM facts: `description` replaces

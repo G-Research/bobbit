@@ -12,7 +12,7 @@ import path from "node:path";
 
 import { resolveDirectGatewayEnv } from "../../../src/server/agent/rpc-bridge.ts";
 import { installMemoryFs } from "./_helpers/memory-fs-spies.js";
-import type { MemFs } from "../../support/harnesses/mem-fs.js";
+import type { MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let memoryFs: MemFs;
 let restoreFs: () => void;

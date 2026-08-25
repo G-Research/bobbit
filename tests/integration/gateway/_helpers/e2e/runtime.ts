@@ -7,8 +7,8 @@
  * locally-defined `apiFetch`/`base()` would see an unbooted gateway. Keeping the
  * state in one module guarantees a single source of truth per fork.
  */
-import { getGateway, type GatewayFixture } from "../../../../support/harnesses/gateway.js";
-import type { TestScope } from "../../../../support/harnesses/scope.js";
+import { getGateway, type GatewayFixture } from "../../../../support/harnesses/shared/gateway.js";
+import type { TestScope } from "../../../../support/harnesses/shared/scope.js";
 
 let _gw: GatewayFixture | undefined;
 let _scope: TestScope | undefined;

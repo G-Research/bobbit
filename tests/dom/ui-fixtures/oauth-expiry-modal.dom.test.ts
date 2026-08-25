@@ -1,8 +1,8 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/oauth-expiry-modal.spec.ts (v2-dom tier).
-// The legacy spec esbuild-bundled tests/ui-fixtures/oauth-expiry-modal-entry.ts,
+// Migrated from tests/support/fixtures/browser/ui/oauth-expiry-modal.spec.ts (v2-dom tier).
+// The legacy spec esbuild-bundled tests/support/fixtures/browser/ui/oauth-expiry-modal-entry.ts,
 // which drives the REAL authenticateGateway() → provider-neutral OAuth expiry
 // modal path (dialogs.showOAuthExpiryModal via dialogs-lazy) plus the Account-tab
 // re-auth flow. This port imports the SAME real modules and replicates the entry's

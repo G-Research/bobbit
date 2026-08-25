@@ -2,7 +2,7 @@ import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, bobbitDir } from "./_helpers/e2e/e2e-setup.js";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const createdProjectIds = new Set<string>();

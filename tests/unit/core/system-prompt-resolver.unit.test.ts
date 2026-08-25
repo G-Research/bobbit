@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { setProjectRoot, bobbitConfigDir } from "../../../src/server/bobbit-dir.js";
 import { resolveSystemPromptPath } from "../../../src/server/agent/system-prompt.js";
-import { withEnv } from "../../support/harnesses/with-env.js";
+import { withEnv } from "../../support/harnesses/shared/with-env.js";
 
 // BOBBIT_DIR / BOBBIT_PI_DIR must not short-circuit setProjectRoot, so every
 // env-reading call runs inside withEnv(CLEARED, ...) which restores on exit

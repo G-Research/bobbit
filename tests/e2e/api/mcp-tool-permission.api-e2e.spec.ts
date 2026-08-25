@@ -7,7 +7,7 @@
  * 3. Client receives the message and can grant access
  * 4. Grant updates the role's toolPolicies
  *
- * Uses the mock MCP server (tests/fixtures/mock-mcp-server.mjs) to provide
+ * Uses the mock MCP server (tests/support/fixtures/shared/mock-mcp-server.mjs) to provide
  * real MCP tools that the role doesn't initially have access to.
  */
 import { test, expect } from "../_helpers/gateway-harness.js";

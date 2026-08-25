@@ -9,7 +9,7 @@ import {
 	sendMessage,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 import {
 	LARGE_REVIEW_DELAYED_TRIGGER,
 	LARGE_REVIEW_ID,

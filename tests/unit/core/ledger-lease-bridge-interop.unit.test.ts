@@ -1,4 +1,4 @@
-// Pins that tests/e2e/ledger-lease-bridge.mjs (the Playwright-safe lease client)
+// Pins that tests/e2e/_helpers/ledger-lease-bridge.mjs (the Playwright-safe lease client)
 // and scripts/testing-v2/ledger.mjs (the vitest/CLI lease implementation) speak
 // the SAME on-disk lease protocol, so the global concurrency caps hold across the
 // browser tier AND the vitest tier AND concurrent runs. If someone changes one
@@ -13,7 +13,7 @@ import { describe, it, beforeAll, afterAll } from "vitest";
 import {
 	runFixtureCommandWithBackend,
 	type FixtureCommandBackend,
-} from "../../support/harnesses/spawn-with-retry.js";
+} from "../../support/harnesses/shared/spawn-with-retry.js";
 
 // The production ledger deliberately lives under the OS temp root so all
 // workflow runs on one machine share its caps. This fixture must never use
@@ -101,7 +101,7 @@ let isolatedTmp: string;
 
 async function loadBoth() {
 	const ledger: any = await import("../../../scripts/testing-v2/ledger.mjs");
-	const bridge: any = await import("../../e2e/ledger-lease-bridge.mjs");
+	const bridge: any = await import("../../e2e/_helpers/ledger-lease-bridge.mjs");
 	return { ledger, bridge };
 }
 

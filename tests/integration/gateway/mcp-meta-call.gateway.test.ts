@@ -16,8 +16,8 @@
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, base, readE2EToken, createSession, defaultProjectId } from "./_helpers/e2e/e2e-setup.js";
 import path from "node:path";
-import type { GatewayFixture as GatewayInfo } from "../../support/harnesses/gateway.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import type { GatewayFixture as GatewayInfo } from "../../support/harnesses/shared/gateway.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 // ─── Stub MCP plumbing ─────────────────────────────────────────────────
 

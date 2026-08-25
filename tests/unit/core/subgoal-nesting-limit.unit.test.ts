@@ -32,7 +32,7 @@ import {
 	SYSTEM_MAX_NESTING_DEPTH_MAX,
 	SYSTEM_MAX_NESTING_DEPTH_MIN,
 } from "../../../src/server/agent/subgoal-nesting-limit.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/subgoal-nesting/work");

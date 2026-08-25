@@ -29,7 +29,7 @@ import { ProjectConfigStore } from "../../../src/server/agent/project-config-sto
 import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
 import { resolveRole } from "../../../src/server/agent/resolve-role.ts";
 import type { Role, RoleStore } from "../../../src/server/agent/role-store.ts";
-import { buildActive, buildFixture, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildActive, buildFixture, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 let tmpRoot: string;
 let stateDir: string;

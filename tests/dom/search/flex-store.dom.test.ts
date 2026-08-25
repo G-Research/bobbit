@@ -23,7 +23,7 @@ import {
 	recencyMultiplier,
 	type FlexDoc,
 } from "../../../src/server/search/flex-store.ts";
-import { makeTmpDir } from "../../../tests/helpers/tmp.ts";
+import { makeTmpDir } from "../../../tests/support/helpers/shared/tmp.ts";
 
 function tmp(prefix = "flex-store-"): string {
 	return makeTmpDir(prefix);

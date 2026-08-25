@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { vi } from "vitest";
-import { createMemFs, type MemFs } from "../../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../support/harnesses/shared/mem-fs.js";
 
 const SYNC_METHODS = [
 	"existsSync",

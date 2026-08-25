@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { createManualClock } from "../../support/harnesses/clock.js";
+import { createManualClock } from "../../support/harnesses/shared/clock.js";
 
 const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
 const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");

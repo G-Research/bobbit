@@ -30,7 +30,7 @@ import {
 import { generateImage } from "../../../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../../../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 // The selector-only harnesses below intentionally isolate tryAutoSelectModel.
 // These two boundary tests instead run through the real SessionManager spawn
@@ -62,7 +62,7 @@ initAuthorSidecarDir(BOUNDARY_STATE_DIR, {
 loadOrCreateToken();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 const SESSION_MANAGER_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-manager.ts");
 const SESSION_SETUP_SOURCE = path.join(PROJECT_ROOT, "src/server/agent/session-setup.ts");
 const SERVER_SOURCE = path.join(PROJECT_ROOT, "src/server/server.ts");

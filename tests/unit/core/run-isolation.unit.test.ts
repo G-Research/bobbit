@@ -20,8 +20,8 @@ import {
   removeOwnedRunChild,
   RUN_ROOT_ENV,
   RUN_ROOT_OWNER_ENV,
-} from "../../support/harnesses/run-isolation.js";
-import { withEnv } from "../../support/harnesses/with-env.js";
+} from "../../support/harnesses/shared/run-isolation.js";
+import { withEnv } from "../../support/harnesses/shared/with-env.js";
 import {
   createE2ERunPaths,
   createIsolatedE2EEnvironment,
@@ -445,16 +445,16 @@ describe("unit run isolation", () => {
   });
 
   it("keeps the gateway fixtures beneath the inherited run root", () => {
-    const source = readFileSync("tests/support/harnesses/gateway.ts", "utf8");
+    const source = readFileSync("tests/support/harnesses/shared/gateway.ts", "utf8");
     expect(source).toContain('from "./run-isolation.js"');
     expect(source).toContain("createRunChild");
     expect(source).toContain("getRunRoot");
 
     const basePathSource = readFileSync(
-      "tests2/integration/helpers/base-path-gateway-fixture.ts",
+      "tests/integration/gateway/_helpers/base-path-gateway-fixture.ts",
       "utf8",
     );
-    expect(basePathSource).toContain('from "../../harness/run-isolation.js"');
+    expect(basePathSource).toContain('from "../../../support/harnesses/shared/run-isolation.js"');
     expect(basePathSource).toContain('createRunChild("base-path-gateway")');
     expect(basePathSource.match(/removeOwnedRunChild\(root\)/g)).toHaveLength(2);
     expect(basePathSource).toMatch(

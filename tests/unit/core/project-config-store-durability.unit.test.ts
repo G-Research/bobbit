@@ -6,7 +6,7 @@ import {
 	ProjectConfigStore,
 	type InlineWorkflowDef,
 } from "../../../src/server/agent/project-config-store.js";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const CONFIG_DIR = path.resolve("/memfs/project-config-durability");
 const CONFIG_FILE = path.join(CONFIG_DIR, "project.yaml");

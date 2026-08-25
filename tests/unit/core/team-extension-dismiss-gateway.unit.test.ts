@@ -12,7 +12,7 @@ import fs from "node:fs";
 import teamExtension from "../../../defaults/tools/team/extension.ts";
 import agentExtension from "../../../defaults/tools/agent/extension.ts";
 import { __clearCredsCacheForTesting } from "../../../defaults/tools/_shared/gateway.ts";
-const __agentGatewayMod: any = await import("../../defaults/tools/agent/gateway" + ".js");
+const __agentGatewayMod: any = await import("../../../defaults/tools/agent/gateway" + ".js");
 const __clearAgentCredsCacheForTesting = __agentGatewayMod.__clearCredsCacheForTesting as () => void;
 
 type RegisteredTool = {

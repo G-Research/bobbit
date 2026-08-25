@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 const suiteRoot = makeTmpDir("headquarters-no-worktree-runtime-");
 const headquartersRoot = path.join(suiteRoot, "headquarters");

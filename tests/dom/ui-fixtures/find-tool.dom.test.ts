@@ -1,8 +1,8 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/find-tool.spec.ts (v2-dom tier).
-// The legacy spec esbuild-bundled tests/fixtures/find-renderer-entry.ts and
+// Migrated from tests/support/fixtures/browser/ui/find-tool.spec.ts (v2-dom tier).
+// The legacy spec esbuild-bundled tests/support/fixtures/shared/find-renderer-entry.ts and
 // rendered the REAL FindRenderer into a file:// fixture, then asserted the DOM.
 // FindRenderer is a pure function of (params, result), so we render it directly
 // under happy-dom via lit `render()` — full fidelity, no gateway.

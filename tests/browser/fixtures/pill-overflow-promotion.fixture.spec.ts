@@ -1,7 +1,7 @@
 /**
  * Browser smoke — pill overflow renders in the real app. The narrow/wide wrap,
  * nowrap label, cache, and promotion matrix lives in the deterministic
- * `tests/ui-fixtures/chat-scroll.spec.ts` fixture.
+ * `tests/support/fixtures/browser/ui/chat-scroll.spec.ts` fixture.
  */
 import { test, expect } from "./fixtures.js";
 import {
@@ -9,7 +9,7 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 	apiFetch,
-} from "../../e2e/e2e-setup.js";
+} from "../../e2e/_helpers/e2e-setup.js";
 import type { Page } from "@playwright/test";
 import { navigateToHash, openApp } from "./ui-helpers.js";
 

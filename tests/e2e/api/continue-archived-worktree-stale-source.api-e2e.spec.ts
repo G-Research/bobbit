@@ -8,8 +8,8 @@ import { pollUntil } from "../_helpers/test-utils/cleanup.js";
 import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 test.use({ enableWorktreePool: false });
 

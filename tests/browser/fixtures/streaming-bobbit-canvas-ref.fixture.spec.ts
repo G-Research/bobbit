@@ -8,9 +8,9 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const FIXTURE = path.resolve("tests/fixtures/streaming-bobbit-canvas-ref.html");
-const BUNDLE = path.resolve("tests/fixtures/streaming-bobbit-canvas-ref-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/streaming-message-container-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/streaming-bobbit-canvas-ref.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/streaming-bobbit-canvas-ref-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/streaming-message-container-entry.ts");
 const SOURCES = [
 	ENTRY,
 	path.resolve("src/ui/components/StreamingMessageContainer.ts"),

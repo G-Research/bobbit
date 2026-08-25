@@ -12,7 +12,7 @@ import {
 	sessionFileRenameAtomic,
 	sessionFileWriteAtomic,
 } from "../../../src/server/agent/session-fs.ts";
-import { SandboxSessionFilesystem } from "../../support/harnesses/sandbox-session-filesystem.ts";
+import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sandbox-session-publish-"));
 const hostSessions = activeAgentSessionsDir();

@@ -43,7 +43,7 @@ import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import { TeamManager } from "../../../src/server/agent/team-manager.ts";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.ts";
 import { registerRpcBridgeFactory } from "../../../src/server/agent/rpc-bridge.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 // This suite exercises restore orchestration, not persistence or prompt assembly.
 // Keep its fixture paths synthetic and process-owned so v2-core workers perform no

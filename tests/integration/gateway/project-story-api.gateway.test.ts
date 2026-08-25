@@ -1,7 +1,7 @@
 // Migrated from tests/e2e/project-story-api.spec.ts (v2-integration tier).
 // API/data-path coverage; browser-only project stories stay in the UI journey.
 import { beforeAll, describe, expect, it } from "vitest";
-import { getGateway, type GatewayFixture } from "../../support/harnesses/gateway.js";
+import { getGateway, type GatewayFixture } from "../../support/harnesses/shared/gateway.js";
 
 let gw: GatewayFixture;
 beforeAll(async () => { gw = await getGateway(); });

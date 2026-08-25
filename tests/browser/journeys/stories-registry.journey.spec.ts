@@ -9,7 +9,7 @@
  *   CT-03 (sidebar updates)    — active-row highlight after navigation
  *   CT-05 (reload/reconnect)   — session survives page reload
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, registerProject } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, registerProject } from "../_helpers/journey-fixture.js";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

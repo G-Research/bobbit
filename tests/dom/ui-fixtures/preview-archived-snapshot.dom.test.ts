@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/preview-archived-snapshot.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/preview-archived-snapshot.spec.ts (v2-dom tier).
 // Acceptance criterion #8: archived sessions stamped with v1 / v2 markers still
 // render an Open button via the read-only legacy compatibility path. The legacy
 // spec esbuild-bundled the preview-renderer file:// fixture; this port renders the

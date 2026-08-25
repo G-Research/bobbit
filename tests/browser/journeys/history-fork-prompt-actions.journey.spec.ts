@@ -19,9 +19,9 @@ import {
 	registerProject,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { agentEndPredicate, connectWs } from "../../e2e/e2e-setup.js";
-import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
+} from "../_helpers/journey-fixture.js";
+import { agentEndPredicate, connectWs } from "../../e2e/_helpers/e2e-setup.js";
+import { sendMessage } from "../../e2e/browser/_helpers/ui-helpers.js";
 
 const RETAINED = "HISTORY_FORK_RETAINED_ALPHA";
 const SELECTED = [

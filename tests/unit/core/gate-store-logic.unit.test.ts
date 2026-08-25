@@ -6,7 +6,7 @@
  * Unit tests for GateStore logic: init, status updates, cascade reset,
  * gate removal, and dependency checking.
  *
- * Runs entirely over the in-memory fsImpl seam (tests/support/harnesses/mem-fs.ts) —
+ * Runs entirely over the in-memory fsImpl seam (tests/support/harnesses/shared/mem-fs.ts) —
  * no real temp dir, no BOBBIT_DIR env mutation. Each test gets a fresh memfs
  * + state dir for isolation.
  */
@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { GateStore } from "../../../src/server/agent/gate-store.ts";
 import type { Workflow, WorkflowGate } from "../../../src/server/agent/workflow-store.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let dirSeq = 0;
 

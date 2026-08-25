@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/preview-reopen.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/preview-reopen.spec.ts (v2-dom tier).
 // The legacy spec esbuild-bundled the preview-renderer file:// fixture and drove
 // the REAL PreviewOpenRenderer's reopen flow. This port renders the same real
 // renderer under happy-dom against app state + a mocked fetch, and mounts a real

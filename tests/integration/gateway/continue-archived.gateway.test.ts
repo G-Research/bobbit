@@ -19,7 +19,7 @@ import {
 	messageEndPredicate,
 	nonGitCwd,
 } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,

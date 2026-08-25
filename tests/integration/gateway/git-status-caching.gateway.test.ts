@@ -18,7 +18,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, deleteSession, defaultProjectId, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 let serverModule: any;
 

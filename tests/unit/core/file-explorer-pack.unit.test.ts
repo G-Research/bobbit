@@ -10,7 +10,7 @@ import { PackContributionRegistry } from "../../../src/server/extension-host/pac
 const MARKET_PACKS = fileURLToPath(new URL("../../../market-packs", import.meta.url));
 const BUILD_MARKET_PACKS_SOURCE = readFileSync(new URL("../../../scripts/build-market-packs.mjs", import.meta.url), "utf8");
 const COPY_BUILTIN_PACKS_SOURCE = readFileSync(new URL("../../../scripts/copy-builtin-packs.mjs", import.meta.url), "utf8");
-const GATEWAY_HARNESS_SOURCE = readFileSync(new URL("../../support/harnesses/gateway.ts", import.meta.url), "utf8");
+const GATEWAY_HARNESS_SOURCE = readFileSync(new URL("../../support/harnesses/shared/gateway.ts", import.meta.url), "utf8");
 const EXPLORER_ROUTES_BUNDLE = readFileSync(new URL("../../../market-packs/file-explorer/lib/explorer-routes.mjs", import.meta.url), "utf8");
 const FILE_EXPLORER_PANEL_BUNDLE = readFileSync(new URL("../../../market-packs/file-explorer/lib/file-explorer-panel.js", import.meta.url), "utf8");
 const EXPLORER_SOURCE_FILES = [

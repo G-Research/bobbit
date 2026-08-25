@@ -19,7 +19,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { createSession, deleteSession, connectWs } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 let createServerHostApi: typeof import("../../../src/server/extension-host/server-host-api.js").createServerHostApi;
 

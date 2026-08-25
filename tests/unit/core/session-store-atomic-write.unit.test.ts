@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import type { PathLike, PathOrFileDescriptor, WriteFileOptions } from "node:fs";
 import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 type SessionStoreMemFs = MemFs & {
 	openSync(file: PathLike, flags: string): number;

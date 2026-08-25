@@ -37,7 +37,7 @@ import {
 	deleteSession,
 	defaultProjectId,
 	navigateToHash,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
 // Deterministic bug repro — a failure here is the bug, not a flake budget.

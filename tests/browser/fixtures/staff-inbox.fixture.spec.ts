@@ -20,8 +20,8 @@
  * specific assertions will fail at runtime. The failure modes are documented
  * inline so the team lead can route follow-up.
  */
-import { test, expect } from "../../e2e/gateway-harness.js";
-import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
+import { apiFetch, defaultProject } from "../../e2e/_helpers/e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 test.describe("Staff inbox panel", () => {

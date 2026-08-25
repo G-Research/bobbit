@@ -6,7 +6,7 @@ guardProcessEnv();
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { makeTmpDir } from "../../support/helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 const tmpRoot = makeTmpDir("staff-clear-context-policy-");
 const stateDir = path.join(tmpRoot, "state");

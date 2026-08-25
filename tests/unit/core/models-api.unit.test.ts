@@ -12,7 +12,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { getBuiltinModel, getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const memfs = createMemFs();
 const stateDir = path.resolve("/memfs/models-test");

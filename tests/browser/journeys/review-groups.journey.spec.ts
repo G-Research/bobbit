@@ -9,7 +9,7 @@ import {
 	sendMessage,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 
 const REVIEW_TABS = '.goal-tab-pill[data-panel-tab-kind="review"]';
 const REGRESSION = "REVIEW_GROUP_PRIMARY_TAB";

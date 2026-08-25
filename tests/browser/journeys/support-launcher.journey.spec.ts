@@ -20,7 +20,7 @@
  * visibility / geometry / title / classes on the inner <button>.
  */
 import type { Page } from "@playwright/test";
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const DESKTOP = { width: 1280, height: 800 };

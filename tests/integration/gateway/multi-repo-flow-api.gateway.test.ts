@@ -3,8 +3,8 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

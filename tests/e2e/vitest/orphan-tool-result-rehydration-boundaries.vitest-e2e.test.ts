@@ -1,23 +1,14 @@
 // v2-e2e-vitest real-filesystem owner: exercises host and sandbox transcript
 // rehydration boundaries plus coordinated replacement lifecycle behavior.
-<<<<<<<< HEAD:tests/unit/core/orphan-tool-result-rehydration-boundaries.unit.test.ts
-import { guardProcessEnv } from "./_helpers/env-guard.js";
-========
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
->>>>>>>> goal/d462c93f/coder-d422:tests/e2e/vitest/orphan-tool-result-rehydration-boundaries.vitest-e2e.test.ts
+import { guardProcessEnv } from "../../unit/core/_helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-<<<<<<<< HEAD:tests/unit/core/orphan-tool-result-rehydration-boundaries.unit.test.ts
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
-import { SandboxSessionFilesystem } from "../../support/harnesses/sandbox-session-filesystem.js";
-========
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
-import { SandboxSessionFilesystem } from "../../../tests2/harness/sandbox-session-filesystem.js";
->>>>>>>> goal/d462c93f/coder-d422:tests/e2e/vitest/orphan-tool-result-rehydration-boundaries.vitest-e2e.test.ts
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
+import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");

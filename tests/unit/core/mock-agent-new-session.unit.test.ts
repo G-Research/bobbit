@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-import { InProcessMockBridge } from "../../e2e/in-process-mock-bridge.mjs";
+import { InProcessMockBridge } from "../../e2e/_helpers/in-process-mock-bridge.mjs";
 
 const roots: string[] = [];
 

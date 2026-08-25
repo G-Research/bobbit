@@ -1,10 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const FIXTURE = path.resolve("tests/fixtures/permission-card-ux.html");
-const ENTRY = path.resolve("tests/fixtures/permission-card-ux-entry.ts");
-const BUNDLE = path.resolve("tests/fixtures/permission-card-ux-bundle.js");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/permission-card-ux.html");
+const ENTRY = path.resolve("tests/support/fixtures/shared/permission-card-ux-entry.ts");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/permission-card-ux-bundle.js");
 const PAGE = `file://${FIXTURE}`;
 const AGENT_INTERFACE_SRC = path.resolve("src/ui/components/AgentInterface.ts");
 const MESSAGE_LIST_SRC = path.resolve("src/ui/components/MessageList.ts");

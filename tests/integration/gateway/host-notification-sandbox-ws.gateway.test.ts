@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getGateway, type EntityCounts, type GatewayFixture } from "../../support/harnesses/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/leak-detector.js";
-import { createScope, type TestScope } from "../../support/harnesses/scope.js";
+import { getGateway, type EntityCounts, type GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/shared/leak-detector.js";
+import { createScope, type TestScope } from "../../support/harnesses/shared/scope.js";
 
 interface CapturedSocket {
 	readonly ws: WebSocket;

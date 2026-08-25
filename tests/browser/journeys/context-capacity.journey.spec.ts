@@ -9,7 +9,7 @@ import {
 	test,
 	waitForAgentResponse,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 320, height: 720 };

@@ -5,7 +5,7 @@ import type { AuthInteraction, Credential, Models } from "@earendil-works/pi-ai"
 import { AtomicCredentialStore } from "../../../src/server/auth/credential-store.js";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { readE2EToken, base } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 let globalAuthPath: typeof import("../../../src/server/bobbit-dir.js").globalAuthPath;
 let oauthCancel: typeof import("../../../src/server/auth/oauth.js").oauthCancel;

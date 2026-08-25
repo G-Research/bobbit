@@ -41,7 +41,7 @@ import type { IndexSource, IndexSourceContext, Indexable } from "../../../src/se
 import type { PersistedGoal, GoalStore } from "../../../src/server/agent/goal-store.ts";
 import type { PersistedSession, SessionStore } from "../../../src/server/agent/session-store.ts";
 import type { PersistedStaff, StaffStore } from "../../../src/server/agent/staff-store.ts";
-import { installScopedMemoryFs } from "../../support/helpers/unit/scoped-memory-fs.ts";
+import { installScopedMemoryFs } from "../../unit/core/_helpers/scoped-memory-fs.ts";
 
 // ── In-memory fake stores ────────────────────────────────────────────
 

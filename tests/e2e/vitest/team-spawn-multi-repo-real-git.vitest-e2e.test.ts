@@ -4,17 +4,10 @@ import { dirname, join, resolve } from "node:path";
 import { vi } from "vitest";
 
 import type { CommandRunner } from "../../../src/server/gateway-deps.js";
-<<<<<<<< HEAD:tests/integration/gateway/team-spawn-multi-repo-real-git.gateway.test.ts
-import { awaitableRm, pollUntil } from "../../support/helpers/e2e/cleanup.js";
-import { copyGitTemplate, prepareGitTemplate } from "../../support/harnesses/git-template.js";
-import { test, expect } from "./_helpers/e2e/in-process-harness.js";
-import { apiFetch, deleteGoal, registerProject, teardownTeam } from "./_helpers/e2e/e2e-setup.js";
-========
 import { awaitableRm, pollUntil } from "../_helpers/test-utils/cleanup.js";
-import { copyGitTemplate, prepareGitTemplate } from "../../../tests2/harness/git-template.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, deleteGoal, registerProject, teardownTeam } from "../../../tests2/integration/_e2e/e2e-setup.js";
->>>>>>>> goal/d462c93f/coder-d422:tests/e2e/vitest/team-spawn-multi-repo-real-git.vitest-e2e.test.ts
+import { copyGitTemplate, prepareGitTemplate } from "../../support/harnesses/shared/git-template.js";
+import { test, expect } from "../../integration/gateway/_helpers/e2e/in-process-harness.js";
+import { apiFetch, deleteGoal, registerProject, teardownTeam } from "../../integration/gateway/_helpers/e2e/e2e-setup.js";
 
 // The E2E Vitest lane defaults to 30s. Give this real-Git lifecycle file the
 // same budget as the integration lane so Windows process and filesystem

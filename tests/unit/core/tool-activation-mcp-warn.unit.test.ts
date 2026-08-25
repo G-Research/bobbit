@@ -36,7 +36,7 @@ import type { ToolProvider } from "../../../src/server/agent/tool-manager.ts";
 type ProviderWithGroup = ToolProvider & { groupDir: string; baseDir: string };
 const MOCK_TOOLS_DIR = "/mock/tools";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.join(__dirname, "..", "..");
+const REPO_ROOT = path.join(__dirname, "..", "..", "..");
 const REPO_MARKET_PACKS_DIR = path.join(REPO_ROOT, "market-packs");
 const PR_WALKTHROUGH_TOOLS_DIR = path.join(REPO_MARKET_PACKS_DIR, "pr-walkthrough", "tools");
 const PR_WALKTHROUGH_TOOL_NAMES = [

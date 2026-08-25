@@ -4,7 +4,7 @@
  * Ported from: add-project-select-all.
  */
 import { rmSync } from "node:fs";
-import { test, expect, openApp } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp } from "../_helpers/journey-fixture.js";
 import {
 	ADD_PROJECT,
 	clearAddedProjects,
@@ -12,7 +12,7 @@ import {
 	openAddProjectDialog,
 	preflightAvailable,
 	selectCompletedProjectPath,
-} from "../../../tests2/browser/_helpers/project-onboarding.js";
+} from "../_helpers/project-onboarding.js";
 
 test.describe("Journey: Project Onboarding — repository selection count", () => {
 	test.afterEach(async () => {

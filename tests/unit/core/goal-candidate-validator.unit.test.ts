@@ -11,7 +11,7 @@ import {
 } from "../../../src/server/agent/goal-manager.js";
 import { GoalStore } from "../../../src/server/agent/goal-store.js";
 import { executionPathIdentity } from "../../../src/server/agent/resolve-project.js";
-import { buildActive, buildFixture, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.js";
+import { buildActive, buildFixture, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.js";
 
 function deferred() {
 	let resolve!: () => void;

@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/compaction-widget.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/compaction-widget.spec.ts (v2-dom tier).
 // Renders the REAL CompactionSummaryRenderer via lit into a single happy-dom
 // container (was an esbuild file:// bundle). Re-rendering into the SAME container
 // gives lit's diff the single-card identity the legacy spec pinned

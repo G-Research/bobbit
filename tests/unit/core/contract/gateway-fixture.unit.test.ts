@@ -13,7 +13,7 @@
  */
 import { test } from "vitest";
 import assert from "node:assert";
-import { pollForMatch } from "../../../contract/fixtures/gateway.js";
+import { pollForMatch } from "../../../support/fixtures/integration/contract/gateway.js";
 
 test("pollForMatch — returns immediately when the first fetch matches", async () => {
 	let calls = 0;

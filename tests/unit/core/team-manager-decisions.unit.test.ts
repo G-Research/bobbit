@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
 import { TeamManager, type TeamManagerConfig } from "../../../src/server/agent/team-manager.ts";
-import { createManualClock } from "../../support/harnesses/clock.ts";
+import { createManualClock } from "../../support/harnesses/shared/clock.ts";
 
 interface MockGoal {
 	id: string;

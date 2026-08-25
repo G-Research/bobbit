@@ -4,7 +4,7 @@
 import { rmSync } from "node:fs";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { readE2EToken, apiFetch } from "./_helpers/e2e/e2e-setup.js";
-import { createRunChild } from "../../support/harnesses/run-isolation.js";
+import { createRunChild } from "../../support/harnesses/shared/run-isolation.js";
 import { SearchUnavailableError } from "../../../src/server/search/search-service.js";
 
 let token: string;

@@ -22,7 +22,7 @@ import {
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsCodexAuth,
 } from "../../../src/server/agent/host-tokens.js";
-import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../support/helpers/shared/agent-dir.js";
 
 const previousEnv: Record<string, string | undefined> = {};
 const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;

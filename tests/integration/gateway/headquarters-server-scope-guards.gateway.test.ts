@@ -27,8 +27,8 @@ import { resolveProjectForRequest, validateExecutionCwd } from "../../../src/ser
 import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.js";
 import { validateToken } from "../../../src/server/auth/token.js";
 import { guardProcessEnv } from "../../unit/core/_helpers/env-guard.js";
-import { createManualClock, type ManualClock } from "../../support/harnesses/clock.js";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createManualClock, type ManualClock } from "../../support/harnesses/shared/clock.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 guardProcessEnv();
 

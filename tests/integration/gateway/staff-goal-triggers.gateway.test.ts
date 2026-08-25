@@ -20,7 +20,7 @@ import { deflateSync, inflateSync } from "node:zlib";
 import { TriggerEngine } from "../../../src/server/agent/staff-trigger-engine.js";
 import { RemoteStateCoordinator } from "../../../src/server/remote-state-coordinator.js";
 import type { Clock, CommandRunner } from "../../../src/server/gateway-deps.js";
-import { copyGitTemplate } from "../../support/harnesses/git-template.js";
+import { copyGitTemplate } from "../../support/harnesses/shared/git-template.js";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, defaultProject, readE2EToken } from "./_helpers/e2e/e2e-setup.js";
 

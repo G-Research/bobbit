@@ -9,7 +9,7 @@ import {
   openApp,
   test,
   waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 
 type StatusFile = { file: string; status: string };
 type RepoStatus = ReturnType<typeof repoStatus>;

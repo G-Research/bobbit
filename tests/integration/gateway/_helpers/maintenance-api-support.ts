@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CommandRunner } from "../../../../src/server/gateway-deps.js";
-import { copyGitTemplate } from "../../../support/harnesses/git-template.js";
+import { copyGitTemplate } from "../../../support/harnesses/shared/git-template.js";
 import { test, expect } from "./e2e/in-process-harness.js";
 import { readE2EToken, apiFetch as gatewayApiFetch, createSession, deleteSession, registerProject } from "./e2e/e2e-setup.js";
 import { installMethodInterceptor } from "./command-runner-dispatcher.js";

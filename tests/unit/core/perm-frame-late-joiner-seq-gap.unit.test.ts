@@ -173,7 +173,7 @@ test("ws/handler.ts on-attach branch reads seq/ts from getPendingToolPermission,
 /** Mirrors the production sequencer in `src/app/remote-agent.ts` —
  * top-level frames that carry seq must advance `_highestSeq`; out-of-order
  * `event` frames are gap-buffered. Identical shape to the existing fixture
- * `tests/fixtures/remote-agent-sequence-hole.html`. */
+ * `tests/support/fixtures/shared/remote-agent-sequence-hole.html`. */
 class FakeClient {
 	highestSeq = 0;
 	seqInitialized = false;

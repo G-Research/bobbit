@@ -2,7 +2,7 @@ import { vi } from "vitest";
 import { SessionManager } from "../../../../src/server/agent/session-manager.js";
 import { EventBuffer } from "../../../../src/server/agent/event-buffer.js";
 import { PromptQueue } from "../../../../src/server/agent/prompt-queue.js";
-import { createManualClock, type ManualClock } from "../../../support/harnesses/clock.js";
+import { createManualClock, type ManualClock } from "../../../support/harnesses/shared/clock.js";
 
 export interface Deferred<T> {
 	promise: Promise<T>;

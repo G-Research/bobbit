@@ -32,8 +32,8 @@ import { tmpdir } from "node:os";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../../../src/server/agent/model-registry.js";
 import { getGoogleCodeAssistModels } from "../../../src/server/agent/google-code-assist-models.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
-import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../support/helpers/shared/agent-dir.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevGoogleKey = process.env.GOOGLE_API_KEY;

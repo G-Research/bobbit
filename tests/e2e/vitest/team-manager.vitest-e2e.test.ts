@@ -11,11 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { resetAgentDirStateForTests } from "../../../src/server/agent-dir-config.js";
-<<<<<<<< HEAD:tests/unit/core/team-manager.unit.test.ts
-import { createManualClock, type ManualClock } from "../../support/harnesses/clock.js";
-========
-import { createManualClock, type ManualClock } from "../../../tests2/harness/clock.js";
->>>>>>>> goal/d462c93f/coder-d422:tests/e2e/vitest/team-manager.vitest-e2e.test.ts
+import { createManualClock, type ManualClock } from "../../support/harnesses/shared/clock.js";
 
 // Flush pending microtasks/IO after advancing the manual clock so async timer
 // callbacks settle before assertions.

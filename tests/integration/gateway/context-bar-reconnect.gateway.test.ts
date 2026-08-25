@@ -15,7 +15,7 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 import {
 	getAvailableModels,
 	invalidateModelCache,

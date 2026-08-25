@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/fixtures/bg-process-pills.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/shared/bg-process-pills.html")}`;
 
 /**
  * Helper: wait for the pill strip measurement to settle after rAF cycles.

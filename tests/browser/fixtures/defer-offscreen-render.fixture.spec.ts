@@ -21,9 +21,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle.ts";
 
-const FIXTURE = path.resolve("tests/fixtures/defer-offscreen-render.html");
-const BUNDLE = path.resolve("tests/fixtures/defer-offscreen-render-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/defer-offscreen-render-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/defer-offscreen-render.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/defer-offscreen-render-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/defer-offscreen-render-entry.ts");
 const DEFERRED_SRC = path.resolve("src/ui/components/DeferredBlock.ts");
 const MESSAGELIST_SRC = path.resolve("src/ui/components/MessageList.ts");
 const PERFFLAGS_SRC = path.resolve("src/app/perf-flags.ts");

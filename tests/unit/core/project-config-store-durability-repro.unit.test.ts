@@ -5,7 +5,7 @@ import {
 	ProjectConfigPersistenceError,
 	ProjectConfigStore,
 } from "../../../src/server/agent/project-config-store.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 describe("ProjectConfigStore durable publication", () => {
 	it("surfaces a publication failure without changing existing project.yaml bytes", () => {

@@ -7,7 +7,7 @@ import {
 	type AsyncOrphanDirectory,
 	type AsyncOrphanScanFs,
 } from "../../../src/server/agent/orphan-cleanup.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.ts";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.ts";
 
 const root = path.resolve("/memfs/orphan-async-walk/agent-sessions");
 let memfs: MemFs;

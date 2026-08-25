@@ -6,9 +6,9 @@
  * the full assistant proposal panel, and tab state must not leak across proposal
  * contexts.
  */
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { MockAgentCore } from "../../../tests/e2e/mock-agent-core.mjs";
+import { MockAgentCore } from "../../e2e/_helpers/mock-agent-core.mjs";
 import { openApp, createSessionViaUI, createGoalAssistantViaUI } from "./ui-helpers.js";
 
 const GOAL_TAB = "[data-testid='goal-proposal-tab-goal']";

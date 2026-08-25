@@ -1,4 +1,4 @@
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 test.describe("Settings mobile tabs", () => {

@@ -11,7 +11,7 @@
  * are structurally typed at the boundary, so light fakes suffice.
  *
  * The real InboxStore runs over the in-memory fsImpl seam
- * (tests/support/harnesses/mem-fs.ts) — no real temp dir.
+ * (tests/support/harnesses/shared/mem-fs.ts) — no real temp dir.
  *
  * Pinned by docs/design/staff-inbox.md §3.3, §5, §13.
  */
@@ -20,8 +20,8 @@ import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { InboxStore } from "../../../src/server/agent/inbox-store.ts";
 import { InboxNudger } from "../../../src/server/agent/inbox-nudger.ts";
-import { createManualClock } from "../../support/harnesses/clock.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createManualClock } from "../../support/harnesses/shared/clock.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let dirSeq = 0;
 

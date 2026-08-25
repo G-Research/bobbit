@@ -13,7 +13,7 @@
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildFixture, buildActive, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 function findChild(fx: Awaited<ReturnType<typeof buildFixture>>): any {
 	return fx.goalStore.getAll().find(g => g.parentGoalId === fx.parent.id);

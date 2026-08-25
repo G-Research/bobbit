@@ -3,9 +3,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
-import { copyGitTemplate } from "../../support/harnesses/git-template.js";
+import { copyGitTemplate } from "../../support/harnesses/shared/git-template.js";
 import { apiFetch as harnessApiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_helpers/e2e/e2e-setup.js";
-import { SandboxSessionFilesystem } from "../../support/harnesses/sandbox-session-filesystem.js";
+import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.js";
 import { readAuthorSidecar } from "../../../src/server/agent/author-sidecar.js";
 
 let operatorCookie: string | undefined;

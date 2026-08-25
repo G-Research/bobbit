@@ -40,7 +40,7 @@ import type { ModuleHost, InvokeRequest } from "../../../src/server/extension-ho
 import type { ContextTraceStore } from "../../../src/server/agent/context-trace-store.js";
 import type { ProviderContribution } from "../../../src/server/agent/pack-contributions.js";
 import type { PackContributionRegistry } from "../../../src/server/extension-host/pack-contribution-registry.js";
-import { makeTmpDir } from "../../helpers/tmp.js";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.js";
 import { installScopedMemFs } from "./_helpers/scoped-memfs.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";

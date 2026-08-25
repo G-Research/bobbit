@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import extensionFactory from "../../../defaults/tools/images/extension.ts";
-import { withEnv, type EnvPatch } from "../../support/harnesses/with-env.js";
+import { withEnv, type EnvPatch } from "../../support/harnesses/shared/with-env.js";
 
 type ToolReg = {
 	name: string;

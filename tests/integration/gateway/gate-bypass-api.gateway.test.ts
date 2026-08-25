@@ -28,7 +28,7 @@ import {
 	teardownTeam,
 	type WsConnection,
 } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 function workflowId(prefix: string): string {
 	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache } = await import("../../../src/server/agent/model-registry.ts");

@@ -6,7 +6,7 @@ import YAML from "yaml";
 import { resolveGrantPolicy, type GroupPolicyProvider } from "../../../src/server/agent/tool-activation.ts";
 import type { GrantPolicy } from "../../../src/server/agent/role-store.ts";
 
-const repoRoot = path.resolve(import.meta.dirname, "..", "..");
+const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 const groupPolicies = YAML.parse(
 	fs.readFileSync(path.join(repoRoot, "defaults", "tool-group-policies.yaml"), "utf8"),
 ) as Record<string, GrantPolicy>;

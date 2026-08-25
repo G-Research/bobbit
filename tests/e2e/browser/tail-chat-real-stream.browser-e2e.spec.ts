@@ -1,7 +1,7 @@
 /**
  * Full-stack chat streaming smoke: one real STREAM_BURST covers the live
  * streaming scroll path and the live-DOM-vs-refresh transcript invariant.
- * Pure DOM reflow and jump-button contracts live in tests/ui-fixtures/chat-scroll.spec.ts.
+ * Pure DOM reflow and jump-button contracts live in tests/support/fixtures/browser/ui/chat-scroll.spec.ts.
  */
 import { test, expect } from "./_helpers/fixtures.js";
 import { waitForHealth, waitForSessionStatus, createSession } from "../_helpers/e2e-setup.js";

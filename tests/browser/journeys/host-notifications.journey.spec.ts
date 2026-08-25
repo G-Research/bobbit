@@ -19,7 +19,7 @@ import {
 	registerProject,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../_helpers/journey-fixture.js";
 
 const SOURCE_DIR = fileURLToPath(new URL("../fixtures/host-notifications", import.meta.url));
 const PACK_NAME = "host-notifications-fixture";

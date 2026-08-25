@@ -42,7 +42,7 @@ import { dirname, join, resolve } from "node:path";
 import { manualTmpRoot } from "./_helpers/manual-test-paths.ts";
 import { seedManualTestModelPreferences } from "./_helpers/manual-test-model-seeding.ts";
 import { fileURLToPath } from "node:url";
-import { setupMultiRepoFixture } from "../fixtures/multi-repo/setup-fixture.mjs";
+import { setupMultiRepoFixture } from "../support/fixtures/shared/multi-repo/setup-fixture.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(HERE, "..", "..");

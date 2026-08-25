@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-goal-promotion-runtime-"));
 process.env.BOBBIT_DIR = root;

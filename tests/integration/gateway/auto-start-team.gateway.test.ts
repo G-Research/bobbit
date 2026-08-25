@@ -7,7 +7,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, nonGitCwd, deleteGoal } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 /** Poll a goal until a predicate is met or timeout. */
 async function pollGoal(

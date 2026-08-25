@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
 
 const MARKER = "RESTART_SAFE_GATE_COMMANDS_REPRO";

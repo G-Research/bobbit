@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/model-selector-fixture.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/model-selector-fixture.spec.ts (v2-dom tier).
 // The legacy spec esbuild-bundled a file:// entry that rendered the REAL
 // <agent-model-selector> (ModelSelector.open) and mocked /api/models. This port
 // mounts the same real component under happy-dom via ModelSelector.open, stubbing
