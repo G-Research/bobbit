@@ -12,6 +12,7 @@ const PANEL_SOURCE = readFileSync(new URL("../../market-packs/performance-optimi
 const PANEL_BUNDLE = readFileSync(new URL("../../market-packs/performance-optimisation/lib/performance-panel.js", import.meta.url), "utf8");
 const SCANNER_ROLE = readFileSync(new URL("../../market-packs/performance-optimisation/roles/performance-scanner.yaml", import.meta.url), "utf8");
 const DIRECTOR_ROLE = readFileSync(new URL("../../market-packs/performance-optimisation/roles/optimisation-director.yaml", import.meta.url), "utf8");
+const INSTALL_SKILL = readFileSync(new URL("../../market-packs/performance-optimisation/skills/install-performance-optimisation/SKILL.md", import.meta.url), "utf8");
 const BUILD_SOURCE = readFileSync(new URL("../../scripts/build-market-packs.mjs", import.meta.url), "utf8");
 const COPY_SOURCE = readFileSync(new URL("../../scripts/copy-builtin-packs.mjs", import.meta.url), "utf8");
 const HARNESS_SOURCE = readFileSync(new URL("../harness/gateway.ts", import.meta.url), "utf8");
@@ -168,6 +169,11 @@ describe("performance optimisation first-party pack", () => {
 		expect(DIRECTOR_ROLE).toMatch(/"Proposals": never/);
 		expect(DIRECTOR_ROLE).toContain("team_delegate: never");
 		expect(DIRECTOR_ROLE).toContain("autoStartTeam: true");
+		expect(INSTALL_SKILL).toContain("perf_coverage_refresh");
+		expect(INSTALL_SKILL).toContain("perf_benchmark_sync");
+		expect(INSTALL_SKILL).toContain("must not create, edit, or execute benchmark commands");
+		expect(INSTALL_SKILL).toContain("Never guess measurement semantics");
+		expect(INSTALL_SKILL).toContain("commandName` is the script key");
 		expect(BUILD_SOURCE).toContain('pack: "performance-optimisation"');
 		expect(BUILD_SOURCE).toContain('{ in: "performance-panel.ts", out: "lib/performance-panel.js" }');
 		expect(COPY_SOURCE).toMatch(/FIRST_PARTY_PACKS\s*=\s*\[[^\]]*"performance-optimisation"/);

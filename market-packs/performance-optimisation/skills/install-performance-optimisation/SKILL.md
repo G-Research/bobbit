@@ -1,7 +1,7 @@
 ---
 name: install-performance-optimisation
 description: Configure the performance optimisation programme and idempotently adopt or create its two persistent staff agents.
-allowed-tools: ask_user_choices, bobbit_read, bobbit_orchestrate, perf_programme_get_settings, perf_programme_set_settings
+allowed-tools: ask_user_choices, bobbit_read, bobbit_orchestrate, read, find, grep, perf_coverage_refresh, perf_benchmark_sync, perf_benchmark_list, perf_programme_get_settings, perf_programme_set_settings
 ---
 
 # Install Performance Optimisation
@@ -27,7 +27,24 @@ Validate custom schedules as standard five-field cron expressions and custom cou
 
 Call `perf_programme_set_settings` with exactly `{ scannerSchedule: <scanner cron>, directorSchedule: <director cron>, maxParallelIdeators: <count>, targetActiveGoals: <count> }`. The timezone belongs on the staff schedule triggers and in the report; it is not a programme-setting field. Report a tool failure and stop rather than claiming configuration succeeded.
 
-## 3. Reconcile staff identities before writing
+## 3. Initialise coverage and discover existing benchmarks
+
+Benchmark implementations remain project-owned. Installation only discovers and registers references; it must not create, edit, or execute benchmark commands.
+
+1. Call `perf_coverage_refresh` once so applicability has a current deterministic production map before any staff wake.
+2. Inspect bounded project configuration, repository manifests, and benchmark documentation under the authoritative project workspace. Candidate commands must already exist as either a Bobbit component command or a named manifest script. Use conventional names containing `benchmark`, `bench`, or `perf` only as discovery hints—not as proof.
+3. Register a candidate only when repository-owned configuration or documentation establishes all of:
+   - exact component and named command/script key (never shell text);
+   - primary metric, unit, and higher/lower improvement direction;
+   - repository-relative production file globs or known current scan-unit IDs that define applicability;
+   - optional warm-up and repetition guidance when documented.
+4. Never guess measurement semantics from a command name. Do not register load generators, profiling helpers, test-only fixtures, historical one-off measurements, or commands without a structured and repeatable measurement contract. Report each ambiguous candidate as skipped with the missing metadata.
+5. Call `perf_benchmark_sync` exactly once with the complete bounded set of validated descriptors. An empty set is valid and must be reported honestly. Use stable IDs when the repository documents them. For package scripts, `commandName` is the script key such as `benchmark:session-open`, not `npm run benchmark:session-open`.
+6. Call `perf_benchmark_list` to verify the committed catalogue. On a clean rerun, the same inputs must update in place rather than duplicate references.
+
+This install-time sync is the MVP registration boundary. Scanner passes and Director wakes consume the catalogue but never redefine it. Re-run this installation skill after the project adds or changes benchmark commands. Benchmark creation in response to an unmeasurable hypothesis is a post-MVP capability and must not be improvised during installation.
+
+## 4. Reconcile staff identities before writing
 
 Call `bobbit_read(operation: "list_staff", projectId: ..., limit: 200)` once and preflight **both** desired identities before creating either:
 
@@ -45,7 +62,7 @@ Apply these rules in order:
 
 An adopted staff record is left byte-for-byte unchanged. In particular, a rerun does not replace its schedule trigger. If the newly selected schedule differs from the existing trigger, report that an explicit user edit is required while still allowing pack-local parallelism/goal-target settings to change.
 
-## 4. Create only missing staff
+## 5. Create only missing staff
 
 For each create-needed identity, call `bobbit_orchestrate(operation: "create_staff")` exactly once with the authoritative `projectId`, stable `name`, and these bodies.
 
@@ -71,8 +88,8 @@ For each create-needed identity, call `bobbit_orchestrate(operation: "create_sta
 
 Use schedule-trigger objects compatible with the gateway contract: `{ type: "schedule", config: { cron, timezone }, prompt, enabled: true }`. Never invoke any staff deletion or update operation.
 
-## 5. Persist IDs and report
+## 6. Persist IDs and report
 
 After creation, verify the returned IDs by calling the bounded project staff list again. The programme tool exposes stable identity fields, so call `perf_programme_set_settings` again with exactly `{ scannerStaffId: <adopted-or-created ID>, directorStaffId: <adopted-or-created ID> }`; omitted operating fields retain their configured values. If a future tool version does not expose those ID fields, do not invent arguments or alternate storage: report that ID persistence is unavailable and keep the installation result explicit.
 
-Finish with the project ID, effective programme settings, timezone, and each staff ID marked `adopted` or `created`. A clean rerun with stored IDs must create zero staff. Never claim success when an identity conflict, missing recorded ID decision, configuration write, staff creation, verification, or supported ID-persistence write remains unresolved.
+Finish with the project ID, effective programme settings, timezone, coverage initialisation result, every registered benchmark reference, every skipped candidate with its reason, and each staff ID marked `adopted` or `created`. A clean rerun with stored IDs must create zero staff. Never claim success when an identity conflict, missing recorded ID decision, configuration write, staff creation, verification, or supported ID-persistence write remains unresolved.

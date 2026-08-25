@@ -116,6 +116,27 @@ describe("performance hypothesis and benchmark registry", () => {
 		db.close();
 	});
 
+	it("selects portable benchmark references through scan-unit bindings or repository-relative file globs", () => {
+		const db = database();
+		refresh(db);
+		const created = hypothesis(db) as { hypothesis: { id: string } };
+		const cacheBenchmark = db.registerBenchmark({
+			id: "cache-journey",
+			name: "Cache journey",
+			component: "server",
+			commandName: "benchmark:cache",
+			metric: "latencyMs",
+			unit: "ms",
+			direction: "lower",
+			fileGlobs: ["src/cache/**"],
+		}) as { benchmark: { id: string } };
+		db.registerBenchmark({ name: "Startup journey", component: "server", commandName: "benchmark:startup", metric: "readyMs", unit: "ms", direction: "lower", fileGlobs: ["src/server/**"] });
+
+		expect(db.listBenchmarks({ hypothesisId: created.hypothesis.id })).toMatchObject({ items: [{ id: cacheBenchmark.benchmark.id }] });
+		expect(() => db.registerBenchmark({ name: "Escaping", component: "server", commandName: "benchmark:escape", metric: "latency", unit: "ms", direction: "lower", fileGlobs: ["../outside/**"] })).toThrowError(expect.objectContaining<Partial<PerformanceDatabaseError>>({ code: "VALIDATION_FAILED" }));
+		db.close();
+	});
+
 	it("claims direct goal creation once, supports owned release, links unique goals, records runs, and makes outcomes idempotent", () => {
 		const db = database();
 		refresh(db);

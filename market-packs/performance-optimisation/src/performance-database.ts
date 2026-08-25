@@ -231,6 +231,31 @@ function structuralId(group: string): string {
 	return `struct-${sha256(group).slice(0, 16)}`;
 }
 
+function normalizeBenchmarkGlob(value: string, index: number): string {
+	const glob = text(value, `fileGlobs[${index}]`, 300).replace(/\\/g, "/");
+	if (glob.startsWith("/") || /^[a-z]:\//i.test(glob) || glob.split("/").includes("..")) {
+		throw new PerformanceDatabaseError("VALIDATION_FAILED", `fileGlobs[${index}] must stay repository-relative`);
+	}
+	return glob.replace(/^\.\//, "");
+}
+
+function benchmarkGlobMatches(file: string, glob: string): boolean {
+	let expression = "^";
+	for (let index = 0; index < glob.length; index += 1) {
+		const character = glob[index];
+		if (character === "*" && glob[index + 1] === "*") {
+			index += 1;
+			if (glob[index + 1] === "/") {
+				index += 1;
+				expression += "(?:.*/)?";
+			} else expression += ".*";
+		} else if (character === "*") expression += "[^/]*";
+		else if (character === "?") expression += "[^/]";
+		else expression += character.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+	}
+	return new RegExp(`${expression}$`).test(file);
+}
+
 function hypothesisFingerprint(input: Pick<HypothesisInput, "description" | "improvementTypes" | "locations">): string {
 	const locations = input.locations.map(location => `${location.scanUnitId ?? ""}|${normalizeRepositoryPath(location.file)}|${location.symbol?.trim().toLowerCase() ?? ""}`).sort();
 	const description = input.description.trim().toLowerCase().replace(/\s+/g, " ");
@@ -968,7 +993,7 @@ export class PerformanceDatabase {
 		const direction = enumValue<"higher" | "lower">(raw.direction, "direction", DIRECTIONS);
 		const scanUnitIds = raw.scanUnitIds === undefined ? [] : stringList(raw.scanUnitIds, "scanUnitIds", { maximum: 50, itemMax: 100 });
 		for (const unitId of scanUnitIds) if (!this.db.prepare("SELECT 1 FROM scan_units WHERE id=?").get(unitId)) throw new PerformanceDatabaseError("VALIDATION_FAILED", `unknown scan unit: ${unitId}`);
-		const fileGlobs = raw.fileGlobs === undefined ? [] : stringList(raw.fileGlobs, "fileGlobs", { maximum: 50, itemMax: 300 });
+		const fileGlobs = raw.fileGlobs === undefined ? [] : stringList(raw.fileGlobs, "fileGlobs", { maximum: 50, itemMax: 300 }).map(normalizeBenchmarkGlob);
 		const tags = raw.tags === undefined ? [] : stringList(raw.tags, "tags", { maximum: 50, itemMax: 80 });
 		const warmup = raw.warmup === undefined ? undefined : boundedInteger(raw.warmup, "warmup", 0, 1_000);
 		const repetitions = raw.repetitions === undefined ? undefined : boundedInteger(raw.repetitions, "repetitions", 1, 10_000);
@@ -981,9 +1006,13 @@ export class PerformanceDatabase {
 			const resolved = String(row(this.db.prepare("SELECT id FROM benchmark_references WHERE component=? AND command_name=? AND metric=?").get(component, commandName, metric))!.id);
 			this.db.prepare("DELETE FROM benchmark_bindings WHERE benchmark_id=?").run(resolved);
 			for (const unitId of scanUnitIds) this.db.prepare("INSERT INTO benchmark_bindings(benchmark_id,scan_unit_id) VALUES(?,?)").run(resolved, unitId);
-			for (const hypothesis of rows(this.db.prepare("SELECT DISTINCT h.id FROM hypotheses h JOIN hypothesis_locations l ON l.hypothesis_id=h.id WHERE h.scheduling_state='blocked-unmeasurable' AND l.scan_unit_id IN (SELECT scan_unit_id FROM benchmark_bindings WHERE benchmark_id=?)").all(resolved))) {
-				this.db.prepare("UPDATE hypotheses SET scheduling_state='open',updated_at=? WHERE id=?").run(now, hypothesis.id);
-			}
+			const blockedLocations = rows(this.db.prepare("SELECT h.id,l.scan_unit_id,l.file_path FROM hypotheses h JOIN hypothesis_locations l ON l.hypothesis_id=h.id WHERE h.scheduling_state='blocked-unmeasurable'").all());
+			const applicableBlockedIds = new Set(blockedLocations.flatMap(location => {
+				const bound = location.scan_unit_id && scanUnitIds.includes(String(location.scan_unit_id));
+				const matchesFile = fileGlobs.some(glob => benchmarkGlobMatches(String(location.file_path), glob));
+				return bound || matchesFile ? [String(location.id)] : [];
+			}));
+			for (const hypothesisId of applicableBlockedIds) this.db.prepare("UPDATE hypotheses SET scheduling_state='open',updated_at=? WHERE id=?").run(now, hypothesisId);
 			return this.visibleChange({ actor: "Performance programme", message: `Benchmark registered: ${name}`, tab: "flow" });
 		});
 		return { revision, benchmark: this.benchmarkById(id) };
@@ -1000,14 +1029,20 @@ export class PerformanceDatabase {
 	listBenchmarks(input: { hypothesisId?: string; scanUnitId?: string; limit?: number } = {}): Record<string, unknown> {
 		const limit = limitOf(input.limit, 50, 100);
 		let scanUnitIds: string[] = [];
-		if (input.hypothesisId) scanUnitIds = rows(this.db.prepare("SELECT DISTINCT scan_unit_id FROM hypothesis_locations WHERE hypothesis_id=? AND scan_unit_id IS NOT NULL").all(text(input.hypothesisId, "hypothesisId", 100))).map(item => String(item.scan_unit_id));
+		let hypothesisFiles: string[] = [];
+		if (input.hypothesisId) {
+			const locations = rows(this.db.prepare("SELECT scan_unit_id,file_path FROM hypothesis_locations WHERE hypothesis_id=?").all(text(input.hypothesisId, "hypothesisId", 100)));
+			scanUnitIds = locations.flatMap(item => item.scan_unit_id ? [String(item.scan_unit_id)] : []);
+			hypothesisFiles = locations.map(item => String(item.file_path));
+		}
 		if (input.scanUnitId) scanUnitIds.push(text(input.scanUnitId, "scanUnitId", 100));
-		const parameters: SqlValue[] = [];
-		let where = "WHERE r.stale=0";
-		if (scanUnitIds.length) { where += ` AND EXISTS(SELECT 1 FROM benchmark_bindings b WHERE b.benchmark_id=r.id AND b.scan_unit_id IN (${scanUnitIds.map(() => "?").join(",")}))`; parameters.push(...scanUnitIds); }
-		parameters.push(limit);
-		const values = rows(this.db.prepare(`SELECT r.id FROM benchmark_references r ${where} ORDER BY r.name,r.id LIMIT ?`).all(...parameters));
-		return { revision: this.revision(), items: values.map(value => this.benchmarkById(String(value.id))) };
+		const values = rows(this.db.prepare("SELECT r.id FROM benchmark_references r WHERE r.stale=0 ORDER BY r.name,r.id").all());
+		const items = values.map(value => this.benchmarkById(String(value.id)) as { scanUnitIds: string[]; fileGlobs: string[] }).filter(item => {
+			if (!input.hypothesisId && !input.scanUnitId) return true;
+			if (item.scanUnitIds.some(unitId => scanUnitIds.includes(unitId))) return true;
+			return Boolean(input.hypothesisId && item.fileGlobs.some(glob => hypothesisFiles.some(file => benchmarkGlobMatches(file, glob))));
+		}).slice(0, limit);
+		return { revision: this.revision(), items };
 	}
 
 	recordBenchmarkRun(raw: BenchmarkRunInput): Record<string, unknown> {

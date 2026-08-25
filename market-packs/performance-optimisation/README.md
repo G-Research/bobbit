@@ -83,7 +83,7 @@ The pack ships two real marketplace roles:
 - `performance-scanner` — read-only evidence discovery.
 - `optimisation-director` — evidence-led planning and coordination.
 
-The pack also ships the ephemeral read-only `performance-ideator` role. After enabling the pack, run `/install-performance-optimisation`; the skill asks for schedules and concurrency, then idempotently adopts or creates the two persistent staff through `bobbit_read` and `bobbit_orchestrate(create_staff)`. Ideators remain temporary. The persistent Director itself claims hypotheses and creates their goals through `bobbit_orchestrate(create_goal)`; it never delegates goal creation or emits proposal drafts.
+The pack also ships the ephemeral read-only `performance-ideator` role. After enabling the pack, run `/install-performance-optimisation`; the skill asks for schedules and concurrency, initializes coverage, discovers existing project benchmark commands with documented measurement contracts, idempotently syncs their references, then adopts or creates the two persistent staff through `bobbit_read` and `bobbit_orchestrate(create_staff)`. Ambiguous benchmark candidates are reported and skipped rather than guessed or executed. Rerun the skill after project benchmarks change. Ideators remain temporary. The persistent Director itself claims hypotheses and creates their goals through `bobbit_orchestrate(create_goal)`; it never delegates goal creation or emits proposal drafts.
 
 ## Development loop
 

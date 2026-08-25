@@ -147,9 +147,14 @@ It offers sensible defaults without making those values architectural invariants
 
 1. Resolves the current project and confirms the pack is enabled.
 2. Initializes or updates programme settings in SQLite.
-3. Lists project staff and first checks staff IDs previously recorded in SQLite.
-4. On first install, adopts an exact stable name-and-role match when one exists; otherwise it creates the missing staff with its role, accessory, prompt, and schedule trigger.
-5. Persists created/adopted staff IDs and reports them.
+3. Initializes deterministic production coverage.
+4. Discovers existing benchmark-like component commands and manifest scripts, retaining only candidates whose repository-owned configuration or documentation defines a primary metric, unit, direction, and production applicability.
+5. Idempotently syncs those validated benchmark references without executing or modifying project commands; ambiguous candidates are reported and skipped.
+6. Lists project staff and first checks staff IDs previously recorded in SQLite.
+7. On first install, adopts an exact stable name-and-role match when one exists; otherwise it creates the missing staff with its role, accessory, prompt, and schedule trigger.
+8. Persists created/adopted staff IDs and reports them.
+
+Install-time discovery is the MVP registration boundary. Scanner and Director passes consume benchmark references but never redefine them. Rerun the installation skill after adding or changing project benchmarks. A post-MVP benchmark-authoring system may respond to `blocked-unmeasurable` demand by creating and validating project-owned benchmarks before registering them.
 
 A same-name record with the wrong role is an explicit blocked installation conflict, not an invitation to create a duplicate. Rerunning the skill follows stored IDs and is idempotent: it never creates duplicates, deletes staff, or silently replaces a renamed or user-modified staff record. If a recorded staff ID no longer exists, the skill reports that condition and asks before recreating it. Because the allowed gateway tool surface creates but does not update staff, changing an existing staff schedule remains an explicit user edit; pack-local concurrency settings may be changed independently.
 
