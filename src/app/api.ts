@@ -346,7 +346,7 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 		// and friends, surfaced via /api/sessions polling every ~5s). Clobbering
 		// lastActivity to Date.now() on every session_status frame caused spurious
 		// "now ●" unread indicators in the sidebar on benign heartbeats and
-		// busy→idle transitions. See tests/spurious-idle-unread.spec.ts.
+		// busy→idle transitions. See tests/dom/spurious-idle-unread.dom.test.ts.
 		state.gatewaySessions[idx] = { ...previous, status };
 		renderApp();
 	}

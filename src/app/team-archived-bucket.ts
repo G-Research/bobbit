@@ -17,7 +17,6 @@
  *
  * This module is intentionally tiny and pure so the bucketing is
  * unit-testable without standing up the full render-helpers state.
- * Tested by `tests/render-helpers-team-archived.test.ts`.
  */
 
 export interface TeamChildLike {

@@ -1202,7 +1202,7 @@ export interface SessionInfo {
 		}>;
 		/** seq/ts of the original `tool_permission_needed` broadcast — replayed
 		 * verbatim to late-joining clients so we never burn a fresh global seq
-		 * on a unicast frame. See tests/perm-frame-late-joiner-seq-gap.test.ts. */
+		 * on a unicast frame. See tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts. */
 		seq: number;
 		ts: number;
 	};
@@ -2936,7 +2936,7 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
  *  container), so a retryable agent_end must never reach clients via
  *  `emitSessionEvent` or settle a wait/abort listener as final. Shared by every
  *  `rpcClient.onEvent` emit path so the suppression contract stays consistent.
- *  Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts. */
+ *  Pinned by tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts. */
 export function isRetryableAgentEnd(event: unknown): boolean {
 	return !!event
 		&& typeof event === "object"
@@ -3137,7 +3137,7 @@ function spliceSkillExpansionsIntoEvent(
 /** Snapshot of the active pending tool-permission grant, returned to clients
  * that attach mid-perm so they can replay the SAME seq/ts as the original
  * broadcast — never allocating a fresh sequence number. Pinned by
- * tests/perm-frame-late-joiner-seq-gap.test.ts. */
+ * tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts. */
 export interface PendingToolPermissionSnapshot {
 	id?: string;
 	toolName: string;
@@ -11822,7 +11822,7 @@ export class SessionManager {
 	/**
 	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
 	 * events while forwarding completed compaction events independently.
-	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
+	 * Pinned by tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts.
 	 */
 	private prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
 		const prepared = prepareVisibleAgentEvent(session, event, this.messageAuthorDependencies(session));
@@ -12395,7 +12395,7 @@ export class SessionManager {
 			// first write (the `wx` open then succeeds). Queued prompts replay normally.
 			// If the worktree/cwd is actually gone, restoreSession() throws below and we
 			// fall back to a dormant (never archived) session. Pinned by
-			// tests/session-manager-no-precreate.test.ts.
+			// tests/unit/core/session-manager-no-precreate.unit.test.ts.
 			if (!ps.sandboxed) {
 				console.log(`[session-manager] Session ${ps.id} recorded ${ps.agentSessionFile} but has no transcript yet (pre-flush restart) — restoring live; agent will create the file on first write`);
 				// fall through to restoreSession()
@@ -13787,7 +13787,7 @@ export class SessionManager {
 				assistantType,
 				taskId: opts?.taskId,
 				// Load-bearing wire: threads staffId from opts → plan → persistOnce so it
-				// lands in PersistedSession on disk. Pinned by `tests/staff-session-staffid-persistence.test.ts`;
+				// lands in PersistedSession on disk. Pinned by `tests/unit/core/staff-session-staffid-persistence.unit.test.ts`;
 				// without it `BOBBIT_STAFF_ID` is lost on respawn and the inbox tools refuse to register.
 				staffId: opts?.staffId,
 				parentSessionId: opts?.parentSessionId,
@@ -13906,7 +13906,7 @@ export class SessionManager {
 			branch: opts?.branch,
 			repoWorktrees: opts?.repoWorktrees,
 			// Load-bearing wire: same contract as the worktree branch above.
-			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
+			// Pinned by `tests/unit/core/staff-session-staffid-persistence.unit.test.ts`.
 			staffId: opts?.staffId,
 			sandboxed: effectiveSandboxed,
 			role: opts?.role,

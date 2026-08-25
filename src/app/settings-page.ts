@@ -2123,7 +2123,7 @@ function renderImageModelRow(
 	`;
 }
 
-// Exported for fixture tests (tests/settings-models-tab-redesign.spec.ts).
+// Exported for fixture tests (tests/dom/settings-models-tab-redesign.dom.test.ts).
 export function __testResetModelsTab(opts: {
 	aigwConfigured?: boolean;
 	aigwUrl?: string;

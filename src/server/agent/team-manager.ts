@@ -2990,7 +2990,7 @@ export class TeamManager {
 		}
 
 		// Create a worktree for this role agent (only when the goal is in a git repo).
-		// Branch shape pinned by tests/team-branch-shape.test.ts:
+		// Branch shape pinned by tests/unit/core/team-branch-shape.unit.test.ts:
 		//   goal/<goalId8>/<role>-<short4>
 		// `createWorktree` flattens slashes to hyphens for the worktree dirname,
 		// so the on-disk directory is `goal-<goalId8>-<role>-<short4>`.

@@ -185,7 +185,7 @@ function reconstructModelText(m: any): string {
 //
 // `isSyntheticCompactionMarker` recognises both so the snapshot dedup
 // invariant (case 12 + "snapshot drops trailing synthetic compaction
-// marker" in tests/message-reducer.test.ts) keeps working unchanged via
+// marker" in tests/unit/core/message-reducer.unit.test.ts) keeps working unchanged via
 // the legacy branch, while the rich-summary path adds new behaviour
 // (case 12b, 12c).
 // ---------------------------------------------------------------------------

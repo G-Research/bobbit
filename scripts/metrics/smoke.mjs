@@ -337,7 +337,7 @@ try {
 	if ((missingTitleSmokeFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail when retained smoke coverage is missing a required title regex");
 
 	writeJson(join(baselineDir, "thresholds.json"), {
-		retainedSmokeFiles: ["tests/e2e/ui/does-not-exist-retained-smoke.spec.ts"],
+		retainedSmokeFiles: ["tests/e2e/browser/does-not-exist-retained-smoke.browser-e2e.spec.ts"],
 	});
 	const missingSmokeFail = runCheck(currentDir);
 	if ((missingSmokeFail.status ?? 0) === 0) throw new Error("expected metrics:check to fail for a missing retained smoke file");

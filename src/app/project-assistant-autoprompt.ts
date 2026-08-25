@@ -9,7 +9,7 @@
  * into the assistant's first turn.
  *
  * The "subset selection" block format below is **pinned by**
- * `tests/project-assistant-autoprompt.test.ts`. Do not change the wording
+ * `tests/unit/core/project-assistant-autoprompt.unit.test.ts`. Do not change the wording
  * without updating the test AND
  * `src/server/agent/project-assistant.ts`, which teaches the assistant to
  * recognise this exact block and treat `selectedIds` as authoritative

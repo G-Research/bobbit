@@ -1761,7 +1761,7 @@ export function __getGitStatusInvocationCount(): number { return _runBatchGitSta
 export function __resetGitStatusInvocationCount(): void { _runBatchGitStatusCount = 0; }
 
 /** Test-only hook: if set, replaces the real `runBatchGitStatus` git-spawn
- *  path with a fake. Used by `tests/e2e/git-status-caching.spec.ts` to
+ *  path with a fake. Used by `tests/integration/gateway/git-status-caching.gateway.test.ts` to
  *  exercise the TTL/single-flight/coalesce logic deterministically without
  *  spawning Git Bash under CI load (which fails unpredictably). Production
  *  code never sets this. */
@@ -1791,7 +1791,7 @@ export function invalidateGitStatusCache(cwd: string, containerId?: string): voi
 }
 
 /** Test-only: mark all cache entries for a cwd as TTL-expired without
- *  sleeping. Used by `tests/e2e/git-status-caching.spec.ts` to deterministically
+ *  sleeping. Used by `tests/integration/gateway/git-status-caching.gateway.test.ts` to deterministically
  *  exercise the TTL re-run path without inflating wall-clock time. Sets
  *  `resolvedAt` to a timestamp older than `GIT_STATUS_TTL_MS` so the next
  *  call falls through to a fresh invocation. */
@@ -5543,7 +5543,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					// unrelated git checkout, `isGitRepo(<state>/system-project)`
 					// walks up to find the host repo and the pool would allocate
 					// `pool/_pool-*` branches there. See
-					// `tests/system-project-pool-leak.test.ts`.
+					// `tests/e2e/node/system-project-pool-leak.node-e2e.test.ts`.
 					// Headquarters never participates in the worktree pool — filter it
 					// out before any git probe or pool init.
 					const contexts = Array.from(projectContextManager.visible()).filter(
@@ -9259,8 +9259,8 @@ async function handleApiRoute(
 		// using `rootGoalId` would leak the whole project's grand total down to
 		// every descendant view. `computeTreeCost` consumes `walkGoalSubtree`
 		// for the descendant walk — do not add another traversal helper here.
-		// Pinned by tests/api-goals-tree-cost.test.ts and
-		// tests/e2e/ui/tree-cost-rollup.spec.ts — do not "fix" this back to
+		// Pinned by tests/unit/core/api-goals-tree-cost.unit.test.ts and
+		// tests/unit/core/tree-cost-rollup.unit.test.ts — do not "fix" this back to
 		// `goal.rootGoalId ?? goal.id` without tripping those tests.
 		if (!goal.projectId) {
 			json({ rootGoalId: goalId, totalCostUsd: 0, totalTokensIn: 0, totalTokensOut: 0, breakdown: [] });
@@ -10101,7 +10101,7 @@ async function handleApiRoute(
 	// archive. Enforces parent-child relationship server-side so a
 	// compromised/buggy team-lead cannot archive arbitrary goals by
 	// supplying their id to the general DELETE /api/goals/:id route.
-	// Pinned by tests/e2e/parent-scoped-archive-child.spec.ts.
+	// Pinned by tests/integration/gateway/parent-scoped-archive-child.gateway.test.ts.
 	const archiveChildMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/archive-child\/([^/]+)$/);
 	if (archiveChildMatch && req.method === "DELETE") {
 		const parentId = archiveChildMatch[1];
@@ -14031,7 +14031,7 @@ async function handleApiRoute(
 		broadcastToGoal(goalId, { type: "gate_signal_received", goalId, gateId, signalId: signal.id });
 
 		// Broadcast verification started AFTER signal received — WS clients
-		// depend on this ordering (see tests/e2e/verification-core.spec.ts
+		// depend on this ordering (see tests/integration/gateway/verification-core.gateway.test.ts
 		// "WS events have correct shape, timestamps, and ordering"). The
 		// `gate_verification_started` event used to be fired synchronously
 		// inside `beginVerification` which inverted the order on the wire.
@@ -15205,7 +15205,7 @@ async function handleApiRoute(
 	}
 
 	// POST /api/goals/:id/team/teardown — fully tear down a team (dismiss agents + terminate team lead).
-	// Cascade required — mirror of `tests/api-team-teardown-cascade.test.ts::teardownRoute`.
+	// Cascade is required so descendant cleanup cannot be omitted accidentally.
 	const teamTeardownMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/(?:team|swarm)\/teardown$/);
 	if (teamTeardownMatch && req.method === "POST") {
 		const goalId = teamTeardownMatch[1];

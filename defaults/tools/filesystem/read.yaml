@@ -108,7 +108,7 @@ detail_docs: >-
 
   # Read a screenshot to analyze UI state
 
-  read(path="tests/screenshots/error-state.png")
+  read(path="tests/support/fixtures/shared/screenshots/error-state.png")
 
   ```
 

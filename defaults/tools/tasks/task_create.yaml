@@ -94,7 +94,7 @@ detail_docs: >-
 
   task_create(title="Write E2E tests for tool API", type="testing",
     depends_on=["impl-task-id-123"],
-    spec="Cover: GET /api/tools (list), GET /api/tools/:name (detail), PUT /api/tools/:name (update), 404 for unknown. Use patterns from tests/e2e/.")
+    spec="Cover: GET /api/tools (list), GET /api/tools/:name (detail), PUT /api/tools/:name (update), 404 for unknown. Create the canonical API E2E test with npm run test:new -- api-e2e tools-api; no registry update is needed.")
 
   # Create a sub-task under a parent task
 

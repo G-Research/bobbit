@@ -433,8 +433,8 @@ components:
     commands:
       build: npm run build
       check: npm run check
-      unit:  npx playwright test --config tests/playwright.config.ts --reporter=line
-      e2e:   npx playwright test --grep-invert 'mcp-integration|session-lifecycle-ui' --config playwright-e2e.config.ts --reporter=line
+      unit:  npm run test:unit
+      e2e:   npm run test:e2e
     config:
       # QA testbed config — read by the /qa-test skill via the agent-qa step's component field.
       # Env vars are inlined into qa_start_command itself; there is no separate qa_env field.

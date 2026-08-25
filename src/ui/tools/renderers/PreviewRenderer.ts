@@ -527,7 +527,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 						// preview overwrote the live mount). Without this, legacy v1/v2 or
 						// v3-without-artifactId markers create tabs with no restore source and
 						// the iframe 404s the next time the tab is selected — pinned by
-						// tests/e2e/ui/dynamic-chat-tabs.spec.ts "legacy v1 and v2 preview_open
+						// tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts "legacy v1 and v2 preview_open
 						// snapshots remain distinct across reload".
 						if (typeof data?.artifactId === "string" && data.artifactId) artifactIdFromPost = data.artifactId;
 					} catch { /* ignore — body parse is best-effort */ }

@@ -463,7 +463,7 @@ export class DirectoryPicker extends LitElement {
 				// (Mini-lit Dialog listens for Esc on `document`) does not also
 				// close. Design doc: "Esc closes suggestions → browse → dialog
 				// (in that order)". Pinned by
-				// tests/e2e/ui/add-project-typeahead.spec.ts.
+				// tests/browser/fixtures/add-project-flow.fixture.spec.ts.
 				e.preventDefault();
 				e.stopPropagation();
 				this._open = false;

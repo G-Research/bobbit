@@ -1104,7 +1104,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 	// for a few ms after Ctrl+↓ off a session row, and any DOM-order based
 	// active-row query (incl. the sidebar-keyboard-nav E2E) reads the stale
 	// session row instead of the new target. Pinned by
-	// tests/e2e/ui/sidebar-keyboard-nav.spec.ts.
+	// tests/browser/fixtures/sidebar-keyboard-nav-fixture.fixture.spec.ts.
 	const kbOverride = getActiveNavId();
 	const navActive = kbOverride ? kbOverride === navId : active;
 	return html`

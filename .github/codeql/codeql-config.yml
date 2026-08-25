@@ -30,7 +30,6 @@ queries:
 # Non-production code is not attack surface. Alerts here are pure noise.
 paths-ignore:
   - tests
-  - tests2
   - scripts
   - tools          # dev-only tooling (e.g. tools/dummy-aigw test double)
   - "**/*.test.ts"

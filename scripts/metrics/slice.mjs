@@ -42,20 +42,20 @@ function listSpecFiles(dir) {
 	for (const entry of readdirSync(dir, { withFileTypes: true })) {
 		const full = join(dir, entry.name);
 		if (entry.isDirectory()) files.push(...listSpecFiles(full));
-		else if (entry.name.endsWith(".spec.ts")) files.push(full);
+		else if (entry.name.endsWith(".browser-e2e.spec.ts")) files.push(full);
 	}
 	return files;
 }
 
-const uiDir = pathFromRoot("tests", "e2e", "ui");
-if (!existsSync(uiDir)) throw new Error(`Missing ${uiDir}`);
-const selected = listSpecFiles(uiDir)
+const browserE2EDir = pathFromRoot("tests", "e2e", "browser");
+if (!existsSync(browserE2EDir)) throw new Error(`Missing ${browserE2EDir}`);
+const selected = listSpecFiles(browserE2EDir)
 	.filter((file) => sliceMatchers[slice].some((matcher) => matcher.test(file)))
 	.map((file) => relative(pathFromRoot(), file).replace(/\\/g, "/"))
 	.sort();
 
 if (selected.length === 0) {
-	console.error(`[metrics] no E2E browser files matched ${slice} slice`);
+	console.error(`[metrics] no canonical browser E2E files matched ${slice} slice`);
 	process.exit(1);
 }
 

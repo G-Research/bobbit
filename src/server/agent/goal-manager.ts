@@ -140,7 +140,7 @@ function assertAdoptedGoalWorkspace(value: AdoptedGoalWorkspace): void {
  *
  * Trim must run *after* the slice so truncation can't reintroduce a
  * trailing hyphen (the `e2e-speed--` artefact). Exported for pinning
- * tests; see `tests/team-branch-shape.test.ts`.
+ * tests; see `tests/unit/core/team-branch-shape.unit.test.ts`.
  */
 export function toBranchName(title: string): string {
 	return title

@@ -854,7 +854,7 @@ export class AgentInterface extends LitElement {
 	 * implementation. The threshold is intentionally scoped to the
 	 * bottom-single "Jump to bottom" variant only — it preserves the
 	 * UX of not flashing the big pill on tiny scroll deltas (pinned by
-	 * `tests/ui-fixtures/chat-scroll.spec.ts`). The top button and the
+	 * `tests/browser/fixtures/chat-scroll.fixture.spec.ts`). The top button and the
 	 * split-bottom variant remain purely geometric so they track
 	 * viewport edges with no state.
 	 *
@@ -882,7 +882,7 @@ export class AgentInterface extends LitElement {
 		// canonical pinned state has `dist === 1`. The legacy
 		// `dist > clientHeight * 0.5` threshold is preserved here so the
 		// big "Jump to bottom" pill does not flash on tiny scroll deltas
-		// (pinned by `tests/ui-fixtures/chat-scroll.spec.ts`). The top
+		// (pinned by `tests/browser/fixtures/chat-scroll.fixture.spec.ts`). The top
 		// button (`aboveExists`) and split-bottom variant (`belowExists`)
 		// keep pure-geometric semantics against the viewport edges.
 		const dist = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -1062,7 +1062,7 @@ export class AgentInterface extends LitElement {
 						this._isAtBottom = true;
 						this._refreshJumpButton();
 						// Apply the post-collapse clamp inherited from the old
-						// algorithm (tests/collapse-scroll-bugs.spec.ts). If
+						// algorithm (tests/browser/fixtures/collapse-scroll-bugs.fixture.spec.ts). If
 						// content bottom rose above the viewport midpoint after
 						// the shrink, snap to target.
 						const { scrollTop, clientHeight } = el;

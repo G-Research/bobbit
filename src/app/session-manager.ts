@@ -663,7 +663,7 @@ function createDraftManager<T>(config: {
 				// promise) repaints the proposal panel with the rehydrated state.
 				// The slow path already renders implicitly in connectToSession's
 				// terminal finally{}; this keeps both paths symmetric. Pinned by
-				// tests/proposal-rehydrate-client.test.ts.
+				// tests/unit/core/proposal-rehydrate-client.unit.test.ts.
 				renderApp();
 				return true;
 			} catch (err) {
@@ -2189,7 +2189,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// Finding 1 — server-stamped revisions are the source of truth for
 			// CONTENT, not just the rev number. The decision is delegated to the
 			// pure `shouldApplyProposalUpdate` policy (pinned by
-			// tests/proposal-update-policy.test.ts) so the slot + form-mirror stay
+			// tests/unit/core/proposal-update-policy.unit.test.ts) so the slot + form-mirror stay
 			// strictly monotonic w.r.t. the server rev. Two stale cases are dropped:
 			//   • A no-serverRev tool-use/transcript rescan (streaming === false)
 			//     carries the ORIGINAL propose_* fields, stale once a later seed/edit

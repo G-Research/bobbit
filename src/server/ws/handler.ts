@@ -1221,7 +1221,7 @@ export function handleWebSocketConnection(
 			// pending-grant record) instead of allocating a fresh seq — a fresh
 			// unicast seq would leave already-attached clients gap-buffering the
 			// next live event forever. Pinned by
-			// tests/perm-frame-late-joiner-seq-gap.test.ts.
+			// tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts.
 			const pendingPerm = sessionManager.getPendingToolPermission(sessionId);
 			if (pendingPerm) {
 				send(ws, { type: "tool_permission_needed", ...pendingPerm });

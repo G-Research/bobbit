@@ -91,7 +91,7 @@ function readDisabledDirs(store?: ProjectConfigReader): Set<string> {
 // mutation via `invalidateMarketPackScanCache()`, which the host already fans
 // out from `invalidateResolverCaches()` on install/update/uninstall/pack-order.
 //
-// Pinned by tests2/core/pack-list-scan-cache.test.ts (N resolutions ⇒ 1 scan;
+// Pinned by tests/unit/core/pack-list-scan-cache.unit.test.ts (N resolutions ⇒ 1 scan;
 // invalidation forces a re-scan). Never widen the key without updating that test.
 const __scanCache = new Map<string, PackEntry[]>();
 
@@ -196,7 +196,7 @@ export function buildPackList(opts: BuildPackListOptions): PackEntry[] {
 	// NOTE: market entries are intentionally NOT deduped by path here. When all
 	// scope bases coincide (a self-managed project whose rootPath == server cwd),
 	// the higher scope re-scans the same dir and its `pack_order` legitimately
-	// wins (pinned by tests/pack-marketplace.test.ts "market-vs-market"). The
+	// wins (pinned by tests/unit/core/pack-marketplace.unit.test.ts "market-vs-market"). The
 	// resulting same-path self-shadow is harmless for skill resolution.
 	const pushMarket = (list: PackEntry[]): void => { entries.push(...list); };
 

@@ -402,7 +402,7 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
  * The ONE legacy exception, preserved byte-identical, is the builtin ↔ user
  * `toolsDir` pair: if the user layer defines a group, it shadows that ENTIRE
  * same-named group in the BUILTIN layer (the pre-cascade two-layer behavior
- * pinned by `tests/e2e/tools-cascade.spec.ts` etc.). This whole-group replace
+ * pinned by `tests/integration/gateway/tools-cascade.gateway.test.ts` etc.). This whole-group replace
  * is identical to a by-name merge in practice because customizing a builtin
  * tool copies the WHOLE group into `toolsDir` first (see `updateToolMetadata`).
  *

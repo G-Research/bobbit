@@ -6,7 +6,7 @@ import "./app.css";
 // fresh tab without first visiting the corresponding Settings page would
 // render the pane unstyled. Vite chunks CSS and JS independently, so an
 // eager CSS import does NOT pull in the lazy JS chunk.
-// Pinned by tests/e2e/ui/proposal-pane-styles.spec.ts.
+// Pinned by tests/browser/fixtures/proposal-panel-streaming.fixture.spec.ts.
 import "./workflow-page.css";
 import "./role-manager.css";
 import "./tool-manager.css";
@@ -136,7 +136,7 @@ document.addEventListener("click", captureSidePanelTabActivation, true);
 
 // E2E test hook: expose renderTool() and lit-html's render() so browser-based
 // tests can mount renderers directly without going through the session
-// pipeline. Used by tests/e2e/ui/children-tool-renderers.spec.ts.
+// pipeline. Used by tests/browser/fixtures/children-tool-renderers.fixture.spec.ts.
 (window as any).__bobbitRenderTool = renderTool;
 (window as any).__bobbitRegisterToolRenderer = registerToolRenderer;
 import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch(() => {});
@@ -144,7 +144,7 @@ import("lit").then(m => { (window as any).__bobbitLitRender = m.render; }).catch
 // E2E test hook: re-drive pack-renderer reconciliation (extension-host §4a) the
 // SAME way a marketplace install/uninstall does (marketplace-page.ts), so browser
 // E2E can assert the running UI reconciles (stale pack renderer removed, built-in
-// restored) WITHOUT a page reload. Used by tests/e2e/ui/extension-host.spec.ts.
+// restored) WITHOUT a page reload. Used by tests/e2e/browser/extension-panel-ux.browser-e2e.spec.ts.
 (window as any).__bobbitReconcilePackRenderers = async () => {
 	// Delegate to the REAL marketplace-mutation reconcile (renderers + panels +
 	// entrypoints), which FORCE re-registers from freshly fetched metadata —

@@ -13,7 +13,7 @@
  *
  * Throws on a malformed template (an `{endif:X}` with no open, a close whose
  * name doesn't match the innermost open, or an unclosed `{if:X}`). These are
- * authoring bugs — pinned by tests/prompt-conditionals.test.ts and the
+ * authoring bugs — pinned by tests/unit/core/prompt-conditionals.unit.test.ts and the
  * template-validity scan — so failing loud at assembly time is correct.
  *
  * Lives in its own module (no imports) so both role-prompt.ts and

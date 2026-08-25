@@ -61,9 +61,8 @@ export interface ComputeEdgePathsOpts {
 	 * column. Retained only so existing tests can opt into the old shape
 	 * for back-compat assertions while they migrate.
 	 *
-	 * TODO (R-026): remove after PR-merged. Dependent tests in
-	 * `tests/plan-edge-paths.test.ts` need to be migrated to the
-	 * right/left routing default before this branch can be deleted.
+	 * TODO (R-026): remove after callers and compatibility assertions migrate
+	 * to the right/left routing default.
 	 */
 	midLineY?: (fromY: number, toY: number) => number;
 }

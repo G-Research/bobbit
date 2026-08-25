@@ -3862,7 +3862,7 @@ let _proposalMaxConcurrentChildren: number | null = null;
 // Regression context: a master→PR merge silently dropped the inline-workflow
 // + inline-roles editor surface. This is its replacement — a tabbed UI reusing
 // the main Workflows/Roles page renderers. Pinned by
-// tests/source-pin-merge-invariants.test.ts.
+// tests/unit/core/source-pin-merge-invariants.unit.test.ts.
 // ----------------------------------------------------------------------------
 type ProposalTab = "goal" | "workflow" | "roles" | "metadata" | "subgoals";
 

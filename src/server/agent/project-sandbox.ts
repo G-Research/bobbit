@@ -458,7 +458,7 @@ export class ProjectSandbox {
 		// `unhandledRejection` — which under load can wedge the gateway for other
 		// sessions. The real rejection is still observed by `getContainerId()`
 		// (which awaits the same promise) and re-thrown on the awaited `init()`
-		// boundary below. See tests/sandbox-init-rejection.test.ts.
+		// boundary below. See tests/unit/core/sandbox-init-rejection.unit.test.ts.
 		this._readyPromise.catch(() => {});
 
 		try {

@@ -46,7 +46,7 @@ detail_docs: |-
   write(path="src/utils/format-date.ts", content="export function formatDate(d: Date): string {\n  return d.toISOString().split('T')[0];\n}\n")
 
   # Create a test fixture
-  write(path="tests/fixtures/sample-config.json", content="{\n  \"port\": 3000,\n  \"host\": \"localhost\",\n  \"debug\": true\n}")
+  write(path="tests/support/fixtures/shared/sample-config.json", content="{\n  \"port\": 3000,\n  \"host\": \"localhost\",\n  \"debug\": true\n}")
 
   # Write an HTML report that renders inline in chat
   write(path="report.html", content="<!DOCTYPE html>\n<html><head><style>body{font-family:system-ui}</style></head>\n<body><h1>Test Results</h1><p>All 42 tests passed.</p></body></html>")

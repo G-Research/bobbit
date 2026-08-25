@@ -7,7 +7,7 @@ provider:
   extension: extension.ts
 # Reclassified Team→Agent (Orchestration Core sub-goal A) — own-children
 # orchestration verb; allow-by-default, server-side own-children scoping.
-# See tests/role-team-tools-policy.test.ts.
+# See tests/unit/core/role-team-tools-policy.unit.test.ts.
 group: Agent
 renderer: src/ui/tools/renderers/TeamToolRenderers.ts
 docs: |-

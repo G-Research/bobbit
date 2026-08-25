@@ -89,7 +89,7 @@ detail_docs: >-
 
   # Open a local HTML fixture for testing
 
-  browser_navigate(url="file:///C:/Users/user/project/tests/fixtures/test.html")
+  browser_navigate(url="file:///C:/Users/user/project/tests/support/fixtures/shared/test.html")
 
   ```
 

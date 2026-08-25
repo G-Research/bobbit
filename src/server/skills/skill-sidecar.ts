@@ -284,7 +284,7 @@ export function findSkillSidecarEntry(
  * `originalText` and re-attach BOTH `skillExpansions` and `fileMentions`
  * (when present). This is the restore / authoritative-snapshot counterpart to
  * the live broadcast splice (`spliceSkillExpansionsIntoEvent`); the two MUST
- * stay in sync or chips vanish on reload. Pinned by tests/skill-sidecar.test.ts.
+ * stay in sync or chips vanish on reload. Pinned by tests/unit/core/skill-sidecar.unit.test.ts.
  *
  * Duplicate identical messages are matched in FIFO order. Idempotent for
  * messages without a matching entry. The input array/objects are not mutated.

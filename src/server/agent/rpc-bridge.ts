@@ -331,7 +331,7 @@ export function packLocalDataDockerExecArgs(env?: Readonly<Record<string, string
  * gateway-url state file.
  *
  * Exported (with injectable deps) for deterministic unit testing without a real
- * spawn. Pinned by tests/rpc-bridge-gateway-env.test.ts.
+ * spawn. Pinned by tests/unit/core/rpc-bridge-gateway-env.unit.test.ts.
  */
 export function resolveDirectGatewayEnv(
 	opts: { gatewayToken?: string; gatewayUrl?: string },

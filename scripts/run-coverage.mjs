@@ -12,8 +12,8 @@
  *   1. e2e `api` project with NODE_V8_COVERAGE set — the api project runs the
  *      gateway IN-PROCESS, so V8 natively writes that process's coverage to
  *      coverage/tmp on exit.
- *   2. c8-wrapped node unit run over a representative server-logic subset —
- *      writes additional V8 coverage into the same coverage/tmp.
+ *   2. c8-wrapped complete canonical Vitest unit lane — writes additional V8
+ *      coverage into the same coverage/tmp without a hand-maintained file list.
  *   3. c8 report — merges everything in coverage/tmp into html + lcov + text.
  *
  * See docs/coverage.md.
@@ -32,19 +32,6 @@ const npx = isWin ? "npx.cmd" : "npx";
 // V8 writes raw coverage here on process exit; c8 reads from the same dir.
 const COVERAGE_TMP = join(projectRoot, "coverage", "tmp");
 process.env.NODE_V8_COVERAGE = COVERAGE_TMP;
-
-// Representative server-logic node tests for the c8-wrapped pass (unchanged set).
-const NODE_COVERAGE_TESTS = [
-	"tests/workflow-manager-logic.test.ts",
-	"tests/task-state-machine.test.ts",
-	"tests/name-validation.test.ts",
-	"tests/gate-store-logic.test.ts",
-	"tests/system-prompt.test.ts",
-	"tests/session-store.test.ts",
-	"tests/cost-tracker.test.ts",
-	"tests/event-buffer.test.ts",
-	"tests/staff-trigger-engine.test.ts",
-];
 
 /**
  * Run a step synchronously; abort the whole command on the first failure.
@@ -76,13 +63,13 @@ function step(label, cmd, args, { shell }) {
 //    directly so the env propagates to the in-process gateway workers.
 step("e2e api coverage", process.execPath, ["scripts/run-playwright-e2e.mjs", "--project", "api"], { shell: false });
 
-// 2. c8-wrapped node unit subset → coverage/tmp.
-step("node unit coverage", npx, [
+// 2. c8-wrapped complete unit lane → coverage/tmp. Vitest discovers the
+// canonical unit, DOM, isolated, and gateway cells from vitest.config.ts.
+step("unit lane coverage", npx, [
 	"c8",
 	`--temp-directory=${COVERAGE_TMP}`,
 	"--src=src/server",
-	"npx", "tsx", "--test", "--test-force-exit",
-	...NODE_COVERAGE_TESTS,
+	"npx", "vitest", "run", "--config", "vitest.config.ts", "--retry=0", "--silent=passed-only",
 ], { shell: isWin });
 
 // 3. Merge into html + lcov + text.

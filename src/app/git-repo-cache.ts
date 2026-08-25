@@ -9,7 +9,7 @@
  * `computeConnectGitState` + `session-manager.ts::refreshGitStatusForSession`).
  *
  * See docs/design/git-status-widget-reliability.md and the reproducing tests
- * `tests2/core/git-repo-cache.test.ts` / `git-empty-widget-cache.test.ts`
+ * `tests/unit/core/git-repo-cache.unit.test.ts` / `git-empty-widget-cache.unit.test.ts`
  * which pin this module's contract.
  */
 

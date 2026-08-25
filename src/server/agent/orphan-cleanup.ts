@@ -3,7 +3,7 @@
  *
  * Extracted out of session-manager.ts so unit tests can exercise the helpers
  * without paying the transitive cost (and runtime hazards) of importing the
- * full SessionManager. Pinned by tests2/core/session-manager-orphan-keep.test.ts.
+ * full SessionManager. Pinned by tests/unit/core/session-manager-orphan-keep.unit.test.ts.
  *
  * See goal `goal-goal-sessions-p-14dc3ec7` and the design doc
  * `docs/design/session-store-crash-safety.md` for context.

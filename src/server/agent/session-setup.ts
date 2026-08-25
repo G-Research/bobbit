@@ -689,8 +689,7 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		// are spread AFTER caller `plan.env` (toolEnv) so the gateway-issued values
 		// always WIN: a caller-supplied toolEnv key can never clobber the session
 		// identity or capability secret (which would let a child impersonate another
-		// session for the binding-routed PR-walkthrough tool routes). Pinned by a
-		// unit test in tests/session-setup-env.test.ts.
+		// session for the binding-routed PR-walkthrough tool routes).
 		env: {
 			...plan.env,
 			BOBBIT_SESSION_ID: plan.id,
@@ -1231,7 +1230,7 @@ export function subscribeToEvents(
 		// even with willRetry:true: that flag means Pi retries the surrounding turn
 		// after compaction has completed. This mirrors SessionManager's
 		// emitAgentEvent() so every rpcClient.onEvent path shares one contract.
-		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
+		// Pinned by tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts.
 		if (!isRetryableAgentEnd(preparedEvent)) {
 			const truncated = truncateLargeToolContent(preparedEvent);
 			emitSessionEvent(session, truncated);
@@ -1751,7 +1750,7 @@ export async function executeWorktreeAsync(
 	// because restoreOneSession() refuses to restore a session whose persisted
 	// agentSessionFile is empty. Pre-existing cloned transcripts are already
 	// recorded above; avoid get_state rewriting their runtime metadata. See
-	// tests/manual-integration/restart-minimal.spec.ts.
+	// tests/manual/restart-minimal.manual.spec.ts.
 	if (ctx.persistSessionMetadata && !plan.preExistingAgentSessionFile) {
 		try { await ctx.persistSessionMetadata(session); }
 		catch (err) { console.warn(`[session-setup] persistSessionMetadata pre-idle failed for ${session.id}:`, err); }

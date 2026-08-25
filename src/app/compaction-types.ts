@@ -173,7 +173,7 @@ export function parseOverflowTokenCount(text: string | null | undefined): number
  *
  * Coupled to pi-coding-agent transcript format — see
  * `docs/design/compaction-e2e-rich-summary.md` §4 risk 1. Case (12c) in
- * `tests/message-reducer.test.ts` pins this as a regression sentinel.
+ * `tests/unit/core/message-reducer.unit.test.ts` pins this as a regression sentinel.
  *
  * Returns null on parse failure.
  */

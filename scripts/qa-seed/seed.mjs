@@ -326,7 +326,7 @@ writeJSON(path.join(stateDir, "gates.json"), [
 							name: "E2E tests",
 							type: "command",
 							passed: false,
-							output: "10 tests passed, 2 failed.\n\nFailed: tests/e2e/ui/theme-toggle.spec.ts\n  - theme toggle button not found (timeout 5000ms)",
+							output: "10 tests passed, 2 failed.\n\nFailed: tests/browser/journeys/theme-toggle.journey.spec.ts\n  - theme toggle button not found (timeout 5000ms)",
 							duration_ms: 45000,
 						},
 						{

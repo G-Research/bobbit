@@ -268,7 +268,7 @@ async function readTranscriptHead(
 /**
  * Locate a transcript for `sessionId` by scanning `<sessionsRoot>/<slug>/`
  * one level deep. The agent CLI names transcripts `<isoTs>_<sessionId>.jsonl`
- * (see `agent-session-path.ts`), while a few older tests/fixtures used
+ * (see `agent-session-path.ts`), while a few older test fixtures used
  * `<sessionId>.jsonl`; accept both. Returns the first match or `undefined`.
  * Defensive — any I/O error is swallowed.
  */

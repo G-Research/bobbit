@@ -1883,7 +1883,7 @@ export async function createProjectAssistantSession(
 //     sticky header, scrollable body, and persistent footer. The footer
 //     container is identical across all states (path/scan + loading + error)
 //     so its bounding box is invariant. Pinned by
-//     `tests/e2e/ui/add-project-footer-stability.spec.ts`.
+//     `tests/browser/fixtures/add-project-footer-stability.fixture.spec.ts`.
 //   - Scan checklist surfaces every detected repo *and* monorepo workspace
 //     candidate as a normalized `ProjectScanItem` and forwards the
 //     user-confirmed subset into the project-assistant's first turn via
@@ -2017,7 +2017,7 @@ function openProjectBrowseDialog(initialPath: string): Promise<string | null> {
 				// for Esc) does not also close when the user dismisses the browse
 				// overlay. Design doc invariant: "Esc closes suggestions → browse →
 				// dialog (in that order)". Pinned by
-				// tests/e2e/ui/add-project-browse-modal.spec.ts.
+				// tests/browser/fixtures/add-project-flow.fixture.spec.ts.
 				e.preventDefault();
 				e.stopImmediatePropagation();
 				close(null);

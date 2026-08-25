@@ -504,7 +504,7 @@ export class StaffManager {
 				accessory: staff.accessory,
 				env: { BOBBIT_STAFF_ID: id },
 				// Persisted so inbox tools survive respawn — see
-				// `tests/staff-session-staffid-persistence.test.ts`. Threads staffId
+				// `tests/unit/core/staff-session-staffid-persistence.unit.test.ts`. Threads staffId
 				// through opts → plan → persistOnce so it lands in PersistedSession.
 				// Without this, on respawn `restoreSession` reads `ps.staffId =
 				// undefined` → no `BOBBIT_STAFF_ID` env → inbox tools refuse to
@@ -996,7 +996,7 @@ export class StaffManager {
 				accessory: staff.accessory,
 				env: { BOBBIT_STAFF_ID: staffId },
 				// Persisted so inbox tools survive respawn — see
-				// `tests/staff-session-staffid-persistence.test.ts`. Same contract as
+				// `tests/unit/core/staff-session-staffid-persistence.unit.test.ts`. Same contract as
 				// `createStaff` above.
 				staffId,
 				sandboxed: staff.sandboxed,

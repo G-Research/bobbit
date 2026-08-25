@@ -9,7 +9,7 @@
  * can never regress the slot to superseded content while the rev stays high.
  *
  * Extracted as a pure function (no DOM, no state) so the live code in
- * `session-manager.ts` and the unit test in `tests/proposal-update-policy.test.ts`
+ * `session-manager.ts` and the unit test in `tests/unit/core/proposal-update-policy.unit.test.ts`
  * share one source of truth. A browser E2E can't deterministically reproduce
  * an out-of-order server-rev race, so the logic is pinned by the unit test.
  *

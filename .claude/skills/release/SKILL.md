@@ -108,7 +108,7 @@ npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 Rules:
 - Runtime registry audits are deliberately outside the release process. Do not run `npm audit` or `audit:packed-consumer` as release gates; mutable advisory data must not change eligibility for an unchanged commit.
 - Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
-- Build must precede `check` because `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
+- Build must precede `check` because `tsconfig.tests.json` follows intentional imports of emitted `dist/server/*.js` declarations.
 - If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
 
 Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.

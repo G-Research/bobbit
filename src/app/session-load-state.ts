@@ -20,7 +20,7 @@
  * `length === 0` true forever, which previously re-entered "initial load" on
  * every 5s poll tick and re-blanked the sidebar. We still suppress the spinner
  * while an error is on screen so background poll retries stay silent under the
- * error/Retry UI. Pinned by tests/sidebar-loading-flash.test.ts.
+ * error/Retry UI. Pinned by tests/unit/core/sidebar-loading-flash.unit.test.ts.
  */
 export interface SessionLoadStateArgs {
 	/** Current length of `state.gatewaySessions`. */

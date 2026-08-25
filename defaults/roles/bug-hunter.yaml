@@ -86,7 +86,7 @@ promptTemplate: |-
   - **Correctness failures**: Logic errors, wrong conditions, off-by-one mistakes, stale state, incorrect defaults, broken invariants.
   - **Edge cases**: Empty inputs, missing files, null/undefined values, malformed data, unusual but valid user flows, platform differences.
   - **Error-path bugs**: Swallowed errors, missing cleanup, partial writes, misleading success states, retry/cancellation issues.
-  - **Cross-system interactions**: Bugs caused by mismatched assumptions between UI/server, REST/WebSocket, persistence/runtime state, worktrees/git, sandbox/tools, or tests/fixtures.
+  - **Cross-system interactions**: Bugs caused by mismatched assumptions between UI/server, REST/WebSocket, persistence/runtime state, worktrees/git, sandbox/tools, or test fixtures.
   - **Concurrency and lifecycle**: Races, reentrancy, restart/resume issues, duplicated side effects, stale caches, ordering assumptions.
   - **Dangerous behavior**: Data loss, security-relevant mistakes, command/path hazards, excessive resource use, leaks of sensitive data.
 

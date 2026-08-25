@@ -8,7 +8,7 @@
  *
  * The allowlist is the single source of truth for "what does the running
  * gateway own at `<rootPath>/.bobbit/`?". A pinning unit test
- * (`tests/bobbit-archive-allowlist.spec.ts`) re-greps writers under
+ * (`tests/unit/core/bobbit-archive-allowlist.unit.test.ts`) re-greps writers under
  * `src/server/` for `bobbitStateDir(` / `bobbitConfigDir(` joins and asserts
  * every distinct `state/` child segment is in this allowlist or annotated
  * `// archive-safe` near the call site. Drift = test failure.

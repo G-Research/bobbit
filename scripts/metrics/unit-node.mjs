@@ -1,23 +1,13 @@
 #!/usr/bin/env node
-import { ensureServerBuild, measureCommand, metricFile, npxCommand } from "./lib.mjs";
-import { NODE_UNIT_GLOBS } from "../test-phase-config.mjs";
+import { measureCommand, metricFile, npmCommand, npmRunArgs } from "./lib.mjs";
 
-ensureServerBuild();
-
-const concurrency = process.env.BOBBIT_UNIT_NODE_CONCURRENCY || process.env.BOBBIT_METRICS_UNIT_NODE_CONCURRENCY || "4";
-
+// Keep the historical metric name stable while measuring the complete canonical
+// Vitest lane. Discovery and the fixed worker cap come from vitest.config.ts.
 await measureCommand({
 	name: "unit-node",
-	kind: "unit-node",
-	command: npxCommand(),
-	args: [
-		"tsx",
-		"--import", "./tests/helpers/css-stub-loader.mjs",
-		"--test",
-		"--test-force-exit",
-		`--test-concurrency=${concurrency}`,
-		...NODE_UNIT_GLOBS,
-	],
+	kind: "unit",
+	command: npmCommand(),
+	args: npmRunArgs("test:unit", ["--retry=0"]),
 	outFile: metricFile("unit-node"),
 	shell: process.platform === "win32",
 });

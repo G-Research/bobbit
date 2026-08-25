@@ -474,7 +474,7 @@ interface TreeCostCacheEntry {
  *  subtree walk includes those descendants, so the signature invalidates
  *  correctly. We deliberately avoid hashing state/title: those don't affect
  *  breakdown membership or ordering keys.
- *  pinned by tests/tree-cost-rollup.test.ts::cache invalidates when a deep subgoal descendant changes */
+ *  pinned by tests/unit/core/tree-cost-rollup.unit.test.ts::cache invalidates when a deep subgoal descendant changes */
 function computeTreeSignature(rootGoalId: string, allGoals: TreeCostGoal[]): string {
 	const members = walkGoalSubtree(rootGoalId, allGoals as unknown as PersistedGoal[], {
 		includeRoot: true,
@@ -570,7 +570,6 @@ export function computeTreeCost(
 	// because the `rootGoalId` stamp on every persisted goal is consistent
 	// with its `parentGoalId` chain (see goal-manager.createGoal). Include
 	// archived nodes — their cost survives archival.
-	// pinned by tests/cost-tree-archived.test.ts::computeTreeCost includes archived descendants in breakdown
 	const treeMembers = walkGoalSubtree(rootGoalId, allGoals as PersistedGoal[], {
 		includeRoot: true,
 		includeArchived: true,

@@ -1193,7 +1193,7 @@ let mobileSelectedSideTabId = "";
 // DOM order and commit it back to state.
 //
 // SortableJS itself is loaded on first tab-bar render so the ~70 kB raw drag
-// library stays out of the eager app-shell SCC pinned by tests/bundle-size.test.ts.
+// library stays out of the eager app-shell SCC pinned by tests/unit/core/bundle-size.unit.test.ts.
 type SortableConstructor = typeof Sortable;
 let SortableCtor: SortableConstructor | null = null;
 let sortableLoadStarted = false;
@@ -1523,7 +1523,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 		// state.previewPanelEntry already matches, skip the state.previewPanelMtime/Entry/
 		// ContentHash assignment so an out-of-band refresh (which bumps previewPanelMtime)
 		// is not clobbered by stale tabState values on the next render. Pinned by
-		// tests/e2e/ui/preview-refresh.spec.ts and preview-happy-path.spec.ts.
+		// tests/browser/fixtures/preview-durable-restart.fixture.spec.ts and preview-panel.fixture.spec.ts.
 		const alreadyMounted = currentMountedPreviewTabId() === tab.id
 			&& !!liveEntry
 			&& state.previewPanelEntry === liveEntry;

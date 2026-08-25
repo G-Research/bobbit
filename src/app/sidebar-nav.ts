@@ -208,7 +208,7 @@ export function getVisibleNavOrder(): string[] {
  *  doesn't match the new override's `navIdToHash`, and the listener clears
  *  it — causing `getActiveNavId()` to fall back to `selectedSessionId` and
  *  re-report the previous (session) row. Pinned by
- *  tests/e2e/ui/sidebar-keyboard-nav.spec.ts. */
+ *  tests/browser/fixtures/sidebar-keyboard-nav-fixture.fixture.spec.ts. */
 const _recentNavHashes = new Set<string>();
 function _noteAuthoredHash(h: string | null): void {
 	if (!h) return;

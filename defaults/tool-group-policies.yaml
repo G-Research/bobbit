@@ -8,7 +8,7 @@ Ask: allow
 # The team-lead role re-grants them via per-tool `always-allow` in
 # `defaults/roles/team-lead.yaml`, which beats this group default
 # (resolveGrantPolicy step 1 > step 4). Pinned by
-# tests/role-children-tools-policy.test.ts.
+# tests/unit/core/role-children-tools-policy.unit.test.ts.
 Children: never
 # Skills group: gates the `activate_skill` tool, which lets the model autonomously
 # invoke any discovered slash skill mid-turn (Agent Skills level-1 progressive
@@ -39,5 +39,5 @@ Team: never
 # Decision C). The pack-shipped `pr-reviewer` role re-grants the whole group via
 # `toolPolicies: { "PR Walkthrough": allow }`, which beats this group default
 # (resolveGrantPolicy step 2 > step 4). Pinned by
-# tests/pr-walkthrough-role-tools-policy.test.ts.
+# tests/unit/core/pr-walkthrough-role-tools-policy.unit.test.ts.
 PR Walkthrough: never

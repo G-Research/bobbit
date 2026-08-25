@@ -8,7 +8,7 @@ await measureCommand({
 	name: "unit-browser",
 	kind: "unit-browser",
 	command: npxCommand(),
-	args: ["playwright", "test", "--config", "tests/playwright.config.ts", "--workers", workers, "--reporter=json"],
+	args: ["playwright", "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2", "--workers", workers, "--reporter=json"],
 	outFile: metricFile("unit-browser"),
 	shell: process.platform === "win32",
 	env: { PLAYWRIGHT_JSON_OUTPUT_NAME: reportFile },

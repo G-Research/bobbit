@@ -5,7 +5,7 @@
  * round-trips through `createSession` opts → plan → `persistOnce`. See
  * `session-manager.ts::createSession` (both plan builders) and
  * `staff-manager.ts` (both `createSession` call sites) for the spawn-path
- * wires; `tests/staff-session-staffid-persistence.test.ts` pins them.
+ * wires; `tests/unit/core/staff-session-staffid-persistence.unit.test.ts` pins them.
  *
  * Background: prior to the fix, `StaffManager` set `session.staffId = id`
  * purely in memory — `SessionManager.createSession()` never accepted `staffId`

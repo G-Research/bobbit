@@ -806,7 +806,7 @@ function sanitizeExistingHeadquartersStores(
  * finds: rewriting the envelope as a bare array (the previous bug) flattened its
  * top-level keys into `{ id: "version" | "epoch" | "sessions" }` pseudo-records,
  * which SessionStore cannot load — so Headquarters sessions silently vanished on
- * the next restart. Pinned by tests/headquarters-state-migration.test.ts.
+ * the next restart. Pinned by tests/unit/core/headquarters-state-migration.unit.test.ts.
  */
 type StoreFileShape = { kind: "array" } | { kind: "sessions-v2"; epoch: number };
 

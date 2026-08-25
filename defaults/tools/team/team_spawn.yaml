@@ -93,7 +93,8 @@ detail_docs: >-
 
   team_spawn(role="tester", task="Write E2E tests for the new /api/tools
   endpoints. Cover: GET list, GET single, PUT update, 404 for unknown tools.
-  Follow patterns in tests/e2e/. Run tests and ensure they pass.")
+  Create the canonical API E2E test with npm run test:new -- api-e2e tools-api,
+  then run npm run test:e2e and ensure it passes.")
 
   ```
 

@@ -185,7 +185,7 @@ detail_docs: >-
 
   # Run a specific test file with timeout
 
-  bash(command="npx playwright test tests/e2e/tools-api.spec.ts --reporter=line", timeout=120)
+  bash(command="npx vitest run --config vitest.config.ts tests/integration/gateway/tools-api.gateway.test.ts --reporter=verbose", timeout=120)
 
   ```
 

@@ -6,7 +6,7 @@
  * dynamic import (network blip, deploy skew, a corrupt dev-server optimizer
  * cache) must surface an error + retry/reload affordance — NEVER an indefinite
  * spinner. This mirrors the same invariant the tool-renderer registry already
- * pins (see tests/lazy-renderer-placeholder.spec.ts, "loader rejection renders
+ * pins (see tests/dom/lazy-renderer-placeholder.dom.test.ts, "loader rejection renders
  * error fallback instead of indefinite spinner").
  */
 import { html, type TemplateResult } from "lit";

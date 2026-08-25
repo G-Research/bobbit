@@ -126,7 +126,7 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 	// Scope candidates to THIS goal's direct children; otherwise opening
 	// "See Archived" pollutes the resolver with unrelated archived siblings.
 	const candidates: PlanNodeChild[] = allGoals
-		// pinned by tests/plan-archived-children.test.ts::computePlanStepsForGoal liveOnly filter
+		// pinned by tests/unit/core/plan-archived-children.unit.test.ts::computePlanStepsForGoal liveOnly filter
 		// liveOnly EXCLUDES archived AND terminal-state (complete/shelved) children — only
 		// in-progress / todo / blocked remain. See PLAN_TERMINAL_STATES.
 		.filter(g => g.parentGoalId === parentGoalId && (!liveOnly || isLivePlanChild(g)))

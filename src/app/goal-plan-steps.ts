@@ -42,7 +42,7 @@ export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { i
 			dependsOn: Array.isArray(v.subgoal.dependsOn) ? v.subgoal.dependsOn : undefined,
 		}));
 	const childSynthesis: SynthesisGoal[] = allGoals
-		// pinned by tests/plan-archived-children.test.ts::computePlanStepsForGoal liveOnly filter
+		// pinned by tests/unit/core/plan-archived-children.unit.test.ts::computePlanStepsForGoal liveOnly filter
 		// liveOnly EXCLUDES archived AND terminal-state (complete/shelved) children — only
 		// in-progress / todo / blocked remain. See PLAN_TERMINAL_STATES.
 		.filter(g => g.parentGoalId === goal.id && (!opts?.liveOnly || isLivePlanChild(g)))
@@ -72,7 +72,7 @@ export function computePlanStepsForGoal(goal: Goal, allGoals: Goal[], opts?: { i
 	// formal node behind when the user has explicitly asked for live work
 	// only. Default mode keeps ALL formal steps (including unresolved/
 	// archived/completed) — the helper default stays inclusive.
-	// pinned by tests/plan-archived-children.test.ts::formal execution plan liveOnly hides steps whose resolved child is archived or completed
+	// pinned by tests/unit/core/plan-archived-children.unit.test.ts::formal execution plan liveOnly hides steps whose resolved child is archived or completed
 	if (opts?.liveOnly && formalSteps && formalSteps.length > 0) {
 		const liveChildPlanIds = new Set(
 			childSynthesis
