@@ -1139,6 +1139,111 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(signals).toHaveLength(2);
 	});
 
+	it("observes Darwin process state only after the single final group signal", async () => {
+		const root = fakeChild(123_460);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let snapshots = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async () => { snapshots++; return "999 S\n"; },
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(snapshots).toBe(0);
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+		expect(signals).toEqual([{ pgid: 123_460, signal: "SIGKILL" }]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshots).toBe(1);
+		tracked.killTree("SIGKILL");
+		expect(signals).toHaveLength(1);
+		root.emit("close", 0, null);
+	});
+
+	it.each([
+		["no exact target rows", "999 S\n1000 R+\n"],
+		["only exact zombie rows with modifiers", "123461 Z\n999 S\n123461 Z+\n"],
+	] as const)("accepts a finalized Darwin group with %s", async (_caseName, snapshot) => {
+		const root = fakeChild(123_461);
+		const signals: NodeJS.Signals[] = [];
+		let snapshots = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async () => { snapshots++; return snapshot; },
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(snapshots).toBe(1);
+		// Completion is monotonic even if the numeric PGID is subsequently reused.
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshots).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it.each([
+		["a mixed exact zombie and live group", async (): Promise<string> => "123462 Z\n123462 S\n999 Z\n"],
+		["a malformed row", async (): Promise<string> => "123462 Z\nmalformed\n"],
+		["an empty snapshot", async (): Promise<string> => "\n  \n"],
+		["an unavailable snapshot", async (): Promise<string> => { throw new Error("ps unavailable"); }],
+	] as const)("keeps finalized Darwin cleanup incomplete for %s", async (_caseName, snapshot) => {
+		const root = fakeChild(123_462);
+		const signals: NodeJS.Signals[] = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: snapshot,
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(signals).toEqual(["SIGKILL"]);
+		root.emit("close", 0, null);
+	});
+
+	it("does not use Darwin process-state observation on Linux or Windows", async () => {
+		let snapshots = 0;
+		const snapshot = async () => { snapshots++; return "123463 Z\n"; };
+		const linuxRoot = fakeChild(123_463);
+		const linux = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => linuxRoot) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: snapshot,
+			signalProcessGroup: () => {},
+		});
+		linuxRoot.readyPipe.emit("data", Buffer.from("."));
+		linuxRoot.emit("exit", 0, null);
+		expect(await linux.waitForTreeExit(0)).toBe(false);
+		linuxRoot.emit("close", 0, null);
+
+		const windowsRoot = fakeChild(2_147_483_640);
+		const windows = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl: (() => windowsRoot) as unknown as NativeSpawn,
+			posixProcessStateSnapshot: snapshot,
+		});
+		windowsRoot.emit("exit", 0, null);
+		expect(await windows.waitForTreeExit(0)).toBe(false);
+		windowsRoot.emit("close", 0, null);
+		expect(snapshots).toBe(0);
+	});
+
 	it("retains only a container transport sentinel through root exit until the explicit handoff reap", async () => {
 		const root = fakeChild(123_456);
 		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];

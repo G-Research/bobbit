@@ -32,7 +32,7 @@
  * should prefer this helper over raw `spawn` to avoid orphan trees.
  */
 
-import { execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +52,12 @@ export interface SpawnTrackedOptions {
 	platform?: NodeJS.Platform;
 	/** Test seam for checking whether the detached POSIX process group remains live. */
 	isProcessGroupAlive?: (pgid: number) => boolean;
+	/**
+	 * Raw Darwin process-state snapshot used only to observe a group after its
+	 * single final signal. The budget is bounded by the caller's existing wait
+	 * deadline; unsupported platforms deliberately ignore this seam.
+	 */
+	posixProcessStateSnapshot?: (budgetMs: number) => Promise<string>;
 	/** Test seam for sending a signal to the detached POSIX process group. */
 	signalProcessGroup?: (pgid: number, signal: NodeJS.Signals) => void;
 	/** Enable the POSIX same-group sentinel (production default). */
@@ -172,6 +178,8 @@ interface InternalTracked extends TrackedChild {
 
 const TREE_EXIT_POLL_MS = 25;
 const TREE_EXIT_SETTLE_MS = 1_500;
+const DARWIN_PROCESS_STATE_OBSERVER_MAX_MS = 250;
+const DARWIN_PROCESS_STATE_MAX_BUFFER = 256 * 1024;
 const POSIX_SENTINEL_READINESS_FAILURE = "POSIX sentinel ownership was not established";
 const WINDOWS_JOB_READINESS_FAILURE = "Windows Job ownership was not established";
 
@@ -185,6 +193,50 @@ function isProcessGroupAlive(pgid: number): boolean {
 	} catch (err: any) {
 		return err?.code === "EPERM";
 	}
+}
+
+type FinalizedProcessGroupState = "empty" | "zombie-only" | "live" | "unavailable";
+
+/** Strictly classify one global, headerless `ps` PGID/state snapshot. */
+function classifyFinalizedProcessGroupSnapshot(raw: string, targetPgid: number): FinalizedProcessGroupState {
+	const rows = raw.split(/\r?\n/).map(row => row.trim()).filter(Boolean);
+	if (rows.length === 0) return "unavailable";
+	let targetRows = 0;
+	let zombieRows = 0;
+	for (const row of rows) {
+		const match = /^(\d+)\s+(\S+)$/.exec(row);
+		if (!match) return "unavailable";
+		const pgid = Number(match[1]);
+		if (!Number.isSafeInteger(pgid) || pgid <= 0) return "unavailable";
+		if (pgid !== targetPgid) continue;
+		targetRows++;
+		if (match[2][0] === "Z") zombieRows++;
+	}
+	if (targetRows === 0) return "empty";
+	return zombieRows === targetRows ? "zombie-only" : "live";
+}
+
+/**
+ * Darwin can retain killed group members as zombies until launchd reaps them,
+ * making kill(0) report a live group even though no member can execute. This
+ * observer is read-only, shell-free, output-bounded, and deadline-bounded.
+ */
+function readDarwinProcessStateSnapshot(budgetMs: number): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const controller = new AbortController();
+		const effectiveBudget = Math.max(0, Math.min(DARWIN_PROCESS_STATE_OBSERVER_MAX_MS, budgetMs));
+		const timer = setTimeout(() => controller.abort(), effectiveBudget);
+		timer.unref?.();
+		execFile("ps", ["-axo", "pgid=,state="], {
+			encoding: "utf8",
+			env: { ...process.env, LC_ALL: "C" },
+			maxBuffer: DARWIN_PROCESS_STATE_MAX_BUFFER,
+			signal: controller.signal,
+		}, (error, stdout) => {
+			clearTimeout(timer);
+			if (error) reject(error); else resolve(stdout);
+		});
+	});
 }
 
 function inspectPosixSentinelIdentity(pid: number, platform: NodeJS.Platform): { pgid: number; startTokenKind: string; startToken: string; sentinelNonce?: string } | undefined {
@@ -400,11 +452,17 @@ export function spawnTracked(
 	args: readonly string[],
 	opts: SpawnTrackedOptions = {},
 ): TrackedChild {
-	const isWin = (opts.platform ?? process.platform) === "win32";
+	const platform = opts.platform ?? process.platform;
+	const isWin = platform === "win32";
 	const spawnImpl = opts.spawnImpl ?? spawn;
 	const killGraceMs = opts.killGraceMs ?? 5000;
 	const clock = opts.clock ?? realClock;
 	const groupIsAlive = opts.isProcessGroupAlive ?? isProcessGroupAlive;
+	// Darwin alone needs zombie-state observation after the final owned signal.
+	// Linux and unsupported POSIX platforms retain kill(0) as their boundary.
+	const processStateSnapshot = platform === "darwin"
+		? (opts.posixProcessStateSnapshot ?? readDarwinProcessStateSnapshot)
+		: undefined;
 	const signalProcessGroup = opts.signalProcessGroup ?? ((pgid, signal) => {
 		process.kill(-pgid, signal);
 	});
@@ -538,6 +596,7 @@ export function spawnTracked(
 			// neither a POSIX PGID nor a Windows PID remains an owned identity. Do not
 			// turn a later numeric lookup into evidence for a recycled process tree.
 			if (tracked._treeCompletionUnverified) return false;
+			if (tracked._processGroupOwnershipLost) return true;
 			const pid = tracked._pid;
 			if (pid == null) return true;
 			const timeout = Math.max(0, timeoutMs ?? killGraceMs + TREE_EXIT_SETTLE_MS);
@@ -552,17 +611,47 @@ export function spawnTracked(
 				return waitWithTimeout(tracked._windowsSupervisorClosed.then(() => true), timeout);
 			}
 
+			// This is observation after the one ownership-safe final signal, never
+			// authority to signal the numeric PGID. Any unavailable or mixed/live
+			// snapshot remains conservatively incomplete.
+			const observeFinalizedDarwinGroup = async (): Promise<boolean> => {
+				if (!processStateSnapshot) return false;
+				try {
+					const raw = await processStateSnapshot(Math.max(0, deadline - Date.now()));
+					const state = classifyFinalizedProcessGroupSnapshot(raw, pid);
+					if (state !== "empty" && state !== "zombie-only") return false;
+					tracked._processGroupOwnershipLost = true;
+					return true;
+				} catch {
+					return false;
+				}
+			};
+
 			// SIGKILL delivery is asynchronous. Once it has been dispatched, later
 			// checks are observation only: they never signal this numeric PGID again,
 			// so a future reuse can at worst produce an unverified result, never
 			// retarget an unrelated tree.
 			if (tracked._posixFinalSignalSent) {
+				if (!groupIsAlive(pid)) {
+					tracked._processGroupOwnershipLost = true;
+					return true;
+				}
+				// Always attempt one immediate observation, including a zero-budget wait.
+				if (await observeFinalizedDarwinGroup()) return true;
+				const permitFinalObservation = timeout > DARWIN_PROCESS_STATE_OBSERVER_MAX_MS;
+				let finalObservationAttempted = false;
 				while (Date.now() < deadline) {
 					if (!groupIsAlive(pid)) {
 						tracked._processGroupOwnershipLost = true;
 						return true;
 					}
-					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+					const remaining = deadline - Date.now();
+					if (permitFinalObservation && !finalObservationAttempted && remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS) {
+						finalObservationAttempted = true;
+						if (await observeFinalizedDarwinGroup()) return true;
+						continue;
+					}
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, remaining)));
 				}
 				if (!groupIsAlive(pid)) {
 					tracked._processGroupOwnershipLost = true;
@@ -623,7 +712,7 @@ export function spawnTracked(
 				let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startTokenKind?: unknown; startToken?: unknown } | undefined;
 				try { record = identity ? JSON.parse(readFileSync(identity.file, "utf8")) : undefined; } catch { /* fail closed below */ }
 				const sentinelPid = Number(record?.pid);
-				const inspector = opts.posixSentinelIdentityInspector ?? (candidate => inspectPosixSentinelIdentity(candidate, opts.platform ?? process.platform));
+				const inspector = opts.posixSentinelIdentityInspector ?? (candidate => inspectPosixSentinelIdentity(candidate, platform));
 				const current = Number.isFinite(sentinelPid) && sentinelPid > 0 ? inspector(sentinelPid) : undefined;
 				const darwinNonceMatches = record?.startTokenKind !== "darwin-lstart-argv-nonce" || current?.sentinelNonce === identity?.nonce;
 				if (!identity || record?.nonce !== identity.nonce || Number(record?.pgid) !== pid ||

@@ -3122,7 +3122,7 @@
     },
     {
       "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
-      "reason": "Failing-first container ownership regression: a sentinel PID and PGID can be reused in a shared container, so cleanup must require the matching stable Linux start token before it can signal a negative process group.",
+      "reason": "Pins exact process-tree ownership and completion across platforms: container cleanup requires a stable Linux start token before signalling a reusable PID/PGID; Darwin accepts only an exact post-final-signal empty or zombie-only group snapshot while mixed, malformed, empty, or unavailable evidence fails closed; Linux retains kill(0) and Windows retains Job-close completion.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -18296,7 +18296,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "node:test logic suite â€” codemod to Vitest (node env, pool=forks), including persisted Darwin gate success after exact post-final zombie-only tree completion while unverified, Linux, and Windows boundaries remain fail-closed.",
       "migrated": true,
       "v2Path": "tests2/core/verification-harness-timeout.test.ts",
       "execution": {

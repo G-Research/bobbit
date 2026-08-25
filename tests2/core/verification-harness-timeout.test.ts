@@ -33,6 +33,7 @@ const {
 	createDockerEngineEventsResponseDecoder,
 	parseDockerExecCreateEvent,
 } = await import("../../src/server/agent/verification-harness.ts");
+const { spawnTracked } = await import("../../src/server/agent/spawn-tree.ts");
 const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
@@ -61,9 +62,14 @@ async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: stri
 }
 
 /** Minimal stubs for a bare-bones VerificationHarness. */
-function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = [], stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"))) {
+function makeHarness(
+	deps: Record<string, unknown> = {},
+	broadcasts: any[] = [],
+	stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-")),
+	gateStore?: any,
+) {
 	fs.mkdirSync(stateDir, { recursive: true });
-	const stubGateStore = {
+	const stubGateStore = gateStore ?? {
 		updateSignalVerification: () => {},
 		updateGateStatus: () => {},
 		getGate: () => undefined,
@@ -451,6 +457,71 @@ describe("runCommandStep tree-kill", () => {
 		const result = await (harness as any).runCommandStep("true", tmp, 60, false) as { passed: boolean; output: string };
 		expect(result.passed).toBe(false);
 		expect(result.output).toContain("subprocess tree completion could not be verified");
+	});
+
+	it("persists a successful gate after Darwin observes only zombies following its final signal", async () => {
+		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "rcs-darwin-zombie-success-"));
+		const gateStoreCalls: Array<{ kind: string; status: string; update?: any }> = [];
+		const gateStore = {
+			updateSignalVerification: (_signalId: string, update: any) => gateStoreCalls.push({ kind: "signal", status: update.status, update }),
+			updateGateStatus: (_goalId: string, _gateId: string, status: string) => gateStoreCalls.push({ kind: "gate", status }),
+			getGate: () => undefined,
+		} as any;
+		const commandStepRunner = {
+			nonDurable: true,
+			spawn: () => {
+				const stdout = Object.assign(new EventEmitter(), { destroy() {} });
+				const stderr = Object.assign(new EventEmitter(), { destroy() {} });
+				const readyPipe = Object.assign(new EventEmitter(), { unref() {} });
+				const child = Object.assign(new EventEmitter(), {
+					pid: 910_011,
+					stdout,
+					stderr,
+					stdio: [null, stdout, stderr, readyPipe],
+					kill: () => true,
+				}) as any;
+				const tracked = spawnTracked("node", ["worker"], {
+					platform: "darwin",
+					spawnImpl: (() => child) as any,
+					posixTreeSentinel: true,
+					isProcessGroupAlive: () => true,
+					posixProcessStateSnapshot: async () => "910011 Z+\n1 S\n",
+					signalProcessGroup: () => {},
+				});
+				// The harness installs stdout/exit/close listeners synchronously after
+				// spawn returns; this microtask is the authoritative fixture boundary.
+				queueMicrotask(() => {
+					readyPipe.emit("data", Buffer.from("."));
+					stdout.emit("data", Buffer.from("ok\n"));
+					child.emit("exit", 0, null);
+					child.emit("close", 0, null);
+				});
+				return tracked;
+			},
+		};
+		const harness = makeHarness({
+			commandStepRunner,
+			platform: "darwin",
+			commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) },
+		}, [], stateDir, gateStore);
+		const signal = {
+			id: "sig-darwin-zombie-success", goalId: "goal-darwin-zombie-success", gateId: "test-fast",
+			sessionId: "session", timestamp: Date.now(), commitSha: "HEAD", verification: { status: "running", steps: [] },
+		} as any;
+		const gate = {
+			id: "test-fast", name: "Fast", dependsOn: [],
+			verify: [{ name: "echo ok", type: "command", run: "echo ok" }],
+		} as any;
+
+		await harness.verifyGateSignal(signal, gate, stateDir);
+
+		const signalUpdate = gateStoreCalls.find(call => call.kind === "signal")?.update;
+		expect(signalUpdate).toMatchObject({
+			status: "passed",
+			steps: [{ name: "echo ok", status: "passed", passed: true, output: "ok" }],
+		});
+		expect(signalUpdate.steps[0].output).not.toContain("subprocess tree completion could not be verified");
+		expect(gateStoreCalls.find(call => call.kind === "gate")?.status).toBe("passed");
 	});
 
 	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {
