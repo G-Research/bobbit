@@ -11,8 +11,29 @@
  *      the edited build_command.
  */
 import { test, expect } from "../../_helpers/journey-fixture.js";
-import { apiFetch, defaultProjectId } from "../../_helpers/e2e-setup.js";
+import { apiFetch, defaultProjectId, nonGitCwd } from "../../_helpers/e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
+
+async function authenticateMockProposalTools(page: import("@playwright/test").Page, gateway: any): Promise<void> {
+	const sessionId = await page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return state?.selectedSessionId as string | undefined;
+	});
+	const agent = sessionId ? gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent : undefined;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("proposal journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("proposal journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
 
 async function getDefaultProjectId(): Promise<string> {
 	const projectId = await defaultProjectId();
@@ -21,7 +42,7 @@ async function getDefaultProjectId(): Promise<string> {
 }
 
 test.describe("Editable proposals â€” project propose â†’ edit â†’ accept", () => {
-	test("propose_project then edit_proposal updates the slot live without a re-emit; accept persists edited value", async ({ page }) => {
+	test("propose_project then edit_proposal updates the slot live without a re-emit; accept persists edited value", async ({ page, gateway }) => {
 		const projectId = await getDefaultProjectId();
 
 		// Seed baseline so the diff has a clear "before" line.
@@ -32,6 +53,7 @@ test.describe("Editable proposals â€” project propose â†’ edit â†�
 
 		await openApp(page);
 		await createSessionViaUI(page);
+		await authenticateMockProposalTools(page, gateway);
 
 		// 1. Initial propose_project. Mock-agent trigger
 		//    EDITABLE_PROPOSAL_INITIAL emits propose_project with
@@ -53,6 +75,39 @@ test.describe("Editable proposals â€” project propose â†’ edit â†�
 		const panel = page.locator('[data-panel="project-proposal"]').first();
 		await expect(panel).toBeVisible({ timeout: 15_000 });
 
+		// The fixture seed describes a new project. This journey applies the edit
+		// to the existing default project, so set the current schema's explicit
+		// project target and replace the mock's nonexistent legacy root first.
+		const sessionId = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.selectedSessionId as string | undefined;
+		});
+		expect(sessionId).toBeTruthy();
+		const targetEdit = await page.evaluate(async ({ sid, cwd, targetProjectId }) => {
+			const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposal/project/edit`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					old_text: "root_path: /tmp/editable",
+					new_text: `root_path: ${JSON.stringify(cwd)}\nprojectId: ${targetProjectId}`,
+				}),
+			});
+			return { status: response.status, text: await response.text() };
+		}, { sid: sessionId!, cwd: nonGitCwd(), targetProjectId: projectId });
+		expect(targetEdit.status, `explicit project target edit failed: ${targetEdit.text}`).toBe(200);
+		await expect.poll(
+			() => page.evaluate((id) => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				const slot = state?.activeProposals?.project;
+				return slot?.fields?.projectId === id && slot?.mode === "registered" ? slot.rev : null;
+			}, projectId),
+			{ timeout: 15_000 },
+		).toBeGreaterThan(1);
+		const revisionBeforeSurgicalEdit = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.project?.rev as number;
+		});
+
 		// 2. Trigger the edit. EDITABLE_PROPOSAL_EDIT emits an
 		//    edit_proposal tool call which the mock-agent translates
 		//    into a POST /api/sessions/:id/proposal/project/edit. The
@@ -69,12 +124,14 @@ test.describe("Editable proposals â€” project propose â†’ edit â†�
 			{ timeout: 15_000 },
 		);
 
-		// 4. Other prior fields preserved.
-		const fieldsAfter = await page.evaluate(
-			() => (window as any).bobbitState?.activeProposals?.project?.fields,
-		);
-		expect(fieldsAfter.name).toBe("Editable");
-		expect(fieldsAfter.test_command).toBe("echo test");
+		// 4. Other prior fields and the monotonic server revision are preserved.
+		const proposalAfter = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.project;
+		});
+		expect(proposalAfter.fields.name).toBe("Editable");
+		expect(proposalAfter.fields.test_command).toBe("echo test");
+		expect(proposalAfter.rev).toBeGreaterThan(revisionBeforeSurgicalEdit);
 
 		// 5. Click Apply Changes (registered mode).
 		const applyBtn = panel
@@ -98,9 +155,10 @@ test.describe("Editable proposals â€” project propose â†’ edit â†�
 		expect(cfg.build_command).toBe("echo new");
 	});
 
-	test("edit-only flow does not produce a second propose_project tool card", async ({ page }) => {
+	test("edit-only flow does not produce a second propose_project tool card", async ({ page, gateway }) => {
 		await openApp(page);
 		await createSessionViaUI(page);
+		await authenticateMockProposalTools(page, gateway);
 
 		await sendMessage(page, "EDITABLE_PROPOSAL_INITIAL");
 		await page.waitForFunction(
@@ -116,6 +174,11 @@ test.describe("Editable proposals â€” project propose â†’ edit â†�
 		await expect(panel).toBeVisible({ timeout: 15_000 });
 
 		const proposeCountBefore = await page.getByText("Project Proposal", { exact: false }).count();
+		const revisionBeforeEdit = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.project?.rev as number | undefined;
+		});
+		expect(revisionBeforeEdit).toBeGreaterThan(0);
 
 		await sendMessage(page, "EDITABLE_PROPOSAL_EDIT");
 		await page.waitForFunction(
@@ -133,5 +196,10 @@ test.describe("Editable proposals â€” project propose â†’ edit â†�
 			.getByText("Project Proposal", { exact: false })
 			.count();
 		expect(proposeCountAfter).toBe(proposeCountBefore);
+		const revisionAfterEdit = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.project?.rev as number | undefined;
+		});
+		expect(revisionAfterEdit).toBeGreaterThan(revisionBeforeEdit!);
 	});
 });

@@ -73,6 +73,27 @@ const CASES: ProposalCase[] = [
 // covered by tests/ui-fixtures/proposal-review-fixture.spec.ts.
 const BROWSER_CASES = CASES.filter((c) => c.type === "role");
 
+async function authenticateMockProposalTools(page: Page, gateway: any): Promise<void> {
+	const sessionId = await page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return state?.selectedSessionId as string | undefined;
+	});
+	const agent = sessionId ? gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent : undefined;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("proposal journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("proposal journey mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
+
 async function waitForProposalSlot(page: Page, type: ProposalType): Promise<void> {
 	await page.waitForFunction(
 		(t) => {
@@ -198,18 +219,22 @@ async function switchToMobileChatAndBack(page: Page, proposal: ProposalCase): Pr
 	await expectSlotField(page, proposal);
 }
 
-async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, sessionId: string): Promise<void> {
+async function reloadAndOpenProposal(page: Page, proposal: ProposalCase, sessionId: string, expectedRev: number): Promise<void> {
 	await page.setViewportSize({ width: 1280, height: 800 });
 	await page.reload();
 	await page.waitForFunction(
-		(sid) => {
+		({ sid, type, rev }) => {
 			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
-			return state?.selectedSessionId === sid && state?.connectionStatus === "connected";
+			const slot = state?.activeProposals?.[type];
+			return state?.selectedSessionId === sid
+				&& state?.connectionStatus === "connected"
+				&& slot?.sessionId === sid
+				&& slot?.rev === rev
+				&& Object.keys(slot?.fields ?? {}).length > 0;
 		},
-		sessionId,
+		{ sid: sessionId, type: proposal.type, rev: expectedRev },
 		{ timeout: 20_000 },
 	);
-	await waitForProposalSlot(page, proposal.type);
 
 	await expect(page.locator('.goal-tab-pill[title="Chat"]')).toHaveCount(0, { timeout: 5_000 });
 	const openButton = await expectProposalToolCard(page, proposal);
@@ -243,9 +268,10 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 		const title = proposal.type === "staff"
 			? "Staff proposal card opens a Staff tab, rehydrates, and dismisses from a normal session"
 			: `${proposal.label} proposal is openable, rehydrates, and dismisses from a normal session`;
-		test(`${title} @smoke`, async ({ page }) => {
+		test(`${title} @smoke`, async ({ page, gateway }) => {
 			await openApp(page);
 			await createSessionViaUI(page);
+			await authenticateMockProposalTools(page, gateway);
 			await expectNormalChatSession(page);
 			const sessionId = await activeSessionId(page);
 
@@ -253,11 +279,16 @@ test.describe("Proposal tabs open all proposal types in normal sessions", () => 
 			const openButton = await expectProposalToolCard(page, proposal);
 			await waitForProposalSlot(page, proposal.type);
 			await expectSlotField(page, proposal);
+			const proposalRev = await page.evaluate((type) => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return state?.activeProposals?.[type]?.rev as number | undefined;
+			}, proposal.type);
+			expect(proposalRev, "persisted proposal should have a server revision").toBeGreaterThan(0);
 
 			await openButton.click();
 			await expectProposalTabAndPane(page, proposal);
 			await switchToMobileChatAndBack(page, proposal);
-			await reloadAndOpenProposal(page, proposal, sessionId);
+			await reloadAndOpenProposal(page, proposal, sessionId, proposalRev!);
 			await dismissProposal(page, proposal, sessionId);
 		});
 	}
