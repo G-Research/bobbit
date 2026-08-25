@@ -20,7 +20,7 @@ const PROVIDER_ID = "memory";
 const PRODUCTION_LIFECYCLE_BUDGET = "budget: { maxTokens: 1200, timeoutMs: 1500 }";
 const TEST_LIFECYCLE_BUDGET = "budget: { maxTokens: 1200, timeoutMs: 10000 }";
 const PACK_SRC = path.resolve(__dirname, "..", "..", "..", "market-packs", PACK_NAME);
-const STUB_PATH = path.resolve(__dirname, "..", "..", "..", "tests", "e2e", "hindsight-stub.mjs");
+const STUB_PATH = path.resolve(__dirname, "..", "..", "..", "tests", "e2e", "_helpers", "hindsight-stub.mjs");
 const CONFIG_STORE_KEY = "provider-config:memory";
 const DEPS_READY =
 	fs.existsSync(path.join(PACK_SRC, "pack.yaml")) &&
