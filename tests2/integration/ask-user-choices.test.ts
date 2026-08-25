@@ -18,6 +18,10 @@
  *  5. Legacy `POST /api/internal/user-question` endpoint is gone (404).
  *  6. Legacy `GET /api/internal/user-question/pending` endpoint is gone (404).
  */
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { vi } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { gatewaySync } from "./_e2e/runtime.js";
 import {
@@ -28,6 +32,7 @@ import {
 	deleteSession,
 	messageEndPredicate,
 	readE2EToken,
+	registerProject,
 	toolStartPredicate,
 } from "./_e2e/e2e-setup.js";
 
@@ -57,7 +62,69 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
-async function postAsk(conn: Awaited<ReturnType<typeof connectWs>>): Promise<string> {
+type TestWsConnection = Awaited<ReturnType<typeof connectWs>>;
+
+function blockQuestionStateFlush(sessionId: string, state: boolean) {
+	const manager = gatewaySync().sessionManager;
+	const store = manager.resolveStoreForId(sessionId)!;
+	const originalFlush = store.flushAsync.bind(store);
+	const entered = deferred<void>();
+	const release = deferred<void>();
+	let blocked = false;
+	const spy = vi.spyOn(store, "flushAsync").mockImplementation(async () => {
+		if (!blocked && store.get(sessionId)?.hasUnansweredQuestion === state) {
+			blocked = true;
+			entered.resolve();
+			await release.promise;
+		}
+		return originalFlush();
+	});
+	return { entered, release, restore: () => spy.mockRestore() };
+}
+
+async function runQuestionStateTransition<T>(
+	sessionId: string,
+	projectId: string,
+	state: boolean,
+	uiConnections: TestWsConnection[],
+	action: () => Promise<T>,
+	whilePersistenceBlocked?: () => void,
+): Promise<T> {
+	const cursors = uiConnections.map(conn => conn.messageCount());
+	const barrier = blockQuestionStateFlush(sessionId, state);
+	let pending: Promise<T> | undefined;
+	try {
+		pending = action();
+		await barrier.entered.promise;
+		await new Promise<void>(resolve => setImmediate(resolve));
+		for (let index = 0; index < uiConnections.length; index++) {
+			expect(uiConnections[index]!.messages.slice(cursors[index]).filter(message =>
+				message.type === "sessions_changed" && message.sessionId === sessionId
+			)).toEqual([]);
+		}
+		whilePersistenceBlocked?.();
+
+		barrier.release.resolve();
+		const result = await pending;
+		const events = await Promise.all(uiConnections.map((conn, index) => conn.waitForFrom(
+			cursors[index]!,
+			message => message.type === "sessions_changed" && message.sessionId === sessionId,
+			10_000,
+		)));
+		for (const event of events) {
+			expect(event).toEqual({ type: "sessions_changed", sessionId, projectId });
+		}
+		expect(gatewaySync().sessionManager.getPersistedSession(sessionId)?.hasUnansweredQuestion).toBe(state);
+		return result;
+	} finally {
+		barrier.release.resolve();
+		if (pending) await pending.catch(() => undefined);
+		barrier.restore();
+		await gatewaySync().sessionManager.resolveStoreForId(sessionId)?.flushAsync();
+	}
+}
+
+async function postAsk(conn: TestWsConnection): Promise<string> {
 	const cursor = conn.messageCount();
 	conn.send({ type: "prompt", text: "please use ask_user_choices" });
 	await conn.waitForFrom(cursor, toolStartPredicate("ask_user_choices"), 10_000);
@@ -217,6 +284,158 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 			}
 		} finally {
 			await deleteSession(sessionId);
+		}
+	});
+
+	test("question-state and dismissal egress reaches UI principals only after persistence", async () => {
+		const victimSessionId = await createSession();
+		const sandboxRoot = join(gatewaySync().bobbitDir, `ask-egress-${randomUUID()}`);
+		mkdirSync(sandboxRoot, { recursive: true });
+		const sandboxProject = await registerProject({
+			name: `ask-egress-${randomUUID()}`,
+			rootPath: sandboxRoot,
+			seedWorkflows: false,
+		});
+		const sandboxSessionId = await createSession({ projectId: sandboxProject.id, cwd: sandboxProject.rootPath });
+		expect(sandboxSessionId).not.toBe(victimSessionId);
+
+		const manager = gatewaySync().sessionManager;
+		const victimProjectId = String(manager.getPersistedSession(victimSessionId)?.projectId);
+		expect(victimProjectId).not.toBe(sandboxProject.id);
+		const sandboxStore = manager.sandboxTokenStore;
+		const unrelatedSandboxToken = sandboxStore.register(sandboxProject.id);
+		sandboxStore.addSession(sandboxProject.id, sandboxSessionId);
+		const askingSandboxToken = sandboxStore.register(victimProjectId);
+		sandboxStore.addSession(victimProjectId, victimSessionId);
+
+		const [victimUiA, victimUiB, unrelatedUi, unrelatedSandbox, askingSandbox] = await Promise.all([
+			connectWs(victimSessionId),
+			connectWs(victimSessionId),
+			connectWs(sandboxSessionId),
+			connectWs(sandboxSessionId, unrelatedSandboxToken),
+			connectWs(victimSessionId, askingSandboxToken),
+		]);
+		const uiConnections = [victimUiA, victimUiB, unrelatedUi];
+		const unrelatedSandboxCursor = unrelatedSandbox.messageCount();
+
+		try {
+			const askAId = await runQuestionStateTransition(
+				victimSessionId,
+				victimProjectId,
+				true,
+				uiConnections,
+				() => postAsk(victimUiA),
+			);
+
+			const answerCursor = victimUiA.messageCount();
+			const answers = [
+				{ question: "Favorite color?", selected: "blue", other_text: null },
+				{ question: "Team size?", selected: "small", other_text: null },
+			];
+			const answered = await runQuestionStateTransition(
+				victimSessionId,
+				victimProjectId,
+				false,
+				uiConnections,
+				() => postSubmit(victimSessionId, askAId, answers),
+			);
+			expect(answered.status).toBe(200);
+			expect(await answered.json()).toEqual({ ok: true });
+			await victimUiA.waitForFrom(
+				answerCursor,
+				message => messageEndPredicate("assistant")(message)
+					&& JSON.stringify(message.data?.message?.content ?? "").includes(askAId),
+				10_000,
+			);
+			await victimUiA.waitForFrom(
+				answerCursor,
+				message => message.type === "session_status" && message.status === "idle",
+				10_000,
+			);
+
+			const askBId = await runQuestionStateTransition(
+				victimSessionId,
+				victimProjectId,
+				true,
+				uiConnections,
+				() => postAsk(victimUiA),
+			);
+			expect(askBId).not.toBe(askAId);
+
+			const before = await manager.getSession(victimSessionId)!.rpcClient.getMessages();
+			const beforeMessages = before.data?.messages || before.data;
+			const dismissalCursors = [victimUiA, victimUiB, unrelatedUi, askingSandbox]
+				.map(conn => conn.messageCount());
+			const dismissed = await runQuestionStateTransition(
+				victimSessionId,
+				victimProjectId,
+				false,
+				uiConnections,
+				() => postDismiss(victimSessionId, askBId),
+				() => {
+					for (const [index, conn] of [victimUiA, victimUiB, unrelatedUi, askingSandbox].entries()) {
+						expect(conn.messages.slice(dismissalCursors[index]).filter(message =>
+							message.type === "ask_question_dismissed"
+						)).toEqual([]);
+					}
+				},
+			);
+			expect(dismissed.status).toBe(200);
+			expect(await dismissed.json()).toEqual({ ok: true });
+
+			for (const [index, conn] of [victimUiA, victimUiB].entries()) {
+				const event = await conn.waitForFrom(
+					dismissalCursors[index]!,
+					message => message.type === "ask_question_dismissed",
+					10_000,
+				);
+				expect(event).toEqual({
+					type: "ask_question_dismissed",
+					sessionId: victimSessionId,
+					toolUseId: askBId,
+				});
+			}
+
+			unrelatedUi.send({ type: "ping" });
+			await unrelatedUi.waitForFrom(dismissalCursors[2]!, message => message.type === "pong", 10_000);
+			expect(unrelatedUi.messages.slice(dismissalCursors[2]).filter(message =>
+				message.type === "ask_question_dismissed"
+			)).toEqual([]);
+
+			askingSandbox.send({ type: "ping" });
+			await askingSandbox.waitForFrom(dismissalCursors[3]!, message => message.type === "pong", 10_000);
+			expect(askingSandbox.messages.slice(dismissalCursors[3]).filter(message =>
+				message.type === "ask_question_dismissed"
+			)).toEqual([]);
+
+			unrelatedSandbox.send({ type: "ping" });
+			await unrelatedSandbox.waitForFrom(unrelatedSandboxCursor, message => message.type === "pong", 10_000);
+			const unrelatedSandboxFrames = unrelatedSandbox.messages.slice(unrelatedSandboxCursor);
+			expect(unrelatedSandboxFrames.filter(message =>
+				message.type === "sessions_changed" && message.sessionId === victimSessionId
+			)).toEqual([]);
+			const serializedSandboxFrames = JSON.stringify(unrelatedSandboxFrames);
+			expect(serializedSandboxFrames).not.toContain(victimSessionId);
+			expect(serializedSandboxFrames).not.toContain(victimProjectId);
+
+			const durable = await getDismissals(victimSessionId);
+			expect(await durable.json()).toEqual({ dismissedToolUseIds: [askBId] });
+			const after = await manager.getSession(victimSessionId)!.rpcClient.getMessages();
+			const afterMessages = after.data?.messages || after.data;
+			expect(afterMessages).toHaveLength(beforeMessages.length);
+			expect(manager.getSession(victimSessionId)?.status).toBe("idle");
+		} finally {
+			victimUiA.close();
+			victimUiB.close();
+			unrelatedUi.close();
+			unrelatedSandbox.close();
+			askingSandbox.close();
+			sandboxStore.removeSession(sandboxProject.id, sandboxSessionId);
+			sandboxStore.removeSession(victimProjectId, victimSessionId);
+			await Promise.all([
+				deleteSession(victimSessionId),
+				deleteSession(sandboxSessionId),
+			]);
 		}
 	});
 
