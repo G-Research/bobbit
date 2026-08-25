@@ -54,8 +54,9 @@ export interface SpawnTrackedOptions {
 	isProcessGroupAlive?: (pgid: number) => boolean;
 	/**
 	 * Raw Darwin process-state snapshot used only to observe a group after its
-	 * single final signal. The budget is bounded by the caller's existing wait
-	 * deadline; unsupported platforms deliberately ignore this seam.
+	 * single final signal. The operation has a fixed hard cap; each caller joins
+	 * the shared snapshot only through its own wait deadline. Unsupported
+	 * platforms deliberately ignore this seam.
 	 */
 	posixProcessStateSnapshot?: (budgetMs: number) => Promise<string>;
 	/** Test seam for sending a signal to the detached POSIX process group. */
@@ -221,7 +222,7 @@ function classifyFinalizedProcessGroupSnapshot(raw: string, targetPgid: number):
 /**
  * Darwin can retain killed group members as zombies until launchd reaps them,
  * making kill(0) report a live group even though no member can execute. This
- * observer is read-only, shell-free, output-bounded, and deadline-bounded.
+ * observer is read-only, shell-free, output-bounded, and operation-bounded.
  */
 function readDarwinProcessStateSnapshot(budgetMs: number): Promise<string> {
 	return new Promise((resolve, reject) => {
@@ -621,13 +622,15 @@ export function spawnTracked(
 			// This is observation after the one ownership-safe final signal, never
 			// authority to signal the numeric PGID. Concurrent callers share one
 			// classification, while each joins it only through its own deadline.
-			const observeFinalizedDarwinGroup = async (): Promise<boolean> => {
-				if (!processStateSnapshot) return convergedCompletion() ?? false;
+			const observeFinalizedDarwinGroup = async (): Promise<FinalizedProcessGroupState | undefined> => {
+				if (!processStateSnapshot) return undefined;
 				let observation = tracked._darwinFinalizedGroupObservation;
 				if (!observation) {
-					const budget = Math.max(0, deadline - Date.now());
 					try {
-						observation = processStateSnapshot(budget).then(
+						// The snapshot belongs to the child, not to its initiating waiter. A
+						// short caller may stop joining it without aborting evidence that a
+						// longer concurrent caller can still use.
+						observation = processStateSnapshot(DARWIN_PROCESS_STATE_OBSERVER_MAX_MS).then(
 							raw => classifyFinalizedProcessGroupSnapshot(raw, pid),
 							() => "unavailable" as const,
 						);
@@ -650,8 +653,8 @@ export function spawnTracked(
 						}
 					});
 				}
-				await waitWithTimeout(observation.then(() => true), Math.max(0, deadline - Date.now()));
-				return convergedCompletion() ?? false;
+				const joined = await waitWithTimeout(observation.then(() => true), Math.max(0, deadline - Date.now()));
+				return joined ? observation : undefined;
 			};
 
 			// SIGKILL delivery is asynchronous. Once it has been dispatched, later
@@ -664,9 +667,18 @@ export function spawnTracked(
 					return convergedCompletion() ?? false;
 				}
 				// Always attempt one immediate observation, including a zero-budget wait.
-				if (await observeFinalizedDarwinGroup()) return true;
+				const immediateObservation = await observeFinalizedDarwinGroup();
 				let completion = convergedCompletion();
 				if (completion != null) return completion;
+				// Unavailable evidence is retryable while this caller still owns time.
+				// Retry once promptly rather than deferring recovery to the unrelated
+				// deadline-edge observation. Settled exact-slot cleanup preserves one
+				// snapshot in flight even when another waiter starts the retry first.
+				if (immediateObservation === "unavailable" && Date.now() < deadline) {
+					await observeFinalizedDarwinGroup();
+					completion = convergedCompletion();
+					if (completion != null) return completion;
+				}
 				const permitFinalObservation = timeout > DARWIN_PROCESS_STATE_OBSERVER_MAX_MS;
 				let finalObservationAttempted = false;
 				while (Date.now() < deadline) {
@@ -679,7 +691,7 @@ export function spawnTracked(
 					const remaining = deadline - Date.now();
 					if (permitFinalObservation && !finalObservationAttempted && remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS) {
 						finalObservationAttempted = true;
-						if (await observeFinalizedDarwinGroup()) return true;
+						await observeFinalizedDarwinGroup();
 						completion = convergedCompletion();
 						if (completion != null) return completion;
 						continue;
