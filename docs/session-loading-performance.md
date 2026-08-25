@@ -2,7 +2,7 @@
 
 Session loading crosses the agent RPC transport, transcript assembly, session-list aggregation, per-project stores, and boot restoration. These paths were optimized together because a fast UI request still feels slow if the gateway is blocked framing output, scanning archives, writing state, or restoring processes.
 
-This document describes the implemented runtime contract. See the [implementation design](design/session-loading-performance.md) for the original change plan and the [benchmark report](design/session-loading-performance-benchmarks.md) for measurement details.
+This document describes the implemented runtime contract. See the [implementation design](design/session-loading-performance.md) for the original change plan. The [historical microbenchmark report](design/session-loading-performance-benchmarks.md) records isolated algorithm evidence; use [Bobbit journey benchmarks](benchmarks.md) for the current production-boundary suite.
 
 ## Behavior-preserving contract
 
@@ -156,6 +156,8 @@ The tests follow the [canonical unit I/O boundary audit](testing-v2/io-boundary-
 Do not move real rename, backup, fresh-reader, recursive-stat/mtime, gateway-restart, or process-lifecycle claims into memfs-only tests. Conversely, core policy tests should not create real temporary trees, sleep through debounce windows, or spawn an agent merely to exercise deterministic decisions.
 
 ## Benchmark results
+
+This section preserves historical algorithm evidence from isolated microbenchmarks. For current production-boundary measurements, use the [session-open journey benchmark](benchmarks.md#session-open-journey) via `npm run benchmark:session-open`.
 
 The reproducible dimensions, raw samples, identity hashes, revisions, and caveats are recorded in [Session-loading performance benchmarks](design/session-loading-performance-benchmarks.md). On the measured Windows/Node environment, the isolated median results were:
 

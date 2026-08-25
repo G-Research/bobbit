@@ -6,6 +6,8 @@ Gateway startup must restore durable state before it accepts traffic, but it sho
 
 Boot phase lines are written to `<headquarters>/state/boot-timings.log`. They measure process and server phases; client reload samples use the separate `boot-timing.jsonl` instrumentation.
 
+This document is a historical startup audit. For current production-boundary measurements across deterministic stores with 0, 100, and 1,000 persisted sessions, use the [gateway-startup journey benchmark](benchmarks.md#gateway-startup-journey) via `npm run benchmark:gateway-startup`.
+
 ## Historical handoff evidence
 
 The following measurements came from the original candidate handoff. They are retained as context, not presented as a reproduction on the final implementation.
@@ -146,7 +148,7 @@ The second restart compared both the repaired TeamStore contents and its filesys
 
 The fixture measures run-local wall-clock restart time and pre-listen duration, and reads a reconciliation phase duration when that boot phase crosses the server's logging threshold. It asserts only that wall-clock restart includes the reported pre-listen work. The deterministic run did **not** retain a stable baseline sample or an exact before/after wall-clock delta suitable for this audit, so no latency number is claimed here.
 
-This omission is deliberate: process startup, filesystem cache state, and the test host dominate a single wall-clock sample. Future performance claims should record repeated baseline and candidate samples on the same environment rather than treating lifecycle assertions as a benchmark.
+This omission is deliberate: process startup, filesystem cache state, and the test host dominate a single wall-clock sample. Future performance claims should follow the [benchmark reproduction and comparison procedure](benchmarks.md#reproduction-and-comparison), recording repeated baseline and candidate samples on the same environment rather than treating lifecycle assertions as a benchmark.
 
 ## Startup work bound
 
