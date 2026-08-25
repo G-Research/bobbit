@@ -85,6 +85,19 @@ describe("EventBuffer", () => {
 			assert.deepEqual(events(buf), [97, 98, 99]);
 		});
 
+		it("preserves ordering and bounded storage through multiple compactions", () => {
+			const buf = new EventBuffer(7);
+			for (let i = 0; i < 4097; i++) buf.push({ i });
+
+			assert.equal(buf.size, 7);
+			assert.deepEqual(events(buf).map((event: any) => event.i), [4090, 4091, 4092, 4093, 4094, 4095, 4096]);
+			assert.deepEqual(buf.getAll().map(entry => entry.seq), [4091, 4092, 4093, 4094, 4095, 4096, 4097]);
+
+			const storage = buf as unknown as { buffer: unknown[]; head: number };
+			assert.ok(storage.buffer.length < 1024 + buf.size, "discarded prefixes are compacted repeatedly");
+			assert.ok(storage.buffer.slice(0, storage.head).every(slot => slot === undefined), "eviction releases payload references");
+		});
+
 		it("fills exactly to capacity without dropping", () => {
 			const buf = new EventBuffer(5);
 			for (let i = 0; i < 5; i++) buf.push(i);
@@ -147,6 +160,21 @@ describe("EventBuffer", () => {
 			assert.equal(buf.size, 1);
 			assert.deepEqual(events(buf), ["x"]);
 		});
+
+		it("clears a discarded prefix and supports reseeding before reuse", () => {
+			const buf = new EventBuffer(3);
+			for (let i = 0; i < 100; i++) buf.push(i);
+			const storage = buf as unknown as { head: number };
+			assert.ok(storage.head > 0, "setup creates a discarded physical prefix");
+
+			buf.clear();
+			buf.seedNextSeq(50);
+			const entry = buf.push("reused");
+			assert.equal(entry.seq, 50);
+			assert.equal(buf.size, 1);
+			assert.deepEqual(events(buf), ["reused"]);
+			assert.equal((buf as unknown as { head: number }).head, 0);
+		});
 	});
 
 	describe("size property", () => {
@@ -180,7 +208,13 @@ test("EventBuffer evicts only oldest mixed-size entries until the byte budget ho
 	buf.push({ id: "large", payload: "x".repeat(100) });
 	buf.push({ id: "small-b", payload: "x".repeat(20) });
 
-	assert.deepEqual(events(buf).map((event: any) => event.id), ["large", "small-b"]);
+	const retained = buf.getAll();
+	assert.deepEqual(retained.map(entry => (entry.event as any).id), ["large", "small-b"]);
+	assert.equal(
+		buf.retainedBytes,
+		retained.reduce((total, entry) => total + Buffer.byteLength(JSON.stringify(entry), "utf8"), 0),
+		"cached retained bytes exactly match the live suffix",
+	);
 	assert.ok(buf.retainedBytes <= buf.maxBytes);
 });
 
@@ -222,6 +256,41 @@ test("EventBuffer drops an oversized event and invalidates replay across its seq
 	assert.deepEqual(buf.getAll().map(entry => entry.seq), [3]);
 	assert.equal(buf.canResumeFrom(1), false, "later retention must not hide the dropped gap");
 	assert.equal(buf.canResumeFrom(2), true);
+});
+
+test("EventBuffer clears retained history for circular and BigInt events", () => {
+	const buf = new EventBuffer(10, 4096);
+	buf.push({ id: "before-circular" });
+	const circular: { self?: unknown } = {};
+	circular.self = circular;
+	const circularEntry = buf.push(circular);
+
+	assert.equal(circularEntry.seq, 2);
+	assert.equal(circularEntry.event, circular, "the unserializable entry remains broadcastable");
+	assert.equal(buf.size, 0);
+	assert.equal(buf.retainedBytes, 0);
+	assert.equal(buf.canResumeFrom(1), false);
+	assert.equal(buf.canResumeFrom(2), true);
+
+	buf.push({ id: "before-bigint" });
+	const bigintEntry = buf.push({ value: 1n });
+	assert.equal(bigintEntry.seq, 4);
+	assert.equal(buf.size, 0);
+	assert.equal(buf.retainedBytes, 0);
+	assert.equal(buf.canResumeFrom(3), false);
+	assert.equal(buf.canResumeFrom(4), true);
+});
+
+test("EventBuffer honors zero count and byte capacities", () => {
+	for (const buf of [new EventBuffer(0, 4096), new EventBuffer(10, 0)]) {
+		const entry = buf.push({ id: "unretained" });
+		assert.equal(entry.seq, 1);
+		assert.equal(buf.size, 0);
+		assert.equal(buf.retainedBytes, 0);
+		assert.deepEqual(buf.getAll(), []);
+		assert.equal(buf.canResumeFrom(0), false);
+		assert.equal(buf.canResumeFrom(1), true);
+	}
 });
 
 // ── Sequence / timestamp / resume-catch-up contract ─────────────────────────
