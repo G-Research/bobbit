@@ -135,6 +135,8 @@ import {
 	sweepReviewPayloads,
 	type CanonicalReviewPayload,
 } from "./review-payload-store.js";
+import { handleUploadedAttachmentToolRoute } from "./uploaded-attachment-routes.js";
+import { purgeUploadedAttachments, sweepUploadedAttachments } from "./agent/uploaded-attachment-store.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -4939,7 +4941,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// a stalled request from entering review persistence during preview purge.
 			const reviewPayloadCleanup = reviewPayloadOperations.purge(sessionId, () => removeReviewPayloads(sessionId));
 			const previewCleanup = previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
-			const [previewResult, reviewPayloadResult] = await Promise.allSettled([previewCleanup, reviewPayloadCleanup]);
+			const attachmentCleanup = purgeUploadedAttachments(sessionId);
+			const [previewResult, reviewPayloadResult, attachmentResult] = await Promise.allSettled([previewCleanup, reviewPayloadCleanup, attachmentCleanup]);
 			if (previewResult.status === "rejected") {
 				// This listener owns preview-artifact cleanup errors; SessionManager
 				// only awaits the listener contract and must not duplicate this log.
@@ -4947,6 +4950,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 			if (reviewPayloadResult.status === "rejected") {
 				console.error(`[review-payloads] remove failed for ${sessionId}:`, reviewPayloadResult.reason);
+			}
+			if (attachmentResult.status === "rejected") {
+				console.error(`[uploaded-attachments] remove failed for ${sessionId}:`, attachmentResult.reason);
 			}
 		}
 	});
@@ -5375,9 +5381,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				try {
 					const knownSessionIds = [...projectContextManager.all()]
 						.flatMap((context) => context.sessionStore.getAll().map((session) => session.id));
-					await sweepReviewPayloads(knownSessionIds);
+					await Promise.all([
+						sweepReviewPayloads(knownSessionIds),
+						sweepUploadedAttachments(knownSessionIds),
+					]);
 				} catch (err) {
-					console.warn("[review-payloads] startup recovery failed (non-fatal):", err);
+					console.warn("[session-payloads] startup recovery failed (non-fatal):", err);
 				}
 			});
 
@@ -6384,6 +6393,8 @@ async function handleApiRoute(
 		operations: reviewPayloadOperations,
 		resolveExistingReview: resolveExistingReviewPayload,
 	})) return;
+
+	if (await handleUploadedAttachmentToolRoute(url, req, res, { sessionManager, readBody })) return;
 
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
 		defaultCwd: config.defaultCwd,
