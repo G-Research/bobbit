@@ -105,7 +105,6 @@ import {
 	type PersistedSession,
 } from "./session-store.js";
 import {
-	backfillUnansweredAskState,
 	hasUnansweredAskUserChoices,
 	normalizeDismissedAskToolUseIds,
 	successfulPostedAskToolUseId,
@@ -10103,19 +10102,12 @@ export class SessionManager {
 			session.latestTurnUserText = extractUserMessageText(event.message);
 		}
 
-		if (event.type === "message_end") {
-			const postedAskId = successfulPostedAskToolUseId(event.message);
-			if (postedAskId) {
-				const store = this.resolveStoreForSession(session.id);
-				const persisted = store.get(session.id);
-				const dismissed = normalizeDismissedAskToolUseIds(persisted?.dismissedAskToolUseIds);
-				if (!dismissed.includes(postedAskId) && persisted?.hasUnansweredQuestion !== true) {
-					store.update(session.id, { hasUnansweredQuestion: true });
-					void store.flushAsync()
-						.then(() => this._onSessionQuestionStateChanged?.(session.id, true))
-						.catch(error => console.error(`[session ${session.id}] Failed to persist unanswered-question state:`, error));
-				}
-			}
+		if (event.type === "message_end" && successfulPostedAskToolUseId(event.message)) {
+			// Posted asks and terminal projections share one FIFO. Re-read the current
+			// transcript and durable terminal evidence after predecessors settle so a
+			// stale answer/dismiss snapshot cannot overwrite a newer posted ask.
+			void this.recomputeHasUnansweredQuestion(session.id)
+				.catch(error => console.error(`[session ${session.id}] Failed to persist unanswered-question state:`, error));
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -13346,24 +13338,30 @@ export class SessionManager {
 		// that verified identity rather than performing another fallible lookup.
 		if (ps.sandboxed && bridgeOptions.containerId) session.containerId = bridgeOptions.containerId;
 
-		// Sessions written before question attention state existed need one durable
-		// projection from their restored transcript. Without this migration, an ask
-		// that predates the upgrade stays invisible in the sidebar forever.
-		if (typeof ps.hasUnansweredQuestion !== "boolean") {
-			try {
-				const messagesResponse = await rpcClient.getMessages();
-				const rawMessages = messagesResponse.data?.messages ?? messagesResponse.data;
-				const migratedState = messagesResponse.success
-					? backfillUnansweredAskState(ps.hasUnansweredQuestion, rawMessages, ps.dismissedAskToolUseIds)
-					: undefined;
-				if (migratedState !== undefined) {
-					restoreStore.update(ps.id, { hasUnansweredQuestion: migratedState });
+		// Reconcile this derived projection from the sanitized current transcript on
+		// every restore. This both migrates legacy rows and repairs a durable boolean
+		// left stale by an interrupted live projection write. Accepted response
+		// envelopes remain terminal even when Pi has not appended their echo yet.
+		try {
+			const messagesResponse = await rpcClient.getMessages();
+			const rawMessages = messagesResponse.data?.messages ?? messagesResponse.data;
+			if (messagesResponse.success && Array.isArray(rawMessages)) {
+				const reconciledState = hasUnansweredAskUserChoices(
+					rawMessages,
+					new Set(normalizeDismissedAskToolUseIds(ps.dismissedAskToolUseIds)),
+					this.askResponseIdsFromRows([
+						...(ps.messageQueue ?? []),
+						...(ps.inFlightSteerTexts ?? []),
+					]),
+				);
+				if (ps.hasUnansweredQuestion !== reconciledState) {
+					restoreStore.update(ps.id, { hasUnansweredQuestion: reconciledState });
 					await restoreStore.flushAsync();
-					ps.hasUnansweredQuestion = migratedState;
+					ps.hasUnansweredQuestion = reconciledState;
 				}
-			} catch (error) {
-				console.warn(`[session-manager] Failed to backfill unanswered-question state for ${ps.id}:`, error);
 			}
+		} catch (error) {
+			console.warn(`[session-manager] Failed to reconcile unanswered-question state for ${ps.id}:`, error);
 		}
 
 		// Install the replacement before enabling lifecycle side effects. A replayed
@@ -15846,18 +15844,23 @@ export class SessionManager {
 		return raw;
 	}
 
-	private durableQueuedAskResponseIds(id: string): Set<string> {
-		const session = this.sessions.get(id);
-		const rows = [
-			...(session?.promptQueue.toArray() ?? []),
-			...(session?.inFlightSteerTexts ?? []),
-		];
+	private askResponseIdsFromRows(rows: readonly (string | { text?: unknown })[]): Set<string> {
 		const ids = new Set<string>();
 		for (const row of rows) {
-			const parsed = parseAskResponseEnvelope(row.text);
+			const text = typeof row === "string" ? row : row.text;
+			if (typeof text !== "string") continue;
+			const parsed = parseAskResponseEnvelope(text);
 			if (parsed) ids.add(parsed.toolUseId);
 		}
 		return ids;
+	}
+
+	private durableQueuedAskResponseIds(id: string): Set<string> {
+		const session = this.sessions.get(id);
+		return this.askResponseIdsFromRows([
+			...(session?.promptQueue.toArray() ?? []),
+			...(session?.inFlightSteerTexts ?? []),
+		]);
 	}
 
 	/** Durably dismiss one ask card without touching the prompt queue or agent runtime. */
