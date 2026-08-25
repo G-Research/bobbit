@@ -63,28 +63,6 @@ async function getRenderedSpecText(page: Page): Promise<string> {
 	});
 }
 
-/** Read the in-memory live state for diagnostics on failure. */
-async function dumpProposalState(page: Page): Promise<Record<string, unknown>> {
-	return page.evaluate(() => {
-		const s = (window as any).bobbitState;
-		const slot = s?.activeProposals?.goal;
-		// _proposalSpec is module-scoped inside render.ts; expose via the
-		// data-panel's <commentable-markdown> .markdown property which is
-		// fed from `config.spec` (= `_proposalSpec`).
-		const cm = document.querySelector("commentable-markdown") as any;
-		return {
-			selectedSessionId: s?.selectedSessionId ?? null,
-			slotPresent: slot != null,
-			slotFieldsKeys: slot ? Object.keys(slot.fields ?? {}) : null,
-			slotSpecLen: typeof slot?.fields?.spec === "string" ? slot.fields.spec.length : null,
-			slotTitle: slot?.fields?.title ?? null,
-			renderedMarkdownLen: typeof cm?.markdown === "string" ? cm.markdown.length : null,
-			renderedMarkdownPreview:
-				typeof cm?.markdown === "string" ? cm.markdown.slice(0, 80) : null,
-		};
-	});
-}
-
 test.describe("Goal proposal spec survives navigate-away/back", () => {
 	test.beforeAll(async () => {
 		await waitForHealth();
