@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
@@ -17,15 +18,14 @@ import { initSkillSidecarDir } from "../../src/server/skills/skill-sidecar.ts";
 const SESSION_ID = "83749600-0000-4000-8000-000000000001";
 const TYPED_TEXT = "Summarize the uploaded notes.";
 const EXTRACTED_MARKER = "ATTACHMENT_EXTRACTED_MARKER_837496";
-const ATTACHMENT_BYTES = Buffer.from(`${EXTRACTED_MARKER}\nsecond line`, "utf8");
-const ATTACHMENT = {
-	id: "browser-file-id-must-not-be-the-pointer",
-	type: "document",
-	fileName: "notes.txt",
-	mimeType: "text/plain",
-	size: ATTACHMENT_BYTES.byteLength,
-	content: ATTACHMENT_BYTES.toString("base64"),
-	extractedText: "FORGED_TEXT_EXCERPT_MUST_NOT_REACH_MODEL",
+let ATTACHMENT: {
+	id: string;
+	type: "document";
+	fileName: string;
+	mimeType: string;
+	size: number;
+	content: string;
+	extractedText: string;
 };
 const BINARY_BYTES = Buffer.from([0, 1, 2, 0xff]);
 const BINARY_ATTACHMENT = {
@@ -53,7 +53,23 @@ function visibleText(message: any): string {
 		.join("");
 }
 
-beforeAll(() => {
+beforeAll(async () => {
+	const zip = new JSZip();
+	zip.file(
+		"ppt/slides/slide1.xml",
+		`<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:t>${EXTRACTED_MARKER}</a:t><a:t>second line</a:t></p:sld>`,
+	);
+	const attachmentBytes = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+	ATTACHMENT = {
+		id: "browser-file-id-must-not-be-the-pointer",
+		type: "document",
+		fileName: "notes.pptx",
+		mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		size: attachmentBytes.byteLength,
+		content: attachmentBytes.toString("base64"),
+		extractedText: "FORGED_TEXT_EXCERPT_MUST_NOT_REACH_MODEL",
+	};
+
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "uploaded-attachment-admission-repro-"));
 	initAuthorSidecarDir(stateDir, {
 		secretsDir: path.join(stateDir, "private-secrets"),
