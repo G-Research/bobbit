@@ -15,11 +15,11 @@ import {
 import type { HostNotification } from "../../../src/shared/extension-host/host-hooks.js";
 import { wireProjectHostNotificationBoundaries } from "../../../src/server/server.js";
 import { enableTsWorkerResolver } from "../../unit/core/_helpers/enable-ts-worker.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
-import { getGateway, type EntityCounts, type GatewayFixture } from "../../support/harnesses/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/leak-detector.js";
-import { createRunChild, removeOwnedRunChild } from "../../support/harnesses/run-isolation.js";
-import { createScope, type TestScope } from "../../support/harnesses/scope.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
+import { getGateway, type EntityCounts, type GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/shared/leak-detector.js";
+import { createRunChild, removeOwnedRunChild } from "../../support/harnesses/shared/run-isolation.js";
+import { createScope, type TestScope } from "../../support/harnesses/shared/scope.js";
 
 const contexts: ProjectContext[] = [];
 const contextRoots: string[] = [];

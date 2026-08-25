@@ -273,7 +273,7 @@ function writeDistFixture(root: string, key: string): void {
 	writeRepoFile(root, "dist/.build-manifest.json", `${JSON.stringify({ schema: 1, key, createdAt: new Date().toISOString() }, null, 2)}\n`);
 }
 
-const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 let workspace: string;
 let repoRoot: string;

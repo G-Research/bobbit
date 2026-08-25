@@ -1,10 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
-const ENTRY = path.resolve("tests/ui-fixtures/inline-html-theme-renderers-entry.ts");
+const SHELL = path.resolve("tests/support/fixtures/browser/ui/fixture-shell.html");
+const ENTRY = path.resolve("tests/support/fixtures/browser/ui/inline-html-theme-renderers-entry.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "inline-html-theme-renderers-bundle.js");
 const WRITE_RENDERER_SRC = path.resolve("src/ui/tools/renderers/WriteRenderer.ts");

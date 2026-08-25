@@ -7,11 +7,7 @@ import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 
-<<<<<<<< HEAD:tests/integration/gateway/base-path-cli-entrypoint.gateway.test.ts
-import { awaitableRm, pollUntil } from "../../support/helpers/e2e/cleanup.js";
-========
 import { awaitableRm, pollUntil } from "../_helpers/test-utils/cleanup.js";
->>>>>>>> goal/d462c93f/coder-d422:tests/e2e/vitest/base-path-cli-entrypoint.vitest-e2e.test.ts
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const CLI_ENTRY = join(REPO_ROOT, "src", "server", "cli.ts");

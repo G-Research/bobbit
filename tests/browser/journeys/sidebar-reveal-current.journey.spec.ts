@@ -1,10 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
-const ENTRY = path.resolve("tests/ui-fixtures/sidebar-status-journey-fixture-entry.ts");
+const SHELL = path.resolve("tests/support/fixtures/browser/ui/fixture-shell.html");
+const ENTRY = path.resolve("tests/support/fixtures/browser/ui/sidebar-status-journey-fixture-entry.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const GENERATED_ENTRY = path.join(BUNDLE_DIR, "sidebar-reveal-current-journey-entry.ts");
 const BUNDLE = path.join(BUNDLE_DIR, "sidebar-reveal-current-journey-bundle.js");
@@ -53,7 +53,7 @@ test.beforeAll(() => {
 	// in the same IIFE keeps that click path executable from a file:// fixture
 	// while retaining one canonical state module instance.
 	fs.writeFileSync(GENERATED_ENTRY, [
-		'import "../../../tests/ui-fixtures/sidebar-status-journey-fixture-entry.ts";',
+		'import "../../../tests/support/fixtures/browser/ui/sidebar-status-journey-fixture-entry.ts";',
 		'import { revealCurrentSidebarSession } from "../../../src/app/sidebar-reveal.ts";',
 		'import { buildSidebarTreeModel } from "../../../src/app/sidebar.ts";',
 		'import { sidebarTreeKey } from "../../../src/app/sidebar-tree-builder.ts";',

@@ -1,5 +1,5 @@
-import { test, expect } from "../../e2e/gateway-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "../../e2e/e2e-setup.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
+import { apiFetch, createGoal, deleteGoal } from "../../e2e/_helpers/e2e-setup.js";
 import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
 
 async function openGoalEditDialog(page: import("@playwright/test").Page) {

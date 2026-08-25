@@ -6,7 +6,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 let _tok: string;
 function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }

@@ -6,7 +6,7 @@ import {
 	parseProposalFile,
 	type ProposalType,
 } from "../../../../src/server/proposals/proposal-files.js";
-import type { TestComponent, TestWorkflowsBlock } from "../../../support/fixtures/e2e/seed-workflows.js";
+import type { TestComponent, TestWorkflowsBlock } from "../../../e2e/_helpers/seed-workflows.js";
 
 interface ProposalProjectFixture {
 	id: string;

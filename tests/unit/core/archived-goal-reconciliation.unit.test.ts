@@ -16,7 +16,7 @@ import { collectTeamOwnedSessionClosure, SessionManager } from "../../../src/ser
 import { SessionStore } from "../../../src/server/agent/session-store.ts";
 import { OrchestrationCore } from "../../../src/server/agent/orchestration-core.ts";
 import { TeamManager, TeamStartError } from "../../../src/server/agent/team-manager.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.ts";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.ts";
 
 interface GoalRow {
 	id: string;

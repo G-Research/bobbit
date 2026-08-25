@@ -20,7 +20,7 @@ import { WorktreePool, isPoolBranch } from "../../../src/server/agent/worktree-p
 import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
 import type { Component } from "../../../src/server/agent/project-config-store.ts";
 import type { CommandRunner, ExecFileResult } from "../../../src/server/gateway-deps.ts";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -334,7 +334,7 @@ describe("consolidated implementation review defaults", () => {
 	});
 
 	it("keeps the active project workflow config parseable with serialized expensive verification phases", () => {
-		const repoRoot = path.resolve(import.meta.dirname, "..", "..");
+		const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 		const project = YAML.parse(fs.readFileSync(path.join(repoRoot, ".bobbit", "config", "project.yaml"), "utf8")) as {
 			workflows?: Record<string, Workflow>;
 		};

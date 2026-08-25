@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
 
-const repoRoot = path.resolve(import.meta.dirname, "..", "..");
+const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 
 const REVIEWER_ROLE_FILES = [
 	"defaults/roles/reviewer.yaml",

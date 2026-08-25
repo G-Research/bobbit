@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/thinking-levels.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/thinking-levels.spec.ts (v2-dom tier).
 // Renders the REAL renderModelsTab() Session-row thinking picker under happy-dom
 // (was an esbuild file:// bundle). State is injected via the real
 // __testResetModelsTab()/__testSetPrefs() (same harness as

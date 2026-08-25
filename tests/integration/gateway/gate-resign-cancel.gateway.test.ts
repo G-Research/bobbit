@@ -8,8 +8,8 @@ import { GateStore, type GateSignal } from "../../../src/server/agent/gate-store
 import { GoalStore, type PersistedGoal } from "../../../src/server/agent/goal-store.js";
 import { VerificationHarness } from "../../../src/server/agent/verification-harness.js";
 import type { Workflow, WorkflowGate } from "../../../src/server/agent/workflow-store.js";
-import { createManualClock, type ManualClock } from "../../support/harnesses/clock.js";
-import { createFakeVerificationCommandRunner } from "../../support/harnesses/fake-verification-command-runner.js";
+import { createManualClock, type ManualClock } from "../../support/harnesses/shared/clock.js";
+import { createFakeVerificationCommandRunner } from "../../support/harnesses/shared/fake-verification-command-runner.js";
 
 const GOAL_ID = "gate-resignal-suite-goal";
 const GATE_ID = "slow-gate";

@@ -15,8 +15,8 @@ import { join } from "node:path";
 
 import { ProjectContext } from "../../../src/server/agent/project-context.js";
 import type { FsLike } from "../../../src/server/gateway-deps.js";
-import { TEST_DEFAULT_COMPONENT } from "../../support/fixtures/e2e/seed-workflows.js";
-import type { GatewayFixture } from "../../support/harnesses/gateway.js";
+import { TEST_DEFAULT_COMPONENT } from "../../e2e/_helpers/seed-workflows.js";
+import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
 import { apiFetch, defaultProject, ensureGateway } from "./_helpers/e2e/e2e-setup.js";
 
 interface SuiteProject {

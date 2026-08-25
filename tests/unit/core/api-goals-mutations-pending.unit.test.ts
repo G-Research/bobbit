@@ -21,7 +21,7 @@ import path from "node:path";
 
 import { PlanMutationStore, DEFAULT_MUTATION_TTL_MS, type PendingMutation } from "../../../src/server/agent/plan-mutation-store.ts";
 import { tryHandleNestedGoalRoute } from "../../../src/server/agent/nested-goal-routes.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 import type { ClassifierPlanStep } from "../../../src/server/agent/plan-mutation.ts";
 
 let memfs: MemFs;

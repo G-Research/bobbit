@@ -23,7 +23,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/fixtures/agent-interface-scroll.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/shared/agent-interface-scroll.html")}`;
 
 test.describe("AgentInterface scroll lock — vibration / snap-back", () => {
 	test("RO fire with delta=0 must NOT clobber user scrollTop while stickToBottom is true", async ({ page }) => {

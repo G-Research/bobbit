@@ -9,7 +9,7 @@
  * Failure prints the offending transition + which axis shifted by how many
  * pixels so the regression source is obvious.
  */
-import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { test, expect, type Page } from "../../e2e/_helpers/gateway-harness.js";
 import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {

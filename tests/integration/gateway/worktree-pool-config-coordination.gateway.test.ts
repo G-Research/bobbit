@@ -11,7 +11,7 @@ import {
 	canonicalGitCommonDir,
 	type RepositoryMutationCoordinator,
 } from "../../../src/server/skills/repository-mutation-coordinator.js";
-import { copyGitTemplate, prepareGitTemplate } from "../../support/harnesses/git-template.js";
+import { copyGitTemplate, prepareGitTemplate } from "../../support/harnesses/shared/git-template.js";
 
 const INCIDENT_LOCK = "could not lock config file .git/config: File exists";
 

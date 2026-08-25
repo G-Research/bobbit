@@ -19,9 +19,9 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const FIXTURE = path.resolve("tests/fixtures/sidebar-bobbit-datauri-cache.html");
-const BUNDLE = path.resolve("tests/fixtures/sidebar-bobbit-datauri-cache-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/sidebar-bobbit-datauri-cache-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/sidebar-bobbit-datauri-cache.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/sidebar-bobbit-datauri-cache-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/sidebar-bobbit-datauri-cache-entry.ts");
 const SOURCES = [
 	ENTRY,
 	path.resolve("src/ui/bobbit-render.ts"),

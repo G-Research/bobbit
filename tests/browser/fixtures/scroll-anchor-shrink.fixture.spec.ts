@@ -1,8 +1,8 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { waitForStableScroll } from "../../../tests2/browser/_helpers/stable-wait.js";
+import { waitForStableScroll } from "../_helpers/stable-wait.js";
 
-const TEST_PAGE = `file://${path.resolve("tests/fixtures/scroll-anchor-shrink.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/shared/scroll-anchor-shrink.html")}`;
 
 const SCROLLER = "#scroll-container";
 

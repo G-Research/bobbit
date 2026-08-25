@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { CostTracker, computeTreeCost, _resetTreeCostCacheForTesting } from "../../../src/server/agent/cost-tracker.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const stateDir = path.resolve("/memfs/api-tree-cost/state");
 let memfs: MemFs;

@@ -14,7 +14,7 @@ import {
 	previewRouteFromStoredValue,
 } from "../../../src/app/gateway-fetch.ts";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const SID = "11111111-2222-3333-4444-555555555555";
 const HASH = "a".repeat(64);
 const ARTIFACT_ID = "ZolfVVBQ";

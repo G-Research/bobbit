@@ -16,7 +16,7 @@ import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 test.setTimeout(15_000);
 

@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionStore } from "../../../src/server/agent/session-store.js";
-import { getGateway, type EntityCounts, type GatewayFixture } from "../../support/harnesses/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/leak-detector.js";
-import { createScope, type TestScope } from "../../support/harnesses/scope.js";
+import { getGateway, type EntityCounts, type GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../support/harnesses/shared/leak-detector.js";
+import { createScope, type TestScope } from "../../support/harnesses/shared/scope.js";
 
 type TaggedSession = {
 	id: string;

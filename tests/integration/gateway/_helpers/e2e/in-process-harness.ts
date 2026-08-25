@@ -5,7 +5,7 @@
  * `test("…", async ({ gateway }) => …)` structure unchanged.
  *
  * Instead of a per-worker Playwright fixture, `gateway` is the fork-scoped
- * singleton from tests/support/harnesses/gateway.ts (booted once per fork). Each
+ * singleton from tests/support/harnesses/shared/gateway.ts (booted once per fork). Each
  * `test.describe` block is automatically wrapped with:
  *   - a per-describe entity-leak guard (snapshot at describe start, assert at
  *     describe end — runs AFTER the spec's own afterAll cleanup); and
@@ -30,9 +30,9 @@ import {
 	it as vIt,
 	expect as vExpect,
 } from "vitest";
-import { exportGatewayApiProfileForTests, exportProductionProfileForTests, type EntityCounts, type GatewayFixture } from "../../../../support/harnesses/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../../../support/harnesses/leak-detector.js";
-import { createScope, type TestScope } from "../../../../support/harnesses/scope.js";
+import { exportGatewayApiProfileForTests, exportProductionProfileForTests, type EntityCounts, type GatewayFixture } from "../../../../support/harnesses/shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../../../support/harnesses/shared/leak-detector.js";
+import { createScope, type TestScope } from "../../../../support/harnesses/shared/scope.js";
 import { currentScope, ensureGateway, gatewaySync, setScope } from "./runtime.js";
 
 // Playwright's retrying `await expect(fn).toPass({ timeout })` matcher — vitest

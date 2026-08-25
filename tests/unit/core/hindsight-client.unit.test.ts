@@ -6,7 +6,7 @@
  * Unit tests for the Hindsight REST client (EP G2 / external mode).
  *
  * Drives the client against the deterministic in-process stub
- * (tests/e2e/hindsight-stub.mjs) plus a couple of bespoke servers for the
+ * (tests/e2e/_helpers/hindsight-stub.mjs) plus a couple of bespoke servers for the
  * transport-error branches (timeout / http-500 / network). Pins the contract in
  * docs/design/hindsight-pack-external.md §3 + §9.1.
  */
@@ -16,7 +16,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { createClient, HindsightError } from "../../../market-packs/hindsight/src/hindsight-client.ts";
-import { startHindsightStub } from "../../e2e/hindsight-stub.mjs";
+import { startHindsightStub } from "../../e2e/_helpers/hindsight-stub.mjs";
 
 interface Stub {
 	url: string;

@@ -12,7 +12,7 @@ import { initAuthorSidecarDir } from "../../../src/server/agent/author-sidecar.t
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
-import { createManualClock } from "../../support/harnesses/clock.ts";
+import { createManualClock } from "../../support/harnesses/shared/clock.ts";
 
 type TestClient = {
 	readyState: number;

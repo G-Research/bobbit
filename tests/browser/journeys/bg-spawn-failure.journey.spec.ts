@@ -1,6 +1,6 @@
 // v2-native — real browser journey for terminal background-process spawn failures.
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import type { GatewayInfo } from "../../e2e/gateway-harness.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import type { GatewayInfo } from "../../e2e/_helpers/gateway-harness.js";
 
 const SPAWN_FAILURE_MESSAGE = "Background process could not be started";
 

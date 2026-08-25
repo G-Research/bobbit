@@ -58,7 +58,7 @@ import {
 } from "../../../src/server/agent/bg-process-manager.ts";
 import { BgProcessStore } from "../../../src/server/agent/bg-process-store.ts";
 import { runBgRunner } from "../../../src/server/agent/bg-runner.ts";
-import { createManualClock, type ManualClock } from "../../support/harnesses/clock.js";
+import { createManualClock, type ManualClock } from "../../support/harnesses/shared/clock.js";
 
 const activeManagers: BgProcessManager[] = [];
 const activeSessions: string[] = [];

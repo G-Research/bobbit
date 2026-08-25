@@ -3,10 +3,10 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { basename, dirname, join } from "node:path";
-import { awaitableRm } from "../../support/helpers/e2e/cleanup.js";
+import { awaitableRm } from "../../e2e/_helpers/test-utils/cleanup.js";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import { createCommandSpawnAdapter } from "../../../src/server/owned-tree-command-spawn.js";
 
 let serverModule: any;

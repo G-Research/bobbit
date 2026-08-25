@@ -3,7 +3,7 @@
  * Covers: journey-app-smoke, journey-session-sharing, journey-draft-persistence
  * Consolidated from: basic-load-*, session-sharing-*, pr-preview-*, draft-loss-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage, createGoal, deleteGoal } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, sendMessage, createGoal, deleteGoal } from "../_helpers/journey-fixture.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: App Smoke", () => {

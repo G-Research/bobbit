@@ -25,7 +25,7 @@ import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 import { validateManifest } from "../../../src/server/agent/pack-manifest.ts";
 import { loadHooks, loadPackContributions, packIdFromRoot, PackContributionError } from "../../../src/server/agent/pack-contributions.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../../src/shared/extension-host/host-api.ts";

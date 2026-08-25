@@ -1,11 +1,11 @@
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "../../e2e/e2e-setup.js";
+} from "../../e2e/_helpers/e2e-setup.js";
 import { navigateToHash, openApp } from "../fixtures/ui-helpers.js";
 
 const MUTATING_TOOLS = ["write", "edit", "bash", "bash_bg"] as const;

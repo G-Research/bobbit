@@ -41,11 +41,11 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const FIXTURE = path.resolve("tests/fixtures/message-editor-arrows-real.html");
-const BUNDLE = path.resolve("tests/fixtures/message-editor-arrows-real-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/message-editor-arrows-real-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/message-editor-arrows-real.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/message-editor-arrows-real-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/message-editor-arrows-real-entry.ts");
 const SRC = path.resolve("src/ui/components/MessageEditor.ts");
 const PAGE = `file://${FIXTURE}`;
 

@@ -2,7 +2,7 @@
  * E2E tests for MCP (Model Context Protocol) server integration.
  *
  * Tests run against a real gateway (started by Playwright webServer).
- * A mock MCP server (tests/fixtures/mock-mcp-server.mjs) provides
+ * A mock MCP server (tests/support/fixtures/shared/mock-mcp-server.mjs) provides
  * deterministic tool responses via stdio transport.
  *
  * Trimmed to 3 core tests: discovery+connection, tool execution, tool list.

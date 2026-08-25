@@ -14,7 +14,7 @@ import path from "node:path";
 import { loadOrCreateToken, readToken } from "../../../src/server/auth/token.js";
 import { caCertPath, tlsDir } from "../../../src/server/auth/tls.js";
 import { bobbitStateDir, serverSecretsDir } from "../../../src/server/bobbit-dir.js";
-import { withEnv } from "../../support/harnesses/with-env.js";
+import { withEnv } from "../../support/harnesses/shared/with-env.js";
 import { installScopedMemFs } from "./_helpers/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/token-dir");

@@ -8,7 +8,7 @@ import {
 	GAP_ANALYSIS_DESIGN_PROMPT,
 } from "../../../src/server/state-migration/seed-default-workflows.ts";
 
-const repoRoot = path.resolve(import.meta.dirname, "..", "..");
+const repoRoot = path.resolve(import.meta.dirname, "..", "..", "..");
 
 function read(relativePath: string): string {
 	return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");

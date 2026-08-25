@@ -26,7 +26,7 @@ import type WebSocket from "ws";
 
 import type { GatewayDeps } from "../../../../src/server/gateway-deps.js";
 import { setEnvironmentValue } from "../../../../scripts/testing-v2/environment-policy.mjs";
-import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../../e2e/seed-workflows.js";
+import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../../e2e/_helpers/seed-workflows.js";
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
@@ -87,7 +87,7 @@ const BUILTINS_DIR = resolve(REPO_ROOT, "defaults");
 const BUILTIN_PACKS_SRC = resolve(REPO_ROOT, "market-packs");
 const FIRST_PARTY_PACKS = ["file-explorer", "pr-walkthrough", "terminal"] as const;
 const BUILTIN_PACK_SKIP_DIRS = new Set(["src", "node_modules"]);
-const MOCK_BRIDGE_SPECIFIER = new URL("../../../e2e/in-process-mock-bridge.mjs", import.meta.url).href;
+const MOCK_BRIDGE_SPECIFIER = new URL("../../../e2e/_helpers/in-process-mock-bridge.mjs", import.meta.url).href;
 
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
 // sessions do not auto-create worktrees. The run root is inherited from the

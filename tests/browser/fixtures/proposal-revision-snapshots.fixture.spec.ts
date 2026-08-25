@@ -15,9 +15,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../e2e/gateway-harness.js";
-import { MockAgentCore } from "../../../tests/e2e/mock-agent-core.mjs";
-import { apiFetch, bobbitDir, nonGitCwd, defaultProjectId } from "../../e2e/e2e-setup.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
+import { MockAgentCore } from "../../e2e/_helpers/mock-agent-core.mjs";
+import { apiFetch, bobbitDir, nonGitCwd, defaultProjectId } from "../../e2e/_helpers/e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {

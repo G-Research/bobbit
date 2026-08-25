@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, createGoal, defaultProject, defaultProjectId, deleteGoal, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 let gateDiagnosticsGoalDir: typeof import("../../../src/server/agent/gate-diagnostics-cleanup.js").gateDiagnosticsGoalDir;
 

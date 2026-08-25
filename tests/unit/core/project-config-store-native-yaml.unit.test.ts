@@ -21,7 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
 import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.js";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 let tmpDir: string;
 

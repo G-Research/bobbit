@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import {
 	apiFetch,
 	base,
@@ -11,7 +11,7 @@ import {
 	startTeam,
 	teardownTeam,
 	waitForSessionStatus,
-} from "../../e2e/e2e-setup.js";
+} from "../../e2e/_helpers/e2e-setup.js";
 import { navigateToHash, openApp } from "./ui-helpers.js";
 
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });

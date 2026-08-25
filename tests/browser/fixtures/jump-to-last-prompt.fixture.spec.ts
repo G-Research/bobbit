@@ -1,11 +1,11 @@
 /**
  * Browser smoke — jump-to-prompt controls mount in the real app and honor
  * mobile header geometry. The prompt-classification/action matrix lives in
- * `tests/ui-fixtures/chat-scroll.spec.ts` where DOM geometry is deterministic.
+ * `tests/support/fixtures/browser/ui/chat-scroll.spec.ts` where DOM geometry is deterministic.
  */
 import { test, expect } from "./fixtures.js";
 import type { Page } from "@playwright/test";
-import { waitForHealth, waitForSessionStatus, createSession } from "../../e2e/e2e-setup.js";
+import { waitForHealth, waitForSessionStatus, createSession } from "../../e2e/_helpers/e2e-setup.js";
 import {
 	SCROLL_SEL,
 	disableScrollAnchoring,

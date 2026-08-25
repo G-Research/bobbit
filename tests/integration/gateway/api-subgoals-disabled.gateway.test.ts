@@ -9,7 +9,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 /** Flip the system-scope subgoalsEnabled flag via PUT /api/preferences. */
 async function setSubgoalsEnabled(enabled: boolean): Promise<void> {

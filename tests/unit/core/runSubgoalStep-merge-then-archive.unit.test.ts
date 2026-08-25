@@ -17,13 +17,13 @@
 import { describe, it, afterAll, beforeAll } from "vitest";
 import assert from "node:assert/strict";
 
-type RunSubgoalFixtureModule = typeof import("../../helpers/run-subgoal-step-fixture.ts");
+type RunSubgoalFixtureModule = typeof import("../../support/helpers/shared/run-subgoal-step-fixture.ts");
 let buildFixture: RunSubgoalFixtureModule["buildFixture"];
 let buildActive: RunSubgoalFixtureModule["buildActive"];
 let buildSubgoalStep: RunSubgoalFixtureModule["buildSubgoalStep"];
 
 beforeAll(async () => {
-	({ buildFixture, buildActive, buildSubgoalStep } = await import("../../helpers/run-subgoal-step-fixture.ts"));
+	({ buildFixture, buildActive, buildSubgoalStep } = await import("../../support/helpers/shared/run-subgoal-step-fixture.ts"));
 });
 
 describe("runSubgoalStep — merge + archive flow", () => {

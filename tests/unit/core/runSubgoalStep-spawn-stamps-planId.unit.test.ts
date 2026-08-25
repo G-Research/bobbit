@@ -18,7 +18,7 @@
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildFixture, buildActive, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoal", () => {
 	it("the very next call after createGoal is updateGoal({ spawnedFromPlanId })", async () => {

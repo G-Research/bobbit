@@ -10,7 +10,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, defaultProjectId, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 async function createGoal(opts?: { title?: string }): Promise<{ id: string; projectId: string }> {
 	const projectId = await defaultProjectId();

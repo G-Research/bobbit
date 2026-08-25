@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { resolveWorktreeSupport } from "../../../src/server/agent/worktree-support.js";
 import { WorktreePool } from "../../../src/server/agent/worktree-pool.js";
 import { createWorktree } from "../../../src/server/skills/git.js";
-import { makeTmpDir } from "../../helpers/tmp.js";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.js";
 
 const execFile = promisify(execFileCb);
 

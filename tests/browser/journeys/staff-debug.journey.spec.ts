@@ -3,7 +3,7 @@
  * Covers: journey-staff, journey-debug-tools
  * Consolidated from: staff-inbox, debug-panel, api-error-modal, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProject } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProject } from "../_helpers/journey-fixture.js";
 
 const PONYTAIL_ID = "ponytail";
 const PONYTAIL_LABEL = "Ponytail";

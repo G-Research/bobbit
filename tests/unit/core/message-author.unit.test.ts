@@ -23,7 +23,7 @@ import {
 	normalizeVisibleMessages,
 	resolvePromptAuthor,
 } from "../../../src/server/agent/message-author.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.ts";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.ts";
 
 type SessionStoreMemFs = MemFs & {
 	openSync(file: string, flags: string): number;

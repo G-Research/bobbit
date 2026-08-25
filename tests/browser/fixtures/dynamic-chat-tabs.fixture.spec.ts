@@ -1,8 +1,8 @@
 /**
  * Retained browser E2E smoke for Dynamic Chat Tabs.
- * Broad tab derivation/order/history matrices live in tests/ui-fixtures/dynamic-panel-workspace-fixture.spec.ts.
+ * Broad tab derivation/order/history matrices live in tests/support/fixtures/browser/ui/dynamic-panel-workspace-fixture.spec.ts.
  */
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import type { Page } from "@playwright/test";
 import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
 

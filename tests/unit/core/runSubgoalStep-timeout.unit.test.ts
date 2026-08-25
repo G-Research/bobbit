@@ -24,7 +24,7 @@
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildFixture, buildActive, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — _waitForChildReadyToMerge timeout (R-011)", () => {
 	it("'timeout' outcome from the wait → step fails non-fatal, no merge, no archive", async () => {

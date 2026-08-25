@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: default/namespace `node:test` import — map hooks/vi by hand | test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent
 
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";

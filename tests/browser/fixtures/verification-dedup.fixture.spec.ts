@@ -18,9 +18,9 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-const FIXTURE = path.resolve("tests/fixtures/verification-dedup.html");
-const BUNDLE = path.resolve("tests/fixtures/verification-dedup-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/verification-dedup-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/verification-dedup.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/verification-dedup-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/verification-dedup-entry.ts");
 const MODAL_SRC = path.resolve("src/ui/components/VerificationOutputModal.ts");
 const LIVE_SRC = path.resolve("src/ui/tools/renderers/GateVerificationLive.ts");
 
@@ -39,7 +39,7 @@ test.beforeAll(() => {
 				"--bundle --format=iife --target=es2022",
 				`--outfile=${BUNDLE}`,
 				"--tsconfig=tsconfig.web.json",
-				"--alias:pdfjs-dist=./tests/fixtures/empty-shim",
+				"--alias:pdfjs-dist=./tests/support/fixtures/shared/empty-shim",
 				"--define:import.meta.url='\"http://localhost/\"'",
 			].join(" "),
 			{ stdio: "pipe" },

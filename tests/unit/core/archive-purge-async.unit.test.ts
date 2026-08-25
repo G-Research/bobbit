@@ -5,7 +5,7 @@ import {
 	SessionManager,
 	type SessionPreviewPurgeOperation,
 } from "../../../src/server/agent/session-manager.ts";
-import { createManualClock, type ManualClock } from "../../support/harnesses/clock.ts";
+import { createManualClock, type ManualClock } from "../../support/harnesses/shared/clock.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 

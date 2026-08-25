@@ -6,7 +6,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { ContextTraceStore, type TraceEntry } from "../../../src/server/agent/context-trace-store.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 // Exercises the ContextTraceStore fsImpl seam entirely in memory (no real fs).
 const STATE_DIR = path.resolve("/memfs/context-trace-store");

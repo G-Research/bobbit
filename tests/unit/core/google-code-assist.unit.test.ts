@@ -42,7 +42,7 @@ import {
 	type StreamFetchLike,
 } from "../../../src/server/agent/google-code-assist.js";
 import { getGoogleCodeAssistModels } from "../../../src/server/agent/google-code-assist-models.js";
-import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../support/helpers/shared/agent-dir.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
 const prevProject = process.env.GOOGLE_CLOUD_PROJECT;

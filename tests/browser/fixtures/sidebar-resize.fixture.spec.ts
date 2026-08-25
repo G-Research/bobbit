@@ -1,7 +1,7 @@
 /**
  * Sidebar resize E2E: drag handle updates width, persists, double-click resets.
  */
-import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { test, expect, type Page } from "../../e2e/_helpers/gateway-harness.js";
 import { openApp } from "./ui-helpers.js";
 
 const SIDEBAR_SELECTOR = ".sidebar-edge";

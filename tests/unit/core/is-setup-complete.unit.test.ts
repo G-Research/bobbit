@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { setProjectRoot, bobbitConfigDir, bobbitStateDir } from "../../../src/server/bobbit-dir.js";
 import { isSetupComplete } from "../../../src/server/setup-status.js";
-import { withEnv } from "../../support/harnesses/with-env.js";
+import { withEnv } from "../../support/harnesses/shared/with-env.js";
 
 // This suite resolves bobbit dirs from an explicit project root, so BOBBIT_DIR /
 // BOBBIT_PI_DIR must be unset while it runs. Under isolate:false a prior file in

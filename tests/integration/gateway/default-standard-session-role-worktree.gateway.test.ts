@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_helpers/e2e/e2e-setup.js";
 import {

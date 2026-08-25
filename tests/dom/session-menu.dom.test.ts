@@ -2,7 +2,7 @@ import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "./_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/session-menu.spec.ts (v2-dom tier).
-// Ports the entire fixture harness (tests/fixtures/session-menu-entry.ts) into
+// Ports the entire fixture harness (tests/support/fixtures/shared/session-menu-entry.ts) into
 // happy-dom, driving the REAL shared session action menu model + popover:
 //   - buildSessionActions (src/app/session-actions.ts)
 //   - registerPackEntrypoints/listLauncherEntrypoints/launcherKey (pack-entrypoints)

@@ -18,7 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it, afterAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 // Set BOBBIT_DIR before any dynamic imports
 const tmpRoot = makeTmpDir("multi-proj-test-");

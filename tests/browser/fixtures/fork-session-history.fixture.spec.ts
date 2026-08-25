@@ -17,14 +17,14 @@
  * the cloned conversation renders.
  */
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import {
 	agentEndPredicate,
 	connectWs,
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "../../e2e/e2e-setup.js";
+} from "../../e2e/_helpers/e2e-setup.js";
 import { openApp, navigateToHash } from "./ui-helpers.js";
 
 const MARKER_1 = "FORK_HISTORY_MARKER_ALPHA";

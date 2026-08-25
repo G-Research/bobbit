@@ -13,7 +13,7 @@ import { pathToFileURL } from "node:url";
 // future node upgrade changed this behavior, the unit gate could silently hang
 // again; this test would catch it.
 
-const reporterUrl = pathToFileURL(resolve("tests/helpers/hung-test-reporter.mjs")).href;
+const reporterUrl = pathToFileURL(resolve("tests/support/helpers/shared/hung-test-reporter.mjs")).href;
 
 const tmpDirs: string[] = [];
 after(() => {

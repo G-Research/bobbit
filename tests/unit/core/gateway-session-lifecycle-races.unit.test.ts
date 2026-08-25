@@ -10,7 +10,7 @@ import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 import { RpcBridge } from "../../../src/server/agent/rpc-bridge.ts";
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import { handleWebSocketConnection } from "../../../src/server/ws/handler.ts";
-import { createManualClock } from "../../support/harnesses/clock.ts";
+import { createManualClock } from "../../support/harnesses/shared/clock.ts";
 
 class FakeWebSocket extends EventEmitter {
 	readyState = 1;

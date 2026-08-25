@@ -11,13 +11,13 @@ import {
 	prepareGitTemplate,
 	readGitTemplateBootstrapAudit,
 	type GitTemplateCommandRunner,
-} from "../../support/harnesses/git-template.js";
+} from "../../support/harnesses/shared/git-template.js";
 import {
 	cleanupOwnedRunRoot,
 	getRunRoot,
 	isRunRootOwner,
 	RUN_ROOT_OWNER_ENV,
-} from "../../support/harnesses/run-isolation.js";
+} from "../../support/harnesses/shared/run-isolation.js";
 
 const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));

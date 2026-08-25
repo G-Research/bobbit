@@ -20,7 +20,7 @@
  *   4. `defaults/tools/browser/extension.ts` passes `--headless=new` and
  *      `--disable-gpu` to `chromium.launch`.
  */
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..", "..");
+const repoRoot = path.resolve(__dirname, "..", "..", "..");
 
 test("`.claude/.mcp.json` passes --headless and --isolated to @playwright/mcp", () => {
   const p = path.join(repoRoot, ".claude", ".mcp.json");

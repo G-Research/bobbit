@@ -7,7 +7,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, base } from "./_helpers/e2e/e2e-setup.js";
-import { pollUntil } from "../../support/helpers/e2e/cleanup.js";
+import { pollUntil } from "../../e2e/_helpers/test-utils/cleanup.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 

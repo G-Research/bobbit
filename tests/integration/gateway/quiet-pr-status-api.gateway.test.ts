@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
-import { awaitableRm } from "../../support/helpers/e2e/cleanup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { awaitableRm } from "../../e2e/_helpers/test-utils/cleanup.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
 

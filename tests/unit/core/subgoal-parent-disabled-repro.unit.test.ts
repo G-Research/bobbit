@@ -32,7 +32,7 @@ import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
 import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.ts";
 import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
 import { checkCanSpawnChild } from "../../../src/server/agent/subgoal-nesting-limit.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/subgoal-parent-disabled/work");

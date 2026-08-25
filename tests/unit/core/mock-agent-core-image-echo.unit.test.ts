@@ -16,7 +16,7 @@
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { MockAgentCore } from "../../e2e/mock-agent-core.mjs";
+import { MockAgentCore } from "../../e2e/_helpers/mock-agent-core.mjs";
 
 function makeCore() {
 	const events: any[] = [];

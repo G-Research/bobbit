@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, it, vi } from "vitest";
 import {
 	GitTemplateHandoffReporter,
 	type GitTemplateHandoffCertifier,
-} from "../../support/harnesses/git-template-handoff-proof.js";
+} from "../../support/harnesses/shared/git-template-handoff-proof.js";
 
 type ProjectConfig = {
 	test: {
@@ -44,7 +44,7 @@ type LoadedConfig = {
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const CONFIG_PATH = resolve(REPO_ROOT, "vitest.config.ts");
-const HARNESS_ROOT = resolve(REPO_ROOT, "tests2", "harness");
+const HARNESS_ROOT = resolve(REPO_ROOT, "tests", "support", "harnesses", "shared");
 const LEDGER_PATH = resolve(REPO_ROOT, "scripts", "testing-v2", "ledger.mjs");
 const packageJson = JSON.parse(
 	readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
@@ -348,17 +348,7 @@ describe("direct unit-stage scheduling", () => {
 				isolate: true,
 				maxWorkers: 1,
 				retry: 3,
-				include: [
-					"tests/unit/core/file-mentions-authenticated-boundary.unit.test.ts",
-					"tests/unit/core/git-lifecycle-no-publication-real-git.unit.test.ts",
-					"tests/unit/core/marketplace-install.unit.test.ts",
-					"tests/unit/core/orphan-tool-result-rehydration-boundaries.unit.test.ts",
-					"tests/unit/core/team-manager.unit.test.ts",
-					"tests2/integration/affected-runner-boundary.test.ts",
-					"tests2/integration/base-path-cli-entrypoint.test.ts",
-					"tests2/integration/benchmark-bobbit-journeys.test.ts",
-					"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
-				],
+				include: ["tests/e2e/vitest/**/*.vitest-e2e.test.ts"],
 				setupFiles: undefined,
 			},
 		);

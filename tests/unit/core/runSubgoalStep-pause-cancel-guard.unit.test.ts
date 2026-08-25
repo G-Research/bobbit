@@ -15,7 +15,7 @@
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildFixture, buildActive, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — pause/cancel guard", () => {
 	it("paused parent → returns passed=false without spawning a child", async () => {

@@ -29,7 +29,7 @@
  *        project is owned by the server task; those banner assertions do not
  *        depend on it.)
  */
-import { test, expect, openApp, createSessionViaUI, registerProject, apiFetch, deleteGoal, defaultProjectId } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, createSessionViaUI, registerProject, apiFetch, deleteGoal, defaultProjectId } from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";

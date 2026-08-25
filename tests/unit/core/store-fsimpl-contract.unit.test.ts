@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
 import { PrStatusStore } from "../../../src/server/agent/pr-status-store.js";
 import { ReviewAnnotationStore } from "../../../src/server/review-annotation-store.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 describe("store fsImpl contract", () => {
 	it("writes selected stores through the injected fs", () => {

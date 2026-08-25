@@ -19,7 +19,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createManualClock } from "../../support/harnesses/clock.js";
+import { createManualClock } from "../../support/harnesses/shared/clock.js";
 
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-treekill-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
@@ -33,7 +33,7 @@ const {
 	createDockerEngineEventsResponseDecoder,
 	parseDockerExecCreateEvent,
 } = await import("../../../src/server/agent/verification-harness.ts");
-const { createFakeVerificationCommandRunner } = await import("../../support/harnesses/fake-verification-command-runner.js");
+const { createFakeVerificationCommandRunner } = await import("../../support/harnesses/shared/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
 async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: number, stepMs = 50): Promise<boolean> {

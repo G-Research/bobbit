@@ -13,7 +13,7 @@ import {
 import type { Workflow } from "../../../src/server/agent/workflow-store.js";
 import { HostNotificationDispatcher } from "../../../src/server/extension-host/host-notification-dispatcher.js";
 import type { HostNotification } from "../../../src/shared/extension-host/host-hooks.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 function captureDispatchedTasks(store: TaskStore): {
 	notifications: HostNotification[];

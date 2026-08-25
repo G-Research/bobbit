@@ -33,7 +33,7 @@ const { SessionManager } = await import("../../../src/server/agent/session-manag
 const { subscribeToEvents } = await import("../../../src/server/agent/session-setup.ts");
 const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
-const { createManualClock } = await import("../../support/harnesses/clock.js");
+const { createManualClock } = await import("../../support/harnesses/shared/clock.js");
 
 const managers: any[] = [];
 

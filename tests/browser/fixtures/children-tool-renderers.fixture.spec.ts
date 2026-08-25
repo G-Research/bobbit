@@ -5,11 +5,11 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const FIXTURE = path.resolve("tests/fixtures/children-tool-renderers.html");
-const BUNDLE = path.resolve("tests/fixtures/children-tool-renderers-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/children-tool-renderers-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/children-tool-renderers.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/children-tool-renderers-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/children-tool-renderers-entry.ts");
 
 const RENDERER_FILES = [
 	"src/ui/tools/renderers/GoalSpawnChildRenderer.ts",

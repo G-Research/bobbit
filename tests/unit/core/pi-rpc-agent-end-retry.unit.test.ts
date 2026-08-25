@@ -17,7 +17,7 @@ const { subscribeToEvents } = await import("../../../src/server/agent/session-se
 const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
 const { initCompactionSidecarDir, purgeCompactionSidecar, readCompactionSidecarEntries } = await import("../../../src/server/agent/compaction-sidecar.ts");
-const { createManualClock } = await import("../../support/harnesses/clock.js");
+const { createManualClock } = await import("../../support/harnesses/shared/clock.js");
 
 initCompactionSidecarDir(tmpRoot);
 

@@ -5,11 +5,11 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const FIXTURE = path.resolve("tests/fixtures/default-tool-renderer.html");
-const BUNDLE = path.resolve("tests/fixtures/default-tool-renderer-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/default-tool-renderer-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/default-tool-renderer.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/default-tool-renderer-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/default-tool-renderer-entry.ts");
 
 const RENDERER_FILES = [
 	"src/ui/tools/index.ts",

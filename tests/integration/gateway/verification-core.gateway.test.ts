@@ -26,7 +26,7 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "./_helpers/e2e/e2e-setup.js";
-import { createFakeVerificationCommandRunner } from "../../support/harnesses/fake-verification-command-runner.js";
+import { createFakeVerificationCommandRunner } from "../../support/harnesses/shared/fake-verification-command-runner.js";
 
 const VERIFICATION_WS_TIMEOUT_MS = 60_000;
 const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;

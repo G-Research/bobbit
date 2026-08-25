@@ -26,7 +26,7 @@ import path from "node:path";
 
 import { computeToolActivationArgs } from "../../../src/server/agent/tool-activation.ts";
 import { assembleSystemPrompt, initPromptDirs } from "../../../src/server/agent/system-prompt.ts";
-import { withEnv } from "../../support/harnesses/with-env.js";
+import { withEnv } from "../../support/harnesses/shared/with-env.js";
 
 // ── F4. tool-activation: fallback path honours disabledTools ─────────────────
 

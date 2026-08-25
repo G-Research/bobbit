@@ -21,7 +21,7 @@ guardProcessEnv();
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import { resolveFfmpeg } from "../../e2e/report/tier-2-5-reporter.js";
+import { resolveFfmpeg } from "../../e2e/_helpers/report/tier-2-5-reporter.js";
 
 describe("resolveFfmpeg", () => {
 	let savedFfmpegPath: string | undefined;

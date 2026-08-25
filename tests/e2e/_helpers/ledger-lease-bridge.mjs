@@ -35,7 +35,7 @@ const DEFAULT_BROWSER_LEASE_TIMEOUT_MS = 1_200_000;
 const LEASE_POLL_MS = 150;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const BUDGET_CAPS_PATH = join(HERE, "..", "..", "..", "tests2", "budget-caps.json");
+const BUDGET_CAPS_PATH = join(HERE, "..", "..", "support", "data", "shared", "budget-caps.json");
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 

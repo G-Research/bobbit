@@ -43,7 +43,7 @@ test("run-unit attaches a hung-test heartbeat reporter without hiding tap output
 	assert.match(src, /BOBBIT_UNIT_NODE_HEARTBEAT_FILE: nodeHeartbeatFile/, "the reporter's heartbeat path is passed via env, not a CLI path arg");
 	// The heartbeat reporter yields nothing, so its destination is the stderr
 	// keyword — never a filesystem path that could contain spaces under shell:true.
-	const reporterIdx = src.indexOf("--test-reporter=./tests/helpers/hung-test-reporter.mjs");
+	const reporterIdx = src.indexOf("--test-reporter=./tests/support/helpers/shared/hung-test-reporter.mjs");
 	const destIdx = src.indexOf("--test-reporter-destination=stderr");
 	assert.ok(reporterIdx > 0 && destIdx > reporterIdx, "the heartbeat reporter destination is the stderr keyword, not a path arg");
 });

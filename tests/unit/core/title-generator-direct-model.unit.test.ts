@@ -17,7 +17,7 @@ import { PreferencesStore } from "../../../src/server/agent/preferences-store.js
 import { invalidateModelCache, type ApiModel } from "../../../src/server/agent/model-registry.js";
 import { generateGoalSummaryTitle, generateSessionTitle } from "../../../src/server/agent/title-generator.js";
 import { completeModelText, testModelPreference } from "../../../src/server/agent/model-completion.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const previousSkipTitleGen = process.env.BOBBIT_SKIP_TITLE_GEN;
 const previousAgentDir = process.env.BOBBIT_AGENT_DIR;

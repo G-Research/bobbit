@@ -8,11 +8,11 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const FIXTURE = path.resolve("tests/fixtures/message-editor-ime.html");
-const BUNDLE = path.resolve("tests/fixtures/message-editor-ime-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/message-editor-ime-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/message-editor-ime.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/message-editor-ime-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/message-editor-ime-entry.ts");
 const SRC = path.resolve("src/ui/components/MessageEditor.ts");
 
 test.beforeAll(() => {

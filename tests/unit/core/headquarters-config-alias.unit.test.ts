@@ -24,7 +24,7 @@ import {
 	ProjectRegistry,
 	SYSTEM_PROJECT_ID,
 } from "../../../src/server/agent/project-registry.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const fixtureRoot = path.resolve("/memfs/headquarters-config-alias");
 const originalProjectRoot = getProjectRoot();

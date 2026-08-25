@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, it, vi } from "vi
 import {
 	MANUAL_INHERIT_SERVER_CONFIG_ENV,
 	seedManualTestModelPreferences,
-} from "../../manual-integration/manual-test-model-seeding.ts";
+} from "../../manual/_helpers/manual-test-model-seeding.ts";
 
 const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
 const fsSpies: Array<{ mockRestore(): void }> = [];

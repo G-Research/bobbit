@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 
 const { resolveBundledDocsDir, resolveBundledSrcDir } = await import("../../../src/server/agent/bundled-paths.ts");
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
+const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const PACKAGE_JSON = path.join(REPO_ROOT, "package.json");
 
 describe("support packaging — package.json files", () => {

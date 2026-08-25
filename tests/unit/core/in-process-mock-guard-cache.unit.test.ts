@@ -5,7 +5,7 @@ import { generateToolGuardExtension } from "../../../src/server/agent/tool-guard
 import {
 	InProcessMockBridge,
 	createInProcessMockExtensionCache,
-} from "../../e2e/in-process-mock-bridge.mjs";
+} from "../../e2e/_helpers/in-process-mock-bridge.mjs";
 
 type RecordedRequest = { path: string; authorization: string };
 

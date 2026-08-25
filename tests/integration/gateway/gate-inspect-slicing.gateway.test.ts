@@ -8,9 +8,9 @@ import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";
 import { GateStore } from "../../../src/server/agent/gate-store.js";
 import { buildGateVerificationSnapshot } from "../../../src/server/gate-verification-snapshot.js";
-import type { GatewayFixture } from "../../support/harnesses/gateway.js";
-import { createFakeVerificationCommandRunner } from "../../support/harnesses/fake-verification-command-runner.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import type { GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { createFakeVerificationCommandRunner } from "../../support/harnesses/shared/fake-verification-command-runner.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const VERIFY_LOG_OUTPUT = Array.from({ length: 160 }, (_, i) => {
 	const line = i + 1;

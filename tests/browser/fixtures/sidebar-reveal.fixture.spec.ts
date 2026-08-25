@@ -12,7 +12,7 @@
  * unrelated expansion state, and (2) scroll the row into view with
  * `scrollIntoView({ block: "nearest" })`.
  */
-import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { test, expect, type Page } from "../../e2e/_helpers/gateway-harness.js";
 import {
 	apiFetch,
 	base,
@@ -27,7 +27,7 @@ import {
 	teardownTeam,
 	waitForHealth,
 	waitForSessionStatus,
-} from "../../e2e/e2e-setup.js";
+} from "../../e2e/_helpers/e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
 
 const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";

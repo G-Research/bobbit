@@ -22,7 +22,7 @@ import { InlineWorkflowStore, type Workflow } from "../../../src/server/agent/wo
 import { WorkflowManager } from "../../../src/server/agent/workflow-manager.ts";
 import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
 import { GoalStore } from "../../../src/server/agent/goal-store.ts";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/inline-workflow-test/work");

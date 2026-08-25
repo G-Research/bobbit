@@ -19,7 +19,7 @@ import { readE2EToken, base } from "./_helpers/e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 let appendCompactionSidecarEntry: typeof import("../../../src/server/agent/compaction-sidecar.js").appendCompactionSidecarEntry;
 let initCompactionSidecarDir: typeof import("../../../src/server/agent/compaction-sidecar.js").initCompactionSidecarDir;

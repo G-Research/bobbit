@@ -17,7 +17,7 @@
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildFixture, buildActive, buildSubgoalStep } from "../../helpers/run-subgoal-step-fixture.ts";
+import { buildFixture, buildActive, buildSubgoalStep } from "../../support/helpers/shared/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — paused child keeps waiting (paused children must NOT count as in-flight — paused != failed)", () => {
 	it("paused live child does NOT exit the wait loop until ready-to-merge passes", async () => {

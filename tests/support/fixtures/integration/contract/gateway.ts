@@ -200,7 +200,7 @@ export async function createTestGateway(opts?: {
 				const project = await createRes.json() as { id?: string };
 				if (project?.id) {
 					projectId = project.id;
-					const { seedTestWorkflows } = await import("../../../../e2e/seed-workflows.js");
+					const { seedTestWorkflows } = await import("../../../../e2e/_helpers/seed-workflows.js");
 					await seedTestWorkflows({ baseURL, token, projectId });
 				}
 			}

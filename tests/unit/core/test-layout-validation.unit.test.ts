@@ -68,7 +68,7 @@ describe("test layout diagnostics", () => {
 		const primitiveSource = 'import { test, chromium } from "@playwright/test";';
 		expect(validateTestPath("tests/e2e/api/browser.api-e2e.spec.ts", primitiveSource).map(({ code }: Diagnostic) => code)).toContain("api-browser-import");
 
-		const boundarySource = 'import { test } from "../../support/harnesses/e2e/browser/fixture.js";';
+		const boundarySource = 'import { test } from "../../support/harnesses/shared/e2e/browser/fixture.js";';
 		expect(validateTestPath("tests/e2e/api/helper.api-e2e.spec.ts", boundarySource).map(({ code }: Diagnostic) => code)).toContain("api-browser-boundary");
 	});
 });

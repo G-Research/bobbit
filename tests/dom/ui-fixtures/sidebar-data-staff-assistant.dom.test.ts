@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/sidebar-data-staff-assistant.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/sidebar-data-staff-assistant.spec.ts (v2-dom tier).
 // Pure-logic port: the legacy fixture bundled state.ts and exercised
 // getSidebarData() directly (no rendering). We call the REAL getSidebarData()
 // against seeded app state and assert the same ungrouped-session bucket facts.

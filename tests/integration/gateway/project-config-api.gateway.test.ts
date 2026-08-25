@@ -12,7 +12,7 @@ import {
 	ProjectConfigStore,
 	type Component,
 } from "../../../src/server/agent/project-config-store.js";
-import { createMemFs, type MemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs, type MemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 /** The full editable field set from the design doc (config-scoped only — name is
  *  handled via the registry endpoint, not project.yaml). */

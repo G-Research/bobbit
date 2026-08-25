@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// Migrated from tests/ui-fixtures/settings-account-tab.spec.ts (v2-dom tier).
+// Migrated from tests/support/fixtures/browser/ui/settings-account-tab.spec.ts (v2-dom tier).
 // Renders the REAL renderAccountTab() Google-OAuth row under happy-dom (was an
 // esbuild file:// bundle). State is driven via the real __testResetAccountTab()
 // and HTTP through gatewayFetch → window.fetch, which we stub + capture. The

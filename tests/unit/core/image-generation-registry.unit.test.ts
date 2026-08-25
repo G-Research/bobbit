@@ -14,8 +14,8 @@ import { afterAll, beforeAll, beforeEach, test, vi } from "vitest";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels, getImageModelByPref, parseImageModelPref } from "../../../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
 import { globalAuthPath } from "../../../src/server/bobbit-dir.js";
-import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../support/helpers/shared/agent-dir.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
 	const memfs = createMemFs();

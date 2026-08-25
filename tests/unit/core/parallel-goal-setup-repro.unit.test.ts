@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
 import { GoalStore, type PersistedGoal } from "../../../src/server/agent/goal-store.ts";
-import { createMemFs } from "../../support/harnesses/mem-fs.ts";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;

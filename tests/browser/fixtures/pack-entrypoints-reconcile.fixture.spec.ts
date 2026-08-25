@@ -25,9 +25,9 @@ import { test, expect } from "@playwright/test";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle";
 
-const FIXTURE = path.resolve("tests/fixtures/pack-entrypoints-reconcile.html");
-const BUNDLE = path.resolve("tests/fixtures/pack-entrypoints-reconcile-bundle.js");
-const ENTRY = path.resolve("tests/fixtures/pack-entrypoints-reconcile-entry.ts");
+const FIXTURE = path.resolve("tests/support/fixtures/shared/pack-entrypoints-reconcile.html");
+const BUNDLE = path.resolve("tests/support/fixtures/shared/pack-entrypoints-reconcile-bundle.js");
+const ENTRY = path.resolve("tests/support/fixtures/shared/pack-entrypoints-reconcile-entry.ts");
 const PACK_SRC = path.resolve("src/app/pack-entrypoints.ts");
 const ROUTING_SRC = path.resolve("src/app/routing.ts");
 const PANELS_SRC = path.resolve("src/app/pack-panels.ts");

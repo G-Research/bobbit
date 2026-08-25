@@ -1,10 +1,10 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "../../support/fixtures/shared/build-bundle.js";
 
-const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
-const ENTRY = path.resolve("tests/ui-fixtures/goal-workflow-editor-entry.ts");
+const SHELL = path.resolve("tests/support/fixtures/browser/ui/fixture-shell.html");
+const ENTRY = path.resolve("tests/support/fixtures/browser/ui/goal-workflow-editor-entry.ts");
 const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
 const BUNDLE = path.join(BUNDLE_DIR, "goal-workflow-editor-bundle.js");
 const WORKFLOW_SRC = path.resolve("src/app/workflow-page.ts");

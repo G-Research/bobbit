@@ -1,4 +1,4 @@
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 const SECRETS = ["RAW_LIST_MUST_NOT_RENDER", "RAW_MESSAGE_MUST_NOT_RENDER", "RAW_RESULT_MUST_NOT_RENDER", "SIBLING_MUST_NOT_RENDER"];
 function seed(gateway: any, sessionId: string): void { const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
 	if (!Array.isArray(agent?.conversationMessages)) throw new Error("journey requires the mock agent transcript"); const cards = [

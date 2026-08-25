@@ -4,9 +4,9 @@ import path from "node:path";
 
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { nonGitCwd, registerProject } from "./_helpers/e2e/e2e-setup.js";
-import { copyGitTemplate } from "../../support/harnesses/git-template.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
-import { SandboxSessionFilesystem } from "../../support/harnesses/sandbox-session-filesystem.js";
+import { copyGitTemplate } from "../../support/harnesses/shared/git-template.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
+import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.js";
 import { SessionStore } from "../../../src/server/agent/session-store.js";
 import { seedSessionTranscript } from "./_helpers/session-fixtures.js";
 

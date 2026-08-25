@@ -4,7 +4,7 @@
 // Review: default/namespace `node:test` import — map hooks/vi by hand
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 import viteConfig from "../../../vite.config.ts";
 
 test("Vite dev watcher ignores Bobbit-generated state and output directories", async () => {

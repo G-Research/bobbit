@@ -4,8 +4,8 @@ guardProcessEnv();
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import reviewExtension from "../../../defaults/tools/review/extension.ts";
-import { getGateway } from "../../support/harnesses/gateway.js";
-import { createScope } from "../../support/harnesses/scope.js";
+import { getGateway } from "../../support/harnesses/shared/gateway.js";
+import { createScope } from "../../support/harnesses/shared/scope.js";
 import { configureAigwRuntimeFlags } from "../../../src/server/agent/aigw-manager.js";
 import { invalidateModelCache } from "../../../src/server/agent/model-registry.js";
 import {

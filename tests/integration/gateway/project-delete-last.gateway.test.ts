@@ -5,8 +5,8 @@
 // path); the default project is restored by scope.cleanup().
 import { mkdirSync } from "node:fs";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { getGateway, type GatewayFixture } from "../../support/harnesses/gateway.js";
-import { createScope, type TestScope } from "../../support/harnesses/scope.js";
+import { getGateway, type GatewayFixture } from "../../support/harnesses/shared/gateway.js";
+import { createScope, type TestScope } from "../../support/harnesses/shared/scope.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 

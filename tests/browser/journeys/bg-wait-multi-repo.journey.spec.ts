@@ -3,8 +3,8 @@
  * Covers: journey-bg-wait-steer, journey-multi-repo
  * Consolidated from: bg-wait-*, multi-repo-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { sendMessage } from "../../../tests/e2e/ui/ui-helpers.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { sendMessage } from "../../e2e/browser/_helpers/ui-helpers.js";
 
 test.describe("Journey: BG Wait Steer", () => {
 	test("session loads for bg-wait interaction", async ({ page }) => {

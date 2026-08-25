@@ -1,4 +1,4 @@
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, sendMessage, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, sendMessage, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 
 const SNAPSHOT_SIZE = 32 * 1024 + 1;
 const PREVIEW_TEXT = "x".repeat(64);

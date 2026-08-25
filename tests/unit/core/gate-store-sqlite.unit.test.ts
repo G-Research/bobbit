@@ -8,7 +8,7 @@ import { GateStore, type GateSignal, type GateState } from "../../../src/server/
 import { ProjectContext } from "../../../src/server/agent/project-context.js";
 import { recoverPreMigrationData } from "../../../src/server/agent/state-migration.js";
 import type { Workflow } from "../../../src/server/agent/workflow-store.js";
-import { createMemFs } from "../../support/harnesses/mem-fs.js";
+import { createMemFs } from "../../support/harnesses/shared/mem-fs.js";
 
 const roots: string[] = [];
 const stores: GateStore[] = [];

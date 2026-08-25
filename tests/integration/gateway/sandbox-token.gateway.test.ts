@@ -3,7 +3,7 @@
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { readE2EToken } from "./_helpers/e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../support/harnesses/server-runtime.js";
+import { loadServerTestRuntime } from "../../support/harnesses/shared/server-runtime.js";
 
 let SandboxTokenStore: typeof import("../../../src/server/auth/sandbox-token.js").SandboxTokenStore;
 let isSandboxAllowed: typeof import("../../../src/server/auth/sandbox-guard.js").isSandboxAllowed;

@@ -3,8 +3,8 @@
  * Covers: journey-goal-editing, journey-subgoals
  * Consolidated from: goal-edit-*, goal-spec-*, subgoals-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, sendMessage, createSessionViaUI } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { nonGitCwd } from "../../e2e/e2e-setup.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch, defaultProjectId, sendMessage, createSessionViaUI } from "../_helpers/journey-fixture.js";
+import { nonGitCwd } from "../../e2e/_helpers/e2e-setup.js";
 import { createGoalAssistantViaUI } from "../fixtures/ui-helpers.js";
 
 test.describe("Journey: Goal Editing", () => {

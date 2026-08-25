@@ -19,7 +19,7 @@
  * This file fails today and passes after the fix. Do NOT weaken these
  * assertions — they encode pi-ai's ground-truth semantics.
  */
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import {
 	getSupportedThinkingLevels,

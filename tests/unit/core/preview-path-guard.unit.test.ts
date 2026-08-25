@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { isPathContained, resolveAssetPath } from "../../../src/server/preview/path-guard.ts";
-import { makeTmpDir } from "../../helpers/tmp.ts";
+import { makeTmpDir } from "../../support/helpers/shared/tmp.ts";
 
 let baseDir: string;
 let outsideFile: string;

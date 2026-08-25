@@ -1,4 +1,4 @@
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect } from "../../e2e/_helpers/gateway-harness.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -8,8 +8,8 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 	type WsConnection,
-} from "../../e2e/e2e-setup.js";
-import { navigateToHash, openApp } from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../e2e/_helpers/e2e-setup.js";
+import { navigateToHash, openApp } from "../_helpers/journey-fixture.js";
 
 async function promptAndWait(conn: WsConnection, text: string): Promise<void> {
 	const cursor = conn.messageCount();

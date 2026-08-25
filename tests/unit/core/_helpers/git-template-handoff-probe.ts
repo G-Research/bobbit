@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
-import { GIT_TEMPLATE_HANDOFF_PROOF_ENV } from "../../../support/harnesses/git-template-handoff-proof.js";
-import { isTier1SpawnGuardInstalled } from "../../../support/harnesses/tier1-spawn-guard.js";
+import { GIT_TEMPLATE_HANDOFF_PROOF_ENV } from "../../../support/harnesses/shared/git-template-handoff-proof.js";
+import { isTier1SpawnGuardInstalled } from "../../../support/harnesses/shared/tier1-spawn-guard.js";
 
 const LABELS = ["a", "b", "c"] as const;
 type ProbeLabel = (typeof LABELS)[number];

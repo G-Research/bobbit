@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "./build-bundle.js";
 
-const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
+const SHELL = path.resolve("tests/support/fixtures/browser/ui/fixture-shell.html");
 const FIXTURE_ORIGIN = "http://fixture.localhost";
 const FIXTURE_URL = `${FIXTURE_ORIGIN}/fixture-shell.html`;
 const ENTRY = path.resolve("tests/browser/fixtures/fixtures/review-groups-fixture-entry.ts");
