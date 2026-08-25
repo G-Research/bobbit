@@ -50,7 +50,13 @@ async function spawnTeamMember(goalId: string): Promise<{ sessionId: string; bra
 	const statusResp = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 	expect(statusResp.status).toBe(200);
 	const status = await statusResp.json();
-	expect(status.remotePublication).toBe("local-only-policy");
+	// Publication-policy metadata was retired. The current contract reports the
+	// repository facts directly: a newly spawned team branch has no upstream,
+	// while legacy policy fields stay absent. An unchanged branch can correctly
+	// report `unpushed: false` because it is already merged into its local base.
+	expect(status.hasUpstream).toBe(false);
+	expect(status.remotePublication).toBeUndefined();
+	expect(status.remotePublicationPolicy).toBeUndefined();
 	expect(status.branch).toMatch(/^goal\/[a-f0-9]{8}\/coder-[a-f0-9]{4}$/);
 	return { sessionId, branch: status.branch };
 }
@@ -78,8 +84,11 @@ async function openGitDropdown(page: Page, sessionId: string, branch: string): P
 	await readyButton.click();
 	const dropdown = page.locator("#git-status-dropdown");
 	await expect(dropdown).toBeVisible({ timeout: 5_000 });
-	await expect(dropdown.getByTestId("git-local-only-policy")).toContainText("Local-only by policy", { timeout: 5_000 });
-	await expect(dropdown).toContainText("not published automatically");
+	// The widget no longer renders policy metadata or publication controls. Its
+	// branch/status view must remain usable without offering a remote Push action.
+	await expect(dropdown.getByTestId("git-local-only-policy")).toHaveCount(0);
+	await expect(dropdown.getByRole("button", { name: "Push", exact: true })).toHaveCount(0);
+	await expect(dropdown).not.toContainText("Remote publication is manual.");
 	await page.keyboard.press("Escape");
 	await expect(dropdown).toBeHidden({ timeout: 5_000 });
 }
