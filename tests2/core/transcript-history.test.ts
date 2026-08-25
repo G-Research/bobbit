@@ -116,6 +116,36 @@ describe("transcript history projection", () => {
 		]);
 	});
 
+	it("reconciles provider-style results without dropping mixed visible user text", () => {
+		const projected = deriveTranscriptNavigation([
+			{
+				id: "ask-row",
+				role: "assistant",
+				content: [ask("mixed-result", questionParams("Choose a target"))],
+			},
+			{
+				id: "mixed-user-row",
+				role: "user",
+				author: USER,
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "mixed-result",
+						content: JSON.stringify({ answers: answer }),
+					},
+					{ type: "text", text: "Please continue with the selected target" },
+				],
+			},
+		] as any);
+
+		expect(projected.entries.map((entry) => [entry.kind, entry.excerpt, entry.unresolved])).toEqual([
+			["question", "Choose a target", false],
+			["user", "Please continue with the selected target", false],
+		]);
+		expect(projected.entries.filter((entry) => entry.kind === "user")).toHaveLength(1);
+		expect(projected.unresolvedQuestions).toEqual([]);
+	});
+
 	it("derives unresolved state only from later matching results and valid response envelopes", () => {
 		const messages = [
 			{ role: "user", content: buildAskResponseEnvelope("before", answer) },

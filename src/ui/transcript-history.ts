@@ -201,7 +201,7 @@ export function deriveTranscriptNavigation(
 			candidate.result = relation.result;
 			refreshCandidate(candidate);
 		}
-		if (results.length > 0 || isToolResultOnlyMessage(message)) continue;
+		if (directResult || isToolResultOnlyMessage(message)) continue;
 
 		if (isAskResponseEnvelope(message)) {
 			const parsed = parseAskResponseEnvelope(textContent(message));
