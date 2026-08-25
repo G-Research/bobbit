@@ -1,0 +1,7 @@
+name: perf_benchmark_list
+group: Performance Optimisation
+description: List bounded applicable project-owned benchmark references.
+summary: "List bounded applicable project-owned benchmark references."
+provider:
+  type: bobbit-extension
+  extension: extension.js

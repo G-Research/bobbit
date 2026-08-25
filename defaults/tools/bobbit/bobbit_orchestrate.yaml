@@ -47,7 +47,7 @@ detail_docs: >-
 
   |---|---|---|---|---|
 
-  | `create_goal` | POST | `/api/goals` | `projectId`, `title` | `spec`, `workflowId`, `cwd`, `parentGoalId`, `sandboxed`, `autoStartTeam`, `enabledOptionalSteps[]`, `metadata{}` |
+  | `create_goal` | POST | `/api/goals` | `projectId`, `title` | `spec`, `workflow` (inline snapshot), `workflowId`, `cwd`, `parentGoalId`, `sandboxed`, `autoStartTeam`, `enabledOptionalSteps[]`, `metadata{}` |
 
   | `update_goal` | PUT | `/api/goals/:goalId` | `goalId` | `title`, `spec`, `state`, `cwd`, `branch`, `repoPath`, `reattemptOf` |
 

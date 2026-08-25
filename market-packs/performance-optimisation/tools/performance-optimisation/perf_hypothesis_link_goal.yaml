@@ -1,0 +1,7 @@
+name: perf_hypothesis_link_goal
+group: Performance Optimisation
+description: Link an accepted Bobbit goal to its performance hypothesis.
+summary: "Link an accepted Bobbit goal to its performance hypothesis."
+provider:
+  type: bobbit-extension
+  extension: extension.js

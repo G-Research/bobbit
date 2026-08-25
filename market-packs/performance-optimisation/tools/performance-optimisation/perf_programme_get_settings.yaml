@@ -1,0 +1,7 @@
+name: perf_programme_get_settings
+group: Performance Optimisation
+description: Read performance programme settings and stable staff IDs.
+summary: "Read performance programme settings and stable staff IDs."
+provider:
+  type: bobbit-extension
+  extension: extension.js

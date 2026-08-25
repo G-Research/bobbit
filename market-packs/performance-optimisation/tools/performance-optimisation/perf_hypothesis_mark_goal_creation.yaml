@@ -1,0 +1,7 @@
+name: perf_hypothesis_mark_goal_creation
+group: Performance Optimisation
+description: Atomically claim an open hypothesis for direct goal creation or release an owned failed claim.
+summary: Claim or release direct goal creation.
+provider:
+  type: bobbit-extension
+  extension: extension.js

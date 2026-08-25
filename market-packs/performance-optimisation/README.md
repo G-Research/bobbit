@@ -6,17 +6,17 @@ Opt-in first-party Extension Host pack for autonomous performance discovery and 
 
 - `/performance` and the session menu open the singleton control pane.
 - `performance-optimisation` is the reload-safe structured route; the panel uses `host.ui.navigate`, never hashes or raw URLs.
-- Tabs are **Flow map**, **Scan coverage**, and **Hypothesis registry**.
+- Tabs are **Flow map**, **Scan coverage**, **Hypothesis registry**, and **Benchmark store**.
 - The panel reads bounded live staff, session, goal, gate, task, and cached PR summaries through panel-only `host.project.snapshot()`.
-- It merges that core state with performance-owned coverage, hypotheses, activity, and linked-goal ids from `control-pane.snapshot` in the implicit pack-scoped `host.store`; only the selected tab is written at `control-pane.ui`.
+- It merges that core state with performance-owned coverage, hypotheses, activity, measurements, outcomes, and goal links read from the pack's `performance-snapshot` route. Only the selected tab remains in the implicit `host.store` as a UI preference.
 - Session links use `host.ui.openPanel({ panelId, sessionId })` when the live project or stored snapshot supplies a real session id.
 - The Scanner avatar is built from Bobbit's canonical `BODY_GRID` and `EYE_POSITIONS` data.
 
 The normal panel starts honestly empty. For layout development only, open the contributed route with structured params `{ tab: "flow", demo: "true" }`; the panel labels this state **Development fixture · not live project data**.
 
-## Snapshot contract
+## Persistence and snapshot contract
 
-A mediated producer will write this versioned record to `control-pane.snapshot`:
+The pack owns `<canonical-project-root>/.performance-optimisation/performance.sqlite` through Pack Local Data. Model-facing tools and the server route use Bobbit's shared `better-sqlite3` runtime dependency; browser code reads this versioned projection through `host.callRoute("performance-snapshot")`:
 
 ```ts
 type PerformanceSnapshot = {
@@ -83,7 +83,7 @@ The pack ships two real marketplace roles:
 - `performance-scanner` — read-only evidence discovery.
 - `optimisation-director` — evidence-led planning and coordination.
 
-Marketplace staff templates are not yet supported. Create the two persistent staff records against these role ids after enabling the pack. This is deliberately not emulated with temporary `host.agents` children.
+The pack also ships the ephemeral read-only `performance-ideator` role. After enabling the pack, run `/install-performance-optimisation`; the skill asks for schedules and concurrency, then idempotently adopts or creates the two persistent staff through `bobbit_read` and `bobbit_orchestrate(create_staff)`. Ideators remain temporary. The persistent Director itself claims hypotheses and creates their goals through `bobbit_orchestrate(create_goal)`; it never delegates goal creation or emits proposal drafts.
 
 ## Development loop
 
@@ -101,11 +101,11 @@ For a copy-installed pack, pass its serving root:
 npm run dev:pack -- performance-optimisation --target <scope>/.bobbit/config/market-packs/performance-optimisation
 ```
 
-## Platform gaps before autonomous operation
+## Current boundaries
 
-- `host.project.snapshot()` is a bounded one-shot panel read. A revisioned project event subscription is still needed for push updates; the MVP uses the panel Refresh control.
-- The Host API cannot structurally navigate to core goal dashboards or PR review surfaces. Pack-owned tabs and real session switching work today.
-- Agent-side pack tools cannot yet write the pack-scoped Extension Host store, so the Scanner cannot safely publish coverage/hypotheses without a mediated producer contract.
-- Persistent staff provisioning is not pack-expressible yet.
-
-These gaps must be implemented as typed, server-scoped contracts rather than raw `/api` calls, global app-state reads, or hand-built hash routes.
+- Project notifications trigger authoritative rereads; the pack does not add SQLite events or file watchers to Bobbit core.
+- Goal correlation uses existing namespaced metadata and an SQLite `hypothesisId → goalId` link; browser metadata projection is unnecessary.
+- Explore Hypothesis is passed as a frozen `workflow` snapshot in the direct `create_goal` body because marketplace workflow declarations are catalogue-only today.
+- Direct goal creation is transactionally claimed in the registry and correlated by namespaced metadata before retry, preventing duplicate goals after interrupted Director turns.
+- Benchmarks and behavioural tests remain existing project-owned commands.
+- Goal teams start automatically, while PR merging remains outside Director authority.

@@ -1,0 +1,7 @@
+name: perf_coverage_mark_module_as
+group: Performance Optimisation
+description: Claim or transition a fingerprint-bound scan attempt.
+summary: "Claim or transition a fingerprint-bound scan attempt."
+provider:
+  type: bobbit-extension
+  extension: extension.js

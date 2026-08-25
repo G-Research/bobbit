@@ -73,6 +73,11 @@ export const PACKS = [
 		defaultServingRoot: "dist/server/builtin-packs/market-packs/performance-optimisation",
 		entries: [
 			{ in: "performance-panel.ts", out: "lib/performance-panel.js" },
+			{ in: "performance-routes.ts", out: "lib/performance-routes.mjs", platform: "node" },
+			{ in: "performance-tool-extension.ts", out: "tools/performance-optimisation/extension.js", platform: "node" },
+		],
+		nativeAssets: [
+			{ package: "better-sqlite3", fromEntry: "../build/Release/better_sqlite3.node", out: "lib/better_sqlite3.node" },
 		],
 	},
 	{
