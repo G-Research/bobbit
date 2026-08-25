@@ -1,0 +1,26 @@
+name: session_attachment
+description: "List metadata or read a bounded byte range from an immutable uploaded attachment"
+summary: "Read immutable uploaded attachment bytes"
+params: [operation, pointer, offset?, length?]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Attachments
+docs: |-
+  Reads browser-uploaded document snapshots owned by this session. Use `operation: "list"` with any attachment pointer from a prompt to list the safe metadata and pointers for that exact prompt occurrence. Use `operation: "read"` with a pointer and optional byte offset/length. Reads return at most 65,536 exact bytes encoded as base64, plus `bytesRead`, `nextOffset`, and `eof`. Continue from `nextOffset` until `eof`.
+detail_docs: |-
+  ## Parameters
+  | Name | Type | Required | Description |
+  |------|------|----------|-------------|
+  | operation | `list` or `read` | yes | List the pointer's accepted prompt occurrence, or read bytes from that exact file snapshot |
+  | pointer | string | yes | Opaque `bobbit-attachment:` pointer supplied in uploaded-document prompt context |
+  | offset | nonnegative integer | read only | Byte offset; defaults to 0 |
+  | length | integer 1-65536 | read only | Maximum bytes to return; defaults to 65536 |
+
+  The response is JSON. `read` uses base64 solely as a bounded byte-exact tool transport; decode it before interpreting binary formats or UTF-8. The pointer resolves immutable send-time bytes and never a workspace or host path. A pointer from another session, a malformed/stale pointer, or a deleted session snapshot is rejected.
+
+  ## Examples
+  ```
+  session_attachment(operation="list", pointer="bobbit-attachment:v1:...")
+  session_attachment(operation="read", pointer="bobbit-attachment:v1:...", offset=0, length=65536)
+  ```

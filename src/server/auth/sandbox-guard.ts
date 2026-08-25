@@ -23,6 +23,9 @@ function isOwnSessionToolEndpoint(subpath: string, method: string): boolean {
 	// Sandboxed agents may upload their own tool output with the owning session
 	// secret, but payload reads and workspace opens are browser/admin surfaces.
 	if (method === "POST" && subpath === "/review-payloads") return true;
+	// Read-only, bounded access to immutable browser-uploaded snapshots. The route
+	// independently requires the exact owning session capability secret.
+	if (method === "POST" && subpath === "/uploaded-attachments/query") return true;
 	if (method === "GET" && subpath === "/transcript") return true;
 	if (method === "POST" && subpath === "/prompt") return true;
 	if (method === "GET" && subpath === "/proposals") return true;
