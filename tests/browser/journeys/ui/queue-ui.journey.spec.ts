@@ -57,8 +57,8 @@ test.describe("Queue UI E2E", () => {
 		// Send a message to make agent busy (tool call with 3s delay)
 		await sendMessage(page, "STAY_BUSY:3000 working");
 
-		// Wait for streaming status (the stop button appears)
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		// Wait for streaming status (the lifecycle-aware stop control appears).
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 		await rec.capture("Agent busy â€” Stop button visible");
 
 		// PI-10 step 1: Queue a message while agent is streaming
@@ -102,7 +102,7 @@ test.describe("Queue UI E2E", () => {
 
 		// Make agent busy (tool call with 3s delay)
 		await sendMessage(page, "STAY_BUSY:3000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 		await rec.capture("Agent busy â€” Stop button visible");
 
 		// PI-10b steps 1-2: Queue two messages
