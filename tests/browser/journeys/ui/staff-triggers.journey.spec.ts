@@ -91,6 +91,11 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 			"STAFF_GOAL_TRIGGER_BROWSER_HEADER: staff edit header should render",
 		).toBeVisible({ timeout: 15_000 });
 
+		// Trigger controls live on the Triggers tab of the current staff editor.
+		const triggersTab = page.getByTestId("staff-edit-tabs").getByRole("button", { name: "Triggers" });
+		await triggersTab.click();
+		await expect(page.getByTestId("staff-triggers-tab-panel")).toBeVisible();
+
 		// Add a trigger via the "+ Add trigger" button.
 		await page.getByRole("button", { name: "+ Add trigger" }).click();
 
@@ -186,6 +191,8 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 		await page.reload();
 		await navigateToHash(page, `#/staff/${staff.id}`);
 		await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
+		await page.getByTestId("staff-edit-tabs").getByRole("button", { name: "Triggers" }).click();
+		await expect(page.getByTestId("staff-triggers-tab-panel")).toBeVisible();
 
 		const reloadedSelect = triggerSelect(page);
 		await expect(

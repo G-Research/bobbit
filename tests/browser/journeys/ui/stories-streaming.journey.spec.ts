@@ -15,6 +15,18 @@ import { apiFetch, waitForHealth } from "../../_helpers/e2e-setup.js";
 import { SpecContext, defineStory } from "../../../support/harnesses/browser/legacy-ui/spec-framework.js";
 import { CT_01, CT_02, CT_05, CT_06 } from "../../../support/harnesses/browser/legacy-ui/spec-contracts.js";
 
+function stopCurrentTurn(s: SpecContext) {
+	return s.page.getByRole("button", { name: "Stop current turn" });
+}
+
+async function waitForStreaming(s: SpecContext): Promise<void> {
+	await expect(stopCurrentTurn(s)).toBeVisible({ timeout: 15_000 });
+}
+
+async function stopStreaming(s: SpecContext): Promise<void> {
+	await stopCurrentTurn(s).click();
+}
+
 test.describe("CT-01: Streaming lifecycle", () => {
 	let s: SpecContext;
 
@@ -61,9 +73,9 @@ test.describe("CT-01: Streaming lifecycle", () => {
 
 		// assert — CT-01-a streaming controls are visible
 		s.assert();
-		await s.wait_for_streaming();
+		await waitForStreaming(s);
 		await rec.capture("Streaming — Stop button visible");
-		await s.editor.can("stop_streaming");
+		await expect(stopCurrentTurn(s)).toBeEnabled();
 
 		// act — CT-01-d queues follow-up sends against the same live stream
 		s.begin(queuedStory);
@@ -119,8 +131,8 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		// act — abort a live stream
 		s.act();
 		await s.send_message("STAY_BUSY:1500 first");
-		await s.wait_for_streaming();
-		await s.stop_streaming();
+		await waitForStreaming(s);
+		await stopStreaming(s);
 		await s.wait_for_idle();
 
 		// assert — CT-01-b leaves the editor usable
@@ -161,13 +173,13 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		s.act();
 		await s.navigate_to("session", "A");
 		await s.send_message("STAY_BUSY:3000 working");
-		await s.wait_for_streaming();
+		await waitForStreaming(s);
 		await s.navigate_to("session", "B");
 		await s.navigate_to("session", "A");
 
 		// assert
 		s.assert();
-		await s.editor.can("stop_streaming");
+		await expect(stopCurrentTurn(s)).toBeVisible();
 	});
 
 	// ---------------------------------------------------------------
@@ -519,7 +531,7 @@ test.describe("CT-01: Streaming lifecycle", () => {
 		// act
 		s.act();
 		await s.send_message("STAY_BUSY:1500 working");
-		await s.wait_for_streaming();
+		await waitForStreaming(s);
 		await s.reload();
 		await s.navigate_to("session", "A");
 

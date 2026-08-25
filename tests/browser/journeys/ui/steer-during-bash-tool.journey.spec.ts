@@ -6,17 +6,9 @@
  * them as steered, clicks Stop. The agent appears to receive nothing — the
  * steered texts only get processed once a fresh prompt is sent.
  *
- * Why the default mock path passes (and why this test wires MOCK_ABORT_AS_ERROR=1):
- * the real Claude bridge surfaces an aborted in-flight turn as an assistant
- * `message_end` with `stopReason:"error"` BEFORE the terminal `agent_end`.
- * That sets `session.lastTurnErrored=true`, which gates `drainQueue` off in
- * the `agent_end` handler (session-manager.ts ~line 1715). Steered rows
- * sitting in `promptQueue` therefore stay parked until the next user prompt
- * implicitly unsticks the session.
- *
- * The default mock emits a clean `agent_end` on abort (no error stopReason),
- * so existing tests don't exercise this path. The MOCK_ABORT_AS_ERROR=1 env
- * switches the mock to real-agent-shape abort behaviour.
+ * The current mock's explicit abort lifecycle matches the bridge contract.
+ * Its post-abort steer-drop mode mirrors Pi accepting steer text after the
+ * active loop has exited; both accepted messages must still surface after Stop.
  *
  * Run with capture on:
  *   RECORDSCREEN=1 npm run test:e2e -- steer-during-bash-tool.spec.ts
@@ -34,33 +26,16 @@ import {
 } from "../../_helpers/e2e-setup.js";
 import { navigateToHash, openApp, sendMessage } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
-async function clickAllSteerButtons(page: any): Promise<void> {
-	const buttons = page.locator(".queue-pill .steer-btn");
-	let remaining = await buttons.count();
-	while (remaining > 0) {
-		// Under full-suite load, a queued row can drain between the count above
-		// and the click. Query synchronously in the page so a vanished button is
-		// treated as already drained instead of waiting for a selector that
-		// should not reappear.
-		const clicked = await page.evaluate(() => {
-			const button = document.querySelector<HTMLButtonElement>(".queue-pill .steer-btn");
-			if (!button) return false;
-			button.click();
-			return true;
-		});
-
-		if (clicked) {
-			await expect.poll(async () => buttons.count(), { timeout: 5_000 }).toBeLessThan(remaining);
-		}
-
-		remaining = await buttons.count();
-	}
-}
-
-async function clickStopIfPresent(page: any): Promise<void> {
-	const stop = page.locator("button[title='Stop streaming']").first();
-	if (await stop.count() === 0) return;
-	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
+async function clickAllSteerButtonsAndStop(page: any): Promise<{ steered: number; stopped: boolean }> {
+	// Dispatch the already-decided user sequence in one browser task so the
+	// first Steer render cannot remove the second Steer or Stop control.
+	return page.evaluate(() => {
+		const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(".queue-pill .steer-btn"));
+		for (const button of buttons) button.click();
+		const stop = document.querySelector<HTMLButtonElement>('button[title="Stop current turn"]');
+		stop?.click();
+		return { steered: buttons.length, stopped: !!stop };
+	});
 }
 
 function userMessageIncludes(text: string): (m: WsMsg) => boolean {
@@ -75,29 +50,21 @@ async function waitForSteeredEchoes(conn: WsConnection, cursor: number): Promise
 	await conn.waitForFrom(cursor, userMessageIncludes("Steer2"), 20_000);
 }
 
-test.describe("steer subsystem — queue + steer + abort with errored agent_end", () => {
+test.describe("steer subsystem — queue + steer + abort recovery", () => {
 	test.setTimeout(90_000);
 
 	test.beforeAll(async () => {
-		// Switch the in-process mock bridge to real-agent-shape abort: the
-		// abort handler emits a `message_end` with `stopReason:"error"` before
-		// `agent_end`, mirroring what the real Claude bridge does.
-		process.env.MOCK_ABORT_AS_ERROR = "1";
-		// Make steer delivery deterministic for this abort-reconcile spec: the
-		// steer RPC is accepted, but the mock does not also enqueue its own
-		// follow-up prompt. The server's in-flight steer ledger must recover it.
-		process.env.MOCK_STEER_QUEUE_DROP = "always";
 		await waitForHealth();
 	});
 
-	test.afterAll(() => {
-		delete process.env.MOCK_ABORT_AS_ERROR;
-		delete process.env.MOCK_STEER_QUEUE_DROP;
-	});
-
-	test("queued+steered messages must drain after Stop without requiring a fresh user prompt", async ({ page, rec }) => {
+	test("queued+steered messages must drain after Stop without requiring a fresh user prompt", async ({ page, rec, gateway }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
+		const mockAgent = gateway.sessionManager.getSession(sessionId)?.rpcClient?._agent;
+		expect(mockAgent, "abort-reconcile journey requires the in-process mock bridge").toBeTruthy();
+		// Configure this exact session, not worker-global process state. In the
+		// current fidelity mode Pi drops steer text only after the abort window.
+		mockAgent.env.MOCK_STEER_QUEUE_DROP = "1";
 		const conn = await connectWs(sessionId);
 
 		try {
@@ -115,9 +82,9 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 			// 1. Long busy bash. Wait for the server-side tool start, not just
 			//    the early UI streaming state, so queued rows cannot race a turn
 			//    that has not actually entered the abortable bash body yet.
-			await sendMessage(page, "STAY_BUSY:10000 working");
+			await sendMessage(page, "STAY_BUSY:30000 working");
 			await conn.waitFor(toolStartPredicate("Bash"), 15_000);
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await rec.capture("Agent busy — bash tool running");
 
 			// 2. Queue two messages. Confirm both the visible pills and the
@@ -134,19 +101,13 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 			await textarea.press("Enter");
 			await conn.waitForFrom(cursor, queueLenPredicate(2), 10_000);
 			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
+			await expect(page.locator(".queue-pill .steer-btn")).toHaveCount(2, { timeout: 5_000 });
 			await rec.capture("Two messages queued");
 
-			// 3. Mark both as steered.
+			// 3–4. Promote both queued rows, then Stop the same active turn.
 			const steerCursor = conn.messageCount();
-			await clickAllSteerButtons(page);
-			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
-			await rec.capture("Both pills steered and dispatched");
-
-			// 4. Stop if the stream is still active. Immediate queued-steer
-			//    dispatch may already have interrupted the mock turn; in that case
-			//    the shortened busy window keeps the fallback path bounded.
-			await clickStopIfPresent(page);
-			await rec.capture("Stop clicked if still streaming — abort with error stopReason");
+			expect(await clickAllSteerButtonsAndStop(page)).toEqual({ steered: 2, stopped: true });
+			await rec.capture("Both pills steered and Stop clicked");
 
 			// 5. Both steered texts must reach the agent without any further user
 			//    input. Queued+steered rows that sat in promptQueue while the
@@ -155,7 +116,9 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 			//    off, and the rows stay parked until a fresh enqueuePrompt does
 			//    the implicit unstick.
 			await waitForSteeredEchoes(conn, steerCursor);
+			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 10_000 });
 		} finally {
+			delete mockAgent.env.MOCK_STEER_QUEUE_DROP;
 			conn.close();
 		}
 	});
