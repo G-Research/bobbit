@@ -809,6 +809,20 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		// inclusion is gone and the default filter hides the active archive again.
 		await page.getByTestId("sidebar-filters-button").click();
 		await page.getByTestId("sidebar-filter-archived").locator("input").check();
+		const archivedFilterState = await page.evaluate((unrelatedArchivedId) => {
+			const state = (window as any).__bobbitState;
+			return {
+				showArchived: state.showArchived,
+				cachedUnrelatedArchived: state.archivedSessions.some((session: any) => session.id === unrelatedArchivedId),
+			};
+		}, IDS.unrelatedArchived);
+		expect(archivedFilterState, `${MARK}: archive filter handler updates canonical state`).toEqual({
+			showArchived: true,
+			cachedUnrelatedArchived: true,
+		});
+		// The handler schedules renderApp in rAF. Queueing behind it joins that
+		// authoritative DOM publication before asserting the newly eligible row.
+		await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
 		await expect(navRow(page, IDS.unrelatedArchived)).toBeVisible();
 		await page.getByTestId("sidebar-filter-archived").locator("input").uncheck();
 		await expect(navRow(page, IDS.archived), `${MARK}: manual archive interaction restores default filter authority`).toHaveCount(0);
