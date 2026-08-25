@@ -828,6 +828,105 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+	test("rejects an unlisted configured sibling alias without probing it or invoking gh", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const projectRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-credential-alias-"));
+		const selectedSource = join(projectRoot, "selected");
+		const siblingSource = join(projectRoot, "sibling");
+		mkdirSync(selectedSource, { recursive: true });
+		mkdirSync(siblingSource, { recursive: true });
+		const host = `credential-alias-${Date.now()}.invalid`;
+		const branch = `fixture/credential-alias-${Date.now()}`;
+		const commonDir = join(projectRoot, ".git", "shared");
+		const project = await registerProject({
+			name: `Credential repository alias ${Date.now()}`,
+			rootPath: projectRoot,
+			components: [
+				{ name: "selected", repo: "selected" },
+				{ name: "sibling", repo: "sibling" },
+			],
+			seedWorkflows: false,
+		});
+		const sessionId = await createRemoteStateSession(gateway, selectedSource, project.id);
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch, repoPath: projectRoot });
+		const session = gateway.sessionManager.getSession(sessionId) as any;
+		session.cwd = selectedSource;
+		session.repoPath = projectRoot;
+
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const originalSpawn = runner.spawn;
+		const originalOwnedTreeCapability = runner.supportsOwnedTreeSpawn;
+		const previousEnterpriseTokens = new Map<string, string | undefined>(
+			["GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"].map(name => [name, process.env[name]] as const),
+		);
+		const probes: Array<{ request: string; cwd: string }> = [];
+		let ghCalls = 0;
+
+		try {
+			delete process.env.GH_ENTERPRISE_TOKEN;
+			delete process.env.GITHUB_ENTERPRISE_TOKEN;
+			runner.spawn = createCommandSpawnAdapter(
+				() => { throw new Error("credential alias fixture received an ordinary spawn"); },
+				((_file: string, _args: readonly string[], options?: any) => {
+					const tracked = credentialHelperResult(
+						`protocol=https\nhost=${host}\nusername=route-fixture\npassword=fixture-secret\n`,
+					);
+					const probe = { request: "", cwd: String(options?.cwd ?? "") };
+					probes.push(probe);
+					tracked.child.stdin.on("data", (chunk: Buffer) => { probe.request += chunk.toString("utf8"); });
+					return tracked;
+				}) as any,
+			);
+			runner.supportsOwnedTreeSpawn = true;
+			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+				const command = commandName(file);
+				const cwd = String(options?.cwd ?? "");
+				const configuredSource = cwd === selectedSource || cwd === siblingSource;
+				if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+					if (!configuredSource) throw new Error("not a configured repository source");
+					return { stdout: `${cwd}\n`, stderr: "" };
+				}
+				if (command === "git" && args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") {
+					if (!configuredSource) throw new Error("unknown repository identity");
+					return { stdout: `${commonDir}\n`, stderr: "" };
+				}
+				if (command === "git" && args.join(" ") === "remote get-url origin") {
+					if (!configuredSource) throw new Error("unknown repository remote");
+					return { stdout: `https://${host}/acme/shared-repository.git\n`, stderr: "" };
+				}
+				if (command === "gh") {
+					ghCalls += 1;
+					throw new Error("ambiguous configured repository reached gh");
+				}
+				return unexpectedRunnerCommand(file, args, options);
+			};
+
+			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
+			expect(status.status).toBe(204);
+			expect(await status.text()).toBe("");
+			expect(probes).toEqual([expect.objectContaining({
+				request: `url=https://${host}\n\n`,
+			})]);
+			expect(probes[0].cwd).not.toBe(selectedSource);
+			expect(probes[0].request).not.toContain(siblingSource);
+			expect(ghCalls).toBe(0);
+		} finally {
+			runner.execFile = originalExecFile;
+			runner.spawn = originalSpawn;
+			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
+			else runner.supportsOwnedTreeSpawn = originalOwnedTreeCapability;
+			for (const [name, value] of previousEnterpriseTokens) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+			await deleteSession(sessionId);
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			const cleanup = await awaitableRm(projectRoot, { maxAttempts: 5, backoffMs: 50 });
+			expect(cleanup.removed, `credential alias fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());

@@ -3526,10 +3526,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		/** Multi-repo candidates stay bound to the authoritative source remote. */
 		remote?: TrustedGithubRemote;
 	};
-	const resolveOwnedPrRepositoryIdentity = async (
-		cwd: string,
-		trustMode: PrRemoteTrustMode,
-	): Promise<OwnedPrRepositoryIdentity | undefined> => {
+	const resolveOwnedPrRepositoryCommonDir = async (cwd: string): Promise<string | undefined> => {
 		let rawCommonDir: string;
 		try {
 			rawCommonDir = (await execGitArgs(
@@ -3553,13 +3550,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		}
 		if (!rawCommonDir) return undefined;
-		const remote = await parsePrRemote(cwd, trustMode);
-		if (!remote) return undefined;
 		const absoluteCommonDir = path.isAbsolute(rawCommonDir) ? rawCommonDir : path.resolve(cwd, rawCommonDir);
-		return {
-			commonDir: comparableOwnedPath(absoluteCommonDir),
-			remote,
-		};
+		return comparableOwnedPath(absoluteCommonDir);
+	};
+	const resolveOwnedPrRepositoryIdentity = async (
+		cwd: string,
+		trustMode: PrRemoteTrustMode,
+	): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		const commonDir = await resolveOwnedPrRepositoryCommonDir(cwd);
+		if (!commonDir) return undefined;
+		const remote = await parsePrRemote(cwd, trustMode);
+		return remote ? { commonDir, remote } : undefined;
+	};
+	const resolveStructuralPrSiblingIdentity = async (cwd: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		const commonDir = await resolveOwnedPrRepositoryCommonDir(cwd);
+		if (!commonDir) return undefined;
+		try {
+			// This candidate is consumed only by duplicate-source rejection. It does
+			// not make the sibling eligible for PR routing or credential probing.
+			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
+			const remote = parseUntrustedGithubRemoteCandidate(origin);
+			return remote ? { commonDir, remote } : undefined;
+		} catch {
+			return undefined;
+		}
 	};
 	const sameOwnedPrRepository = (left: OwnedPrRepositoryIdentity, right: OwnedPrRepositoryIdentity): boolean => (
 		left.commonDir === right.commonDir
@@ -3693,10 +3707,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				const siblingTopLevel = await resolveConfiguredPrTopLevel(siblingSource);
 				if (!siblingTopLevel) continue;
 				if (comparableOwnedPath(siblingTopLevel) !== comparableOwnedPath(siblingSource)) return [];
-				// Siblings are inspected only for pre-existing listed-host aliases. A status
-				// request may credential-vouch its selected source, but must not invoke an
-				// operator's credential helpers for unrelated configured repositories.
-				const siblingIdentity = await resolveOwnedPrRepositoryIdentity(siblingSource, "listed-only");
+				// Structural sibling inspection preserves fail-closed duplicate-source
+				// rejection without trusting the sibling host or consulting credentials.
+				const siblingIdentity = await resolveStructuralPrSiblingIdentity(siblingSource);
 				if (siblingIdentity && sameOwnedPrRepository(sourceIdentity, siblingIdentity)) return [];
 			}
 			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
