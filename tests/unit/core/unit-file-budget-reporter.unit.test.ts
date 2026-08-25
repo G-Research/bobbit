@@ -47,7 +47,7 @@ describe("UnitFileBudgetReporter", () => {
 	test("hard-fails by default after measuring the whole module wall and aggregating retries", () => {
 		const { reporter, elapse } = timedReporter();
 		elapse(moduleFor("C:\\repo\\tests\\unit\\core\\retry.unit.test.ts?first", "v2-core"), 12_500);
-		elapse(moduleFor("file:///C:/repo/tests/unit/core/retry.test.ts?retry", "v2-core"), 12_501);
+		elapse(moduleFor("file:///C:/repo/tests/unit/core/retry.unit.test.ts?retry", "v2-core"), 12_501);
 
 		assert.throws(
 			() => reporter.onTestRunEnd(),
@@ -134,9 +134,10 @@ describe("UnitFileBudgetReporter", () => {
 
 	test("leaves the standard unit command and Vitest execution controls independent of proof mode", () => {
 		const packageJson = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
+		assert.equal(packageJson.scripts["test:unit"], "npm run test:v2:core --");
 		assert.equal(
-			packageJson.scripts["test:unit"],
-			"vitest run --config vitest.config.ts --silent=passed-only",
+			packageJson.scripts["test:v2:core"],
+			"npm run test:layout && vitest run --config vitest.config.ts --silent=passed-only",
 		);
 
 		const config = readFileSync(new URL("../../../vitest.config.ts", import.meta.url), "utf8");
