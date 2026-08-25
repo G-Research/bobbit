@@ -38,6 +38,12 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
+// Keep runtime imports pointed at the built server while deriving their types
+// from source, so type-checking this test harness does not require dist/.
+function importBuiltServerModule<T>(specifier: string): Promise<T> {
+	return import(specifier) as Promise<T>;
+}
+
 // Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
 // (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
 // local overlay FS instead.  On the host, use os.tmpdir() to guarantee the CWD
@@ -245,11 +251,11 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			createGateway,
 			registerRpcBridgeFactory,
 		} = await withDistServerImportLock(async () => {
-			const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
-			const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-			const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-			const { createGateway } = await import("../../../dist/server/server.js");
-			const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+			const { setProjectRoot } = await importBuiltServerModule<typeof import("../../../src/server/bobbit-dir.js")>("../../../dist/server/bobbit-dir.js");
+			const { scaffoldBobbitDir } = await importBuiltServerModule<typeof import("../../../src/server/scaffold.js")>("../../../dist/server/scaffold.js");
+			const { loadOrCreateToken } = await importBuiltServerModule<typeof import("../../../src/server/auth/token.js")>("../../../dist/server/auth/token.js");
+			const { createGateway } = await importBuiltServerModule<typeof import("../../../src/server/server.js")>("../../../dist/server/server.js");
+			const { registerRpcBridgeFactory } = await importBuiltServerModule<typeof import("../../../src/server/agent/rpc-bridge.js")>("../../../dist/server/agent/rpc-bridge.js");
 			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
 		});
 		// Register the in-process mock bridge factory before any sessions are
