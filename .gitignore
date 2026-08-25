@@ -44,9 +44,9 @@ binaries/binaries-*/bin/rg.exe
 .e2e-real-bobbit
 
 # Generated esbuild bundles for file:// Playwright fixtures.
-# Specs rebuild these on demand via tests/fixtures/build-bundle.ts or local beforeAll hooks.
-tests/fixtures/*-bundle.js
-tests/fixtures/*-bundle.css
+# Specs rebuild these on demand via tests/support/fixtures/shared/build-bundle.ts.
+/tests/support/fixtures/shared/*-bundle.js
+/tests/support/fixtures/shared/*-bundle.css
 
 .e2e-ui-pi
 .e2e-ui-bobbit
