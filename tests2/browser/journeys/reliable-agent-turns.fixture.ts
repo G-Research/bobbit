@@ -54,6 +54,9 @@ export interface AbortHold {
 	receivedBoundary: string;
 	received: Promise<void>;
 	beforeAgentEnd: CoreBarrierHold;
+	afterTerminalIdle: CoreBarrierHold;
+	/** Release every abort hold. Idempotent so scenario cleanup can always call it. */
+	release(): void;
 }
 
 /**
@@ -68,6 +71,7 @@ export class ReliableTurnRuntime {
 	private readonly bridge: any;
 	private readonly originalHandlePrompt: (...args: any[]) => Promise<any>;
 	private readonly originalSteer: (...args: any[]) => Promise<any>;
+	private readonly originalAbort: (...args: any[]) => Promise<any>;
 	private readonly originalEmit: (event: any) => void;
 	private readonly originalSleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 	private readonly echoHolds = new Map<string, TurnBarrier[]>();
@@ -78,6 +82,7 @@ export class ReliableTurnRuntime {
 	private nextCompaction: CompactionHold | undefined;
 	private nextSteerUserStartOccurrence = 1;
 	private nextAbortOccurrence = 1;
+	private readonly abortCommandTails = new Map<number, Promise<any>>();
 	private restored = false;
 
 	constructor(gateway: GatewayInfo, sessionId: string) {
@@ -91,6 +96,7 @@ export class ReliableTurnRuntime {
 		}
 		this.originalHandlePrompt = this.core.handlePrompt;
 		this.originalSteer = this.bridge.steer;
+		this.originalAbort = this.bridge.abort;
 		this.originalEmit = this.core.emit;
 		this.originalSleep = this.core._sleep;
 		this.nextSteerUserStartOccurrence = Number(this.core._commandSequence?.steer ?? 0) + 1;
@@ -109,6 +115,12 @@ export class ReliableTurnRuntime {
 			const gate = fixture.shift(fixture.steerAckHolds, text);
 			if (gate) await gate.wait();
 			return result;
+		};
+		this.bridge.abort = function observedAbort(...args: any[]) {
+			const occurrence = Number(fixture.core._commandSequence?.abort ?? 0) + 1;
+			const tail = Promise.resolve(fixture.originalAbort.call(this, ...args));
+			fixture.abortCommandTails.set(occurrence, tail);
+			return tail;
 		};
 		this.core.emit = function observedEmit(event: any) {
 			return fixture.emitWithBarriers(this, event);
@@ -215,7 +227,7 @@ export class ReliableTurnRuntime {
 		return hold;
 	}
 
-	/** Observe abort command receipt independently from its held terminal event. */
+	/** Observe abort receipt and hold both sides of its real terminal lifecycle. */
 	holdNextAbort(): AbortHold {
 		const occurrence = Math.max(
 			this.nextAbortOccurrence,
@@ -223,11 +235,18 @@ export class ReliableTurnRuntime {
 		);
 		this.nextAbortOccurrence = occurrence + 1;
 		const receivedBoundary = `abort:${occurrence}:received`;
+		const beforeAgentEnd = this.holdCoreBarrier(`abort:${occurrence}:before-agent-end`, occurrence);
+		const afterTerminalIdle = this.holdCoreBarrier(`abort:${occurrence}:after-terminal-idle`, occurrence);
 		return {
 			occurrence,
 			receivedBoundary,
 			received: Promise.resolve(this.core.waitForBarrier(receivedBoundary)).then(() => undefined),
-			beforeAgentEnd: this.holdCoreBarrier(`abort:${occurrence}:before-agent-end`, occurrence),
+			beforeAgentEnd,
+			afterTerminalIdle,
+			release: () => {
+				beforeAgentEnd.release();
+				afterTerminalIdle.release();
+			},
 		};
 	}
 
@@ -287,6 +306,51 @@ export class ReliableTurnRuntime {
 	}
 
 	/**
+	 * Capture the Stop coordinator while abort is held, then join its existing
+	 * tail, the already-dispatched abort command, and the interrupted active turn.
+	 * Together they own canonical terminal replay, process lifecycle completion,
+	 * coordinator removal, and the sole release drain; this fixture only verifies
+	 * that published postcondition.
+	 */
+	async joinAbortTerminalProjection(abort: AbortHold): Promise<RemoteLifecycleRevision> {
+		const occurrence = abort.occurrence;
+		if (Number(this.core._commandSequence?.abort ?? 0) !== occurrence) {
+			throw new Error(`Cannot join superseded mock abort occurrence ${occurrence}`);
+		}
+		const abortCommandTail = this.abortCommandTails.get(occurrence);
+		if (!abortCommandTail || typeof abortCommandTail.then !== "function") {
+			throw new Error("Cannot join the authoritative mock abort command tail");
+		}
+		const activeTurnTail = this.core._activeTurn?.settled;
+		if (!activeTurnTail || typeof activeTurnTail.then !== "function") {
+			throw new Error("Cannot join the authoritative mock active-turn tail");
+		}
+		const coordinators = this.sessionManager?._sessionReplacementCoordinators;
+		const coordinator = coordinators?.get(this.sessionId);
+		if (!coordinator || typeof coordinator.tail?.then !== "function") {
+			throw new Error("Cannot join the authoritative Stop replacement coordinator");
+		}
+		const tail = coordinator.tail;
+		await Promise.all([tail, abortCommandTail, activeTurnTail]);
+		this.abortCommandTails.delete(occurrence);
+		if (coordinators.get(this.sessionId) === coordinator) {
+			throw new Error("Stop replacement coordinator remained installed after its tail settled");
+		}
+		const session = this.sessionManager?.getSession(this.sessionId);
+		if (!session) throw new Error("Canonical session disappeared after Stop replacement");
+		if (session.status !== "idle" || session.isCompacting === true || session.streamingStartedAt !== undefined) {
+			throw new Error(
+				`Stop terminal projection was not canonical idle: status=${session.status} compacting=${String(session.isCompacting)} streamingStartedAt=${String(session.streamingStartedAt)}`,
+			);
+		}
+		const revision = this.statusRevision();
+		if (revision.status !== "idle" || revision.activeRun) {
+			throw new Error("Stop terminal lifecycle revision retained an active run");
+		}
+		return revision;
+	}
+
+	/**
 	 * Admit the already active held mock run after compaction overwrote its status.
 	 * The accepted agent_start is the sole owner of the canonical status revision;
 	 * waiting for its buffered event revision also fences the preceding terminal
@@ -312,11 +376,13 @@ export class ReliableTurnRuntime {
 		this.nextCompaction?.compaction.release();
 		this.nextCompaction?.retry?.release();
 		this.core.releaseAllBarriers();
+		this.abortCommandTails.clear();
 		for (const gates of [...this.echoHolds.values(), ...this.steerAckHolds.values()]) {
 			for (const gate of gates) gate.release();
 		}
 		this.core.handlePrompt = this.originalHandlePrompt;
 		this.bridge.steer = this.originalSteer;
+		this.bridge.abort = this.originalAbort;
 		this.core.emit = this.originalEmit;
 		this.core.setSleep(this.originalSleep);
 	}

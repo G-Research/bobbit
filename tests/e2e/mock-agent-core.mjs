@@ -3596,6 +3596,10 @@ export class MockAgentCore {
 				await this._crossBarrier(`abort:${occurrence}:after-agent-end`, commandReceipt);
 				this.emit({ type: "agent_settled" });
 				this.emit({ type: "session_status", status: "idle" });
+				const terminalIdleBoundary = `abort:${occurrence}:after-terminal-idle`;
+				if (this._barriers.get(terminalIdleBoundary)?.armed === true) {
+					await this._crossBarrier(terminalIdleBoundary, commandReceipt);
+				}
 				return { success: true };
 			}
 
