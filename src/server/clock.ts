@@ -20,8 +20,14 @@ function normalizeRealTimerDelay(ms: number): number {
 
 export const realClock: Clock = {
 	now: () => Date.now(),
-	setTimeout: (handler, ms) => globalThis.setTimeout(handler, normalizeRealTimerDelay(ms)),
-	setInterval: (handler, ms) => globalThis.setInterval(handler, normalizeRealTimerDelay(ms)),
+	setTimeout: (handler, ms) => {
+		// codeql[js/resource-exhaustion] The generic Clock DI boundary receives internal durations, normalized to finite [0, 2^31-1] before this sink.
+		return globalThis.setTimeout(handler, normalizeRealTimerDelay(ms));
+	},
+	setInterval: (handler, ms) => {
+		// codeql[js/resource-exhaustion] The generic Clock DI boundary receives internal durations, normalized to finite [0, 2^31-1] before this sink.
+		return globalThis.setInterval(handler, normalizeRealTimerDelay(ms));
+	},
 	clearTimeout: handle => globalThis.clearTimeout(handle),
 	clearInterval: handle => globalThis.clearInterval(handle),
 };
