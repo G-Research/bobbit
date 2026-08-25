@@ -10,6 +10,13 @@ export const EVENT_STREAM_PROPOSAL_TITLE = "Bobbit Event Stream Benchmark";
 export const EVENT_STREAM_PROPOSAL_SPEC = "Deterministic proposal emitted by the event-stream benchmark fixture.";
 export const EVENT_STREAM_TOOL_OUTPUT = "BOBBIT_BENCH_TOOL_OK";
 export const EVENT_STREAM_ERROR_OUTPUT = "BOBBIT_BENCH_TOOL_ERROR";
+export const EVENT_STREAM_RETENTION_PREFILL_COUNT = 1_000;
+export const EVENT_STREAM_RETENTION_EVICTION_COUNT = 20_000;
+export const EVENT_STREAM_RETENTION_TRIGGER_UPDATE_COUNT = 200;
+export const EVENT_STREAM_RETENTION_TRIGGER_INTERVAL_MS = 997;
+export const EVENT_STREAM_RETENTION_PREFILL_TYPE = "benchmark_retention_prefill";
+export const EVENT_STREAM_RETENTION_EVICTION_TYPE = "benchmark_retention_evict";
+export const EVENT_STREAM_RETENTION_PROBE_TYPE = "benchmark_retention_probe";
 
 function boundedInteger(value, label, minimum, maximum) {
 	if (!Number.isInteger(value) || value < minimum || value > maximum) {
@@ -95,6 +102,71 @@ export function eventStreamToolPairs(projection) {
 	}));
 }
 
+/** Build the benchmark-only saturation phase. The existing mock-agent trigger
+ * routes every event through the production emitSessionEvent/EventBuffer path.
+ * Prefill and suffix use distinct event types so opt-in CPU diagnostics can
+ * isolate only the full-window head-eviction work. */
+export function createEventStreamRetentionFixture({
+	prefillCount = EVENT_STREAM_RETENTION_PREFILL_COUNT,
+	evictionCount = EVENT_STREAM_RETENTION_EVICTION_COUNT,
+} = {}) {
+	boundedInteger(prefillCount, "prefillCount", EVENT_STREAM_RETENTION_PREFILL_COUNT, 100_000);
+	boundedInteger(evictionCount, "evictionCount", 1, 100_000);
+	const events = [];
+	for (let ordinal = 1; ordinal <= prefillCount; ordinal += 1) {
+		events.push({
+			data: {
+				type: EVENT_STREAM_RETENTION_PREFILL_TYPE,
+				benchmarkRetentionPhase: "prefill",
+				benchmarkRetentionOrdinal: ordinal,
+				payload: "event-buffer-saturation",
+			},
+			delayAfterMs: 0,
+			persistMessage: false,
+		});
+	}
+	for (let ordinal = 1; ordinal <= evictionCount; ordinal += 1) {
+		events.push({
+			data: {
+				type: EVENT_STREAM_RETENTION_EVICTION_TYPE,
+				benchmarkRetentionPhase: "eviction",
+				benchmarkRetentionOrdinal: ordinal,
+				payload: "event-buffer-saturation",
+			},
+			delayAfterMs: 0,
+			persistMessage: false,
+		});
+	}
+	events.push({
+		data: {
+			type: EVENT_STREAM_RETENTION_PROBE_TYPE,
+			benchmarkRetentionPhase: "proof",
+			benchmarkRetentionOrdinal: 1,
+			payload: "event-buffer-saturation",
+		},
+		delayAfterMs: 0,
+		persistMessage: false,
+	});
+	const projection = {
+		prefillCount,
+		evictionCount,
+		prefillType: EVENT_STREAM_RETENTION_PREFILL_TYPE,
+		evictionType: EVENT_STREAM_RETENTION_EVICTION_TYPE,
+		probeType: EVENT_STREAM_RETENTION_PROBE_TYPE,
+		payload: "event-buffer-saturation",
+		eventSequenceSha256: createHash("sha256").update(JSON.stringify(events.map(entry => entry.data))).digest("hex"),
+	};
+	return {
+		trigger: `BENCHMARK_EVENT_STREAM:${EVENT_STREAM_RETENTION_TRIGGER_UPDATE_COUNT}:${EVENT_STREAM_RETENTION_TRIGGER_INTERVAL_MS}`,
+		updateCount: EVENT_STREAM_RETENTION_TRIGGER_UPDATE_COUNT,
+		intervalMs: EVENT_STREAM_RETENTION_TRIGGER_INTERVAL_MS,
+		events,
+		prefillCount,
+		evictionCount,
+		semanticHash: createHash("sha256").update(JSON.stringify(projection)).digest("hex"),
+	};
+}
+
 /**
  * Build the deterministic test-agent event fixture shared by the benchmark
  * driver and the test-owned mock agent. It contains only production-shape agent
@@ -106,6 +178,10 @@ export function createEventStreamFixture({
 } = {}) {
 	boundedInteger(updateCount, "updateCount", 8, 200);
 	boundedInteger(intervalMs, "intervalMs", 0, 1_000);
+	if (updateCount === EVENT_STREAM_RETENTION_TRIGGER_UPDATE_COUNT
+		&& intervalMs === EVENT_STREAM_RETENTION_TRIGGER_INTERVAL_MS) {
+		return createEventStreamRetentionFixture();
+	}
 	const events = [];
 	let index = 0;
 	const add = (type, data, options = {}) => {
