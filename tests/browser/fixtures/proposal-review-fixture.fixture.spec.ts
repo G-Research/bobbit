@@ -220,6 +220,12 @@ test.describe("Proposal/review lightweight fixture", () => {
 		]));
 
 		await expect(page.locator(".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']")).toHaveCount(3, { timeout: 10_000 });
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().workspaceReviewIds), { timeout: 10_000 })
+			.toEqual([
+				"proposal-review-fixture-Document%20A",
+				"proposal-review-fixture-Document%20B",
+				"proposal-review-fixture-Document%20C",
+			]);
 		await reviewPanelTab(page, "Document B").click();
 		await expect(page.locator("review-pane .review-tab")).toHaveCount(3, { timeout: 10_000 });
 		await expect(page.locator("review-document").getByText("Second document content").first()).toBeVisible({ timeout: 10_000 });
@@ -231,6 +237,11 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await reviewPanelTab(page, "Document B").locator(".goal-tab-close").click();
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().groups.map((group: any) => group.title)), { timeout: 10_000 })
 			.toEqual(["Document A", "Document C"]);
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().workspaceReviewIds), { timeout: 10_000 })
+			.toEqual([
+				"proposal-review-fixture-Document%20A",
+				"proposal-review-fixture-Document%20C",
+			]);
 		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 10_000 });
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document B", "Document C"]);
 	});

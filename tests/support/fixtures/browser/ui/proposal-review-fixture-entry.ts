@@ -2,8 +2,10 @@ import { html } from "lit";
 import { doRenderApp, setSelectedWorkflowId } from "../../../../../src/app/render.js";
 import { renderApp, setProjects, setRenderApp, state, type GatewaySession, type Project } from "../../../../../src/app/state.js";
 import { clearProposalDismissed, isProposalDismissed, markProposalDismissed } from "../../../../../src/app/proposal-helpers.js";
+import { buildPanelWorkspaceTabs } from "../../../../../src/app/panel-workspace.js";
 import { PROPOSAL_TYPE_REGISTRY, type ProposalType } from "../../../../../src/app/proposal-registry.js";
 import { resetProposalAnnCount } from "../../../../../src/app/proposal-panels.js";
+import { applySidePanelWorkspaceFromServer } from "../../../../../src/app/side-panel-workspace.js";
 import { addAnnotation, clearAllAnnotations, clearReviewSubmitted, getAnnotations, getDocumentAnnotationCount, isReviewSubmitted } from "../../../../../src/ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../../../../../src/ui/components/review/review-types.js";
 
@@ -470,6 +472,31 @@ function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {
 	state.reviewPanelOpen = normalizedDocs.length > 0;
 	state.previewPanelActiveTab = "review";
 	state.previewPanelTab = "review";
+
+	// Seed the file:// fixture's authoritative workspace from canonical review
+	// groups. Leaving this to the legacy fixture fallback would also derive one
+	// primary per compatibility document, duplicating the grouped primaries.
+	const tabs = buildPanelWorkspaceTabs({
+		sessionId: SESSION_ID,
+		isPreviewSession: false,
+		previewEntry: "",
+		activeProposalTypes: [],
+		assistantProposalType: null,
+		reviewTitles: [...state.reviewDocuments.keys()],
+		reviewGroups: groups,
+		reviewPanelOpen: groups.length > 0,
+		inboxPanelOpen: false,
+		inboxHasPending: false,
+	}).map((tab) => ({ ...tab, updatedAt: Date.now() }));
+	applySidePanelWorkspaceFromServer({
+		version: 1,
+		sessionId: SESSION_ID,
+		revision: 1,
+		tabs,
+		activeTabId: tabs[0]?.id ?? "",
+		sizeMode: "split",
+		updatedAt: Date.now(),
+	}, { source: "hydrate", force: true, skipRender: true });
 	for (const [title, anns] of Object.entries(annotations)) {
 		for (const ann of anns) addAnnotation(SESSION_ID, title, ann);
 	}
@@ -524,6 +551,9 @@ document.addEventListener("proposal-open", (event) => {
 	active: state.reviewActiveTab,
 	titles: [...state.reviewDocuments.keys()],
 	groups: [...state.reviewGroups.values()].map((group) => ({ reviewId: group.reviewId, title: group.title })),
+	workspaceReviewIds: (state.sidePanelWorkspaceBySession[SESSION_ID]?.tabs ?? [])
+		.filter((tab) => tab.kind === "review")
+		.map((tab) => tab.source.type === "review" ? tab.source.reviewId : undefined),
 	submitted: isReviewSubmitted(SESSION_ID) || persistedReviewSubmitted(),
 });
 (window as any).__getReviewAnnotationCount = (title: string) => getDocumentAnnotationCount(SESSION_ID, title);
