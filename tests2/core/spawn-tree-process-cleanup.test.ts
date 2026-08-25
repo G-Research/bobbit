@@ -1268,6 +1268,117 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 	});
 
+	it("keeps a shared Darwin observer independent when the zero-deadline waiter starts first", async () => {
+		const root = fakeChild(123_468);
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: budgetMs => {
+				observerBudgets.push(budgetMs);
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				return new Promise<string>(resolve => {
+					resolveSnapshot = snapshot => {
+						activeSnapshots--;
+						resolve(snapshot);
+					};
+				});
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const zeroDeadlineWait = tracked.waitForTreeExit(0);
+		const longerWait = tracked.waitForTreeExit(200);
+		expect(observerBudgets).toEqual([250]);
+		expect(activeSnapshots).toBe(1);
+		// The zero-deadline waiter stops joining without aborting the child-owned
+		// snapshot that the synchronously started longer waiter already shares.
+		expect(await zeroDeadlineWait).toBe(false);
+		expect(activeSnapshots).toBe(1);
+		resolveSnapshot("123468 Z+\n1 S\n");
+
+		expect(await longerWait).toBe(true);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toEqual([250]);
+		root.emit("close", 0, null);
+	});
+
+	it.each(["unavailable", "rejected"] as const)("promptly retries a shared Darwin observation that settles %s", async firstOutcome => {
+		const root = fakeChild(firstOutcome === "unavailable" ? 123_469 : 123_470);
+		const targetPgid = root.pid!;
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		let settleFirst!: () => void;
+		let resolveRetry!: (snapshot: string) => void;
+		let announceRetry!: () => void;
+		const retryStarted = new Promise<void>(resolve => { announceRetry = resolve; });
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: budgetMs => {
+				observerBudgets.push(budgetMs);
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				return new Promise<string>((resolve, reject) => {
+					if (observerBudgets.length === 1) {
+						settleFirst = () => {
+							activeSnapshots--;
+							if (firstOutcome === "rejected") reject(new Error("ps aborted"));
+							else resolve("\n");
+						};
+						return;
+					}
+					resolveRetry = snapshot => {
+						activeSnapshots--;
+						resolve(snapshot);
+					};
+					announceRetry();
+				});
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const zeroDeadlineWait = tracked.waitForTreeExit(0);
+		const longerWait = tracked.waitForTreeExit(200);
+		expect(observerBudgets).toEqual([250]);
+		expect(await zeroDeadlineWait).toBe(false);
+		settleFirst();
+		await retryStarted;
+
+		// The longer waiter retries as soon as the exact shared slot clears. It
+		// does not wait for a 250 ms deadline edge, overlap the old observer, or
+		// claim completion before the retry supplies authoritative evidence.
+		expect(observerBudgets).toEqual([250, 250]);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(activeSnapshots).toBe(1);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(observerBudgets).toEqual([250, 250]);
+		resolveRetry(`${targetPgid} Z\n`);
+
+		expect(await longerWait).toBe(true);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toEqual([250, 250]);
+		root.emit("close", 0, null);
+	});
+
 	it("clears a settled unavailable Darwin observation so a later waiter can retry", async () => {
 		const root = fakeChild(123_467);
 		let snapshotCalls = 0;
