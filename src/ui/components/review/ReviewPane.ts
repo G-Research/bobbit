@@ -462,6 +462,7 @@ export class ReviewPane extends LitElement {
                 type="button"
                 role="tab"
                 aria-selected=${file.fileId === activeFile?.fileId ? "true" : "false"}
+                data-review-file-id=${file.fileId}
                 class="review-tab ${file.fileId === activeFile?.fileId ? "review-tab--active" : ""}"
                 @click=${() => this._switchFile(review.reviewId, file.fileId)}
                 title=${file.title}
@@ -510,6 +511,7 @@ export class ReviewPane extends LitElement {
                   role="menuitem"
                   class="review-tab-overflow-item ${file.fileId === activeFile?.fileId ? "review-tab--active" : ""}"
                   data-active=${file.fileId === activeFile?.fileId ? "true" : "false"}
+                  data-review-file-id=${file.fileId}
                   @click=${() => this._switchFile(review.reviewId, file.fileId)}
                 >
                   <span class="review-tab-label">${file.title}</span>

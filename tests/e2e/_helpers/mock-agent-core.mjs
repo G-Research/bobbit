@@ -237,10 +237,10 @@ export class MockAgentCore {
 	/** Override the event emitter (used by child-process mode). */
 	setEventEmitter(fn) { this._onEvent = fn; }
 
-	/** Arm a named deterministic barrier. Safe to call repeatedly. */
+	/** Arm a named deterministic barrier. Safe to call repeatedly or after release. */
 	armBarrier(name) {
 		let barrier = this._barriers.get(name);
-		if (!barrier) {
+		if (!barrier || barrier.released) {
 			barrier = { entered: deferred(), release: deferred(), armed: true, released: false };
 			this._barriers.set(name, barrier);
 		} else {
@@ -1209,12 +1209,16 @@ export class MockAgentCore {
 				}
 			}
 			const completed = await this._handleAutoCompaction(3, reason);
+			const terminalIdleBoundary = `${delivery.kind || "prompt"}:${delivery.occurrence}:after-terminal-idle`;
 			if (!completed || !this.currentAbortController || this.currentAbortController.signal.aborted) {
 				this._reliableOverflowRetryActive = false;
 				this.currentAbortController = null;
 				this.emit({ type: "agent_end", willRetry: false });
 				this.emit({ type: "agent_settled" });
 				this.emit({ type: "session_status", status: "idle" });
+				if (this._barriers.get(terminalIdleBoundary)?.armed === true) {
+					await this._crossBarrier(terminalIdleBoundary, { ...delivery, reason });
+				}
 				return;
 			}
 			if (reason === "overflow") {
@@ -1228,6 +1232,9 @@ export class MockAgentCore {
 			this.emit({ type: "agent_settled" });
 			this._reliableOverflowRetryActive = false;
 			this.emit({ type: "session_status", status: "idle" });
+			if (this._barriers.get(terminalIdleBoundary)?.armed === true) {
+				await this._crossBarrier(terminalIdleBoundary, { ...delivery, reason });
+			}
 			return;
 		}
 
@@ -3036,6 +3043,7 @@ export class MockAgentCore {
 			}
 		};
 
+		const intermediateBoundary = `proposal-stream:${type}:intermediate-delta`;
 		for (let i = 0; i < n; i++) {
 			if (this.currentAbortController?.signal.aborted) return;
 			const input = buildInput(i);
@@ -3046,6 +3054,17 @@ export class MockAgentCore {
 				],
 			};
 			this.emit({ type: "message_update", message: assistantMsg });
+			// An explicitly armed browser fixture holds the first valid,
+			// non-terminal delta immediately. Unarmed streams retain their normal
+			// cadence and do not allocate an observational barrier.
+			if (i === 0 && n > 1 && this._barriers.get(intermediateBoundary)?.armed === true) {
+				await this._crossBarrier(intermediateBoundary, {
+					proposalType: type,
+					toolId,
+					delta: i + 1,
+					total: n,
+				});
+			}
 			await this.tick(intervalMs);
 		}
 
@@ -3577,6 +3596,10 @@ export class MockAgentCore {
 				await this._crossBarrier(`abort:${occurrence}:after-agent-end`, commandReceipt);
 				this.emit({ type: "agent_settled" });
 				this.emit({ type: "session_status", status: "idle" });
+				const terminalIdleBoundary = `abort:${occurrence}:after-terminal-idle`;
+				if (this._barriers.get(terminalIdleBoundary)?.armed === true) {
+					await this._crossBarrier(terminalIdleBoundary, commandReceipt);
+				}
 				return { success: true };
 			}
 

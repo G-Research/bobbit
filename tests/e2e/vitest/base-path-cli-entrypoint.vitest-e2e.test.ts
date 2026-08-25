@@ -8,6 +8,7 @@ import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 
 import { awaitableRm, pollUntil } from "../_helpers/test-utils/cleanup.js";
+import { isConnectionRefusal } from "../_helpers/test-utils/gateway-readiness.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const CLI_ENTRY = join(REPO_ROOT, "src", "server", "cli.ts");
@@ -68,6 +69,73 @@ function close(server: Server): Promise<void> {
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface GatewayHealth {
+	status: "ok";
+	localhost?: boolean;
+	[key: string]: unknown;
+}
+
+type GatewayReadiness =
+	| { kind: "ready"; health: GatewayHealth }
+	| { kind: "failed"; message: string };
+
+function childExitDescription(child: ChildProcess): string | null {
+	if (child.exitCode === null && child.signalCode === null) return null;
+	return String(child.exitCode ?? child.signalCode);
+}
+
+async function waitForHealthyGateway(
+	child: ChildProcess,
+	url: string,
+	output: () => string,
+	label: string,
+): Promise<GatewayHealth> {
+	const result = await pollUntil<GatewayReadiness | null>(async () => {
+		const exit = childExitDescription(child);
+		if (exit !== null) {
+			return { kind: "failed", message: `${label} exited before becoming healthy (${exit})\n${output()}` };
+		}
+
+		let response: Response;
+		let bodyText: string;
+		try {
+			response = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(5_000) });
+			bodyText = await response.text();
+		} catch (error) {
+			const requestExit = childExitDescription(child);
+			if (requestExit !== null) {
+				return { kind: "failed", message: `${label} exited before becoming healthy (${requestExit})\n${output()}` };
+			}
+			if (isConnectionRefusal(error)) return null;
+			return { kind: "failed", message: `${label} health request failed unexpectedly: ${String(error)}` };
+		}
+
+		const responseExit = childExitDescription(child);
+		if (responseExit !== null) {
+			return { kind: "failed", message: `${label} exited while reporting health (${responseExit})\n${output()}` };
+		}
+		if (response.status === 503) return null;
+		if (response.status !== 200) {
+			return { kind: "failed", message: `${label} health returned unexpected ${response.status}: ${bodyText}` };
+		}
+
+		let health: GatewayHealth;
+		try {
+			health = JSON.parse(bodyText) as GatewayHealth;
+		} catch {
+			return { kind: "failed", message: `${label} health returned invalid JSON: ${bodyText}` };
+		}
+		if (health.status !== "ok") {
+			return { kind: "failed", message: `${label} health returned 200 without status ok: ${bodyText}` };
+		}
+		return { kind: "ready", health };
+	}, { timeoutMs: 5_000, intervalMs: 50, label: `${label} authoritative health` });
+
+	if (result === null) throw new Error(`${label} health polling returned without a readiness result`);
+	if (result.kind === "failed") throw new Error(result.message);
+	return result.health;
 }
 
 describe("executable CLI root and nested base-path smoke", () => {
@@ -242,9 +310,8 @@ describe("executable CLI root and nested base-path smoke", () => {
 			expect(output).not.toMatch(/token grants full shell access/i);
 			expect(output).not.toContain("?token=");
 
-			const health = await fetch(`${persistedUrl}/api/health`, { signal: AbortSignal.timeout(5_000) });
-			expect(health.status).toBe(200);
-			expect(await health.json()).toMatchObject({ status: "ok", localhost: true });
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "mounted CLI");
+			expect(health).toMatchObject({ status: "ok", localhost: true });
 
 			const shell = await fetch(`${persistedUrl}/`, { signal: AbortSignal.timeout(5_000) });
 			expect(shell.status).toBe(200);
@@ -333,9 +400,8 @@ describe("executable CLI root and nested base-path smoke", () => {
 			expect(parsed.pathname).toBe("/");
 			expect(readFileSync(gatewayUrlPath, "utf8")).toBe(persistedUrl);
 
-			const health = await fetch(`${persistedUrl}/api/health`, { signal: AbortSignal.timeout(5_000) });
-			expect(health.status).toBe(200);
-			expect(await health.json()).toMatchObject({ status: "ok", localhost: true });
+			const health = await waitForHealthyGateway(child, persistedUrl, () => output, "symlinked CLI");
+			expect(health).toMatchObject({ status: "ok", localhost: true });
 
 			const shutdown = await fetch(`${persistedUrl}/api/shutdown`, {
 				method: "POST",

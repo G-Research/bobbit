@@ -215,7 +215,7 @@ function buildPosixWrapper(
 }
 
 /** Default production spawner: POSIX wrapper, Node helper, or docker setsid wrapper. */
-function defaultSpawn(command: string, cwd: string, containerId: string | undefined, paths: BgPaths): ChildProcess {
+export const defaultBgProcessSpawn: SpawnFn = (command, cwd, containerId, paths) => {
 	if (containerId) {
 		const wrapper = buildDockerWrapper(command, paths);
 		return spawn("docker", ["exec", "-w", cwd, containerId, "setsid", "/bin/sh", "-c", wrapper], {
@@ -253,7 +253,7 @@ function defaultSpawn(command: string, cwd: string, containerId: string | undefi
 		detached: true,
 		env: process.env,
 	});
-}
+};
 
 // ── Tailer abstraction ───────────────────────────────────────────────────────
 
@@ -547,7 +547,7 @@ export class BgProcessManager {
 
 	constructor(
 		clientsProvider: (sessionId: string) => Set<WebSocket> | undefined,
-		spawnFn: SpawnFn = defaultSpawn,
+		spawnFn: SpawnFn = defaultBgProcessSpawn,
 		storeProvider: (sessionId: string) => BgProcessStore | undefined = () => undefined,
 		tailerFactory: TailerFactory = defaultTailerFactory,
 		env: BgEnv = defaultEnv,

@@ -9,20 +9,20 @@
  *   D — recursive `.vitest-e2e.test.ts` files under `tests/e2e/vitest/` (isolated Vitest)
  *
  * The gateway/worktree/browser-heavy A → B → C chain remains serialized. The
- * isolated one-worker D group runs concurrently. Every group is fenced from
- * external services; Docker-dependent paths are reported rather than omitted.
+ * isolated one-worker D group runs concurrently. Set BOBBIT_V2_RETRY_FREE=1 to
+ * qualify Groups B/C/D without retries. Every group is fenced from external
+ * services; Docker-dependent paths are reported rather than omitted. CPU is
+ * sampled over this process subtree and reported per group and in total.
  *
  * Usage:
  *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
-import { finished } from "node:stream/promises";
-import { execFileSync } from "node:child_process";
 import { createCpuSampler } from "./assert-budget.mjs";
 import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
@@ -125,16 +125,25 @@ export function classifyCanonicalE2E() {
 	};
 }
 
-function dockerAvailable() {
+const SANDBOX_IMAGE = "bobbit-agent";
+
+function probeDocker(args, timeoutMs) {
 	try {
-		execFileSync("docker", ["ps"], { stdio: "pipe", timeout: 15_000 });
+		execFileSync("docker", args, { stdio: "ignore", timeout: timeoutMs });
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-/** Specs known to require a live Docker daemon (their Docker paths skip otherwise). */
+/** Classify the exact local capability required by image-backed sandbox tests. */
+export function detectDockerSandboxCapability(probe = probeDocker) {
+	if (!probe(["info"], 5_000)) return "daemon-unavailable";
+	if (!probe(["image", "inspect", SANDBOX_IMAGE], 10_000)) return "image-unavailable";
+	return "available";
+}
+
+/** Specs whose Docker-backed cases require the local sandbox image. */
 const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 
 function npmCmd() {
@@ -151,80 +160,38 @@ export function resolveE2ePlaywrightWorkers(env = process.env) {
 	return Math.min(4, requested);
 }
 
-function run(command, args, { env = {}, label, shell, captureOutputDir } = {}) {
+function run(command, args, { env = {}, label, shell } = {}) {
 	const startWall = performance.now();
 	return new Promise((resolveRun) => {
-		const capturedOutput = captureOutputDir ? {
-			dir: captureOutputDir,
-			stdout: join(captureOutputDir, "stdout.log"),
-			stderr: join(captureOutputDir, "stderr.log"),
-		} : undefined;
-		if (capturedOutput) mkdirSync(capturedOutput.dir, { recursive: true });
-
 		const child = spawn(command, args, {
 			cwd: REPO_ROOT,
 			// `env` is already built from the coordinator's sanitized environment.
 			// Re-merging process.env here would restore deleted credentials/cache roots.
 			env: composeE2EChildEnvironment(env),
-			stdio: capturedOutput ? ["inherit", "pipe", "pipe"] : "inherit",
+			stdio: "inherit",
 			// Default: shell on Windows (needed for npm.cmd/npx.cmd). Callers that
 			// spawn an absolute exe with spaces (e.g. process.execPath under
 			// "C:\Program Files\…") pass shell:false so the path isn't word-split.
 			shell: shell ?? (process.platform === "win32"),
 		});
 
-		// Pipe continuously into live spool files. Node's pipe backpressure keeps
-		// both child streams drained without an exec-style maxBuffer, while the
-		// files retain failure output if the outer gate kills this runner before
-		// the deterministic replay point.
-		let captureCompletion = Promise.resolve(null);
-		if (capturedOutput) {
-			const stdoutSink = createWriteStream(capturedOutput.stdout);
-			const stderrSink = createWriteStream(capturedOutput.stderr);
-			child.stdout.pipe(stdoutSink);
-			child.stderr.pipe(stderrSink);
-			captureCompletion = Promise.all([finished(stdoutSink), finished(stderrSink)])
-				.then(() => null, (error) => error);
-		}
-
 		let settled = false;
-		const finishRun = async (result) => {
+		const finishRun = (result) => {
 			if (settled) return;
 			settled = true;
-			const captureError = await captureCompletion;
 			resolveRun({
 				...result,
 				label,
-				code: captureError ? 1 : result.code,
-				error: result.error ?? (captureError ? `Failed to capture output: ${captureError}` : undefined),
 				wallMs: Math.round(performance.now() - startWall),
-				capturedOutput,
 			});
 		};
 		child.on("close", (code, signal) => {
-			void finishRun({ code: code ?? (signal ? 1 : 0), signal });
+			finishRun({ code: code ?? (signal ? 1 : 0), signal });
 		});
 		child.on("error", (error) => {
-			void finishRun({ code: 1, error: String(error) });
+			finishRun({ code: 1, error: String(error) });
 		});
 	});
-}
-
-async function replayCapturedOutput(capturedOutput) {
-	if (!capturedOutput) return;
-	// Replay raw Buffers so ANSI/control bytes are unchanged. Stream the files
-	// instead of reading them wholesale, and honor destination backpressure so
-	// replay completes before the deterministic Group D summary.
-	for (const [file, destination] of [
-		[capturedOutput.stdout, process.stdout],
-		[capturedOutput.stderr, process.stderr],
-	]) {
-		for await (const chunk of createReadStream(file)) {
-			if (!destination.write(chunk)) await once(destination, "drain");
-		}
-	}
-	// Keep the live spool intact if replay throws so failure detail is not lost.
-	rmSync(capturedOutput.dir, { recursive: true, force: true });
 }
 
 // Fail-closed external-service env for ALL groups (belt-and-braces on top of the
@@ -308,7 +275,7 @@ export function groupDVitestArgs(env = process.env) {
 	];
 }
 
-async function runGroupD(specs, { captureOutputDir, coordinatorEnv } = {}) {
+async function runGroupD(specs, { coordinatorEnv } = {}) {
 	if (specs.length === 0) return { label: "D/vitest", code: 0, wallMs: 0, skipped: true };
 	const vitestCli = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
 	return run(process.execPath, [vitestCli, ...groupDVitestArgs(coordinatorEnv)], {
@@ -319,7 +286,6 @@ async function runGroupD(specs, { captureOutputDir, coordinatorEnv } = {}) {
 		}),
 		label: "D/vitest-real-fidelity",
 		shell: false,
-		captureOutputDir,
 	});
 }
 
@@ -334,10 +300,14 @@ async function main() {
 
 	console.log(`[e2e-v2] canonical real-fidelity tier — A(node)=${A.length} B(api)=${B.length} C(browser)=${C.length} D(vitest)=${D.length}`);
 
-	const docker = dockerAvailable();
+	const dockerCapability = detectDockerSandboxCapability();
+	const docker = dockerCapability === "available";
 	const dockerGatedPresent = DOCKER_GATED.filter((f) => B.includes(f));
 	if (dockerGatedPresent.length) {
-		console.log(`[e2e-v2] Docker ${docker ? "AVAILABLE" : "UNAVAILABLE"} — Docker-gated specs: ${dockerGatedPresent.join(", ")}${docker ? "" : " (Docker paths will self-skip; non-Docker paths still run)"}`);
+		const unavailableReason = dockerCapability === "daemon-unavailable"
+			? "daemon unreachable"
+			: "bobbit-agent image missing";
+		console.log(`[e2e-v2] Docker sandbox ${docker ? "AVAILABLE" : `UNAVAILABLE (${unavailableReason})`} — image-backed specs: ${dockerGatedPresent.join(", ")}${docker ? "" : " (Docker paths will self-skip; non-Docker paths still run)"}`);
 	}
 
 	const paths = createE2ERunPaths(coordinatorTempDirectory());
@@ -347,7 +317,6 @@ async function main() {
 
 	const only = args.group;
 	const results = [];
-	let groupDResult;
 	if (only) {
 		// Focused group runs retain their existing single-group behavior.
 		if (only === "A") results.push(await runGroupA(A, coordinatorEnv));
@@ -355,36 +324,18 @@ async function main() {
 		if (only === "C") results.push(await runGroupC(C, coordinatorEnv));
 		if (only === "D") results.push(await runGroupD(D, { coordinatorEnv }));
 	} else {
-		// Keep the gateway/worktree/browser-heavy A → B → C lane serialized. Group D
-		// is independent: it owns a separate Vitest coordinator and PID-scoped cache,
-		// uses isolated temp fixture roots, and is already capped at one worker. Start
-		// only that bounded lane concurrently, then await it so cleanup, reporting,
-		// failure aggregation, and result ordering remain unchanged.
-		console.log("[e2e-v2] schedule: A → B → C; isolated single-worker D runs concurrently");
-		const groupDCaptureDir = join(paths.root, "e2e-captures", "group-d");
-		console.log(`[e2e-v2] Group D output captured live at ${groupDCaptureDir} until replay`);
-		const groupDRun = runGroupD(D, { captureOutputDir: groupDCaptureDir, coordinatorEnv });
+		// Hosted runners cannot reliably absorb a second process-heavy coordinator
+		// alongside the gateway/worktree/browser phases. Preserve each group's own
+		// retries and worker controls, but do not overlap their process trees.
+		console.log("[e2e-v2] schedule: A → B → C → D (serialized)");
 		results.push(await runGroupA(A, coordinatorEnv));
 		results.push(await runGroupB(B, coordinatorEnv));
 		results.push(await runGroupC(C, coordinatorEnv));
-		groupDResult = await groupDRun;
-		results.push(groupDResult);
+		results.push(await runGroupD(D, { coordinatorEnv }));
 	}
 
-	// Stop execution sampling as soon as both lanes settle, matching the original
-	// CPU/wall accounting. Deferred log replay is reporting overhead, not test work.
 	const sample = sampler.stop();
 	const wallMs = Math.round(performance.now() - startWall);
-
-	if (groupDResult?.capturedOutput) {
-		console.log("[e2e-v2] replaying captured Group D output");
-		try {
-			await replayCapturedOutput(groupDResult.capturedOutput);
-		} catch (error) {
-			groupDResult.code = 1;
-			groupDResult.error ??= `Failed to replay captured output: ${error}; retained at ${groupDResult.capturedOutput.dir}`;
-		}
-	}
 
 	const samplePath = defaultPerformanceReportPath(paths);
 	mkdirSync(dirname(samplePath), { recursive: true });
@@ -396,6 +347,7 @@ async function main() {
 		wallSec: +(wallMs / 1000).toFixed(1),
 		peakProcesses: sample.peakProcesses,
 		docker,
+		dockerCapability,
 		groups: results.map((r) => ({ label: r.label, code: r.code, wallSec: +(r.wallMs / 1000).toFixed(1), skipped: !!r.skipped, error: r.error })),
 		counts: { A: A.length, B: B.length, C: C.length, D: D.length },
 		createdAt: new Date().toISOString(),

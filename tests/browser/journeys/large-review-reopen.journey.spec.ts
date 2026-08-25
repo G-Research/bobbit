@@ -69,23 +69,61 @@ async function expectLargeReviewSelected(page: Page): Promise<void> {
 	await expect(largeReviewPane(page)).toBeVisible({ timeout: 20_000 });
 }
 
-async function selectLastFile(page: Page): Promise<void> {
-	const files = largeReviewFiles();
+async function selectFileById(page: Page, sessionId: string, fileId: string): Promise<void> {
 	const pane = largeReviewPane(page);
+	const target = pane.locator(`button[data-review-file-id="${fileId}"]`);
 	const more = pane.getByRole("button", { name: "More tabs", exact: true });
-	await expect(more).toBeVisible();
-	await more.click();
-	const menu = page.getByRole("menu", { name: `More files in ${LARGE_REVIEW_TITLE}`, exact: true });
-	await expect(menu).toBeVisible();
-	await menu.getByRole("menuitem", { name: files.at(-1)!.title, exact: true }).click();
-	await expect(pane.locator("review-document").getByText(files.at(-1)!.marker, { exact: true })).toBeVisible({ timeout: 20_000 });
+
+	// Layout owns whether a file is a visible tab or an overflow item. Follow the
+	// opaque identity through either rendering and use the actual UI control.
+	await expect.poll(async () => {
+		if (await target.isVisible().catch(() => false)) {
+			await target.click();
+			return true;
+		}
+		if (await more.isVisible().catch(() => false)
+			&& await more.getAttribute("aria-expanded") !== "true") {
+			await more.click();
+		}
+		return false;
+	}, {
+		timeout: 20_000,
+		message: `${REGRESSION}: file ${fileId} must render as a visible tab or overflow item`,
+	}).toBe(true);
+	await expectActiveLargeReviewFile(page, sessionId, fileId);
 }
 
-async function expectActiveLargeReviewFile(page: Page, fileId: string): Promise<void> {
-	await expect.poll(() => selectedReviewModel(page).then((model) => model.activeFileId), {
+async function expectActiveLargeReviewFile(page: Page, sessionId: string, fileId: string): Promise<void> {
+	await expect.poll(() => workspaceReviewSource(page, sessionId).then((tab) => tab?.state?.activeFileId), {
 		timeout: 20_000,
-		message: `${REGRESSION}: selected file identity must settle to ${fileId}`,
+		message: `${REGRESSION}: authoritative workspace file identity must settle to ${fileId}`,
 	}).toBe(fileId);
+}
+
+async function clickAndWaitForManualOpen(
+	page: Page,
+	sessionId: string,
+	receipt: { toolCallId: string; payloadId: string; reviewId: string; hash: string },
+	action: () => Promise<unknown>,
+	expectedStatus: number,
+): Promise<void> {
+	const pathname = `/api/sessions/${encodeURIComponent(sessionId)}/review-payloads/${encodeURIComponent(receipt.payloadId)}/open`;
+	const responsePromise = page.waitForResponse((response) => {
+		const request = response.request();
+		const url = new URL(response.url());
+		if (request.method() !== "POST" || url.pathname !== pathname || url.searchParams.get("toolCallId") !== receipt.toolCallId) return false;
+		try {
+			const body = request.postDataJSON() as Record<string, unknown>;
+			return body.toolCallId === receipt.toolCallId
+				&& body.payloadId === receipt.payloadId
+				&& body.reviewId === receipt.reviewId
+				&& body.hash === receipt.hash;
+		} catch {
+			return false;
+		}
+	});
+	const [response] = await Promise.all([responsePromise, action()]);
+	expect(response.status(), `${REGRESSION}: exact manual-open mutation returned ${await response.text().catch(() => "")}`).toBe(expectedStatus);
 }
 
 async function closeLargeReview(page: Page): Promise<void> {
@@ -149,7 +187,7 @@ test.describe("Journey: durable large review recovery", () => {
 			await expectLargeReviewSelected(page);
 			await expect(page.locator(REVIEW_TABS)).toHaveCount(3);
 			await expectSiblingReviews(page);
-			let model = await selectedReviewModel(page);
+			const model = await selectedReviewModel(page);
 			expect(model).toMatchObject({
 				reviewId: LARGE_REVIEW_ID,
 				title: LARGE_REVIEW_TITLE,
@@ -171,19 +209,17 @@ test.describe("Journey: durable large review recovery", () => {
 			// Exercise both an ordinary visible file and an overflow file. The model
 			// assertion above proves the duplicate-title entries retained distinct IDs.
 			const pane = largeReviewPane(page);
-			await pane.getByRole("tab", { name: files[2].title, exact: true }).click();
+			await selectFileById(page, sessionId, files[2].fileId);
 			await expect(pane.locator("review-document").getByText(files[2].marker, { exact: true })).toBeVisible();
-			await selectLastFile(page);
-			model = await selectedReviewModel(page);
-			expect(model.activeFileId).toBe(files.at(-1)!.fileId);
+			await selectFileById(page, sessionId, files.at(-1)!.fileId);
+			await expect(pane.locator("review-document").getByText(files.at(-1)!.marker, { exact: true })).toBeVisible({ timeout: 20_000 });
 
 			// The selected opaque file identity is stored on the authoritative tab,
 			// not inferred from title or lost when the 485 KiB body is re-fetched.
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToSession(page, sessionId);
 			await expectLargeReviewSelected(page);
-			model = await selectedReviewModel(page);
-			expect(model.activeFileId).toBe(files.at(-1)!.fileId);
+			await expectActiveLargeReviewFile(page, sessionId, files.at(-1)!.fileId);
 			await expect(page.locator("review-document").getByText(files.at(-1)!.marker, { exact: true })).toBeVisible({ timeout: 30_000 });
 
 			await closeLargeReview(page);
@@ -199,16 +235,22 @@ test.describe("Journey: durable large review recovery", () => {
 			await expect(restoredButton).toHaveText("Re-open review", { timeout: 30_000 });
 			await restoredButton.focus();
 			await expect(restoredButton).toBeFocused();
-			await restoredButton.press("Enter");
+			await clickAndWaitForManualOpen(page, sessionId, receipt, () => restoredButton.press("Enter"), 200);
 			await expectLargeReviewSelected(page);
-			await expectActiveLargeReviewFile(page, files.at(-1)!.fileId);
+			await expectActiveLargeReviewFile(page, sessionId, files.at(-1)!.fileId);
 			await expect(page.locator(REVIEW_TABS)).toHaveCount(3);
 
 			// A retryable server failure must be sanitized, leave no partial primary,
 			// retain both siblings and the recovery action, then succeed exactly once.
 			await closeLargeReview(page);
 			injectedFailure = await failNextReviewOpen(page);
-			await restoredCard.getByTestId(REVIEW_RENDERER_SELECTORS.button).click();
+			await clickAndWaitForManualOpen(
+				page,
+				sessionId,
+				receipt,
+				() => restoredCard.getByTestId(REVIEW_RENDERER_SELECTORS.button).click(),
+				503,
+			);
 			await expect.poll(() => injectedFailure!.attempts(), { timeout: 20_000 }).toBe(1);
 			const alert = restoredCard.getByTestId(REVIEW_RENDERER_SELECTORS.error);
 			await expect(alert).toBeVisible({ timeout: 20_000 });
@@ -225,9 +267,9 @@ test.describe("Journey: durable large review recovery", () => {
 
 			await injectedFailure.remove();
 			injectedFailure = undefined;
-			await retry.click();
+			await clickAndWaitForManualOpen(page, sessionId, receipt, () => retry.click(), 200);
 			await expectLargeReviewSelected(page);
-			await expectActiveLargeReviewFile(page, files.at(-1)!.fileId);
+			await expectActiveLargeReviewFile(page, sessionId, files.at(-1)!.fileId);
 			await expect(restoredCard.getByTestId(REVIEW_RENDERER_SELECTORS.error)).toHaveCount(0);
 			await expect(restoredCard.getByTestId(REVIEW_RENDERER_SELECTORS.status)).toHaveText("Review opened.");
 			await expect(retry).toHaveText("Re-open review");

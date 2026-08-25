@@ -1,4 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
+import { promisify } from "node:util";
 import type { PersistedSession } from "./session-store.js";
+
+const nativeRealpath = promisify(fs.realpath.native) as (value: string) => Promise<string>;
 
 export interface WorktreeReferenceRecord {
 	id?: string;
@@ -10,6 +15,11 @@ export interface WorktreeReferenceRecord {
 
 export interface WorktreeReferenceOptions {
 	ignoreSessionId?: string;
+}
+
+export interface AsyncWorktreeReferenceOptions extends WorktreeReferenceOptions {
+	/** Narrow test seam; production uses the asynchronous native realpath API. */
+	realpathNative?: (value: string) => Promise<string>;
 }
 
 /** Normalize host worktree paths for cross-platform ownership checks. */
@@ -80,6 +90,69 @@ export function isWorktreePathReferencedByLiveSession(
 			for (const wt of Object.values(session.repoWorktrees)) {
 				if (normalizeWorktreeHostPath(wt) === candidate) return true;
 			}
+		}
+	}
+	return false;
+}
+
+function hasExplicitAliasEvidence(value: string): boolean {
+	const segments = value.split(/[\\/]+/);
+	return segments.includes(".")
+		|| segments.includes("..")
+		|| (process.platform === "win32" && segments.some(segment => /~\d/i.test(segment)));
+}
+
+async function cleanupIdentity(
+	value: string,
+	realpathNative: (value: string) => Promise<string>,
+): Promise<string | undefined> {
+	const resolved = path.resolve(value);
+	if (!hasExplicitAliasEvidence(value)) return normalizeWorktreeHostPath(resolved);
+	try {
+		return normalizeWorktreeHostPath(await realpathNative(resolved));
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Alias-aware reference check for destructive cleanup boundaries only.
+ *
+ * Ordinary coordinates retain the synchronous guard's zero-I/O behavior. When
+ * an explicit dot-segment or Windows 8.3 alias needs native proof, an unreadable
+ * identity is treated as referenced so cleanup fails closed.
+ */
+export async function isWorktreePathReferencedByLiveSessionForCleanup(
+	candidatePath: string | undefined,
+	sessions: Iterable<WorktreeReferenceRecord | PersistedSession>,
+	options?: AsyncWorktreeReferenceOptions,
+): Promise<boolean> {
+	const records = liveRecords(sessions, options);
+	if (!candidatePath || records.length === 0) return false;
+	if (isWorktreePathReferencedByLiveSession(candidatePath, records)) return true;
+
+	const references: Array<{ path: string; descendant: boolean }> = [];
+	for (const session of records) {
+		if (session.worktreePath) references.push({ path: session.worktreePath, descendant: false });
+		if (session.cwd) references.push({ path: session.cwd, descendant: true });
+		for (const worktreePath of Object.values(session.repoWorktrees ?? {})) {
+			if (worktreePath) references.push({ path: worktreePath, descendant: false });
+		}
+	}
+
+	const candidateHasAlias = hasExplicitAliasEvidence(candidatePath);
+	const resolveNative = options?.realpathNative ?? nativeRealpath;
+	let candidateIdentity: string | undefined;
+	for (const reference of references) {
+		if (!candidateHasAlias && !hasExplicitAliasEvidence(reference.path)) continue;
+		candidateIdentity ??= await cleanupIdentity(candidatePath, resolveNative);
+		if (!candidateIdentity) return true;
+		const referenceIdentity = await cleanupIdentity(reference.path, resolveNative);
+		if (!referenceIdentity) return true;
+		if (reference.descendant
+			? isSameOrChildPath(candidateIdentity, referenceIdentity)
+			: candidateIdentity === referenceIdentity) {
+			return true;
 		}
 	}
 	return false;

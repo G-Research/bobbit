@@ -185,7 +185,10 @@ test.describe("published Bobbit package dependency security", () => {
 			expectSuccess(lockConfig);
 			expect(lockConfig.stdout.trim(), "clean consumer must use npm's normal package-lock=true default").toBe("true");
 
-			const install = await runNpm(["install", tarballPath], consumerDir, 10 * 60_000, consumerEnv);
+			// The workflow's preceding npm ci populates the inherited npm cache from
+			// this repository's authoritative lockfile. Offline mode makes a missing
+			// artifact fail immediately instead of falling back to the public registry.
+			const install = await runNpm(["install", "--offline", tarballPath], consumerDir, 10 * 60_000, consumerEnv);
 			expectSuccess(install);
 			expect(existsSync(join(consumerDir, "package-lock.json")), "consumer install must create its own lockfile").toBe(true);
 			expect(

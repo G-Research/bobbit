@@ -81,6 +81,17 @@ function expectMutatingToolsWithheld(gateway: any, sessionId: string, phase: str
 	}
 }
 
+async function authoritativePromptCount(gateway: any, sessionId: string, text: string): Promise<number> {
+	const response = await gateway.sessionManager.getSession(sessionId)?.rpcClient.getMessages();
+	const messages = response?.data?.messages ?? response?.data;
+	if (!Array.isArray(messages)) return 0;
+	return messages.filter((message: any) =>
+		message?.role === "user"
+		&& Array.isArray(message.content)
+		&& message.content.some((block: any) => block?.type === "text" && block.text === text)
+	).length;
+}
+
 test.describe("active read-only delegate interaction", () => {
 	test("stays live and promptable through navigation, reload, reconnect, and authoritative refresh", async ({ page, gateway }) => {
 		test.slow();
@@ -100,6 +111,14 @@ test.describe("active read-only delegate interaction", () => {
 			const composer = page.locator("agent-interface message-editor textarea").first();
 			await composer.fill(followUp);
 			await composer.press("Enter");
+			await expect.poll(
+				() => authoritativePromptCount(gateway, delegateId!, followUp),
+				{
+					timeout: 10_000,
+					message: "direct follow-up must reach the delegate transport, not only optimistic UI",
+				},
+			).toBe(1);
+			await waitForSessionStatus(delegateId, "idle");
 			await expect(page.getByText(followUp, { exact: true }).first(), "accepted follow-up should render in the transcript")
 				.toBeVisible({ timeout: 10_000 });
 			await expect.poll(async () => {

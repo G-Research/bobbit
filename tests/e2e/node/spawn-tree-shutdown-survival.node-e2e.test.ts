@@ -54,14 +54,6 @@ function longRunningTracked(): SpawnLifecycle {
 	return { t, ready, closed };
 }
 
-async function assertExactRejection(promise: Promise<void>, message: string): Promise<void> {
-	await assert.rejects(promise, error => {
-		assert.ok(error instanceof Error);
-		assert.equal(error.message, message);
-		return true;
-	});
-}
-
 async function establishSurvivalOwnership(lifecycle: SpawnLifecycle): Promise<void> {
 	// Wait for the platform's observable ownership acknowledgement before
 	// allowing a shutdown-survival request to take effect.
@@ -99,13 +91,14 @@ describe("verification-harness shutdown — survival contract", () => {
 		await lifecycle.closed;
 	});
 
-	it("kills POSIX survival-marked children before sentinel readiness", async () => {
+	it("kills POSIX survival-marked children when shutdown is requested immediately", async () => {
 		if (process.platform === "win32") return;
 		const lifecycle = longRunningTracked();
 		lifecycle.t.markSurvival();
 		killAllTracked("SIGKILL");
 		await lifecycle.closed;
-		await assertExactRejection(lifecycle.ready, "POSIX sentinel ownership was not established");
+		// FD 3 can acknowledge from the pipe buffer before close, so ownershipReady
+		// may resolve or reject. The subscribed close and dead PID are authoritative.
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "handshake-pending survival child must be reaped");
 	});
 
@@ -125,12 +118,8 @@ describe("verification-harness shutdown — survival contract", () => {
 		const lifecycle = longRunningTracked();
 		killAllTracked("SIGKILL");
 		await lifecycle.closed;
-		await assertExactRejection(
-			lifecycle.ready,
-			process.platform === "win32"
-				? "Windows Job ownership was not established"
-				: "POSIX sentinel ownership was not established",
-		);
+		// Immediate shutdown races ownership acknowledgement by design. Child close
+		// and liveness, not promise settlement direction, prove cleanup completed.
 		assert.equal(isAlive(lifecycle.t.child.pid), false, "non-survival child should be reaped by shutdown");
 	});
 

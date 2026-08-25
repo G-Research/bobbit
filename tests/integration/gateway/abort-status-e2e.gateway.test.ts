@@ -473,6 +473,10 @@ test.describe("Abort status E2E", () => {
 		const oldBridge = live.rpcClient;
 		const originalStop = oldBridge.stop.bind(oldBridge);
 		let stopCalls = 0;
+		let processExitSignals = 0;
+		oldBridge.onEvent((event: { type?: string }) => {
+			if (event.type === "process_exit") processExitSignals += 1;
+		});
 		oldBridge.abort = () => new Promise<void>(() => {});
 		oldBridge.stop = async () => {
 			stopCalls += 1;
@@ -502,6 +506,25 @@ test.describe("Abort status E2E", () => {
 		expect(manager.getSession(sessionId)?.status).toBe("terminated");
 		expect(oldBridge.running).toBe(false);
 		expect(stopCalls).toBe(1);
+		expect(processExitSignals).toBe(1);
 		expect(manager.getPersistedSession(sessionId)).toMatchObject(retiredTuple);
+
+		// The failed replacement leaves an intentionally terminated capsule. Its
+		// already-observed process exit must cancel metadata retry authority so real
+		// DELETE cleanup can join the admitted store lane rather than wait for another
+		// clock advance. Cleanup remains idempotent at the stopped bridge boundary.
+		const deleteResponse = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+		const deleteBody = await deleteResponse.json();
+		expect(deleteResponse.status, JSON.stringify(deleteBody)).toBe(200);
+		expect(deleteBody).toMatchObject({ ok: true });
+		expect(stopCalls).toBe(2);
+		expect(processExitSignals).toBe(1);
+		expect(live.pendingMetadataPersist).toBeUndefined();
+		expect(manager.getSession(sessionId)).toBeUndefined();
+		expect(manager.getArchivedSession(sessionId)).toMatchObject({
+			...retiredTuple,
+			archived: true,
+		});
+		sessionId = "";
 	});
 });

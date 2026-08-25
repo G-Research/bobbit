@@ -26,7 +26,7 @@ test("node --test-timeout fails and names a hung test file while the reporter re
 	const hangFixture = join(dir, "hangs.test.mjs");
 	const okFixture = join(dir, "passes.test.mjs");
 	const heartbeatFile = join(dir, "heartbeat.json");
-	writeFileSync(hangFixture, 'import { test } from "node:test";\ntest("never settles", async () => { await new Promise(() => {}); });\n');
+	writeFileSync(hangFixture, 'import { test } from "node:test";\ntest("never settles", async () => { await new Promise(() => { setInterval(() => {}, 1000); }); });\n');
 	writeFileSync(okFixture, 'import { test } from "node:test";\ntest("settles fast", () => {});\n');
 
 	// This test itself runs under `node --test`, which sets NODE_TEST_CONTEXT for

@@ -4,7 +4,7 @@
  * reload, the unavailable reason, and the unchanged new-worktree control path.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GatewayInfo } from "../../e2e/_helpers/gateway-harness.js";
 import {
@@ -186,13 +186,41 @@ async function restartGateway(gateway: GatewayInfo): Promise<void> {
 	}, { timeout: 20_000, intervals: [250], message: "gateway should be healthy after restart" }).toBe(true);
 }
 
-async function waitForGoalOwnedBy(sessionId: string): Promise<any> {
-	let found: any;
-	await expect.poll(async () => {
-		found = (await liveGoals()).find((goal) => goal.worktreeOwnerSessionId === sessionId || goal.teamLeadSessionId === sessionId);
-		return found?.id || "";
-	}, { timeout: 40_000, intervals: [100, 250, 500] }).not.toBe("");
-	return found;
+async function waitForPromotionOwnership(
+	gateway: GatewayInfo,
+	sessionId: string,
+	projectId: string,
+	goalId: string,
+): Promise<{ persisted: any; live: any; team: any }> {
+	let persisted: any;
+	let live: any;
+	let team: any;
+	await expect.poll(() => {
+		persisted = gateway.sessionManager?.getPersistedSession(sessionId);
+		live = gateway.sessionManager?.getSession(sessionId);
+		team = gateway.teamManager?.getTeamState(goalId);
+		return {
+			persisted: {
+				projectId: persisted?.projectId,
+				goalId: persisted?.goalId,
+				teamGoalId: persisted?.teamGoalId,
+			},
+			live: {
+				projectId: live?.projectId,
+				goalId: live?.goalId,
+				teamGoalId: live?.teamGoalId,
+			},
+			team: {
+				goalId: team?.goalId,
+				teamLeadSessionId: team?.teamLeadSessionId,
+			},
+		};
+	}, { message: "promotion acceptance must converge the durable session, live runtime, and team owner" }).toEqual({
+		persisted: { projectId, goalId, teamGoalId: goalId },
+		live: { projectId, goalId, teamGoalId: goalId },
+		team: { goalId, teamLeadSessionId: sessionId },
+	});
+	return { persisted, live, team };
 }
 
 async function openSeededProposal(page: import("@playwright/test").Page, sessionId: string): Promise<void> {
@@ -210,6 +238,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			const before = await sessionRecord(source.id);
 			expect(before.branch).toBeTruthy();
 			expect(before.worktreePath).toBeTruthy();
+			const canonicalWorktreePath = realpathSync.native(before.worktreePath);
 			const transcriptBefore = transcriptSnapshot(gateway, source.id);
 			const goalTitle = `Promote browser session ${Date.now()}`;
 			const kickoff = promotionKickoff(goalTitle);
@@ -260,11 +289,28 @@ test.describe("Journey: Current-session goal promotion", () => {
 			await qaCheckbox.click();
 			await expect(qaCheckbox).not.toBeChecked();
 
+			const acceptPath = `/api/sessions/${encodeURIComponent(source.id)}/proposal/goal/accept`;
+			const acceptUrl = new URL(`${gateway.baseURL}${acceptPath}`);
+			const acceptResponsePromise = page.waitForResponse((response) => {
+				const candidate = new URL(response.url());
+				return response.request().method() === "POST"
+					&& candidate.origin === acceptUrl.origin
+					&& candidate.pathname === acceptUrl.pathname
+					&& candidate.search === "";
+			});
 			await page.locator("[data-testid='proposal-primary-submit'] button").click();
-			const goal = await waitForGoalOwnedBy(source.id);
+			const acceptResponse = await acceptResponsePromise;
+			expect(acceptResponse.status(), await acceptResponse.text()).toBe(201);
+			const acceptedBody = await acceptResponse.json() as any;
+			const goal = acceptedBody?.goal ?? acceptedBody;
+			expect(goal?.id, "promotion acceptance must return the adopted goal id").toEqual(expect.any(String));
 			goalId = goal.id;
+			const ownership = await waitForPromotionOwnership(gateway, source.id, source.projectId, goal.id);
 			const after = await sessionRecord(source.id);
 			const team = await teamRecord(goal.id);
+			expect(ownership.persisted.id).toBe(source.id);
+			expect(ownership.live.id).toBe(source.id);
+			expect(ownership.team.agents ?? []).toHaveLength(0);
 			expect(after.id).toBe(source.id);
 			expect(after.branch).toBe(before.branch);
 			expect(after.worktreePath).toBe(before.worktreePath);
@@ -272,6 +318,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(after.teamGoalId).toBe(goal.id);
 			expect(team.teamLeadSessionId).toBe(source.id);
 			expect(team.agents ?? []).toHaveLength(0);
+			expect(goal.worktreeOwnerSessionId).toBe(source.id);
 			expect(goal.state).toBe("in-progress");
 			expect(goal.title).toBe(goalTitle);
 			expect(goal.enabledOptionalSteps ?? []).toEqual([]);
@@ -353,13 +400,20 @@ test.describe("Journey: Current-session goal promotion", () => {
 
 			const purged = await apiFetch(`/api/sessions/${source.id}?purge=true`, { method: "DELETE" });
 			expect(purged.status, await purged.clone().text()).toBe(200);
-			await expect.poll(async () => (await apiFetch(`/api/sessions/${source.id}?include=archived`)).status, {
-				timeout: 20_000,
-				message: "final source purge must remove the archived session row",
-			}).toBe(404);
+			// The purge route awaits its lifecycle owner through worktree cleanup and
+			// durable store removal. Its response is the completion barrier: polling
+			// after 200 would hide a leaked checkout as a timing race.
+			expect({
+				persistedSession: gateway.sessionManager?.getPersistedSession(source.id),
+				sessionStatus: (await apiFetch(`/api/sessions/${source.id}?include=archived`)).status,
+				canonicalWorktreeExists: existsSync(canonicalWorktreePath),
+			}, "final source purge must remove both authoritative session state and the canonical adopted worktree").toEqual({
+				persistedSession: undefined,
+				sessionStatus: 404,
+				canonicalWorktreeExists: false,
+			});
 			expect((await apiFetch(`/api/goals/${goal.id}/team`)).status).toBe(404);
 			expect((await responseJson(await apiFetch(`/api/goals/${goal.id}`))).archived).toBe(true);
-			expect(existsSync(before.worktreePath), "final purge may clean the unreferenced adopted worktree").toBe(false);
 		} finally {
 			if (goalId) await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" }).catch(() => {});
 			await removeGitSession(source);

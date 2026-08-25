@@ -192,11 +192,11 @@ export class MaintenanceGitModel {
 	addWorktree(root: string, worktreePath: string, branch: string): void {
 		const repo = this.requireRootRepo(root);
 		const worktreeKey = key(worktreePath);
+		const resolvedWorktreePath = resolve(worktreePath);
 		repo.branches.add(branch);
-		repo.worktrees.set(worktreeKey, { path: resolve(worktreePath), branch });
+		repo.worktrees.set(worktreeKey, { path: resolvedWorktreePath, branch });
 		globalState().worktreeOwners.set(worktreeKey, key(repo.root));
-		mkdirSync(worktreePath, { recursive: true });
-		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${resolve(repo.root, ".git", "worktrees", worktreeKey.split("/").pop() ?? "worktree")}\n`);
+		this.materializeLinkedWorktree(repo.root, resolvedWorktreePath);
 	}
 
 	removeWorktree(root: string, worktreePath: string): void {
@@ -207,6 +207,7 @@ export class MaintenanceGitModel {
 		const worktreeKey = key(worktreePath);
 		if (worktreeKey !== repoKey) repo.worktrees.delete(worktreeKey);
 		if (state.worktreeOwners.get(worktreeKey) === repoKey) state.worktreeOwners.delete(worktreeKey);
+		if (worktreeKey !== repoKey) rmSync(this.linkedWorktreeAdminPath(repo.root, worktreePath), { recursive: true, force: true });
 		this.deferRemovePath(worktreePath, this.owner);
 	}
 
@@ -221,7 +222,7 @@ export class MaintenanceGitModel {
 		if (!repo) throw commandError(args, cwd);
 		const [command, ...rest] = args;
 
-		if (command === "worktree" && rest[0] === "list") return this.worktreeList(repo);
+		if (command === "worktree" && rest[0] === "list") return this.worktreeList(repo, rest.includes("-z"));
 		if (command === "worktree" && rest[0] === "add") {
 			const branchIndex = rest.indexOf("-b");
 			const branch = branchIndex >= 0 ? rest[branchIndex + 1] : undefined;
@@ -330,14 +331,30 @@ export class MaintenanceGitModel {
 			if (!existsSync(candidate.path)) continue;
 			mkdirSync(resolve(worktreePath, ".."), { recursive: true });
 			renameSync(candidate.path, worktreePath);
+			this.materializeLinkedWorktree(repoRoot, worktreePath);
 			if (deferred.length === 0) state.deferredPaths.delete(worktreeKey);
 			return;
 		}
-		mkdirSync(worktreePath, { recursive: true });
-		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${resolve(repoRoot, ".git", "worktrees", worktreeKey.split("/").pop() ?? "worktree")}\n`);
+		this.materializeLinkedWorktree(repoRoot, worktreePath);
 	}
 
-	private worktreeList(repo: RepoState): string {
+	private linkedWorktreeAdminPath(repoRoot: string, worktreePath: string): string {
+		return resolve(repoRoot, ".git", "worktrees", basename(resolve(worktreePath)) || "worktree");
+	}
+
+	private materializeLinkedWorktree(repoRoot: string, worktreePath: string): void {
+		const adminPath = this.linkedWorktreeAdminPath(repoRoot, worktreePath);
+		mkdirSync(adminPath, { recursive: true });
+		mkdirSync(worktreePath, { recursive: true });
+		writeFileSync(resolve(worktreePath, ".git"), `gitdir: ${adminPath}\n`);
+	}
+
+	private worktreeList(repo: RepoState, nulDelimited: boolean): string {
+		if (nulDelimited) {
+			return [...repo.worktrees.values()]
+				.map(worktree => `worktree ${worktree.path}\0HEAD 0000000000000000000000000000000000000001\0branch refs/heads/${worktree.branch}\0\0`)
+				.join("");
+		}
 		return [...repo.worktrees.values()]
 			.map(worktree => `worktree ${worktree.path}\nHEAD 0000000000000000000000000000000000000001\nbranch refs/heads/${worktree.branch}\n`)
 			.join("\n");
