@@ -162,7 +162,7 @@ test.describe("Journey: Review Commenting", () => {
 // Ported from image-attach-roundtrip.spec.ts (audit: misc GAP / BR60): an
 // attached image renders a tile in the composer and, after ECHO_IMAGE_BLOCK,
 // in the sent user message.
-test.describe("Journey: Image Attachment", () => {
+test.describe("Journey: File Attachments", () => {
 	const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 	test("attached image renders a tile in the composer and in the sent message", async ({ page }) => {
 		test.setTimeout(90_000);
@@ -182,6 +182,30 @@ test.describe("Journey: Image Attachment", () => {
 			await textarea.fill("ECHO_IMAGE_BLOCK here is a picture");
 			await textarea.press("Enter");
 			// The sent user message must render the image attachment tile.
+			await expect(page.locator("user-message attachment-tile").first()).toBeVisible({ timeout: 15_000 });
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+
+	test("picker accepts an arbitrary file extension and sends its attachment tile", async ({ page }) => {
+		test.setTimeout(90_000);
+		const sessionId = await createSession();
+		try {
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle"),
+			]);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			const input = page.locator('message-editor input[type="file"]');
+			await expect(input).toHaveAttribute("accept", "");
+			await input.setInputFiles({
+				name: "notes.custom", mimeType: "application/x-custom", buffer: Buffer.from("ARBITRARY_ATTACHMENT_MARKER"),
+			});
+			await expect(page.locator("message-editor attachment-tile").first()).toBeVisible({ timeout: 10_000 });
+			const textarea = page.locator("message-editor textarea").first();
+			await textarea.fill("What have I attached?");
+			await textarea.press("Enter");
 			await expect(page.locator("user-message attachment-tile").first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});

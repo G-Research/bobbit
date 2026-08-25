@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/uploaded-attachment-context.test.ts",
+      "reason": "Pure unit coverage for model-facing context generated from uploaded text and arbitrary binary document metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/attachment-upload.test.ts",
+      "reason": "Real composer and browser File coverage for unrestricted file selection, unknown-extension UTF-8 extraction, and arbitrary binary attachment retention.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/context-capacity.journey.spec.ts",
       "reason": "Browser journey covering capacity-scaled context meter zones, dual and single-limit popover fallbacks, themed track visibility, post-compaction stale state, responsive geometry, reload, and cleanup.",
       "execution": {

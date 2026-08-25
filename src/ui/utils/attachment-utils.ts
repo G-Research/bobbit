@@ -160,7 +160,9 @@ export async function loadAttachment(
 		};
 	}
 
-	// Check if it's a text document
+	// Check if it's a text document. MIME metadata is frequently absent for
+	// source, log, and extensionless files, so unknown files also get a bounded
+	// UTF-8/text-likeness probe instead of relying on an extension allowlist.
 	const textExtensions = [
 		".txt",
 		".md",
@@ -175,12 +177,13 @@ export async function loadAttachment(
 		".yml",
 		".yaml",
 	];
-	const isTextFile =
+	const declaredText =
 		mimeType.startsWith("text/") || textExtensions.some((ext) => detectedFileName.toLowerCase().endsWith(ext));
+	const extractedText = declaredText
+		? new TextDecoder().decode(arrayBuffer)
+		: decodeLikelyUtf8Text(arrayBuffer);
 
-	if (isTextFile) {
-		const decoder = new TextDecoder();
-		const text = decoder.decode(arrayBuffer);
+	if (extractedText !== undefined) {
 		return {
 			id,
 			type: "document",
@@ -188,11 +191,39 @@ export async function loadAttachment(
 			mimeType: mimeType.startsWith("text/") ? mimeType : "text/plain",
 			size,
 			content: base64Content,
-			extractedText: text,
+			extractedText,
 		};
 	}
 
-	throw new Error(`Unsupported file type: ${mimeType}`);
+	// Arbitrary binary files are valid attachments too. They retain their exact
+	// bytes and metadata even when Bobbit cannot produce a text preview.
+	return {
+		id,
+		type: "document",
+		fileName: detectedFileName,
+		mimeType,
+		size,
+		content: base64Content,
+	};
+}
+
+function decodeLikelyUtf8Text(arrayBuffer: ArrayBuffer): string | undefined {
+	let text: string;
+	try {
+		text = new TextDecoder("utf-8", { fatal: true }).decode(arrayBuffer);
+	} catch {
+		return undefined;
+	}
+	if (text.includes("\0")) return undefined;
+
+	let controlCharacters = 0;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) controlCharacters++;
+	}
+	return controlCharacters > Math.max(1, Math.floor(text.length * 0.01))
+		? undefined
+		: text;
 }
 
 async function processPdf(

@@ -7704,7 +7704,8 @@ export class SessionManager {
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
 		const hasSkillExpansions = !!opts?.skillExpansions?.length;
 		const hasFileMentions = !!opts?.fileMentions?.length;
-		if (hasSkillExpansions || hasFileMentions) {
+		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
+		if (hasSkillExpansions || hasFileMentions || hasModelTextOverride) {
 			const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 				ts: this.clock.now(),
 				modelText: dispatchText,
@@ -7925,7 +7926,8 @@ export class SessionManager {
 				const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
 				const hasSkillExpansions = !!opts?.skillExpansions?.length;
 				const hasFileMentions = !!opts?.fileMentions?.length;
-				if (hasSkillExpansions || hasFileMentions) {
+				const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
+				if (hasSkillExpansions || hasFileMentions || hasModelTextOverride) {
 					const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
 						ts: this.clock.now(),
 						modelText: dispatchText,
@@ -8086,7 +8088,8 @@ export class SessionManager {
 		}
 		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
 		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
-		if (hasSkillExpansions || hasFileMentions) {
+		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
+		if (hasSkillExpansions || hasFileMentions || hasModelTextOverride) {
 			const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
 				ts: this.clock.now(),
 				modelText: dispatchText,
