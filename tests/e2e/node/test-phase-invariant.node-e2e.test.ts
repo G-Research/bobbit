@@ -1,197 +1,194 @@
-/**
- * Phase-invariant guard.
- *
- * Pins the rule that makes the test suite a "no-brainer": every test file under
- * tests/ — except those under tests/manual-integration/** — MUST run in exactly
- * one workflow phase, either `unit` or `e2e`. A file run by no phase (an
- * orphan) silently lets failures slip onto master; a file claimed by two phases
- * wastes wall time and confuses ownership. Both fail this test.
- *
- * The four membership buckets, derived from the SAME sources the runners use so
- * the guard can never drift from reality:
- *   1. unit · node     — scripts/test-phase-config.mjs NODE_UNIT_GLOBS, run by
- *                        scripts/run-unit.mjs (`tsx --test`).
- *   2. unit · browser  — tests/playwright.config.ts (file:// browser fixtures),
- *                        run by scripts/run-unit.mjs (`playwright test`).
- *   3. e2e             — playwright-e2e.config.ts (union across its projects),
- *                        run by the e2e gate.
- *   4. manual-integration — the path tests/manual-integration/**. This is the
- *                        ONLY gate-exempt path. The guard NEVER consults
- *                        playwright-manual.config.ts: a spec that some other
- *                        config happens to collect but that does not physically
- *                        live under tests/manual-integration/ is treated as an
- *                        orphan, by design (no "fourth bucket" loophole).
- *
- * Also pins the runner-convention purity that keeps the two unit runners
- * separable: *.test.ts ⇒ node:test, *.spec.ts ⇒ Playwright. A *.test.ts must
- * never import @playwright/test and a *.spec.ts must never import node:test.
- *
- * See docs/design/test-phase-invariant.md and docs/testing-strategy.md.
- */
-import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { NODE_UNIT_GLOBS } from "../../../scripts/test-phase-config.mjs";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+	TEST_LAYOUT,
+	classifyTestPath,
+	isRunnableTestPath,
+	patternsFor,
+	validateTestInventory,
+} from "../../../scripts/testing/layout-policy.mjs";
+import { classifyCanonicalE2E } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
 
-const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(TESTS_DIR, "..", "..", "..");
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(HERE, "..", "..", "..");
+const TESTS_ROOT = join(REPO_ROOT, "tests");
 
-// Playwright's built-in default when a project sets neither testMatch nor a
-// config-level testMatch. We only have .ts test files, so this subset suffices.
-const PLAYWRIGHT_DEFAULT_MATCH = ["**/*.spec.ts", "**/*.test.ts"];
+interface Convention {
+	semantic: string;
+	lane: string;
+	runner: string;
+	directory: string;
+	suffix: string;
+	pattern: string;
+}
 
-/** Convert a Playwright/minimatch-style glob to an anchored RegExp. */
-function globToRegExp(glob: string): RegExp {
-	let re = "^";
-	for (let i = 0; i < glob.length; i++) {
-		const c = glob[i];
-		if (c === "*") {
-			if (glob[i + 1] === "*") {
-				i++; // consume the second '*'
-				if (glob[i + 1] === "/") {
-					i++; // consume the trailing '/'
-					re += "(?:.*/)?"; // '**/' ⇒ zero or more path segments
-				} else {
-					re += ".*"; // bare '**' ⇒ anything, including '/'
-				}
-			} else {
-				re += "[^/]*"; // single '*' ⇒ anything but '/'
-			}
-		} else if (c === "?") {
-			re += "[^/]";
-		} else if (".+^${}()|[]\\/".includes(c)) {
-			re += "\\" + c;
-		} else {
-			re += c;
+function repoPath(path: string): string {
+	return relative(REPO_ROOT, path).replace(/\\/g, "/");
+}
+
+function collectFiles(directory: string, output: string[] = []): string[] {
+	if (!existsSync(directory)) return output;
+	for (const entry of readdirSync(directory, { withFileTypes: true })) {
+		const path = join(directory, entry.name);
+		if (entry.isDirectory()) collectFiles(path, output);
+		else if (entry.isFile()) output.push(repoPath(path));
+	}
+	return output;
+}
+
+function sorted(values: Iterable<string>): string[] {
+	return [...values].sort();
+}
+
+function readRepoFile(path: string): string {
+	return readFileSync(join(REPO_ROOT, ...path.split("/")), "utf8");
+}
+
+function ownedPaths(files: readonly string[], owner: string): string[] {
+	const ownerPatterns = new Set(patternsFor(owner));
+	return files.filter((path) => {
+		const classification = classifyTestPath(path);
+		return classification !== null && ownerPatterns.has(classification.pattern);
+	}).sort();
+}
+
+function assertPairwiseDisjoint(namedSets: Readonly<Record<string, readonly string[]>>): void {
+	const claims = new Map<string, string[]>();
+	for (const [name, paths] of Object.entries(namedSets)) {
+		for (const path of paths) {
+			const owners = claims.get(path) ?? [];
+			owners.push(name);
+			claims.set(path, owners);
 		}
 	}
-	return new RegExp(re + "$");
+	const overlaps = [...claims]
+		.filter(([, owners]) => owners.length > 1)
+		.map(([path, owners]) => `${path}: ${owners.join(", ")}`);
+	assert.deepEqual(overlaps, [], `Lane discovery must be pairwise disjoint:\n${overlaps.join("\n")}`);
 }
 
-const toPosix = (p: string) => p.replace(/\\/g, "/");
-const asArray = <T,>(v: T | T[] | undefined): T[] =>
-	v === undefined ? [] : Array.isArray(v) ? v : [v];
+const runnableFiles = collectFiles(TESTS_ROOT).filter(isRunnableTestPath).sort();
+const conventions = TEST_LAYOUT as readonly Convention[];
 
-/** Recursively collect every *.test.ts / *.spec.ts under `dir`. */
-function collectTestFiles(dir: string, out: string[] = []): string[] {
-	for (const name of readdirSync(dir)) {
-		const full = join(dir, name);
-		const st = statSync(full);
-		if (st.isDirectory()) {
-			if (name === "node_modules") continue;
-			collectTestFiles(full, out);
-		} else if (st.isFile() && /\.(test|spec)\.ts$/.test(name)) {
-			out.push(full);
-		}
-	}
-	return out;
-}
-
-interface ProjectLike {
-	testDir?: string;
-	testMatch?: string | string[];
-	testIgnore?: string | string[];
-}
-
-/**
- * Does a Playwright config (resolved relative to `configDir`) run `absFile`?
- * A file is run if ANY of the config's projects matches it (union semantics):
- * matched by a testMatch glob and not excluded by a testIgnore glob, with all
- * globs evaluated against the path relative to that project's testDir.
- */
-function configRuns(config: any, configDir: string, absFile: string): boolean {
-	const projects: ProjectLike[] = Array.isArray(config?.projects) && config.projects.length > 0
-		? config.projects
-		: [config]; // configs without projects are themselves a single "project"
-	const filePosix = toPosix(absFile);
-	for (const project of projects) {
-		const testDirAbs = resolve(configDir, project.testDir ?? config.testDir ?? ".");
-		const rel = toPosix(relative(testDirAbs, absFile));
-		if (rel.startsWith("../")) continue; // file is outside this project's testDir
-		const matchGlobs = asArray(project.testMatch ?? config.testMatch).length > 0
-			? asArray(project.testMatch ?? config.testMatch)
-			: PLAYWRIGHT_DEFAULT_MATCH;
-		const ignoreGlobs = asArray(project.testIgnore ?? config.testIgnore);
-		const matched = matchGlobs.some((g) => globToRegExp(g).test(rel));
-		if (!matched) continue;
-		const ignored = ignoreGlobs.some((g) => globToRegExp(g).test(rel));
-		if (!ignored) return true;
-		void filePosix;
-	}
-	return false;
-}
-
-async function importDefault(absPath: string): Promise<any> {
-	// Bound any import-time side effects (e.g. the e2e config's cache bootstrap)
-	// to a throwaway temp cache dir so importing for introspection is inert.
-	if (!process.env.PWTEST_CACHE_DIR) {
-		process.env.PWTEST_CACHE_DIR = join(REPO_ROOT, "node_modules", ".cache", "phase-invariant-pwtest");
-	}
-	const mod = await import(pathToFileURL(absPath).href);
-	return mod.default ?? mod;
-}
-
-test("every test file is claimed by exactly one phase (no orphans, no double-claims)", async () => {
-	const unitConfigPath = join(TESTS_DIR, "playwright.config.ts");
-	const e2eConfigPath = join(REPO_ROOT, "playwright-e2e.config.ts");
-	const unitConfig = await importDefault(unitConfigPath);
-	const e2eConfig = await importDefault(e2eConfigPath);
-
-	const nodeUnitRes = NODE_UNIT_GLOBS.map((g: string) => globToRegExp(g));
-
-	const files = collectTestFiles(TESTS_DIR);
-	const problems: string[] = [];
-
-	for (const abs of files) {
-		const repoRel = toPosix(relative(REPO_ROOT, abs));
-		const buckets: string[] = [];
-
-		if (nodeUnitRes.some((re) => re.test(repoRel))) buckets.push("unit·node");
-		if (configRuns(unitConfig, TESTS_DIR, abs)) buckets.push("unit·browser");
-		if (configRuns(e2eConfig, REPO_ROOT, abs)) buckets.push("e2e");
-		if (repoRel.startsWith("tests/manual-integration/")) buckets.push("manual-integration");
-
-		if (buckets.length === 0) {
-			problems.push(`ORPHAN: ${repoRel} — runs in no phase. Add it to a unit/e2e config or move it under tests/manual-integration/.`);
-		} else if (buckets.length > 1) {
-			problems.push(`DOUBLE-CLAIM: ${repoRel} — claimed by [${buckets.join(", ")}]. A file must run in exactly one phase.`);
-		}
+test("the canonical policy is the only owner of every runnable test", () => {
+	assert.ok(Object.isFrozen(TEST_LAYOUT), "the convention table must be immutable");
+	for (const convention of conventions) {
+		assert.ok(Object.isFrozen(convention), `${convention.semantic} convention must be immutable`);
+		assert.deepEqual(
+			Object.keys(convention).sort(),
+			["directory", "lane", "pattern", "runner", "semantic", "suffix"],
+			`${convention.semantic} must contain a convention, never a per-file registry record`,
+		);
 	}
 
+	const diagnostics = validateTestInventory(runnableFiles, (path: string) => readRepoFile(path));
+	assert.deepEqual(
+		diagnostics,
+		[],
+		`Canonical test ownership violations:\n${diagnostics.map(({ path, message }: { path: string; message: string }) => `${path}: ${message}`).join("\n")}`,
+	);
+
+	const unowned = runnableFiles.filter((path) => classifyTestPath(path) === null);
+	assert.deepEqual(unowned, [], `Every runnable test must have exactly one semantic owner:\n${unowned.join("\n")}`);
 	assert.equal(
-		problems.length,
-		0,
-		`Phase-invariant violations (${problems.length}):\n${problems.join("\n")}`,
+		new Set(conventions.map(({ pattern }) => pattern)).size,
+		conventions.length,
+		"each semantic owner must have one unique discovery pattern",
 	);
 });
 
-test("runner-convention purity: .test.ts ⇒ node:test, .spec.ts ⇒ Playwright", () => {
-	const files = collectTestFiles(TESTS_DIR);
-	// Detect an ACTUAL import/require STATEMENT of a module specifier — not a
-	// bare substring. We require the specifier to be immediately preceded by an
-	// import keyword (`import "x"`), a re-export/binding `from`, or `require(`.
-	// A module name appearing as a plain string argument elsewhere in a file
-	// (e.g. this guard passes "@playwright/test" / "node:test" as arguments)
-	// is NOT preceded by any of those, so the guard can — and does — scan itself.
-	const importsModule = (src: string, spec: string): boolean => {
-		const q = spec.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(`(?:\\bfrom|\\bimport|\\brequire\\(\\s*)\\s*["']${q}["']`).test(src);
-	};
+test("unit, browser, E2E, and manual inventories are complete and pairwise disjoint", () => {
+	const lanes = Object.fromEntries(
+		["unit", "browser", "e2e", "manual"].map((lane) => [lane, ownedPaths(runnableFiles, lane)]),
+	) as Record<string, string[]>;
 
-	const offenders: string[] = [];
-	for (const abs of files) {
-		const name = abs.split(/[\\/]/).pop()!;
-		const src = readFileSync(abs, "utf8");
-		const repoRel = toPosix(relative(REPO_ROOT, abs));
-		if (name.endsWith(".test.ts") && importsModule(src, "@playwright/test")) {
-			offenders.push(`${repoRel} — a *.test.ts must use node:test, not @playwright/test (rename to *.spec.ts or switch runner).`);
-		}
-		if (name.endsWith(".spec.ts") && importsModule(src, "node:test")) {
-			offenders.push(`${repoRel} — a *.spec.ts must use Playwright, not node:test (rename to *.test.ts or switch runner).`);
-		}
+	assertPairwiseDisjoint(lanes);
+	assert.deepEqual(
+		sorted(Object.values(lanes).flat()),
+		runnableFiles,
+		"the complete lane union must equal the canonical runnable inventory",
+	);
+
+	const supportRunnables = collectFiles(join(TESTS_ROOT, "support")).filter(isRunnableTestPath);
+	assert.deepEqual(supportRunnables, [], "tests/support is non-runnable and cannot own a lane test");
+});
+
+test("runner discovery keeps browser, API E2E, browser-fidelity E2E, and manual tests disjoint", () => {
+	const normalBrowser = [
+		...ownedPaths(runnableFiles, "browser-fixture"),
+		...ownedPaths(runnableFiles, "browser-journey"),
+	].sort();
+	assert.deepEqual(normalBrowser, ownedPaths(runnableFiles, "browser"));
+
+	const e2eGroups = classifyCanonicalE2E();
+	assert.deepEqual(e2eGroups.A, ownedPaths(runnableFiles, "node-e2e"));
+	assert.deepEqual(e2eGroups.B, ownedPaths(runnableFiles, "api-e2e"));
+	assert.deepEqual(e2eGroups.C, ownedPaths(runnableFiles, "browser-e2e"));
+	assert.deepEqual(e2eGroups.D, ownedPaths(runnableFiles, "vitest-e2e"));
+	assertPairwiseDisjoint({ normalBrowser, ...e2eGroups, manual: ownedPaths(runnableFiles, "manual") });
+
+	for (const path of normalBrowser) assert.equal(classifyTestPath(path)?.lane, "browser");
+	for (const path of e2eGroups.B) assert.equal(classifyTestPath(path)?.semantic, "api-e2e");
+	for (const path of e2eGroups.C) assert.equal(classifyTestPath(path)?.semantic, "browser-e2e");
+	for (const path of ownedPaths(runnableFiles, "manual")) assert.equal(classifyTestPath(path)?.lane, "manual");
+
+	const vitestConfig = readRepoFile("vitest.config.ts");
+	for (const pattern of [...patternsFor("unit"), ...patternsFor("vitest-e2e")]) {
+		assert.ok(vitestConfig.includes(JSON.stringify(pattern)), `Vitest config must discover ${pattern}`);
 	}
 
-	assert.deepEqual(offenders, [], `Runner-convention violations:\n${offenders.join("\n")}`);
+	const browserConfig = readRepoFile("playwright-v2.config.ts");
+	assert.match(browserConfig, /testDir:\s*"\.\/tests\/browser"/);
+	assert.match(browserConfig, /"fixtures\/\*\*\/\*\.fixture\.spec\.ts"/);
+	assert.match(browserConfig, /"journeys\/\*\*\/\*\.journey\.spec\.ts"/);
+	assert.doesNotMatch(browserConfig, /\.api-e2e\.spec\.ts|\.browser-e2e\.spec\.ts|\.manual\.spec\.ts/);
+
+	const e2eConfig = readRepoFile("playwright-e2e.config.ts");
+	assert.match(e2eConfig, /testDir:\s*"\.\/tests\/e2e\/api"[\s\S]*?testMatch:\s*\["\*\*\/\*\.api-e2e\.spec\.ts"\]/);
+	assert.match(e2eConfig, /testDir:\s*"\.\/tests\/e2e\/browser"[\s\S]*?testMatch:\s*\["\*\*\/\*\.browser-e2e\.spec\.ts"\]/);
+	assert.doesNotMatch(e2eConfig, /\.fixture\.spec\.ts|\.journey\.spec\.ts|\.manual\.spec\.ts/);
+
+	const manualConfig = readRepoFile("playwright-manual.config.ts");
+	assert.match(manualConfig, /testDir:\s*"\.\/tests\/manual"/);
+	assert.match(manualConfig, /testMatch:\s*\["\*\*\/\*\.manual\.spec\.ts"\]/);
+	assert.doesNotMatch(manualConfig, /\.fixture\.spec\.ts|\.journey\.spec\.ts|\.api-e2e\.spec\.ts|\.browser-e2e\.spec\.ts/);
+
+	for (const source of [vitestConfig, browserConfig, e2eConfig, manualConfig, readRepoFile("scripts/testing-v2/run-e2e-v2.mjs")]) {
+		assert.doesNotMatch(source, /tests-map|affected-test/i, "runner discovery must not depend on a registry or impact graph");
+	}
+});
+
+test("public and CI lane commands run complete deterministic owners without a registry", () => {
+	const packageJson = JSON.parse(readRepoFile("package.json")) as { scripts: Record<string, string> };
+	const scripts = packageJson.scripts;
+	assert.equal(scripts["test:unit"], "npm run test:v2:core --");
+	assert.equal(scripts["test:v2:core"], "npm run test:layout && vitest run --config vitest.config.ts --silent=passed-only");
+	assert.equal(scripts["test:browser"], "npm run test:v2:browser --");
+	assert.equal(scripts["test:v2:browser"], "npm run test:layout && node scripts/testing-v2/run-browser-v2.mjs");
+	assert.equal(scripts["test:e2e"], "npm run test:e2e:v2");
+	assert.equal(scripts["test:e2e:v2"], "npm run test:layout && node scripts/testing-v2/ensure-dist.mjs && node scripts/testing-v2/run-e2e-v2.mjs");
+	assert.equal(scripts["test:manual"], "npm run test:layout && npm run build && npx playwright test --config playwright-manual.config.ts");
+	assert.equal(scripts.test, "npm run test:unit && npm run test:browser && npm run test:e2e");
+
+	const authoritativeCommands = [
+		scripts["test:v2:core"],
+		scripts["test:v2:browser"],
+		scripts["test:e2e:v2"],
+		scripts["test:manual"],
+		scripts.test,
+	].join("\n");
+	assert.doesNotMatch(authoritativeCommands, /tests-map|test:affected|--changed|--related/i);
+
+	const projectConfig = readRepoFile(".bobbit/config/project.yaml");
+	assert.match(projectConfig, /^\s*unit:\s+npm run test:unit\s*$/m);
+	assert.match(projectConfig, /^\s*browser:\s+npm run test:browser\s*$/m);
+	assert.match(projectConfig, /^\s*e2e:\s+npm run test:e2e\s*$/m);
+
+	const buildUnitWorkflow = readRepoFile(".github/workflows/build-unit-gate.yml");
+	assert.match(buildUnitWorkflow, /^\s*run:\s+npm run test:layout\s*$/m);
+	assert.match(buildUnitWorkflow, /^\s*run:\s+npm run test:unit\s*$/m);
+	assert.doesNotMatch(buildUnitWorkflow, /test:affected|--changed|tests-map/i);
 });
