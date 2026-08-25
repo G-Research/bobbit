@@ -68,13 +68,15 @@ test.describe("Preview panel retained full-stack smoke", () => {
 			return { status: r.status, text, body };
 		}, { baseUrl, sessionId });
 		expect(mountResp.status, `mount POST should succeed: ${mountResp.text}`).toBe(200);
-		const mount = mountResp.body as { entry?: string; mtime?: number; contentHash?: string } | null;
+		const mount = mountResp.body as { entry?: string; mtime?: number; contentHash?: string; artifactId?: string } | null;
 		const expectedEntry = String(mount?.entry || "");
 		const expectedMtime = Number(mount?.mtime || 0);
 		const expectedHash = String(mount?.contentHash || "");
+		const expectedArtifactId = String(mount?.artifactId || "");
 		expect(expectedEntry).toBe("report.html");
 		expect(expectedMtime).toBeGreaterThan(0);
 		expect(expectedHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(expectedArtifactId).toMatch(/^[A-Za-z0-9_-]{8}$/);
 
 		// Wait for the mount identity to arrive through the product readiness path
 		// (live SSE or its bootstrap frame) before asserting DOM URL shape.
@@ -86,6 +88,7 @@ test.describe("Preview panel retained full-stack smoke", () => {
 					entry: s.previewPanelEntry || "",
 					mtime: Number(s.previewPanelMtime) || 0,
 					contentHash: s.previewPanelContentHash || "",
+					artifactId: s.previewPanelArtifactId || "",
 				};
 			}),
 			{ timeout: 10_000, message: "preview mount should reach client state via SSE/bootstrap" },
@@ -94,12 +97,15 @@ test.describe("Preview panel retained full-stack smoke", () => {
 			entry: expectedEntry,
 			mtime: expectedMtime,
 			contentHash: expectedHash,
+			artifactId: expectedArtifactId,
 		});
 
 		const encodedSessionId = encodeURIComponent(sessionId);
+		const encodedArtifactId = encodeURIComponent(expectedArtifactId);
 		const encodedEntry = encodeURIComponent(expectedEntry);
-		const expectedSrc = `/preview/${encodedSessionId}/${encodedEntry}?mtime=${expectedMtime}`;
-		const previewSrcPattern = new RegExp(`^/preview/${escapeRegExp(encodedSessionId)}/${escapeRegExp(encodedEntry)}\\?mtime=\\d+$`);
+		const previewPath = `/preview/${encodedSessionId}/_artifact/${encodedArtifactId}/${encodedEntry}`;
+		const expectedSrc = `${baseUrl}${previewPath}?mtime=${expectedMtime}`;
+		const previewSrcPattern = new RegExp(`^${escapeRegExp(baseUrl)}${escapeRegExp(previewPath)}\\?mtime=\\d+$`);
 
 		// Wait for the iframe to mount with the exact server-confirmed cache-buster.
 		const iframe = page.locator(".goal-preview-panel iframe").first();
@@ -116,7 +122,7 @@ test.describe("Preview panel retained full-stack smoke", () => {
 
 		// Open-in-new-tab anchor renders with matching href.
 		const link = page.locator('a[title="Open preview in new tab"]').first();
-		const expectedHref = `/preview/${encodedSessionId}/${encodedEntry}`;
+		const expectedHref = `${baseUrl}${previewPath}`;
 		await expect(link).toBeVisible({ timeout: 10_000 });
 		await expect(link).toHaveAttribute("href", expectedHref);
 		const href = await link.getAttribute("href");
