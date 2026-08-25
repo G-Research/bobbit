@@ -7659,11 +7659,6 @@ export class SessionManager {
 	}>(sessionId: string, text: string, opts: T | undefined): Promise<T | undefined> {
 		if (!opts?.attachments?.length) return opts;
 
-		assertUploadedAttachmentSerializedSendWithinLimit({
-			text,
-			images: opts.images,
-			attachments: opts.attachments,
-		}, this.uploadedAttachmentSerializedSendLimitBytes);
 		const displayAttachments = sanitizeAttachmentDisplayMetadata(opts.attachments);
 		if (!displayAttachments) {
 			throw new UploadedAttachmentStoreError(
@@ -7679,14 +7674,11 @@ export class SessionManager {
 		let contextAttachments: unknown[] = [];
 		if (documents.length > 0) {
 			const stored = await persistUploadedAttachmentOccurrence(sessionId, occurrenceId, documents);
-			contextAttachments = stored.attachments.map((attachment, index) => {
-				const extractedText = (documents[index] as { extractedText?: unknown }).extractedText;
-				return {
-					type: "document",
-					...attachment,
-					...(typeof extractedText === "string" ? { extractedText } : {}),
-				};
-			});
+			contextAttachments = stored.attachments.map(({ trustedExtractedText, ...attachment }) => ({
+				type: "document",
+				...attachment,
+				...(trustedExtractedText === undefined ? {} : { extractedText: trustedExtractedText }),
+			}));
 		}
 
 		const baseModelText = synthesizeAttachmentText(
@@ -7797,6 +7789,9 @@ export class SessionManager {
 		promptId: string,
 	): AttachmentDisplayMetadata[] | undefined {
 		if (!carrier) return undefined;
+		if (session.pendingSkillExpansions?.some((entry) => entry.promptId === promptId)) {
+			return carrier.attachments?.map((attachment) => ({ ...attachment }));
+		}
 		this.appendPromptDisplayEnvelope(session, carrier.originalText, modelText, {
 			modelText,
 			attachments: carrier.attachments,
@@ -8054,6 +8049,15 @@ export class SessionManager {
 		// ownership can mutate. It also mints the accepted occurrence used by the
 		// immutable pointer when a legacy caller did not supply one. Trusted internal
 		// producers retain their established metadata-only attachment contract.
+		if ((opts?.attachments?.length || opts?.images?.length) && (opts.source ?? "user") === "user") {
+			assertUploadedAttachmentSerializedSendWithinLimit({
+				text,
+				intentId: opts.intentId,
+				images: opts.images,
+				attachments: opts.attachments ?? [],
+				suppressTitleGen: opts.suppressTitleGen,
+			}, this.uploadedAttachmentSerializedSendLimitBytes);
+		}
 		if (opts?.attachments?.length && (opts.source ?? "user") === "user") {
 			opts = await this.admitUploadedAttachments(sessionId, text, opts);
 		}
@@ -11196,7 +11200,18 @@ export class SessionManager {
 					canonical.lastPromptSource = savedPromptSource;
 					const durableId = this.ensureDurableRetryRow(canonical, acceptedRetry);
 					try {
-						await this.dispatchDirectPrompt(canonical, retryText, retryImages, retryAttachments, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+						await this.dispatchDirectPrompt(
+							canonical,
+							retryText,
+							retryImages,
+							retryAttachments,
+							false,
+							false,
+							"system",
+							BOBBIT_SYSTEM_AUTHOR,
+							durableId,
+							acceptedRetry.id,
+						);
 					} catch (err) {
 						canonical.lastTurnErrored = true;
 						canonical.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -11306,7 +11321,12 @@ export class SessionManager {
 			if (!recoveredVerifierRow && !consumedRecovered && isAuto) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
-			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
+			const retryDisplay = recoveredVerifierRow ? undefined : savedPromptDisplay;
+			const acceptedRetry = !isAuto
+				? this.enqueueDurableRetryRow(session, retryText, savedPromptImages, retryDisplay?.attachments)
+				: undefined;
+			const retryPromptId = acceptedRetry?.id ?? recoveredVerifierRow?.id ?? promptAttemptId("auto-retry");
+			const retryAttachments = this.appendRetryPromptDisplayEnvelope(session, retryDisplay, retryText, retryPromptId);
 			// Manual recovery belongs only to an explicit Retry's newly accepted
 			// durable row. Automatic retries keep their bounded budget, whether
 			// they consume ordinary recovered work or redrive a verifier's same row.
@@ -11314,14 +11334,14 @@ export class SessionManager {
 			await this.dispatchDirectPrompt(
 				session,
 				retryText,
-				session.lastPromptImages,
-				undefined,
+				savedPromptImages,
+				retryAttachments,
 				false,
 				false,
 				recoveredVerifierRow?.source ?? "system",
 				recoveredVerifierRow?.author ?? BOBBIT_SYSTEM_AUTHOR,
 				acceptedRetry?.id ?? recoveredVerifierRow?.id,
-				undefined,
+				retryPromptId,
 				recoveredVerifierRow?.streamingBehavior,
 				manualRecoveryRequired,
 				recoveredVerifierRow?.verifierOwned === true,

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { decodeLikelyUtf8Text } from "../../shared/uploaded-attachment-text.js";
 import { bobbitStateDir } from "../bobbit-dir.js";
 
 export const MAX_UPLOADED_ATTACHMENTS_PER_OCCURRENCE = 10;
@@ -40,7 +41,7 @@ export interface StoredUploadedAttachmentMetadata {
 
 export interface StoredUploadedAttachmentOccurrence {
 	occurrenceId: string;
-	attachments: StoredUploadedAttachmentMetadata[];
+	attachments: Array<StoredUploadedAttachmentMetadata & { trustedExtractedText?: string }>;
 }
 
 export interface UploadedAttachmentRange {
@@ -80,6 +81,7 @@ interface CanonicalInput {
 	size: number;
 	bytes: Buffer;
 	sha256: string;
+	trustedExtractedText?: string;
 }
 
 export class UploadedAttachmentStoreError extends Error {
@@ -176,24 +178,29 @@ function decodeBase64(value: unknown, declaredSize: unknown): Buffer {
 }
 
 /**
- * Measure the exact browser prompt frame retained by the existing composer
- * guard. Admission calls this before persistence so direct WS clients cannot
- * bypass the same serialized payload ceiling. The optional limit is a narrow
+ * Measure the canonical browser prompt frame covered by the existing composer
+ * guard, including the send-time intent fields added by RemoteAgent. Admission
+ * calls this before persistence so direct WS clients cannot bypass the same
+ * serialized payload ceiling. The optional limit is a narrow
  * test seam that avoids allocating a production-sized fixture.
  */
 export function assertUploadedAttachmentSerializedSendWithinLimit(input: {
 	text: string;
+	intentId?: string;
 	images?: unknown[];
 	attachments: unknown[];
+	suppressTitleGen?: boolean;
 }, limitBytes = MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES): void {
 	if (!Number.isSafeInteger(limitBytes) || limitBytes < 0) invalid("Invalid serialized attachment send limit");
 	let serialized: string;
 	try {
 		serialized = JSON.stringify({
 			type: "prompt",
+			...(input.intentId ? { intentId: input.intentId } : {}),
 			text: input.text,
 			...(input.images?.length ? { images: input.images } : {}),
 			...(input.attachments.length ? { attachments: input.attachments } : {}),
+			...(input.suppressTitleGen ? { suppressTitleGen: true } : {}),
 		});
 	} catch {
 		invalid("Uploaded attachment prompt frame is not serializable");
@@ -201,6 +208,23 @@ export function assertUploadedAttachmentSerializedSendWithinLimit(input: {
 	if (Buffer.byteLength(serialized, "utf8") > limitBytes) {
 		invalid("Uploaded attachment prompt exceeds the serialized send limit");
 	}
+}
+
+function isSpecializedDocument(fileName: string, mimeType: string, bytes: Uint8Array): boolean {
+	const lowerName = fileName.toLowerCase();
+	const lowerMime = mimeType.toLowerCase();
+	return lowerName.endsWith(".pdf")
+		|| lowerName.endsWith(".docx")
+		|| lowerName.endsWith(".pptx")
+		|| lowerMime === "application/pdf"
+		|| lowerMime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		|| lowerMime === "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+		|| (bytes.length >= 5
+			&& bytes[0] === 0x25
+			&& bytes[1] === 0x50
+			&& bytes[2] === 0x44
+			&& bytes[3] === 0x46
+			&& bytes[4] === 0x2d);
 }
 
 function canonicalInputs(raw: unknown): CanonicalInput[] {
@@ -224,6 +248,9 @@ function canonicalInputs(raw: unknown): CanonicalInput[] {
 		const bytes = decodeBase64(candidate.content, candidate.size);
 		totalBytes += bytes.length;
 		if (totalBytes > MAX_UPLOADED_ATTACHMENT_AGGREGATE_BYTES) invalid("Uploaded attachments exceed the aggregate byte limit");
+		const trustedExtractedText = isSpecializedDocument(fileName, mimeType, bytes)
+			? undefined
+			: decodeLikelyUtf8Text(bytes);
 		return {
 			id,
 			fileName,
@@ -231,6 +258,7 @@ function canonicalInputs(raw: unknown): CanonicalInput[] {
 			size: bytes.length,
 			bytes,
 			sha256: createHash("sha256").update(bytes).digest("hex"),
+			...(trustedExtractedText === undefined ? {} : { trustedExtractedText }),
 		};
 	});
 }
@@ -325,10 +353,26 @@ async function loadManifest(sessionId: string, parsed: { sessionKey: string; occ
 	}
 }
 
-function publicOccurrence(manifest: Manifest): StoredUploadedAttachmentOccurrence {
+function publicOccurrence(manifest: Manifest): {
+	occurrenceId: string;
+	attachments: StoredUploadedAttachmentMetadata[];
+} {
 	return {
 		occurrenceId: manifest.occurrenceId,
 		attachments: manifest.attachments.map(({ pointer, fileName, mimeType, size, sha256 }) => ({ pointer, fileName, mimeType, size, sha256 })),
+	};
+}
+
+function admittedOccurrence(manifest: Manifest, inputs: CanonicalInput[]): StoredUploadedAttachmentOccurrence {
+	const occurrence = publicOccurrence(manifest);
+	return {
+		...occurrence,
+		attachments: occurrence.attachments.map((attachment, index) => ({
+			...attachment,
+			...(inputs[index].trustedExtractedText === undefined
+				? {}
+				: { trustedExtractedText: inputs[index].trustedExtractedText }),
+		})),
 	};
 }
 
@@ -350,7 +394,7 @@ export async function persistUploadedAttachmentOccurrence(
 		if (existing.contentDigest !== digest) {
 			throw new UploadedAttachmentStoreError(409, "UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT", "Attachment occurrence was already accepted with different content");
 		}
-		return publicOccurrence(existing);
+		return admittedOccurrence(existing, inputs);
 	};
 
 	try {
@@ -393,7 +437,7 @@ export async function persistUploadedAttachmentOccurrence(
 		}
 		await fs.promises.writeFile(path.join(tmpDir, MANIFEST_FILE), JSON.stringify(manifest), { encoding: "utf8", flag: "wx", mode: 0o600 });
 		await fs.promises.rename(tmpDir, finalDir);
-		return publicOccurrence(manifest);
+		return admittedOccurrence(manifest, inputs);
 	} catch (error) {
 		await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
 		if ((error as NodeJS.ErrnoException)?.code === "EEXIST" || (error as NodeJS.ErrnoException)?.code === "ENOTEMPTY") return loadExisting();
