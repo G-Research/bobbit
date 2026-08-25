@@ -377,6 +377,10 @@ function fakeChild(pid: number): FakeChild {
 	}) as unknown as FakeChild;
 }
 
+async function flushMicrotasks(turns = 12): Promise<void> {
+	for (let turn = 0; turn < turns; turn++) await Promise.resolve();
+}
+
 function runProbe(): Promise<{ stdout: string; stderr: string; code: number | null }> {
 	const state = (process as NodeJS.Process & { [SPAWN_GUARD_STATE]?: GuardState })[SPAWN_GUARD_STATE];
 	const nativeSpawn = state?.originals?.spawn;
@@ -1455,6 +1459,7 @@ describe("spawnTracked timeout cleanup", () => {
 	});
 
 	it("promptly re-observes a Darwin group transitioning from live to zombie-only", async () => {
+		const clock = createManualClock(0);
 		const root = fakeChild(123_471);
 		const signals: NodeJS.Signals[] = [];
 		const observerBudgets: number[] = [];
@@ -1463,6 +1468,7 @@ describe("spawnTracked timeout cleanup", () => {
 		let maxActiveSnapshots = 0;
 		const tracked = spawnTracked("node", ["worker"], {
 			platform: "darwin",
+			clock,
 			spawnImpl: (() => root) as unknown as NativeSpawn,
 			posixTreeSentinel: true,
 			isProcessGroupAlive: () => { events.push("alive"); return true; },
@@ -1479,11 +1485,17 @@ describe("spawnTracked timeout cleanup", () => {
 		root.readyPipe.emit("data", Buffer.from("."));
 		root.emit("exit", 0, null);
 
-		expect(await tracked.waitForTreeExit(1_000)).toBe(true);
+		const completion = tracked.waitForTreeExit(1_000);
+		await flushMicrotasks();
+		expect(clock.pending()).toBe(1);
+		clock.advance(25);
+		await flushMicrotasks();
+		expect(await completion).toBe(true);
 		expect(observerBudgets).toEqual([250, 250]);
 		expect(maxActiveSnapshots).toBe(1);
 		expect(events).toEqual(["alive", "snapshot:1", "alive", "snapshot:2"]);
 		expect(signals).toEqual(["SIGKILL"]);
+		expect(clock.pending()).toBe(0);
 		// Accepted completion is monotonic and cannot re-observe or re-signal a
 		// numeric PGID that may subsequently be reused.
 		expect(await tracked.waitForTreeExit(0)).toBe(true);
@@ -1492,38 +1504,83 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 	});
 
-	it("admits the final Darwin observer with its complete operation window", async () => {
+	it("admits a final Darwin observer after a delayed lifecycle turn leaves 260 ms", async () => {
+		const clock = createManualClock(0);
 		const root = fakeChild(123_472);
 		const signals: NodeJS.Signals[] = [];
 		const observerBudgets: number[] = [];
-		const timeoutMs = 450;
-		let waitStartedAt = 0;
-		let finalObserverRemainingMs = 0;
 		const tracked = spawnTracked("node", ["worker"], {
 			platform: "darwin",
+			clock,
 			spawnImpl: (() => root) as unknown as NativeSpawn,
 			posixTreeSentinel: true,
 			isProcessGroupAlive: () => true,
 			posixProcessStateSnapshot: async budgetMs => {
 				observerBudgets.push(budgetMs);
-				if (observerBudgets.length < 3) return `${root.pid} S\n1 S\n`;
-				finalObserverRemainingMs = (waitStartedAt + timeoutMs) - Date.now();
-				return `${root.pid} Z\n1 S\n`;
+				return observerBudgets.length < 3 ? `${root.pid} S\n1 S\n` : `${root.pid} Z\n1 S\n`;
 			},
 			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
 		});
 		root.readyPipe.emit("data", Buffer.from("."));
 		root.emit("exit", 0, null);
 
-		waitStartedAt = Date.now();
-		expect(await tracked.waitForTreeExit(timeoutMs)).toBe(true);
+		const completion = tracked.waitForTreeExit(450);
+		await flushMicrotasks();
+		// The 25 ms poll becomes due, but its continuation does not run until this
+		// delayed virtual turn has advanced to 190 ms, leaving exactly 260 ms.
+		expect(clock.pending()).toBe(1);
+		clock.advance(190);
+		await flushMicrotasks();
+
+		expect(await completion).toBe(true);
 		expect(observerBudgets).toEqual([250, 250, 250]);
-		// The old deadline-edge admission supplied less than the observer's own
-		// fixed cap. The replacement begins while that entire 250 ms still fits.
-		expect(finalObserverRemainingMs).toBeGreaterThanOrEqual(250);
 		expect(signals).toEqual(["SIGKILL"]);
+		expect(clock.pending()).toBe(0);
 		expect(await tracked.waitForTreeExit(0)).toBe(true);
 		expect(observerBudgets).toHaveLength(3);
+		root.emit("close", 0, null);
+	});
+
+	it.each([
+		[250, true, 3],
+		[249, false, 2],
+	] as const)("admits a final Darwin observer with %i ms remaining: %s", async (remainingAtRetry, expected, expectedSnapshots) => {
+		const clock = createManualClock(0);
+		const root = fakeChild(expected ? 123_473 : 123_474);
+		const observerBudgets: number[] = [];
+		const signals: NodeJS.Signals[] = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			clock,
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async budgetMs => {
+				observerBudgets.push(budgetMs);
+				return observerBudgets.length < 3 ? `${root.pid} S\n1 S\n` : `${root.pid} Z\n1 S\n`;
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const timeoutMs = 450;
+		let settled: boolean | undefined;
+		const completion = tracked.waitForTreeExit(timeoutMs);
+		void completion.then(value => { settled = value; });
+		await flushMicrotasks();
+		clock.advance(timeoutMs - remainingAtRetry);
+		await flushMicrotasks();
+
+		while (settled == null && clock.now() < timeoutMs) {
+			clock.advance(Math.min(25, timeoutMs - clock.now()));
+			await flushMicrotasks();
+		}
+		expect(await completion).toBe(expected);
+		expect(observerBudgets).toHaveLength(expectedSnapshots);
+		expect(observerBudgets.every(budget => budget === 250)).toBe(true);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(clock.pending()).toBe(0);
 		root.emit("close", 0, null);
 	});
 
