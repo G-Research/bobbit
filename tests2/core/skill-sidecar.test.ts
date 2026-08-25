@@ -262,7 +262,39 @@ describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
 		]);
 		assert.equal(out[0].content, "first");
 		assert.equal(out[1].content, "second");
-		assert.equal(out[2].content, "same", "bound envelopes must not fall back to text association");
+		assert.equal(out[2].content, "same", "ambiguous bound envelopes must not fall back to text association");
+	});
+
+	it("projects one authoritative bound envelope when the outward source omits entry identity", () => {
+		const entry = {
+			ts: 1,
+			modelText: "retained model text",
+			originalText: "retained visible text",
+			skillExpansions: [],
+			transcriptEntryId: "retained-entry",
+		};
+		const out = mergeSidecarEntriesIntoMessages([entry], [
+			{ role: "user", content: "retained model text" },
+		]);
+		assert.equal(out[0].content, "retained visible text");
+	});
+
+	it("fails closed when identity-free messages could claim the same bound envelope", () => {
+		const entry = {
+			ts: 1,
+			modelText: "duplicate model text",
+			originalText: "must not project",
+			skillExpansions: [],
+			transcriptEntryId: "one-bound-entry",
+		};
+		const out = mergeSidecarEntriesIntoMessages([entry], [
+			{ role: "user", content: "duplicate model text" },
+			{ role: "user", content: "duplicate model text" },
+		]);
+		assert.deepEqual(out.map((message: any) => message.content), [
+			"duplicate model text",
+			"duplicate model text",
+		]);
 	});
 
 	it("provides a reusable session projection for title and copy sources", () => {

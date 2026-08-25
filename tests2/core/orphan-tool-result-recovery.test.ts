@@ -819,11 +819,12 @@ describe("SessionManager poisoned-history recovery", () => {
 		);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
 			recordId: skillRecordId,
+			promptId: intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
 			skillExpansions,
 			fileMentions,
-		}]);
+		}], "stable admission binds the display envelope before recovery so an equal-text occurrence cannot claim it");
 		assert.equal(rollback.lastPromptSource, "agent");
 
 		// Once recovery gating clears, repeated drains still hand this occurrence to
