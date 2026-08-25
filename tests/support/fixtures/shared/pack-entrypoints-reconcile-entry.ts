@@ -1,0 +1,173 @@
+// Test entry — exercises `reconcilePackEntrypointsForProject` + `registerPackEntrypoints`
+// + `lookupPackRoute` + `navigateToTarget` + `runLauncherEntrypoint` (pack schema
+// V1 §8.2; design docs/design/pack-schema-v1-rationalisation.md). Mirrors
+// pack-panels-reconcile-entry.ts: stub `window.fetch` to record every request URL
+// and serve fake /api/ext/contributions metadata, then drive the helpers via window
+// globals under a file:// fixture. Uses a THIRD-PARTY pack fixture (not the litmus
+// packs) to prove the surface is reusable, not hardcoded. Pins:
+//   1. reconcile fetches /api/ext/contributions scoped to the project id; dedupes.
+//   2. lookupPackRoute resolves a registered routeId → its target panel + paramKeys + packId.
+//   3. navigateToTarget maps a structured RouteTarget → #/ext/<routeId>?<params>
+//      (params filtered to declared paramKeys; pack never builds the URL), and
+//      getRouteFromHash parses it back to { view:"ext", extRouteId, extParams }.
+//   4. reload restoration: a #/ext/<routeId> deep-link → lookupPackRoute →
+//      openPackPanel serves the pack-addressed bearer-only /panels/ endpoint.
+//   5. uninstall reconcile drops the route + launchers (a later navigate no-ops).
+//   6. duplicate routeId across packs is rejected (lookupPackRoute undefined).
+//   7. legacy command-palette/git-widget launchers are ignored.
+//   8. NO auto-invoke on mount: reconcile alone hits no /panels/ endpoint + no hash.
+import {
+	registerPackEntrypoints,
+	reconcilePackEntrypointsForProject,
+	entrypointInfosFromContributions,
+	lookupPackRoute,
+	navigateToTarget,
+	runLauncherEntrypoint,
+	listLauncherEntrypoints,
+	launcherKey,
+} from "../../../../src/app/pack-entrypoints.js";
+import { getRouteFromHash } from "../../../../src/app/routing.js";
+import { registerPackPanels, setLauncherHostFactory } from "../../../../src/app/pack-panels.js";
+
+type EntrypointWire = {
+	id: string;
+	kind: "composer-slash" | "session-menu" | "route" | "command-palette" | "git-widget-button";
+	label?: string;
+	routeId?: string;
+	target?: { panelId?: string; route?: string; params?: Record<string, unknown>; action?: string };
+	paramKeys?: string[];
+	listName: string;
+};
+type PackWire = { packId: string; packName: string; panels: Array<{ id: string; title?: string }>; entrypoints: EntrypointWire[]; routeNames: string[] };
+
+const fetchCalls: string[] = [];
+
+// THIRD-PARTY pack (not artifacts / pr-walkthrough): a deep-link route + a
+// composer-slash launcher + session-menu route/panel/spawn launchers. Proves the
+// surface is generic.
+const THIRDPARTY_PACKS: PackWire[] = [
+	{
+		packId: "thirdparty_pack",
+		packName: "thirdparty_pack",
+		panels: [{ id: "thirdparty.viewer" }],
+		routeNames: [],
+		entrypoints: [
+			{ id: "tp.route", kind: "route", routeId: "thirdparty.route", target: { panelId: "thirdparty.viewer" }, paramKeys: ["itemId"], listName: "tp-route" },
+			{ id: "tp.slash", kind: "composer-slash", label: "Open Third-Party", target: { panelId: "thirdparty.viewer" }, listName: "tp-slash" },
+			{ id: "tp.navlaunch", kind: "session-menu", label: "Deep-link TP", target: { route: "thirdparty.route" }, listName: "tp-navlaunch" },
+			{ id: "tp.menubtn", kind: "session-menu", label: "TP Menu Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-menubtn" },
+			// Legacy launcher kinds must be ignored after the breaking schema change.
+			{ id: "tp.palette-old", kind: "command-palette", label: "Old Palette", target: { route: "thirdparty.route" }, listName: "tp-palette-old" },
+			{ id: "tp.git-old", kind: "git-widget-button", label: "Old Git Button", target: { panelId: "thirdparty.viewer" }, listName: "tp-git-old" },
+			// A SPAWN launcher (design pr-walkthrough-launch-ux.md §3.1): click → call the
+			// pack `run` route, then open `panelId` in the returned childSessionId. It also
+			// carries a `panelId`, so the registry's `action`-first detection must keep it
+			// off the openPackPanel path (T-10/R3).
+			{ id: "tp.spawn", kind: "session-menu", label: "TP Spawn", target: { action: "spawn", route: "run", panelId: "thirdparty.viewer" }, listName: "tp-spawn" },
+		],
+	},
+];
+
+let contributions: PackWire[] = THIRDPARTY_PACKS;
+
+const contribDelayByProject = new Map<string, number>();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const PANEL_MODULE = "export default function(){ return { render(){ return ''; } }; }";
+
+(window as any).fetch = async (input: any): Promise<Response> => {
+	const url = typeof input === "string" ? input : (input && input.url) || String(input);
+	fetchCalls.push(url);
+	if (url.includes("/panels/")) {
+		return new Response(PANEL_MODULE, { status: 200, headers: { "Content-Type": "text/javascript" } });
+	}
+	const m = /[?&]projectId=([^&]*)/.exec(url);
+	const pid = m ? decodeURIComponent(m[1]) : "";
+	const delay = contribDelayByProject.get(pid) ?? 0;
+	if (delay > 0) await sleep(delay);
+	return new Response(JSON.stringify({ packs: contributions }), {
+		status: 200,
+		headers: { "Content-Type": "application/json" },
+	});
+};
+
+(window as any).__setContributions = (c: PackWire[]) => { contributions = c; };
+(window as any).__thirdparty = () => THIRDPARTY_PACKS;
+(window as any).__setContribDelay = (pid: string, ms: number) => { contribDelayByProject.set(pid, ms); };
+(window as any).__calls = (): string[] => fetchCalls.slice();
+(window as any).__clearCalls = () => { fetchCalls.length = 0; };
+(window as any).__reconcile = (pid?: string): Promise<void> => reconcilePackEntrypointsForProject(pid);
+(window as any).__startReconcile = (pid?: string): Promise<void> => reconcilePackEntrypointsForProject(pid);
+// Register directly from the current metadata (bypassing the dedupe guard) — the
+// marketplace install/uninstall path.
+(window as any).__register = (pid?: string) => registerPackEntrypoints(entrypointInfosFromContributions(contributions as any), pid);
+(window as any).__lookup = (routeId: string) => lookupPackRoute(routeId) ?? null;
+(window as any).__navigate = (route: string, params?: Record<string, unknown>) => navigateToTarget({ route, params });
+// Register the third-party panel in the (separate) pack-panel registry so a panel-
+// target launcher's openPackPanel actually resolves + fetches the /panels/ endpoint
+// (panel registration is a distinct registry from the entrypoint registry).
+(window as any).__registerPanel = (pid?: string, packId?: string, panelId?: string) =>
+	registerPackPanels([{ packId: packId ?? "thirdparty_pack", panelId: panelId ?? "thirdparty.viewer" }], pid);
+// Register MULTIPLE panels at once — registerPackPanels REPLACES the whole registry,
+// so two packs' panels must be registered together (used by the collision test).
+(window as any).__registerPanels = (list: Array<{ packId: string; panelId: string }>, pid?: string) =>
+	registerPackPanels(list, pid);
+(window as any).__runLauncher = (keyOrId: string) => runLauncherEntrypoint(keyOrId);
+(window as any).__launchers = (kind?: any) => listLauncherEntrypoints(kind).map((l) => l.id);
+// Compound launcher keys (packId+id) — for the same-id-across-packs collision test.
+(window as any).__launcherKey = (packId: string, id: string) => launcherKey(packId, id);
+(window as any).__launcherEntries = (kind?: any) =>
+	listLauncherEntrypoints(kind).map((l) => ({ id: l.id, packId: l.packId, key: l.key }));
+(window as any).__route = () => getRouteFromHash();
+(window as any).__hash = () => window.location.hash;
+(window as any).__setHash = (h: string) => { window.location.hash = h; };
+(window as any).__clearHash = () => { history.replaceState({}, "", window.location.pathname); };
+(window as any).__flush = async (): Promise<void> => { await new Promise((r) => setTimeout(r, 30)); };
+
+// ── SPAWN-LAUNCHER dispatch fixtures (design §3 / T-1 / T-10) ────────────────────
+// A MOCK launcher host installed via setLauncherHostFactory records `callRoute`
+// invocations + `ui.openPanel` targets, so the spawn dispatch can be asserted WITHOUT
+// a real server: a `run` returning {ok:true, childSessionId} must open the panel in
+// THAT child (auto-switch) and mount NO owner panel; an {ok:false}/throw must flow
+// back through onResult; a never-resolving `callRoute` proves the within-gesture guard
+// suppresses a second concurrent click.
+type SpawnBehavior = "ok" | "nopr" | "throw" | "hang";
+const callRouteCalls: Array<{ route: string; sessionId: string | undefined; packId: string; contributionId: string; body?: unknown }> = [];
+const openPanelCalls: Array<{ panelId?: string; sessionId?: string }> = [];
+(window as any).__installLauncherHost = (behavior: SpawnBehavior): void => {
+	callRouteCalls.length = 0;
+	openPanelCalls.length = 0;
+	setLauncherHostFactory((sessionId, packId, contributionId) => ({
+		capabilities: { callRoute: true } as any,
+		callRoute: async (route: string, init?: { body?: unknown }) => {
+			callRouteCalls.push({ route, sessionId, packId, contributionId, body: init?.body });
+			if (behavior === "nopr") return { ok: false, code: "NO_PR", error: "No open GitHub PR for the current branch." };
+			if (behavior === "throw") throw new Error("spawn boom");
+			if (behavior === "hang") return await new Promise(() => { /* never resolves */ });
+			return { ok: true, childSessionId: "c1", jobId: "job-1" };
+		},
+		ui: { openPanel: (t: { panelId?: string; sessionId?: string }) => { openPanelCalls.push({ panelId: t.panelId, sessionId: t.sessionId }); } },
+	}) as any);
+};
+// Run a spawn launcher and resolve with the dispatch result (or null if onResult
+// never fires within the window — the "hang" case).
+(window as any).__runSpawn = (keyOrId: string): Promise<any> => new Promise((resolve) => {
+	let settled = false;
+	runLauncherEntrypoint(keyOrId, (r) => { settled = true; resolve(r); });
+	setTimeout(() => { if (!settled) resolve(null); }, 250);
+});
+(window as any).__runSpawnWithBody = (keyOrId: string, body: Record<string, unknown>): Promise<any> => new Promise((resolve) => {
+	let settled = false;
+	(runLauncherEntrypoint as any)(keyOrId, (r: any) => { settled = true; resolve(r); }, { body });
+	setTimeout(() => { if (!settled) resolve(null); }, 250);
+});
+// Fire the SAME launcher twice synchronously (a re-entrant double-click) — the
+// within-gesture guard must let only the first reach callRoute.
+(window as any).__runSpawnTwiceSync = (keyOrId: string): void => {
+	runLauncherEntrypoint(keyOrId);
+	runLauncherEntrypoint(keyOrId);
+};
+(window as any).__callRouteCalls = (): typeof callRouteCalls => callRouteCalls.slice();
+(window as any).__openPanelCalls = (): typeof openPanelCalls => openPanelCalls.slice();
+
+(window as any).__ready = true;
