@@ -1,0 +1,88 @@
+/**
+ * True end-to-end test: real UI in a real browser, mock agent backend.
+ *
+ * Flow: open app → create session → send message → verify response renders →
+ *       optionally screenshot → terminate session.
+ *
+ * This test uses the gateway-harness fixture with E2E_SERVE_UI=1 so the
+ * gateway serves the built UI. Set SCREENSHOT=1 to capture screenshots.
+ */
+import { test, expect } from "../_helpers/gateway-harness.js";
+import { readE2EToken, apiFetch } from "../_helpers/e2e-setup.js";
+import { pollUntil } from "../_helpers/test-utils/cleanup.js";
+import type { Page } from "@playwright/test";
+
+const SCREENSHOT = process.env.SCREENSHOT === "1";
+
+/** Open the app authenticated via token query param. */
+async function openApp(page: Page): Promise<void> {
+	const token = readE2EToken();
+	const base = `http://127.0.0.1:${process.env.E2E_PORT}`;
+	await page.goto(`${base}/?token=${encodeURIComponent(token)}`);
+	await expect(
+		page.locator("button[title^='New session']").first(),
+	).toBeVisible({ timeout: 15_000 });
+}
+
+test.describe("Session lifecycle (full-stack UI)", () => {
+	test("create session, send message, see response, terminate @smoke", async ({ page }) => {
+		await openApp(page);
+
+		// Create a new session
+		await page.locator("button[title^='New session']").first().click();
+		const textarea = page.locator("textarea").first();
+		await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+		// Send a message
+		await textarea.fill("Hello from the fullstack test");
+		await textarea.press("Enter");
+
+		// Wait for the mock agent's "OK" response
+		await expect(
+			page.getByText("OK", { exact: true }).first(),
+		).toBeVisible({ timeout: 15_000 });
+
+		// Verify session reached idle
+		const sessionsResp = await apiFetch("/api/sessions");
+		const sessions = ((await sessionsResp.json()).sessions || []);
+		expect(sessions.length).toBeGreaterThanOrEqual(1);
+		const sessionId = sessions[0].id;
+
+		await pollUntil(async () => {
+			const resp = await apiFetch(`/api/sessions/${sessionId}`);
+			return (await resp.json()).status === "idle";
+		}, { timeoutMs: 15_000, intervalMs: 100, label: "session idle" });
+
+		// Optional screenshot
+		if (SCREENSHOT) {
+			await page.screenshot({
+				path: "tests/e2e/screenshots/session-with-response.png",
+				fullPage: true,
+			});
+		}
+
+		// Terminate via API
+		const delResp = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+		expect(delResp.ok).toBe(true);
+
+		// Verify session disappears from the server
+		await pollUntil(async () => {
+			const resp = await apiFetch("/api/sessions");
+			const remaining = ((await resp.json()).sessions || []).filter(
+				(s: { id: string }) => s.id === sessionId,
+			);
+			return remaining.length === 0;
+		}, { timeoutMs: 15_000, intervalMs: 100, label: "session deleted" });
+
+		// The session was deleted server-side. The UI may still be showing
+		// the chat panel (WebSocket reconnect loop). Reload at the landing
+		// route to get a fresh state and verify no chat is rendered.
+		const base = `http://127.0.0.1:${process.env.E2E_PORT}`;
+		const token = readE2EToken();
+		await page.goto(`${base}/?token=${encodeURIComponent(token)}#/landing`);
+		await expect(
+			page.locator("button[title^='New session']").first(),
+		).toBeVisible({ timeout: 15_000 });
+		await expect(textarea).not.toBeVisible({ timeout: 5_000 });
+	});
+});
