@@ -18,7 +18,7 @@
     "noEmit": true
   },
   "include": [
-    "tests2/**/*.ts",
+    "tests/**/*.ts",
     "src/app/qrcode.d.ts",
     "src/ui/speech-recognition.d.ts"
   ]

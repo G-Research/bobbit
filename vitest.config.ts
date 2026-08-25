@@ -1,18 +1,18 @@
-import { join } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { defineConfig } from "vitest/config";
-import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
-import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
+import UnitFileBudgetReporter from "./tests/support/harnesses/shared/unit-file-budget-reporter.js";
 import GitTemplateHandoffReporter, {
 	GIT_TEMPLATE_HANDOFF_PROOF_ENV,
-} from "./tests2/harness/git-template-handoff-proof.js";
+} from "./tests/support/harnesses/shared/git-template-handoff-proof.js";
 import {
 	GIT_TEMPLATE_DIGEST_ENV,
 	GIT_TEMPLATE_PATH_ENV,
 	prepareGitTemplate,
 	type GitTemplateDescriptor,
-} from "./tests2/harness/git-template.js";
-import { getRunRoot, installRunIsolation, isRunRootOwner } from "./tests2/harness/run-isolation.js";
+} from "./tests/support/harnesses/shared/git-template.js";
+import { getRunRoot, installRunIsolation, isRunRootOwner } from "./tests/support/harnesses/shared/run-isolation.js";
 
 // Must run before server prebundling and test collection so workers inherit
 // only run-owned discovery roots and the credential-neutral environment.
@@ -59,7 +59,37 @@ export function resolveVitestCoveragePath(pid: number = process.pid): string {
 
 const MAX_WORKERS = resolveMaxWorkers();
 const MODULE_CACHE_PATH = resolveVitestModuleCachePath();
-const execution = loadVitestExecutionMap();
+
+export const CANONICAL_VITEST_PATTERNS = Object.freeze({
+	core: ["tests/unit/core/**/*.unit.test.ts"],
+	dom: ["tests/dom/**/*.dom.test.ts"],
+	integration: ["tests/integration/gateway/**/*.gateway.test.ts"],
+	isolated: ["tests/unit/isolated/**/*.isolated.test.ts"],
+	e2e: ["tests/e2e/vitest/**/*.vitest-e2e.test.ts"],
+});
+
+function collectSemanticTests(root: string, suffix: string): string[] {
+	const absoluteRoot = resolve(root);
+	if (!existsSync(absoluteRoot)) return [];
+	const files: string[] = [];
+	const visit = (directory: string): void => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = join(directory, entry.name);
+			if (entry.isDirectory()) visit(path);
+			else if (entry.name.endsWith(suffix)) files.push(relative(process.cwd(), path).replace(/\\/g, "/"));
+		}
+	};
+	visit(absoluteRoot);
+	return files.sort();
+}
+
+const UNIT_TEST_FILES = [
+	...collectSemanticTests("tests/unit/core", ".unit.test.ts"),
+	...collectSemanticTests("tests/unit/isolated", ".isolated.test.ts"),
+	...collectSemanticTests("tests/dom", ".dom.test.ts"),
+	...collectSemanticTests("tests/integration/gateway", ".gateway.test.ts"),
+].sort();
+
 const shared = {
 	pool: "forks" as const,
 	isolate: false,
@@ -82,9 +112,9 @@ const shared = {
 		fsModuleCachePath: MODULE_CACHE_PATH,
 	},
 };
-const tier1SetupFiles = ["tests2/harness/tier1-spawn-guard.ts"];
+const tier1SetupFiles = ["tests/support/harnesses/shared/tier1-spawn-guard.ts"];
 // Per-file reset of leaking dir singletons for the isolate:false projects.
-const fileBoundaryRunner = "tests2/harness/file-boundary-runner.ts";
+const fileBoundaryRunner = "tests/support/harnesses/shared/file-boundary-runner.ts";
 
 const coverage = {
 	provider: "v8" as const,
@@ -118,7 +148,7 @@ export default defineConfig({
 			"default",
 			new UnitFileBudgetReporter(),
 			...(coordinatorGitTemplate
-				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, MAX_WORKERS, execution.unit)]
+				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, MAX_WORKERS, UNIT_TEST_FILES)]
 				: []),
 		],
 		coverage,
@@ -131,7 +161,7 @@ export default defineConfig({
 					environment: "node",
 					isolate: true,
 					maxWorkers: 1,
-					include: execution.e2e,
+					include: CANONICAL_VITEST_PATTERNS.e2e,
 				},
 			}] : []),
 			{
@@ -143,7 +173,7 @@ export default defineConfig({
 					env: { [GIT_TEMPLATE_HANDOFF_PROOF_ENV]: "v2-core" },
 					runner: fileBoundaryRunner,
 					setupFiles: tier1SetupFiles,
-					include: execution.core,
+					include: CANONICAL_VITEST_PATTERNS.core,
 				},
 			},
 			{
@@ -156,8 +186,8 @@ export default defineConfig({
 					environment: "happy-dom",
 					pool: "threads" as const,
 					isolate: true,
-					setupFiles: [...tier1SetupFiles, "tests2/harness/v2-dom-environment.ts"],
-					include: execution.dom,
+					setupFiles: [...tier1SetupFiles, "tests/support/harnesses/shared/v2-dom-environment.ts"],
+					include: CANONICAL_VITEST_PATTERNS.dom,
 				},
 			},
 			{
@@ -169,7 +199,7 @@ export default defineConfig({
 					env: { [GIT_TEMPLATE_HANDOFF_PROOF_ENV]: "v2-integration" },
 					runner: fileBoundaryRunner,
 					setupFiles: tier1SetupFiles,
-					include: execution.integration,
+					include: CANONICAL_VITEST_PATTERNS.integration,
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},
@@ -183,7 +213,7 @@ export default defineConfig({
 					isolate: true,
 					maxWorkers: 1,
 					setupFiles: tier1SetupFiles,
-					include: execution.isolated,
+					include: CANONICAL_VITEST_PATTERNS.isolated,
 				},
 			},
 		],

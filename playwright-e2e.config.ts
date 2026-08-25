@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
-import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
+import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests/support/harnesses/shared/run-isolation.js";
 
 export function resolveE2EOutputDir(runRoot = getRunRoot()): string {
 	return join(runRoot, "playwright-e2e-results");
@@ -40,7 +40,7 @@ function prepareE2ERuntimeCaches(): void {
 	// loaded Playwright's default transform-cache module while loading this config.
 	const runRoot = getRunRoot();
 	const ownedCacheRoot = join(runRoot, "pwtest-transform-cache");
-	// The legacy Docker sandbox namespace is owned by this coordinator's root,
+	// The Docker sandbox namespace is owned by this coordinator's root,
 	// never an inherited value from a concurrent host run.
 	process.env.BOBBIT_E2E_RUN_ID = basename(runRoot);
 	process.env.BOBBIT_E2E_TMP_ROOT = join(runRoot, "tmp", "bobbit-e2e");
@@ -65,7 +65,7 @@ prepareE2ERuntimeCaches();
 // Tier 2.5 video reporter — opt-in via RECORDSCREEN=1. When unset, the
 // reporter file is never loaded → zero overhead. See docs/testing-tier-2-5.md.
 const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
-	? [["./tests/e2e/report/tier-2-5-reporter.ts"]]
+	? [["./tests/e2e/_helpers/report/tier-2-5-reporter.ts"]]
 	: [];
 
 // Workflow retries protect developer productivity after isolated transients.
@@ -96,8 +96,8 @@ export default {
 		[process.stdout.isTTY ? "list" : "line"],
 		...recordScreenReporters,
 	],
-	globalSetup: "./tests/e2e/e2e-global-setup.ts",
-	globalTeardown: "./tests/e2e/e2e-teardown.ts",
+	globalSetup: "./tests/e2e/_helpers/e2e-global-setup.ts",
+	globalTeardown: "./tests/e2e/_helpers/e2e-teardown.ts",
 	// Default artifact / launch settings. Chromium's GPU process, prerenderer,
 	// background timers, and BFCache consume ~1 core per worker when idle.
 	// Disabling them has no effect on test semantics for headless runs.
@@ -119,52 +119,19 @@ export default {
 	projects: [
 		{
 			name: "api",
-			testDir: "./tests/e2e",
-			testIgnore: [
-				"**/ui/**",
-				"**/session-lifecycle-ui*",
-				"**/mcp-tool-permission*",
-				"**/mcp-integration*",
-				"**/per-project-config-dirs*",
-				"**/port-auto-increment*",
-				// Owned by the api-realpush project (different env).
-				"**/goal-archive-branch-cleanup*",
-			],
-			// In-process API workers still boot a full gateway and shell out to git in
-			// several specs. On Windows, 4 concurrent gateways under verification load
-			// produced fixture setup retries and 900s broad-suite timeouts; 2 preserves
-			// parallelism while avoiding the hot contention cluster.
+			testDir: "./tests/e2e/api",
+			testMatch: ["**/*.api-e2e.spec.ts"],
+			// API workers still boot a full gateway and shell out to git. Two workers
+			// preserve parallelism without the Windows filesystem contention seen at four.
 			workers: 2,
 		},
 		{
-			// Real-push variant of the in-process harness — isolated project so it
-			// doesn't share env (BOBBIT_TEST_NO_PUSH) with the main API project.
-			// See tests/e2e/in-process-harness-realpush.ts.
-			name: "api-realpush",
-			testDir: "./tests/e2e",
-			testMatch: ["**/goal-archive-branch-cleanup.spec.ts"],
-			workers: 1,
-			fullyParallel: false,
-		},
-		{
 			name: "browser",
-			testDir: "./tests/e2e",
-			testMatch: [
-				"**/ui/*.spec.ts",
-				"**/session-lifecycle-ui*.spec.ts",
-				"**/mcp-tool-permission*.spec.ts",
-				"**/mcp-integration*.spec.ts",
-				"**/per-project-config-dirs*.spec.ts",
-				"**/port-auto-increment*.spec.ts",
-			],
+			testDir: "./tests/e2e/browser",
+			testMatch: ["**/*.browser-e2e.spec.ts"],
 			workers: 3,
-			// Serialise browser specs within the project. Each browser worker
-			// is gateway + Chromium + UI static serve — even at workers=3, cross-
-			// worker contention on Windows FS / Defender still produced 3–4 flakes
-			// per run. fullyParallel=false confines parallelism to the 3 workers
-			// (one spec per worker, sequential within-spec), which empirically
-			// eliminates a flake cluster. API project stays fullyParallel: true
-			// (inherited from top-level).
+			// Each worker owns a gateway, Chromium, and static UI server. Keep files
+			// sequential within workers to avoid cross-worker filesystem contention.
 			fullyParallel: false,
 		},
 	],

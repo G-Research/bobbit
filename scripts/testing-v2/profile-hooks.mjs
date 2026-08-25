@@ -47,8 +47,8 @@ Options:
 
 Unrecognized args are forwarded to: npx vitest run --config vitest.config.ts --reporter=json --outputFile <run>/vitest.json
 Examples:
-  npm run test:v2:profile-hooks -- tests2/core/team-manager.test.ts
-  npm run test:v2:profile-hooks -- --project v2-integration tests2/integration/gateway-fixture-leak.test.ts`;
+  npm run test:v2:profile-hooks -- tests/unit/core/team-manager.unit.test.ts
+  npm run test:v2:profile-hooks -- --project v2-integration tests/integration/gateway/gateway-fixture-leak.gateway.test.ts`;
 }
 
 function parseArgs(argv) {
@@ -265,8 +265,8 @@ function normalizeFileSummary(file) {
 function normalizeFile(file) {
 	if (typeof file !== "string" || !file) return null;
 	const normalized = toPosix(file);
-	if (normalized.includes("/tests2/")) return normalized.slice(normalized.indexOf("/tests2/") + 1);
-	if (normalized.startsWith("tests2/")) return normalized;
+	if (normalized.includes("/tests/")) return normalized.slice(normalized.indexOf("/tests/") + 1);
+	if (normalized.startsWith("tests/")) return normalized;
 	return rel(resolve(REPO_ROOT, file));
 }
 
@@ -473,7 +473,7 @@ async function selfTest(opts) {
 	writeFileSync(jsonPath, JSON.stringify({
 		testResults: [
 			{
-				name: join(REPO_ROOT, "tests2", "core", "alpha.test.ts"),
+				name: join(REPO_ROOT, "tests", "unit", "core", "alpha.unit.test.ts"),
 				status: "passed",
 				startTime: 1000,
 				endTime: 1750,
@@ -483,7 +483,7 @@ async function selfTest(opts) {
 				],
 			},
 			{
-				name: join(REPO_ROOT, "tests2", "integration", "beta.test.ts"),
+				name: join(REPO_ROOT, "tests", "integration", "gateway", "beta.gateway.test.ts"),
 				status: "failed",
 				duration: 1200,
 				assertionResults: [{ fullName: "beta fails", status: "failed", duration: 900 }],

@@ -75,7 +75,7 @@ export function bundledRepoSourceFiles(repoRoot, roots) {
 /** Repository-source closure of the gateway runtime umbrella, and no other prebundle entries. */
 export function serverRuntimeRepoSourceFiles(repoRoot) {
 	const absoluteRepoRoot = resolve(repoRoot);
-	const runtimeEntry = join(absoluteRepoRoot, "tests2", "harness", "server-runtime-entry.ts");
+	const runtimeEntry = join(absoluteRepoRoot, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts");
 	return bundledRepoSourceFiles(absoluteRepoRoot, [runtimeEntry]);
 }
 
