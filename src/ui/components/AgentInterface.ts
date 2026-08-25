@@ -48,6 +48,12 @@ import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
 import { state as appState, renderApp, type GatewaySession, type RemoteStateMetadata } from "../../app/state.js";
 import {
+	ASK_DISMISSALS_CHANGED_EVENT,
+	dismissedAskToolUseIds,
+	loadAskQuestionDismissals,
+	type AskDismissalsChangedDetail,
+} from "../../app/ask-dismissals.js";
+import {
 	resolvePromptAuthorAppearance,
 	type PromptAuthorAppearance,
 } from "../../app/message-author-appearance.js";
@@ -385,6 +391,10 @@ export class AgentInterface extends LitElement {
 	private _transcriptHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly _handleTranscriptBoundsResize = (): void => {
 		if (this._transcriptHistoryOpen) this._measureTranscriptHistoryAvailableHeight();
+	};
+	private readonly _handleAskDismissalsChanged = (event: Event): void => {
+		const detail = (event as CustomEvent<AskDismissalsChangedDetail>).detail;
+		if (detail?.sessionId === this.session?.sessionId) this.requestUpdate();
 	};
 
 	// --- Legacy backward-compat shims ---
@@ -962,6 +972,7 @@ export class AgentInterface extends LitElement {
 			this._transcriptJumpStatus = "";
 			this._clearTranscriptHighlight();
 			const newSid = this.session?.sessionId;
+			if (newSid) void loadAskQuestionDismissals(newSid).catch(() => {});
 			// Restore the per-session composer attachment draft (lifted out of the
 			// transient <message-editor>) whenever the bound session changes —
 			// covers slow-path switch, reload, and archived/isPreparing re-renders.
@@ -992,6 +1003,8 @@ export class AgentInterface extends LitElement {
 		void ensureBgProcessPill();
 		void ensureCostPopover();
 		void ensureContinueSessionChooser();
+
+		document.addEventListener(ASK_DISMISSALS_CHANGED_EVENT, this._handleAskDismissalsChanged);
 
 		this.style.display = "flex";
 		this.style.flexDirection = "column";
@@ -1183,6 +1196,7 @@ export class AgentInterface extends LitElement {
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
 		document.removeEventListener("keydown", this._handleGlobalEscape, true);
+		document.removeEventListener(ASK_DISMISSALS_CHANGED_EVENT, this._handleAskDismissalsChanged);
 
 		if (this._unsubscribeSession) {
 			this._unsubscribeSession();
@@ -1708,7 +1722,9 @@ export class AgentInterface extends LitElement {
 
 	private _handleJumpToUnansweredClick = async (): Promise<void> => {
 		if (!this._scrollContainer) return;
-		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? []);
+		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? [], {
+			dismissedToolUseIds: dismissedAskToolUseIds(this.session?.sessionId),
+		});
 		if (navigation.unresolvedQuestions.length === 0) return;
 
 		// Release tail-following before deferred rows materialize so their anchor-
@@ -3012,7 +3028,9 @@ export class AgentInterface extends LitElement {
 	// test id and geometry; unresolved asks keep the group discoverable while
 	// later output is streaming.
 	private _renderJumpToLastPrompt() {
-		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? []);
+		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? [], {
+			dismissedToolUseIds: dismissedAskToolUseIds(this.session?.sessionId),
+		});
 		const unresolvedCount = navigation.unresolvedQuestions.length;
 		const show = this._showJumpToLastPrompt || unresolvedCount > 0 || this._transcriptHistoryOpen;
 		const topOffset = this._getTopPromptNavOffsetCss();
@@ -3081,6 +3099,7 @@ export class AgentInterface extends LitElement {
 					.open=${this._transcriptHistoryOpen}
 					.anchorEl=${this._transcriptHistoryTrigger}
 					.availableHeight=${this._transcriptHistoryAvailableHeight}
+					.resolvePromptAuthorAppearance=${this._resolvePromptAuthorAppearance}
 					@close=${this._handleTranscriptHistoryClose}
 					@transcript-entry-select=${this._handleTranscriptEntrySelect}
 				></transcript-history-popover>

@@ -71,6 +71,7 @@ import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { initAnnotationStore } from "../ui/components/review/AnnotationStore.js";
 import { applyEntryAdded as applyInboxEntryAdded, applyEntryUpdated as applyInboxEntryUpdated, applyEntryRemoved as applyInboxEntryRemoved } from "./inbox-panel.js";
 import { findAskResponseAnswers as _findAskResponseAnswers, type AskResponseAnswer } from "../shared/ask-envelope.js";
+import { applyAskQuestionDismissed, clearAskQuestionDismissals } from "./ask-dismissals.js";
 import { reduce, initialState, type ReducerState, type Action, type OrderedMessage } from "./message-reducer.js";
 import { computeStreamingMessageId } from "./streaming-message-id.js";
 import {
@@ -2935,6 +2936,13 @@ export class RemoteAgent {
 				this._applyPreferences(msg.preferences);
 				break;
 
+			case "ask_question_dismissed":
+				if (typeof msg.sessionId === "string" && typeof msg.toolUseId === "string") {
+					applyAskQuestionDismissed(msg.sessionId, msg.toolUseId);
+					scheduleSessionListRefreshFromPush();
+				}
+				break;
+
 			case "projects_changed": {
 				const projects = Array.isArray((msg as any).projects) ? (msg as any).projects : null;
 				if (projects && setProjectsIfChanged(projects)) renderApp();
@@ -3028,6 +3036,7 @@ export class RemoteAgent {
 				const removedId = (msg as any).sessionId as string | undefined;
 				const reason = (msg as any).reason as string | undefined;
 				if (!removedId) break;
+				clearAskQuestionDismissals(removedId);
 				if (removedId === this._sessionId) this._pendingReviewToolCalls.clear();
 				this.onSessionRemoved?.(removedId, reason ?? "archived");
 				break;

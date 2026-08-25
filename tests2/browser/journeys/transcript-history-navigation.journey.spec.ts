@@ -91,6 +91,16 @@ test.describe("Journey: Transcript history navigation", () => {
 			await expect(widget).toBeVisible({ timeout: 20_000 });
 			await waitForSessionStatus(sessionId, "idle");
 
+			// An unread session with an unanswered ask replaces the generic dot with
+			// the question-circle attention icon.
+			await navigateToHash(page, "#/");
+			const sidebarRow = page.locator(`[data-session-id="${sessionId}"]`).first();
+			await expect(sidebarRow).toBeVisible({ timeout: 20_000 });
+			await expect(sidebarRow.locator(".unanswered-question-indicator")).toHaveCount(1);
+			await expect(sidebarRow.locator(".unseen-dot")).toHaveCount(0);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+
 			const navigation = page.locator("[role='group'][aria-label='Transcript navigation']");
 			await expect(navigation).toBeVisible();
 			await expect(previousButton(page)).toHaveCount(1);
@@ -106,8 +116,13 @@ test.describe("Journey: Transcript history navigation", () => {
 			expect(oldestIndex).toBeGreaterThanOrEqual(0);
 			expect(askPromptIndex).toBeGreaterThan(oldestIndex);
 			expect(questionIndex).toBeGreaterThan(askPromptIndex);
+			await expect(dialog(page)).not.toContainText("Oldest → newest");
 			await expect(dialog(page)).not.toContainText("Recent");
 			await expect(dialog(page)).not.toContainText("Earlier today");
+			await expect(dialog(page).locator(".transcript-history-footer")).toHaveCount(0);
+			await expect(rows(page).locator(
+				".transcript-history-row-icon > :is(svg, .prompt-author-avatar, .prompt-author-initial, .prompt-author-system-icon)",
+			)).toHaveCount(await rows(page).count());
 			await expect(dialog(page).locator("kbd")).toHaveCount(0);
 			expect(await dialog(page).locator(".transcript-history-list").evaluate((list) =>
 				list.scrollTop + list.clientHeight >= list.scrollHeight - 4)).toBe(true);
@@ -166,6 +181,8 @@ test.describe("Journey: Transcript history navigation", () => {
 				await popover.updateComplete;
 			});
 			await expect(rows(page)).toHaveCount(40);
+			expect(await dialog(page).locator(".transcript-history-filters").evaluate((filters) =>
+				filters.scrollWidth <= filters.clientWidth)).toBe(true);
 			await expect.poll(async () => {
 				const bounds = await popoverBounds(page);
 				return bounds.dialogBottom <= bounds.boundary + 1;
@@ -198,10 +215,32 @@ test.describe("Journey: Transcript history navigation", () => {
 			await expect(page.locator(".transcript-navigation-highlight")).toHaveCount(1);
 			await completeQuestion(page);
 			await expect(unansweredButton(page)).toHaveCount(0, { timeout: 20_000 });
+			await waitForSessionStatus(sessionId, "idle");
+
+			await openHistory(page);
+			await dialog(page).getByRole("button", { name: "Questions", exact: true }).click();
+			await expect(dialog(page).locator('.transcript-history-question-status[data-status="answered"]')).toHaveText("Answered");
+			await page.keyboard.press("Escape");
+
+			// A second ask can be dismissed durably without waking the idle agent.
+			await sendMessage(page, "ask_user_choices dismissal journey");
+			const secondWidget = page.locator("ask-user-choices-widget").last();
+			await expect(secondWidget).toBeVisible({ timeout: 20_000 });
+			await waitForSessionStatus(sessionId, "idle");
+			await secondWidget.locator(".ask-dismiss-all").click();
+			await expect(page.locator(".ask-dismissed-badge").last()).toContainText("Dismissed", { timeout: 20_000 });
+			await expect(unansweredButton(page)).toHaveCount(0);
+
+			await openHistory(page);
+			await dialog(page).getByRole("button", { name: "Questions", exact: true }).click();
+			await expect(dialog(page).locator('.transcript-history-question-status[data-status="answered"]')).toHaveCount(1);
+			await expect(dialog(page).locator('.transcript-history-question-status[data-status="dismissed"]')).toHaveCount(1);
+			await page.keyboard.press("Escape");
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator(".ask-answered-badge").first()).toHaveText("Answered", { timeout: 20_000 });
+			await expect(page.locator(".ask-dismissed-badge").last()).toContainText("Dismissed", { timeout: 20_000 });
 			await expect(unansweredButton(page)).toHaveCount(0);
 		} finally {
 			await deleteSession(sessionId).catch(() => {});

@@ -11,6 +11,10 @@ import { AskUserChoicesRenderer } from "../../src/ui/tools/renderers/AskUserChoi
 import "../../src/app/message-reducer.js";
 import type { ToolRenderContext } from "../../src/ui/tools/types.js";
 import "../../src/ui/components/AskUserChoicesWidget.js";
+import {
+	applyAskQuestionDismissed,
+	resetAskDismissalsForTests,
+} from "../../src/app/ask-dismissals.js";
 
 let state: typeof import("../../src/app/state.js")["state"];
 let registerToolRenderer: typeof import("../../src/ui/tools/renderer-registry.js")["registerToolRenderer"];
@@ -54,6 +58,7 @@ afterEach(() => {
 	state.remoteAgent = null;
 	state.gatewaySessions = [];
 	state.archivedSessions = [];
+	resetAskDismissalsForTests();
 	vi.restoreAllMocks();
 });
 
@@ -83,6 +88,7 @@ describe("AskUserChoicesRenderer error-vs-interactive gating", () => {
 		});
 		expect(count(el, '[role="tab"]')).toBe(2);
 		expect(count(el, ".ask-submit")).toBe(1);
+		expect(count(el, ".ask-dismiss-all")).toBe(1);
 		expect(count(el, ".ask-error")).toBe(0);
 	});
 
@@ -103,6 +109,56 @@ describe("AskUserChoicesRenderer error-vs-interactive gating", () => {
 		// Even a stale/direct handler cannot cross the read-only boundary.
 		await widget._submit();
 		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("Dismiss All persists the whole card and flips it read-only", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+			JSON.stringify({ ok: true }),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		));
+		const el = await renderAsk(PARAMS, {
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: "ask-live" }) }],
+		}, {
+			capabilityMode: "active",
+			sessionId: "session-live",
+			toolUseId: "ask-live",
+			getAskResponseAnswers: () => null,
+		});
+		const widget = el.querySelector("ask-user-choices-widget") as any;
+		const dismissButton = el.querySelector(".ask-dismiss-all") as HTMLButtonElement;
+		const primarySpy = vi.spyOn(widget, "_clickPrimary");
+		dismissButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		expect(primarySpy).not.toHaveBeenCalled();
+		dismissButton.click();
+		for (let index = 0; index < 4; index++) {
+			await Promise.resolve();
+			await widget.updateComplete;
+		}
+		expect(fetchSpy).toHaveBeenCalledWith(
+			expect.stringContaining("/api/internal/user-question/dismiss"),
+			expect.objectContaining({ method: "POST" }),
+		);
+		expect(widget.dismissed).toBe(true);
+		expect(el.querySelector(".ask-widget")?.className).toContain("ask-dismissed");
+		expect(count(el, ".ask-dismiss-all")).toBe(0);
+		expect(count(el, ".ask-submit")).toBe(0);
+	});
+
+	it("renders a server-backed dismissal as a completed read-only card", async () => {
+		applyAskQuestionDismissed("session-dismissed", "ask-dismissed");
+		const el = await renderAsk(PARAMS, {
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: "ask-dismissed" }) }],
+		}, {
+			capabilityMode: "active",
+			sessionId: "session-dismissed",
+			toolUseId: "ask-dismissed",
+			getAskResponseAnswers: () => null,
+		});
+		expect(el.querySelector(".ask-dismissed-badge")?.textContent).toContain("Dismissed");
+		expect(el.querySelector(".ask-widget")?.className).toContain("ask-dismissed");
+		expect(count(el, ".ask-dismiss-all")).toBe(0);
+		expect(count(el, ".ask-submit")).toBe(0);
+		expect(Array.from(el.querySelectorAll("input")).every((input) => (input as HTMLInputElement).disabled)).toBe(true);
 	});
 
 	it("renders answered choices as a visibly completed, read-only summary", async () => {

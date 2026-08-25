@@ -1,5 +1,10 @@
+import { icon } from "@mariozechner/mini-lit";
 import { html, LitElement, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { Bot, CircleHelp, MessageSquare, Settings2 } from "lucide";
+import type { PromptAuthorAppearance } from "../../app/message-author-appearance.js";
+import { isMessageAuthor } from "../../shared/message-author.js";
+import { getAccessoryDef, renderStaticSidebarBobbitCanvas } from "../bobbit-render.js";
 import {
 	filterTranscriptEntries,
 	type TranscriptHistoryEntry,
@@ -30,6 +35,7 @@ export class TranscriptHistoryPopover extends LitElement {
 	@property({ type: Boolean, reflect: true }) open = false;
 	@property({ attribute: false }) anchorEl: HTMLElement | null = null;
 	@property({ type: Number, attribute: false }) availableHeight = 535;
+	@property({ attribute: false }) resolvePromptAuthorAppearance?: (author: unknown) => PromptAuthorAppearance;
 
 	@state() private _query = "";
 	@state() private _filter: TranscriptHistoryFilter = "all";
@@ -165,9 +171,47 @@ export class TranscriptHistoryPopover extends LitElement {
 		this._scrollNewestAfterUpdate = true;
 	}
 
+	private _questionStatus(entry: TranscriptHistoryEntry): "unanswered" | "answered" | "dismissed" | "failed" | null {
+		if (entry.kind !== "question") return null;
+		return entry.questionStatus ?? (entry.unresolved ? "unanswered" : "answered");
+	}
+
+	private _questionStatusLabel(entry: TranscriptHistoryEntry): string {
+		const status = this._questionStatus(entry);
+		return status ? `${status[0].toUpperCase()}${status.slice(1)}` : "";
+	}
+
 	private _rowLabel(entry: TranscriptHistoryEntry): string {
-		const state = entry.kind === "question" && entry.unresolved ? ", unanswered" : "";
+		const status = this._questionStatus(entry);
+		const state = status ? `, ${status}` : "";
 		return `${entry.authorLabel}, ${entry.typeLabel}${state}: ${entry.excerpt}`;
+	}
+
+	private _rowIcon(entry: TranscriptHistoryEntry) {
+		const author = isMessageAuthor(entry.author) ? entry.author : undefined;
+		if (author?.kind === "agent") {
+			const appearance = this.resolvePromptAuthorAppearance?.(author);
+			return html`
+				<span class="prompt-author-avatar">
+					${renderStaticSidebarBobbitCanvas({
+						hueRotate: appearance?.hueRotate ?? 0,
+						accessory: getAccessoryDef(appearance?.accessoryId),
+					})}
+				</span>
+			`;
+		}
+		if (author?.kind === "user") {
+			return html`<span class="prompt-author-initial" data-initial="U"></span>`;
+		}
+		if (author?.kind === "system") {
+			return html`<span class="prompt-author-system-icon">${icon(Settings2, "xs")}</span>`;
+		}
+		switch (entry.kind) {
+			case "user": return icon(MessageSquare, "sm");
+			case "system": return icon(Settings2, "sm");
+			case "question": return icon(CircleHelp, "sm");
+			default: return icon(Bot, "sm");
+		}
 	}
 
 	override render() {
@@ -184,16 +228,19 @@ export class TranscriptHistoryPopover extends LitElement {
 					transform: translateX(-50%);
 					z-index: 50;
 					display: flex;
-					width: min(475px, calc(100vw - 24px));
+					width: min(420px, calc(100vw - 24px));
 					max-height: min(535px, var(--transcript-history-available-height, 535px));
 					flex-direction: column;
 					overflow: hidden;
+					padding: 12px;
 					border: 1px solid var(--border);
-					border-radius: 10px;
-					background: var(--popover);
-					color: var(--popover-foreground);
-					box-shadow: 0 14px 36px color-mix(in oklch, var(--foreground) 16%, transparent);
-					font-size: 12px;
+					border-radius: 8px;
+					background: var(--card);
+					color: var(--foreground);
+					box-shadow:
+						0 10px 15px -3px color-mix(in oklch, var(--foreground) 12%, transparent),
+						0 4px 6px -4px color-mix(in oklch, var(--foreground) 12%, transparent);
+					font-size: 13px;
 				}
 				transcript-history-popover .transcript-history-visually-hidden {
 					position: absolute;
@@ -207,18 +254,17 @@ export class TranscriptHistoryPopover extends LitElement {
 					border: 0;
 				}
 				transcript-history-popover .transcript-history-search-wrap {
-					padding: 12px 12px 9px;
+					padding: 0 0 8px;
 				}
 				transcript-history-popover .transcript-history-search {
 					box-sizing: border-box;
 					width: 100%;
-					border: 1px solid var(--input);
-					border-radius: 7px;
-					background: var(--background);
+					border: 1px solid var(--border);
+					border-radius: 4px;
+					background: var(--card);
 					color: var(--foreground);
-					padding: 7px 9px;
+					padding: 6px 8px;
 					font: inherit;
-					font-size: 13px;
 					outline: none;
 				}
 				transcript-history-popover .transcript-history-search:focus-visible,
@@ -229,52 +275,82 @@ export class TranscriptHistoryPopover extends LitElement {
 				}
 				transcript-history-popover .transcript-history-filters {
 					display: flex;
+					flex-wrap: wrap;
+					align-items: center;
 					gap: 4px;
-					overflow-x: auto;
-					padding: 0 12px 9px;
+					padding: 0 0 10px;
 					border-bottom: 1px solid var(--border);
 				}
 				transcript-history-popover .transcript-history-filter {
 					flex: 0 0 auto;
+					min-height: 26px;
 					border: 1px solid transparent;
 					border-radius: 999px;
 					background: transparent;
 					color: var(--muted-foreground);
-					padding: 4px 9px;
+					padding: 3px 8px;
 					font: inherit;
+					font-size: 12px;
 					font-weight: 500;
+					line-height: 1.2;
+					white-space: nowrap;
 					cursor: pointer;
+					transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 				}
 				transcript-history-popover .transcript-history-filter:hover {
-					background: var(--muted);
+					background: color-mix(in oklch, var(--muted) 50%, transparent);
 					color: var(--foreground);
 				}
 				transcript-history-popover .transcript-history-filter[aria-pressed="true"] {
 					border-color: var(--border);
-					background: var(--accent);
-					color: var(--accent-foreground);
+					background: color-mix(in oklch, var(--muted) 70%, transparent);
+					color: var(--foreground);
+					font-weight: 600;
 				}
 				transcript-history-popover .transcript-history-list {
 					min-height: 0;
 					flex: 1 1 auto;
 					overflow-y: auto;
-					padding: 5px;
+					padding: 6px 0 0;
 				}
 				transcript-history-popover .transcript-history-row {
-					display: block;
+					display: grid;
+					grid-template-columns: 24px minmax(0, 1fr);
+					align-items: start;
+					column-gap: 8px;
 					box-sizing: border-box;
 					width: 100%;
 					border: 0;
-					border-radius: 6px;
+					border-radius: 4px;
 					background: transparent;
 					color: inherit;
-					padding: 8px 9px;
+					padding: 7px 8px;
 					text-align: left;
 					font: inherit;
 					cursor: pointer;
 				}
 				transcript-history-popover .transcript-history-row:hover {
-					background: var(--muted);
+					background: color-mix(in oklch, var(--muted) 50%, transparent);
+				}
+				transcript-history-popover .transcript-history-row-icon {
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					width: 24px;
+					height: 24px;
+					border-radius: 4px;
+					background: color-mix(in oklch, var(--muted) 45%, transparent);
+					color: var(--muted-foreground);
+				}
+				transcript-history-popover .transcript-history-row-icon[data-author-kind] {
+					background: transparent;
+				}
+				transcript-history-popover .transcript-history-row-icon > svg {
+					width: 14px;
+					height: 14px;
+				}
+				transcript-history-popover .transcript-history-row-content {
+					min-width: 0;
 				}
 				transcript-history-popover .transcript-history-row-meta {
 					display: flex;
@@ -288,9 +364,21 @@ export class TranscriptHistoryPopover extends LitElement {
 					color: var(--foreground);
 					font-weight: 600;
 				}
-				transcript-history-popover .transcript-history-unanswered {
-					color: var(--warning);
+				transcript-history-popover .transcript-history-question-status {
 					font-weight: 600;
+					text-transform: capitalize;
+				}
+				transcript-history-popover .transcript-history-question-status[data-status="unanswered"] {
+					color: var(--warning);
+				}
+				transcript-history-popover .transcript-history-question-status[data-status="answered"] {
+					color: var(--positive);
+				}
+				transcript-history-popover .transcript-history-question-status[data-status="dismissed"] {
+					color: var(--muted-foreground);
+				}
+				transcript-history-popover .transcript-history-question-status[data-status="failed"] {
+					color: var(--negative);
 				}
 				transcript-history-popover .transcript-history-excerpt {
 					display: -webkit-box;
@@ -303,13 +391,6 @@ export class TranscriptHistoryPopover extends LitElement {
 					padding: 30px 16px;
 					color: var(--muted-foreground);
 					text-align: center;
-				}
-				transcript-history-popover .transcript-history-footer {
-					border-top: 1px solid var(--border);
-					padding: 7px 12px;
-					color: var(--muted-foreground);
-					font-size: 11px;
-					text-align: right;
 				}
 				@media (max-width: 639px) {
 					transcript-history-popover .transcript-history-dialog {
@@ -360,19 +441,29 @@ export class TranscriptHistoryPopover extends LitElement {
 								aria-label=${this._rowLabel(entry)}
 								@click=${() => this._select(entry)}
 							>
-								<span class="transcript-history-row-meta">
-									<span class="transcript-history-row-author">${entry.authorLabel}</span>
-									<span aria-hidden="true">·</span>
-									<span>${entry.typeLabel}</span>
-									${entry.kind === "question" && entry.unresolved
-										? html`<span class="transcript-history-unanswered">Unanswered</span>`
-										: nothing}
+								<span
+									class="transcript-history-row-icon"
+									data-kind=${entry.kind}
+									data-author-kind=${isMessageAuthor(entry.author) ? entry.author.kind : nothing}
+									aria-hidden="true"
+								>${this._rowIcon(entry)}</span>
+								<span class="transcript-history-row-content">
+									<span class="transcript-history-row-meta">
+										<span class="transcript-history-row-author">${entry.authorLabel}</span>
+										<span aria-hidden="true">·</span>
+										<span>${entry.typeLabel}</span>
+										${this._questionStatus(entry) ? html`
+											<span
+												class="transcript-history-question-status"
+												data-status=${this._questionStatus(entry)}
+											>${this._questionStatusLabel(entry)}</span>
+										` : nothing}
+									</span>
+									<span class="transcript-history-excerpt">${entry.excerpt}</span>
 								</span>
-								<span class="transcript-history-excerpt">${entry.excerpt}</span>
 							</button>
 						`)}
 				</div>
-				<div class="transcript-history-footer">Oldest → newest</div>
 			</section>
 		`;
 	}

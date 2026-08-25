@@ -19,6 +19,7 @@
  *  6. Legacy `GET /api/internal/user-question/pending` endpoint is gone (404).
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { gatewaySync } from "./_e2e/runtime.js";
 import {
 	apiFetch,
 	base,
@@ -36,6 +37,18 @@ async function postSubmit(sessionId: string, toolUseId: string, answers: any) {
 		headers: { "Content-Type": "application/json", Authorization: `Bearer ${readE2EToken()}` },
 		body: JSON.stringify({ sessionId, toolUseId, answers }),
 	});
+}
+
+async function postDismiss(sessionId: string, toolUseId: string) {
+	return fetch(`${base()}/api/internal/user-question/dismiss`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", Authorization: `Bearer ${readE2EToken()}` },
+		body: JSON.stringify({ sessionId, toolUseId }),
+	});
+}
+
+async function getDismissals(sessionId: string) {
+	return apiFetch(`/api/internal/user-question/dismissals?sessionId=${encodeURIComponent(sessionId)}`);
 }
 
 test.describe("ask_user_choices non-blocking REST", () => {
@@ -88,6 +101,24 @@ test.describe("ask_user_choices non-blocking REST", () => {
 		const r = await postSubmit("no-such-session", "t", []);
 		expect(r.status).toBe(404);
 	});
+
+	test("dismissal routes validate sessions and matching ask calls", async () => {
+		const missingQuery = await apiFetch("/api/internal/user-question/dismissals");
+		expect(missingQuery.status).toBe(400);
+		const unknown = await getDismissals("no-such-session");
+		expect(unknown.status).toBe(404);
+
+		const sessionId = await createSession();
+		try {
+			const empty = await getDismissals(sessionId);
+			expect(empty.status).toBe(200);
+			expect(await empty.json()).toEqual({ dismissedToolUseIds: [] });
+			const noCall = await postDismiss(sessionId, "not-an-ask");
+			expect(noCall.status).toBe(404);
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
 });
 
 test.describe("ask_user_choices end-to-end via mock agent", () => {
@@ -124,9 +155,18 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 					{ question: "Favorite color?", selected: "blue", other_text: null },
 					{ question: "Team size?", selected: "Other", other_text: "tiny" },
 				];
+				const answerCursor = conn.messageCount();
 				const submitResp = await postSubmit(sessionId, toolUseId, answers);
 				expect(submitResp.status).toBe(200);
 				expect(await submitResp.json()).toEqual({ ok: true });
+				await conn.waitForFrom(
+					answerCursor,
+					(m) => m.type === "sessions_changed" && m.sessionId === sessionId,
+					10_000,
+				);
+				const answeredList = await apiFetch("/api/sessions");
+				const answeredRows = (await answeredList.json()).sessions;
+				expect(answeredRows.find((row: any) => row.id === sessionId)?.hasUnansweredQuestion).toBe(false);
 
 				// Agent wakes on the envelope user message and echoes a response.
 				const echo = await conn.waitFor(
@@ -142,6 +182,121 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 				const echoed = JSON.parse(echoText);
 				expect(echoed.gotAnswersFor).toBe(toolUseId);
 				expect(echoed.answers).toEqual(answers);
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("dismiss persists, broadcasts, stays idle, updates list state, and rejects later answers", async () => {
+		const sessionId = await createSession();
+		try {
+			const conn = await connectWs(sessionId);
+			try {
+				conn.send({ type: "prompt", text: "please use ask_user_choices" });
+				await conn.waitFor(toolStartPredicate("ask_user_choices"), 10_000);
+				const stubResult = await conn.waitFor(
+					(m) => messageEndPredicate("toolResult")(m)
+						&& m.data?.message?.toolName === "ask_user_choices",
+					10_000,
+				);
+				const toolUseId = JSON.parse(stubResult.data.message.content[0].text).tool_use_id as string;
+				await conn.waitFor((m) => m.type === "sessions_changed" && m.sessionId === sessionId, 10_000);
+				await conn.waitFor((m) => m.type === "session_status" && (m as any).status === "idle", 10_000);
+
+				const pendingList = await apiFetch("/api/sessions");
+				const pendingRows = (await pendingList.json()).sessions;
+				expect(pendingRows.find((row: any) => row.id === sessionId)?.hasUnansweredQuestion).toBe(true);
+
+				const before = await gatewaySync().sessionManager.getSession(sessionId)!.rpcClient.getMessages();
+				const beforeMessages = before.data?.messages || before.data;
+				const dismissalCursor = conn.messageCount();
+				const dismissedEvent = conn.waitForFrom(
+					dismissalCursor,
+					(m) => m.type === "ask_question_dismissed" && m.sessionId === sessionId && m.toolUseId === toolUseId,
+					10_000,
+				);
+				const refreshEvent = conn.waitForFrom(
+					dismissalCursor,
+					(m) => m.type === "sessions_changed" && m.sessionId === sessionId,
+					10_000,
+				);
+				const response = await postDismiss(sessionId, toolUseId);
+				expect(response.status).toBe(200);
+				expect(await response.json()).toEqual({ ok: true });
+				await dismissedEvent;
+				await refreshEvent;
+
+				const durable = await getDismissals(sessionId);
+				expect(await durable.json()).toEqual({ dismissedToolUseIds: [toolUseId] });
+				expect(gatewaySync().sessionManager.getPersistedSession(sessionId)?.dismissedAskToolUseIds).toEqual([toolUseId]);
+				const settledList = await apiFetch("/api/sessions");
+				const settledRows = (await settledList.json()).sessions;
+				expect(settledRows.find((row: any) => row.id === sessionId)?.hasUnansweredQuestion).toBe(false);
+
+				const duplicate = await postDismiss(sessionId, toolUseId);
+				expect(await duplicate.json()).toEqual({ ok: true, alreadyDismissed: true });
+				const rejected = await postSubmit(sessionId, toolUseId, [
+					{ question: "Favorite color?", selected: "blue", other_text: null },
+					{ question: "Team size?", selected: "small", other_text: null },
+				]);
+				expect(rejected.status).toBe(409);
+
+				const after = await gatewaySync().sessionManager.getSession(sessionId)!.rpcClient.getMessages();
+				const afterMessages = after.data?.messages || after.data;
+				expect(afterMessages).toHaveLength(beforeMessages.length);
+				expect(gatewaySync().sessionManager.getSession(sessionId)?.status).toBe("idle");
+			} finally {
+				conn.close();
+			}
+		} finally {
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("concurrent answer and dismissal linearize to exactly one terminal winner", async () => {
+		const sessionId = await createSession();
+		try {
+			const conn = await connectWs(sessionId);
+			try {
+				conn.send({ type: "prompt", text: "please use ask_user_choices" });
+				await conn.waitFor(toolStartPredicate("ask_user_choices"), 10_000);
+				const stubResult = await conn.waitFor(
+					(m) => messageEndPredicate("toolResult")(m)
+						&& m.data?.message?.toolName === "ask_user_choices",
+					10_000,
+				);
+				const toolUseId = JSON.parse(stubResult.data.message.content[0].text).tool_use_id as string;
+				await conn.waitFor((m) => m.type === "session_status" && (m as any).status === "idle", 10_000);
+				const answers = [
+					{ question: "Favorite color?", selected: "blue", other_text: null },
+					{ question: "Team size?", selected: "small", other_text: null },
+				];
+
+				const [submit, dismiss] = await Promise.all([
+					postSubmit(sessionId, toolUseId, answers),
+					postDismiss(sessionId, toolUseId),
+				]);
+				expect([submit.status, dismiss.status].sort((a, b) => a - b)).toEqual([200, 409]);
+
+				const dismissalState = await getDismissals(sessionId).then(response => response.json());
+				const transcript = await gatewaySync().sessionManager.getSession(sessionId)!.rpcClient.getMessages();
+				const messages = transcript.data?.messages || transcript.data;
+				const envelopeCount = messages.filter((message: any) => {
+					const content = typeof message?.content === "string"
+						? message.content
+						: message?.content?.find?.((block: any) => block?.type === "text")?.text;
+					return typeof content === "string" && content.startsWith(`[ask_user_choices_response tool_use_id=${toolUseId}]`);
+				}).length;
+				if (submit.status === 200) {
+					expect(dismissalState.dismissedToolUseIds).not.toContain(toolUseId);
+					expect(envelopeCount).toBe(1);
+				} else {
+					expect(dismissalState.dismissedToolUseIds).toContain(toolUseId);
+					expect(envelopeCount).toBe(0);
+				}
 			} finally {
 				conn.close();
 			}

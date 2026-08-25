@@ -364,6 +364,7 @@ export type ServerMessage =
 	/** Broad invalidation fallback for session-list changes. Optional fields let
 	 * clients patch a known row immediately while retaining refresh authority. */
 	| { type: "sessions_changed"; projectId?: string; sessionId?: string; user_tags?: string[] }
+	| { type: "ask_question_dismissed"; sessionId: string; toolUseId: string }
 	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
 	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
