@@ -1,0 +1,3772 @@
+/**
+ * mock-agent-core.mjs — supported user-prompt triggers
+ * ====================================================
+ *
+ * The mock LLM agent inspects the user prompt text for these phrases and
+ * selects a canned response pattern. Every trigger emits production-shape
+ * events (multi-delta message_update, tool_execution_* lifecycle, role-correct
+ * message_end) so any production reducer / state-machine change is exercised
+ * by tests that use these triggers.
+ *
+ * Busy / wait
+ * -----------
+ *  STAY_BUSY:<ms>           Emit one Bash tool_execution_start, tick <ms>,
+ *                           then tool_execution_end. Default for prompts
+ *                           with no other trigger is busyMs=10.
+ *  STAY_BUSY:propose_<type>:<n>[:<intervalMs>]
+ *                           Emit N message_update deltas streaming a
+ *                           propose_<type> tool_use, then message_end +
+ *                           tool_execution_* lifecycle. Stable block id
+ *                           so RemoteAgent's _processedProposalIds dedup
+ *                           engages.
+ *  BENCHMARK_EVENT_STREAM:<n>:<intervalMs>
+ *                           Emit the project-owned deterministic benchmark
+ *                           sequence: cumulative assistant updates, proposal,
+ *                           successful tool, failed tool, and final marker.
+ *  BG_WAIT:<ms>             Drive the real gateway BgProcessManager:
+ *                           POST a `sleep <ceil(ms/1000)>` bg process,
+ *                           long-poll wait. abortAllWaits resolves it on
+ *                           steer/stop. Multi-delta message_update on both
+ *                           the create and wait assistant messages.
+ *  BG_WAIT_NOID:<ms>        Synthetic-event variant retained for the
+ *                           dual-render regression test. Emits one
+ *                           bash_bg.wait toolCall in an assistant
+ *                           message_end with NO `id` field, parks for
+ *                           <ms> ms, then closes. No real bg process.
+ *  BG_WAIT_END_ONLY:<ms>    Emits one bash_bg.wait toolCall in an
+ *                           assistant message_end with no preceding
+ *                           message_update, then parks for <ms> ms.
+ *                           Reproduces the hidden-until-refresh card bug.
+ *
+ * Bursts
+ * ------
+ *  MIXED_BURST:<n>          n cycles (1..6) of [propose_goal + BG_WAIT 1.5s].
+ *                           Stresses the message-ordering reducer.
+ *  STREAM_BURST:<n>         Like MIXED_BURST, plus chunked-text streams
+ *                           before (no final message_end) and after each
+ *                           bash_bg.wait. Reproduces transient client-state
+ *                           bugs cleared by browser refresh.
+ *
+ * Tools (real fs / shell)
+ * -----------------------
+ *  Read:<path>              fs.readFileSync(path, "utf-8") → output.
+ *  Write:<path>::<content>  Recursive mkdir + writeFileSync.
+ *  Edit:<path>::<old>::<new>  read + replace + write.
+ *  Bash:<cmd>               execSync(cmd, {cwd, timeout:10_000}).
+ *  PI_EXTENSION_TOOL:<name>::<json>
+ *                           Invoke a tool registered by a loaded --extension
+ *                           in the in-process mock runtime.
+ *  SESSION_PROMPT_TOOL:<targetSessionId>::<message>
+ *                           Simulate ask-gated session_prompt: request a tool
+ *                           grant, then POST the message to the target session.
+ *
+ * Proposals (assistant-driven)
+ * ----------------------------
+ *  goal_proposal / goal proposal       → propose_goal
+ *  project_proposal / project proposal → propose_project
+ *  proposal_burst                      → 3x propose_goal in one turn
+ *  GOAL_PROPOSAL_PARITY[_EDIT] / PROJECT_PROPOSAL_PARITY[_EDIT] /
+ *  ROLE_PROPOSAL_PARITY[_EDIT] / TOOL_PROPOSAL_PARITY[_EDIT] /
+ *  STAFF_PROPOSAL_PARITY[_EDIT]        → UX-parity matrix triggers
+ *  EDITABLE_PROPOSAL_INITIAL / EDITABLE_PROPOSAL_EDIT
+ *                                      → editable-proposals seed/edit
+ *  GOAL_PROPOSAL_REV2                  → 2nd propose_goal (different title/spec)
+ *  GOAL_PROPOSAL_OUTSIDE_CWD           → propose_goal with a cwd outside its project
+ *  GOAL_PROPOSAL_FIXED_CWD             → corrected propose_goal with project-default cwd
+ *  GOAL_EDITABLE_EDIT                  → edit_proposal type:"goal" (Mode A repro)
+ *  (See _decideToolAction / respondToPrompt for the full matcher table.)
+ *
+ * UI primitives
+ * -------------
+ *  ask_user_choices         Single-select widget.
+ *  ask_user_choices_composite Single-select widget with composite tool_use_id.
+ *  ask_user_choices_multi   Multi-select widget.
+ *
+ * Steer (RPC, not a prompt-text trigger)
+ * --------------------------------------
+ *  Steer commands (handleCommand → case "steer") abort the in-flight turn
+ *  and queue a fresh handlePrompt(steeredText), which produces a real
+ *  <user-message> in the chat. Tests assert on that transcript event.
+ *
+ * ----------------------------------------------------------------------
+ *
+ * Core mock agent logic, extracted from mock-agent.mjs as a per-session class.
+ *
+ * Used in two modes:
+ *   1. Child-process mode (mock-agent.mjs) — one instance per spawned process,
+ *      communicates via stdin/stdout JSONL.
+ *   2. In-process mode (in-process-mock-bridge.mjs) — one instance per session,
+ *      plugged directly into RpcBridge via the same public API. Skips Node
+ *      process spawn, JSONL serialization, and stdio setup per session.
+ *
+ * Isolation rules:
+ *   - All state (messages, model, session file path, abort controller) lives
+ *     on the instance — never on module-level globals.
+ *   - Environment reads (BOBBIT_SESSION_ID, BOBBIT_DIR, ...) go through the
+ *     constructor opts so in-process mode can pass per-session overrides.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import http from "node:http";
+import { execSync } from "node:child_process";
+import { createEventStreamFixture } from "../../../scripts/benchmarks/event-stream/fixture.mjs";
+
+// Keep explicitly aligned with src/shared/ask-envelope.ts. This file is .mjs
+// and is used directly by E2E mock-agent processes, so it cannot import the TS
+// shared module without extra loader wiring.
+const ASK_TOOL_USE_ID_PATTERN = "[A-Za-z0-9_|-]+";
+const ASK_RESPONSE_ENVELOPE_REGEX = new RegExp(
+	`^\\[ask_user_choices_response tool_use_id=(${ASK_TOOL_USE_ID_PATTERN})\\]\\n([\\s\\S]+)$`,
+);
+
+const DEFAULT_MODEL = { provider: "mock", id: "mock-model", contextWindow: 128000, maxTokens: 16384, reasoning: true };
+
+const KNOWN_MODELS = {
+	"claude-sonnet-4-20250514": { provider: "anthropic", id: "claude-sonnet-4-20250514", contextWindow: 1_000_000, maxTokens: 16384 },
+	// Mirror pi-ai's authoritative Claude Fable 5 metadata so the mock's get_state
+	// reports the same shape the real agent does (1M context, reasoning, and the
+	// forced-adaptive-thinking map). Without this the mock would return the 128k
+	// unknown-model stub on reconnect, masking the real behaviour the Fable
+	// model-state e2e (tests/e2e/fable-model-state-frame.spec.ts) verifies.
+	"claude-fable-5": { provider: "anthropic", id: "claude-fable-5", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+};
+
+export function mockModelFromString(modelString) {
+	if (typeof modelString !== "string") return null;
+	const slash = modelString.indexOf("/");
+	if (slash <= 0 || slash >= modelString.length - 1) return null;
+	const provider = modelString.slice(0, slash);
+	const modelId = modelString.slice(slash + 1);
+	const known = KNOWN_MODELS[modelId];
+	if (known && known.provider === provider) return { ...known };
+	return { provider, id: modelId, contextWindow: 128000, maxTokens: 16384 };
+}
+
+/**
+ * @typedef {Object} MockAgentOptions
+ * @property {string} [cwd] - Working directory (defaults to process.cwd())
+ * @property {Object} [env] - Env-var overrides (defaults to process.env)
+ * @property {string} [initialModel] - Optional spawn-time `<provider>/<modelId>` pin.
+ * @property {(event: any) => void} [onEvent] - Event emitter. Required for in-process mode.
+ * @property {(ms: number, signal?: AbortSignal) => Promise<void>} [sleep] - Injectable, abortable delay. Defaults to real time.
+ */
+
+function deferred() {
+	let resolve;
+	const promise = new Promise((done) => { resolve = done; });
+	return { promise, resolve };
+}
+
+function realSleep(ms, signal) {
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", finish);
+			resolve();
+		};
+		if (signal?.aborted) {
+			finish();
+			return;
+		}
+		timer = setTimeout(finish, Math.max(0, ms));
+		signal?.addEventListener("abort", finish, { once: true });
+	});
+}
+
+export class MockAgentCore {
+	/** @param {MockAgentOptions} options */
+	constructor(options = {}) {
+		this.cwd = options.cwd || process.cwd();
+		this.env = options.env || process.env;
+		this._onEvent = options.onEvent || (() => {});
+		this.conversationMessages = [];
+		// Pi owns two related but intentionally distinct views: model-facing
+		// messages and the append-only session-entry tree. Agent events expose only
+		// messages; durable entry ids are available through read-only session RPCs.
+		this._transcriptEntries = [];
+		this._sessionHeader = null;
+		this._runtimeCwdMetadata = [];
+		this._lastTranscriptEntryId = null;
+		this._nextTranscriptEntrySequence = 1;
+		this.currentModel = mockModelFromString(options.initialModel) || { ...DEFAULT_MODEL };
+		// Pi initializes sessions at its default thinking level and reports the
+		// effective value through get_state after every runtime mutation.
+		this.currentThinkingLevel = "medium";
+		this.sessionFilePath = null;
+		// When an AUTO_COMPACT turn has run, this holds the FULL on-disk
+		// transcript (orphaned pre-compaction entries + a compaction marker +
+		// the kept active-branch tail), each as a top-level `.jsonl` entry with
+		// a stable `id`. get_state writes THIS verbatim instead of re-deriving
+		// from conversationMessages so the orphan-history endpoint can split the
+		// transcript at firstKeptEntryId. Null until a compaction fires.
+		this._postCompactionEntries = null;
+		this.currentAbortController = null;
+		// Tracks the complete turn independently of the transport's prompt chain.
+		// Child-process mode owns its chain outside this class, while in-process
+		// mode owns it here; new_session must be able to settle either one before
+		// rotating transcript state.
+		this._activeTurn = null;
+		this._sleep = options.sleep || realSleep;
+		this.mockPiTools = options.mockPiTools || new Map();
+		this.mockPiToolCallHandlers = options.mockPiToolCallHandlers || [];
+
+		// Deterministic lifecycle barriers for reliable-turn integration tests.
+		// A barrier is observable even when it is not armed; arming additionally
+		// holds execution until releaseBarrier(). Tests sequence on these promises
+		// rather than elapsed-time sleeps.
+		this._barriers = new Map();
+		this._barrierJournal = [];
+		this._commandJournal = [];
+		this._commandSequence = { prompt: 0, steer: 0, abort: 0, compact: 0 };
+		this._reliableDeliveryIntentIds = new Map();
+		this._reliableScenario = { compaction: {}, steerFailures: {} };
+		this._reliableOverflowRetryActive = false;
+
+		// Serializes concurrent handlePrompt calls so a second prompt queued
+		// while the first is still in flight runs after the first completes.
+		// Mirrors the real agent's sequential stream behaviour, which the
+		// team-manager relies on when sending a delegate's initial
+		// "Execute the task" prompt followed immediately by the actual task.
+		this._promptChain = Promise.resolve();
+	}
+
+	/** Override the event emitter (used by child-process mode). */
+	setEventEmitter(fn) { this._onEvent = fn; }
+
+	/** Arm a named deterministic barrier. Safe to call repeatedly. */
+	armBarrier(name) {
+		let barrier = this._barriers.get(name);
+		if (!barrier) {
+			barrier = { entered: deferred(), release: deferred(), armed: true, released: false };
+			this._barriers.set(name, barrier);
+		} else {
+			barrier.armed = true;
+		}
+		return name;
+	}
+
+	/** Wait until execution reaches a named barrier (armed or observational). */
+	waitForBarrier(name) {
+		let barrier = this._barriers.get(name);
+		if (!barrier) {
+			barrier = { entered: deferred(), release: deferred(), armed: false, released: false };
+			this._barriers.set(name, barrier);
+		}
+		return barrier.entered.promise;
+	}
+
+	/** Release a held barrier. Idempotent and safe during cleanup. */
+	releaseBarrier(name) {
+		const barrier = this._barriers.get(name);
+		if (!barrier || barrier.released) return false;
+		barrier.released = true;
+		barrier.release.resolve();
+		return true;
+	}
+
+	releaseAllBarriers() {
+		for (const name of this._barriers.keys()) this.releaseBarrier(name);
+	}
+
+	async _crossBarrier(name, details = {}) {
+		let barrier = this._barriers.get(name);
+		if (!barrier) {
+			barrier = { entered: deferred(), release: deferred(), armed: false, released: false };
+			this._barriers.set(name, barrier);
+		}
+		this._barrierJournal.push({ name, ...details });
+		barrier.entered.resolve({ name, ...details });
+		if (barrier.armed && !barrier.released) await barrier.release.promise;
+		return barrier.armed;
+	}
+
+	configureReliableScenario(patch = {}) {
+		this._reliableScenario = {
+			...this._reliableScenario,
+			...patch,
+			compaction: { ...this._reliableScenario.compaction, ...(patch.compaction || {}) },
+			steerFailures: { ...this._reliableScenario.steerFailures, ...(patch.steerFailures || {}) },
+		};
+	}
+
+	get barrierJournal() { return this._barrierJournal.map((entry) => ({ ...entry })); }
+	get commandJournal() { return this._commandJournal.map((entry) => ({ ...entry })); }
+
+	bindReliableDeliveryIntent(kind, occurrence, intentId) {
+		this._reliableDeliveryIntentIds.set(`${kind}:${occurrence}`, intentId);
+	}
+
+	/** Emit an agent event to the listener. Message events deliberately remain
+	 * id-free: real Pi persists the corresponding SessionEntry only after the
+	 * terminal event. The read-only entry RPCs below are the authoritative cursor
+	 * surface. */
+	emit(event) {
+		this._onEvent(event);
+		if (this._activeTurn) {
+			if (event?.type === "agent_end") this._activeTurn.agentEndEmitted = true;
+			if (event?.type === "agent_settled") this._activeTurn.agentSettledEmitted = true;
+			if (event?.type === "session_status" && event.status === "idle") this._activeTurn.idleEmitted = true;
+		}
+		if (event?.type === "message_end" && event.message && typeof event.message === "object") {
+			this._appendTranscriptMessage(event.message);
+		}
+		// Pi emits agent_settled explicitly only after post-agent compaction and
+		// continuation handling completes. Terminal call sites below preserve that
+		// ordering instead of synthesizing settlement inside agent_end emission.
+	}
+
+	_nextTranscriptEntryId() {
+		const occupied = new Set(this._activeTranscriptEntries().map(entry => entry?.id).filter(Boolean));
+		let id;
+		do {
+			id = `mock-entry-${this._nextTranscriptEntrySequence++}`;
+		} while (occupied.has(id));
+		return id;
+	}
+
+	_activeTranscriptEntries() {
+		return Array.isArray(this._postCompactionEntries) ? this._postCompactionEntries : this._transcriptEntries;
+	}
+
+	_appendTranscriptMessage(message) {
+		const entry = {
+			type: "message",
+			id: this._nextTranscriptEntryId(),
+			parentId: this._lastTranscriptEntryId,
+			timestamp: new Date().toISOString(),
+			message,
+		};
+		this._activeTranscriptEntries().push(entry);
+		this._lastTranscriptEntryId = entry.id;
+		this._persistTranscript();
+		return entry;
+	}
+
+	_createSessionHeader() {
+		const uuid = (typeof crypto !== "undefined" && crypto.randomUUID?.()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		return {
+			type: "session",
+			version: 3,
+			id: `mock-session-${uuid}`,
+			timestamp: new Date().toISOString(),
+			cwd: this.cwd,
+		};
+	}
+
+	_persistTranscript() {
+		const sf = this.ensureSessionFile();
+		const lines = [
+			JSON.stringify(this._sessionHeader),
+			...this._runtimeCwdMetadata.map(entry => JSON.stringify(entry)),
+			...this._activeTranscriptEntries().map(entry => JSON.stringify(entry)),
+		];
+		fs.writeFileSync(sf, `${lines.join("\n")}\n`);
+	}
+
+	/** Ensure the session .jsonl file exists and return its path */
+	ensureSessionFile() {
+		if (this.sessionFilePath) return this.sessionFilePath;
+		const agentDir = this.env.BOBBIT_AGENT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || "/tmp", ".bobbit", "agent");
+		const slug = this.cwd.replace(/[^a-zA-Z0-9]/g, "-").replace(/-+/g, "-").substring(0, 60) || "--workspace--";
+		const dir = path.join(agentDir, "sessions", slug);
+		fs.mkdirSync(dir, { recursive: true });
+		const ts = new Date().toISOString().replace(/[:.]/g, "-");
+		const uuid = (typeof crypto !== "undefined" && crypto.randomUUID?.()) || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		this.sessionFilePath = path.join(dir, `${ts}_${uuid}.jsonl`);
+		this._sessionHeader ||= this._createSessionHeader();
+		fs.writeFileSync(this.sessionFilePath, `${JSON.stringify(this._sessionHeader)}\n`);
+		return this.sessionFilePath;
+	}
+
+	/** Extract a file path from prompt text (handles Windows and Unix paths) */
+	static extractFilePath(text) {
+		const winMatch = text.match(/[A-Z]:[\\\/][^\s"']+/);
+		if (winMatch) return winMatch[0].replace(/[.,;:!?)]+$/, '');
+		const unixMatch = text.match(/\/[\w./-]+/);
+		if (unixMatch) return unixMatch[0].replace(/[.,;:!?)]+$/, '');
+		return "/tmp/mock-file.txt";
+	}
+
+	/** Detect which tool the prompt is asking for and return a canned response */
+	static respondToPrompt(text) {
+		const lower = text.toLowerCase();
+
+		const markdownLocalImageMatch = text.match(/MARKDOWN_LOCAL_IMAGE:(\S+)/);
+		if (markdownLocalImageMatch) {
+			return { text: `Local image follows:\n\n![Session local screenshot](${markdownLocalImageMatch[1]})` };
+		}
+
+		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
+		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
+
+		const sessionPromptToolMatch = text.match(/SESSION_PROMPT_TOOL:([\w-]+)::([\s\S]+)/);
+		if (sessionPromptToolMatch) {
+			return { sessionPromptTool: { targetSessionId: sessionPromptToolMatch[1], message: sessionPromptToolMatch[2].trim() } };
+		}
+
+		const piExtensionToolMatch = text.match(/PI_EXTENSION_TOOL:([^:\s]+)(?:::(\{[\s\S]*\}))?/);
+		if (piExtensionToolMatch) {
+			let input = {};
+			if (piExtensionToolMatch[2]) {
+				try { input = JSON.parse(piExtensionToolMatch[2]); } catch { input = { raw: piExtensionToolMatch[2] }; }
+			}
+			return { piExtensionTool: { name: piExtensionToolMatch[1], input } };
+		}
+
+		// Live-update flow: two consecutive propose_project calls in the
+		// same turn. Checked BEFORE the more general project_proposal substring
+		// match because LIVE_UPDATE_PROPOSAL also contains "proposal".
+		if (text.includes("LIVE_UPDATE_PROPOSAL")) {
+			return { liveUpdateProposal: true };
+		}
+
+		// Per-component config flow: two consecutive propose_project calls.
+		// First emits components with `config:` populated; second emits the
+		// same components without `config:` (only `commands:`). Tests that
+		// the per-component shallow-merge in onProjectProposal preserves the
+		// previously-proposed `config` map.
+		if (text.includes("COMPONENT_CONFIG_PROPOSAL")) {
+			return { componentConfigProposal: true };
+		}
+
+		// Multi-component proposal with structured components + workflows.
+		if (text.includes("MULTI_COMPONENT_PROPOSAL")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Multi Comp Project",
+					root_path: "/tmp/multi-comp",
+					components: [
+						{ name: "api", repo: ".", relative_path: "packages/api", commands: { build: "npm run build:api", test: "npm test --workspace=api" } },
+						{ name: "web", repo: ".", relative_path: "packages/web", commands: { build: "npm run build:web", test: "npm test --workspace=web" } },
+					],
+					workflows: {
+						"feature-api": {
+							id: "feature-api",
+							name: "Feature (api)",
+							description: "Feature flow scoped to the api component.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+						"feature-web": {
+							id: "feature-web",
+							name: "Feature (web)",
+							description: "Feature flow scoped to the web component.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+						"all-components": {
+							id: "all-components",
+							name: "All Components",
+							description: "Fan-out flow that builds every component in parallel.",
+							gates: [
+								{ id: "design-doc", name: "Design Document", verify: [] },
+								{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+							],
+						},
+					},
+				},
+				output: "Multi-component project proposal submitted.",
+			};
+		}
+
+		// Editable-proposals + parity matchers must precede the generic
+		// `project_proposal` substring match below — EDITABLE_PROPOSAL_*
+		// and PROJECT_PROPOSAL_PARITY both contain that substring.
+		if (text.includes("EDITABLE_PROPOSAL_INITIAL")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Editable",
+					root_path: "/tmp/editable",
+					build_command: "echo old",
+					test_command: "echo test",
+				},
+				output: "Project proposal seeded with echo old.",
+			};
+		}
+		if (text.includes("EDITABLE_PROPOSAL_EDIT")) {
+			return {
+				tool: "edit_proposal",
+				input: { type: "project", old_text: "echo old", new_text: "echo new" },
+				output: "Edit applied.",
+			};
+		}
+		if (text.includes("PROJECT_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_project",
+				input: { name: "Parity Project", root_path: "/tmp/parity-project", build_command: "echo parity-edited" },
+				output: "Project proposal partial submitted.",
+			};
+		}
+		if (text.includes("PROJECT_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Parity Project",
+					root_path: "/tmp/parity-project",
+					build_command: "echo parity",
+					test_command: "echo parity-test",
+					components: [{ name: "core", repo: ".", commands: { build: "echo build-core" } }],
+				},
+				output: "Project proposal submitted.",
+			};
+		}
+
+		if (lower.includes("project_proposal") || lower.includes("project proposal")) {
+			return {
+				tool: "propose_project",
+				input: {
+					name: "Test Project",
+					root_path: "/tmp/test-project",
+					build_command: "npm run build",
+					test_command: "npm test",
+					typecheck_command: "npm run check",
+					worktree_setup_command: "npm ci",
+					qa_start_command: "npm run dev",
+				},
+				output: "Project proposal submitted.",
+			};
+		}
+
+		// Burst of two consecutive `propose_*` tool calls in two separate
+		// assistant turns, each followed by a toolResult. Used by ST-DEDUP-02
+		// to prove the unified message-ordering reducer keeps both widgets in
+		// order without overwriting (regression: legacy single-slot deferred
+		// assistant message overwrote the first widget when the second arrived).
+		if (lower.includes("proposal_burst")) {
+			return { proposalBurst: true };
+		}
+
+		// UX-parity matrix triggers for assistant-only types (workflow / role /
+		// tool / staff). _PARITY emits a full propose_<type>; _PARITY_EDIT emits
+		// a partial that touches one scalar so mergeFields preservation is
+		// exercised. Goal + project parity triggers live above (they must precede
+		// the generic substring matchers).
+		if (text.includes("GOAL_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_goal",
+				input: { title: "Parity Goal A — edited", workflow: "general", spec: "Body B." },
+				output: "Goal proposal partial submitted.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_goal",
+				input: { title: "Parity Goal A", workflow: "general", spec: "Body A." },
+				output: "Goal proposal submitted.",
+			};
+		}
+		if (text.includes("ROLE_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_role",
+				input: { name: "parity-role", label: "parity-role-edited", prompt: "P", tools: "", accessory: "none" },
+				output: "Role proposal partial submitted.",
+			};
+		}
+		if (text.includes("ROLE_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_role",
+				input: { name: "parity-role", label: "Parity Role", prompt: "Parity prompt body.", tools: "", accessory: "none" },
+				output: "Role proposal submitted.",
+			};
+		}
+		if (text.includes("TOOL_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_tool",
+				input: { tool: "parity-tool", action: "docs", content: "parity-tool-edited content" },
+				output: "Tool proposal partial submitted.",
+			};
+		}
+		if (text.includes("TOOL_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_tool",
+				input: { tool: "parity-tool", action: "docs", content: "Parity tool docs." },
+				output: "Tool proposal submitted.",
+			};
+		}
+		if (text.includes("STAFF_PROPOSAL_PARITY_EDIT")) {
+			return {
+				tool: "propose_staff",
+				input: { name: "parity-staff", description: "parity-staff-edited", prompt: "P", triggers: "[]", cwd: "" },
+				output: "Staff proposal partial submitted.",
+			};
+		}
+		if (text.includes("STAFF_PROPOSAL_ROLE")) {
+			return {
+				tool: "propose_staff",
+				input: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "", role: "coder" },
+				output: "Staff proposal (with role) submitted.",
+			};
+		}
+		if (text.includes("STAFF_PROPOSAL_PARITY")) {
+			return {
+				tool: "propose_staff",
+				input: { name: "parity-staff", description: "Parity staff description.", prompt: "Parity staff prompt.", triggers: "[]", cwd: "" },
+				output: "Staff proposal submitted.",
+			};
+		}
+
+		// Failed workflow-validation proposal path. The omitted workflow makes the
+		// gateway seed endpoint return MISSING_WORKFLOW; _handleSingleTool mirrors
+		// that 400 as an isError toolResult so the UI can render the failed draft.
+		if (text.includes("GOAL_PROPOSAL_MISSING_WORKFLOW")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Missing Workflow Goal",
+					spec: "A draft intentionally missing workflow so the proposal seed endpoint rejects it.",
+				},
+				output: "Goal proposal failed workflow validation.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_FIXED_WORKFLOW")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Fixed Workflow Goal",
+					workflow: "general",
+					spec: "A corrected draft with an explicit valid workflow.",
+				},
+				output: "Corrected goal proposal submitted.",
+			};
+		}
+
+		// Non-workflow validation failure + correction. A path directly below the
+		// filesystem root is deterministically outside the harness default project
+		// on Windows and POSIX; it need not exist for containment validation.
+		if (text.includes("GOAL_PROPOSAL_OUTSIDE_CWD")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Outside Cwd Goal",
+					workflow: "general",
+					spec: "A draft intentionally using a cwd outside the selected project.",
+					cwd: path.join(path.parse(process.cwd()).root, "__bobbit-outside-proposal__"),
+				},
+				output: "Goal proposal failed cwd validation.",
+			};
+		}
+		if (text.includes("GOAL_PROPOSAL_FIXED_CWD")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Corrected Cwd Goal",
+					workflow: "general",
+					spec: "A corrected draft using the selected project's default cwd.",
+				},
+				output: "Corrected cwd goal proposal submitted.",
+			};
+		}
+
+		// Goal revision (2nd propose_goal with a different title/spec) — used by
+		// goal-proposal-revision-autoupdate.spec.ts (Failure Mode A). Must precede
+		// the generic `goal_proposal` matcher below because the trigger string
+		// contains the "GOAL_PROPOSAL" substring. The spec deliberately retains the
+		// "It validates the goal creation UI." sentence so the GOAL_EDITABLE_EDIT
+		// edit trigger (below) can apply cleanly after a revision as well as after
+		// the initial proposal.
+		if (text.includes("GOAL_PROPOSAL_REV2")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Revised Goal Title",
+					workflow: "general",
+					spec: "Revised body for revision two.\nIt validates the goal creation UI.",
+				},
+				output: "Revised goal proposal submitted.",
+			};
+		}
+		// Goal edit_proposal trigger — sibling to EDITABLE_PROPOSAL_EDIT (project)
+		// but targeting type:"goal". Drives the deterministic Failure Mode A repro:
+		// `edit_proposal` is not a `propose_*` tool, so the legacy onGoalProposal
+		// callback never fires and only the unified proposal_update {source:"edit"}
+		// path runs. `old_text` is a substring present in both the initial
+		// GOAL_PROPOSAL spec and the GOAL_PROPOSAL_REV2 spec so the edit applies
+		// cleanly regardless of whether a revision preceded it.
+		if (text.includes("GOAL_EDITABLE_EDIT")) {
+			return {
+				tool: "edit_proposal",
+				input: {
+					type: "goal",
+					old_text: "It validates the goal creation UI.",
+					new_text: "EDITED SPEC BODY for Mode A repro.",
+				},
+				output: "Goal proposal edited.",
+			};
+		}
+
+		// Goal proposal pre-filled with the Sub-goals tab fields — used by
+		// goal-proposal-subgoal-prefill.spec.ts to assert the agent can set
+		// everything a human sets on that tab. Must precede the generic
+		// goal_proposal matcher (it contains the "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_SUBGOAL_PREFILL")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Prefilled Goal",
+					workflow: "general",
+					spec: "A goal whose Sub-goals tab is pre-filled by the agent.",
+					subgoalsAllowed: true,
+					maxNestingDepth: 2,
+					divergencePolicy: "autonomous",
+					maxConcurrentChildren: 4,
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
+		// Goal proposal carrying a parentGoalId (a child-goal proposal) — used by
+		// subgoals-experimental-toggle.spec.ts to assert the Sub-goals tab is a
+		// pure function of the system flag and does NOT appear merely because the
+		// proposal has a parent. Must precede the generic goal_proposal matcher
+		// (it contains the "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_WITH_PARENT")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "Child Goal",
+					workflow: "general",
+					spec: "A child-goal proposal seeded with a parentGoalId.",
+					parentGoalId: "some-parent-id",
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
+		// Goal proposal carrying arbitrary per-goal metadata — used to assert a
+		// propose_goal-seeded proposal mirrors `metadata` into the goal form and
+		// preserves it through acceptance. Supersedes the removed per-goal
+		// worktreeSetupCommand / worktreeSetupTimeoutMs surface (PR #816). Must
+		// precede the generic goal_proposal matcher (it contains the
+		// "GOAL_PROPOSAL" substring).
+		if (text.includes("GOAL_PROPOSAL_METADATA")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "E2E Test Goal",
+					workflow: "general",
+					spec: "A goal whose metadata is seeded by the agent.",
+					metadata: {
+						"hindsight.memory.enabled": false,
+						"bobbit.disabledTools": ["browser_navigate"],
+					},
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
+		if (lower.includes("goal_proposal") || lower.includes("goal proposal")) {
+			return {
+				tool: "propose_goal",
+				input: {
+					title: "E2E Test Goal",
+					workflow: "general",
+					options: "QA testing",
+					spec: "This is a test goal created via the assistant flow.\nIt validates the goal creation UI.",
+				},
+				output: "Proposal submitted. Waiting for user response.",
+			};
+		}
+
+		// Preview snapshot triggers for tests — must precede review_open matching
+		// (the substring "review_open" occurs inside "preview_open").
+		if (text.includes("PREVIEW_OPEN_ARTIFACT_FILE_COMPACT_SNAPSHOT")) {
+			return { previewArtifactFileCompactSnapshot: true };
+		}
+		if (text.includes("PREVIEW_OPEN_ARTIFACT_COMPACT_SNAPSHOT")) {
+			return { previewArtifactCompactSnapshot: true };
+		}
+		const previewMatch = text.match(/PREVIEW_OPEN_SNAPSHOT\s+SIZE=(\d+)/);
+		if (previewMatch) {
+			const size = Math.max(1, parseInt(previewMatch[1], 10));
+			const body = "<!DOCTYPE html><html><body>" + "x".repeat(size) + "</body></html>";
+			return { previewSnapshot: body };
+		}
+
+		// Durable large-review adapter. Unlike the legacy canned review triggers,
+		// this posts the canonical payload through the authenticated production API
+		// and emits the returned bounded receipt as the correlated tool result.
+		const durableLargeReview = text.match(/REVIEW_OPEN_DURABLE_LARGE_20(?:_DELAY:(\d+))?/);
+		if (durableLargeReview) {
+			return { durableLargeReview: { delayMs: durableLargeReview[1] ? Math.max(0, parseInt(durableLargeReview[1], 10)) : 0 } };
+		}
+
+		// Review-group browser triggers. Stable review/file identities make reload,
+		// background-session, close, and replay-suppression assertions deterministic.
+		const reviewGroupAction = (reviewId, title, files) => ({
+			tool: "review_open",
+			input: { title, files: files.map(({ title: fileTitle, markdown }) => ({ title: fileTitle, markdown })) },
+			output: JSON.stringify({ action: "review_open", reviewId, title, files, replace: true }),
+		});
+		const alphaReviewFiles = [
+			{ fileId: "alpha-file-1", title: "Overview.md", markdown: "# Alpha overview\n\nAlpha overview body." },
+			{ fileId: "alpha-file-2", title: "Details.md", markdown: "# Alpha details\n\nAlpha details body." },
+		];
+		const overflowReviewFiles = Array.from({ length: 7 }, (_, index) => ({
+			fileId: `overflow-file-${index + 1}`,
+			title: `Section ${index + 1}.md`,
+			markdown: `# Overflow section ${index + 1}\n\nOverflow body ${index + 1}.`,
+		}));
+		const backgroundReviewFiles = [
+			{ fileId: "background-file-1", title: "Background A.md", markdown: "# Background A\n\nBackground owner content A." },
+			{ fileId: "background-file-2", title: "Background B.md", markdown: "# Background B\n\nBackground owner content B." },
+		];
+		if (lower.includes("review_groups_two")) {
+			return {
+				multiTool: [
+					reviewGroupAction("alpha-review", "Alpha Review", alphaReviewFiles),
+					reviewGroupAction(
+						"overflow-review",
+						"Overflow Review With A Very Long Primary Workspace Tab Title That Must Truncate",
+						overflowReviewFiles,
+					),
+				],
+			};
+		}
+		if (lower.includes("review_group_background_open")) {
+			return reviewGroupAction("background-review", "Background Session Review", backgroundReviewFiles);
+		}
+		if (lower.includes("review_group_background_close")) {
+			return {
+				tool: "review_close",
+				input: { title: "Background Session Review" },
+				output: JSON.stringify({ action: "review_close", title: "Background Session Review" }),
+			};
+		}
+		if (lower.includes("review_multi")) {
+			const docs = [
+				{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
+				{ title: "Document B", markdown: "# Document B\n\nSecond document content." },
+				{ title: "Document C", markdown: "# Document C\n\nThird document content." },
+			];
+			return {
+				multiTool: docs.map(d => ({
+					tool: "review_open",
+					input: { title: d.title, markdown: d.markdown },
+					output: JSON.stringify({ action: "review_open", title: d.title, markdown: d.markdown, replace: true }),
+				})),
+			};
+		}
+		if (lower.includes("review_open_revised")) {
+			const md = "# Test Document\n\nRevised review document after rejection.\n\n## Revised Section\n\nRevised markdown after rejected feedback should reopen the review pane.";
+			return {
+				tool: "review_open",
+				input: { title: "Test Document", markdown: md },
+				output: JSON.stringify({ action: "review_open", title: "Test Document", markdown: md, replace: true }),
+			};
+		}
+		if (lower.includes("review_open")) {
+			const md = "# Test Document\n\nThis is a test document for review.\n\n## Section One\n\nSome important text that could be commented on.\n\n## Section Two\n\nMore content here with `code examples` and details.";
+			return {
+				tool: "review_open",
+				input: { title: "Test Document", markdown: md },
+				output: JSON.stringify({ action: "review_open", title: "Test Document", markdown: md, replace: true }),
+			};
+		}
+		if (lower.includes("review_close")) {
+			return {
+				tool: "review_close",
+				input: { title: "Test Document" },
+				output: JSON.stringify({ action: "review_close", title: "Test Document" }),
+			};
+		}
+
+		if (lower.includes("mock_error")) return { mockError: true };
+
+		// Extension-host litmus (tests/e2e/ui/extension-host.spec.ts): emit a
+		// `sample_action` tool call so the retry-demo pack's PACK renderer mounts in
+		// the live session view. The toolId is STABLE so the browser E2E can write a
+		// matching transcript line for the action endpoint's toolUseId-ownership
+		// check (design §5 iii) and the rendered ctx.toolUseId == the persisted id.
+		if (text.includes("SAMPLE_ACTION_TOOL")) {
+			return { tool: "sample_action", input: {}, output: "sample action tool executed", toolId: "tu-sample-1" };
+		}
+
+		// Extension-host Phase-2 litmus (tests/e2e/ui/artifacts-pack.spec.ts): emit an
+		// `artifact_demo` tool call carrying a stable artifactId + filename + content in
+		// its INPUT so the artifacts pack's PACK renderer mounts the inline pill and the
+		// renderer can persist the payload to the pack store on a user click. Stable
+		// toolId so the browser E2E can satisfy any toolUseId-ownership checks.
+		if (text.includes("ARTIFACT_DEMO_TOOL")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-1",
+					filename: "hello.html",
+					content: "<h1>Hello Artifact</h1>",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-1",
+			};
+		}
+
+		// Multi-type variants of the artifacts litmus (tests/e2e/ui/artifacts-pack.spec.ts):
+		// each emits an `artifact_demo` tool call with a DISTINCT artifactId/filename/content
+		// so the strengthened E2E can exercise the viewer's per-type rendering (markdown,
+		// svg, image) end-to-end alongside the html-with-sandbox case above. Stable
+		// artifactIds + toolIds so the browser E2E can address each pill deterministically.
+		if (text.includes("ARTIFACT_DEMO_MD")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-md",
+					filename: "notes.md",
+					content: "# Hello Markdown\n\nSome **bold** and `code` text.",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-md",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_SVG")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-svg",
+					filename: "shape.svg",
+					content: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4" fill="red"/></svg>',
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-svg",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_IMG")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-img",
+					filename: "pixel.png",
+					// 1x1 transparent PNG.
+					content: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-img",
+			};
+		}
+		// D1 parity-hardening variants: the formerly-fallback types now render for
+		// REAL via the VENDORED libs bundled into the pack (hljs / pdfjs / docx-preview)
+		// + an html artifact whose script logs to console (capture parity).
+		if (text.includes("ARTIFACT_DEMO_CODE")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-code",
+					filename: "snippet.ts",
+					content: "const greeting: string = \"hi\";\nfunction add(a: number, b: number) { return a + b; }",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-code",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_CONSOLE")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-console",
+					filename: "logger.html",
+					content: "<h1>Console artifact</h1><script>console.log('ARTIFACT_LOG_LINE');console.error('ARTIFACT_ERR_LINE');<\/script>",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-console",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_PDF")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-pdf",
+					filename: "doc.pdf",
+					// A minimal one-page PDF (text "PDF Parity OK"), base64.
+					content: "JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDEyMF0vUmVzb3VyY2VzPDwvRm9udDw8L0YxIDQgMCBSPj4+Pi9Db250ZW50cyA1IDAgUj4+ZW5kb2JqCjQgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iago1IDAgb2JqPDwvTGVuZ3RoIDQzPj5zdHJlYW0KQlQgL0YxIDIwIFRmIDIwIDYwIFRkIChQREYgUGFyaXR5IE9LKSBUaiBFVAplbmRzdHJlYW0gZW5kb2JqCnhyZWYKMCA2CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDUyIDAwMDAwIG4gCjAwMDAwMDAxMDEgMDAwMDAgbiAKMDAwMDAwMDIxMSAwMDAwMCBuIAowMDAwMDAwMjcyIDAwMDAwIG4gCnRyYWlsZXI8PC9TaXplIDYvUm9vdCAxIDAgUj4+CnN0YXJ0eHJlZgozNjEKJSVFT0Y=",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-pdf",
+			};
+		}
+		if (text.includes("ARTIFACT_DEMO_DOCX")) {
+			return {
+				tool: "artifact_demo",
+				input: {
+					command: "create",
+					artifactId: "art-demo-docx",
+					filename: "doc.docx",
+					// A minimal valid DOCX (one paragraph "DOCX Parity OK"), base64.
+					content: "UEsDBAoAAAAAAO49yVx5bjPXrQEAAK0BAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04IiBzdGFuZGFsb25lPSJ5ZXMiPz48VHlwZXMgeG1sbnM9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9wYWNrYWdlLzIwMDYvY29udGVudC10eXBlcyI+PERlZmF1bHQgRXh0ZW5zaW9uPSJyZWxzIiBDb250ZW50VHlwZT0iYXBwbGljYXRpb24vdm5kLm9wZW54bWxmb3JtYXRzLXBhY2thZ2UucmVsYXRpb25zaGlwcyt4bWwiLz48RGVmYXVsdCBFeHRlbnNpb249InhtbCIgQ29udGVudFR5cGU9ImFwcGxpY2F0aW9uL3htbCIvPjxPdmVycmlkZSBQYXJ0TmFtZT0iL3dvcmQvZG9jdW1lbnQueG1sIiBDb250ZW50VHlwZT0iYXBwbGljYXRpb24vdm5kLm9wZW54bWxmb3JtYXRzLW9mZmljZWRvY3VtZW50LndvcmRwcm9jZXNzaW5nbWwuZG9jdW1lbnQubWFpbit4bWwiLz48L1R5cGVzPlBLAwQKAAAAAADuPclcAAAAAAAAAAAAAAAABgAAAF9yZWxzL1BLAwQKAAAAAADuPclcm/036ikBAAApAQAACwAAAF9yZWxzLy5yZWxzPD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9InllcyI/PjxSZWxhdGlvbnNoaXBzIHhtbG5zPSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvcGFja2FnZS8yMDA2L3JlbGF0aW9uc2hpcHMiPjxSZWxhdGlvbnNoaXAgSWQ9InJJZDEiIFR5cGU9Imh0dHA6Ly9zY2hlbWFzLm9wZW54bWxmb3JtYXRzLm9yZy9vZmZpY2VEb2N1bWVudC8yMDA2L3JlbGF0aW9uc2hpcHMvb2ZmaWNlRG9jdW1lbnQiIFRhcmdldD0id29yZC9kb2N1bWVudC54bWwiLz48L1JlbGF0aW9uc2hpcHM+UEsDBAoAAAAAAO49yVwAAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMECgAAAAAA7j3JXAh++GfXAAAA1wAAABEAAAB3b3JkL2RvY3VtZW50LnhtbDw/eG1sIHZlcnNpb249IjEuMCIgZW5jb2Rpbmc9IlVURi04IiBzdGFuZGFsb25lPSJ5ZXMiPz48dzpkb2N1bWVudCB4bWxuczp3PSJodHRwOi8vc2NoZW1hcy5vcGVueG1sZm9ybWF0cy5vcmcvd29yZHByb2Nlc3NpbmdtbC8yMDA2L21haW4iPjx3OmJvZHk+PHc6cD48dzpyPjx3OnQ+RE9DWCBQYXJpdHkgT0s8L3c6dD48L3c6cj48L3c6cD48L3c6Ym9keT48L3c6ZG9jdW1lbnQ+UEsBAhQACgAAAAAA7j3JXHluM9etAQAArQEAABMAAAAAAAAAAAAAAAAAAAAAAFtDb250ZW50X1R5cGVzXS54bWxQSwECFAAKAAAAAADuPclcAAAAAAAAAAAAAAAABgAAAAAAAAAAABAAAADeAQAAX3JlbHMvUEsBAhQACgAAAAAA7j3JXJv9N+opAQAAKQEAAAsAAAAAAAAAAAAAAAAAAgIAAF9yZWxzLy5yZWxzUEsBAhQACgAAAAAA7j3JXAAAAAAAAAAAAAAAAAUAAAAAAAAAAAAQAAAAVAMAAHdvcmQvUEsBAhQACgAAAAAA7j3JXAh++GfXAAAA1wAAABEAAAAAAAAAAAAAAAAAdwMAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAAFAAUAIAEAAH0EAAAAAA==",
+				},
+				output: "artifact created",
+				toolId: "tu-artifact-docx",
+			};
+		}
+
+		// Orchestration Core (team_delegate) card render litmus
+		// (tests/e2e/ui/team-delegate.spec.ts). Emits a team_delegate tool_use +
+		// toolResult carrying details.delegates so the shared DelegateRenderer
+		// mounts. CANNED — does NOT spawn a real child (the renderer is what the
+		// browser test asserts; real spawn/wait/dismiss are covered by the API
+		// specs). TEAM_DELEGATE_CARD_PARALLEL renders the multi-child card.
+		if (text.includes("TEAM_DELEGATE_CARD_PARALLEL")) {
+			return { teamDelegateCard: "parallel" };
+		}
+		if (text.includes("TEAM_DELEGATE_CARD")) {
+			return { teamDelegateCard: "single" };
+		}
+
+		// Autonomous skill activation: drives the activate_skill tool path.
+		// Trigger phrase: "please activate_skill <name> [args...]" (case-insensitive).
+		const activateMatch = text.match(/please\s+activate_skill\s+([\w-]+)(?:\s+([\s\S]*))?$/i);
+		if (activateMatch) {
+			return {
+				activateSkill: { name: activateMatch[1], args: (activateMatch[2] || "").trim() },
+			};
+		}
+
+		if (lower.includes("bash") || lower.includes("echo ")) {
+			return { tool: "Bash", input: { command: "echo BOBBIT_TOOL_TEST_OK_12345" }, output: "BOBBIT_TOOL_TEST_OK_12345\n" };
+		}
+		if (lower.includes("write tool") || lower.includes("use the write")) {
+			const filePath = MockAgentCore.extractFilePath(text);
+			return { tool: "Write", input: { path: filePath, content: "E2E_WRITE_TEST\n" }, output: `Wrote to ${filePath}` };
+		}
+		if (lower.includes("read tool") || lower.includes("use the read")) {
+			const filePath = MockAgentCore.extractFilePath(text);
+			return { tool: "Read", input: { path: filePath }, output: "READ_THIS_CONTENT_E2E\n" };
+		}
+		if (lower.includes("edit tool") || lower.includes("use the edit")) {
+			const filePath = MockAgentCore.extractFilePath(text);
+			return { tool: "Edit", input: { path: filePath, oldText: "ORIGINAL_VALUE", newText: "EDITED_VALUE" }, output: "Edited successfully" };
+		}
+		if (lower.includes("ask_user_choices with bad tab labels then retry")) {
+			// Simulates the failure-then-retry path: emits one ask_user_choices
+			// tool_use with questions[1] missing tab_label (rejected with isError:true)
+			// then a second, valid ask_user_choices with the {status:"posted"} stub.
+			return { askUserChoices: "errorThenRetry" };
+		}
+		if (lower.includes("ask_user_choices_multi")) {
+			return { askUserChoices: "multi" };
+		}
+		if (lower.includes("ask_user_choices_composite") || lower.includes("ask user choices composite")) {
+			return { askUserChoices: "composite" };
+		}
+		if (lower.includes("ask_user_choices") || lower.includes("ask user choices")) {
+			// Signals the mock agent to emit a non-blocking ask_user_choices tool_use.
+			// The tool returns {status:"posted", tool_use_id} synchronously; answers arrive
+			// later as a tagged user message via POST /api/internal/user-question/submit.
+			return { askUserChoices: true };
+		}
+		return null;
+	}
+
+	/** Replace the delay implementation. Used by in-process tests to inject virtual time. */
+	setSleep(sleep) {
+		this._sleep = sleep || realSleep;
+	}
+
+	/** Small abortable delay. Each delay settles once, including on abort. */
+	tick(ms = 10) {
+		return this._sleep(ms, this.currentAbortController?.signal);
+	}
+
+	/** Simulate a full agent turn: streaming start → tool calls → assistant text → end */
+	async handlePrompt(text, images, delivery = {}) {
+		const controller = new AbortController();
+		const settled = deferred();
+		const activeTurn = {
+			controller,
+			settled: settled.promise,
+			agentEndEmitted: false,
+			agentSettledEmitted: false,
+			idleEmitted: false,
+		};
+		this.currentAbortController = controller;
+		this._activeTurn = activeTurn;
+		try {
+
+		// Reliable-turn fixtures expose Pi's actual acknowledgement boundary:
+		// message_start means the accepted occurrence is entering the transcript;
+		// RPC acknowledgement alone is deliberately not enough.
+		if (delivery.kind === "steer") {
+			await this._crossBarrier(`steer:${delivery.occurrence}:before-user-start`, delivery);
+			const boundIntentId = this._reliableDeliveryIntentIds.get(`steer:${delivery.occurrence}`);
+			if (boundIntentId) {
+				delivery.intentId = boundIntentId;
+				this._reliableDeliveryIntentIds.delete(`steer:${delivery.occurrence}`);
+			}
+		}
+
+		// Echo back the user message (real agent does this).
+		//
+		// Image fidelity (WP0 / PR-0): the real pi-agent builds the user echo as
+		// {role:"user", content:[text, ...imageBlocks]} via normalizePromptInput
+		// (pi-agent-core/dist/agent.js:248-259) and persists it to .jsonl. The
+		// default mock echoed text-only and discarded forwarded images, which
+		// structurally excised the image round-trip from the e2e tier (hid
+		// S1/S6/S18/S26 — see docs/design/comms-stack/02-analysis.md §4 P0). Opt
+		// in via the ECHO_IMAGE_BLOCK trigger so the default path stays
+		// byte-identical for every existing test.
+		const echoImages = /ECHO_IMAGE_BLOCK/.test(text) && Array.isArray(images) && images.length
+			? images.map((im) => ({ type: "image", data: im.data, mimeType: im.mimeType || "image/png" }))
+			: [];
+		const userMsg = {
+			role: "user",
+			content: [{ type: "text", text }, ...echoImages],
+			...(delivery.intentId ? { deliveryIntentId: delivery.intentId } : {}),
+		};
+		// Optional echo-delay knob to widen the optimistic→echo race window for
+		// timing tests (env MOCK_USER_ECHO_DELAY_MS, or inline USER_ECHO_DELAY=<ms>
+		// so it survives the spawned/in-process boundary). Default: synchronous.
+		const echoDelayMs = (() => {
+			const m = /USER_ECHO_DELAY=(\d+)/.exec(text);
+			return m ? parseInt(m[1], 10) : parseInt(this.env.MOCK_USER_ECHO_DELAY_MS || "0", 10);
+		})();
+		if (echoDelayMs > 0) await this.tick(echoDelayMs);
+		if (delivery.kind === "steer") {
+			this.emit({
+				type: "message_start",
+				message: userMsg,
+				...(delivery.intentId ? { deliveryIntentId: delivery.intentId } : {}),
+			});
+			await this._crossBarrier(`steer:${delivery.occurrence}:after-user-start`, delivery);
+		}
+		this.conversationMessages.push(userMsg);
+		this.emit({
+			type: "message_end",
+			message: userMsg,
+			...(delivery.intentId ? { deliveryIntentId: delivery.intentId } : {}),
+		});
+
+		// Tiny delay before starting — just enough to mimic a real async
+		// boundary without adding significant test wall time. The original
+		// 50ms was meant to mirror the real agent's startup latency but
+		// tests don't care about that specific number; a microtask boundary
+		// is sufficient.
+		await this.tick(5);
+
+		// Emit agent lifecycle events
+		this.emit({ type: "agent_start" });
+		this.emit({ type: "session_status", status: "streaming" });
+
+		await this.tick(5);
+
+		// Non-blocking ask_user_choices: if this prompt is the envelope user
+		// message carrying answers, echo them as an assistant text reply so E2E
+		// tests can observe the round-trip, then end the turn.
+		if (/^\[ask_user_choices_response tool_use_id=/.test(text)) {
+			await this._handleAskResponseEnvelope(text);
+			await this.tick(5);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// RELIABLE_COMPACTION:<threshold|overflow> drives named, holdable
+		// lifecycle barriers. Overflow additionally exposes a recoverable length
+		// tail and Pi's willRetry boundary before the continuing attempt.
+		const reliableCompactionMatch = text.match(/RELIABLE_COMPACTION:(threshold|overflow)/);
+		if (reliableCompactionMatch) {
+			const reason = reliableCompactionMatch[1];
+			if (reason === "overflow") {
+				this._reliableOverflowRetryActive = true;
+				const truncated = {
+					role: "assistant",
+					content: [{ type: "text", text: "truncated recoverable length tail" }],
+					stopReason: "length",
+				};
+				this.emit({ type: "message_end", message: truncated });
+				await this._crossBarrier("overflow:length-tail", { reason });
+				const preCompactionError = this._reliableScenario.compaction?.overflow?.preCompactionError;
+				if (typeof preCompactionError === "string" && preCompactionError.length > 0) {
+					this.emit({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [],
+							stopReason: "error",
+							errorMessage: preCompactionError,
+						},
+					});
+				}
+			}
+			const completed = await this._handleAutoCompaction(3, reason);
+			if (!completed || !this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this._reliableOverflowRetryActive = false;
+				this.currentAbortController = null;
+				this.emit({ type: "agent_end", willRetry: false });
+				this.emit({ type: "agent_settled" });
+				this.emit({ type: "session_status", status: "idle" });
+				return;
+			}
+			if (reason === "overflow") {
+				this.emit({ type: "agent_end", willRetry: true });
+				await this._crossBarrier("overflow:before-retry", { reason, willRetry: true });
+				this.emit({ type: "agent_start", retry: true });
+			}
+			await this._crossBarrier(`${reason}:before-final-agent-end`, { reason });
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end", willRetry: false });
+			this.emit({ type: "agent_settled" });
+			this._reliableOverflowRetryActive = false;
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// AUTO_COMPACT:<preCount> — drive a LIVE auto/threshold compaction.
+		// Emits auto_compaction_start, persists a `.jsonl` with top-level ids
+		// (preCount orphaned entries + a compaction marker + a kept tail), then
+		// emits auto_compaction_end carrying result.firstKeptEntryId. The server
+		// (session-manager) appends the compaction sidecar from the event result
+		// and triggers refreshAfterCompaction; the orphan-history endpoint then
+		// computes the pre-compaction count from the sidecar + on-disk ids.
+		// Reproduces the live-session affordance bug (no compactionId on the
+		// in-flight `compact_active` card + a duplicate spliced sidecar card).
+		const autoCompactMatch = text.match(/AUTO_COMPACT:(\d+)/);
+		if (autoCompactMatch) {
+			await this._handleAutoCompaction(parseInt(autoCompactMatch[1], 10));
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// BG_WAIT_NOID:<ms> — emit an assistant message_end with a single
+		// bash_bg.wait toolCall block AND no `id` field on the message itself,
+		// mimicking the real LLM stream that triggers the dual-render bug.
+		// The toolCall id is stable so the synthetic-id fallback
+		// `synth:tc:<id>` is deterministic. Used by
+		// tests/e2e/ui/bg-wait-no-dup.spec.ts. Distinct from BG_WAIT:<ms>
+		// (real-process flow, handled below) because the regression specifically
+		// targets the synthetic-event timing where message_end races ahead of
+		// the pendingToolCalls update.
+		const bgWaitNoidMatch = text.match(/BG_WAIT_NOID:(\d+)/);
+		if (bgWaitNoidMatch) {
+			const waitMs = parseInt(bgWaitNoidMatch[1], 10);
+			const toolId = "tc-bg-wait-1";
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: "bash_bg", arguments: { action: "wait", id: "bg-1" }, input: { action: "wait", id: "bg-1" } },
+				],
+			};
+			// message_update first — sets `state.streamingMessage` on the client so
+			// the StreamingMessageContainer renders the in-flight card. The 100ms
+			// settle gives Lit's requestAnimationFrame batch in StreamingMessageContainer
+			// time to commit before the message_end fires.
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(150);
+			// NOTE: deliberately do NOT emit tool_execution_start. The bug surface is
+			// the dual-render of the same toolCall row in `state.messages` AND in
+			// `state.streamingMessage`. When the toolCall is in `pendingToolCalls`,
+			// MessageList hides it via `hidePendingToolCalls`, masking the bug; here
+			// we simulate the production timing where message_end races ahead of the
+			// pending-set update.
+			// Assistant message_end WITHOUT an `id` — reproduces the bug condition.
+			// The pre-fix path stamps streamingMessageId=undefined, the visible-messages
+			// filter short-circuits, and the same card renders in BOTH message-list
+			// and StreamingMessageContainer.
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			// Park here — no further events until waitMs elapses, mirroring a real
+			// `bash_bg.wait` that sits indefinitely.
+			await this.tick(waitMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// BG_WAIT_END_ONLY:<ms> — emit an assistant message_end with a
+		// bash_bg.wait toolCall but no preceding message_update. This reproduces
+		// the live UI hole where RemoteAgent hides the finalized row via
+		// streamingMessageId, but the streaming container has no message to own
+		// until a later refresh/snapshot/agent_end clears the transient id.
+		const bgWaitEndOnlyMatch = text.match(/BG_WAIT_END_ONLY:(\d+)/);
+		if (bgWaitEndOnlyMatch) {
+			const waitMs = parseInt(bgWaitEndOnlyMatch[1], 10);
+			const toolId = "tc-bg-wait-end-only-1";
+			const assistantMsg = {
+				id: "msg-bg-wait-end-only-1",
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: "bash_bg", arguments: { action: "wait", id: "bg-end-only-1" }, input: { action: "wait", id: "bg-end-only-1" } },
+				],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			// Park here — no further events until waitMs elapses, mirroring a real
+			// `bash_bg.wait` that remains pending long enough for live UI assertions.
+			await this.tick(waitMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// Project-owned event-stream benchmark. The fixture helper is shared with
+		// the benchmark oracle so stable ids, order and marker counts cannot drift.
+		const benchmarkStreamMatch = text.match(/BENCHMARK_EVENT_STREAM:(\d+):(\d+)/);
+		if (benchmarkStreamMatch) {
+			await this._handleBenchmarkEventStream(
+				parseInt(benchmarkStreamMatch[1], 10),
+				parseInt(benchmarkStreamMatch[2], 10),
+			);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// Streaming proposal driver — STAY_BUSY:propose_<type>:<n>[:<intervalMs>].
+		// Emits N message_update deltas (each with a single tool_use whose input
+		// grows on each delta), then message_end + tool_execution_* + agent_end.
+		// Block id is stable so RemoteAgent's _processedProposalIds dedup engages.
+		const proposeStreamMatch = text.match(/STAY_BUSY:propose_([a-z]+):(\d+)(?::(\d+))?/);
+		if (proposeStreamMatch) {
+			await this._handleStreamingProposal(
+				proposeStreamMatch[1],
+				parseInt(proposeStreamMatch[2], 10),
+				proposeStreamMatch[3] ? parseInt(proposeStreamMatch[3], 10) : undefined,
+			);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// Give browser journeys a deterministic window to navigate away before a
+		// background session emits its live review_open/review_close result.
+		const reviewGroupDelay = text.match(/REVIEW_GROUP_BACKGROUND_(?:OPEN|CLOSE)_DELAY:(\d+)/);
+		if (reviewGroupDelay) await this.tick(Math.max(0, parseInt(reviewGroupDelay[1], 10)));
+
+		const toolAction = MockAgentCore.respondToPrompt(text);
+
+		if (toolAction && toolAction.toolDenied) {
+			await this._handleToolDenied(toolAction.toolDenied);
+		} else if (toolAction && toolAction.sessionPromptTool) {
+			await this._handleSessionPromptTool(toolAction.sessionPromptTool.targetSessionId, toolAction.sessionPromptTool.message);
+		} else if (toolAction && toolAction.piExtensionTool) {
+			await this._handlePiExtensionTool(toolAction.piExtensionTool.name, toolAction.piExtensionTool.input);
+		} else if (toolAction && toolAction.askUserChoices) {
+			if (toolAction.askUserChoices === "errorThenRetry") {
+				await this._handleAskUserChoicesErrorThenRetry();
+			} else {
+				await this._handleAskUserChoices(
+					toolAction.askUserChoices === "multi",
+					{ compositeId: toolAction.askUserChoices === "composite" },
+				);
+			}
+		} else if (toolAction && toolAction.liveUpdateProposal) {
+			await this._handleLiveUpdateProposal();
+		} else if (toolAction && toolAction.componentConfigProposal) {
+			await this._handleComponentConfigProposal();
+		} else if (toolAction && toolAction.activateSkill) {
+			await this._handleActivateSkill(toolAction.activateSkill);
+		} else if (toolAction && toolAction.teamDelegateCard) {
+			await this._handleTeamDelegateCard(toolAction.teamDelegateCard);
+		} else if (toolAction && toolAction.proposalBurst) {
+			await this._handleProposalBurst();
+		} else if (toolAction && toolAction.durableLargeReview) {
+			await this._handleDurableLargeReview(toolAction.durableLargeReview.delayMs);
+		} else if (toolAction && toolAction.multiTool) {
+			this._handleMultiTool(toolAction.multiTool);
+		} else if (toolAction && toolAction.previewArtifactFileCompactSnapshot) {
+			await this._handlePreviewArtifactFileCompactSnapshot();
+		} else if (toolAction && toolAction.previewArtifactCompactSnapshot) {
+			await this._handlePreviewArtifactCompactSnapshot();
+		} else if (toolAction && toolAction.previewSnapshot) {
+			this._handlePreviewSnapshot(toolAction.previewSnapshot);
+		} else if (toolAction && toolAction.mockError) {
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: "Error: something went wrong" }],
+				stopReason: "error",
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		} else if (toolAction && toolAction.tool) {
+			await this._handleSingleTool(toolAction);
+		} else if (toolAction && toolAction.text) {
+			const assistantMsg = { role: "assistant", content: [{ type: "text", text: toolAction.text }] };
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		} else {
+			// Simple text response with realistic usage data
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: "OK" }],
+				usage: {
+					input: 150, output: 25, cacheRead: 0, cacheWrite: 0, totalTokens: 175,
+					cost: { input: 0.00045, output: 0.0003, cacheRead: 0, cacheWrite: 0, total: 0.00075 },
+				},
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		}
+
+		// Delay before completing — only stay busy when tests explicitly request it.
+		const lower = text.toLowerCase();
+		const busyMatch = text.match(/STAY_BUSY:(\d+)/);
+		// BG_WAIT:<ms> — drive the REAL gateway BgProcessManager via REST.
+		const bgWaitMatch = text.match(/BG_WAIT:(\d+)/);
+		// MIXED_BURST:N — N alternating (propose_goal, real bash_bg create+wait) cycles.
+		const mixedBurstMatch = text.match(/MIXED_BURST:(\d+)/);
+		// STREAM_BURST:N — like MIXED_BURST plus chunked-text streams around each wait.
+		const streamBurstMatch = text.match(/STREAM_BURST:(\d+)/);
+		let busyMs = 10;
+		if (bgWaitMatch) {
+			busyMs = parseInt(bgWaitMatch[1], 10);
+		} else if (busyMatch) {
+			busyMs = parseInt(busyMatch[1], 10);
+		} else if (lower.includes("sleep 120") || lower.includes("sleep 60")) {
+			busyMs = 60000;
+		} else if (lower.includes("working") || lower.includes("first prompt") || lower.includes("long essay")) {
+			busyMs = 500;
+		}
+
+		if (text.includes("RELIABLE_TOOL_HOLD")) {
+			const toolId = "tool_reliable_hold";
+			this.emit({ type: "tool_execution_start", toolName: "Bash", toolId, input: { command: "deterministic hold" } });
+			await this._crossBarrier("tool:before-end", { toolId });
+			const aborted = !this.currentAbortController || this.currentAbortController.signal.aborted;
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "Bash", isError: aborted });
+			await this._crossBarrier("tool:after-end", { toolId, aborted });
+			if (aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (streamBurstMatch) {
+			const n = Math.max(1, Math.min(6, parseInt(streamBurstMatch[1], 10)));
+			await this._handleStreamBurst(n);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (mixedBurstMatch) {
+			const n = Math.max(1, Math.min(6, parseInt(mixedBurstMatch[1], 10)));
+			await this._handleMixedBurst(n);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (bgWaitMatch && busyMs > 100) {
+			// Drive the REAL gateway BgProcessManager via the same REST endpoints
+			// the production bash_bg extension uses. This means a real OS `sleep`
+			// runs server-side, the pill strip in the UI engages, and the wait
+			// long-poll resolves via the production code path —
+			// SessionManager._dispatchSteeredMessages calls bg.abortAllWaits which
+			// aborts the registered AbortController for this very HTTP request.
+			await this._handleRealBgWait(busyMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
+		} else if (busyMs > 100) {
+			const busyToolId = `tool_busy_${Date.now()}`;
+			this.emit({ type: "tool_execution_start", toolName: "Bash", toolId: busyToolId, input: { command: "sleep" } });
+			await this.tick(busyMs);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				// Real-agent fidelity (MOCK_ABORT_TOOL_END=1): the bash tool
+				// extension emits tool_execution_end on abort because the
+				// underlying bash process is killed. Default mock returns
+				// early for backwards compatibility with existing tests.
+				if (this.env.MOCK_ABORT_TOOL_END === "1") {
+					this.emit({ type: "tool_execution_end", toolCallId: busyToolId, toolName: "Bash", isError: true });
+				}
+				this.currentAbortController = null;
+				return;
+			}
+			this.emit({ type: "tool_execution_end", toolCallId: busyToolId, toolName: "Bash", isError: false });
+		} else {
+			await this.tick(busyMs);
+		}
+
+		if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+			this.currentAbortController = null;
+			return;
+		}
+		this.currentAbortController = null;
+
+		await this._crossBarrier("turn:before-agent-end");
+		this.emit({ type: "agent_end" });
+		await this._crossBarrier("turn:after-agent-end");
+		this.emit({ type: "agent_settled" });
+		this.emit({ type: "session_status", status: "idle" });
+		} finally {
+			if (this.currentAbortController === controller) this.currentAbortController = null;
+			if (this._activeTurn === activeTurn) this._activeTurn = null;
+			settled.resolve();
+		}
+	}
+
+	/**
+	 * Drive a live auto/threshold compaction (AUTO_COMPACT:<preCount> trigger).
+	 *
+	 * Builds a faithful post-compaction on-disk transcript: `preCount` orphaned
+	 * message entries, a `type:"compaction"` marker, then a single kept
+	 * active-branch entry whose id is the boundary (`kept-0`). Each entry carries
+	 * a top-level `id` so the orphan-history reader can split the file at
+	 * firstKeptEntryId. getMessages() returns ONLY the kept tail (mirroring the
+	 * real agent's active-branch view); the orphans live solely in the `.jsonl`.
+	 *
+	 * Emits auto_compaction_start → (tick) → auto_compaction_end with
+	 * result.firstKeptEntryId so the server appends the sidecar and refreshes.
+	 *
+	 * `reason` selects the event family emitted, faithfully mirroring pi
+	 * 0.74+: "threshold"/"auto"/"overflow" emit `auto_compaction_start/end`
+	 * (auto path, handled by session-manager); "manual" emits
+	 * `compaction_start/end` (the /compact path — session-manager's manual
+	 * branch + ws-handler's manual sidecar logic).
+	 */
+	async _handleAutoCompaction(preCount, reason = "threshold") {
+		const isManual = reason === "manual";
+		const startType = isManual ? "compaction_start" : "auto_compaction_start";
+		const endType = isManual ? "compaction_end" : "auto_compaction_end";
+		const scenario = this._reliableScenario.compaction?.[reason] || {};
+		const retainedErrorMessage = typeof scenario.preCompactionError === "string"
+			? scenario.preCompactionError
+			: null;
+		this.ensureSessionFile();
+		const ts = new Date().toISOString();
+		const firstKeptEntryId = retainedErrorMessage ? "retained-overflow-error" : "kept-0";
+		const keptEntryId = "kept-0";
+		const tokensBefore = 50_000;
+		const entries = [];
+		for (let i = 0; i < preCount; i++) {
+			entries.push({
+				type: "message",
+				id: `pre-${i}`,
+				parentId: null,
+				timestamp: ts,
+				ts,
+				message: {
+					role: i % 2 === 0 ? "user" : "assistant",
+					content: [{ type: "text", text: `pre-msg-${i}` }],
+				},
+			});
+		}
+		// Legacy-fallback boundary marker (the orphan reader skips non-message
+		// entries when counting, so this never inflates the orphan total).
+		entries.push({
+			type: "compaction",
+			id: "compaction-marker",
+			parentId: null,
+			timestamp: ts,
+			summary: "",
+			firstKeptEntryId,
+			tokensBefore,
+		});
+		// Codex can retain the overflow error at the active-branch boundary even
+		// after compaction succeeds. This reproduces the snapshot that used to
+		// replace the live row and lose its client-only suppression marker.
+		const retainedErrorMsg = retainedErrorMessage
+			? { role: "assistant", content: [], stopReason: "error", errorMessage: retainedErrorMessage }
+			: null;
+		if (retainedErrorMsg) {
+			entries.push({
+				type: "message",
+				id: firstKeptEntryId,
+				parentId: null,
+				timestamp: ts,
+				ts,
+				message: retainedErrorMsg,
+			});
+		}
+		// Kept active-branch tail. Text deliberately avoids the "Context
+		// compacted" prefix so it is NOT mistaken for a legacy text-marker by
+		// the client reducer's compaction dedup.
+		const keptMsg = { role: "assistant", content: [{ type: "text", text: "Resuming work after the summary." }] };
+		entries.push({
+			type: "message",
+			id: keptEntryId,
+			parentId: retainedErrorMsg ? firstKeptEntryId : null,
+			timestamp: ts,
+			ts,
+			message: keptMsg,
+		});
+		// Persist the full transcript (with ids) and pin it so get_state keeps it.
+		this._postCompactionEntries = entries;
+		this._lastTranscriptEntryId = keptEntryId;
+		this._persistTranscript();
+		// getMessages() returns only the active branch post-compaction.
+		this.conversationMessages = [
+			...(retainedErrorMsg ? [{ id: firstKeptEntryId, ...retainedErrorMsg }] : []),
+			{ id: keptEntryId, ...keptMsg },
+		];
+
+		// Lifecycle: start → deterministic hold → end. Legacy tests retain the
+		// short tick when no named barrier is armed.
+		this.emit({ type: startType, reason });
+		const held = await this._crossBarrier(`${reason}:compaction-start`, { reason });
+		if (!held) await this.tick(150);
+		// The auto path runs inside a prompt turn and must honour a mid-turn
+		// abort. The manual /compact path is driven from handleCommand with no
+		// turn abort controller — don't treat its absence as an abort.
+		if (!isManual && (!this.currentAbortController || this.currentAbortController.signal.aborted)) return false;
+		await this._crossBarrier(`${reason}:before-compaction-end`, { reason });
+		if (scenario.outcome === "failure" || scenario.outcome === "aborted") {
+			this.emit({
+				type: endType,
+				reason,
+				aborted: scenario.outcome === "aborted",
+				error: scenario.error || "deterministic compaction failure",
+				willRetry: false,
+			});
+			await this._crossBarrier(`${reason}:compaction-failed`, { reason, outcome: scenario.outcome });
+			return false;
+		}
+		this.emit({
+			type: endType,
+			reason,
+			result: { tokensBefore, firstKeptEntryId },
+			aborted: false,
+			willRetry: scenario.willRetry ?? reason === "overflow",
+		});
+		await this._crossBarrier(`${reason}:compaction-end`, {
+			reason,
+			willRetry: scenario.willRetry ?? reason === "overflow",
+		});
+		return true;
+	}
+
+	/**
+	 * Mock the activate_skill tool: call the gateway endpoint to get the
+	 * expanded skill body, then emit the same shape of events the real
+	 * extension would produce — a toolCall in an assistant message plus a
+	 * toolResult carrying `details.skillExpansion` so the UI's
+	 * ActivateSkillRenderer renders a <skill-chip>.
+	 */
+	async _handleActivateSkill({ name, args }) {
+		const toolId = `tool_act_${Date.now()}`;
+		const input = { name, ...(args ? { args } : {}) };
+		this.emit({ type: "tool_execution_start", toolName: "activate_skill", toolId, input });
+
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gwUrl = null;
+		}
+
+		let expanded = "";
+		let source, filePath, isError = false, errMsg = "";
+		if (gwUrl && sessionId) {
+			try {
+				const body = JSON.stringify({ name, args: args || "" });
+				const result = await new Promise((resolve, reject) => {
+					const u = new URL(`${gwUrl}/api/sessions/${sessionId}/activate-skill`);
+					const req = http.request(u, {
+						method: "POST",
+						headers: {
+							"Authorization": `Bearer ${token}`,
+							"Content-Type": "application/json",
+							"Content-Length": Buffer.byteLength(body),
+						},
+						timeout: 10_000,
+					}, (res) => {
+						let data = "";
+						res.on("data", (c) => data += c);
+						res.on("end", () => {
+							try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+							catch { resolve({ status: res.statusCode, body: { error: data } }); }
+						});
+					});
+					req.on("timeout", () => { req.destroy(); resolve({ status: 0, body: { error: "timeout" } }); });
+					req.on("error", reject);
+					req.write(body);
+					req.end();
+				});
+				if (result.status === 200 && result.body?.ok) {
+					expanded = result.body.expanded || "";
+					source = result.body.source;
+					filePath = result.body.filePath;
+				} else {
+					isError = true;
+					errMsg = result.body?.error || `HTTP ${result.status}`;
+				}
+			} catch (err) {
+				isError = true;
+				errMsg = err?.message || String(err);
+			}
+		} else {
+			isError = true;
+			errMsg = "gateway credentials unavailable";
+		}
+
+		this.emit({
+			type: "tool_execution_update",
+			toolId,
+			toolName: "activate_skill",
+			status: "complete",
+			output: isError ? `activate_skill failed: ${errMsg}` : expanded,
+		});
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "activate_skill", isError });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "activate_skill", arguments: input, input },
+				{ type: "text", text: isError ? `Skill activation failed: ${errMsg}` : `Activated /${name}.` },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "activate_skill",
+			isError,
+			content: [{ type: "text", text: isError ? `activate_skill failed: ${errMsg}` : expanded }],
+			details: isError
+				? undefined
+				: { skillExpansion: { name, args: args || "", source, filePath, expanded } },
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Mixed burst: emit N alternating (propose_goal assistant turn, bash_bg
+	 * create+wait pair) cycles in a single turn. Each propose_goal emits a
+	 * full assistant message + toolResult; each bash_bg cycle drives the real
+	 * gateway BgProcessManager via REST and waits ~1.5s. This is the exact
+	 * event-mix that historically caused proposal widgets to duplicate or
+	 * land out of order — the unified message-ordering reducer in
+	 * src/app/message-reducer.ts is the production code under test.
+	 */
+	async _handleMixedBurst(n) {
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// ── propose_goal turn ─────────────────────────────────
+			const propToolId = `tool_burst_${Date.now()}_${i}_${Math.random().toString(36).slice(2,5)}`;
+			const propInput = {
+				title: `Burst Goal ${i + 1}`,
+				workflow: "general",
+				spec: `proposal #${i + 1} in mixed burst`,
+			};
+			this.emit({ type: "tool_execution_start", toolName: "propose_goal", toolId: propToolId, input: propInput });
+			const propAssistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "text", text: `Proposing goal ${i + 1} of ${n}…` },
+					{ type: "toolCall", id: propToolId, name: "propose_goal", arguments: propInput, input: propInput },
+				],
+			};
+			this.conversationMessages.push(propAssistantMsg);
+			this.emit({ type: "message_update", message: propAssistantMsg });
+			await this.tick(20);
+			this.emit({ type: "message_end", message: propAssistantMsg });
+			const propOutput = `Proposal (${propInput.title}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId: propToolId, toolName: "propose_goal", status: "complete", output: propOutput });
+			this.emit({ type: "tool_execution_end", toolCallId: propToolId, toolName: "propose_goal", isError: false });
+			const propResultMsg = {
+				role: "toolResult",
+				toolCallId: propToolId,
+				toolName: "propose_goal",
+				isError: false,
+				content: [{ type: "text", text: propOutput }],
+			};
+			this.conversationMessages.push(propResultMsg);
+			this.emit({ type: "message_end", message: propResultMsg });
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// ── bash_bg create + wait (real, ~1.5s) ──────────────────
+			await this._handleRealBgWait(1500);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+		const doneMsg = { role: "assistant", content: [{ type: "text", text: `MIXED_BURST_DONE:${n}` }] };
+		this.conversationMessages.push(doneMsg);
+		this.emit({ type: "message_end", message: doneMsg });
+	}
+
+	/**
+	 * Like _handleMixedBurst, but each cycle interleaves a chunked-streamed
+	 * assistant text BETWEEN the proposal and the bash_bg.wait, then a
+	 * second chunked-streamed text AFTER the wait. Reproduces transient
+	 * client-side message duplication / out-of-order rendering bugs.
+	 */
+	async _handleStreamBurst(n) {
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 1. propose_goal turn
+			const propToolId = `tool_sburst_${Date.now()}_${i}_${Math.random().toString(36).slice(2,5)}`;
+			const propInput = {
+				title: `Stream Goal ${i + 1}`,
+				workflow: "general",
+				spec: `proposal #${i + 1} in stream burst`,
+			};
+			this.emit({ type: "tool_execution_start", toolName: "propose_goal", toolId: propToolId, input: propInput });
+			const propAssistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "text", text: `Proposing stream goal ${i + 1} of ${n}…` },
+					{ type: "toolCall", id: propToolId, name: "propose_goal", arguments: propInput, input: propInput },
+				],
+			};
+			this.conversationMessages.push(propAssistantMsg);
+			this.emit({ type: "message_update", message: propAssistantMsg });
+			await this.tick(20);
+			this.emit({ type: "message_end", message: propAssistantMsg });
+			const propOutput = `Proposal (${propInput.title}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId: propToolId, toolName: "propose_goal", status: "complete", output: propOutput });
+			this.emit({ type: "tool_execution_end", toolCallId: propToolId, toolName: "propose_goal", isError: false });
+			const propResultMsg = {
+				role: "toolResult",
+				toolCallId: propToolId,
+				toolName: "propose_goal",
+				isError: false,
+				content: [{ type: "text", text: propOutput }],
+			};
+			this.conversationMessages.push(propResultMsg);
+			this.emit({ type: "message_end", message: propResultMsg });
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 2. Pre-wait chunked streamed text — deliberately omit the final
+			//    message_end, mimicking the LLM abandoning partial text to
+			//    pivot to a tool_use.
+			await this._streamChunkedText(`PRE-WAIT-CHUNK-${i + 1}`, 30, { omitFinalEnd: true });
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 3. Real bash_bg create + wait (~1.5s).
+			await this._handleRealBgWait(1500);
+
+			if (this.currentAbortController?.signal.aborted) return;
+
+			// 4. Post-wait chunked streamed text — finalises so next iteration
+			//    starts clean.
+			await this._streamChunkedText(`POST-WAIT-CHUNK-${i + 1}`, 30);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+		const doneMsg = { role: "assistant", content: [{ type: "text", text: `STREAM_BURST_DONE:${n}` }] };
+		this.conversationMessages.push(doneMsg);
+		this.emit({ type: "message_end", message: doneMsg });
+	}
+
+	/**
+	 * Stream chunked assistant text.
+	 * @param label string  prefix for each chunk so they're identifiable in the report
+	 * @param chunkCount number  how many message_update events to emit
+	 * @param opts.omitFinalEnd boolean  when true, do NOT emit the final message_end.
+	 * @param opts.omitId boolean  when true, do NOT include `id` on the message_update payloads.
+	 */
+	async _streamChunkedText(label, chunkCount, opts = {}) {
+		const msgId = opts.omitId ? undefined : `msg_stream_${Date.now()}_${Math.random().toString(36).slice(2,5)}`;
+		let acc = "";
+		for (let i = 0; i < chunkCount; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+			const chunk = `[${label}#${String(i + 1).padStart(2, "0")}] `;
+			acc += chunk;
+			const partial = {
+				role: "assistant",
+				content: [{ type: "text", text: acc }],
+			};
+			if (msgId) partial.id = msgId;
+			this.emit({ type: "message_update", message: partial });
+			await this.tick(8);
+		}
+		if (opts.omitFinalEnd) return;
+		const finalMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: acc }],
+		};
+		if (msgId) finalMsg.id = msgId;
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+	}
+
+	/**
+	 * Drive a real bash_bg create+wait via the gateway REST API the production
+	 * bash_bg extension uses. The pill strip above the composer engages because
+	 * a real BgProcessManager entry exists; the long-poll wait is resolved by
+	 * SessionManager.abortAllWaits via the production code path on steer/stop.
+	 * Multi-delta message_update on both the create and wait assistant
+	 * messages so the reducer / streaming-message-id code paths exercise the
+	 * realistic real-LLM event shape.
+	 */
+	async _handleRealBgWait(durationMs) {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gwUrl = null;
+		}
+		if (!gwUrl || !sessionId) {
+			// Out-of-process / unit-test usage — fall back to a plain tick.
+			await this.tick(durationMs);
+			return;
+		}
+
+		const gwReq = (method, p, body) => new Promise((resolve, reject) => {
+			const u = new URL(`${gwUrl}${p}`);
+			const payload = body ? JSON.stringify(body) : null;
+			const headers = { "Authorization": `Bearer ${token}` };
+			if (payload) {
+				headers["Content-Type"] = "application/json";
+				headers["Content-Length"] = Buffer.byteLength(payload);
+			}
+			const opts = {
+				method,
+				hostname: u.hostname,
+				port: u.port,
+				path: u.pathname + (u.search || ""),
+				headers,
+				timeout: Math.max(durationMs * 2, 30_000),
+			};
+			const req = http.request(opts, (res) => {
+				let data = "";
+				res.on("data", (c) => data += c);
+				res.on("end", () => {
+					try { resolve({ status: res.statusCode, body: data ? JSON.parse(data) : null }); }
+					catch { resolve({ status: res.statusCode, body: { error: data } }); }
+				});
+			});
+			req.on("error", reject);
+			req.on("timeout", () => { req.destroy(new Error("timeout")); });
+			if (payload) req.write(payload);
+			req.end();
+		});
+
+		// ── 1. CREATE ────────────────────────────────────────────
+		const createToolId = `tool_bgcreate_${Date.now()}`;
+		const sleepSecs = Math.max(1, Math.ceil(durationMs / 1000));
+		const command = `sleep ${sleepSecs}`;
+		const name = "long task";
+		const createInput = { action: "create", name, command };
+		this.emit({ type: "tool_execution_start", toolName: "bash_bg", toolId: createToolId, input: createInput });
+		const createAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: createToolId, name: "bash_bg", arguments: createInput, input: createInput }],
+		};
+		this.conversationMessages.push(createAssistantMsg);
+		// Real LLM agents stream the toolCall input progressively via
+		// multiple message_update deltas before the final message_end.
+		const NUM_CREATE_DELTAS = 4;
+		for (let i = 0; i < NUM_CREATE_DELTAS; i++) {
+			this.emit({ type: "message_update", message: createAssistantMsg });
+			await this.tick(20);
+		}
+		this.emit({ type: "message_end", message: createAssistantMsg });
+
+		let bgId;
+		try {
+			const createResp = await gwReq("POST", `/api/sessions/${sessionId}/bg-processes`, { command, name });
+			if (createResp.status !== 201 || !createResp.body?.id) {
+				throw new Error(`bg create failed: ${createResp.status} ${JSON.stringify(createResp.body)}`);
+			}
+			bgId = createResp.body.id;
+		} catch (err) {
+			const msg = `bg create error: ${err?.message || err}`;
+			this.emit({ type: "tool_execution_update", toolId: createToolId, toolName: "bash_bg", status: "complete", output: msg });
+			this.emit({ type: "tool_execution_end", toolCallId: createToolId, toolName: "bash_bg", isError: true });
+			return;
+		}
+
+		const createOutput = `ID: ${bgId} (${name})`;
+		this.emit({ type: "tool_execution_update", toolId: createToolId, toolName: "bash_bg", status: "complete", output: createOutput });
+		this.emit({ type: "tool_execution_end", toolCallId: createToolId, toolName: "bash_bg", isError: false });
+		const createResultMsg = {
+			role: "toolResult",
+			toolCallId: createToolId,
+			toolName: "bash_bg",
+			isError: false,
+			content: [{ type: "text", text: createOutput }],
+		};
+		this.conversationMessages.push(createResultMsg);
+		this.emit({ type: "message_end", message: createResultMsg });
+
+		// ── 2. WAIT (long-poll — abortAllWaits resolves it on steer/stop) ───
+		const waitToolId = `tool_bgwait_${Date.now()}`;
+		const waitInput = { action: "wait", id: bgId, name };
+		this.emit({ type: "tool_execution_start", toolName: "bash_bg", toolId: waitToolId, input: waitInput });
+		const waitAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: waitToolId, name: "bash_bg", arguments: waitInput, input: waitInput }],
+		};
+		this.conversationMessages.push(waitAssistantMsg);
+		// Multi-delta is critical — see PR #436. The 6-delta count is
+		// load-bearing for the dual-render repro condition; do not lower it.
+		const NUM_WAIT_DELTAS = 6;
+		for (let i = 0; i < NUM_WAIT_DELTAS; i++) {
+			this.emit({ type: "message_update", message: waitAssistantMsg });
+			await this.tick(20);
+		}
+		this.emit({ type: "message_end", message: waitAssistantMsg });
+
+		let waitResp;
+		const waitTimeoutSecs = Math.max(10, Math.ceil(durationMs / 1000) + 5);
+		try {
+			waitResp = await gwReq("GET", `/api/sessions/${sessionId}/bg-processes/${bgId}/wait?timeout=${waitTimeoutSecs}`);
+		} catch (err) {
+			waitResp = { status: 0, body: { error: err?.message || String(err) } };
+		}
+
+		const localAborted = !this.currentAbortController || this.currentAbortController.signal.aborted;
+		const bodyAborted = !!(waitResp?.body && (waitResp.body.aborted || waitResp.body.cancelled));
+		const aborted = localAborted || bodyAborted;
+		const waitOutput = aborted
+			? `wait aborted for ${bgId}`
+			: (waitResp?.body?.exitCode != null ? `${bgId} exited with code ${waitResp.body.exitCode}` : `${bgId} done`);
+
+		this.emit({ type: "tool_execution_update", toolId: waitToolId, toolName: "bash_bg", status: "complete", output: waitOutput });
+		this.emit({ type: "tool_execution_end", toolCallId: waitToolId, toolName: "bash_bg", isError: aborted });
+		const waitResultMsg = {
+			role: "toolResult",
+			toolCallId: waitToolId,
+			toolName: "bash_bg",
+			isError: aborted,
+			content: [{ type: "text", text: waitOutput }],
+		};
+		this.conversationMessages.push(waitResultMsg);
+		this.emit({ type: "message_end", message: waitResultMsg });
+
+		if (aborted) {
+			// Best-effort kill so the OS `sleep` doesn't outlive the test.
+			try { await gwReq("DELETE", `/api/sessions/${sessionId}/bg-processes/${bgId}`); } catch { /* ignore */ }
+		}
+	}
+
+	async _handleAskUserChoices(multi = false, { compositeId = false } = {}) {
+		// Non-blocking model: the ask_user_choices tool returns immediately with
+		// a `{status:"posted", tool_use_id}` stub and the turn ends. The user's
+		// answers arrive in a *later* prompt as an envelope user message — see
+		// `_handleAskResponseEnvelope` below.
+		const toolId = compositeId
+			? `tool_ask_${Date.now()}|fc_${Math.random().toString(36).slice(2, 8)}`
+			: `tool_ask_${Date.now()}`;
+
+		const questions = multi
+			? [
+				{ question: "Which colors?", options: ["red", "blue", "green"], multi: true, tab_label: "Colors" },
+				{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
+			]
+			: [
+				{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
+				{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
+			];
+
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId, input: { questions } });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions }, input: { questions } }],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_update", message: assistantMsg });
+		await this.tick(20);
+		this.emit({ type: "message_update", message: assistantMsg });
+		await this.tick(20);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		// Stub tool_result — ends the turn immediately.
+		const stub = { status: "posted", tool_use_id: toolId };
+		const resultText = JSON.stringify(stub);
+		this.emit({ type: "tool_execution_update", toolId, toolName: "ask_user_choices", status: "complete", output: resultText });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "ask_user_choices", isError: false });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "ask_user_choices",
+			isError: false,
+			content: [{ type: "text", text: resultText }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Failure-then-retry path for the `ask_user_choices` widget. Emits two
+	 * tool calls back-to-back in the same turn:
+	 *   1. First call has questions[1] missing tab_label → tool_result is
+	 *      flagged isError:true with an `{error:"..."}` body, matching what
+	 *      the real `defaults/tools/ask/extension.ts` validation produces.
+	 *      The renderer must collapse this into a minimal `.ask-error` chip.
+	 *   2. Second call is a valid two-question ask with the normal
+	 *      `{status:"posted"}` stub, rendering the full interactive widget.
+	 *
+	 * After this turn the transcript should contain exactly ONE interactive
+	 * `<ask-user-choices-widget>` (tabs + .ask-submit) preceded by ONE
+	 * `.ask-error` chip. Drives tests/e2e/ui/ask-user-choices-ui.spec.ts's
+	 * error-then-retry case.
+	 */
+	async _handleAskUserChoicesErrorThenRetry() {
+		// ── First call — invalid (questions[1].tab_label missing) ──────────
+		const badToolId = `tool_ask_bad_${Date.now()}`;
+		const badQuestions = [
+			{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
+			// Intentionally missing tab_label — the real extension rejects this.
+			{ question: "Team size?", options: ["small", "medium", "large"] },
+		];
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId: badToolId, input: { questions: badQuestions } });
+		const badAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: badToolId, name: "ask_user_choices", arguments: { questions: badQuestions }, input: { questions: badQuestions } }],
+		};
+		this.conversationMessages.push(badAssistantMsg);
+		this.emit({ type: "message_end", message: badAssistantMsg });
+
+		const errBody = JSON.stringify({
+			error: "ask_user_choices: questions[1].tab_label is required when there are multiple questions.",
+		});
+		this.emit({ type: "tool_execution_update", toolId: badToolId, toolName: "ask_user_choices", status: "complete", output: errBody });
+		this.emit({ type: "tool_execution_end", toolCallId: badToolId, toolName: "ask_user_choices", isError: true });
+		const badToolResultMsg = {
+			role: "toolResult",
+			toolCallId: badToolId,
+			toolName: "ask_user_choices",
+			isError: true,
+			content: [{ type: "text", text: errBody }],
+		};
+		this.conversationMessages.push(badToolResultMsg);
+		this.emit({ type: "message_end", message: badToolResultMsg });
+
+		await this.tick(20);
+
+		// ── Second call — valid, posted stub ────────────────────────────────
+		const goodToolId = `tool_ask_good_${Date.now()}`;
+		const goodQuestions = [
+			{ question: "Favorite color?", options: ["red", "blue", "green"], tab_label: "Color" },
+			{ question: "Team size?", options: ["small", "medium", "large"], tab_label: "Team size" },
+		];
+		this.emit({ type: "tool_execution_start", toolName: "ask_user_choices", toolId: goodToolId, input: { questions: goodQuestions } });
+		const goodAssistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: goodToolId, name: "ask_user_choices", arguments: { questions: goodQuestions }, input: { questions: goodQuestions } }],
+		};
+		this.conversationMessages.push(goodAssistantMsg);
+		this.emit({ type: "message_end", message: goodAssistantMsg });
+
+		const stub = JSON.stringify({ status: "posted", tool_use_id: goodToolId });
+		this.emit({ type: "tool_execution_update", toolId: goodToolId, toolName: "ask_user_choices", status: "complete", output: stub });
+		this.emit({ type: "tool_execution_end", toolCallId: goodToolId, toolName: "ask_user_choices", isError: false });
+		const goodToolResultMsg = {
+			role: "toolResult",
+			toolCallId: goodToolId,
+			toolName: "ask_user_choices",
+			isError: false,
+			content: [{ type: "text", text: stub }],
+		};
+		this.conversationMessages.push(goodToolResultMsg);
+		this.emit({ type: "message_end", message: goodToolResultMsg });
+	}
+
+	/**
+	 * Handle a `[ask_user_choices_response tool_use_id=...]` envelope user
+	 * message. Parse the JSON body and echo the answers back as an assistant
+	 * text message so E2E tests can observe the round-trip.
+	 */
+	async _handleAskResponseEnvelope(text) {
+		const m = ASK_RESPONSE_ENVELOPE_REGEX.exec(text);
+		if (!m) return;
+		const toolUseId = m[1];
+		let answers = null;
+		try { answers = JSON.parse(m[2]).answers; } catch { /* ignore */ }
+		const echo = JSON.stringify({ gotAnswersFor: toolUseId, answers });
+		const assistantMsg = { role: "assistant", content: [{ type: "text", text: echo }] };
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+	}
+
+	async _handlePiExtensionTool(toolName, input = {}) {
+		const toolId = `tool_pi_ext_${Date.now()}`;
+		const assistantMsg = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: toolName, arguments: input, input }],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "tool_execution_start", toolName, toolId, input });
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		let isError = false;
+		let output;
+		try {
+			for (const handler of this.mockPiToolCallHandlers) {
+				const decision = await handler({ toolName, tool: toolName, input, args: input, toolCallId: toolId });
+				if (decision?.block) {
+					isError = true;
+					output = `Tool blocked: ${decision.reason || "blocked by policy"}`;
+					break;
+				}
+			}
+			if (!isError) {
+				const tool = this.mockPiTools.get(toolName);
+				if (!tool) {
+					isError = true;
+					output = `Pi extension tool not registered in mock runtime: ${toolName}`;
+				} else {
+					const result = await tool.handler(input, { toolCallId: toolId });
+					output = typeof result === "string" ? result : JSON.stringify(result);
+				}
+			}
+		} catch (err) {
+			isError = true;
+			output = `Pi extension tool error: ${err?.message || err}`;
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	async _gatewayJson(method, pathname, body, extraHeaders = {}) {
+		const bobbitDir = this.env.BOBBIT_DIR || path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		const gwUrl = (this.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+		const token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		const payload = body === undefined ? "" : JSON.stringify(body);
+		const url = new URL(gwUrl + pathname);
+		return new Promise((resolve, reject) => {
+			const headers = {
+				"Authorization": "Bearer " + token,
+				...extraHeaders,
+			};
+			if (payload) {
+				headers["Content-Type"] = "application/json";
+				headers["Content-Length"] = Buffer.byteLength(payload);
+			}
+			const req = http.request(url, { method, headers, timeout: 30_000 }, (res) => {
+				let data = "";
+				res.on("data", (chunk) => data += chunk);
+				res.on("end", () => {
+					let json;
+					try { json = JSON.parse(data); } catch { json = {}; }
+					resolve({ status: res.statusCode || 0, body: json, raw: data });
+				});
+			});
+			req.on("timeout", () => { req.destroy(); resolve({ status: 0, body: { error: "timeout" }, raw: "" }); });
+			req.on("error", reject);
+			if (payload) req.write(payload);
+			req.end();
+		});
+	}
+
+	async _postGatewayJson(pathname, body, extraHeaders = {}) {
+		return this._gatewayJson("POST", pathname, body, extraHeaders);
+	}
+
+	async _getGatewayJson(pathname) {
+		return this._gatewayJson("GET", pathname);
+	}
+
+	async _deliverSessionPromptTool(targetSessionId, message) {
+		return this._postGatewayJson(
+			"/api/sessions/" + encodeURIComponent(targetSessionId) + "/prompt",
+			{ message, mode: "prompt" },
+			{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+		);
+	}
+
+	async _isSessionPromptPersistentlyAllowed() {
+		try {
+			const session = await this._getGatewayJson("/api/sessions/" + encodeURIComponent(this.env.BOBBIT_SESSION_ID));
+			const roleName = session.body?.role || session.body?.roleId || "general";
+			const role = await this._getGatewayJson("/api/roles/" + encodeURIComponent(roleName));
+			return role.body?.toolPolicies?.session_prompt === "allow";
+		} catch {
+			return false;
+		}
+	}
+
+	async _handleSessionPromptTool(targetSessionId, message) {
+		const toolName = "session_prompt";
+		const toolId = `tool_${Date.now()}`;
+		this.emit({ type: "tool_execution_start", toolName, toolId, input: { targetSessionId, message } });
+
+		try {
+			if (!(await this._isSessionPromptPersistentlyAllowed())) {
+				const grant = await this._postGatewayJson(
+					"/api/sessions/" + encodeURIComponent(this.env.BOBBIT_SESSION_ID) + "/tool-grant-request",
+					{ toolName, toolGroup: "Agent" },
+				);
+				if (!grant.body?.granted) {
+					this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: true });
+					const deniedMsg = { role: "assistant", content: [{ type: "text", text: "I tried to use session_prompt but permission was denied." }] };
+					this.conversationMessages.push(deniedMsg);
+					this.emit({ type: "message_end", message: deniedMsg });
+					return;
+				}
+			}
+
+			const delivery = await this._deliverSessionPromptTool(targetSessionId, message);
+			const ok = delivery.status >= 200 && delivery.status < 300 && delivery.body?.ok !== false;
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: !ok });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: ok ? `session_prompt delivered: ${message}` : `session_prompt failed: ${delivery.status} ${JSON.stringify(delivery.body)}` }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		} catch (err) {
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: true });
+			const assistantMsg = { role: "assistant", content: [{ type: "text", text: `session_prompt error: ${err.message}` }] };
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		}
+	}
+
+	async _handleToolDenied(deniedTool) {
+		const toolId = `tool_${Date.now()}`;
+		this.emit({ type: "tool_execution_start", toolName: deniedTool, toolId, input: {} });
+
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR || path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gwUrl, token;
+		try {
+			gwUrl = (this.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch (err) {
+			const toolResultMsg = {
+				role: "toolResult",
+				content: [{ type: "text", text: `Error: Tool ${deniedTool} is not allowed for your current role. Ask the user to grant permission.` }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+			this.emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		const toolGroup = deniedTool.startsWith("mcp__") ? "MCP: " + deniedTool.split("__")[1] : "unknown";
+		const body = JSON.stringify({ toolName: deniedTool, toolGroup });
+		const url = new URL(gwUrl + "/api/sessions/" + sessionId + "/tool-grant-request");
+
+		try {
+			const result = await new Promise((resolve, reject) => {
+				const req = http.request(url, {
+					method: "POST",
+					headers: {
+						"Authorization": "Bearer " + token,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(body),
+					},
+					timeout: 30_000,
+				}, (res) => {
+					let data = "";
+					res.on("data", (chunk) => data += chunk);
+					res.on("end", () => {
+						try { resolve(JSON.parse(data)); } catch { resolve({ granted: false }); }
+					});
+				});
+				req.on("timeout", () => { req.destroy(); resolve({ granted: false, reason: "timeout" }); });
+				req.on("error", reject);
+				req.write(body);
+				req.end();
+			});
+
+			if (result && result.granted) {
+				this.emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: false });
+				const assistantMsg = {
+					role: "assistant",
+					content: [{ type: "text", text: `Permission granted for ${deniedTool}. Tool executed successfully.` }],
+				};
+				this.conversationMessages.push(assistantMsg);
+				this.emit({ type: "message_end", message: assistantMsg });
+			} else {
+				this.emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
+				const assistantMsg = {
+					role: "assistant",
+					content: [{ type: "text", text: `I tried to use ${deniedTool} but permission was denied.` }],
+				};
+				this.conversationMessages.push(assistantMsg);
+				this.emit({ type: "message_end", message: assistantMsg });
+			}
+		} catch (err) {
+			this.emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "text", text: `Error requesting permission for ${deniedTool}: ${err.message}` }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+		}
+	}
+
+	/**
+	 * Burst two consecutive `propose_*` tool-call assistant turns followed by
+	 * matching toolResults. Each propose_* assistant turn is its own message
+	 * (so the legacy `_deferredAssistantMessage` slot would have overwritten
+	 * the first when the second arrived); the unified reducer keeps both
+	 * widgets in chronological order keyed by their tool_use id.
+	 */
+	async _handleProposalBurst() {
+		const proposals = [
+			{
+				tool: "propose_goal",
+				input: {
+					title: "Burst Goal A",
+					workflow: "general",
+					spec: "first proposal in the burst",
+				},
+			},
+			{
+				tool: "propose_role",
+				input: {
+					name: "burst-role-b",
+					label: "Burst Role B",
+					prompt: "second proposal in the burst",
+					tools: "",
+					accessory: "none",
+				},
+			},
+		];
+		for (const p of proposals) {
+			const toolId = `tool_burst_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+			const toolName = p.tool;
+			this.emit({ type: "tool_execution_start", toolName, toolId, input: p.input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: toolName, arguments: p.input, input: p.input },
+				],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(5);
+			this.emit({ type: "message_end", message: assistantMsg });
+
+			const output = `${toolName} proposal accepted`;
+			this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName,
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+			await this.tick(5);
+		}
+		const finalMsg = {
+			role: "assistant",
+			content: [{ type: "text", text: "BURST_DONE_E2E" }],
+		};
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+	}
+
+	_handleMultiTool(multiTool) {
+		const contentBlocks = [];
+		for (const action of multiTool) {
+			const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+			this.emit({ type: "tool_execution_start", toolName: action.tool, toolId, input: action.input });
+			this.emit({ type: "tool_execution_update", toolId, toolName: action.tool, status: "complete", output: action.output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: action.tool, isError: false });
+			contentBlocks.push({ type: "toolCall", id: toolId, name: action.tool, arguments: action.input, input: action.input });
+
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: action.tool,
+				isError: false,
+				content: [{ type: "text", text: action.output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		}
+
+		contentBlocks.push({ type: "text", text: `Done. Used ${multiTool.length} tools.` });
+		const assistantMsg = { role: "assistant", content: contentBlocks };
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+	}
+
+	/**
+	 * Drive the preview mount endpoint, including immutable-artifact persistence,
+	 * then emit the exact compact v3 shape selected by the snapshot writer when
+	 * its complete metadata payload would exceed the 250-byte result cap.
+	 *
+	 * `compact.html` deliberately makes the full metadata marker too large while
+	 * keeping the compact URL variant within the cap. This is the real historical
+	 * marker form the preview reopen journey must continue to read.
+	 */
+	async _handlePreviewArtifactCompactSnapshot() {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gatewayUrl, token;
+		try {
+			gatewayUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gatewayUrl = null;
+		}
+
+		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		const entry = "compact.html";
+		const html = "<!DOCTYPE html><html><body>Artifact Compact Snapshot Restored Content</body></html>";
+		const input = { html, entry };
+		this.emit({ type: "tool_execution_start", toolName: "preview_open", toolId, input });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input },
+				{ type: "text", text: "Opened artifact-backed preview." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const fail = (message) => {
+			this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output: message });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: true });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "preview_open",
+				isError: true,
+				content: [{ type: "text", text: message }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		if (!gatewayUrl || !token || !sessionId) {
+			fail("artifact preview fixture requires a gateway session");
+			return;
+		}
+
+		let mounted;
+		try {
+			mounted = await new Promise((resolve, reject) => {
+				const url = new URL(`${gatewayUrl}/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`);
+				const payload = JSON.stringify(input);
+				const req = http.request({
+					method: "POST",
+					hostname: url.hostname,
+					port: url.port,
+					path: url.pathname + url.search,
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(payload),
+					},
+				}, (res) => {
+					let data = "";
+					res.on("data", chunk => { data += chunk; });
+					res.on("end", () => {
+						try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+						catch { reject(new Error(`preview mount returned invalid JSON: ${data}`)); }
+					});
+				});
+				req.on("error", reject);
+				req.write(payload);
+				req.end();
+			});
+		} catch (error) {
+			fail(`artifact preview mount failed: ${error?.message || error}`);
+			return;
+		}
+
+		if (mounted.status !== 200 || !mounted.body?.url || !mounted.body?.path || !mounted.body?.contentHash || !mounted.body?.artifactId) {
+			fail(`artifact preview mount failed: ${mounted.status} ${JSON.stringify(mounted.body)}`);
+			return;
+		}
+
+		const marker = "__preview_snapshot_v3__\n";
+		const fullPayload = {
+			kind: "preview",
+			url: mounted.body.url,
+			path: mounted.body.path,
+			entry: mounted.body.entry,
+			artifactId: mounted.body.artifactId,
+			contentHash: mounted.body.contentHash,
+		};
+		const compactPayload = {
+			kind: "preview",
+			url: `/preview/${sessionId}/`,
+			path: mounted.body.entry,
+			entry: mounted.body.entry,
+			contentHash: mounted.body.contentHash,
+			artifactId: mounted.body.artifactId,
+		};
+		const fullMarker = marker + JSON.stringify(fullPayload) + "\n";
+		const compactMarker = marker + JSON.stringify(compactPayload) + "\n";
+		if (fullMarker.length <= 250 || compactMarker.length > 250) {
+			fail(`invalid compact preview fixture sizes: full=${fullMarker.length}, compact=${compactMarker.length}`);
+			return;
+		}
+
+		const output = "Preview panel is open and will auto-update.";
+		this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: false });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: output },
+				{ type: "text", text: compactMarker },
+			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * File-mode counterpart to the compact artifact fixture above. It writes a
+	 * Unicode/dotted entry below a source subdirectory with a nested declared
+	 * asset, mounts it through the real gateway, and removes the source right
+	 * away so reopening must use the immutable artifact.
+	 */
+	async _handlePreviewArtifactFileCompactSnapshot() {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gatewayUrl, token;
+		try {
+			gatewayUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gatewayUrl = null;
+		}
+
+		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		const entry = "résumé.v1.雪.html";
+		const sourceRoot = fs.mkdtempSync(path.join(this.cwd, ".preview-reopen-source-"));
+		const sourceDir = path.join(sourceRoot, "pages");
+		const sourceFile = path.join(sourceDir, entry);
+		const nestedAsset = path.join(sourceDir, "assets", "nested", "proof.css");
+		const input = { file: sourceFile, assets: ["assets/nested/proof.css"] };
+		this.emit({ type: "tool_execution_start", toolName: "preview_open", toolId, input });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input },
+				{ type: "text", text: "Opened file-backed artifact preview." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const fail = (message) => {
+			this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output: message });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: true });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "preview_open",
+				isError: true,
+				content: [{ type: "text", text: message }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		if (!gatewayUrl || !token || !sessionId) {
+			fs.rmSync(sourceRoot, { recursive: true, force: true });
+			fail("artifact file preview fixture requires a gateway session");
+			return;
+		}
+
+		fs.mkdirSync(path.dirname(nestedAsset), { recursive: true });
+		fs.writeFileSync(sourceFile, [
+			"<!doctype html>",
+			"<html><head><link rel=\"stylesheet\" href=\"assets/nested/proof.css\"></head>",
+			"<body><h1>Artifact File Compact Snapshot Restored Content</h1><div id=\"nested-proof\">Nested asset proof</div></body></html>",
+		].join(""));
+		fs.writeFileSync(nestedAsset, "#nested-proof { color: rgb(12, 34, 56); }");
+
+		let mounted;
+		try {
+			mounted = await new Promise((resolve, reject) => {
+				const url = new URL(`${gatewayUrl}/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`);
+				const payload = JSON.stringify(input);
+				const req = http.request({
+					method: "POST",
+					hostname: url.hostname,
+					port: url.port,
+					path: url.pathname + url.search,
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(payload),
+					},
+				}, (res) => {
+					let data = "";
+					res.on("data", chunk => { data += chunk; });
+					res.on("end", () => {
+						try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+						catch { reject(new Error(`preview mount returned invalid JSON: ${data}`)); }
+					});
+				});
+				req.on("error", reject);
+				req.write(payload);
+				req.end();
+			});
+		} catch (error) {
+			fs.rmSync(sourceRoot, { recursive: true, force: true });
+			fail(`artifact file preview mount failed: ${error?.message || error}`);
+			return;
+		}
+		fs.rmSync(sourceRoot, { recursive: true, force: true });
+
+		if (mounted.status !== 200 || !mounted.body?.url || !mounted.body?.path || !mounted.body?.contentHash || !mounted.body?.artifactId) {
+			fail(`artifact file preview mount failed: ${mounted.status} ${JSON.stringify(mounted.body)}`);
+			return;
+		}
+
+		let marker;
+		try {
+			const { buildPreviewSnapshotV3Block } = await import(new URL("../../../defaults/tools/html/snapshot.ts", import.meta.url).href);
+			marker = buildPreviewSnapshotV3Block(
+				mounted.body.url,
+				mounted.body.relPath || mounted.body.path,
+				mounted.body.contentHash,
+				{ artifactId: mounted.body.artifactId, entry: mounted.body.entry },
+			);
+			const payload = JSON.parse(marker.slice("__preview_snapshot_v3__\n".length));
+			if (
+				Buffer.byteLength(marker, "utf8") > 250 ||
+				payload.entry !== entry ||
+				payload.path !== undefined ||
+				payload.contentHash !== mounted.body.contentHash ||
+				payload.artifactId !== mounted.body.artifactId ||
+				payload.url !== `/preview/${sessionId}/`
+			) {
+				fail(`file compact snapshot must retain the canonical entry and identities: ${marker}`);
+				return;
+			}
+		} catch (error) {
+			fail(`file compact snapshot builder failed: ${error?.message || error}`);
+			return;
+		}
+
+		const output = "Preview panel is open and will auto-update.";
+		this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: false });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: output },
+				{ type: "text", text: marker },
+			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	_handlePreviewSnapshot(html) {
+		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+		const input = { html };
+		this.emit({ type: "tool_execution_start", toolName: "preview_open", toolId, input });
+		this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output: "Preview panel is open and will auto-update." });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: false });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input },
+				{ type: "text", text: "Opened preview." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: "__preview_snapshot_v1__\n" + html },
+			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/** Live-update test driver: emit two consecutive propose_project tool
+	 *  calls in the same turn. The first carries components only; the second
+	 *  carries the same components plus a workflows map. This proves the
+	 *  client merges structured side-tables across calls (Bug C live-update
+	 *  fix) and re-renders the panel for each call. */
+	async _handleLiveUpdateProposal() {
+		const components = [
+			{ name: "api", repo: ".", relative_path: "packages/api", commands: { build: "npm run build:api" } },
+			{ name: "web", repo: ".", relative_path: "packages/web", commands: { build: "npm run build:web" } },
+		];
+		const firstInput = {
+			name: "Live Update Project",
+			root_path: "/tmp/live-update",
+			components,
+		};
+		const secondInput = {
+			name: "Live Update Project",
+			root_path: "/tmp/live-update",
+			components,
+			workflows: {
+				"feature-api": {
+					id: "feature-api",
+					name: "Feature (api)",
+					description: "Feature flow scoped to the api component.",
+					gates: [
+						{ id: "design-doc", name: "Design Document", verify: [] },
+						{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+					],
+				},
+				"feature-web": {
+					id: "feature-web",
+					name: "Feature (web)",
+					description: "Feature flow scoped to the web component.",
+					gates: [
+						{ id: "design-doc", name: "Design Document", verify: [] },
+						{ id: "implementation", name: "Implementation", depends_on: ["design-doc"], verify: [] },
+					],
+				},
+			},
+		};
+
+		const emitOne = (input, label) => {
+			const toolId = `tool_propose_project_${label}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+			this.emit({ type: "tool_execution_start", toolName: "propose_project", toolId, input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "propose_project", arguments: input, input }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			const output = `Proposal (${label}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId, toolName: "propose_project", status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "propose_project", isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "propose_project",
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		emitOne(firstInput, "first");
+		await this.tick(60);
+		emitOne(secondInput, "second");
+	}
+
+	async _handleComponentConfigProposal() {
+		// First call: components carry `config:` populated with qa_* keys.
+		const firstInput = {
+			name: "CompConfig Project",
+			root_path: "/tmp/comp-config",
+			components: [
+				{
+					name: "web",
+					repo: ".",
+					commands: { build: "npm run build", test: "npm test" },
+					config: {
+						qa_start_command: "PORT=$PORT NODE_ENV=test npm start",
+						qa_health_check: "http://127.0.0.1:$PORT/health",
+						qa_max_duration_minutes: "10",
+					},
+				},
+				{ name: "api", repo: ".", commands: { build: "npm run build:api" } },
+			],
+		};
+		// Second call: same components but WITHOUT `config:` — the per-component
+		// shallow merge in session-manager.onProjectProposal must preserve the
+		// previously-proposed `config` map on web.
+		const secondInput = {
+			name: "CompConfig Project",
+			root_path: "/tmp/comp-config",
+			components: [
+				{ name: "web", repo: ".", commands: { build: "npm run build", test: "npm test" } },
+				{ name: "api", repo: ".", commands: { build: "npm run build:api" } },
+			],
+		};
+
+		const emitOne = (input, label) => {
+			const toolId = `tool_propose_project_${label}_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+			this.emit({ type: "tool_execution_start", toolName: "propose_project", toolId, input });
+			const assistantMsg = {
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolId, name: "propose_project", arguments: input, input }],
+			};
+			this.conversationMessages.push(assistantMsg);
+			this.emit({ type: "message_end", message: assistantMsg });
+			const output = `Proposal (${label}) submitted.`;
+			this.emit({ type: "tool_execution_update", toolId, toolName: "propose_project", status: "complete", output });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "propose_project", isError: false });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "propose_project",
+				isError: false,
+				content: [{ type: "text", text: output }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		emitOne(firstInput, "first");
+		await this.tick(60);
+		emitOne(secondInput, "second");
+	}
+
+	/** Emit the deterministic production-shape event fixture used by the durable
+	 * event-stream benchmark. Only the test-owned mock gains this trigger; the
+	 * gateway, WebSocket, reducer and render paths remain production code. */
+	async _handleBenchmarkEventStream(updateCount, intervalMs) {
+		const fixture = createEventStreamFixture({ updateCount, intervalMs });
+		for (const entry of fixture.events) {
+			if (this.currentAbortController?.signal.aborted) return;
+			if (entry.persistMessage && entry.data?.message) {
+				this.conversationMessages.push(entry.data.message);
+			}
+			this.emit(entry.data);
+			if (entry.delayAfterMs > 0) await this.tick(entry.delayAfterMs);
+		}
+	}
+
+	/** Stream a propose_<type> tool_use across N message_update deltas, then
+	 *  emit message_end + tool_execution_start/end. */
+	async _handleStreamingProposal(type, n, intervalMs = 60) {
+		const toolId = `tool_propose_${type}_${Date.now()}`;
+		const toolName = `propose_${type}`;
+		// Per-type input shape — keep the title/name field stable after first delta.
+		const paragraph = (i) => `Paragraph ${i}: ` + "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(2);
+		const growSpec = (count) => Array.from({ length: count }, (_, i) => paragraph(i + 1)).join("\n\n");
+		const buildInput = (deltaIdx) => {
+			const grown = growSpec(deltaIdx + 1);
+			switch (type) {
+				case "goal":
+					return { title: "E2E Streaming Goal", workflow: "general", spec: grown };
+				case "role":
+					return { name: "e2e-stream-role", label: "E2E Stream Role", prompt: grown, tools: "", accessory: "none" };
+				case "tool":
+					return { tool: "e2e_stream_tool", action: "docs", content: grown };
+				case "staff":
+					return { name: "e2e-stream-staff", description: "E2E", prompt: grown, triggers: "[]", cwd: "" };
+				case "setup":
+					return { action: "system-prompt", content: grown };
+				case "workflow":
+					return { id: "e2e-stream-wf", name: "E2E Stream Workflow", description: grown, gates: "[]" };
+				case "project":
+					return { name: "E2E Stream Project", root_path: "/tmp/e2e-stream", build_command: "npm run build" };
+				default:
+					return { spec: grown };
+			}
+		};
+
+		for (let i = 0; i < n; i++) {
+			if (this.currentAbortController?.signal.aborted) return;
+			const input = buildInput(i);
+			const assistantMsg = {
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: toolId, name: toolName, arguments: input, input },
+				],
+			};
+			this.emit({ type: "message_update", message: assistantMsg });
+			await this.tick(intervalMs);
+		}
+
+		if (this.currentAbortController?.signal.aborted) return;
+
+		// Final message_end carries the complete tool_use block.
+		const finalInput = buildInput(n - 1);
+		const finalMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: toolName, arguments: finalInput, input: finalInput },
+			],
+		};
+		this.conversationMessages.push(finalMsg);
+		this.emit({ type: "message_end", message: finalMsg });
+
+		this.emit({ type: "tool_execution_start", toolName, toolId, input: finalInput });
+		const output = "Proposal submitted.";
+		this.emit({ type: "tool_execution_update", toolId, toolName, status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName, isError: false });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName,
+			isError: false,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * Emit a canned team_delegate tool_use + toolResult whose toolResult carries
+	 * `details.delegates` in the shape the shared DelegateRenderer consumes
+	 * (see defaults/tools/agent/extension.ts + src/ui/tools/renderers/DelegateRenderer.ts).
+	 * Used by tests/e2e/ui/team-delegate.spec.ts to assert the blocking-one-shot
+	 * card renders. Deterministic: no real child is spawned.
+	 */
+	async _handleTeamDelegateCard(variant) {
+		const toolId = `tool_teamdelegate_${Date.now()}`;
+		const input = variant === "parallel"
+			? { parallel: [{ instructions: "Review the auth module" }, { instructions: "Audit the API surface" }] }
+			: { instructions: "Summarise the design doc" };
+		this.emit({ type: "tool_execution_start", toolName: "team_delegate", toolId, input });
+		await this.tick(10);
+
+		const delegates = variant === "parallel"
+			? [
+				{ id: "child-aaaaaaaa", sessionId: "child-aaaaaaaa-1111", instructions: "Review the auth module", status: "completed", durationMs: 1200 },
+				{ id: "child-bbbbbbbb", sessionId: "child-bbbbbbbb-2222", instructions: "Audit the API surface", status: "completed", durationMs: 1500 },
+			]
+			: [
+				{ id: "child-cccccccc", sessionId: "child-cccccccc-3333", instructions: "Summarise the design doc", status: "completed", durationMs: 900 },
+			];
+		const output = variant === "parallel"
+			? "2/2 children completed."
+			: "TEAM_DELEGATE_CARD_OUTPUT — child finished and was auto-dismissed.";
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: "team_delegate", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "team_delegate", isError: false });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "team_delegate", arguments: input, input },
+				{ type: "text", text: "Delegation complete." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "team_delegate",
+			isError: false,
+			content: [{ type: "text", text: output }],
+			details: { delegates },
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	async _handleDurableLargeReview(delayMs = 0) {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const toolId = `tool_large_review_${Date.now()}`;
+		const title = "Durable 20-file review";
+		const reviewId = "browser-large-review-20";
+		const totalBytes = 485 * 1024;
+		const bytesPerFile = totalBytes / 20;
+		const files = Array.from({ length: 20 }, (_, offset) => {
+			const index = offset + 1;
+			const suffix = String(index).padStart(2, "0");
+			const fileId = `browser-large-file-${suffix}`;
+			const fileTitle = index === 9 || index === 10 ? "Duplicate.md" : `Large file ${suffix}.md`;
+			const marker = `LARGE_REVIEW_MARKER_${suffix}`;
+			const prefix = `# Large file ${suffix}\n\nIdentity: ${fileId}\n\n${marker}\n\n`;
+			const markdown = prefix + "x".repeat(bytesPerFile - Buffer.byteLength(prefix, "utf8"));
+			return { fileId, title: fileTitle, markdown };
+		});
+		const input = {
+			title,
+			replace: true,
+			files: files.map(({ title: fileTitle, markdown }) => ({ title: fileTitle, markdown })),
+		};
+		this.emit({ type: "tool_execution_start", toolName: "review_open", toolId, input });
+		if (delayMs > 0) await this.tick(delayMs);
+
+		let output;
+		let isError = false;
+		try {
+			const response = sessionId ? await this._gatewayPost(
+				`/api/sessions/${encodeURIComponent(sessionId)}/review-payloads`,
+				{
+					toolCallId: toolId,
+					review: {
+						reviewId,
+						title,
+						files,
+						activeFileId: files[0].fileId,
+						replace: true,
+					},
+				},
+				{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+			) : null;
+			if (!response || response.action !== "review_open" || response.version !== 2 || response.toolCallId !== toolId) {
+				isError = true;
+				output = JSON.stringify({
+					action: "review_open",
+					version: 2,
+					toolCallId: toolId,
+					error: { code: "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", retryable: true, message: "Review content could not be prepared." },
+				});
+			} else {
+				output = JSON.stringify(response);
+			}
+		} catch {
+			isError = true;
+			output = JSON.stringify({
+				action: "review_open",
+				version: 2,
+				toolCallId: toolId,
+				error: { code: "REVIEW_PAYLOAD_GATEWAY_UNAVAILABLE", retryable: true, message: "Review content could not be prepared." },
+			});
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: "review_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "review_open", isError });
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "review_open", arguments: input, input },
+				{ type: "text", text: "Done. Used review_open tool." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "review_open",
+			isError,
+			content: [{ type: "text", text: output }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+		// Keep the mock turn streaming until the browser has had an event-loop
+		// window to fetch and hydrate the artifact behind the bounded receipt.
+		// The real agent naturally spends longer after a 485 KiB tool call; without
+		// this adapter delay a status poll can observe idle before the client open
+		// coordinator has published its result.
+		await this.tick(1_000);
+	}
+
+	async _handleSingleTool(toolAction) {
+		// Honor an explicit stable toolId when provided (extension-host litmus), else
+		// the default per-call id. A stable id lets a test correlate the rendered
+		// tool block with the persisted transcript entry.
+		const toolId = toolAction.toolId || `tool_${Date.now()}`;
+		this.emit({ type: "tool_execution_start", toolName: toolAction.tool, toolId, input: toolAction.input });
+
+		// Run the actual tool effect against the real filesystem / shell where
+		// possible. The chat card shows whatever string we put in `output`, so
+		// downstream tests can assert on real file contents and real exit codes.
+		let output = toolAction.output;
+		let isError = false;
+		try {
+			if (toolAction.tool === "Write" && toolAction.input.path && typeof toolAction.input.content === "string") {
+				fs.mkdirSync(path.dirname(toolAction.input.path), { recursive: true });
+				fs.writeFileSync(toolAction.input.path, toolAction.input.content, "utf-8");
+				output = `Wrote ${Buffer.byteLength(toolAction.input.content, "utf-8")} bytes to ${toolAction.input.path}`;
+			} else if (toolAction.tool === "Edit" && toolAction.input.path) {
+				const content = fs.readFileSync(toolAction.input.path, "utf-8");
+				const next = content.replace(toolAction.input.oldText, toolAction.input.newText);
+				fs.writeFileSync(toolAction.input.path, next, "utf-8");
+				output = next === content ? `Edit no-op (oldText not found)` : `Edited ${toolAction.input.path}`;
+			} else if (toolAction.tool === "Read" && toolAction.input.path) {
+				output = fs.readFileSync(toolAction.input.path, "utf-8");
+			} else if (toolAction.tool === "Bash" && toolAction.input.command) {
+				// Real shell. Use cwd so commands resolve relative paths correctly.
+				output = execSync(toolAction.input.command, { cwd: this.cwd, encoding: "utf-8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] });
+			}
+		} catch (err) {
+			isError = true;
+			output = `${toolAction.tool} error: ${err?.message || err}`;
+		}
+
+		// propose_* tools: mirror the real extension's seed POST so the file-on-disk
+		// source of truth (Slice B) is populated during E2E. Awaited so the seed
+		// completes before message_end fires — the rehydrate path on reload depends
+		// on the file already existing. If the gateway rejects the seed, surface that
+		// structured body as an isError result to match the real tool extension.
+		let revMarker = undefined;
+		if (typeof toolAction.tool === "string" && toolAction.tool.startsWith("propose_")) {
+			const seedResult = await this._seedProposal(toolAction.tool.slice("propose_".length), toolAction.input);
+			if (seedResult && typeof seedResult === "object") {
+				if (typeof seedResult.rev === "number") {
+					revMarker = seedResult.rev;
+				} else if (seedResult.ok === false || typeof seedResult.code === "string" || typeof seedResult.message === "string") {
+					isError = true;
+					output = JSON.stringify(seedResult, null, 2);
+				}
+			}
+		}
+		// edit_proposal tool: shell to the gateway edit endpoint so the file
+		// updates and the server broadcasts proposal_update {source:"edit"}.
+		if (toolAction.tool === "edit_proposal" && toolAction.input?.type) {
+			revMarker = await this._editProposal(
+				toolAction.input.type,
+				toolAction.input.old_text ?? "",
+				toolAction.input.new_text ?? "",
+			);
+		}
+		let effectiveOutput = output;
+		if (typeof revMarker === "number" && revMarker > 0) {
+			effectiveOutput = `${effectiveOutput}\n__proposal_rev_v1__:${revMarker}`;
+		}
+
+		this.emit({ type: "tool_execution_update", toolId, toolName: toolAction.tool, status: "complete", output: effectiveOutput });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: toolAction.tool, isError });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: toolAction.tool, arguments: toolAction.input, input: toolAction.input },
+				{ type: "text", text: `Done. Used ${toolAction.tool} tool.` },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: toolAction.tool,
+			isError,
+			content: [{ type: "text", text: effectiveOutput }],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/** Resolve the gateway URL+token. Returns null when unavailable. */
+	_gatewayCreds() {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		try {
+			const gwUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			const token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+			if (!sessionId || !gwUrl || !token) return null;
+			return { sessionId, gwUrl, token };
+		} catch {
+			return null;
+		}
+	}
+
+	/** Generic gateway POST helper used by seed, edit, and durable review fixtures. */
+	_gatewayPost(pathname, body, extraHeaders = {}) {
+		const creds = this._gatewayCreds();
+		if (!creds) return Promise.resolve(null);
+		const { gwUrl, token } = creds;
+		const payload = JSON.stringify(body);
+		return new Promise((resolve) => {
+			try {
+				const u = new URL(`${gwUrl}${pathname}`);
+				const req = http.request(u, {
+					method: "POST",
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(payload),
+						...extraHeaders,
+					},
+					timeout: 5_000,
+				}, (res) => {
+					let buf = "";
+					res.on("data", (chunk) => { buf += chunk.toString(); });
+					res.on("end", () => {
+						try { resolve(buf ? JSON.parse(buf) : null); } catch { resolve(null); }
+					});
+				});
+				req.on("timeout", () => { req.destroy(); resolve(null); });
+				req.on("error", () => resolve(null));
+				req.write(payload);
+				req.end();
+			} catch { resolve(null); }
+		});
+	}
+
+	async _seedProposal(type, args) {
+		const creds = this._gatewayCreds();
+		if (!creds) return undefined;
+		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
+		return body && typeof body === "object" ? body : undefined;
+	}
+
+	async _editProposal(type, oldText, newText) {
+		const creds = this._gatewayCreds();
+		if (!creds) return undefined;
+		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/edit`, {
+			old_text: oldText,
+			new_text: newText,
+		});
+		return body && typeof body === "object" && typeof body.rev === "number" ? body.rev : undefined;
+	}
+
+	/** Handle RPC command. Returns response data or undefined. */
+	async handleCommand(msg) {
+		switch (msg.type) {
+			case "prompt":
+			case "follow_up": {
+				const occurrence = ++this._commandSequence.prompt;
+				const intentId = msg.intentId || msg.id;
+				const commandReceipt = { kind: "prompt", occurrence, text: msg.message || "", intentId };
+				this._commandJournal.push(commandReceipt);
+				await this._crossBarrier(`prompt:${occurrence}:received`, commandReceipt);
+				// Real-agent fidelity (MOCK_ABORT_BUSY=1): reject prompts that
+				// arrive in the same microtask as agent_end-from-abort, mirroring
+				// pi-agent-core's "Agent is already processing." guard.
+				if (this._busyOverride) {
+					return { success: false, error: "Agent is already processing." };
+				}
+				// A fresh prompt restarts the loop — clear the abort window.
+				this._abortedRecently = false;
+				// Respond to ack, then handle prompt async. Serialize onto the
+				// per-instance promise chain so concurrent prompts queue up
+				// rather than interleave (which would double-assign
+				// currentAbortController and scramble event ordering).
+				const text = msg.message || "";
+				// Make the durable large-review fixture's busy transition observable
+				// before the prompt acknowledgement reaches browser polling helpers.
+				if (text.includes("REVIEW_OPEN_DURABLE_LARGE_20")) {
+					this.emit({ type: "session_status", status: "streaming" });
+				}
+				// Forward images so the echo can build image content blocks under the
+				// ECHO_IMAGE_BLOCK trigger (default text-only echo discarded them).
+				const images = Array.isArray(msg.images) ? msg.images : undefined;
+				this._promptChain = this._promptChain
+					.catch(() => {})
+					.then(() => this.handlePrompt(text, images, { kind: "prompt", occurrence, intentId }))
+					.catch(err => {
+						console.error("[mock-agent-core] Prompt error:", err);
+					});
+				// This fixture is parsed directly from the in-process transcript. Await
+				// its bounded real-API round trip so the prompt acknowledgement cannot
+				// race the journey's receipt lookup while ordinary mock prompts retain
+				// the production-like immediate acknowledgement.
+				if (text.includes("REVIEW_OPEN_DURABLE_LARGE_20")) await this._promptChain;
+				await this._crossBarrier(`prompt:${occurrence}:before-ack`, commandReceipt);
+				return { success: true };
+			}
+
+			case "steer": {
+				// Production behaviour: steer interrupts the current turn and
+				// the steered text becomes a fresh user prompt with its own
+				// assistant turn. Tests scan the rendered chat for a
+				// <user-message> matching the steered text — we get that by
+				// queueing a real handlePrompt round-trip after the in-flight
+				// turn finishes.
+				//
+				// Crucially we do NOT null out currentAbortController here:
+				// the in-flight handlePrompt is still on the call stack and
+				// observes signal.aborted via that reference. Clearing it makes
+				// loop-iteration aborted-checks read undefined and keep running,
+				// which lets the in-flight burst overlap with the steered
+				// handlePrompt and corrupts ordering.
+				const steeredText = msg.message || msg.text || "";
+				const occurrence = ++this._commandSequence.steer;
+				const intentId = msg.intentId || msg.id;
+				const commandReceipt = { kind: "steer", occurrence, text: steeredText, intentId };
+				this._commandJournal.push(commandReceipt);
+				await this._crossBarrier(`steer:${occurrence}:received`, commandReceipt);
+				const configuredFailure = this._reliableScenario.steerFailures?.[occurrence];
+				if (configuredFailure === "pre-dispatch") {
+					throw new Error("deterministic pre-dispatch steer rejection");
+				}
+				const reliableContinuation = this._reliableOverflowRetryActive;
+				if (this.currentAbortController && !reliableContinuation) {
+					this.currentAbortController.abort();
+				}
+
+				// Real-agent fidelity (MOCK_STEER_QUEUE_DROP=1): the SDK queues
+				// steer text on `_steeringMessages` and only consumes it at the
+				// start of the NEXT loop iteration. If the agent loop has just
+				// been aborted (and won't iterate again until a fresh prompt()),
+				// the steer text is silently dropped — the SDK accepts the RPC
+				// but the message never surfaces as a <user-message>. Default
+				// mock immediately runs handlePrompt(steeredText), which always
+				// surfaces the message; that hides this real-agent failure mode.
+				// MOCK_STEER_QUEUE_DROP=always is a deterministic test-harness mode
+				// for abort-reconcile specs: accept the steer RPC but leave Bobbit's
+				// in-flight steer ledger as the only source that can recover it.
+				const dropSteerEcho = this.env.MOCK_STEER_QUEUE_DROP === "always"
+					|| (this.env.MOCK_STEER_QUEUE_DROP === "1" && this._abortedRecently);
+
+				if (steeredText && !dropSteerEcho && reliableContinuation) {
+					// A continuation steer belongs to the retrying overflow run. Surface
+					// its correlated Pi user event inside that run without replacing or
+					// aborting the retry controller; the controlled final agent_end remains
+					// the sole boundary that can release next-turn prompts.
+					const delivery = { kind: "steer", occurrence, intentId };
+					await this._crossBarrier(`steer:${occurrence}:before-user-start`, delivery);
+					const userMsg = {
+						role: "user",
+						content: [{ type: "text", text: steeredText }],
+						...(intentId ? { deliveryIntentId: intentId } : {}),
+					};
+					this.emit({
+						type: "message_start",
+						message: userMsg,
+						...(intentId ? { deliveryIntentId: intentId } : {}),
+					});
+					await this._crossBarrier(`steer:${occurrence}:after-user-start`, delivery);
+					this.conversationMessages.push(userMsg);
+					this.emit({
+						type: "message_end",
+						message: userMsg,
+						...(intentId ? { deliveryIntentId: intentId } : {}),
+					});
+				} else if (steeredText && !dropSteerEcho) {
+					// Test-only knob (MOCK_STEER_ECHO_DELAY_MS=N): delay the
+					// steered handlePrompt by N ms so the dispatch→echo race
+					// window in SessionManager._dispatchSteer (queue row
+					// removed + ledger pushed, awaiting the user-role
+					// message_end echo) is wide enough to be observed by a
+					// client `get_messages` poll. Used by
+					// tests/e2e/steer-snapshot-continuity.spec.ts to pin the
+					// invariant that the steer text never disappears from both
+					// the queue pill and the transcript simultaneously.
+					const delayMs = parseInt(this.env.MOCK_STEER_ECHO_DELAY_MS || "0", 10);
+					this._promptChain = this._promptChain
+						.catch(() => {})
+						.then(async () => {
+							if (delayMs > 0) await this.tick(delayMs);
+							return this.handlePrompt(steeredText, undefined, { kind: "steer", occurrence, intentId });
+						})
+						.catch(err => {
+							console.error("[mock-agent-core] Steered prompt error:", err);
+						});
+				}
+				await this._crossBarrier(`steer:${occurrence}:before-ack`, commandReceipt);
+				if (configuredFailure === "ambiguous") {
+					throw new Error("deterministic ambiguous steer acknowledgement failure");
+				}
+				return { success: true };
+			}
+
+			case "abort": {
+				const occurrence = ++this._commandSequence.abort;
+				const commandReceipt = { kind: "abort", occurrence };
+				this._commandJournal.push(commandReceipt);
+				await this._crossBarrier(`abort:${occurrence}:received`, commandReceipt);
+				if (this.currentAbortController) {
+					this.currentAbortController.abort();
+					this.currentAbortController = null;
+				}
+				// MOCK_STEER_QUEUE_DROP fidelity: mark a window during which steer
+				// RPCs return success but their text is dropped (matching SDK
+				// behaviour where _steeringMessages is populated but the loop
+				// has exited). Cleared on the next prompt() so a fresh user
+				// turn (which restarts the loop) processes steers normally.
+				if (this.env.MOCK_STEER_QUEUE_DROP === "1") {
+					this._abortedRecently = true;
+				}
+				// Real-agent fidelity (MOCK_ABORT_BUSY=1): the SDK emits agent_end
+				// from `handleRunFailure` while `activeRun` is still set; only the
+				// outer try/finally's `finishRun()` clears it on the next microtask.
+				// A synchronous prompt() call from an agent_end listener (e.g.
+				// drainQueue calling rpcClient.prompt) therefore rejects with
+				// "Agent is already processing." Setting _busyOverride here for one
+				// microtask reproduces that exact race — cleared via setImmediate so
+				// any deferred drain (microtask / setImmediate / setTimeout) succeeds.
+				if (this.env.MOCK_ABORT_BUSY === "1") {
+					this._busyOverride = true;
+					setImmediate(() => { this._busyOverride = false; });
+				}
+				await this._crossBarrier(`abort:${occurrence}:before-agent-end`, commandReceipt);
+				// Emit abort events synchronously — the caller's `await abort()`
+				// resolves on the return value below, after which their listener
+				// setup (if any) has already been registered via prior calls.
+				// In-process listeners are effectively ordered, so emitting here
+				// delivers events to all currently-subscribed handlers without
+				// racing a subsequent prompt's new abortController.
+				//
+				// Real-agent fidelity: when the user aborts an in-flight turn, the
+				// real Claude bridge surfaces the abort by emitting an assistant
+				// `message_end` with `stopReason:"error"` (rendered as "Request
+				// aborted" in the UI) BEFORE the terminal `agent_end`. This is the
+				// signal that flips `session.lastTurnErrored=true` in the server,
+				// which then gates `drainQueue` off in the `agent_end` handler.
+				// The MOCK_ABORT_AS_ERROR opt-in switches the mock to that shape so
+				// tests can exercise the error-gated drain path without changing
+				// the default abort behaviour for tests that rely on the clean
+				// (non-errored) abort.
+				if (this.env.MOCK_ABORT_AS_ERROR === "1") {
+					const abortedMsg = {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: "Request aborted",
+					};
+					this.emit({ type: "message_end", message: abortedMsg });
+				}
+				this.emit({ type: "agent_end" });
+				await this._crossBarrier(`abort:${occurrence}:after-agent-end`, commandReceipt);
+				this.emit({ type: "agent_settled" });
+				this.emit({ type: "session_status", status: "idle" });
+				return { success: true };
+			}
+
+			case "new_session": {
+				// Pi's new_session tears down the current agent run before replacing its
+				// SessionManager. Persist the outgoing generation after that settlement,
+				// then rotate every conversation-owned structure while retaining the
+				// runtime instance and its cwd/model/thinking configuration.
+				const previousPath = this.ensureSessionFile();
+				this._persistTranscript();
+				const activeTurn = this._activeTurn;
+				if (activeTurn) {
+					activeTurn.controller.abort();
+					await activeTurn.settled;
+					if (!activeTurn.agentEndEmitted) this.emit({ type: "agent_end" });
+					if (!activeTurn.agentSettledEmitted) this.emit({ type: "agent_settled" });
+					if (!activeTurn.idleEmitted) this.emit({ type: "session_status", status: "idle" });
+				}
+				// Settlement may have appended the final outgoing message entry.
+				this._persistTranscript();
+
+				this.conversationMessages = [];
+				this._transcriptEntries = [];
+				this._postCompactionEntries = null;
+				this._sessionHeader = this._createSessionHeader();
+				this._runtimeCwdMetadata = [];
+				this._lastTranscriptEntryId = null;
+				this._nextTranscriptEntrySequence = 1;
+				this._reliableOverflowRetryActive = false;
+				this._abortedRecently = false;
+				this.sessionFilePath = null;
+				const nextPath = this.ensureSessionFile();
+				if (nextPath === previousPath) {
+					throw new Error("new_session failed to rotate the mock transcript path");
+				}
+				return {
+					command: "new_session",
+					success: true,
+					data: { cancelled: false },
+				};
+			}
+
+			case "get_state": {
+				const sf = this.ensureSessionFile();
+				// A few E2E seams replace conversationMessages directly. Rebuild the
+				// mock entry tree only for that explicit mismatch; normal agent turns,
+				// compaction, and switch_session retain their durable ids verbatim.
+				if (!Array.isArray(this._postCompactionEntries)) {
+					const trackedMessages = this._transcriptEntries
+						.filter(entry => entry?.type === "message")
+						.map(entry => entry.message);
+					const externallyReplaced = trackedMessages.length !== this.conversationMessages.length
+						|| trackedMessages.some((message, index) => message !== this.conversationMessages[index]);
+					if (externallyReplaced) {
+						this._transcriptEntries = [];
+						this._lastTranscriptEntryId = null;
+						for (const message of this.conversationMessages) this._appendTranscriptMessage(message);
+					}
+				}
+				this._persistTranscript();
+				return {
+					success: true,
+					data: {
+						status: "idle",
+						sessionFile: sf,
+						model: this.currentModel,
+						thinkingLevel: this.currentThinkingLevel,
+						messageCount: this.conversationMessages.length,
+						pendingMessageCount: 0,
+					},
+				};
+			}
+
+			case "get_messages":
+				return { success: true, data: this.conversationMessages };
+
+			case "get_entries": {
+				const entries = this._activeTranscriptEntries();
+				let start = 0;
+				if (msg.since !== undefined) {
+					const cursor = entries.findIndex(entry => entry?.id === msg.since);
+					if (cursor < 0) return { success: false, error: `Entry not found: ${msg.since}` };
+					start = cursor + 1;
+				}
+				return {
+					success: true,
+					data: {
+						entries: entries.slice(start),
+						leafId: this._lastTranscriptEntryId,
+					},
+				};
+			}
+
+			case "get_fork_messages": {
+				const entries = this._activeTranscriptEntries();
+				const byId = new Map(entries.filter(entry => typeof entry?.id === "string").map(entry => [entry.id, entry]));
+				const active = [];
+				const seen = new Set();
+				let current = this._lastTranscriptEntryId ? byId.get(this._lastTranscriptEntryId) : undefined;
+				while (current && !seen.has(current.id)) {
+					active.push(current);
+					seen.add(current.id);
+					current = current.parentId ? byId.get(current.parentId) : undefined;
+				}
+				active.reverse();
+				const messages = active.flatMap(entry => {
+					if (entry?.type !== "message" || (entry.message?.role !== "user" && entry.message?.role !== "user-with-attachments")) return [];
+					const content = entry.message.content;
+					const text = typeof content === "string"
+						? content
+						: Array.isArray(content)
+							? content.filter(block => block?.type === "text" && typeof block.text === "string").map(block => block.text).join("\n")
+							: "";
+					return [{ entryId: entry.id, text }];
+				});
+				return { success: true, data: { messages } };
+			}
+
+			case "set_model": {
+				const provider = msg.provider || "mock";
+				const modelId = msg.modelId || "mock-model";
+				this.currentModel = mockModelFromString(`${provider}/${modelId}`) || { ...DEFAULT_MODEL };
+				return { success: true };
+			}
+
+			case "set_thinking_level":
+				this.currentThinkingLevel = msg.level;
+				return { success: true };
+
+			case "compact": {
+				const occurrence = ++this._commandSequence.compact;
+				const commandReceipt = { kind: "compact", occurrence };
+				this._commandJournal.push(commandReceipt);
+				await this._crossBarrier(`compact:${occurrence}:received`, commandReceipt);
+				// Manual /compact: mirror pi 0.74+ by emitting compaction_start/end
+				// (reason "manual") from inside compact() before resolving. Drives the
+				// ws-handler manual branch + session-manager manual sidecar path so the
+				// summary card renders complete/ok. Keep a small pre-compaction history
+				// (3 orphans) so the transcript shape matches a real compaction.
+				await this._handleAutoCompaction(3, "manual");
+				await this._crossBarrier(`compact:${occurrence}:before-ack`, commandReceipt);
+				return { success: true };
+			}
+
+			case "switch_session": {
+				// Faithful to the real pi-agent CLI: rehydrate both the visible message
+				// view and its durable append-only entry tree. Used by restore,
+				// Continue-Archived, and Fork.
+				try {
+					const sp = msg.sessionPath;
+					if (sp && fs.existsSync(sp)) {
+						const loaded = [];
+						const entries = [];
+						let sessionHeader = null;
+						const runtimeCwdMetadata = [];
+						for (const line of fs.readFileSync(sp, "utf-8").split("\n")) {
+							const trimmed = line.trim();
+							if (!trimmed) continue;
+							try {
+								const parsed = JSON.parse(trimmed);
+								if (parsed && (parsed.type === "system" || parsed.type === "session") && typeof parsed.cwd === "string" && !fs.existsSync(parsed.cwd)) {
+									return { success: false, error: `Stored session working directory does not exist: ${parsed.cwd}` };
+								}
+								if (parsed?.type === "session" && !sessionHeader) {
+									sessionHeader = parsed;
+								} else if (parsed?.type === "system" && typeof parsed.cwd === "string") {
+									runtimeCwdMetadata.push(parsed);
+								} else if (parsed && parsed.type !== "session") {
+									entries.push(parsed);
+									if (parsed.type === "message" && parsed.message) loaded.push(parsed.message);
+								}
+							} catch { /* skip malformed line */ }
+						}
+						this.conversationMessages = loaded;
+						this._transcriptEntries = entries;
+						this._postCompactionEntries = null;
+						this._sessionHeader = sessionHeader || this._createSessionHeader();
+						this._runtimeCwdMetadata = runtimeCwdMetadata;
+						const lastEntry = entries.at(-1);
+						this._lastTranscriptEntryId = lastEntry?.type === "leaf"
+							? (typeof lastEntry.targetId === "string" ? lastEntry.targetId : null)
+							: (typeof lastEntry?.id === "string" ? lastEntry.id : null);
+						this.sessionFilePath = sp;
+					}
+				} catch { /* best-effort — leave existing conversation intact */ }
+				return { success: true };
+			}
+
+			default:
+				return { success: true };
+		}
+	}
+}

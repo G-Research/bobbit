@@ -1,0 +1,15 @@
+{
+	"api/mcp-tool-permission.api-e2e.spec.ts": 1,
+	"api/multi-repo-pool.api-e2e.spec.ts": 1,
+	"api/pool-flow.api-e2e.spec.ts": 4,
+	"browser/_helpers/packaged-runtime-helpers.ts": 1,
+	"browser/_helpers/source-vite-runtime-helpers.ts": 2,
+	"browser/file-explorer-pack.browser-e2e.spec.ts": 2,
+	"node/system-project-pool-leak.node-e2e.test.ts": 2,
+	"node/worktree-pool-base-ref.node-e2e.test.ts": 4,
+	"node/worktree-pool-multi.node-e2e.test.ts": 2,
+	"node/worktree-pool-nested-rootpath.node-e2e.test.ts": 1,
+	"node/worktree-pool.node-e2e.test.ts": 11,
+	"vitest/benchmark-bobbit-journeys.vitest-e2e.test.ts": 2,
+	"vitest/marketplace-install.vitest-e2e.test.ts": 1
+}
