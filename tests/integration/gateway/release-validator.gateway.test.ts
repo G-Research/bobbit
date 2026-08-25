@@ -189,7 +189,7 @@ describe("release validator integration", () => {
 	it("parses the captured npm attestation and rejects its different source commit", async () => {
 		const fixture = JSON.parse(
 			readFileSync(
-				resolve("tests/support/fixtures/release/npm-attestations-bobbit-0.15.1.json"),
+				resolve("tests/support/fixtures/integration/release/npm-attestations-bobbit-0.15.1.json"),
 				"utf8",
 			),
 		);
