@@ -139,6 +139,70 @@ describe("cleanupWorktree filesystem aliases", () => {
 	);
 
 	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
+		"rejects a %s alias replacement interposed before Git removal",
+		async (aliasKind) => {
+			const fixture = await createFixture(`alias-pre-git-replacement-${aliasKind}`, aliasKind);
+			const originalRoot = `${fixture.worktree}-generation-a`;
+			const markerPath = path.join(fixture.worktree, ".git");
+			const sentinelPath = path.join(fixture.worktree, "replacement.txt");
+			const realReadFile = fs.promises.readFile.bind(fs.promises);
+			const destructiveGitCalls: string[][] = [];
+			let interposed = false;
+			let replacementGeneration: AsyncTreeStats | undefined;
+			const readFileSpy = vi.spyOn(fs.promises, "readFile").mockImplementation((async (filePath: any, options?: any) => {
+				const result = await realReadFile(filePath, options);
+				if (!interposed && path.resolve(String(filePath)) === path.resolve(markerPath)) {
+					interposed = true;
+					const originalGeneration = await fs.promises.lstat(fixture.worktree);
+					await fs.promises.rename(fixture.worktree, originalRoot);
+					replacementGeneration = await recreateWithDistinctGeneration(fixture.worktree, originalGeneration);
+					await fs.promises.writeFile(markerPath, result);
+					await fs.promises.writeFile(sentinelPath, "replacement generation\n");
+				}
+				return result;
+			}) as any);
+			const runner: CommandRunner = {
+				execFile: async (file, args, options) => {
+					if ((args[0] === "worktree" && args[1] === "remove")
+						|| (args[0] === "branch" && args[1] === "-D")) {
+						destructiveGitCalls.push([...args]);
+					}
+					return realCommandRunner.execFile(file, args, options);
+				},
+			};
+			try {
+				try {
+					await expect(cleanupWorktree(
+						fixture.repo,
+						fixture.alias,
+						fixture.branch,
+						true,
+						runner,
+						{ skipRemotePush: true },
+					)).rejects.toThrow(/filesystem generation changed before Git removal/i);
+				} finally {
+					readFileSpy.mockRestore();
+				}
+
+				expect(interposed).toBe(true);
+				expect(replacementGeneration).toBeDefined();
+				expect(destructiveGitCalls).toEqual([]);
+				expect((await fs.promises.lstat(fixture.worktree)).isDirectory()).toBe(true);
+				expect(await fs.promises.readFile(sentinelPath, "utf8")).toBe("replacement generation\n");
+				expect((await fs.promises.lstat(fixture.adminPath)).isDirectory()).toBe(true);
+				const registeredIdentities = await Promise.all((await registeredWorktreePaths(fixture.repo)).map(
+					candidate => nativeRealpath(candidate),
+				));
+				expect(registeredIdentities).toContain(await nativeRealpath(fixture.worktree));
+				expect(await git(fixture.repo, ["show-ref", "--verify", `refs/heads/${fixture.branch}`])).toBeTruthy();
+			} finally {
+				readFileSpy.mockRestore();
+				await removeFixture(fixture.root);
+			}
+		},
+	);
+
+	it.each<AliasKind>(process.platform === "win32" ? ["native", "lexical"] : ["lexical"])(
 		"recovers only the captured directory generation after successful Git removal through a %s alias",
 		async (aliasKind) => {
 			const fixture = await createFixture(`alias-residue-${aliasKind}`, aliasKind);
@@ -272,10 +336,11 @@ describe("cleanupWorktree filesystem aliases", () => {
 		const fixture = await createFixture("alias-identity-error", "lexical");
 		const realLstat = fs.promises.lstat.bind(fs.promises);
 		let targetLstatCalls = 0;
+		let removeCalls = 0;
 		let branchDeleteCalls = 0;
 		const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation(async (filePath) => {
 			if (path.resolve(String(filePath)) === path.resolve(fixture.worktree)
-				&& ++targetLstatCalls > 1) {
+				&& ++targetLstatCalls > 2) {
 				throw new Error("synthetic generation revalidation failure");
 			}
 			return realLstat(filePath);
@@ -283,6 +348,7 @@ describe("cleanupWorktree filesystem aliases", () => {
 		const runner: CommandRunner = {
 			execFile: async (file, args, options) => {
 				if (args[0] === "worktree" && args[1] === "remove") {
+					removeCalls += 1;
 					await fs.promises.rm(fixture.adminPath, { recursive: true, force: true });
 					return { stdout: "", stderr: "" };
 				}
@@ -300,6 +366,7 @@ describe("cleanupWorktree filesystem aliases", () => {
 				{ skipRemotePush: true },
 			)).rejects.toThrow(/synthetic generation revalidation failure/i);
 
+			expect(removeCalls).toBe(1);
 			expect(branchDeleteCalls).toBe(0);
 		} finally {
 			lstatSpy.mockRestore();
