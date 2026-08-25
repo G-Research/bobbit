@@ -26,25 +26,37 @@ async function readJson<T>(path: string): Promise<T> {
 	return await res.json() as T;
 }
 
-function accessoryButton(page: import("@playwright/test").Page, label: string) {
-	return page.locator(`button[title="${label}"]`).filter({ hasText: label }).first();
-}
-
-async function expectAccessorySelected(page: import("@playwright/test").Page, label: string): Promise<void> {
-	await expect(accessoryButton(page, label)).toBeVisible({ timeout: 10_000 });
-	await expect
-		.poll(
-			async () => await accessoryButton(page, label).evaluate((el) => el.className.toString()),
-			{
-				timeout: 10_000,
-				message: `STAFF_ROLE_ACCESSORY_PREFILL: accessory "${label}" should be selected`,
-			},
-		)
-		.toContain("ring-2");
-}
-
 function roleSelect(page: import("@playwright/test").Page) {
-	return page.locator('[data-testid="staff-role-select"]');
+	return page.getByTestId("staff-role-select");
+}
+
+async function selectRole(page: import("@playwright/test").Page, value: string, label: string): Promise<void> {
+	await roleSelect(page).click();
+	const options = page.getByRole("listbox", { name: "Role options" });
+	await expect(options).toBeVisible();
+	const option = value
+		? options.locator(`[role="option"][data-value="${value}"]`)
+		: options.getByRole("option", { name: "No role", exact: true });
+	await option.click();
+	await expect(roleSelect(page)).toContainText(label);
+}
+
+function accessorySelect(page: import("@playwright/test").Page) {
+	return page.getByTestId("staff-accessory-select");
+}
+
+async function selectAccessory(page: import("@playwright/test").Page, value: string, label: string): Promise<void> {
+	await accessorySelect(page).click();
+	const options = page.getByRole("listbox", { name: "Accessory options" });
+	await expect(options).toBeVisible();
+	await options.locator(`[role="option"][data-value="${value}"]`).click();
+	await expectAccessorySelected(page, value, label);
+}
+
+async function expectAccessorySelected(page: import("@playwright/test").Page, value: string, label: string): Promise<void> {
+	await expect(accessorySelect(page)).toBeVisible({ timeout: 10_000 });
+	await expect(accessorySelect(page)).toHaveAttribute("data-value", value);
+	await expect(accessorySelect(page)).toContainText(label);
 }
 
 test.describe("Staff role selection", () => {
@@ -77,12 +89,11 @@ test.describe("Staff role selection", () => {
 			// Role picker starts with "No role".
 			const select = roleSelect(page);
 			await expect(select).toBeVisible({ timeout: 10_000 });
-			await expect(select).toHaveValue("");
+			await expect(select).toContainText("No role");
 
 			// Pick a role → accessory pre-fills from the role's default.
-			await select.selectOption(ROLE_A);
-			await expect(select).toHaveValue(ROLE_A);
-			await expectAccessorySelected(page, ROLE_A_ACCESSORY_LABEL);
+			await selectRole(page, ROLE_A, "Architect");
+			await expectAccessorySelected(page, ROLE_A_ACCESSORY, ROLE_A_ACCESSORY_LABEL);
 
 			// Save → PUT carries roleId; persisted on the staff record.
 			const saveButton = page.getByRole("button", { name: "Save Changes" });
@@ -106,17 +117,15 @@ test.describe("Staff role selection", () => {
 			await page.reload();
 			await navigateToHash(page, `#/staff/${staff.id}`);
 			await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
-			await expect(roleSelect(page)).toHaveValue(ROLE_A);
-			await expectAccessorySelected(page, ROLE_A_ACCESSORY_LABEL);
+			await expect(roleSelect(page)).toContainText("Architect");
+			await expectAccessorySelected(page, ROLE_A_ACCESSORY, ROLE_A_ACCESSORY_LABEL);
 
 			// Accessory remains overridable after a role is in effect: a manual
 			// pick must NOT be clobbered by subsequently changing the role.
-			await accessoryButton(page, MANUAL_ACCESSORY_LABEL).click();
-			await expectAccessorySelected(page, MANUAL_ACCESSORY_LABEL);
-			await roleSelect(page).selectOption(ROLE_B);
-			await expect(roleSelect(page)).toHaveValue(ROLE_B);
+			await selectAccessory(page, MANUAL_ACCESSORY, MANUAL_ACCESSORY_LABEL);
+			await selectRole(page, ROLE_B, "Coder");
 			// Manual accessory survives the role change.
-			await expectAccessorySelected(page, MANUAL_ACCESSORY_LABEL);
+			await expectAccessorySelected(page, MANUAL_ACCESSORY, MANUAL_ACCESSORY_LABEL);
 
 			putWait = page.waitForResponse((resp2) =>
 				resp2.request().method() === "PUT" && resp2.url().includes(`/api/staff/${staff!.id}`),
@@ -132,8 +141,7 @@ test.describe("Staff role selection", () => {
 			expect(saved.accessory).toBe(MANUAL_ACCESSORY);
 
 			// Clear the role ("No role") → roleId cleared on the server.
-			await roleSelect(page).selectOption("");
-			await expect(roleSelect(page)).toHaveValue("");
+			await selectRole(page, "", "No role");
 			putWait = page.waitForResponse((resp2) =>
 				resp2.request().method() === "PUT" && resp2.url().includes(`/api/staff/${staff!.id}`),
 			);
@@ -148,7 +156,7 @@ test.describe("Staff role selection", () => {
 			await page.reload();
 			await navigateToHash(page, `#/staff/${staff.id}`);
 			await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
-			await expect(roleSelect(page)).toHaveValue("");
+			await expect(roleSelect(page)).toContainText("No role");
 		} finally {
 			if (staff?.id) {
 				await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => {});

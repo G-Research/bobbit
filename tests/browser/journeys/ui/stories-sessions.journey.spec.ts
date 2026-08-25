@@ -11,8 +11,8 @@
  *   cleanup → teardown (not tracked)
  */
 import { test, expect } from "../../_helpers/gateway-harness.js";
-import { apiFetch, base, readE2ETokenAsync, waitForHealth, deleteSession } from "../../_helpers/e2e-setup.js";
-import { waitForAgentResponse } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
+import { waitForHealth, deleteSession } from "../../_helpers/e2e-setup.js";
+import { openApp, waitForAgentResponse } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 import { SpecContext } from "../../../support/harnesses/browser/legacy-ui/spec-framework.js";
 import {
 	STORY_S01,
@@ -27,19 +27,10 @@ import {
 } from "../../../support/harnesses/browser/legacy-ui/story-registry.js";
 
 async function openStoryApp(s: SpecContext): Promise<void> {
-	await expect(async () => {
-		const resp = await apiFetch("/api/oauth/status?provider=anthropic");
-		expect(resp.ok).toBe(true);
-		const status = await resp.json();
-		expect(status.authenticated).toBe(true);
-	}).toPass({ timeout: 20_000 });
-
-	const page = s.page;
-	const token = await readE2ETokenAsync();
-	await page.goto(`${base()}/?token=${encodeURIComponent(token)}`);
-	await expect(
-		page.locator("button").filter({ hasText: "Settings" }).first(),
-	).toBeVisible({ timeout: 20_000 });
+	// The worker fixture owns mock-agent authentication. Open through the
+	// canonical token/bootstrap helper rather than probing provider OAuth state,
+	// which is unrelated to these mock session stories.
+	await openApp(s.page);
 }
 
 test.describe("Session lifecycle stories", () => {

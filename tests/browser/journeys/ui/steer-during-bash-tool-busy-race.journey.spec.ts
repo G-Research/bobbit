@@ -69,9 +69,9 @@ async function clickAllSteerButtons(page: any): Promise<void> {
 }
 
 async function clickStopIfPresent(page: any): Promise<void> {
-	const stop = page.locator("button[title='Stop streaming']").first();
+	const stop = page.getByRole("button", { name: "Stop current turn" });
 	if (await stop.count() === 0) return;
-	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
+	await stop.click().catch(() => { /* already settled */ });
 }
 
 function userMessageIncludes(text: string): (m: WsMsg) => boolean {
@@ -121,7 +121,7 @@ test.describe("steer subsystem \u2014 queue + steer + abort with busy-race", () 
 
 			await sendMessage(page, "STAY_BUSY:30000 working");
 			await conn.waitFor(toolStartPredicate("Bash"), 15_000);
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await rec.capture("Agent busy \u2014 long bash running");
 
 			const textarea = page.locator("textarea").first();

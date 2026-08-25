@@ -13,107 +13,49 @@
  * surfaces the structure even when totals are $0.00.
  */
 import { test, expect } from "../../_helpers/gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader, teardownTeam, waitForCondition } from "../../_helpers/e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId } from "../../_helpers/e2e-setup.js";
 import { openApp, navigateToHash } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
-/**
- * Spawn a child via the ORCHESTRATION-class endpoint. spawn-child requires a
- * team-lead-matching X-Bobbit-Spawning-Session header (the cookie does NOT
- * bypass), so seed a team-lead on the parent and send the matching header.
- */
-function spawnChild(gateway: any, parentId: string, body: Record<string, unknown>): Promise<Response> {
-	return apiFetch(`/api/goals/${parentId}/spawn-child`, {
+/** Create a data-only child through the current operator-owned child API. */
+async function createChildGoal(
+	projectId: string,
+	parentGoalId: string,
+	title: string,
+	spec: string,
+	options: { subgoalsAllowed?: boolean; maxNestingDepth?: number } = {},
+): Promise<string> {
+	const response = await apiFetch("/api/goals", {
 		method: "POST",
-		headers: seedTeamLeadHeader(gateway, parentId),
-		body: JSON.stringify(body),
+		body: JSON.stringify({
+			title,
+			spec,
+			projectId,
+			parentGoalId,
+			team: false,
+			worktree: false,
+			autoStartTeam: false,
+			...options,
+		}),
 	});
-}
-
-/**
- * A data-only (`setupStatus === "ready"`, non-git) child spawned via
- * `/spawn-child` now AUTO-STARTS its team — this is intended product
- * behaviour (see goal task `d6e48b46`). For the cost-rollup fixtures below we
- * need the child goal to KEEP EXISTING (so the subtree rollup walks it) but we
- * must NOT let a live team-lead session perturb the very things these tests
- * assert on: per-goal cost, `unattributableLegacy.firstSeenAt`, the goal's
- * `createdAt` backdate, and goal `state`.
- *
- * So after each spawn we (event-driven, NO fixed sleeps):
- *   1. wait for the auto-started team-lead to come up (in-process team manager),
- *   2. tear it down via `POST /api/goals/:id/team/teardown` (authenticated like
- *      every other helper call),
- *   3. wait until the team is gone before returning — so the subsequent
- *      backdating / cost seeding / assertions can't race a live team-lead, and
- *   4. wipe any cost the team-lead's mock-agent turn billed against the child's
- *      goalId. The mock agent records ~$0.00075 on its first response, stamped
- *      to the child goal; teardown terminates the session but the cost entry
- *      survives (cost is addressed by goalId, by design). Removing those
- *      entries restores the child's per-goal cost to exactly zero, which is the
- *      premise of both the subtree-total and legacy-zero fixtures.
- *
- * Best-effort on step 1: if the team never comes up (e.g. capacity-blocked)
- * there is nothing to tear down and we return without failing.
- */
-async function quiesceAutoStartedChildTeam(gateway: any, childId: string, projectId: string | undefined): Promise<void> {
-	const tm = gateway?.teamManager;
-	if (!tm?.getTeamState) return;
-	try {
-		await waitForCondition(() => !!tm.getTeamState(childId), {
-			timeoutMs: 15_000,
-			intervalMs: 25,
-			message: `auto-started team for child ${childId}`,
-		});
-	} catch {
-		return; // team never came up — nothing to tear down
-	}
-	// Capture every session the auto-started team owns (team-lead + any members)
-	// so we can wipe their cost after teardown.
-	const teamSessionIds = (() => {
-		const st = tm.getTeamState(childId) as { teamLeadSessionId?: string; agents?: Array<{ sessionId?: string }> } | undefined;
-		const ids: string[] = [];
-		if (st?.teamLeadSessionId) ids.push(st.teamLeadSessionId);
-		for (const a of st?.agents ?? []) if (a?.sessionId) ids.push(a.sessionId);
-		return ids;
-	})();
-	await teardownTeam(childId);
-	await waitForCondition(() => !tm.getTeamState(childId), {
-		timeoutMs: 10_000,
-		intervalMs: 25,
-		message: `teardown of auto-started team for child ${childId}`,
-	});
-	// Wipe the cost the (now terminated) team sessions recorded against this
-	// child's goalId so its per-goal cost is exactly zero again. Use both the
-	// captured session ids (public removeSession) and a goalId sweep over the
-	// tracker's entries (belt-and-suspenders against a member spawned in the
-	// brief window before capture).
-	const ct = projectId ? gateway?.sessionManager?.getCostTracker?.(projectId) as {
-		removeSession?: (sid: string) => void;
-		costs?: Map<string, { goalId?: string }>;
-	} | undefined : undefined;
-	if (ct?.removeSession) {
-		for (const sid of teamSessionIds) ct.removeSession(sid);
-		const entries = ct.costs;
-		if (entries instanceof Map) {
-			for (const [sid, entry] of [...entries]) {
-				if (entry?.goalId === childId) ct.removeSession(sid);
-			}
-		}
-	}
+	expect(response.status, `create child ${title}: ${await response.clone().text().catch(() => "")}`).toBe(201);
+	return (await response.json()).id as string;
 }
 
 test.describe("Phase 5b — tree cost rollup", () => {
-	test("parent dashboard renders Tree cost row + per-child breakdown", async ({ page, gateway }) => {
-		const projectId = await defaultProjectId();
-		const parent = await createGoal({ title: "Tree-cost parent", projectId, team: false });
-		const r1 = await spawnChild(gateway, parent.id, { planId: "p1", title: "Tree-cost child 1", spec: "tree-cost UI test child 1: padded to meet spec validator minimum length." });
-		const c1 = (await r1.json()).id as string;
-		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost UI test child 2: padded to meet spec validator minimum length." });
-		const c2 = (await r2.json()).id as string;
+	test.beforeAll(async () => {
+		const response = await apiFetch("/api/preferences", {
+			method: "PUT",
+			body: JSON.stringify({ subgoalsEnabled: true }),
+		});
+		expect(response.status).toBe(200);
+	});
 
-		// Tear down the children's auto-started teams so no live team-lead
-		// session perturbs the rollup; the goals themselves remain.
-		await quiesceAutoStartedChildTeam(gateway, c1, projectId);
-		await quiesceAutoStartedChildTeam(gateway, c2, projectId);
+	test("parent dashboard renders Tree cost row + per-child breakdown", async ({ page }) => {
+		const projectId = await defaultProjectId();
+		if (!projectId) throw new Error("defaultProjectId() returned undefined");
+		const parent = await createGoal({ title: "Tree-cost parent", projectId, team: false, subgoalsAllowed: true });
+		const c1 = await createChildGoal(projectId, parent.id, "Tree-cost child 1", "tree-cost UI test child 1: padded to meet spec validator minimum length.");
+		const c2 = await createChildGoal(projectId, parent.id, "Tree-cost child 2", "tree-cost UI test child 2: padded to meet spec validator minimum length.");
 
 		// Sanity: REST endpoint returns the structured rollup.
 		const treeRes = await apiFetch(`/api/goals/${parent.id}/tree-cost`);
@@ -157,18 +99,12 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		void c1; void c2;
 	});
 
-	test("Tree cost row stays visible when all children are archived", async ({ page, gateway }) => {
+	test("Tree cost row stays visible when all children are archived", async ({ page }) => {
 		const projectId = await defaultProjectId();
-		const parent = await createGoal({ title: "Tree-cost archived-children parent", projectId, team: false });
-		const r1 = await spawnChild(gateway, parent.id, { planId: "p1", title: "Tree-cost child 1", spec: "tree-cost archived-children UI test child 1: padded to meet validator length." });
-		const c1 = (await r1.json()).id as string;
-		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost archived-children UI test child 2: padded to meet validator length." });
-		const c2 = (await r2.json()).id as string;
-
-		// Tear down the children's auto-started teams before archiving so no live
-		// team-lead session perturbs the rollup.
-		await quiesceAutoStartedChildTeam(gateway, c1, projectId);
-		await quiesceAutoStartedChildTeam(gateway, c2, projectId);
+		if (!projectId) throw new Error("defaultProjectId() returned undefined");
+		const parent = await createGoal({ title: "Tree-cost archived-children parent", projectId, team: false, subgoalsAllowed: true });
+		const c1 = await createChildGoal(projectId, parent.id, "Tree-cost child 1", "tree-cost archived-children UI test child 1: padded to meet validator length.");
+		const c2 = await createChildGoal(projectId, parent.id, "Tree-cost child 2", "tree-cost archived-children UI test child 2: padded to meet validator length.");
 
 		// Archive both children (they're leaves, so cascade=false is fine).
 		const d1 = await apiFetch(`/api/goals/${c1}?cascade=false`, { method: "DELETE" });
@@ -211,19 +147,28 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const projectId = await defaultProjectId();
 		if (!projectId) throw new Error("defaultProjectId() returned undefined");
 
-		// Build a 3-deep chain: parent → child → grandchild.
-		const parent = await createGoal({ title: "Tree-cost subtree parent", projectId, team: false });
-		const rChild = await spawnChild(gateway, parent.id, { planId: "sub-c", title: "Tree-cost subtree child", spec: "tree-cost subtree-rooted E2E child: padded to meet spec validator minimum length." });
-		expect(rChild.status).toBe(201);
-		const childId = (await rChild.json()).id as string;
-		const rGrand = await spawnChild(gateway, childId, { planId: "sub-g", title: "Tree-cost subtree grandchild", spec: "tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length." });
-		expect(rGrand.status).toBe(201);
-		const grandId = (await rGrand.json()).id as string;
-
-		// Tear down the auto-started teams on the child + grandchild so their
-		// team-lead sessions can't perturb the per-goal cost we seed below.
-		await quiesceAutoStartedChildTeam(gateway, childId, projectId);
-		await quiesceAutoStartedChildTeam(gateway, grandId, projectId);
+		// Build a data-only 3-deep chain: parent → child → grandchild. Keeping
+		// teams disabled makes cost accounting exact and removes setup races.
+		const parent = await createGoal({
+			title: "Tree-cost subtree parent",
+			projectId,
+			team: false,
+			subgoalsAllowed: true,
+			maxNestingDepth: 3,
+		});
+		const childId = await createChildGoal(
+			projectId,
+			parent.id,
+			"Tree-cost subtree child",
+			"tree-cost subtree-rooted E2E child: padded to meet spec validator minimum length.",
+			{ subgoalsAllowed: true, maxNestingDepth: 3 },
+		);
+		const grandId = await createChildGoal(
+			projectId,
+			childId,
+			"Tree-cost subtree grandchild",
+			"tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length.",
+		);
 
 		// ── REST sanity: endpoint must root the rollup at the requested goal ──
 		async function fetchTree(goalId: string): Promise<{ rootGoalId: string; totalCostUsd: number; breakdown: Array<{ goalId: string }> }> {
@@ -345,17 +290,20 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const projectId = await defaultProjectId();
 		if (!projectId) throw new Error("defaultProjectId() returned undefined");
 
-		// Parent + one child. The child will be backdated to predate the
-		// sidecar-era threshold and intentionally left with zero spend.
-		const parent = await createGoal({ title: "Tree-cost legacy-zero parent", projectId, team: false });
-		const rChild = await spawnChild(gateway, parent.id, { planId: "legacy-c", title: "Tree-cost legacy child", spec: "tree-cost legacy-zero E2E child: padded to meet spec validator minimum length requirement." });
-		expect(rChild.status).toBe(201);
-		const childId = (await rChild.json()).id as string;
-
-		// Tear down the child's auto-started team BEFORE backdating its createdAt
-		// and seeding the legacy bucket — a live team-lead session would otherwise
-		// re-stamp goal state / cost and break the legacy-zero classification.
-		await quiesceAutoStartedChildTeam(gateway, childId, projectId);
+		// Parent + one data-only child. The child will be backdated to predate
+		// the sidecar-era threshold and intentionally left with zero spend.
+		const parent = await createGoal({
+			title: "Tree-cost legacy-zero parent",
+			projectId,
+			team: false,
+			subgoalsAllowed: true,
+		});
+		const childId = await createChildGoal(
+			projectId,
+			parent.id,
+			"Tree-cost legacy child",
+			"tree-cost legacy-zero E2E child: padded to meet spec validator minimum length requirement.",
+		);
 
 		// Backdate the child's createdAt well before any plausible sidecar
 		// `firstSeenAt`. Goal-store `update()` deliberately excludes
