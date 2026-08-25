@@ -241,6 +241,7 @@ test.describe("Journey: Anthropic OAuth", () => {
 			const firstPopup = page.waitForEvent("popup");
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			const popup = await firstPopup;
+			await expect(popup).toHaveURL("https://oauth.example/authorize?flow=anthropic-flow-1");
 			await popup.close();
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 			await expect(page.getByText("OAuth cancellation did not complete. Retry cancellation before starting another sign-in.", { exact: true })).toBeVisible();
@@ -256,6 +257,7 @@ test.describe("Journey: Anthropic OAuth", () => {
 			const retryPopup = page.waitForEvent("popup");
 			await page.getByRole("button", { name: "Try again", exact: true }).click();
 			const replacementPopup = await retryPopup;
+			await expect(replacementPopup).toHaveURL("https://oauth.example/authorize?flow=anthropic-flow-2");
 			await replacementPopup.close();
 			expect(callsFor(oauth, "/api/oauth/start")).toHaveLength(2);
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();

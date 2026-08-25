@@ -915,9 +915,9 @@ describe("SessionManager current-session runtime promotion", () => {
 			repoWorktrees: undefined,
 		};
 		fx.store.getAll.mockReturnValue([fx.persisted, borrower]);
-		expect(fx.manager.adoptedWorkspaceHasLiveReference(fx.persisted)).toBe(true);
+		expect(await fx.manager.adoptedWorkspaceHasLiveReference(fx.persisted)).toBe(true);
 		fx.store.getAll.mockReturnValue([fx.persisted]);
-		expect(fx.manager.adoptedWorkspaceHasLiveReference(fx.persisted)).toBe(false);
+		expect(await fx.manager.adoptedWorkspaceHasLiveReference(fx.persisted)).toBe(false);
 
 		const ordinary = { ...fx.persisted, id: "ordinary-lead" };
 		fx.manager.resolveGoal = vi.fn(() => ({ ...archivedGoal, worktreeOwnerSessionId: undefined }));

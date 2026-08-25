@@ -103,10 +103,52 @@ function regularSessionRows(page: Page, sessionId: string): Locator {
 	return page.locator(`.sidebar-root [data-session-id="${sessionId}"]`);
 }
 
+async function waitForStaffProjection(page: Page, expected: StaffRecord): Promise<void> {
+	await page.waitForFunction(({ id, name, projectId, currentSessionId }) => {
+		const app = (window as any).__bobbitState;
+		return app?.staffList?.some((staff: any) => staff?.id === id
+			&& staff?.name === name
+			&& staff?.projectId === projectId
+			&& staff?.currentSessionId === currentSessionId);
+	}, expected, { timeout: 20_000 });
+}
+
+async function waitForForkRouteHydration(
+	page: Page,
+	expected: {
+		projectId: string;
+		source: StaffRecord;
+		destination: StaffRecord;
+		forkSessionId: string;
+	},
+): Promise<void> {
+	await page.waitForFunction(({ projectId, source, destination, forkSessionId }) => {
+		const app = (window as any).__bobbitState;
+		const staff = Array.isArray(app?.staffList) ? app.staffList : [];
+		const sessions = Array.isArray(app?.gatewaySessions) ? app.gatewaySessions : [];
+		const hasStaffTuple = (candidate: any, record: StaffRecord) => candidate?.id === record.id
+			&& candidate?.name === record.name
+			&& candidate?.projectId === projectId
+			&& candidate?.currentSessionId === record.currentSessionId;
+		return window.location.hash === `#/session/${forkSessionId}`
+			&& app?.selectedSessionId === forkSessionId
+			&& staff.some((candidate: any) => hasStaffTuple(candidate, destination))
+			&& staff.some((candidate: any) => hasStaffTuple(candidate, source))
+			&& sessions.some((session: any) => session?.id === forkSessionId
+				&& session?.projectId === projectId
+				&& session?.staffId === destination.id);
+	}, expected, { timeout: 20_000 });
+}
+
 async function ensureStaffSectionExpanded(page: Page, projectId: string, expectedRow: Locator): Promise<Locator> {
 	const header = page.locator(`[data-testid="sidebar-staff-header"][data-nav-id="staff-header:${projectId}"]`).first();
 	await expect(header).toBeVisible({ timeout: 20_000 });
-	if (!(await expectedRow.isVisible().catch(() => false))) await header.click();
+	const disclosure = header.locator(".sidebar-chevron-glyph").first();
+	await expect(disclosure).toHaveText(/^[▾▸]$/);
+	if ((await disclosure.textContent()) === "▸") {
+		await header.click();
+		await expect(disclosure).toHaveText("▾");
+	}
 	await expect(expectedRow).toBeVisible({ timeout: 20_000 });
 	return header.locator("..");
 }
@@ -156,6 +198,7 @@ test.describe("Journey: Independent staff fork", () => {
 			await openApp(page);
 			await navigateToHash(page, `#/session/${sourceSessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForStaffProjection(page, source);
 			let section = projectStaffSection(page, project.id);
 			const sourceRow = staffRow(section, sourceSessionId, sourceName);
 			section = await ensureStaffSectionExpanded(page, project.id, sourceRow);
@@ -242,10 +285,15 @@ test.describe("Journey: Independent staff fork", () => {
 			// Reload proves the ID-based Staff placement, transcript and independent
 			// destination inbox all survive client rehydration.
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 20_000 }).toBe(`#/session/${forkSessionId}`);
+			await waitForForkRouteHydration(page, {
+				projectId: project.id,
+				source,
+				destination: destination!,
+				forkSessionId,
+			});
 			section = projectStaffSection(page, project.id);
 			const destinationAfterReload = staffRow(section, forkSessionId, destination!.name);
-			await ensureStaffSectionExpanded(page, project.id, destinationAfterReload);
+			await expect(destinationAfterReload, "the active Staff route must reveal its durable row after hydration").toBeVisible({ timeout: 20_000 });
 			await expect(staffRow(section, sourceSessionId, sourceName)).toBeVisible();
 			await expect(regularSessionRows(page, forkSessionId)).toHaveCount(0);
 			await expect(page.locator("user-message").filter({ hasText: historyMarker })).toBeVisible({ timeout: 30_000 });

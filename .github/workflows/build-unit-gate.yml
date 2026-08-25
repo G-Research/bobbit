@@ -53,6 +53,105 @@ jobs:
 
       - name: Unit gate
         run: npm run test:unit
+        # Hosted Windows can heavily starve three concurrent Vitest workers; an
+        # empty value on other runners preserves the suite's normal fixed cap.
+        env:
+          VITEST_MAX_WORKERS: ${{ runner.os == 'Windows' && '2' || '' }}
+
+  browser:
+    name: Browser (${{ matrix.os }}, Node 22.19.0)
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Hosted Windows showed event-loop starvation at two concurrent Browser
+        # workers; keep the less constrained Linux and macOS runners at two.
+        include:
+          - os: ubuntu-latest
+            workers: 2
+          - os: windows-latest
+            workers: 1
+          - os: macos-latest
+            workers: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Chromium with dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+
+      - name: Browser gate
+        run: npm run test:browser
+        env:
+          BOBBIT_V2_PLAYWRIGHT_WORKERS: ${{ matrix.workers }}
+
+  e2e:
+    name: E2E (${{ matrix.os }}, Node 22.19.0)
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # npm ci caches locked content, but not every packument/artifact selected by
+      # a fresh lock-free consumer. Registry access stays in dependency preparation;
+      # the authoritative packed-consumer E2E remains strict offline.
+      - name: Warm packed-consumer npm cache
+        run: node scripts/testing-v2/prewarm-packed-consumer-cache.mjs
+
+      - name: Install Chromium with dependencies
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+
+      # Hosted Linux has Docker, so construct the version-matched image required by
+      # image-backed E2E cases. Other runners retain the non-Docker E2E coverage.
+      - name: Build sandbox image
+        if: runner.os == 'Linux'
+        run: |
+          PI_AGENT_VERSION=$(node -p "require('./package.json').dependencies['@earendil-works/pi-coding-agent']")
+          docker build --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" -t bobbit-agent docker/
+
+      - name: E2E gate
+        run: npm run test:e2e
 
   release-contract:
     name: Release contract

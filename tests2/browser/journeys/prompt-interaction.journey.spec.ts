@@ -3,10 +3,11 @@
  * Covers: journey-prompt-interaction, journey-bg-wait-steer
  * Consolidated from: prompt-tool-renderer-*, bg-wait-*, steer-*, etc.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../_helpers/journey-fixture.js";
+import { awaitableRm } from "../../../tests/e2e/test-utils/cleanup.js";
 import { sendMessage, createSessionViaUI } from "../../../tests/e2e/ui/ui-helpers.js";
 
 test.describe("Journey: Prompt Interaction", () => {
@@ -224,7 +225,8 @@ test.describe("Journey: Prompt Interaction", () => {
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
-			rmSync(cwd, { recursive: true, force: true });
+			const cleanup = await awaitableRm(cwd);
+			expect(cleanup.removed, `mixed prompt fixture cleanup failed after ${cleanup.attempts} attempts: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 		}
 	});
 

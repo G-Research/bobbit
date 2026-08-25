@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-manager-first-turn-finalizer.test.ts",
+      "reason": "Focused SessionManager lifecycle coverage proving the first-turn setup finalizer is synchronously registered in the serialized session-owned metadata lane and that both terminate and graceful shutdown join it before bridge and project-store teardown.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/worktree-cleanup-alias.test.ts",
+      "reason": "Focused real-Git coverage proving linked-worktree cleanup resolves lexical dot-segment aliases and Windows native short paths to Git's registered spelling, fences alias and ordinary root generations against ABA replacement while recovering same-generation residue without ordinary porcelain, verifies exact directory/admin absence before branch deletion, rejects swallowed removal failures, and preserves nonexistent injected-coordinate compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/transcript-history-navigation.journey.spec.ts",
       "reason": "Browser journey covering segmented transcript controls, chronological history, search and filter composition, scroll targeting and highlighting, unanswered resolution, reload durability, narrow layout, dismissal, and cleanup.",
       "execution": {
@@ -1375,7 +1393,7 @@
     },
     {
       "path": "tests2/browser/e2e/source-vite-inline-html-theme.spec.ts",
-      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path.",
+      "reason": "Real Vite development-runtime smoke against an isolated focused-write-agent gateway proving the actual chat WriteRenderer receives parse-time and live same-iframe theme, palette, font, surface, semantic, and chart state from the canonical source bridge without swipe forwarding, compiled dist/ui, or the standalone server-filesystem snapshot path; deterministic lifecycle pins require spawn-time Windows Job ownership before readiness, coalesced tree closes joined within existing bounds, all-attempted two-runtime stop/report/temp cleanup with exact aggregate failures, no synchronous process-tree utility, and registry cleanup without changing raw POSIX fixtures.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2157,6 +2175,15 @@
       }
     },
     {
+      "path": "tests2/core/gateway-readiness-classification.test.ts",
+      "reason": "Gateway startup readiness retries exact ECONNREFUSED transport failures through fetch causes and AggregateError address attempts while failing closed for resets, malformed responses, mixed codes, and unclassified wrappers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/gateway-url-publication.test.ts",
       "reason": "Injected filesystem coverage pinning single-owner gateway URL publication, the Windows existing-target fallback, unrelated-error preservation, temporary cleanup, and the CLI callback-only boundary.",
       "execution": {
@@ -2294,6 +2321,15 @@
     {
       "path": "tests2/core/ensure-dist-build-key.test.ts",
       "reason": "Pins the content-addressed dist build cache used by test:e2e:v2 and browser-global-setup: changed build inputs must change the key, and validation must fail closed on missing/stale manifests or missing dist artifacts so a stale build is never silently tested.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-packed-consumer-offline.test.ts",
+      "reason": "Pins the all-OS owned real-tarball cache prewarm after npm ci, including inherited npm configuration, bounded process-tree lifecycle and cleanup/failure behavior, while retaining the authoritative distinct clean-consumer strict-offline install, normal retries, generated lockfile, dependency-owned shrinkwrap and tree/binary security assertions.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3149,7 +3185,16 @@
     },
     {
       "path": "tests2/core/build-unit-gate-ci.test.ts",
-      "reason": "Structural CI qualification pin: validates YAML syntax, main-only push/PR triggers, native Ubuntu/Windows/macOS coverage, the Ubuntu Node 26 qualifier, the full standard unit invocation, and the temporary exclusion of affected testing from CI.",
+      "reason": "Structural CI qualification pin: validates YAML syntax, main-scoped build/unit and CodeQL triggers, PR-only Ubuntu/Windows/macOS Browser and E2E matrices on exact Node 22.19.0 with Chromium, unskippable standard gate commands, retry and failure policy, one Browser worker on Windows and two on Ubuntu/macOS, Linux-only version-matched sandbox image construction, and the temporary exclusion of affected testing from CI.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/e2e-docker-scheduling.test.ts",
+      "reason": "Core scheduling contract pinning daemon-plus-image Docker capability detection, image-backed-only sandbox skips with non-Docker coverage retained, serial Group D execution after Groups A-C without changing standard retries or worker controls, and the Browser spawn-failure journey's command-matched one-shot gateway injection with no container mutation or Docker access.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3167,7 +3212,7 @@
     },
     {
       "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
-      "reason": "Failing-first container ownership regression: a sentinel PID and PGID can be reused in a shared container, so cleanup must require the matching stable Linux start token before it can signal a negative process group.",
+      "reason": "Pins exact process-tree ownership and completion across platforms: failed POSIX ownership handshakes join already-terminal readiness/root handles, reject and initiate exactly one force cleanup, then separate the fail-closed verification verdict from one bounded async nonce-bound process snapshot that accepts only absent or zombie sentinel residue and ignores unrelated PGID reuse; container cleanup requires a stable Linux start token before signalling a reusable PID/PGID; overlapping Darwin waiters coalesce one fixed-cap post-final observation per child independently of caller order, preserve per-caller deadlines, promptly retry unavailable evidence without observer overlap, and publish only monotonic exact empty or zombie-only completion while mixed, malformed, empty, or unavailable evidence fails closed; Linux retains kill(0) and Windows retains Job-close completion.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3203,7 +3248,7 @@
     },
     {
       "path": "tests2/browser/journeys/bg-spawn-failure.journey.spec.ts",
-      "reason": "Real browser journey through WebSocket delivery, persisted REST rehydration, distinct spawn-failed diagnostic rendering, and user removal of a background process whose container runtime cannot start.",
+      "reason": "Docker-independent real browser journey using a command-matched one-shot asynchronous gateway spawn error while preserving REST acceptance, WebSocket terminal delivery, persisted GET rehydration, exact spawn-failed diagnostics, dismissal, and final list removal.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -8173,7 +8218,7 @@
       "method": "legacy-pending",
       "rationale": "v2-browser: legacy-pending - behavioral assertions (API error modal + stack trace + page.route interception) need a dedicated journey test; covered by legacy suite until switchover.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/proposal-controls.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8335,7 +8380,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8345,7 +8390,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-compaction.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8365,7 +8410,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8476,7 +8521,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8698,7 +8743,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-dynamic-panels.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/proposal-controls.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8744,7 +8789,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -8916,7 +8961,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -9092,7 +9137,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-preview-artifacts.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -9164,7 +9209,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-cost-tracking.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -9318,7 +9363,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-review-commenting.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/review-artifacts.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -10155,7 +10200,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -10165,7 +10210,7 @@
       "method": "legacy-pending",
       "rationale": "Non-geometry browser E2E â€” consolidate into journey-workflow-editor.",
       "replacement": [
-        "tests2/browser/journeys/misc.journey.spec.ts"
+        "tests2/browser/journeys/usage-workflows.journey.spec.ts"
       ],
       "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
     },
@@ -18368,7 +18413,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "node:test logic suite â€” codemod to Vitest (node env, pool=forks), including persisted Darwin gate success after exact post-final zombie-only tree completion while unverified, Linux, and Windows boundaries remain fail-closed.",
       "migrated": true,
       "v2Path": "tests2/core/verification-harness-timeout.test.ts",
       "execution": {
