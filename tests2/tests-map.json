@@ -3122,7 +3122,7 @@
     },
     {
       "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
-      "reason": "Pins exact process-tree ownership and completion across platforms: container cleanup requires a stable Linux start token before signalling a reusable PID/PGID; Darwin accepts only an exact post-final-signal empty or zombie-only group snapshot while mixed, malformed, empty, or unavailable evidence fails closed; Linux retains kill(0) and Windows retains Job-close completion.",
+      "reason": "Pins exact process-tree ownership and completion across platforms: container cleanup requires a stable Linux start token before signalling a reusable PID/PGID; overlapping Darwin waiters coalesce one deadline-bounded post-final observation per child, preserve per-caller deadlines and monotonic completion, and accept only an exact empty or zombie-only group while mixed, malformed, empty, or unavailable evidence fails closed; Linux retains kill(0) and Windows retains Job-close completion.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

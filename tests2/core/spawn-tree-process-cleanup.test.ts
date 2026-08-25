@@ -1164,6 +1164,134 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 	});
 
+	it("coalesces overlapping Darwin completion observations per child", async () => {
+		const root = fakeChild(123_464);
+		const signals: NodeJS.Signals[] = [];
+		let snapshotCalls = 0;
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: () => {
+				snapshotCalls++;
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				return new Promise<string>(resolve => {
+					resolveSnapshot = snapshot => {
+						activeSnapshots--;
+						resolve(snapshot);
+					};
+				});
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const first = tracked.waitForTreeExit(1_000);
+		const second = tracked.waitForTreeExit(1_000);
+		expect(snapshotCalls).toBe(1);
+		expect(activeSnapshots).toBe(1);
+		resolveSnapshot("123464 Z+\n1 S\n");
+
+		expect(await Promise.all([first, second])).toEqual([true, true]);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(signals).toEqual(["SIGKILL"]);
+		// Accepted completion is monotonic and never launches another snapshot.
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshotCalls).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it("does not let an older negative Darwin observation override concurrent completion", async () => {
+		const root = fakeChild(123_465);
+		let groupAlive = true;
+		let snapshotCalls = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => groupAlive,
+			posixProcessStateSnapshot: () => {
+				snapshotCalls++;
+				return new Promise<string>(resolve => { resolveSnapshot = resolve; });
+			},
+			signalProcessGroup: () => {},
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const olderWait = tracked.waitForTreeExit(1_000);
+		expect(snapshotCalls).toBe(1);
+		groupAlive = false;
+		// kill(0) emptiness is an independent authoritative completion path.
+		expect(await tracked.waitForTreeExit(1_000)).toBe(true);
+		resolveSnapshot("123465 S\n");
+		expect(await olderWait).toBe(true);
+		expect(snapshotCalls).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it("bounds each Darwin observation join to its caller deadline", async () => {
+		const root = fakeChild(123_466);
+		let snapshotCalls = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: () => {
+				snapshotCalls++;
+				return new Promise<string>(resolve => { resolveSnapshot = resolve; });
+			},
+			signalProcessGroup: () => {},
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const longerWait = tracked.waitForTreeExit(1_000);
+		expect(snapshotCalls).toBe(1);
+		// This zero-budget caller shares the active snapshot but does not inherit
+		// the first caller's larger deadline.
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(snapshotCalls).toBe(1);
+		resolveSnapshot("123466 Z\n");
+		expect(await longerWait).toBe(true);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshotCalls).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it("clears a settled unavailable Darwin observation so a later waiter can retry", async () => {
+		const root = fakeChild(123_467);
+		let snapshotCalls = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async () => {
+				snapshotCalls++;
+				if (snapshotCalls === 1) throw new Error("ps aborted");
+				return "123467 Z\n";
+			},
+			signalProcessGroup: () => {},
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshotCalls).toBe(2);
+		root.emit("close", 0, null);
+	});
+
 	it.each([
 		["no exact target rows", "999 S\n1000 R+\n"],
 		["only exact zombie rows with modifiers", "123461 Z\n999 S\n123461 Z+\n"],
