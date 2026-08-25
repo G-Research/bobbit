@@ -10,7 +10,7 @@ import { openApp, createSessionViaUI, sendMessage } from "../../../support/harne
 
 test.describe.configure({ mode: "serial" });
 
-const SOURCE_DIR = fileURLToPath(new URL("../../../market-packs", import.meta.url));
+const SOURCE_DIR = fileURLToPath(new URL("../../../../market-packs", import.meta.url));
 const PACK = "artifacts";
 const TOOL = "artifact_demo";
 const HTML_ARTIFACT = { id: "art-demo-1", trigger: "ARTIFACT_DEMO_TOOL please", filename: "hello.html", content: "<h1>Hello Artifact</h1>" };
