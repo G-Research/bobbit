@@ -935,7 +935,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(fixture.worktree, \"README.md\")", count: 1 },
 			{ expression: "path.join(fixture.worktree, \"replacement.txt\")", count: 3 },
 			{ expression: "markerPath", count: 2 },
-			{ expression: "sentinelPath", count: 1 },
+			{ expression: "sentinelPath", count: 2 },
 		]),
 	},
 	{
