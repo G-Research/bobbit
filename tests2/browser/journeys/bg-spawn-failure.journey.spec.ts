@@ -8,17 +8,8 @@ function pill(page: import("@playwright/test").Page, processId: string) {
 	return page.locator(`bg-process-pill[data-id="${processId}"]`);
 }
 
-/**
- * Route the production REST create endpoint through its container runtime path.
- * An unallocated container ID is deterministic whether Docker is absent
- * (child `error`) or installed (the docker wrapper exits non-zero), and the
- * manager maps both outcomes to the same persisted spawn-failed terminal state.
- */
-function forceMissingContainerRuntime(gateway: GatewayInfo, sessionId: string): void {
-	const session = gateway.sessionManager?.getSession(sessionId) as { containerId?: string; sandboxed?: boolean } | undefined;
-	expect(session, "test session must be live in the gateway fixture").toBeTruthy();
-	session!.containerId = `missing-bg-runtime-${process.pid}-${Date.now().toString(36)}`;
-	session!.sandboxed = true;
+function armSpawnFailure(gateway: GatewayInfo): () => void {
+	return gateway.armBgProcessSpawnError("echo never-runs");
 }
 
 test.describe("Journey: background spawn failure pill", () => {
@@ -26,6 +17,7 @@ test.describe("Journey: background spawn failure pill", () => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
 		let processId = "";
+		let disarmSpawnFailure = () => {};
 
 		try {
 			await waitForSessionStatus(sessionId, "idle");
@@ -40,7 +32,7 @@ test.describe("Journey: background spawn failure pill", () => {
 				undefined,
 				{ timeout: 15_000 },
 			);
-			forceMissingContainerRuntime(gateway, sessionId);
+			disarmSpawnFailure = armSpawnFailure(gateway);
 
 			const create = await apiFetch(`/api/sessions/${sessionId}/bg-processes`, {
 				method: "POST",
@@ -90,6 +82,7 @@ test.describe("Journey: background spawn failure pill", () => {
 			const body = await listed.json() as { processes: Array<{ id: string }> };
 			expect(body.processes.some((process) => process.id === processId)).toBe(false);
 		} finally {
+			disarmSpawnFailure();
 			await deleteSession(sessionId);
 		}
 	});

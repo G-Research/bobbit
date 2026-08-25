@@ -71,4 +71,23 @@ describe("E2E Docker capability and scheduling", () => {
 			source.lastIndexOf("test.skip(!isDockerSandboxAvailable()"),
 		);
 	});
+
+	it("keeps the Browser spawn-failure journey Docker-free and occurrence-scoped", () => {
+		const journey = readFileSync("tests2/browser/journeys/bg-spawn-failure.journey.spec.ts", "utf8");
+		const harness = readFileSync("tests/e2e/gateway-harness.ts", "utf8");
+		const manager = readFileSync("src/server/agent/bg-process-manager.ts", "utf8");
+		const server = readFileSync("src/server/server.ts", "utf8");
+
+		expect(journey).toContain('gateway.armBgProcessSpawnError("echo never-runs")');
+		expect(journey).not.toMatch(/containerId|sandboxed|docker|isDocker/i);
+		expect(harness).toContain("if (!armed || armed.command !== command)");
+		expect(harness).toContain("return defaultBgProcessSpawn(command, cwd, containerId, paths)");
+		expect(harness).toContain("bgProcessSpawnErrorArm = undefined");
+		expect(harness).toContain('createAsyncSpawnErrorChild("ENOENT")');
+		expect(harness).toContain("queueMicrotask(() =>");
+		expect(harness).toContain('child.emit("error", error)');
+		expect(manager).toContain("export const defaultBgProcessSpawn: SpawnFn");
+		expect(manager).toContain('child.on?.("error", (err: unknown) => this.reconcileSpawnFailure');
+		expect(server).toContain("config.bgProcessSpawnFn");
+	});
 });
