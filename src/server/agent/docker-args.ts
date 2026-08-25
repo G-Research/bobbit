@@ -190,6 +190,8 @@ export interface DockerRunConfig {
 	cpuLimit?: string;
 	/** Container PID limit (default: "512"). */
 	pidsLimit?: string;
+	/** Docker restart policy (default: the long-lived project-container policy). */
+	restartPolicy?: "unless-stopped" | "no";
 
 	// ── Sandbox config ───────────────────────────────────────────────────
 	sandboxMounts?: string[];
@@ -253,7 +255,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		baseHostArgs.push("--add-host=169.254.169.254:0.0.0.0");
 	}
 
-	const args: string[] = ["run", "-d", "--restart=unless-stopped", ...baseHostArgs];
+	const args: string[] = ["run", "-d", `--restart=${config.restartPolicy ?? "unless-stopped"}`, ...baseHostArgs];
 
 	// ── Labels ─────────────────────────────────────────────────────────
 	if (label && labelPrefix) {

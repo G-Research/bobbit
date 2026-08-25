@@ -7,7 +7,7 @@
  */
 
 import { ProjectSandbox } from "./project-sandbox.js";
-import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
+import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, SessionRuntimeExpectation } from "./project-sandbox.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
@@ -29,6 +29,10 @@ export function isSandboxExemptProject(projectId: string): boolean {
 export interface SandboxManagerStats {
 	projects: number;
 	containers: ContainerState[];
+}
+
+export interface ManagedSessionRuntimeExpectation extends SessionRuntimeExpectation {
+	projectId: string;
 }
 
 /**
@@ -63,6 +67,10 @@ export class SandboxManager {
 	private sandboxes = new Map<string, ProjectSandbox>();
 	private _recoveryListeners: Array<(projectId: string, containerId: string) => void> = [];
 	private _healthUnsubscribes = new Map<string, () => void>();
+	/** Exact server-side registry; never populated from client state. */
+	private _sessionRuntimes = new Map<string, { projectId: string; containerId: string }>();
+	/** Serializes registry mutation, Docker reconciliation, and attestation. */
+	private _sessionRuntimeLifecycleTail: Promise<void> = Promise.resolve();
 	/**
 	 * Dedupes concurrent calls to `ensureForProject(projectId)`: while one init
 	 * is in-flight, later callers await the same Promise. On failure the entry
@@ -76,6 +84,14 @@ export class SandboxManager {
 	constructor(opts: SandboxManagerOptions = {}) {
 		this._bootstrap = opts.bootstrap ?? null;
 		this.deps = { commandRunner: opts.commandRunner, clock: opts.clock, worktreeSetupRuntime: opts.worktreeSetupRuntime };
+	}
+
+	private async _withSessionRuntimeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+		const prior = this._sessionRuntimeLifecycleTail;
+		let release!: () => void;
+		this._sessionRuntimeLifecycleTail = new Promise<void>((resolve) => { release = resolve; });
+		await prior.catch(() => {});
+		try { return await operation(); } finally { release(); }
 	}
 
 	/** Set or replace the bootstrap function post-construction. */
@@ -199,6 +215,72 @@ export class SandboxManager {
 		return this.sandboxes.get(projectId);
 	}
 
+	/** Ensure and register a session-owned execution container. */
+	async ensureSessionRuntime(projectId: string, sessionId: string, expectedId?: string): Promise<string> {
+		return this._withSessionRuntimeLifecycle(async () => {
+			const existing = this._sessionRuntimes.get(sessionId);
+			if (existing && existing.projectId !== projectId) {
+				throw new Error(`[sandbox-manager] Session runtime ${sessionId} is already owned by another project`);
+			}
+			if (existing && expectedId && existing.containerId !== expectedId) {
+				throw new Error(`[sandbox-manager] Session runtime identity mismatch for ${sessionId}`);
+			}
+			await this.ensureForProject(projectId);
+			const sandbox = this.sandboxes.get(projectId);
+			if (!sandbox || sandbox.getStatus().status !== "ready") {
+				throw new Error(`[sandbox-manager] No ready project sandbox for session runtime ${sessionId}`);
+			}
+			const containerId = await sandbox.ensureSessionRuntime(sessionId, expectedId ?? existing?.containerId);
+			this._sessionRuntimes.set(sessionId, { projectId, containerId });
+			return containerId;
+		});
+	}
+
+	/** Release only the exact registered project/session runtime. */
+	async releaseSessionRuntime(projectId: string, sessionId: string): Promise<void> {
+		await this._withSessionRuntimeLifecycle(async () => {
+			const existing = this._sessionRuntimes.get(sessionId);
+			if (existing && existing.projectId !== projectId) {
+				throw new Error(`[sandbox-manager] Refusing to release foreign session runtime ${sessionId}`);
+			}
+			await this.sandboxes.get(projectId)?.removeSessionRuntime(sessionId);
+			if (!existing || existing.projectId === projectId) this._sessionRuntimes.delete(sessionId);
+		});
+	}
+
+	/** Rebuild the exact registry from server-owned persisted expectations. */
+	async reconcileSessionRuntimes(expectations: readonly ManagedSessionRuntimeExpectation[]): Promise<void> {
+		await this._withSessionRuntimeLifecycle(async () => {
+			const byProject = new Map<string, SessionRuntimeExpectation[]>();
+			const seenSessions = new Set<string>();
+			for (const item of expectations) {
+				if (seenSessions.has(item.sessionId)) throw new Error(`[sandbox-manager] Duplicate session runtime expectation for ${item.sessionId}`);
+				seenSessions.add(item.sessionId);
+				const project = byProject.get(item.projectId) ?? [];
+				project.push({ sessionId: item.sessionId, containerId: item.containerId });
+				byProject.set(item.projectId, project);
+			}
+			for (const projectId of byProject.keys()) await this.ensureForProject(projectId);
+
+			const next = new Map<string, { projectId: string; containerId: string }>();
+			for (const [projectId, sandbox] of this.sandboxes) {
+				const reconciled = await sandbox.reconcileSessionRuntimes(byProject.get(projectId) ?? []);
+				for (const [sessionId, containerId] of reconciled) next.set(sessionId, { projectId, containerId });
+			}
+			this._sessionRuntimes = next;
+		});
+	}
+
+	/** Exact registry + Docker Engine attestation for a live isolated runtime. */
+	async isSessionRuntimeIsolated(projectId: string, sessionId: string, containerId: string): Promise<boolean> {
+		return this._withSessionRuntimeLifecycle(async () => {
+			const registered = this._sessionRuntimes.get(sessionId);
+			if (!registered || registered.projectId !== projectId || registered.containerId !== containerId) return false;
+			const sandbox = this.sandboxes.get(projectId);
+			return sandbox ? await sandbox.isSessionRuntimeIsolated(sessionId, containerId) : false;
+		});
+	}
+
 	/** Check if a project has a sandbox registered (regardless of state). */
 	has(projectId: string): boolean {
 		return this.sandboxes.has(projectId);
@@ -272,6 +354,7 @@ export class SandboxManager {
 			}),
 		);
 		await Promise.allSettled(shutdownPromises);
+		this._sessionRuntimes.clear();
 		console.log(`[sandbox-manager] All ${this.sandboxes.size} sandbox(es) shut down`);
 	}
 
@@ -286,6 +369,9 @@ export class SandboxManager {
 
 		await sandbox.destroy();
 		this.sandboxes.delete(projectId);
+		for (const [sessionId, runtime] of this._sessionRuntimes) {
+			if (runtime.projectId === projectId) this._sessionRuntimes.delete(sessionId);
+		}
 		console.log(`[sandbox-manager] Destroyed sandbox for project ${projectId}`);
 	}
 
@@ -304,6 +390,7 @@ export class SandboxManager {
 		);
 		await Promise.allSettled(destroyPromises);
 		this.sandboxes.clear();
+		this._sessionRuntimes.clear();
 	}
 
 	/** Number of tracked sandboxes. */

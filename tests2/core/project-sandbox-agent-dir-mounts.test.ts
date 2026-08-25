@@ -5,8 +5,18 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getPackLocalDataMountStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
-import { packLocalDataContainerDirectory, type PackLocalDataMountPlan } from "../../src/server/agent/docker-args.js";
+import {
+	ProjectSandbox,
+	SESSION_RUNTIME_PROJECT_LABEL,
+	SESSION_RUNTIME_ROLE_LABEL,
+	SESSION_RUNTIME_ROLE_VERSION,
+	SESSION_RUNTIME_SESSION_LABEL,
+	getAgentDirMountStaleness,
+	getModelsJsonContentStaleness,
+	getPackLocalDataMountStaleness,
+	getStateDirMountStaleness,
+} from "../../src/server/agent/project-sandbox.js";
+import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../src/server/agent/docker-args.js";
 import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
@@ -377,5 +387,199 @@ describe("ProjectSandbox state mount staleness", () => {
 
 		assert.deepEqual(calls, [["remove", "old-container-id"], "create", "init"]);
 		assert.equal((sandbox as any).containerId, "new-container-id");
+	});
+});
+
+
+type RuntimeInspection = {
+	Id: string;
+	Image: string;
+	State: { Running: boolean };
+	Config: { Image: string; Labels: Record<string, string>; Env: string[] };
+	HostConfig: { PidMode: string; NetworkMode: string; ExtraHosts: string[]; Privileged: boolean; Memory: number; NanoCpus: number; PidsLimit: number; RestartPolicy: { Name: string } };
+	Mounts: Array<{ Type: string; Name: string; Destination: string; RW: boolean }>;
+};
+
+function makeRuntimeSandbox(): ProjectSandbox {
+	const sandbox = new ProjectSandbox({
+		projectId: "runtime-project",
+		projectDir: path.resolve("/project"),
+		repoUrl: "https://example.test/repo.git",
+		image: "runtime-image:latest",
+		sandboxNetwork: "bobbit-sandbox-net",
+		sandboxCredentials: { OPENAI_API_KEY: "secret" },
+	});
+	(sandbox as any).containerId = "control-container";
+	(sandbox as any)._status = "ready";
+	return sandbox;
+}
+
+function runtimeInspection(containerId: string, sessionId: string): RuntimeInspection {
+	const volumes = projectSandboxVolumeNames("runtime-project", "");
+	return {
+		Id: containerId,
+		Image: "sha256:runtime-image",
+		State: { Running: true },
+		Config: {
+			Image: "runtime-image:latest",
+			Labels: {
+				[SESSION_RUNTIME_ROLE_LABEL]: SESSION_RUNTIME_ROLE_VERSION,
+				[SESSION_RUNTIME_PROJECT_LABEL]: "runtime-project",
+				[SESSION_RUNTIME_SESSION_LABEL]: sessionId,
+			},
+			Env: ["NODE_OPTIONS=--no-warnings"],
+		},
+		HostConfig: {
+			PidMode: "",
+			NetworkMode: "bobbit-sandbox-net",
+			ExtraHosts: [
+				"host.docker.internal:host-gateway",
+				"metadata.google.internal:0.0.0.0",
+				"metadata.internal:0.0.0.0",
+				"169.254.169.254:0.0.0.0",
+			],
+			Privileged: false,
+			Memory: 4 * 1024 ** 3,
+			NanoCpus: 2 * 1_000_000_000,
+			PidsLimit: 256,
+			RestartPolicy: { Name: "no" },
+		},
+		Mounts: [
+			{ Type: "volume", Name: volumes.workspace, Destination: "/workspace", RW: true },
+			{ Type: "volume", Name: volumes.worktrees, Destination: "/workspace-wt", RW: true },
+		],
+	};
+}
+
+function stubRuntimeInspection(sandbox: ProjectSandbox, inspections: Map<string, RuntimeInspection>): void {
+	(sandbox as any)._inspectContainer = async (containerId: string) => inspections.get(containerId) ?? null;
+	(sandbox as any)._sessionRuntimeMountsAreCurrent = async () => true;
+	(sandbox as any).execDocker = async (args: string[]) => {
+		if (args[0] === "inspect" && args.at(-1) === "runtime-image:latest") return { stdout: "sha256:runtime-image\n", stderr: "" };
+		throw new Error(`unexpected docker call: ${args.join(" ")}`);
+	};
+}
+
+describe("ProjectSandbox session execution runtimes", () => {
+	it("attests only the exact live private runtime and denies dead, forged, control, and PID1-secret containers", async () => {
+		const sandbox = makeRuntimeSandbox();
+		const valid = runtimeInspection("runtime-valid", "session-a");
+		const dead = structuredClone(valid); dead.Id = "runtime-dead"; dead.State.Running = false;
+		const forged = structuredClone(valid); forged.Id = "runtime-forged"; forged.Config.Labels[SESSION_RUNTIME_SESSION_LABEL] = "session-b";
+		const sharedControl = structuredClone(valid); sharedControl.Id = "control-container"; sharedControl.Config.Labels["bobbit-project"] = "runtime-project";
+		const secret = structuredClone(valid); secret.Id = "runtime-secret"; secret.Config.Env.push("OPENAI_API_KEY=leaked");
+		const inspections = new Map([
+			[valid.Id, valid], [dead.Id, dead], [forged.Id, forged], [sharedControl.Id, sharedControl], [secret.Id, secret],
+		]);
+		stubRuntimeInspection(sandbox, inspections);
+
+		for (const id of inspections.keys()) (sandbox as any)._sessionRuntimes.set("session-a", id);
+		(sandbox as any)._sessionRuntimes.set("session-a", valid.Id);
+		assert.equal(await sandbox.isSessionRuntimeIsolated("session-a", valid.Id), true);
+		for (const candidate of [dead.Id, forged.Id, sharedControl.Id, secret.Id]) {
+			(sandbox as any)._sessionRuntimes.set("session-a", candidate);
+			assert.equal(await sandbox.isSessionRuntimeIsolated("session-a", candidate), false, candidate);
+		}
+		(sandbox as any)._sessionRuntimes.set("session-a", valid.Id);
+		assert.equal(await sandbox.isSessionRuntimeIsolated("session-a", "runtime-prefix"), false);
+	});
+
+	it("reuses one validated runtime idempotently and rejects duplicate, stale, and unexpected expected identities", async () => {
+		const sandbox = makeRuntimeSandbox();
+		let finds = 0;
+		(sandbox as any)._findSessionRuntimeContainerIds = async () => { finds++; return ["runtime-a"]; };
+		(sandbox as any)._isSessionRuntimeCandidateValid = async (_sessionId: string, containerId: string) => containerId === "runtime-a";
+		(sandbox as any)._createSessionRuntime = async () => { throw new Error("must reuse"); };
+
+		assert.equal(await sandbox.ensureSessionRuntime("session-a", "runtime-a"), "runtime-a");
+		assert.equal(await sandbox.ensureSessionRuntime("session-a", "runtime-a"), "runtime-a");
+		assert.equal(finds, 1, "the registered runtime should bypass rediscovery after attestation");
+		await assert.rejects(() => sandbox.ensureSessionRuntime("session-a", "runtime-other"), /identity mismatch/);
+
+		const duplicate = makeRuntimeSandbox();
+		(duplicate as any)._findSessionRuntimeContainerIds = async () => ["runtime-a", "runtime-b"];
+		await assert.rejects(() => duplicate.ensureSessionRuntime("session-a"), /Duplicate session runtimes/);
+
+		const stale = makeRuntimeSandbox();
+		const removed: string[] = [];
+		(stale as any)._findSessionRuntimeContainerIds = async () => ["runtime-dead"];
+		(stale as any)._isSessionRuntimeCandidateValid = async () => false;
+		(stale as any)._isOwnedSessionRuntime = async () => true;
+		(stale as any)._removeContainer = async (id: string) => { removed.push(id); };
+		(stale as any)._createSessionRuntime = async () => { throw new Error("must not replace an expected identity"); };
+		await assert.rejects(() => stale.ensureSessionRuntime("session-a", "runtime-dead"), /not live and isolated/);
+		assert.deepEqual(removed, ["runtime-dead"]);
+	});
+
+	it("serializes concurrent creation and removes unexpected runtimes during restart reconciliation", async () => {
+		const sandbox = makeRuntimeSandbox();
+		let creates = 0;
+		const removed: string[] = [];
+		(sandbox as any)._findSessionRuntimeContainerIds = async () => [];
+		(sandbox as any)._createSessionRuntime = async () => `runtime-${++creates}`;
+		(sandbox as any)._isSessionRuntimeCandidateValid = async () => true;
+		const [first, second] = await Promise.all([
+			sandbox.ensureSessionRuntime("session-a"),
+			sandbox.ensureSessionRuntime("session-a"),
+		]);
+		assert.equal(first, "runtime-1");
+		assert.equal(second, "runtime-1");
+		assert.equal(creates, 1);
+
+		(sandbox as any)._findProjectSessionRuntimeContainerIds = async () => ["runtime-orphan"];
+		(sandbox as any)._sessionRuntimeOwner = async (id: string) => id === "runtime-orphan" ? "session-orphan" : null;
+		(sandbox as any)._removeContainer = async (id: string) => { removed.push(id); };
+		(sandbox as any)._sessionRuntimes.clear();
+		(sandbox as any)._findSessionRuntimeContainerIds = async () => ["runtime-restored"];
+		(sandbox as any)._isSessionRuntimeCandidateValid = async () => true;
+		const restored = await sandbox.reconcileSessionRuntimes([{ sessionId: "session-a", containerId: "runtime-restored" }]);
+		assert.deepEqual(removed, ["runtime-orphan"]);
+		assert.equal(restored.get("session-a"), "runtime-restored");
+	});
+
+	it("removes all session runtimes before the project control container and volumes", async () => {
+		const sandbox = makeRuntimeSandbox();
+		const calls: string[] = [];
+		(sandbox as any)._findProjectSessionRuntimeContainerIds = async () => ["runtime-a"];
+		(sandbox as any)._sessionRuntimeOwner = async (id: string) => id === "runtime-a" ? "session-a" : null;
+		(sandbox as any)._removeContainer = async (id: string) => { calls.push(`remove:${id}`); };
+		(sandbox as any).execDocker = async (args: string[]) => { calls.push(args.slice(0, 3).join(":")); return { stdout: "", stderr: "" }; };
+
+		await sandbox.destroy();
+
+		assert.equal(calls[0], "remove:runtime-a");
+		assert.equal(calls[1], "rm:-f:control-container");
+		assert.match(calls[2], /^volume:rm:-f$/);
+	});
+});
+
+describe("SandboxManager session runtime registry", () => {
+	it("binds ensure, attestation, reconciliation, release, and shutdown to exact project/session ownership", async () => {
+		const manager = new SandboxManager();
+		const calls: string[] = [];
+		const sandbox = {
+			getStatus: () => ({ projectId: "runtime-project", status: "ready", containerId: "control" }),
+			ensureSessionRuntime: async (sessionId: string, expectedId?: string) => { calls.push(`ensure:${sessionId}:${expectedId ?? ""}`); return expectedId ?? "runtime-a"; },
+			isSessionRuntimeIsolated: async (sessionId: string, id: string) => sessionId === "session-a" && id === "runtime-a",
+			removeSessionRuntime: async (sessionId: string) => { calls.push(`remove:${sessionId}`); },
+			reconcileSessionRuntimes: async (items: Array<{ sessionId: string; containerId?: string }>) => new Map(items.map((item) => [item.sessionId, item.containerId ?? "created"])),
+			stopHealthMonitor() {},
+			shutdown: async () => { calls.push("shutdown"); },
+		};
+		(manager as any).sandboxes.set("runtime-project", sandbox);
+
+		assert.equal(await manager.ensureSessionRuntime("runtime-project", "session-a"), "runtime-a");
+		assert.equal(await manager.isSessionRuntimeIsolated("runtime-project", "session-a", "runtime-a"), true);
+		assert.equal(await manager.isSessionRuntimeIsolated("runtime-project", "session-a", "runtime-forged"), false);
+		await assert.rejects(() => manager.releaseSessionRuntime("other-project", "session-a"), /foreign/);
+		await manager.reconcileSessionRuntimes([{ projectId: "runtime-project", sessionId: "session-a", containerId: "runtime-a" }]);
+		assert.equal(await manager.isSessionRuntimeIsolated("runtime-project", "session-a", "runtime-a"), true);
+		await manager.releaseSessionRuntime("runtime-project", "session-a");
+		assert.equal(await manager.isSessionRuntimeIsolated("runtime-project", "session-a", "runtime-a"), false);
+
+		await manager.ensureSessionRuntime("runtime-project", "session-a");
+		await manager.shutdownAll();
+		assert.equal(await manager.isSessionRuntimeIsolated("runtime-project", "session-a", "runtime-a"), false);
+		assert.ok(calls.includes("shutdown"));
 	});
 });

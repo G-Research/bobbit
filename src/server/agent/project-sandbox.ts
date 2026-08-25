@@ -48,12 +48,47 @@ const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL:
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
 
+export const SESSION_RUNTIME_ROLE_LABEL = "bobbit-session-runtime";
+export const SESSION_RUNTIME_ROLE_VERSION = "1";
+export const SESSION_RUNTIME_PROJECT_LABEL = "bobbit-runtime-project";
+export const SESSION_RUNTIME_SESSION_LABEL = "bobbit-runtime-session";
+export const SESSION_RUNTIME_MEMORY_LIMIT = "4g";
+export const SESSION_RUNTIME_CPU_LIMIT = "2";
+export const SESSION_RUNTIME_PIDS_LIMIT = "256";
+
+const SAFE_RUNTIME_LABEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SESSION_RUNTIME_SECRET_ENV_KEYS = new Set([
+	"BOBBIT_TOKEN",
+	"BOBBIT_SESSION_SECRET",
+	"BOBBIT_PROJECT_TOKEN",
+	"GITHUB_TOKEN",
+]);
+
 interface DockerMountInfo {
 	Type?: string;
+	Name?: string;
 	Source?: string;
 	Destination?: string;
 	RW?: boolean;
 	Mode?: string;
+}
+
+interface DockerContainerInspection {
+	Id?: string;
+	Image?: string;
+	State?: { Running?: boolean };
+	Config?: { Image?: string; Labels?: Record<string, string> | null; Env?: string[] | null };
+	HostConfig?: {
+		PidMode?: string;
+		NetworkMode?: string;
+		ExtraHosts?: string[] | null;
+		Privileged?: boolean;
+		Memory?: number;
+		NanoCpus?: number;
+		PidsLimit?: number;
+		RestartPolicy?: { Name?: string };
+	};
+	Mounts?: DockerMountInfo[];
 }
 
 type SandboxVolumeOwnershipEvidence = {
@@ -394,6 +429,40 @@ export type SandboxHealthEvent =
 	| { type: "container-died"; projectId: string; containerId: string }
 	| { type: "container-recovered"; projectId: string; containerId: string };
 
+export interface SessionRuntimeExpectation {
+	sessionId: string;
+	containerId?: string;
+}
+
+function validatedSessionRuntimeLabel(kind: "project" | "session", value: string): string {
+	if (typeof value !== "string" || !SAFE_RUNTIME_LABEL_VALUE.test(value)) {
+		throw new Error(`[project-sandbox] Invalid ${kind} identity for session runtime`);
+	}
+	return value;
+}
+
+function runtimeLabels(projectId: string, sessionId: string, e2eRunId?: string): Record<string, string> {
+	const labels: Record<string, string> = {
+		[SESSION_RUNTIME_ROLE_LABEL]: SESSION_RUNTIME_ROLE_VERSION,
+		[SESSION_RUNTIME_PROJECT_LABEL]: validatedSessionRuntimeLabel("project", projectId),
+		[SESSION_RUNTIME_SESSION_LABEL]: validatedSessionRuntimeLabel("session", sessionId),
+	};
+	if (e2eRunId) labels["bobbit-e2e-run"] = e2eRunId;
+	return labels;
+}
+
+function exactRuntimeLabelsMatch(
+	labels: Record<string, string> | null | undefined,
+	projectId: string,
+	sessionId: string,
+	e2eRunId?: string,
+): boolean {
+	if (!labels || labels["bobbit-project"] !== undefined) return false;
+	const expected = runtimeLabels(projectId, sessionId, e2eRunId);
+	return Object.entries(expected).every(([key, value]) => labels[key] === value)
+		&& (e2eRunId ? labels["bobbit-e2e-run"] === e2eRunId : labels["bobbit-e2e-run"] === undefined);
+}
+
 // ── ProjectSandbox ─────────────────────────────────────────────────────────
 
 export class ProjectSandbox {
@@ -412,6 +481,10 @@ export class ProjectSandbox {
 	private _modelMountGeneration = 0;
 	/** Latest publication generation known to be mounted by the live container. */
 	private _mountedModelGeneration = 0;
+	/** Exact live execution-container identity by owning session. */
+	private readonly _sessionRuntimes = new Map<string, string>();
+	/** Serializes ensure/remove/reconcile for each session identity. */
+	private readonly _sessionRuntimeTails = new Map<string, Promise<void>>();
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -486,6 +559,128 @@ export class ProjectSandbox {
 			status: this._status,
 			projectId: this.options.projectId,
 		};
+	}
+
+	/**
+	 * Ensure one isolated execution container for a session. The project
+	 * container remains the control/worktree owner; this runtime only shares its
+	 * named data volumes and safe immutable/bounded mounts.
+	 */
+	async ensureSessionRuntime(sessionId: string, expectedId?: string): Promise<string> {
+		validatedSessionRuntimeLabel("project", this.options.projectId);
+		validatedSessionRuntimeLabel("session", sessionId);
+		if (expectedId !== undefined && (typeof expectedId !== "string" || !expectedId)) {
+			throw new Error("[project-sandbox] Expected session runtime identity must be non-empty");
+		}
+		await this.getContainerId();
+		return this._withSessionRuntimeLifecycle(sessionId, async () => {
+			const registered = this._sessionRuntimes.get(sessionId);
+			if (registered) {
+				if (expectedId && registered !== expectedId) {
+					throw new Error(`[project-sandbox] Session runtime identity mismatch for ${sessionId}`);
+				}
+				if (await this._isSessionRuntimeCandidateValid(sessionId, registered)) return registered;
+				this._sessionRuntimes.delete(sessionId);
+				if (await this._isOwnedSessionRuntime(sessionId, registered)) await this._removeContainer(registered);
+				if (expectedId) throw new Error(`[project-sandbox] Expected session runtime is not live and isolated for ${sessionId}`);
+			}
+
+			const discovered = await this._findSessionRuntimeContainerIds(sessionId);
+			if (discovered.length > 1) {
+				throw new Error(`[project-sandbox] Duplicate session runtimes found for ${sessionId}`);
+			}
+			const candidate = discovered[0];
+			if (candidate) {
+				if (expectedId && candidate !== expectedId) {
+					throw new Error(`[project-sandbox] Unexpected session runtime identity for ${sessionId}`);
+				}
+				if (await this._isSessionRuntimeCandidateValid(sessionId, candidate)) {
+					this._sessionRuntimes.set(sessionId, candidate);
+					return candidate;
+				}
+				if (!(await this._isOwnedSessionRuntime(sessionId, candidate))) {
+					throw new Error(`[project-sandbox] Refusing unowned or control-container runtime candidate for ${sessionId}`);
+				}
+				await this._removeContainer(candidate);
+				if (expectedId) throw new Error(`[project-sandbox] Expected session runtime is not live and isolated for ${sessionId}`);
+			} else if (expectedId) {
+				throw new Error(`[project-sandbox] Expected session runtime was not found for ${sessionId}`);
+			}
+
+			const created = await this._createSessionRuntime(sessionId);
+			if (!(await this._isSessionRuntimeCandidateValid(sessionId, created))) {
+				await this._removeContainer(created);
+				throw new Error(`[project-sandbox] Created session runtime failed isolation attestation for ${sessionId}`);
+			}
+			this._sessionRuntimes.set(sessionId, created);
+			return created;
+		});
+	}
+
+	/** Remove only the runtime proven to belong to this project/session. */
+	async removeSessionRuntime(sessionId: string): Promise<void> {
+		validatedSessionRuntimeLabel("session", sessionId);
+		await this._withSessionRuntimeLifecycle(sessionId, async () => {
+			const candidates = new Set<string>();
+			for (const containerId of await this._findSessionRuntimeContainerIds(sessionId)) {
+				if (await this._isOwnedSessionRuntime(sessionId, containerId)) candidates.add(containerId);
+			}
+			const registered = this._sessionRuntimes.get(sessionId);
+			if (registered && await this._isOwnedSessionRuntime(sessionId, registered)) candidates.add(registered);
+			this._sessionRuntimes.delete(sessionId);
+			for (const containerId of candidates) await this._removeContainer(containerId);
+		});
+	}
+
+	/** Exact live attestation; never trusts a client/container-ID prefix. */
+	async isSessionRuntimeIsolated(sessionId: string, containerId: string): Promise<boolean> {
+		try {
+			validatedSessionRuntimeLabel("session", sessionId);
+			if (!containerId || this._sessionRuntimes.get(sessionId) !== containerId) return false;
+			return await this._isSessionRuntimeCandidateValid(sessionId, containerId);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Restart reconciliation. Expected exact identities are adopted only after
+	 * live attestation; unexpected Bobbit-owned runtimes are removed.
+	 */
+	async reconcileSessionRuntimes(expectations: readonly SessionRuntimeExpectation[]): Promise<Map<string, string>> {
+		const expected = new Map<string, string | undefined>();
+		for (const item of expectations) {
+			validatedSessionRuntimeLabel("session", item.sessionId);
+			if (expected.has(item.sessionId)) throw new Error(`[project-sandbox] Duplicate runtime expectation for ${item.sessionId}`);
+			expected.set(item.sessionId, item.containerId);
+		}
+
+		const discovered = await this._findProjectSessionRuntimeContainerIds();
+		for (const containerId of discovered) {
+			const owner = await this._sessionRuntimeOwner(containerId);
+			if (owner && !expected.has(owner)) await this._removeContainer(containerId);
+		}
+		this._sessionRuntimes.clear();
+
+		const reconciled = new Map<string, string>();
+		for (const [sessionId, expectedId] of expected) {
+			const containerId = await this.ensureSessionRuntime(sessionId, expectedId);
+			reconciled.set(sessionId, containerId);
+		}
+		return reconciled;
+	}
+
+	/** Remove every Bobbit-owned session runtime before control-container cleanup. */
+	async removeAllSessionRuntimes(): Promise<void> {
+		const containerIds = new Set<string>();
+		for (const containerId of await this._findProjectSessionRuntimeContainerIds()) {
+			if (await this._sessionRuntimeOwner(containerId)) containerIds.add(containerId);
+		}
+		for (const [sessionId, containerId] of this._sessionRuntimes) {
+			if (await this._isOwnedSessionRuntime(sessionId, containerId)) containerIds.add(containerId);
+		}
+		this._sessionRuntimes.clear();
+		for (const containerId of containerIds) await this._removeContainer(containerId);
 	}
 
 	/** Create a git worktree inside the container. Returns the container-internal path. */
@@ -1051,6 +1246,7 @@ export class ProjectSandbox {
 	/** Graceful shutdown: stop the container (don't remove — named volume persists). */
 	async shutdown(): Promise<void> {
 		this.stopHealthMonitor();
+		await this.removeAllSessionRuntimes();
 		if (!this.containerId) return;
 		try {
 			// Audit worktree state before stopping — helps diagnose lost worktrees on restart
@@ -1071,6 +1267,7 @@ export class ProjectSandbox {
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
+		await this.removeAllSessionRuntimes();
 		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
 		// Production retains its historic workspace-only destroy behavior. Legacy
 		// E2E owns both run-namespaced volumes and must remove both even when a
@@ -1643,6 +1840,193 @@ export class ProjectSandbox {
 				`[project-sandbox] Could not inspect pack local-data mounts for container ${containerId.substring(0, 12)}: ${err?.message || err}`,
 				{ cause: err },
 			);
+		}
+	}
+
+	private async _withSessionRuntimeLifecycle<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+		const prior = this._sessionRuntimeTails.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const turn = new Promise<void>((resolve) => { release = resolve; });
+		const tail = prior.catch(() => {}).then(() => turn);
+		this._sessionRuntimeTails.set(sessionId, tail);
+		await prior.catch(() => {});
+		try {
+			return await operation();
+		} finally {
+			release();
+			if (this._sessionRuntimeTails.get(sessionId) === tail) this._sessionRuntimeTails.delete(sessionId);
+		}
+	}
+
+	private async _createSessionRuntime(sessionId: string): Promise<string> {
+		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs } = this.options;
+		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
+		const packLocalDataMounts = this.options.resolvePackLocalDataMounts
+			? await this._resolvePackLocalDataMounts()
+			: undefined;
+		const dockerArgs = buildDockerRunArgs({
+			image,
+			workspaceDir: "",
+			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
+			additionalLabels: runtimeLabels(projectId, sessionId, this.e2eRunId),
+			e2eRunId: this.e2eRunId ?? "",
+			projectId,
+			stateDir,
+			sessionId,
+			memoryLimit: SESSION_RUNTIME_MEMORY_LIMIT,
+			cpuLimit: SESSION_RUNTIME_CPU_LIMIT,
+			pidsLimit: SESSION_RUNTIME_PIDS_LIMIT,
+			restartPolicy: "no",
+			sandboxMounts,
+			// Secrets belong on the later docker-exec agent process, never PID 1.
+			sandboxAgentAuthAllowed,
+			sandboxAgentAuthGoogleAllowed,
+			sandboxAgentAuthPrefs,
+			sandboxNetwork,
+			toolManager: this.options.toolManager,
+			packLocalDataMounts,
+		}, this.commandRunner);
+		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: DOCKER_ENV });
+		const containerId = stdout.trim();
+		if (!containerId) throw new Error(`[project-sandbox] docker run returned empty session runtime ID for ${sessionId}`);
+		console.log(`[project-sandbox] Created session runtime ${containerId.substring(0, 12)} for ${sessionId}`);
+		return containerId;
+	}
+
+	private async _inspectContainer(containerId: string): Promise<DockerContainerInspection | null> {
+		try {
+			const { stdout } = await this.execDocker([
+				"inspect", "--format", "{{json .}}", containerId,
+			], { timeout: 5_000, env: DOCKER_ENV });
+			const value = JSON.parse(stdout.trim()) as DockerContainerInspection;
+			return value && typeof value === "object" ? value : null;
+		} catch {
+			return null;
+		}
+	}
+
+	private async _sessionRuntimeOwner(containerId: string): Promise<string | null> {
+		const inspection = await this._inspectContainer(containerId);
+		if (!inspection || inspection.Id !== containerId) return null;
+		const labels = inspection.Config?.Labels;
+		if (!labels || labels["bobbit-project"] !== undefined) return null;
+		if (labels[SESSION_RUNTIME_ROLE_LABEL] !== SESSION_RUNTIME_ROLE_VERSION) return null;
+		if (labels[SESSION_RUNTIME_PROJECT_LABEL] !== this.options.projectId) return null;
+		if (this.e2eRunId && labels["bobbit-e2e-run"] !== this.e2eRunId) return null;
+		const sessionId = labels[SESSION_RUNTIME_SESSION_LABEL];
+		try { return validatedSessionRuntimeLabel("session", sessionId); } catch { return null; }
+	}
+
+	private async _isOwnedSessionRuntime(sessionId: string, containerId: string): Promise<boolean> {
+		return await this._sessionRuntimeOwner(containerId) === sessionId;
+	}
+
+	private _hasRequiredSessionRuntimeVolumes(mounts: DockerMountInfo[] | undefined): boolean {
+		if (!Array.isArray(mounts)) return false;
+		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId ?? "");
+		return Object.entries({ "/workspace": volumes.workspace, "/workspace-wt": volumes.worktrees }).every(([destination, name]) => {
+			const matches = mounts.filter((mount) => normalizeContainerMountDestination(mount.Destination) === destination);
+			return matches.length === 1 && matches[0].Type === "volume" && matches[0].Name === name && matches[0].RW !== false;
+		});
+	}
+
+	private _sessionRuntimeHasPid1Secrets(env: string[] | null | undefined): boolean {
+		const forbidden = new Set([
+			...SESSION_RUNTIME_SECRET_ENV_KEYS,
+			...Object.keys(this.options.sandboxCredentials ?? {}),
+		]);
+		return (env ?? []).some((entry) => {
+			const key = entry.split("=", 1)[0] ?? "";
+			return forbidden.has(key) || /^BOBBIT_.*(?:TOKEN|SECRET)$/i.test(key);
+		});
+	}
+
+	private async _sessionRuntimeMountsAreCurrent(inspection: DockerContainerInspection, containerId: string): Promise<boolean> {
+		const activeAgentDir = globalAgentDir();
+		const modelsJson = path.join(activeAgentDir, "models.json");
+		let modelsJsonExists = false;
+		try { modelsJsonExists = fs.statSync(modelsJson).isFile(); } catch { /* absent is valid */ }
+		if (getAgentDirMountStaleness(inspection.Mounts, {
+			sessionsDir: activeAgentSessionsDir(),
+			modelsJson,
+			modelsJsonExists,
+		}).stale) return false;
+		if (getStateDirMountStaleness(inspection.Mounts, {
+			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
+		}).stale) return false;
+		if (this.options.resolvePackLocalDataMounts) {
+			const expected = await this._resolvePackLocalDataMounts();
+			if (getPackLocalDataMountStaleness(inspection.Mounts, expected).stale) return false;
+		}
+		if (modelsJsonExists) {
+			const hostContent = fs.readFileSync(modelsJson, "utf-8");
+			const containerContent = await this._dockerExec(containerId, ["cat", CONTAINER_AGENT_MODELS_JSON], { timeout: 5_000 });
+			if (getModelsJsonContentStaleness(hostContent, containerContent).stale) return false;
+		}
+		return true;
+	}
+
+	private async _isSessionRuntimeCandidateValid(sessionId: string, containerId: string): Promise<boolean> {
+		try {
+			if (!containerId || containerId === this.containerId) return false;
+			const inspection = await this._inspectContainer(containerId);
+			if (!inspection || inspection.Id !== containerId || inspection.State?.Running !== true) return false;
+			if (!exactRuntimeLabelsMatch(inspection.Config?.Labels, this.options.projectId, sessionId, this.e2eRunId)) return false;
+			if (inspection.Config?.Image !== this.options.image) return false;
+			if (inspection.HostConfig?.PidMode || inspection.HostConfig?.Privileged !== false) return false;
+			if (inspection.HostConfig?.RestartPolicy?.Name !== "no") return false;
+			if (inspection.HostConfig?.Memory !== 4 * 1024 ** 3) return false;
+			if (inspection.HostConfig?.NanoCpus !== 2 * 1_000_000_000) return false;
+			if (inspection.HostConfig?.PidsLimit !== Number(SESSION_RUNTIME_PIDS_LIMIT)) return false;
+			if (this.options.sandboxNetwork) {
+				if (inspection.HostConfig?.NetworkMode !== this.options.sandboxNetwork) return false;
+				const extraHosts = new Set(inspection.HostConfig?.ExtraHosts ?? []);
+				for (const entry of [
+					"metadata.google.internal:0.0.0.0",
+					"metadata.internal:0.0.0.0",
+					"169.254.169.254:0.0.0.0",
+				]) if (!extraHosts.has(entry)) return false;
+			}
+			if (this._sessionRuntimeHasPid1Secrets(inspection.Config?.Env)) return false;
+			if (!this._hasRequiredSessionRuntimeVolumes(inspection.Mounts)) return false;
+
+			const { stdout: currentImageId } = await this.execDocker([
+				"inspect", "--format", "{{.Id}}", this.options.image,
+			], { timeout: 5_000, env: DOCKER_ENV });
+			if (!inspection.Image || inspection.Image !== currentImageId.trim()) return false;
+			if (!(await this._sessionRuntimeMountsAreCurrent(inspection, containerId))) return false;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async _findSessionRuntimeContainerIds(sessionId: string): Promise<string[]> {
+		const labels = runtimeLabels(this.options.projectId, sessionId, this.e2eRunId);
+		const args = ["ps", "-a", "--no-trunc"];
+		for (const [key, value] of Object.entries(labels)) args.push("--filter", `label=${key}=${value}`);
+		args.push("--format", "{{.ID}}");
+		try {
+			const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
+			return stdout.trim().split("\n").filter(Boolean);
+		} catch {
+			return [];
+		}
+	}
+
+	private async _findProjectSessionRuntimeContainerIds(): Promise<string[]> {
+		const args = [
+			"ps", "-a", "--no-trunc",
+			"--filter", `label=${SESSION_RUNTIME_ROLE_LABEL}=${SESSION_RUNTIME_ROLE_VERSION}`,
+			"--filter", `label=${SESSION_RUNTIME_PROJECT_LABEL}=${validatedSessionRuntimeLabel("project", this.options.projectId)}`,
+		];
+		if (this.e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${this.e2eRunId}`);
+		args.push("--format", "{{.ID}}");
+		try {
+			const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
+			return stdout.trim().split("\n").filter(Boolean);
+		} catch {
+			return [];
 		}
 	}
 
