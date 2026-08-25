@@ -21,6 +21,42 @@
   },
   "v2Native": [
     {
+      "path": "tests2/browser/journeys/transcript-history-navigation.journey.spec.ts",
+      "reason": "Browser journey covering segmented transcript controls, chronological history, search and filter composition, scroll targeting and highlighting, unanswered resolution, reload durability, narrow layout, dismissal, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/transcript-history.test.ts",
+      "reason": "Pure unit coverage for chronological transcript projection, trusted author and type classification, stable targets, composed filtering and search, ask lifecycle semantics, unanswered detection, and target selection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/transcript-history-popover.test.ts",
+      "reason": "DOM coverage for accessible transcript history rendering, open-to-newest behavior, composed filters and search, live tail preservation, empty state, selection, outside and Escape dismissal, and focus restoration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/transcript-navigation-integration.test.ts",
+      "reason": "DOM integration coverage for committed-message navigation updates during streaming, immediate answer-envelope resolution, unanswered control removal, targeted deferred resolution, spring targeting, highlight, and follow-tail escape.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/context-capacity.journey.spec.ts",
       "reason": "Browser journey covering capacity-scaled context meter zones, dual and single-limit popover fallbacks, themed track visibility, post-compaction stale state, responsive geometry, reload, and cleanup.",
       "execution": {
