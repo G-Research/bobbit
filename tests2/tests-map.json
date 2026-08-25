@@ -3104,7 +3104,7 @@
     },
     {
       "path": "tests2/core/e2e-docker-scheduling.test.ts",
-      "reason": "Core scheduling contract pinning daemon-plus-image Docker capability detection, image-backed-only sandbox skips with non-Docker coverage retained, and serial Group D execution after Groups A-C without changing standard retries or worker controls.",
+      "reason": "Core scheduling contract pinning daemon-plus-image Docker capability detection, image-backed-only sandbox skips with non-Docker coverage retained, serial Group D execution after Groups A-C without changing standard retries or worker controls, and the Browser spawn-failure journey's command-matched one-shot gateway injection with no container mutation or Docker access.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3158,7 +3158,7 @@
     },
     {
       "path": "tests2/browser/journeys/bg-spawn-failure.journey.spec.ts",
-      "reason": "Real browser journey through WebSocket delivery, persisted REST rehydration, distinct spawn-failed diagnostic rendering, and user removal of a background process whose container runtime cannot start.",
+      "reason": "Docker-independent real browser journey using a command-matched one-shot asynchronous gateway spawn error while preserving REST acceptance, WebSocket terminal delivery, persisted GET rehydration, exact spawn-failed diagnostics, dismissal, and final list removal.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
