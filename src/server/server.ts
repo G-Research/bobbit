@@ -2445,15 +2445,39 @@ function defaultPublishedGatewayUrl(config: GatewayConfig, actualPort: number, l
 	return normalizePublishedGatewayUrl(`${protocol}://${publishedUrlHost(callbackHost)}:${actualPort}${config.basePath ?? ""}`);
 }
 
-function persistPublishedGatewayUrl(stateDir: string, gatewayUrl: string, fileSystem: FsLike): void {
+export function persistPublishedGatewayUrl(
+	stateDir: string,
+	gatewayUrl: string,
+	fileSystem: FsLike,
+	platform: NodeJS.Platform = process.platform,
+): void {
 	const target = path.join(stateDir, "gateway-url");
 	const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+	let published = false;
 	try {
 		fileSystem.writeFileSync(temp, gatewayUrl, "utf-8");
-		fileSystem.renameSync(temp, target);
-	} catch (error) {
-		try { fileSystem.unlinkSync(temp); } catch { /* best-effort temp cleanup */ }
-		throw error;
+		try {
+			fileSystem.renameSync(temp, target);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException | undefined)?.code;
+			const windowsReplaceFailure = platform === "win32"
+				&& (code === "EPERM" || code === "EACCES" || code === "EBUSY");
+			if (!windowsReplaceFailure) throw error;
+
+			// Windows cannot reliably rename over an existing destination. Retry by
+			// removing only this known state file; every other failure remains fatal.
+			try {
+				fileSystem.unlinkSync(target);
+			} catch (unlinkError) {
+				if ((unlinkError as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw unlinkError;
+			}
+			fileSystem.renameSync(temp, target);
+		}
+		published = true;
+	} finally {
+		if (!published) {
+			try { fileSystem.unlinkSync(temp); } catch { /* best-effort temp cleanup */ }
+		}
 	}
 }
 

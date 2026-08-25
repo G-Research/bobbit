@@ -586,6 +586,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/benchmark-bobbit-journeys.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "fixtureRoot", "test-owned gateway fixture copied between isolated benchmark temporary roots"),
+		]),
+	},
+	{
 		consumer: "tests2/core/bobbit-archive-allowlist.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("recursive-directory-scan", "walkTs", ["scan:server-typescript-source-guards"]),
@@ -2281,6 +2287,20 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "rec.logFile", count: 1 },
 			{ expression: "opts.pidFile", count: 1 },
 			{ expression: "opts.statusFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/benchmark-bobbit-journeys.test.ts",
+		allowReason: "test-owned benchmark fixtures and reports generated beneath per-test temporary roots",
+		reads: frozen([
+			{ expression: "baseline", count: 2 },
+			{ expression: "destination", count: 2 },
+			{ expression: "transcriptPath", count: 1 },
+			{ expression: "path.join(fixture.directory, \"transcript.jsonl\")", count: 1 },
+			{ expression: "preferencesPath", count: 1 },
+			{ expression: "path.join(outputRoot, \"baseline.failed.json\")", count: 1 },
+			{ expression: "path.join(root, \"sample-a\", \"secrets\", \"token\")", count: 1 },
+			{ expression: "path.join(sample.secretsRoot, \"token\")", count: 1 },
 		]),
 	},
 	{

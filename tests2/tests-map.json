@@ -2121,6 +2121,15 @@
       }
     },
     {
+      "path": "tests2/core/gateway-url-publication.test.ts",
+      "reason": "Injected filesystem coverage pinning single-owner gateway URL publication, the Windows existing-target fallback, unrelated-error preservation, temporary cleanup, and the CLI callback-only boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/verification-command-runner-contract.test.ts",
       "reason": "DI seam contract: fake verification command-step runner is observably equivalent to the real durable runner; seam defaults to real; cli wires no fake.",
       "execution": {
@@ -3771,6 +3780,33 @@
     {
       "path": "tests2/browser/journeys/staff-context-policy.journey.spec.ts",
       "reason": "Browser journey covering the Compact default and selecting, saving, reloading, and responsively rendering Preserve and Clear staff context policies.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/benchmark-bobbit-journeys.test.ts",
+      "reason": "Core contract coverage for benchmark CLI bounds, deterministic fixtures, alternating schedules, statistics, bounded reports, and cleanup safety.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/benchmark-bobbit-journeys.test.ts",
+      "reason": "Vitest E2E coverage for reduced benchmark fixtures through a real production gateway process, session stores, readiness, WebSocket snapshots, archived relationships, and failure cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/benchmark-bobbit-journeys.spec.ts",
+      "reason": "Browser journey covering reduced session-open and event-stream benchmarks through production WebSocket and UI boundaries, metric presence, exact ordering, reload equivalence, and cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

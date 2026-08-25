@@ -305,17 +305,17 @@ describe("affected repository reader inventory", () => {
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
-		expect(audit).toHaveLength(48);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(63);
+		expect(audit).toHaveLength(49);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(64);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(68);
+		)).toBe(69);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(17);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(observedOperations.size).toBe(48);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(48);
+		expect(observedOperations.size).toBe(49);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(49);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {
@@ -323,6 +323,19 @@ describe("affected repository reader inventory", () => {
 					`${entry.consumer}: ${operation.kind}:${operation.expression}`).toBe(true);
 			}
 		}
+
+		const benchmarkCore = "tests2/core/benchmark-bobbit-journeys.test.ts";
+		expect(audit.find((entry) => entry.consumer === benchmarkCore)).toEqual({
+			consumer: benchmarkCore,
+			operations: [
+				{
+					kind: "repository-directory-copy",
+					expression: "fixtureRoot",
+					count: 1,
+					allowReason: "test-owned gateway fixture copied between isolated benchmark temporary roots",
+				},
+			],
+		});
 
 		const staffGoalTriggers = "tests2/integration/staff-goal-triggers.test.ts";
 		expect(audit.find((entry) => entry.consumer === staffGoalTriggers)).toEqual({
@@ -467,6 +480,23 @@ describe("affected repository reader inventory", () => {
 			expect(graph.testDeps.get(staffGoalTriggers)?.has(read.expression),
 				`${read.expression} remains test-owned fixture content`).toBe(false);
 		}
+
+		const benchmarkCore = "tests2/core/benchmark-bobbit-journeys.test.ts";
+		const benchmarkFixtureAudit = audit.find((entry) => entry.consumer === benchmarkCore);
+		expect(benchmarkFixtureAudit).toEqual({
+			consumer: benchmarkCore,
+			allowReason: "test-owned benchmark fixtures and reports generated beneath per-test temporary roots",
+			reads: [
+				{ expression: "baseline", count: 2 },
+				{ expression: "destination", count: 2 },
+				{ expression: "transcriptPath", count: 1 },
+				{ expression: "path.join(fixture.directory, \"transcript.jsonl\")", count: 1 },
+				{ expression: "preferencesPath", count: 1 },
+				{ expression: "path.join(outputRoot, \"baseline.failed.json\")", count: 1 },
+				{ expression: "path.join(root, \"sample-a\", \"secrets\", \"token\")", count: 1 },
+				{ expression: "path.join(sample.secretsRoot, \"token\")", count: 1 },
+			],
+		});
 	});
 
 	it("rejects a new unresolved read and a declaration that no longer supplies edges", () => {
