@@ -1454,6 +1454,79 @@ describe("spawnTracked timeout cleanup", () => {
 		root.emit("close", 0, null);
 	});
 
+	it("promptly re-observes a Darwin group transitioning from live to zombie-only", async () => {
+		const root = fakeChild(123_471);
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		const events: string[] = [];
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => { events.push("alive"); return true; },
+			posixProcessStateSnapshot: async budgetMs => {
+				observerBudgets.push(budgetMs);
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				events.push(`snapshot:${observerBudgets.length}`);
+				activeSnapshots--;
+				return observerBudgets.length === 1 ? `${root.pid} S\n1 S\n` : `${root.pid} Z+\n1 S\n`;
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(1_000)).toBe(true);
+		expect(observerBudgets).toEqual([250, 250]);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(events).toEqual(["alive", "snapshot:1", "alive", "snapshot:2"]);
+		expect(signals).toEqual(["SIGKILL"]);
+		// Accepted completion is monotonic and cannot re-observe or re-signal a
+		// numeric PGID that may subsequently be reused.
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toEqual([250, 250]);
+		expect(signals).toEqual(["SIGKILL"]);
+		root.emit("close", 0, null);
+	});
+
+	it("admits the final Darwin observer with its complete operation window", async () => {
+		const root = fakeChild(123_472);
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		const timeoutMs = 450;
+		let waitStartedAt = 0;
+		let finalObserverRemainingMs = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async budgetMs => {
+				observerBudgets.push(budgetMs);
+				if (observerBudgets.length < 3) return `${root.pid} S\n1 S\n`;
+				finalObserverRemainingMs = (waitStartedAt + timeoutMs) - Date.now();
+				return `${root.pid} Z\n1 S\n`;
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		waitStartedAt = Date.now();
+		expect(await tracked.waitForTreeExit(timeoutMs)).toBe(true);
+		expect(observerBudgets).toEqual([250, 250, 250]);
+		// The old deadline-edge admission supplied less than the observer's own
+		// fixed cap. The replacement begins while that entire 250 ms still fits.
+		expect(finalObserverRemainingMs).toBeGreaterThanOrEqual(250);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toHaveLength(3);
+		root.emit("close", 0, null);
+	});
+
 	it.each(["unavailable", "rejected"] as const)("promptly retries a shared Darwin observation that settles %s", async firstOutcome => {
 		const root = fakeChild(firstOutcome === "unavailable" ? 123_469 : 123_470);
 		const targetPgid = root.pid!;

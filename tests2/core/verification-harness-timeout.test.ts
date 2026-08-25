@@ -459,9 +459,11 @@ describe("runCommandStep tree-kill", () => {
 		expect(result.output).toContain("subprocess tree completion could not be verified");
 	});
 
-	it("persists a successful gate after Darwin observes only zombies following its final signal", async () => {
+	it("persists a successful gate after Darwin re-observes live members as zombie-only", async () => {
 		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "rcs-darwin-zombie-success-"));
 		const gateStoreCalls: Array<{ kind: string; status: string; update?: any }> = [];
+		let snapshotCalls = 0;
+		let signalCalls = 0;
 		const gateStore = {
 			updateSignalVerification: (_signalId: string, update: any) => gateStoreCalls.push({ kind: "signal", status: update.status, update }),
 			updateGateStatus: (_goalId: string, _gateId: string, status: string) => gateStoreCalls.push({ kind: "gate", status }),
@@ -485,8 +487,11 @@ describe("runCommandStep tree-kill", () => {
 					spawnImpl: (() => child) as any,
 					posixTreeSentinel: true,
 					isProcessGroupAlive: () => true,
-					posixProcessStateSnapshot: async () => "910011 Z+\n1 S\n",
-					signalProcessGroup: () => {},
+					posixProcessStateSnapshot: async () => {
+						snapshotCalls++;
+						return snapshotCalls === 1 ? "910011 S\n1 S\n" : "910011 Z+\n1 S\n";
+					},
+					signalProcessGroup: () => { signalCalls++; },
 				});
 				// The harness installs stdout/exit/close listeners synchronously after
 				// spawn returns; this microtask is the authoritative fixture boundary.
@@ -522,6 +527,8 @@ describe("runCommandStep tree-kill", () => {
 		});
 		expect(signalUpdate.steps[0].output).not.toContain("subprocess tree completion could not be verified");
 		expect(gateStoreCalls.find(call => call.kind === "gate")?.status).toBe("passed");
+		expect(snapshotCalls).toBe(2);
+		expect(signalCalls).toBe(1);
 	});
 
 	it("fails closed when a Windows command exits zero while a descendant keeps stdio open", async () => {

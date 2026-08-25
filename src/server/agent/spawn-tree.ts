@@ -669,14 +669,23 @@ export function spawnTracked(
 				const immediateObservation = await observeFinalizedDarwinGroup();
 				let completion = convergedCompletion();
 				if (completion != null) return completion;
-				// Unavailable evidence is retryable while this caller still owns time.
-				// Retry once promptly rather than deferring recovery to the unrelated
-				// deadline-edge observation. Settled exact-slot cleanup preserves one
-				// snapshot in flight even when another waiter starts the retry first.
-				if (immediateObservation === "unavailable" && Date.now() < deadline) {
-					await observeFinalizedDarwinGroup();
+				// SIGKILL delivery can still be transitioning when the immediate snapshot
+				// reports a live group, and an unavailable snapshot is not negative proof.
+				// Cross one existing lifecycle-poll boundary before one prompt retry. The
+				// child-owned slot still coalesces concurrent callers to one observer.
+				if ((immediateObservation === "live" || immediateObservation === "unavailable") && Date.now() < deadline) {
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
 					completion = convergedCompletion();
 					if (completion != null) return completion;
+					if (!groupIsAlive(pid)) {
+						tracked._processGroupOwnershipLost = true;
+						return convergedCompletion() ?? false;
+					}
+					if (Date.now() < deadline) {
+						await observeFinalizedDarwinGroup();
+						completion = convergedCompletion();
+						if (completion != null) return completion;
+					}
 				}
 				const permitFinalObservation = timeout > DARWIN_PROCESS_STATE_OBSERVER_MAX_MS;
 				let finalObservationAttempted = false;
@@ -688,7 +697,14 @@ export function spawnTracked(
 						return convergedCompletion() ?? false;
 					}
 					const remaining = deadline - Date.now();
-					if (permitFinalObservation && !finalObservationAttempted && remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS) {
+					// Admit the last observer before the deadline edge, while its complete
+					// fixed operation cap still fits inside this caller's unchanged deadline.
+					// Opening at two observer caps leaves a full cap for execution even under a
+					// delayed lifecycle turn. The lower bound refuses an observer once that full
+					// window no longer remains.
+					if (permitFinalObservation && !finalObservationAttempted &&
+						remaining >= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS + TREE_EXIT_POLL_MS &&
+						remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS * 2) {
 						finalObservationAttempted = true;
 						await observeFinalizedDarwinGroup();
 						completion = convergedCompletion();
