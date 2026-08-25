@@ -525,7 +525,16 @@ export function collectTeamOwnedSessionClosure(
 	return selected;
 }
 
-type StrictSandboxWiringOptions = SandboxWiringOptions & { expectedExistingContainerId?: string };
+type StrictSandboxWiringOptions = SandboxWiringOptions & {
+	/** Exact persisted execution-container identity. Never a client-supplied hint. */
+	expectedExistingContainerId?: string;
+	/** Ordinary legacy rows may migrate only when their ID is the exact live control container. */
+	allowLegacyControlMigration?: boolean;
+	/** Ordinary recovery may replace only an expected runtime proven absent/dead by SandboxManager. */
+	allowMissingRuntimeReplacement?: boolean;
+	/** Staged bridge swaps defer durable identity publication until commit. */
+	persistRuntimeIdentity?: boolean;
+};
 
 interface ArchivedWorktreeScanContext {
 	candidateContexts: ProjectContext[];
@@ -5224,9 +5233,9 @@ export class SessionManager {
 				const persisted = this.getSessionStore(session.projectId).get(session.id);
 				if (persisted && this.isCanonicalAdoptedWorkspaceOwner(persisted)) {
 					const expected = persisted.containerId?.trim();
-					if (!expected || session.containerId !== expected || newContainerId !== expected) {
-						this.assertPromotedSessionRecoveryAllowed(session.id, "transfer to a recovered sandbox container");
-						throw new Error(`Cannot recover promoted session ${session.id}: sandbox container identity changed`);
+					if (!expected || session.containerId !== expected) {
+						this.assertPromotedSessionRecoveryAllowed(session.id, "transfer to a replacement execution runtime");
+						throw new Error(`Cannot recover promoted session ${session.id}: execution runtime identity changed`);
 					}
 				}
 				// Verify/repair/recreate worktree if needed. Headquarters never owns
@@ -5282,8 +5291,7 @@ export class SessionManager {
 							console.warn(`[orphan-cleanup] WARN: would-archive ${session.id} but worktree+recent-transcript present — leaving live`);
 						} else {
 							console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
-							try { await this.archiveWithCascade(session.id, this.getSessionStore(session.projectId)); } catch { /* best-effort */ }
-							broadcastStatus(session, "terminated");
+							try { await this.terminateSession(session.id); } catch { /* best-effort */ }
 						}
 						continue;
 					}
@@ -5297,8 +5305,27 @@ export class SessionManager {
 					continue;
 				}
 
+				const expectedRuntimeId = ps.containerId?.trim();
+				const runtimeStillLive = !!(
+					expectedRuntimeId
+					&& session.containerId === expectedRuntimeId
+					&& this.sandboxManager
+					&& await this.sandboxManager.isSessionRuntimeIsolated(projectId, session.id, expectedRuntimeId)
+				);
+				if (runtimeStillLive) {
+					// Project control recovery does not disturb Pi, RpcBridge, queued
+					// prompts, or bg processes running in the isolated session container.
+					console.log(`[session-manager] Session ${session.id} runtime remained live during project control recovery`);
+					continue;
+				}
+				if (this.isCanonicalAdoptedWorkspaceOwner(ps)) {
+					this.assertPromotedSessionRecoveryAllowed(session.id, "replace its unavailable execution runtime");
+					throw new Error(`Cannot recover promoted session ${session.id}: exact execution runtime is unavailable`);
+				}
+
 				// Save connected WebSocket clients in case respawn fails and we need
-				// to re-attach them to the original (now terminated) session.
+				// to re-attach them to the original (now terminated) session. Ordinary
+				// restore may allocate a replacement only after exact absence/death proof.
 				const savedClients = new Set(session.clients);
 				try {
 					await this._respawnAgentInPlace(session, ps);
@@ -6166,12 +6193,10 @@ export class SessionManager {
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
 	 * Returns true if sandbox was applied, false if sandbox is not configured.
 	 *
-	 * With the new per-project sandbox architecture, this:
-	 * - Gets the ProjectSandbox for the project
-	 * - Gets the container ID
-	 * - Sets up credentials and token (one per project, not per session)
-	 * - Sets bridgeOptions.containerId
-	 * - The CWD is the container-internal worktree path (set by caller or /workspace)
+	 * The ProjectSandbox control container owns clone/worktree mutation only.
+	 * Pi, RpcBridge, and background commands execute in a distinct container owned
+	 * by the exact project/session pair; bridgeOptions.containerId always projects
+	 * that execution identity.
 	 */
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
@@ -6205,27 +6230,22 @@ export class SessionManager {
 		if (opts?.expectedExistingContainerId !== undefined && !expectedExistingContainerId) {
 			throw new Error(`Cannot reuse sandbox for session ${sessionId}: expected container identity is missing`);
 		}
-		// Ordinary creation/restore lazily initializes as before. Promotion and
-		// promoted-source restore pass an exact identity and must only inspect the
-		// already-ready sandbox: never bootstrap, transfer, or repair its realm.
-		if (!expectedExistingContainerId) await this.sandboxManager.ensureForProject(projectId);
+		// The control container is recoverable project infrastructure, not session
+		// execution identity. Always establish it before worktree mutation, including
+		// when an exact session runtime is being reused.
+		await this.sandboxManager.ensureForProject(projectId);
 		const sandbox = this.sandboxManager.get(projectId);
 		if (!sandbox) {
 			throw new Error(`No sandbox initialized for project ${projectId}`);
 		}
-		const assertExpectedContainer = () => {
-			if (!expectedExistingContainerId) return;
+		const controlContainerId = await sandbox.getContainerId();
+		const assertControlContainer = () => {
 			const status = sandbox.getStatus();
-			if (status.status !== "ready" || status.containerId !== expectedExistingContainerId) {
-				throw new Error(`Cannot reuse sandbox for session ${sessionId}: expected ready container ${expectedExistingContainerId}`);
+			if (status.status !== "ready" || status.containerId !== controlContainerId) {
+				throw new Error(`Cannot wire sandbox for session ${sessionId}: project control container changed`);
 			}
 		};
-		assertExpectedContainer();
-		const containerId = await sandbox.getContainerId();
-		if (expectedExistingContainerId && containerId !== expectedExistingContainerId) {
-			throw new Error(`Cannot reuse sandbox for session ${sessionId}: container identity changed`);
-		}
-		assertExpectedContainer();
+		assertControlContainer();
 
 		// Read gateway URL and generate scoped token for the container.
 		const gwUrl = this.readGatewayUrlForAgent();
@@ -6246,9 +6266,8 @@ export class SessionManager {
 
 		// Re-check after credential wiring as well: a health transition during an
 		// await must reject before a candidate bridge can start.
-		assertExpectedContainer();
+		assertControlContainer();
 		bridgeOptions.sandboxed = true;
-		bridgeOptions.containerId = containerId;
 		const projectRootPath = projectContext?.project.rootPath;
 		if (projectRootPath) {
 			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
@@ -6356,8 +6375,76 @@ export class SessionManager {
 				scope: projectId,
 			});
 		});
-		assertExpectedContainer();
+		assertControlContainer();
 
+		// A pre-isolation ordinary row may contain the exact current control ID.
+		// That single legacy shape is migrated by creating/adopting the labelled
+		// session runtime. Any other expected identity remains exact and fail-closed.
+		let expectedRuntimeId = expectedExistingContainerId;
+		if (expectedRuntimeId === controlContainerId) {
+			if (!opts?.allowLegacyControlMigration) {
+				throw new Error(`Cannot reuse sandbox for session ${sessionId}: persisted identity is the project control container`);
+			}
+			expectedRuntimeId = undefined;
+		}
+
+		let runtimeContainerId: string;
+		try {
+			runtimeContainerId = await this.sandboxManager.ensureSessionRuntime(projectId, sessionId, expectedRuntimeId);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const provenMissingOrDead = message.includes("Expected session runtime was not found")
+				|| message.includes("Expected session runtime is not live and isolated");
+			if (!opts?.allowMissingRuntimeReplacement || !expectedRuntimeId || !provenMissingOrDead) throw error;
+			// ensureSessionRuntime has already proved the expected labelled runtime
+			// absent/dead (and removed an owned stale container). Clear only this exact
+			// project/session registry before allocating its replacement.
+			await this.sandboxManager.releaseSessionRuntime(projectId, sessionId);
+			runtimeContainerId = await this.sandboxManager.ensureSessionRuntime(projectId, sessionId);
+		}
+		assertControlContainer();
+		if (runtimeContainerId === controlContainerId
+			|| !await this.sandboxManager.isSessionRuntimeIsolated(projectId, sessionId, runtimeContainerId)) {
+			await this.sandboxManager.releaseSessionRuntime(projectId, sessionId).catch(() => {});
+			throw new Error(`Cannot wire sandbox for session ${sessionId}: execution runtime failed exact isolation attestation`);
+		}
+		bridgeOptions.containerId = runtimeContainerId;
+
+		// Creation may not have published its placeholder row yet. Restore,
+		// migration, and replacement do: durably project the execution identity
+		// before the bridge can start.
+		if (opts?.persistRuntimeIdentity !== false) {
+			try {
+				const store = this.resolveStoreForId(sessionId);
+				if (store?.get(sessionId)?.containerId !== runtimeContainerId) {
+					store?.update(sessionId, { containerId: runtimeContainerId });
+				}
+			} catch { /* initial creation persists immediately after wiring */ }
+		}
+
+		return true;
+	}
+
+	/**
+	 * Release a session runtime only while the caller's exact execution identity is
+	 * still authoritative. This prevents delayed rollback/teardown from deleting a
+	 * newer replacement allocated for the same durable session ID.
+	 */
+	private async releaseSessionExecutionRuntime(
+		projectId: string | undefined,
+		sessionId: string,
+		expectedRuntimeId: string | undefined,
+		unpublishedPredecessorId?: string,
+	): Promise<boolean> {
+		if (!projectId || !expectedRuntimeId || !this.sandboxManager || isSandboxExemptProject(projectId)) return false;
+		const liveIdentity = this.sessions.get(sessionId)?.containerId?.trim();
+		const persistedIdentity = this.resolveStoreForId(sessionId)?.get(sessionId)?.containerId?.trim();
+		const currentIdentity = liveIdentity || persistedIdentity;
+		if (currentIdentity && currentIdentity !== expectedRuntimeId && currentIdentity !== unpublishedPredecessorId) {
+			console.warn(`[session-manager] Skipping stale runtime release for ${sessionId}: execution identity advanced`);
+			return false;
+		}
+		await this.sandboxManager.releaseSessionRuntime(projectId, sessionId);
 		return true;
 	}
 
@@ -13039,9 +13126,7 @@ export class SessionManager {
 				bridgeOptions.cwd = ps.cwd;
 			}
 			const adoptedSource = this.isCanonicalAdoptedWorkspaceOwner(ps);
-			const expectedExistingContainerId = adoptedSource
-				? ps.containerId?.trim()
-				: undefined;
+			const expectedExistingContainerId = ps.containerId?.trim();
 			if (adoptedSource && !expectedExistingContainerId) {
 				this.assertPromotedSessionRecoveryAllowed(ps.id, "restore without its durable sandbox container identity");
 				throw new Error(`Cannot restore promoted session ${ps.id}: durable sandbox container identity is missing`);
@@ -13051,7 +13136,13 @@ export class SessionManager {
 					projectId: ps.projectId,
 					goalId: ps.goalId ?? ps.teamGoalId,
 					expectedExistingContainerId,
+					allowLegacyControlMigration: !adoptedSource,
+					allowMissingRuntimeReplacement: !adoptedSource,
 				});
+				if (bridgeOptions.containerId && bridgeOptions.containerId !== ps.containerId) {
+					ps.containerId = bridgeOptions.containerId;
+					this.resolveStoreForSession(ps.id).update(ps.id, { containerId: bridgeOptions.containerId });
+				}
 			} catch (error) {
 				if (adoptedSource) {
 					this.assertPromotedSessionRecoveryAllowed(ps.id, "transfer to a replacement sandbox container");
@@ -13077,12 +13168,17 @@ export class SessionManager {
 			this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		}
 		if (restoredSandboxed) {
-			// Verify the sandbox worktree still exists inside the container. Headquarters
-			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
-			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && !ps.borrowsWorktree && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+			// Headquarters sessions are no-worktree, so never repair/recreate /workspace-wt paths.
+			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && !ps.borrowsWorktree && ps.cwd?.startsWith("/workspace-wt/")) {
+				// Worktree inspection and mutation remain owned by the project control
+				// container; the execution runtime only consumes the shared volumes.
+				const controlContainerId = ps.projectId && this.sandboxManager
+					? await this.sandboxManager.get(ps.projectId)?.getContainerId()
+					: undefined;
+				if (!controlContainerId) throw new Error(`Cannot restore sandbox worktree for ${ps.id}: project control container is unavailable`);
 				try {
 					await this.commandRunner.execFile("docker", [
-						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
+						"exec", controlContainerId, "test", "-d", ps.cwd,
 					], { timeout: 5_000 });
 					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
 				} catch {
@@ -13093,12 +13189,12 @@ export class SessionManager {
 					// Try git worktree repair first — handles broken .git link files after hard container kill
 					try {
 						await this.commandRunner.execFile("docker", [
-							"exec", "-w", "/workspace", bridgeOptions.containerId!,
+							"exec", "-w", "/workspace", controlContainerId,
 							"git", "worktree", "repair",
 						], { timeout: 10_000 });
 						// Re-check if worktree now exists after repair
 						await this.commandRunner.execFile("docker", [
-							"exec", bridgeOptions.containerId!, "test", "-d", ps.cwd!,
+							"exec", controlContainerId, "test", "-d", ps.cwd!,
 						], { timeout: 5_000 });
 						console.log(`[session-manager] Sandbox worktree repaired for ${ps.id}: ${ps.cwd}`);
 						recovered = true;
@@ -14115,6 +14211,9 @@ export class SessionManager {
 				opts?.initialThinkingLevel,
 			);
 			const setupPromise = executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
+				if (session.sandboxed && session.containerId) {
+					ctx.store.update(session.id, { containerId: session.containerId });
+				}
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
 				// here is redundant but kept as a safety net for re-attempts where the
@@ -14125,6 +14224,12 @@ export class SessionManager {
 				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
+			}).catch(async (error) => {
+				try { session.unsubscribe?.(); } catch { /* best-effort */ }
+				await session.rpcClient?.stop?.().catch(() => {});
+				try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
+				await this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId).catch(() => {});
+				throw error;
 			}).finally(releaseSetupThinkingAuthority);
 
 			if (opts?.awaitWorktreeSetup) {
@@ -14205,6 +14310,9 @@ export class SessionManager {
 		try {
 			const session = await executePlan(plan, ctx);
 			if (projectId) session.projectId = projectId;
+			if (session.sandboxed && session.containerId) {
+				ctx.store.update(session.id, { containerId: session.containerId });
+			}
 			// Verification/reviewer sessions deliberately skip the ordinary post-spawn
 			// selectors because their tuple was pinned in argv. They still need the same
 			// exact read-back and one atomic durable tuple commit before create returns.
@@ -14229,6 +14337,13 @@ export class SessionManager {
 			}
 
 			return session;
+		} catch (error) {
+			const failedSession = this.sessions.get(id);
+			try { failedSession?.unsubscribe?.(); } catch { /* best-effort */ }
+			await failedSession?.rpcClient?.stop?.().catch(() => {});
+			try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
+			await this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId).catch(() => {});
+			throw error;
 		} finally {
 			releaseSetupThinkingAuthority();
 		}
@@ -14453,6 +14568,16 @@ export class SessionManager {
 				throw new Error("Cannot create a delegate for an archived team goal");
 			}
 			session = await executePlan(plan, ctx);
+			if (session.sandboxed && session.containerId) {
+				ctx.store.update(session.id, { containerId: session.containerId });
+			}
+		} catch (error) {
+			const failedSession = this.sessions.get(id);
+			try { failedSession?.unsubscribe?.(); } catch { /* best-effort */ }
+			await failedSession?.rpcClient?.stop?.().catch(() => {});
+			try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
+			await this.releaseSessionExecutionRuntime(parentProjectId, id, plan.bridgeOptions.containerId).catch(() => {});
+			throw error;
 		} finally {
 			releaseSetupThinkingAuthority();
 		}
@@ -16648,24 +16773,37 @@ export class SessionManager {
 		// longer be wired; silently launching Pi on the host would strand the
 		// container transcript and make an apparently successful role change lose
 		// model-visible history.
+		let stagedExpectedRuntimeId: string | undefined;
 		if (replacementSession.sandboxed) {
-			const adoptedExpectedContainerId = this.isCanonicalAdoptedWorkspaceOwner(respawnPersisted ?? persistedBeforeRole!)
-				? respawnPersisted?.containerId?.trim()
-				: undefined;
-			const strictExpectedContainerId = projection?.expectedSandboxContainerId ?? adoptedExpectedContainerId;
-			if (!projection && this.isCanonicalAdoptedWorkspaceOwner(respawnPersisted ?? persistedBeforeRole!) && !strictExpectedContainerId) {
+			const persistedRuntimeOwner = respawnPersisted ?? persistedBeforeRole!;
+			const alreadyCanonical = this.isCanonicalAdoptedWorkspaceOwner(persistedRuntimeOwner);
+			const strictExpectedContainerId = projection?.expectedSandboxContainerId
+				?? persistedRuntimeOwner.containerId?.trim()
+				?? replacementSession.containerId?.trim();
+			stagedExpectedRuntimeId = strictExpectedContainerId;
+			if (!projection && alreadyCanonical && !strictExpectedContainerId) {
 				throw new Error(`Cannot replace promoted session ${id}: durable sandbox container identity is missing`);
 			}
 			const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 				projectId: replacementSession.projectId,
 				goalId: replacementSession.goalId ?? replacementSession.teamGoalId,
 				expectedExistingContainerId: strictExpectedContainerId,
+				allowLegacyControlMigration: !alreadyCanonical,
+				persistRuntimeIdentity: false,
 			});
 			if (!sandboxApplied) {
 				throw new Error(`Cannot assign role for sandboxed session ${id}: sandbox realm is unavailable`);
 			}
 			if (strictExpectedContainerId && bridgeOptions.containerId !== strictExpectedContainerId) {
-				throw new Error(`Cannot replace sandboxed session ${id}: container identity changed during staging`);
+				const controlId = this.sandboxManager && replacementSession.projectId
+					? await this.sandboxManager.get(replacementSession.projectId)?.getContainerId()
+					: undefined;
+				if (alreadyCanonical || strictExpectedContainerId !== controlId) {
+					throw new Error(`Cannot replace sandboxed session ${id}: execution runtime identity changed during staging`);
+				}
+				// The only permitted identity change here is the ordinary row's exact
+				// legacy-control migration. Promotion then makes the new runtime canonical.
+				if (projection) projection.expectedSandboxContainerId = bridgeOptions.containerId;
 			}
 		} else {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, replacementSession.projectId, replacementSession.goalId ?? replacementSession.teamGoalId);
@@ -16772,7 +16910,11 @@ export class SessionManager {
 							? { containerId: projection.expectedSandboxContainerId }
 							: {}),
 					} as Parameters<SessionStore["update"]>[1]
-					: { role: role.name, accessory: role.accessory });
+					: {
+						role: role.name,
+						accessory: role.accessory,
+						...(bridgeOptions.containerId ? { containerId: bridgeOptions.containerId } : {}),
+					});
 			} catch (err) {
 				if (promotionAttachmentBefore) {
 					await this.restorePromotionAttachment(roleStore, id, promotionAttachmentBefore);
@@ -16808,6 +16950,26 @@ export class SessionManager {
 		} catch (err) {
 			unsub();
 			await rpcClient.stop().catch(() => {});
+			if (bridgeOptions.containerId && bridgeOptions.containerId !== stagedExpectedRuntimeId) {
+				await this.releaseSessionExecutionRuntime(
+					replacementSession.projectId,
+					id,
+					bridgeOptions.containerId,
+					stagedExpectedRuntimeId,
+				).catch(() => {});
+				// A failed staged legacy migration must put the durable identity back
+				// on the still-canonical old bridge (including exact optional absence).
+				if (persistedBeforeRole) {
+					const hadContainerId = Object.prototype.hasOwnProperty.call(persistedBeforeRole, "containerId");
+					roleStore.update(id, { containerId: persistedBeforeRole.containerId });
+					const restored = roleStore.get(id) as Record<string, unknown> | undefined;
+					if (restored && !hadContainerId) {
+						delete restored.containerId;
+						roleStore.update(id, { lastActivity: restored.lastActivity as number });
+					}
+					await roleStore.flushAsync().catch(() => {});
+				}
+			}
 			// If terminal cancellation landed during the irreversible old stop, both
 			// bridges are now gone. Surface that canonical capsule as terminated;
 			// never leave a dead old bridge looking idle after the staged one is disposed.
@@ -16828,7 +16990,7 @@ export class SessionManager {
 		session.messagesSnapshotCursorProjection = undefined;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-		if (projection?.expectedSandboxContainerId) session.containerId = projection.expectedSandboxContainerId;
+		if (bridgeOptions.containerId) session.containerId = bridgeOptions.containerId;
 		if (verifiedReplacementTuple) {
 			session.spawnPinnedModel = `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`;
 			session.spawnPinnedThinkingLevel = verifiedReplacementTuple.thinkingLevel;
@@ -17311,6 +17473,11 @@ export class SessionManager {
 			try { (this as any).bgProcessManager.cleanup(id); } catch { /* best-effort */ }
 		}
 		try {
+			await this.releaseSessionExecutionRuntime(session.projectId, id, session.containerId);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to release quiesced execution runtime for ${id}:`, err);
+		}
+		try {
 			if (this.sandboxTokenStore && session.projectId) this.sandboxTokenStore.removeSession(session.projectId, id);
 		} catch { /* process is already stopped */ }
 		try { this.sessionSecretStore.remove(id); } catch { /* process is already stopped */ }
@@ -17454,6 +17621,11 @@ export class SessionManager {
 		if ((this as any).bgProcessManager) {
 			(this as any).bgProcessManager.abortAllWaits(id);
 			(this as any).bgProcessManager.cleanup(id);
+		}
+		try {
+			await this.releaseSessionExecutionRuntime(session.projectId, id, session.containerId);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to release terminated execution runtime for ${id}:`, err);
 		}
 
 		// Clean up sandbox token — remove session from project scope (not the whole project token)
@@ -18579,6 +18751,14 @@ export class SessionManager {
 		// the purge of its parent.
 		try { await this.cascadeReapOwner(ps.id); } catch { /* best-effort */ }
 
+		// A crash may leave an archived/store-only runtime behind. Runtime removal is
+		// idempotent and precedes transcript/worktree data destruction.
+		try {
+			await this.releaseSessionExecutionRuntime(ps.projectId, ps.id, ps.containerId);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to release purged execution runtime for ${ps.id}:`, err);
+		}
+
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
@@ -19293,10 +19473,9 @@ export class SessionManager {
 		// kill immediately; recovery must never wait on the bridge being replaced.
 		// Paths remain in the agent's coordinate system — no translation needed.
 		const persistedBeforeAbort = this.resolveStoreForSession(id).get(id);
-		const adoptedExpectedContainerId = persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort)
-			? persistedBeforeAbort.containerId?.trim()
-			: undefined;
-		if (persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort) && !adoptedExpectedContainerId) {
+		const abortingCanonicalSource = !!persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort);
+		const adoptedExpectedContainerId = persistedBeforeAbort?.containerId?.trim() ?? session.containerId?.trim();
+		if (abortingCanonicalSource && !adoptedExpectedContainerId) {
 			throw new Error(`Cannot force-abort promoted session ${id}: durable sandbox container identity is missing`);
 		}
 		let agentSessionFile = persistedBeforeAbort?.agentSessionFile;
@@ -19354,11 +19533,11 @@ export class SessionManager {
 		emitSessionEvent(session, { type: "agent_end", messages: [] });
 
 		// Restart the agent process
+		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 		try {
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
 			}
-			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			// Prepare the cold replacement's scoped catalogue before any later
@@ -19380,6 +19559,8 @@ export class SessionManager {
 					projectId: session.projectId,
 					goalId: session.goalId ?? session.teamGoalId,
 					expectedExistingContainerId: adoptedExpectedContainerId,
+					allowLegacyControlMigration: !abortingCanonicalSource,
+					allowMissingRuntimeReplacement: !abortingCanonicalSource,
 				});
 				if (!sandboxApplied) {
 					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
@@ -19604,6 +19785,7 @@ export class SessionManager {
 				: bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = verifiedReplacementTuple?.thinkingLevel
 				?? bridgeOptions.initialThinkingLevel;
+			if (bridgeOptions.containerId) session.containerId = bridgeOptions.containerId;
 			if (verifiedReplacementTuple) {
 				this.persistSessionModel(
 					id,
@@ -19623,6 +19805,17 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
+			if (bridgeOptions.containerId && bridgeOptions.containerId !== adoptedExpectedContainerId) {
+				await this.releaseSessionExecutionRuntime(
+					session.projectId,
+					id,
+					bridgeOptions.containerId,
+					adoptedExpectedContainerId,
+				).catch(() => {});
+				if (persistedBeforeAbort && adoptedExpectedContainerId) {
+					this.resolveStoreForSession(id).update(id, { containerId: adoptedExpectedContainerId });
+				}
+			}
 			// Without a complete closed-generation replay, neither delivery nor
 			// non-delivery is proven. Preserve the durable uncertain carrier and forbid
 			// automatic replay; explicit dismissal remains available through removeQueued.
