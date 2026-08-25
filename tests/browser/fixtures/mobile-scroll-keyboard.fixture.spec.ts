@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import path from "node:path";
 import { waitForStableScroll, waitForFrames } from "../_helpers/stable-wait.js";
 
-const TEST_PAGE = `file://${path.resolve("tests/mobile-scroll-keyboard.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/browser/pages/mobile-scroll-keyboard.html")}`;
 
 const SCROLLER = "#scroll-container";
 

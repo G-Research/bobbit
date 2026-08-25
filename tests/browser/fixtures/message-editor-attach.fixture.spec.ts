@@ -8,7 +8,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const FIXTURE = `file://${path.resolve("tests/message-editor-attach.html").replace(/\\/g, "/")}`;
+const FIXTURE = `file://${path.resolve("tests/support/fixtures/browser/pages/message-editor-attach.html").replace(/\\/g, "/")}`;
 
 test.describe("PI-06: File attachment via button", () => {
 	test.beforeEach(async ({ page }) => {

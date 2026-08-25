@@ -1,7 +1,7 @@
 /**
  * Browser smoke — jump-to-prompt controls mount in the real app and honor
  * mobile header geometry. The prompt-classification/action matrix lives in
- * `tests/support/fixtures/browser/ui/chat-scroll.spec.ts` where DOM geometry is deterministic.
+ * `tests/browser/fixtures/chat-scroll.fixture.spec.ts` where geometry is deterministic.
  */
 import { test, expect } from "./fixtures.js";
 import type { Page } from "@playwright/test";

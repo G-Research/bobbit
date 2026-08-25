@@ -11,7 +11,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/mobile-review-annotation.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/browser/pages/mobile-review-annotation.html")}`;
 
 /** Helper: programmatically select text within #selectable paragraph */
 async function selectText(page: import("@playwright/test").Page, selector = "#selectable") {

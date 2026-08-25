@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/git-status-widget.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/browser/pages/git-status-widget.html")}`;
 
 // =============================================================================
 // Data parsing tests — verify server-side git status porcelain parsing

@@ -1,8 +1,8 @@
 /**
- * v2 browser (geometry) — parity port of tests/e2e/ui/sidebar-reveal.spec.ts.
+ * Normal-browser geometry coverage for sidebar reveal behavior.
  * Kept in Chromium under tests/browser/fixtures/ because it exercises
  * getBoundingClientRect / scrollIntoView / scrollTop geometry against a real
- * gateway. Import paths resolve through the tests2/browser/*.ts shims verbatim.
+ * gateway. Imports resolve directly from the canonical test support tree.
  *
  * Browser E2E for "Sidebar Reveal On Nav".
  *

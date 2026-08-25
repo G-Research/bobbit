@@ -11,7 +11,7 @@
  *  - Setting `answers` prop initially renders read-only.
  *  - Setting `errored=true` renders the error branch only.
  *
- * NOTE: The fixture at tests/ask-user-choices-widget.html reimplements the
+ * NOTE: The fixture at tests/support/fixtures/browser/pages/ask-user-choices-widget.html reimplements the
  * widget's DOM/state logic in plain JS (mirroring
  * src/ui/components/AskUserChoicesWidget.ts). Behaviour parity must be kept
  * manually when the source changes.
@@ -19,7 +19,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const FIXTURE = `file://${path.resolve("tests/ask-user-choices-widget.html").replace(/\\/g, "/")}`;
+const FIXTURE = `file://${path.resolve("tests/support/fixtures/browser/pages/ask-user-choices-widget.html").replace(/\\/g, "/")}`;
 
 test.describe("ask_user_choices widget", () => {
 	test.beforeEach(async ({ page }) => {

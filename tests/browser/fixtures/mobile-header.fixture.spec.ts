@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const TEST_PAGE = `file://${path.resolve("tests/mobile-header.html")}`;
+const TEST_PAGE = `file://${path.resolve("tests/support/fixtures/browser/pages/mobile-header.html")}`;
 
 test.describe("Mobile header always visible", () => {
 	test.use({ viewport: { width: 375, height: 667 } }); // iPhone SE size
