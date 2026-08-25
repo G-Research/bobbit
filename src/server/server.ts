@@ -2,8 +2,9 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
-import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
+import { parseTrustedGithubRemote, parseUntrustedGithubRemoteCandidate, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { GithubTrustedHostResolver } from "./github-trusted-hosts.js";
+import { GithubHostCredentialTrust } from "./github-host-credential-trust.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
@@ -1268,6 +1269,10 @@ export function buildGhPrMergePermissionsArgs(remote: TrustedGithubRemote, numbe
 	];
 }
 
+export function buildGhRepoPermissionArgs(remote: TrustedGithubRemote): string[] {
+	return ["repo", "view", "--repo", githubRepositorySelector(remote), "--json", "viewerPermission"];
+}
+
 export function buildGhBranchRulesArgs(remote: TrustedGithubRemote, branch: string): string[] {
 	return [
 		"api", ...ghApiHostnameArgs(remote),
@@ -1309,20 +1314,26 @@ export function __resetPrStatusCachesForTests(): void {
 	_repoPermCache.clear();
 }
 
-// Cache viewer permission per repo (rarely changes, long TTL)
+// Cache viewer permission per exact repository (rarely changes, long TTL).
+// The cwd alone is not an authority: a remote can change while the process runs.
 const _repoPermCache = new Map<string, { perm: string; ts: number }>();
 const REPO_PERM_CACHE_TTL_MS = 300_000; // 5 minutes
 
-async function getViewerIsAdmin(cwd: string): Promise<boolean> {
-	const cached = _repoPermCache.get(cwd);
+function repoPermissionCacheKey(cwd: string, remote: TrustedGithubRemote): string {
+	return `${cwd}\0${githubRepositorySelector(remote)}`;
+}
+
+async function getViewerIsAdmin(cwd: string, remote: TrustedGithubRemote): Promise<boolean> {
+	const cacheKey = repoPermissionCacheKey(cwd, remote);
+	const cached = _repoPermCache.get(cacheKey);
 	if (cached && Date.now() - cached.ts < REPO_PERM_CACHE_TTL_MS) return cached.perm === "ADMIN";
 	try {
-		const stdout = await execGh(["repo", "view", "--json", "viewerPermission"], cwd);
+		const stdout = await execGh(buildGhRepoPermissionArgs(remote), cwd);
 		const perm = JSON.parse(stdout).viewerPermission ?? "";
-		_repoPermCache.set(cwd, { perm, ts: Date.now() });
+		_repoPermCache.set(cacheKey, { perm, ts: Date.now() });
 		return perm === "ADMIN";
 	} catch {
-		_repoPermCache.set(cwd, { perm: "", ts: Date.now() });
+		_repoPermCache.set(cacheKey, { perm: "", ts: Date.now() });
 		return false;
 	}
 }
@@ -1352,7 +1363,7 @@ async function getViewerMergePermissions(
 			const parsed = JSON.parse(stdout);
 			const repository = parsed?.data?.repository;
 			const perm = repository?.viewerPermission ?? "";
-			_repoPermCache.set(cwd, { perm, ts: Date.now() });
+			_repoPermCache.set(repoPermissionCacheKey(cwd, remote), { perm, ts: Date.now() });
 
 			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
 			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
@@ -1364,7 +1375,10 @@ async function getViewerMergePermissions(
 			// Fall through to legacy permission probe.
 		}
 	}
-	return { viewerIsAdmin: await getViewerIsAdmin(cwd), viewerCanMergeAsAdmin: false };
+	return {
+		viewerIsAdmin: remote ? await getViewerIsAdmin(cwd, remote) : false,
+		viewerCanMergeAsAdmin: false,
+	};
 }
 
 async function getViewerCanBypassBranchRules(
@@ -1467,6 +1481,8 @@ export type CoordinatedPrLookupTarget = {
 	remote: TrustedGithubRemote;
 	selector: CoordinatedPrSelector;
 };
+
+type PrRemoteTrustMode = "listed-only" | "credential-status";
 
 type NormalizedCoordinatedPr = {
 	data: any;
@@ -2708,6 +2724,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		getManagedHosts: () => normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts")),
 		env: process.env,
 	});
+	// This fallback is deliberately separate from the configured/discovered host
+	// resolver: it grants process-local admission only to PR operations and never
+	// persists or broadens githubTrustedHosts. Resolve spawn and environment per
+	// probe so injected runners and live ambient-token refusal remain authoritative.
+	const githubHostCredentialTrust = new GithubHostCredentialTrust({
+		resolveCommandRunner: () => gatewayDeps.commandRunner,
+		clock: gatewayDeps.clock,
+		getEnv: () => process.env,
+	});
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir, gatewayDeps.fsImpl);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
@@ -3435,10 +3460,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// was never registered or identity lookup is temporarily unavailable.
 		}
 	};
-	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
+	const parsePrRemote = async (
+		cwd: string,
+		trustMode: PrRemoteTrustMode = "listed-only",
+	): Promise<{ host: string; owner: string; repository: string } | undefined> => {
 		try {
 			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
-			return parseTrustedGithubRemote(origin, await githubTrustedHostResolver.resolve());
+			const listed = parseTrustedGithubRemote(origin, await githubTrustedHostResolver.resolve());
+			if (listed) return listed;
+			if (trustMode === "listed-only") return undefined;
+
+			// Structural parsing remains the sole authority for malformed/unsafe remote
+			// rejection. Only an otherwise-valid, unlisted candidate reaches the local
+			// credential probe, and the exact candidate is returned only for status reads.
+			const candidate = parseUntrustedGithubRemoteCandidate(origin);
+			if (!candidate) return undefined;
+			return await githubHostCredentialTrust.isTrusted(candidate.host) ? candidate : undefined;
 		} catch {
 			return undefined;
 		}
@@ -3489,7 +3526,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		/** Multi-repo candidates stay bound to the authoritative source remote. */
 		remote?: TrustedGithubRemote;
 	};
-	const resolveOwnedPrRepositoryIdentity = async (cwd: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+	const resolveOwnedPrRepositoryCommonDir = async (cwd: string): Promise<string | undefined> => {
 		let rawCommonDir: string;
 		try {
 			rawCommonDir = (await execGitArgs(
@@ -3513,13 +3550,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		}
 		if (!rawCommonDir) return undefined;
-		const remote = await parsePrRemote(cwd);
-		if (!remote) return undefined;
 		const absoluteCommonDir = path.isAbsolute(rawCommonDir) ? rawCommonDir : path.resolve(cwd, rawCommonDir);
-		return {
-			commonDir: comparableOwnedPath(absoluteCommonDir),
-			remote,
-		};
+		return comparableOwnedPath(absoluteCommonDir);
+	};
+	const resolveOwnedPrRepositoryIdentity = async (
+		cwd: string,
+		trustMode: PrRemoteTrustMode,
+	): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		const commonDir = await resolveOwnedPrRepositoryCommonDir(cwd);
+		if (!commonDir) return undefined;
+		const remote = await parsePrRemote(cwd, trustMode);
+		return remote ? { commonDir, remote } : undefined;
+	};
+	const resolveStructuralPrSiblingIdentity = async (cwd: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		const commonDir = await resolveOwnedPrRepositoryCommonDir(cwd);
+		if (!commonDir) return undefined;
+		try {
+			// This candidate is consumed only by duplicate-source rejection. It does
+			// not make the sibling eligible for PR routing or credential probing.
+			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
+			const remote = parseUntrustedGithubRemoteCandidate(origin);
+			return remote ? { commonDir, remote } : undefined;
+		} catch {
+			return undefined;
+		}
 	};
 	const sameOwnedPrRepository = (left: OwnedPrRepositoryIdentity, right: OwnedPrRepositoryIdentity): boolean => (
 		left.commonDir === right.commonDir
@@ -3543,14 +3597,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!rawTopLevel) return undefined;
 		return canonicalOwnedPath(path.isAbsolute(rawTopLevel) ? rawTopLevel : path.resolve(source, rawTopLevel));
 	};
-	const resolveConfiguredPrSourceIdentity = async (source: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+	const resolveConfiguredPrSourceIdentity = async (
+		source: string,
+		trustMode: PrRemoteTrustMode,
+	): Promise<OwnedPrRepositoryIdentity | undefined> => {
 		const topLevel = await resolveConfiguredPrTopLevel(source);
 		// A selected nested component must be a repository root in its own right.
 		// Merely resolving Git through an enclosing repository is not ownership.
 		if (!topLevel || comparableOwnedPath(topLevel) !== comparableOwnedPath(source)) return undefined;
-		return resolveOwnedPrRepositoryIdentity(source);
+		return resolveOwnedPrRepositoryIdentity(source, trustMode);
 	};
-	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<OwnedPrCandidate[]> => {
+	const ownedPrCandidates = async (
+		owner: PrRouteOwner,
+		trustMode: PrRemoteTrustMode,
+	): Promise<OwnedPrCandidate[]> => {
 		// Project scope comes from the store that owns the entity, never from its
 		// mutable/persisted projectId or repository metadata.
 		const owningContext = projectContextManager.getContextForGoal(owner.id)
@@ -3640,14 +3700,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// routing, but any observable top-level/identity alias still fails closed.
 			const selectedConfiguredSource = configuredSources.get(selected.repo);
 			if (!selectedConfiguredSource || comparableOwnedPath(selectedConfiguredSource) !== comparableOwnedPath(selectedSource)) return [];
-			const sourceIdentity = await resolveConfiguredPrSourceIdentity(selectedConfiguredSource);
+			const sourceIdentity = await resolveConfiguredPrSourceIdentity(selectedConfiguredSource, trustMode);
 			if (!sourceIdentity) return [];
 			for (const [repo, siblingSource] of configuredSources) {
 				if (repo === selected.repo) continue;
 				const siblingTopLevel = await resolveConfiguredPrTopLevel(siblingSource);
 				if (!siblingTopLevel) continue;
 				if (comparableOwnedPath(siblingTopLevel) !== comparableOwnedPath(siblingSource)) return [];
-				const siblingIdentity = await resolveOwnedPrRepositoryIdentity(siblingSource);
+				// Structural sibling inspection preserves fail-closed duplicate-source
+				// rejection without trusting the sibling host or consulting credentials.
+				const siblingIdentity = await resolveStructuralPrSiblingIdentity(siblingSource);
 				if (siblingIdentity && sameOwnedPrRepository(sourceIdentity, siblingIdentity)) return [];
 			}
 			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
@@ -3655,7 +3717,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				add(candidate, allowedRoots);
 				if (candidates.length === before) return;
 				const added = candidates[candidates.length - 1];
-				const identity = await resolveOwnedPrRepositoryIdentity(added);
+				const identity = await resolveOwnedPrRepositoryIdentity(added, trustMode);
 				if (!identity || !sameOwnedPrRepository(sourceIdentity, identity)) {
 					candidates.pop();
 					seen.delete(comparableOwnedPath(added));
@@ -3685,12 +3747,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		owner: PrRouteOwner,
 		branch: string | undefined,
 		identitySource?: { cwd: string; containerId?: string },
+		trustMode: PrRemoteTrustMode = "listed-only",
 	): Promise<PrSnapshotTarget | undefined> => {
 		// Selection is local-only and restricted to entity/project-owned candidates.
 		// A broken worktree can recover through its persisted repoPath or registered
 		// project root, but a merely Git-valid ambient directory is never eligible.
 		let selectedCandidate: OwnedPrCandidate | undefined;
-		for (const candidate of await ownedPrCandidates(owner)) {
+		for (const candidate of await ownedPrCandidates(owner, trustMode)) {
 			try {
 				await execGitArgs(["rev-parse", "--git-dir"], candidate.cwd, 5_000, undefined, gatewayDeps.commandRunner);
 				selectedCandidate = candidate;
@@ -3701,7 +3764,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const executionCwd = selectedCandidate.cwd;
 
 		const [remote, head] = await Promise.all([
-			selectedCandidate.remote ? Promise.resolve(selectedCandidate.remote) : parsePrRemote(executionCwd),
+			selectedCandidate.remote ? Promise.resolve(selectedCandidate.remote) : parsePrRemote(executionCwd, trustMode),
 			resolvePullRequestHeadIdentity(
 				identitySource?.cwd ?? executionCwd,
 				branch,
@@ -3769,6 +3832,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	const remoteStateRoutes = {
 		resolveGithubTrustedHosts: () => githubTrustedHostResolver.resolve(),
+		forgetUnverifiedGithubHosts: () => githubHostCredentialTrust.forgetUnverified(),
 		publicSnapshot: publicRemoteSnapshot,
 		publicGitSnapshot,
 		gitSnapshotFor,
@@ -14641,7 +14705,8 @@ async function handleApiRoute(
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
 		const optional = url.searchParams.get("optional") === "1";
-		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (url.searchParams.get("intent") === "explicit") remoteState.forgetUnverifiedGithubHosts();
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch, undefined, "credential-status");
 		const snapshot = target
 			? await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, url.searchParams.get("intent"))
 			: undefined;
@@ -18202,7 +18267,11 @@ async function handleApiRoute(
 		}
 		return;
 	}
-	const resolveSessionPrRouteSelector = async (id: string, session: any) => {
+	const resolveSessionPrRouteSelector = async (
+		id: string,
+		session: any,
+		trustMode: PrRemoteTrustMode = "listed-only",
+	) => {
 		const cwd = session.cwd as string;
 		const cid = session.sandboxed ? session.containerId as string | undefined : undefined;
 		const persisted = sessionManager.getPersistedSession(id);
@@ -18233,7 +18302,7 @@ async function handleApiRoute(
 			cwd,
 			cid,
 			branch,
-			target: await remoteState.resolvePrSnapshotTarget(owner, branch, identitySource),
+			target: await remoteState.resolvePrSnapshotTarget(owner, branch, identitySource, trustMode),
 		};
 	};
 
@@ -18243,7 +18312,8 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
-		const selector = await resolveSessionPrRouteSelector(id, session);
+		if (url.searchParams.get("intent") === "explicit") remoteState.forgetUnverifiedGithubHosts();
+		const selector = await resolveSessionPrRouteSelector(id, session, "credential-status");
 		const optional = url.searchParams.get("optional") === "1";
 		const snapshot = selector.target
 			? await remoteState.prSnapshotFor(selector.target, { kind: "session", id }, url.searchParams.get("intent"))

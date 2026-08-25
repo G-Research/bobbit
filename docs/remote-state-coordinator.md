@@ -28,33 +28,78 @@ A repository without `origin` remains valid local state. Its refresh path does n
 
 A pull-request identity combines normalized host, owner, repository, and either a resolved head identity or PR number. Once a head lookup returns a PR number, both selectors alias the same record.
 
-Only complete remotes whose host is in Bobbit's effective GitHub trust set are eligible for PR lookup. The Git transport identity remains port-sensitive, but PR/API authority is derived separately: SSH transport ports are dropped, while explicit HTTP(S) web/API ports remain part of the PR identity and every host-scoped `gh` call. Untrusted hosts, malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL are rejected rather than falling back to an independent lookup.
+PR lookup separates structural remote parsing from host trust. The structural parser still rejects incomplete or unsafe remotes, including malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL. A valid candidate becomes eligible only through the listed-host rules below or the narrow PR-status credential check. The Git transport identity remains port-sensitive, but PR/API authority is derived separately: SSH transport ports are dropped, while explicit HTTP(S) web/API ports remain part of the PR identity and every host-scoped `gh` call. Rejection never falls back to an independent lookup.
 
 A repository-scoped head lookup validates every candidate against the exact server-owned head and head repository. It selects the unique open PR when present; otherwise it selects the uniquely newest terminal PR, allowing safe branch reuse without a second external read. Ambiguous, malformed, or cross-repository results fail closed and retain any last-good snapshot. Candidate refs, repository ownership, and ordering fields are validation inputs only and are never published.
 
-### Effective GitHub host trust
+### Listed GitHub host trust
 
-One server-side resolver supplies the same effective trust decision to PR status polling,
+One server-side resolver supplies the listed-host trust decision to PR status polling,
 merge and permission checks, PR Walkthrough, and the browser's trust-prompt preflight.
 The effective set combines Bobbit's built-in GitHub hosts, managed
 `githubTrustedHosts`, and normalized host keys explicitly configured in the local `gh`
-CLI. This lets an existing host-specific `gh` login enable an enterprise host without a
-duplicate Bobbit preference, while preventing individual consumers from drifting onto
-different allowlists.
+`hosts.yml`. This lets an existing host-specific `gh` login enable an enterprise host
+without a duplicate Bobbit preference, while preventing individual consumers from
+drifting onto different allowlists.
 
 Discovery reads only host keys from the local `gh` configuration; it does not run an
 authentication-status or API probe, request tokens, or contact the configured hosts.
 Token data is never returned, persisted, or logged, and environment-only authorization
-cannot authorize an arbitrary remote. Results are briefly cached and concurrent callers
-share the lookup. If `gh` configuration cannot be read, discovery contributes nothing
-and trust falls back to the built-in plus managed set.
+cannot add a host to this set. Results are briefly cached and concurrent callers share
+the lookup. If `gh` configuration cannot be read, discovery contributes nothing and
+trust falls back to the built-in plus managed set.
 
 The browser queries the server for a normalized boolean decision rather than receiving
-or rebuilding the effective list. Unknown hosts therefore remain rejected, while a
-host configured only in `gh` is accepted consistently by status and action routes and
-by the PR Walkthrough launch flow. See
+or rebuilding the effective list. A host configured only in `gh` is therefore accepted
+consistently by status and action routes and by the PR Walkthrough launch flow. See
 [Trusted GitHub hosts](pr-walkthrough-panel.md#trusted-github-hosts) for discovery and
 prompt details.
+
+### Credential-derived PR-status eligibility
+
+PR status has one additional, process-local path for a structurally valid enterprise
+remote absent from the effective set. Bobbit asks the operator's local Git credential
+configuration about the exact normalized host with `git credential fill`. It accepts
+the host only when the bounded reply echoes that exact host authority and contains a
+password-bearing credential. The resulting `gh` reads remain bound to that host and the
+validated owner/repository; the credential result cannot authorize an unqualified or
+different target.
+
+This is **PR-status-only eligibility**, not an addition to the effective host set. It
+does not persist trust, modify `githubTrustedHosts`, widen merge or permission actions,
+or authorize PR Walkthrough launch, fetch, or posting. Built-in, managed, and
+`hosts.yml`-discovered hosts keep their existing behavior.
+
+The probe runs only through the injected command-runner spawn seam, from a neutral
+temporary directory so repository-local helpers cannot grant process-wide host trust.
+Terminal, GUI, and askpass prompting are disabled. Missing spawn support, subprocess or
+input errors, timeout, malformed or mismatched output, and output beyond the inspection
+bounds all fail closed. Output inspection is byte-bounded, and a timed-out process is
+terminated with escalation so a wedged helper cannot accumulate across polls.
+Credential values and helper errors are never returned, persisted, or logged. The
+security boundary is narrower than "no network access": credential helpers are
+operator-configured code and may themselves contact the queried host.
+
+Credential-derived trust is refused before probing when `gh` would prefer a set
+host-class-wide ambient token for the target: `GH_TOKEN` or `GITHUB_TOKEN` for
+`github.com` and `*.ghe.com`, and `GH_ENTERPRISE_TOKEN` or
+`GITHUB_ENTERPRISE_TOKEN` for other enterprise hosts. This prevents admission based on
+a host-specific credential from causing `gh` to send a different class-wide token.
+Bobbit warns once per host, naming the applicable variable but never its value. This
+refusal does not alter trust or ambient-token behavior for listed hosts. Uniform
+ambient-token scrubbing for `gh` calls admitted by existing trust sources is a separate
+follow-up concern.
+
+Verdicts are cached by normalized host with one in-flight probe per host. Positive
+verdicts remain for the gateway process lifetime. Negative verdicts remain until an
+explicit PR-status refresh; that refresh clears negatives and stops callers from joining
+older-generation in-flight probes, while preserving positives. Automatic, visibility,
+and sidebar reads do not re-probe a cached negative.
+
+Trust verdicts are not persisted, but a successful lookup may still populate the
+separate persistent PR-status cache used for startup hydration. Revalidating that cache
+immediately after credential revocation is a follow-up concern; startup hydration can
+therefore display stale PR status before later live processing updates it.
 
 Published PR URLs are reconstructed from the validated server-derived HTTPS authority, owner, repository, and positive PR number. Upstream URLs containing credentials, query strings, fragments, mismatched authorities, non-HTTPS schemes, or non-canonical paths are rejected. Clients apply the same safe-link shape defensively before assigning a URL to a navigation sink.
 
