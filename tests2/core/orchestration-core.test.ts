@@ -46,7 +46,7 @@ class FakeView implements OrchestrationSessionView {
 	private seq = 0;
 
 	owner(id: string, opts?: Partial<FakeSession> & Partial<PersistedSessionLike>): void {
-		this.live.set(id, { id, status: "idle", cwd: `/cwd/${id}`, allowedTools: opts?.allowedTools, title: opts?.title });
+		this.live.set(id, { id, status: "idle", projectId: opts?.projectId, cwd: opts?.cwd ?? `/cwd/${id}`, allowedTools: opts?.allowedTools, title: opts?.title });
 		this.persisted.set(id, { id, title: opts?.title, delegateOf: opts?.delegateOf, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, archived: opts?.archived, sandboxed: opts?.sandboxed, projectId: opts?.projectId, teamGoalId: opts?.teamGoalId, cwd: opts?.cwd ?? `/cwd/${id}` });
 	}
 
@@ -128,7 +128,7 @@ function makeCore(
 	view: FakeView,
 	model?: string,
 	resolveEffectiveTools?: (id: string) => string[] | undefined,
-	resolveRoleAllowedTools?: (roleName: string, projectId?: string) => string[] | undefined,
+	resolveRoleAllowedTools?: (roleName: string, projectId?: string, cwd?: string) => string[] | undefined,
 ) {
 	return new OrchestrationCore({
 		sessionManager: view,
@@ -415,23 +415,18 @@ describe("OrchestrationCore.spawn — role-sourced child tools (Decision A.2, FA
 		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, ["read", "grep"]);
 	});
 
-	it("threads the OWNER's projectId into role-tool resolution (project-scoped role no longer fails closed)", async () => {
-		// FINDING 2: childAllowedTools used to call resolveRoleAllowedTools(role)
-		// WITHOUT projectId, so a project-scoped/custom role that only resolves with
-		// the owner's projectId would fail closed with ROLE_TOOLS_UNRESOLVED. The fake
-		// resolver below returns tools ONLY when called with (role, expected projectId),
-		// proving the owner's projectId is threaded through.
+	it("threads the OWNER's project and cwd into role-tool resolution before the allowlist freezes", async () => {
 		const view = new FakeView();
-		view.owner("owner-1", { projectId: "proj-Z" });
-		const seen: Array<{ role: string; projectId?: string }> = [];
-		const resolver = (role: string, projectId?: string): string[] | undefined => {
-			seen.push({ role, projectId });
-			return projectId === "proj-Z" ? ["read", "grep"] : undefined;
+		view.owner("owner-1", { projectId: "proj-Z", cwd: "/worktrees/scanner" });
+		const seen: Array<{ role: string; projectId?: string; cwd?: string }> = [];
+		const resolver = (role: string, projectId?: string, cwd?: string): string[] | undefined => {
+			seen.push({ role, projectId, cwd });
+			return projectId === "proj-Z" && cwd === "/worktrees/scanner" ? ["read", "project_scan_reconcile"] : undefined;
 		};
 		const core = makeCore(view, undefined, undefined, resolver);
 		await core.spawn({ ownerSessionId: "owner-1", instructions: "x", role: "project-role", lifecycle: "full" });
-		assert.deepEqual(seen, [{ role: "project-role", projectId: "proj-Z" }]);
-		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, ["read", "grep"]);
+		assert.deepEqual(seen, [{ role: "project-role", projectId: "proj-Z", cwd: "/worktrees/scanner" }]);
+		assert.deepEqual(view.createSessionCalls[0].opts.allowedTools, ["read", "project_scan_reconcile"]);
 	});
 
 	it("FAIL CLOSED: throws ROLE_TOOLS_UNRESOLVED when no resolver is wired", async () => {

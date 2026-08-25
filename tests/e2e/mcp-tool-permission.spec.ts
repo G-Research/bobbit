@@ -48,6 +48,19 @@ const MCP_GROUP_POLICY_KEY = "mcp__mock";
 const MCP_META_TOOL = "mcp_mock";
 const REFRESH_ROLE_NAME = "mcp-refresh-policy-role";
 const GROUP_DENY_ROLE_NAME = "mcp-group-deny-precedence-role";
+const HEADQUARTERS_PROJECT_ID = "headquarters";
+let owningProjectId = "";
+
+function scopedRolePath(roleName: string, projectId: string): string {
+	return `/api/roles/${encodeURIComponent(roleName)}?projectId=${encodeURIComponent(projectId)}`;
+}
+
+async function deleteRoleAcrossOwnedScopes(roleName: string): Promise<void> {
+	if (owningProjectId) {
+		await apiFetch(scopedRolePath(roleName, owningProjectId), { method: "DELETE" }).catch(() => {});
+	}
+	await apiFetch(scopedRolePath(roleName, HEADQUARTERS_PROJECT_ID), { method: "DELETE" }).catch(() => {});
+}
 
 async function setMockMcpGroupPolicy(policy: "allow" | "ask" | "never" | null): Promise<void> {
 	const resp = await apiFetch(`/api/tool-group-policies/${encodeURIComponent(MCP_GROUP_POLICY_KEY)}`, {
@@ -96,9 +109,9 @@ test.beforeAll(async ({ gateway }) => {
 	await gateway.sessionManager.initMcp(bobbitDir());
 
 	// 2. Restart the mock MCP server in the normal default project so session-scoped MCP calls discover it.
-	const projectId = await defaultProjectId();
-	expect(projectId).toBeTruthy();
-	const restartResp = await apiFetch(mcpRestartPath(projectId!), { method: "POST" });
+	owningProjectId = (await defaultProjectId()) ?? "";
+	expect(owningProjectId).toBeTruthy();
+	const restartResp = await apiFetch(mcpRestartPath(owningProjectId), { method: "POST" });
 	expect(restartResp.status).toBe(200);
 	const restartData = await restartResp.json();
 	expect(restartData.toolCount).toBeGreaterThanOrEqual(2);
@@ -117,9 +130,9 @@ test.beforeAll(async ({ gateway }) => {
 });
 
 test.afterAll(async () => {
-	// Clean up roles
+	// Clean up project-local grant overrides as well as their server-owned source roles.
 	for (const roleName of [ROLE_NAME, REFRESH_ROLE_NAME, GROUP_DENY_ROLE_NAME]) {
-		await apiFetch(`/api/roles/${roleName}`, { method: "DELETE" }).catch(() => {});
+		await deleteRoleAcrossOwnedScopes(roleName);
 	}
 	await setMockMcpGroupPolicy(null).catch(() => {});
 	// Clean up MCP config
@@ -302,6 +315,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 	test("grant_tool_permission adds tool to role's toolPolicies", async () => {
 		// Use a fresh role for this test to avoid pollution
 		const grantRoleName = "mcp-grant-test-role";
+		await deleteRoleAcrossOwnedScopes(grantRoleName);
 		await apiFetch("/api/roles", {
 			method: "POST",
 			body: JSON.stringify({
@@ -313,11 +327,12 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 		});
 
 		try {
-			// Create session with this role
+			// Create an explicitly project-owned session with this server-defined role.
 			const resp = await apiFetch("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({
 					cwd: nonGitCwd(),
+					projectId: owningProjectId,
 					roleId: grantRoleName,
 				}),
 			});
@@ -351,21 +366,29 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				// Wait for the replayed prompt's turn to complete
 				await conn.waitFor(agentEndPredicate(), 15_000).catch(() => {});
 
-				// Verify the role now includes the granted tool
-				const roleResp = await apiFetch(`/api/roles/${grantRoleName}`);
-				expect(roleResp.status).toBe(200);
-				const role = await roleResp.json();
-				expect(role.toolPolicies[DENIED_TOOL]).toBe("allow");
+				// Persistent grants are copy-on-write in the session's owning project.
+				const projectRoleResp = await apiFetch(scopedRolePath(grantRoleName, owningProjectId));
+				expect(projectRoleResp.status).toBe(200);
+				const projectRole = await projectRoleResp.json();
+				expect(projectRole.origin).toBe("project");
+				expect(projectRole.toolPolicies[DENIED_TOOL]).toBe("allow");
+
+				// The server-owned source role must remain unchanged.
+				const serverRoleResp = await apiFetch(scopedRolePath(grantRoleName, HEADQUARTERS_PROJECT_ID));
+				expect(serverRoleResp.status).toBe(200);
+				const serverRole = await serverRoleResp.json();
+				expect(serverRole.toolPolicies[DENIED_TOOL]).toBe("never");
 			} finally {
 				conn.close();
 			}
 		} finally {
-			await apiFetch(`/api/roles/${grantRoleName}`, { method: "DELETE" }).catch(() => {});
+			await deleteRoleAcrossOwnedScopes(grantRoleName);
 		}
 	});
 
 	test("grant_tool_permission with scope=group adds all MCP tools from group", async () => {
 		const groupRoleName = "mcp-group-grant-role";
+		await deleteRoleAcrossOwnedScopes(groupRoleName);
 		await apiFetch("/api/roles", {
 			method: "POST",
 			body: JSON.stringify({
@@ -381,6 +404,7 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				method: "POST",
 				body: JSON.stringify({
 					cwd: nonGitCwd(),
+					projectId: owningProjectId,
 					roleId: groupRoleName,
 				}),
 			});
@@ -415,17 +439,27 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 				// Wait for the replayed prompt's turn to complete
 				await conn.waitFor(agentEndPredicate(), 15_000).catch(() => {});
 
-				// Verify the role includes canonical MCP operations and the model-facing meta-tool.
-				const roleResp = await apiFetch(`/api/roles/${groupRoleName}`);
-				const role = await roleResp.json();
-				expect(role.toolPolicies["mcp__mock__echo"]).toBe("allow");
-				expect(role.toolPolicies["mcp__mock__add"]).toBe("allow");
-				expect(role.toolPolicies[MCP_META_TOOL]).toBe("allow");
+				// Verify the owning project override includes canonical MCP operations and the model-facing meta-tool.
+				const projectRoleResp = await apiFetch(scopedRolePath(groupRoleName, owningProjectId));
+				expect(projectRoleResp.status).toBe(200);
+				const projectRole = await projectRoleResp.json();
+				expect(projectRole.origin).toBe("project");
+				expect(projectRole.toolPolicies["mcp__mock__echo"]).toBe("allow");
+				expect(projectRole.toolPolicies["mcp__mock__add"]).toBe("allow");
+				expect(projectRole.toolPolicies[MCP_META_TOOL]).toBe("allow");
+
+				// The server-owned source role must retain its deny policies.
+				const serverRoleResp = await apiFetch(scopedRolePath(groupRoleName, HEADQUARTERS_PROJECT_ID));
+				expect(serverRoleResp.status).toBe(200);
+				const serverRole = await serverRoleResp.json();
+				expect(serverRole.toolPolicies["mcp__mock__echo"]).toBe("never");
+				expect(serverRole.toolPolicies["mcp__mock__add"]).toBe("never");
+				expect(serverRole.toolPolicies[MCP_META_TOOL]).toBeUndefined();
 			} finally {
 				conn.close();
 			}
 		} finally {
-			await apiFetch(`/api/roles/${groupRoleName}`, { method: "DELETE" }).catch(() => {});
+			await deleteRoleAcrossOwnedScopes(groupRoleName);
 		}
 	});
 

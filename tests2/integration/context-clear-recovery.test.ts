@@ -417,6 +417,10 @@ function makeManager(store: RecoveryStore, bridgeFactory: (options: any) => any)
 	manager.projectContextManager = {
 		all: () => [],
 		getAllLiveSessions: () => store.getLive(),
+		getOrCreate: () => ({
+			toolManager: manager.toolManager,
+			toolGroupPolicyStore: manager.groupPolicyStore,
+		}),
 	};
 	manager.getSessionStore = () => store;
 	manager.resolveStoreForSession = () => store;

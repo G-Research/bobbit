@@ -762,6 +762,29 @@ All four routes accept `intent`:
 
 `sidebar` changes cadence only for PR state; a Git route still uses the repository's normal automatic policy. On Git routes, legacy `fetch=true` has the same blocking revalidation role as `intent=explicit`. It may be combined with `untracked=1` so the response reflects newly fetched refs and includes the full untracked-file scan. Without either explicit form, stale revalidation completes asynchronously and is delivered through WebSocket.
 
+#### PR host eligibility
+
+PR-status routes first apply the normal built-in, managed `githubTrustedHosts`, and local
+`gh` `hosts.yml` trust rules. If a structurally valid enterprise remote is otherwise
+unlisted, PR status may additionally derive process-local eligibility from the
+operator's local Git credential configuration. It requires `git credential fill` to
+echo the exact host and return a password-bearing result; failures remain the existing
+ineligible response and do not reach `gh`. This fallback does not persist trust, change
+preferences, or authorize any PR Walkthrough or PR action route.
+
+Credential probes are single-flight per host. Positive verdicts remain until process
+exit; negative verdicts and stale in-flight probes are cleared only by
+`intent=explicit` on a PR-status route. An explicit refresh therefore discovers a newly
+provisioned credential, but does not re-probe a host already vouched for in this process.
+
+The fallback is refused when a set ambient variable would take precedence in `gh` for
+the target's host class: `GH_TOKEN` or `GITHUB_TOKEN` for `github.com` and `*.ghe.com`,
+or `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN` for other enterprise hosts. The
+server warns once per host with the variable name, never its value. Listed hosts retain
+their existing behavior. See
+[Credential-derived PR-status eligibility](remote-state-coordinator.md#credential-derived-pr-status-eligibility)
+for the subprocess, output-bound, redaction, and cache security boundary.
+
 #### Response envelopes
 
 The public coordinator metadata is:
@@ -813,7 +836,7 @@ On a cold eligible PR record, `data` and `refreshedAt` are absent while the firs
 
 PR absence has two distinct route outcomes:
 
-- If the target cannot be resolved to an eligible GitHub or trusted GitHub Enterprise repository and head, the default response is `404 { error: "No PR found" }`; `optional=1` returns empty `204`. No independent fallback lookup runs.
+- If the target cannot be resolved to an eligible GitHub repository and head—including when an unlisted enterprise host has no acceptable credential-derived verdict—the default response is `404 { error: "No PR found" }`; `optional=1` returns empty `204`. No `gh` call or independent fallback lookup runs.
 - If the target is eligible and a successful lookup returns `data: null`, the default response is `200` with that envelope; `optional=1` returns empty `204`. Cold and failed eligible snapshots remain `200` envelopes even with `optional=1`, because their freshness/error metadata is meaningful.
 
 Unknown entities, missing host worktrees, no-worktree goals/Headquarters sessions, sandbox resolution, and the existing explicit Git/PR mutation routes retain their endpoint-specific behavior.

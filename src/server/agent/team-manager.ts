@@ -2691,10 +2691,16 @@ export class TeamManager {
 			}
 			: undefined;
 
-		// Resolve team-lead extension via cascade (ToolManager) or fall back to deprecated TOOLS_DIR
+		// Resolve the initial team extension from the goal-owning project cascade.
+		// The explicit extension arg is assembled before createSession can apply its
+		// scoped activation, so using the server manager here would leak a second,
+		// conflicting provider path into every project team lead.
 		let teamLeadExtPath: string;
-		if (this.config.toolManager) {
-			teamLeadExtPath = this.config.toolManager.getExtensionPath("team", "extension.ts");
+		const projectToolManager = this.config.projectContextManager
+			?.getContextForGoal(goalId)?.toolManager;
+		const extensionToolManager = projectToolManager ?? this.config.toolManager;
+		if (extensionToolManager) {
+			teamLeadExtPath = extensionToolManager.getExtensionPath("team", "extension.ts");
 		} else {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
 			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");

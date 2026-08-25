@@ -3,6 +3,38 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.18.0
+
+Upgrading from v0.17.0. This release adds in-place session promotion, fresh-context controls, richer Extension Host APIs, independent staff forks, clearer context limits, and stronger startup and team recovery.
+
+### ✨ New Features
+
+* 🚀 **Promote sessions to goals**: Turn an active session into a Team Lead without changing its conversation, checkout, dirty files, branch, or sandbox. Promotion starts reliably after team setup and remains safe across retries and restarts.
+
+* 🧹 **Fresh context with `/clear`**: Start with an empty model-facing conversation while retaining the same session, worktree, configuration, and permissions. Previous messages remain available in expandable read-only history, and staff can clear context before inbox delivery.
+
+* 🪝 **Unified Extension Host hooks**: Extension packs can participate in typed lifecycle operations before commit or observe durable session, staff, goal, task, and gate events afterward, including through browser notifications and staff triggers.
+
+* 💾 **Project-local extension data**: Schema-2 packs can declare stable read-write directories shared across worktrees, restored sessions, agents, and sandboxes. Data remains intact when a pack is disabled or uninstalled.
+
+* 👥 **Independent staff forks**: Forking a staff session now creates a separate persistent staff identity with isolated configuration, triggers, inbox, authorization, and lifecycle ownership.
+
+* 📊 **Clearer context capacity**: Context meters distinguish the operating soft limit from the provider’s full model capacity, with a target marker and semantic usage zones without changing compaction behavior.
+
+* 🎭 **Bobbit sprites for extensions**: Extension UIs can create canonical animated Bobbit avatars through the Host API, with project-scoped identity resolution and automatic lifecycle cleanup.
+
+### 🐛 Bug Fixes
+
+* ⚡ **Faster, safer gateway recovery**: Startup checkpoints avoid repeating completed migration and historical recovery work, while failed checkpoints and interrupted server-build promotions remain durable and retryable.
+
+* 🗄️ **Archived teams stay archived**: Sessions owned by archived goals no longer respawn after restart, and durable worktree ownership prevents premature cleanup or dangling team state.
+
+* ✅ **Atomic goal validation**: Goal proposals, edits, acceptance, and child creation now share canonical validation. Invalid or stale candidates leave no partial goals, workflows, gates, worktrees, or draft mutations behind.
+
+* 🧑‍💻 **Promptable read-only delegates**: Active read-only delegates can receive prompts while retaining their tool and mutation restrictions. Lifecycle and model-recovery state also remains accurate across refreshes and reconnects.
+
+* ⌨️ **Command history preserves edits**: Changes made while browsing previous composer commands are retained as you move backward and forward through history.
+
 ## v0.17.0
 
 Upgrading from v0.16.3. This release adds a built-in file explorer, conversation forks, richer sidebar views, durable reviews and state storage, and major improvements to agent-turn reliability.

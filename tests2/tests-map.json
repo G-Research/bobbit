@@ -39,6 +39,15 @@
       }
     },
     {
+      "path": "tests2/core/project-scoped-group-grant.test.ts",
+      "reason": "Core lifecycle coverage that statically owns SessionManager changes affecting project-scoped persistent group grants, builtin copy-on-write role overrides, cross-project isolation, read-only marketplace fallback, projectless persistence, stale pending requests, and explicit empty allowlists; its recursive fixture callback reads only run-owned temporary role snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-setup-event-fence.test.ts",
       "reason": "Core coverage proving the ordinary session-setup event subscription rejects old-generation message, terminal, and compaction events while lifecycle-fenced, then resumes exact-once publication after unfencing.",
       "execution": {
@@ -164,6 +173,33 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/clock.test.ts",
+      "reason": "Deterministic core coverage proving the real Clock visibly bounds overflow and non-finite timeout and interval delays while preserving ordinary, zero, negative, and clear-handle behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/github-host-credential-trust.test.ts",
+      "reason": "Core security coverage for PR-only credential-derived host trust: exact bounded credential records, injected owned-tree spawning, neutral temporary directories, prompt suppression, tree-completion kill escalation, per-host refresh generations, live ambient-token refusal, and secret-redacted failure behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/owned-tree-command-spawn.test.ts",
+      "reason": "Core process-boundary coverage proving branded logical commands select spawnTracked ownership defaults with synchronous control binding while ordinary CommandRunner spawns remain direct.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     },
     {

@@ -43,8 +43,6 @@ git log --oneline <prev-tag>..origin/main | head    # must be non-empty (somethi
 node -v                                  # must satisfy engines.node (>=22.19.0)
 npm whoami                               # only needed if republishing binary sub-packages (§3); root ships via CI
 gh auth status                           # must be authed for G-Research/bobbit
-git config --get user.signingkey || echo "NO_SIGNING_KEY"
-git config --get commit.gpgsign || echo "commit.gpgsign=unset"
 ```
 
 Note: do **not** gate on the current worktree's branch or cleanliness — the
@@ -56,7 +54,6 @@ so the session/primary worktree state is irrelevant. What matters is that
 - `origin/main` has nothing new since the previous tag (nothing to release), or it isn't the commit they expect to ship.
 - `npm whoami` fails **and** step 3 will republish binary sub-packages — ask them to run `npm login` (and enable 2FA if not already; npm requires OTP for those sub-package publishes). The root `@gresearch/bobbit` publish needs no npm login — it goes through CI/OIDC.
 - `gh auth status` not logged in — ask them to run `gh auth login`.
-- No GPG/SSH signing key configured — this only affects the release **commit**, not the tag (CI creates the tag and it is not signed). Confirm whether to proceed with an unsigned commit or wait. Default to waiting.
 
 ## 1. Decide the new version
 
@@ -189,12 +186,9 @@ Once the user approves the notes, commit the version bump and the notes together
 ```bash
 git add package.json package-lock.json CHANGELOG.md
 # include binaries/* package.json edits if §3 changed them
-git commit -m "chore(release): v<new-version>" \
-  --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>" \
-  -S    # GPG/SSH-sign the commit if a signing key is configured
+git -c commit.gpgsign=false commit -m "chore(release): v<new-version>" \
+  --trailer "Co-authored-by: bobbit-ai <bobbit@bobbit.ai>"
 ```
-
-If no signing key is set, drop `-S` (you already confirmed with the user in step 0).
 
 The commit lands on this worktree's detached HEAD — that's expected. The
 required squash merge in §8 creates the final `main` commit; that commit,
@@ -390,7 +384,6 @@ Report to the user:
 ## Rules / best practices
 
 - **Never tag by hand.** CI creates the immutable public source tag. Safe reruns are authorized by npm's verified provenance for this workflow and commit, not by the repository-wide GitHub Actions tag bypass.
-- **Signed commit if a signing key is configured.** Add `-S` to `git commit`. Never override `user.name` / `user.email`; never silently disable signing.
 - **Publish, tag, and GitHub release are CI-only.** They run via `release-publish.yml` (OIDC trusted publishing) on the merge to `main`, with provenance automatic. Never run them manually.
 - **OTP is the human's job** — but only for the binary sub-package publishes. Pause and let them type it; don't try to read it from anywhere. The root publish uses no OTP.
 - **Never `npm publish --force`.** If a sub-package republish is genuinely needed, bump the patch version and republish cleanly. If the CI root publish fails, re-run all jobs in the same workflow run for the same version.

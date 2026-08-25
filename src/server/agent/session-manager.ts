@@ -120,8 +120,8 @@ import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generato
 import { CostTracker, type SessionCost } from "./cost-tracker.js";
 import type { ColorStore } from "./color-store.js";
 import type { RoleManager } from "./role-manager.js";
-import type { ToolManager } from "./tool-manager.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -129,6 +129,7 @@ import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-pro
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
+import { normalizeConfigProjectId } from "./config-cascade.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
 import { eagerDeleteRemoteSessionBranch } from "./session-eager-branch-delete.js";
 import type { GrantPolicy, Role } from "./role-store.js";
@@ -212,6 +213,13 @@ import {
 	type PackLocalDataBindingsResolver,
 } from "./pack-local-data-runtime.js";
 
+
+interface PreparedScopedToolRuntime {
+	toolManager: ToolManager | undefined;
+	groupPolicyStore: GroupPolicyProvider | undefined;
+	toolScope: ScopedToolContext;
+	piExtensionActivation: MarketplacePiExtensionActivation;
+}
 
 function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
@@ -1003,6 +1011,8 @@ export interface SessionInfo {
 	lastActivity: number;
 	clients: Set<WebSocket>;
 	rpcClient: RpcBridge;
+	/** Pi extension/schema snapshot owned by the currently installed runtime. */
+	runtimePiExtensions?: RuntimePiExtensionInfo[];
 	eventBuffer: EventBuffer;
 	unsubscribe: () => void;
 	isCompacting: boolean;
@@ -5433,21 +5443,24 @@ export class SessionManager {
 		}
 	}
 
-	/** Resolve goal tools extension path via toolManager cascade (with fallback). */
-	private getGoalToolsExtensionPath(): string {
-		if (this.toolManager) return this.toolManager.getExtensionPath("tasks", "extension.ts");
+	/** Resolve goal tools extension path through the session project's cascade. */
+	private getGoalToolsExtensionPath(projectId?: string): string {
+		const toolManager = this.getToolManagerForProject(projectId);
+		if (toolManager) return toolManager.getExtensionPath("tasks", "extension.ts");
 		return path.join(bobbitConfigDir(), "tools", "tasks", "extension.ts");
 	}
 
-	/** Resolve team lead extension path via toolManager cascade (with fallback). */
-	private getTeamLeadExtensionPath(): string {
-		if (this.toolManager) return this.toolManager.getExtensionPath("team", "extension.ts");
+	/** Resolve team lead extension path through the session project's cascade. */
+	private getTeamLeadExtensionPath(projectId?: string): string {
+		const toolManager = this.getToolManagerForProject(projectId);
+		if (toolManager) return toolManager.getExtensionPath("team", "extension.ts");
 		return path.join(bobbitConfigDir(), "tools", "team", "extension.ts");
 	}
 
-	/** Resolve proposal tools extension path via toolManager cascade (with fallback). */
-	private getProposalToolsExtensionPath(): string {
-		if (this.toolManager) return this.toolManager.getExtensionPath("proposals", "extension.ts");
+	/** Resolve proposal tools extension path through the session project's cascade. */
+	private getProposalToolsExtensionPath(projectId?: string): string {
+		const toolManager = this.getToolManagerForProject(projectId);
+		if (toolManager) return toolManager.getExtensionPath("proposals", "extension.ts");
 		return path.join(bobbitConfigDir(), "tools", "proposals", "extension.ts");
 	}
 
@@ -5831,6 +5844,23 @@ export class SessionManager {
 		return this.sandboxManager;
 	}
 
+	/** Resolve the ToolManager that owns a session's project-scoped pack cascade. */
+	private getToolManagerForProject(projectId?: string): ToolManager | undefined {
+		if (!projectId || !this.projectContextManager) return this.toolManager;
+		return this.projectContextManager.getOrCreate(projectId)?.toolManager;
+	}
+
+	/** Resolve effective group policies through the same project cascade as tools. */
+	private getGroupPolicyProviderForProject(projectId?: string): GroupPolicyProvider | undefined {
+		// Preserve the established server-scope path for genuinely projectless
+		// sessions and the raw-store path used by isolated SessionManager tests.
+		if (!projectId || !this.configCascade) {
+			if (!projectId || !this.projectContextManager) return this.groupPolicyStore;
+			return this.projectContextManager.getOrCreate(projectId)?.toolGroupPolicyStore;
+		}
+		return this.configCascade.createToolGroupPolicyProvider(projectId, this.groupPolicyStore);
+	}
+
 	/** Build a PipelineContext from this manager's fields. Requires projectId when PCM is active. */
 	buildPipelineContext(projectId?: string, cwd?: string): PipelineContext {
 		const resolvedStore = this.getSessionStore(projectId);
@@ -5838,6 +5868,8 @@ export class SessionManager {
 		let resolvedGoalManager: GoalManager;
 		let resolvedTaskManager: TaskManager;
 		let resolvedProjectConfigStore = this.projectConfigStore ?? null;
+		let resolvedToolManager = this.toolManager ?? null;
+		let resolvedGroupPolicyStore: GroupPolicyProvider | null = this.getGroupPolicyProviderForProject(projectId) ?? null;
 		let resolvedCostTracker: CostTracker;
 		if (projectId && this.projectContextManager) {
 			const ctx = this.projectContextManager.getOrCreate(projectId);
@@ -5845,6 +5877,7 @@ export class SessionManager {
 				resolvedGoalManager = ctx.goalManager;
 				resolvedTaskManager = new TaskManager(ctx.taskStore);
 				resolvedProjectConfigStore = ctx.projectConfigStore;
+				resolvedToolManager = ctx.toolManager;
 				resolvedCostTracker = ctx.costTracker;
 			} else {
 				throw new Error(`Cannot build pipeline context: project "${projectId}" not found`);
@@ -5861,7 +5894,7 @@ export class SessionManager {
 			agentCliPath: this.agentCliPath,
 			systemPromptPath: this.systemPromptPath,
 			roleManager: this.roleManager ?? null,
-			toolManager: this.toolManager ?? null,
+			toolManager: resolvedToolManager,
 			mcpManager: this.getMcpManagerForContext(projectId, cwd),
 			marketplacePiExtensionResolver: this.marketplacePiExtensionResolver,
 			packLocalDataBindingsResolver: this.packLocalDataBindingsResolver,
@@ -5872,7 +5905,7 @@ export class SessionManager {
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
-			groupPolicyStore: this.groupPolicyStore ?? null,
+			groupPolicyStore: resolvedGroupPolicyStore,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
 			hostInterceptors: this.hostInterceptors,
@@ -5882,7 +5915,7 @@ export class SessionManager {
 			sessions: this.sessions,
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
 			commandRunner: this.commandRunner,
-			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts, projectId),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
@@ -6615,13 +6648,31 @@ export class SessionManager {
 		this.packLocalDataBindingsResolver = resolver ?? null;
 	}
 
-	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string): ReturnType<MarketplacePiExtensionResolver> {
-		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }) ?? []);
+	resolveMarketplacePiExtensionContributions(projectId?: string, cwd?: string, selectedToolManager?: ToolManager): ReturnType<MarketplacePiExtensionResolver> {
+		const toolManager = selectedToolManager ?? this.getToolManagerForProject(projectId);
+		return this.overlayPiExtensionRuntimeDiagnostics(this.marketplacePiExtensionResolver?.({ projectId, cwd }, toolManager) ?? []);
 	}
 
-	private resolveMarketplacePiExtensionArgs(projectId?: string, cwd?: string): MarketplacePiExtensionActivation {
-		const activation = resolveMarketplacePiExtensionActivation((scope) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd), projectId, cwd);
-		return activation;
+	private resolveMarketplacePiExtensionArgs(projectId: string | undefined, cwd: string | undefined, toolManager: ToolManager | undefined): MarketplacePiExtensionActivation {
+		return resolveMarketplacePiExtensionActivation(
+			(scope, selectedToolManager) => this.resolveMarketplacePiExtensionContributions(scope.projectId, scope.cwd, selectedToolManager),
+			projectId,
+			cwd,
+			toolManager,
+		);
+	}
+
+	/**
+	 * Select one scoped tool-policy tuple and discover Pi tools into that exact
+	 * manager. Replacement funnels prepare this before allowlists or prompt docs,
+	 * then reuse the discovery snapshot when building activation argv.
+	 */
+	private prepareScopedToolRuntime(projectId: string | undefined, cwd: string | undefined): PreparedScopedToolRuntime {
+		const toolManager = this.getToolManagerForProject(projectId);
+		const groupPolicyStore = this.getGroupPolicyProviderForProject(projectId);
+		const toolScope = scopedToolContext(projectId, cwd);
+		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd, toolManager);
+		return { toolManager, groupPolicyStore, toolScope, piExtensionActivation };
 	}
 
 	private piExtensionDiagnosticKeys(extension: Pick<RuntimePiExtensionInfo, "entryPath" | "listName" | "origin">): string[] {
@@ -6798,10 +6849,24 @@ export class SessionManager {
 	 * If the role has explicit allowedTools, use those.
 	 * Otherwise, compute from the full policy cascade (honouring the allow default).
 	 */
-	private resolveEffectiveAllowedTools(role: import("./role-store.js").Role | undefined): EffectiveTool[] {
+	private resolveEffectiveAllowedTools(
+		role: import("./role-store.js").Role | undefined,
+		projectId?: string,
+		cwd?: string,
+		preparedRuntime?: Pick<PreparedScopedToolRuntime, "toolManager" | "groupPolicyStore" | "toolScope">,
+	): EffectiveTool[] {
 		if (!role) return [];
-		if (this.toolManager) {
-			return computeEffectiveAllowedTools(this.toolManager, role, this.groupPolicyStore, this.mcpManager ?? undefined);
+		const toolManager = preparedRuntime
+			? preparedRuntime.toolManager
+			: this.getToolManagerForProject(projectId);
+		if (toolManager) {
+			return computeEffectiveAllowedTools(
+				toolManager,
+				role,
+				preparedRuntime ? preparedRuntime.groupPolicyStore : this.getGroupPolicyProviderForProject(projectId),
+				this.getMcpManagerForContext(projectId, cwd) ?? undefined,
+				preparedRuntime ? preparedRuntime.toolScope : scopedToolContext(projectId, cwd),
+			);
 		}
 		return [];
 	}
@@ -6913,6 +6978,7 @@ export class SessionManager {
 		effectiveGoalId?: string,
 		grantedTools?: string[],
 		sandboxed = false,
+		preparedRuntime?: PreparedScopedToolRuntime,
 	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
@@ -6923,18 +6989,18 @@ export class SessionManager {
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
-		const toolScope = scopedToolContext(projectId, cwd);
+		const runtime = preparedRuntime ?? this.prepareScopedToolRuntime(projectId, cwd);
+		const { toolManager, groupPolicyStore, toolScope, piExtensionActivation } = runtime;
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, toolManager, groupPolicyStore, disabledTools, toolScope)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
-		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
-		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
+		const activation = computeToolActivationArgs(filteredAllowed, toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
 
@@ -6944,16 +7010,16 @@ export class SessionManager {
 		// session-only approval should pre-populate the guard after restart. One-time
 		// approvals are intentionally not threaded into grantedTools; the guard lets
 		// only the blocked invocation continue based on the grant response mode.
-		const roleBaseTools = role && this.toolManager
-			? computeEffectiveAllowedTools(this.toolManager, role as import("./role-store.js").Role, this.groupPolicyStore, mcpManager ?? undefined, toolScope)
+		const roleBaseTools = role && toolManager
+			? computeEffectiveAllowedTools(toolManager, role as import("./role-store.js").Role, groupPolicyStore, mcpManager ?? undefined, toolScope)
 			: [];
 		const roleAllowed = new Set(roleBaseTools.map(t => t.name.toLowerCase()));
 		const derivedSessionGrants = (flatNames ?? []).filter(t => !roleAllowed.has(t.toLowerCase()));
 		const sessionGrants = this.mergeToolNames(derivedSessionGrants, grantedTools) ?? [];
 
 		// Tool guard extension for 'ask' policy tools
-		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
+		const guardPath = toolManager
+			? writeToolGuardExtension(sessionId, toolManager, mcpManager ?? undefined, role, groupPolicyStore, sessionGrants, disabledTools, toolScope)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -7074,13 +7140,15 @@ export class SessionManager {
 	}
 
 	/** Generate tool docs and inject into prompt parts before assembly. */
-	private assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
-		return profile("sessionManager.assemblePrompt", () => this._assemblePrompt(sessionId, parts));
+	private assemblePrompt(sessionId: string, parts: PromptParts, projectId?: string): string | undefined {
+		return profile("sessionManager.assemblePrompt", () => this._assemblePrompt(sessionId, parts, projectId));
 	}
 
-	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
-		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+	private _assemblePrompt(sessionId: string, parts: PromptParts, projectId?: string): string | undefined {
+		const effectiveProjectId = projectId ?? this.sessions.get(sessionId)?.projectId;
+		const promptToolManager = this.getToolManagerForProject(effectiveProjectId);
+		if (promptToolManager && !parts.toolDocs) {
+			parts.toolDocs = promptToolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), scopedToolContext(effectiveProjectId, parts.cwd));
 		}
 		// Skills catalog — progressive disclosure (level 1) for autonomous activation.
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
@@ -7249,8 +7317,10 @@ export class SessionManager {
 				sessionId: session.id,
 			});
 			parts.dynamicContext = session.promptParts?.dynamicContext;
-			if (this.toolManager && !parts.toolDocs) {
-				parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+			const delegateProjectId = session.projectId ?? persisted.projectId;
+			const delegateToolManager = this.getToolManagerForProject(delegateProjectId);
+			if (delegateToolManager && !parts.toolDocs) {
+				parts.toolDocs = delegateToolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), scopedToolContext(delegateProjectId, parts.cwd));
 			}
 			if (!parts.skillsCatalog) {
 				parts.skillsCatalog = this.computeSkillsCatalog(
@@ -7349,8 +7419,10 @@ export class SessionManager {
 			};
 		}
 
-		if (this.toolManager && !parts.toolDocs) {
-			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+		const promptProjectId = session.projectId ?? persisted?.projectId;
+		const sessionToolManager = this.getToolManagerForProject(promptProjectId);
+		if (sessionToolManager && !parts.toolDocs) {
+			parts.toolDocs = sessionToolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), scopedToolContext(promptProjectId, parts.cwd));
 		}
 		if (!parts.skillsCatalog) {
 			parts.skillsCatalog = this.computeSkillsCatalog(
@@ -11129,8 +11201,9 @@ export class SessionManager {
 			// Approving a group covers tools in that group only. Do not use the full
 			// effective role surface here: ask-gated tools are registered there so the
 			// model can attempt them, but they are not approved grants yet.
-			if (this.mcpManager) {
-				for (const info of this.mcpManager.getToolInfos()) {
+			const mcpManager = this.getMcpManagerForContext(session.projectId, session.cwd);
+			if (mcpManager) {
+				for (const info of mcpManager.getToolInfos()) {
 					if (info.group !== group) continue;
 					grantScopeTools.push(info.name);
 
@@ -11144,15 +11217,22 @@ export class SessionManager {
 					if (parsed) grantScopeTools.push(makeMetaToolName(parsed.server, parsed.sub));
 				}
 			}
-			if (this.toolManager) {
-				for (const tool of this.toolManager.getAvailableTools()) {
+			const toolManager = this.getToolManagerForProject(session.projectId);
+			if (toolManager) {
+				for (const tool of toolManager.getAvailableTools(scopedToolContext(session.projectId, session.cwd))) {
 					if (tool.group === group) grantScopeTools.push(tool.name);
 				}
 			}
 		} else {
 			grantScopeTools.push(toolName);
 		}
-		const approvedGrantTools = this.mergeToolNames(undefined, grantScopeTools.length > 0 ? grantScopeTools : [toolName]) ?? [toolName];
+		// A group approval is bounded by the group's currently registered members.
+		// If marketplace invalidation removed the group between request and approval,
+		// never reinterpret the stale request name as an individual grant or restart
+		// the runtime merely to install the already-current empty catalogue.
+		const approvedGrantTools = scope === "group"
+			? this.mergeToolNames(undefined, grantScopeTools) ?? []
+			: this.mergeToolNames(undefined, [toolName]) ?? [toolName];
 
 		if (permissionId && !session.pendingGrantRequest) {
 			throw new Error(`Ignored stale permission grant for ${toolName}; request is no longer pending.`);
@@ -11192,6 +11272,8 @@ export class SessionManager {
 			}
 		}
 
+		if (approvedGrantTools.length === 0) return session.allowedTools ?? [];
+
 		let resultTools: string[];
 
 		if (mode === "one-time") {
@@ -11211,23 +11293,50 @@ export class SessionManager {
 			resultTools = session.allowedTools;
 
 		} else {
-			// Persistent grant (default): update toolPolicies on role YAML when the
-			// role is locally writable. Pack roles are read-only through RoleManager,
-			// so keep the grant effective for this session without writing to the pack.
+			// Persistent grants must be written at the role winner's mutable config
+			// scope. A normal project never mutates the injected server RoleManager:
+			// server/builtin/global-user winners are copied into the project's user
+			// role pack, while immutable market-pack winners remain session-only.
 			const updatedPolicies = { ...role.toolPolicies };
 			for (const t of approvedGrantTools) {
 				updatedPolicies[t] = 'allow' as GrantPolicy;
 			}
-			const writableRole = this.roleManager.getRole(role.name);
 			let effectiveRole: Role = { ...role, toolPolicies: updatedPolicies };
-			if (writableRole) {
-				this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
-				effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+			let persistedGrant = false;
+			const configProjectId = normalizeConfigProjectId(session.projectId);
+			if (configProjectId) {
+				const projectRoleStore = this.projectContextManager?.getOrCreate(configProjectId)?.roleStore;
+				let resolvedEntry: ReturnType<NonNullable<typeof this.configCascade>["resolveRolesEntries"]>[number] | undefined;
+				if (projectRoleStore && this.configCascade) {
+					try {
+						resolvedEntry = this.configCascade.resolveRolesEntries(configProjectId).find(entry => entry.item.name === role.name);
+					} catch { /* fail closed to a session-only grant */ }
+				}
+				const immutableWinner = resolvedEntry?.origin.kind === "market"
+					|| (resolvedEntry?.origin.readOnly === true && resolvedEntry.origin.kind !== "builtin");
+				if (projectRoleStore && resolvedEntry && !immutableWinner) {
+					projectRoleStore.put({
+						...resolvedEntry.item,
+						toolPolicies: updatedPolicies,
+						updatedAt: Date.now(),
+					});
+					persistedGrant = true;
+					effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+				}
 			} else {
+				const writableRole = this.roleManager.getRole(role.name);
+				if (writableRole) {
+					persistedGrant = this.roleManager.updateRole(role.name, { toolPolicies: updatedPolicies });
+					if (persistedGrant) {
+						effectiveRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? effectiveRole;
+					}
+				}
+			}
+			if (!persistedGrant) {
 				session.sessionOnlyGrantedTools = this.mergeToolNames(session.sessionOnlyGrantedTools, approvedGrantTools);
 			}
-			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole).map(e => e.name);
-			session.allowedTools = this.mergeToolNames(updatedEffective, writableRole ? undefined : approvedGrantTools) ?? updatedEffective;
+			const updatedEffective = this.resolveEffectiveAllowedTools(effectiveRole, session.projectId, session.cwd).map(e => e.name);
+			session.allowedTools = this.mergeToolNames(updatedEffective, persistedGrant ? undefined : approvedGrantTools) ?? updatedEffective;
 			resultTools = session.allowedTools;
 		}
 
@@ -11437,7 +11546,9 @@ export class SessionManager {
 		// children, explicit createSession overrides, incl. an explicit empty `[]`).
 		// Preserve them exactly, with any live grants layered on top.
 		if (persistedAllowedTools) {
-			return this.mergeToolNames(persistedAllowedTools, sessionGrants);
+			// mergeToolNames treats two empty inputs as absent. Here the base is an
+			// explicit session constraint, so preserve [] when there are no grants.
+			return this.mergeToolNames(persistedAllowedTools, sessionGrants) ?? persistedAllowedTools;
 		}
 
 		// Normal sessions derive their tool surface from the current role/group/MCP
@@ -11445,7 +11556,7 @@ export class SessionManager {
 		// respawn; the old live session.allowedTools is just a stale cache.
 		if (!sessionGrants) return undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
-		const recomputedAllowed = this.resolveEffectiveAllowedTools(restoredRole).map(t => t.name);
+		const recomputedAllowed = this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd).map(t => t.name);
 		return this.mergeToolNames(recomputedAllowed, sessionGrants);
 	}
 
@@ -12638,7 +12749,6 @@ export class SessionManager {
 		if (preparedRestore.changed) await restoreStore.flushAsync();
 		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
-		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
 		// Restore env vars needed by extensions. The per-session capability
 		// secret (S1) is regenerated here on restore and handed to the
@@ -12773,16 +12883,16 @@ export class SessionManager {
 			const isTeamLead = ps.role === "team-lead";
 			if (isTeamLead) {
 				// Team leads need both: team tools + goal tools (tasks/gates)
-				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
+				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(ps.projectId), "--extension", this.getGoalToolsExtensionPath(ps.projectId)];
 			} else {
-				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
+				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath(ps.projectId)];
 			}
 		}
 
 		// Restore proposal tools extension for assistant sessions
 		if (ps.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
-			const proposalExtPath = this.getProposalToolsExtensionPath();
+			const proposalExtPath = this.getProposalToolsExtensionPath(ps.projectId);
 			if (!bridgeOptions.args.includes(proposalExtPath)) {
 				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
@@ -12800,11 +12910,15 @@ export class SessionManager {
 		const persistedAllowedTools = Array.isArray(ps.allowedTools) ? ps.allowedTools : undefined;
 		const hasExplicitAllowlist = overrideAllowedTools !== undefined || persistedAllowedTools !== undefined;
 		const restoredRole = this.resolveSessionRole(ps.role, ps.assistantType, ps.projectId);
+		// Cold restore must discover project Pi tools before tagging persisted names,
+		// computing role policy, or assembling prompt documentation.
+		const restoredToolRuntime = this.prepareScopedToolRuntime(ps.projectId, ps.cwd);
+		if (restoredToolRuntime.toolManager) bridgeOptions.toolManager = restoredToolRuntime.toolManager;
 		const effectiveAllowed: EffectiveTool[] = overrideAllowedTools
-			? tagAllowedTools(overrideAllowedTools, this.toolManager)
+			? tagAllowedTools(overrideAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
 			: persistedAllowedTools
-				? tagAllowedTools(persistedAllowedTools, this.toolManager)
-				: this.resolveEffectiveAllowedTools(restoredRole);
+				? tagAllowedTools(persistedAllowedTools, restoredToolRuntime.toolManager, restoredToolRuntime.toolScope)
+				: this.resolveEffectiveAllowedTools(restoredRole, ps.projectId, ps.cwd, restoredToolRuntime);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) from the
 		// restored allowlist so the prompt tool-docs + persisted allowedTools stay
 		// consistent with what buildToolActivationArgs actually activates.
@@ -12830,7 +12944,7 @@ export class SessionManager {
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed);
+		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools, restoredSandboxed, restoredToolRuntime);
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
@@ -12878,7 +12992,7 @@ export class SessionManager {
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
-			});
+			}, ps.projectId);
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else if (ps.delegateOf && !ps.goalId) {
 			// Delegate restore: rebuild the system prompt from durable instructions +
@@ -12899,7 +13013,7 @@ export class SessionManager {
 				projectId: ps.projectId,
 				goalId: ps.teamGoalId,
 				sessionId: ps.id,
-			}));
+			}), ps.projectId);
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		} else {
 			const goal = ps.goalId ? this.resolveGoal(ps.goalId) : undefined;
@@ -12928,7 +13042,7 @@ export class SessionManager {
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
 				sectionOrder: restoreSectionOrder,
-			});
+			}, ps.projectId);
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		}
 
@@ -13016,6 +13130,7 @@ export class SessionManager {
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
 			rpcClient,
+			runtimePiExtensions: bridgeOptions.piExtensions,
 			eventBuffer,
 			unsubscribe: () => {},
 			isCompacting: false,
@@ -13464,12 +13579,6 @@ export class SessionManager {
 				}
 			}
 		}
-		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
-			? tagAllowedTools(opts.allowedTools, this.toolManager)
-			: undefined;
-		const sessionScopedAllowedTools = opts?.allowedTools && opts.allowedTools.length > 0
-			? [...opts.allowedTools]
-			: undefined;
 		// Resolve projectId from opts or from the goal's project.
 		// Headquarters is a server/data workspace: ignore every worktree request at
 		// the lifecycle boundary so downstream setup never claims a pool, creates a
@@ -13483,6 +13592,12 @@ export class SessionManager {
 		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
 		await this.ensureMcpManagerForContext(projectId, cwd);
 		const ctx = this.buildPipelineContext(projectId, cwd);
+		const optsAllowedTagged: EffectiveTool[] | undefined = opts?.allowedTools
+			? tagAllowedTools(opts.allowedTools, ctx.toolManager ?? undefined, scopedToolContext(projectId, cwd))
+			: undefined;
+		const sessionScopedAllowedTools = opts?.allowedTools !== undefined
+			? [...opts.allowedTools]
+			: undefined;
 
 		// Spawn-path rolePrompt resolution. The orchestration spawn path
 		// (`host.agents.spawn` → OrchestrationCore.spawn → createSession) threads only
@@ -13964,7 +14079,7 @@ export class SessionManager {
 			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
-			? tagAllowedTools(sourceAllowedTools, this.toolManager)
+			? tagAllowedTools(sourceAllowedTools, ctx.toolManager ?? undefined, scopedToolContext(parentProjectId, opts.cwd))
 			: undefined;
 		// H2 — PERSIST the (already-stripped) allow-list so restart/revive preserves
 		// the recursion guard (spawn verbs removed) AND read-only restrictions
@@ -13973,7 +14088,7 @@ export class SessionManager {
 		// allowedTools is undefined and a restored child falls back to role defaults
 		// — silently re-enabling team_delegate/team_spawn (grandchildren) and the
 		// mutating tools a read-only child must never carry.
-		const sessionScopedAllowedTools = sourceAllowedTools && sourceAllowedTools.length > 0
+		const sessionScopedAllowedTools = sourceAllowedTools !== undefined
 			? [...sourceAllowedTools]
 			: undefined;
 		const directGatewayEnv = !delegateSandboxed
@@ -16132,12 +16247,15 @@ export class SessionManager {
 		// Look up the full role (with toolPolicies) cascade-first so pack-contributed
 		// roles keep their policies during role reassignment.
 		const fullRole = this.resolveSessionRole(role.name, undefined, replacementSession.projectId) ?? (role as Role);
+		// Cold role replacement must discover project Pi tools before policy and
+		// prompt docs. The same snapshot is reused when activation argv is built.
+		const replacementToolRuntime = this.prepareScopedToolRuntime(replacementSession.projectId, replacementSession.cwd);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
 		// session's effective goal so the reassembled prompt, the activation args,
 		// and the persisted allowedTools all agree after a role reassignment.
 		const respawnEffectiveGoalId = replacementSession.goalId ?? replacementSession.teamGoalId;
 		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, replacementSession.projectId);
-		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
+		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole, replacementSession.projectId, replacementSession.cwd, replacementToolRuntime);
 		const effectiveAllowed = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
@@ -16176,7 +16294,7 @@ export class SessionManager {
 		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
-		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
+		if (replacementToolRuntime.toolManager) bridgeOptions.toolManager = replacementToolRuntime.toolManager;
 		bridgeOptions.env = {
 			BOBBIT_SESSION_ID: id,
 			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
@@ -16186,16 +16304,16 @@ export class SessionManager {
 			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
 			const isTeamLead = replacementSession.role === "team-lead";
 			if (isTeamLead) {
-				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
+				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(replacementSession.projectId), "--extension", this.getGoalToolsExtensionPath(replacementSession.projectId)];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
-				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
+				bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath(replacementSession.projectId)];
 			}
 		}
 
 		// Re-attach proposal tools extension for assistant sessions
 		if (session.assistantType) {
 			bridgeOptions.args = bridgeOptions.args || [];
-			const proposalExtPath = this.getProposalToolsExtensionPath();
+			const proposalExtPath = this.getProposalToolsExtensionPath(replacementSession.projectId);
 			if (!bridgeOptions.args.includes(proposalExtPath)) {
 				bridgeOptions.args.push("--extension", proposalExtPath);
 			}
@@ -16205,7 +16323,7 @@ export class SessionManager {
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
 		await this.ensureMcpManagerForContext(replacementSession.projectId, replacementSession.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true);
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools, replacementSession.sandboxed === true, replacementToolRuntime);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -16331,6 +16449,7 @@ export class SessionManager {
 		const stagedSession = {
 			...replacementSession,
 			rpcClient,
+			runtimePiExtensions: bridgeOptions.piExtensions,
 			unsubscribe: unsub,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
@@ -16436,6 +16555,7 @@ export class SessionManager {
 
 		try { oldUnsubscribe(); } catch { /* stopped old bridge; listener cleanup is best-effort */ }
 		session.rpcClient = rpcClient;
+		session.runtimePiExtensions = bridgeOptions.piExtensions;
 		session.unsubscribe = unsub;
 		// Snapshot bases and cursor projections are bridge-specific. Clear both at
 		// the commit boundary so no response from the stopped bridge can be reused or
@@ -18977,7 +19097,10 @@ export class SessionManager {
 			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
-			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
+			// Prepare the cold replacement's scoped catalogue before any later
+			// allowlist/tag/guard calculation and reuse one Pi discovery snapshot.
+			const forceAbortToolRuntime = this.prepareScopedToolRuntime(session.projectId, session.cwd);
+			if (forceAbortToolRuntime.toolManager) bridgeOptions.toolManager = forceAbortToolRuntime.toolManager;
 			bridgeOptions.env = {
 				BOBBIT_SESSION_ID: id,
 				BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
@@ -19006,16 +19129,16 @@ export class SessionManager {
 				bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
 				const isTeamLead = session.role === "team-lead";
 				if (isTeamLead) {
-					bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
+					bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(session.projectId), "--extension", this.getGoalToolsExtensionPath(session.projectId)];
 				} else {
-					bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath()];
+					bridgeOptions.args = ["--extension", this.getGoalToolsExtensionPath(session.projectId)];
 				}
 			}
 
 			// Restore proposal tools extension for assistant sessions
 			if (session.assistantType) {
 				bridgeOptions.args = bridgeOptions.args || [];
-				const proposalExtPath = this.getProposalToolsExtensionPath();
+				const proposalExtPath = this.getProposalToolsExtensionPath(session.projectId);
 				if (!bridgeOptions.args.includes(proposalExtPath)) {
 					bridgeOptions.args.push("--extension", proposalExtPath);
 				}
@@ -19036,8 +19159,8 @@ export class SessionManager {
 			// persisted snapshot cannot re-grant a spent capability on replacement.
 			const forceAbortAllowedNames = session.allowedTools ?? forceAbortPersisted?.allowedTools;
 			const effective: EffectiveTool[] = Array.isArray(forceAbortAllowedNames)
-				? tagAllowedTools(forceAbortAllowedNames, this.toolManager)
-				: this.resolveEffectiveAllowedTools(role);
+				? tagAllowedTools(forceAbortAllowedNames, forceAbortToolRuntime.toolManager, forceAbortToolRuntime.toolScope)
+				: this.resolveEffectiveAllowedTools(role, session.projectId, session.cwd, forceAbortToolRuntime);
 			// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 			// distinction. A persisted `[]` means NO tools and MUST stay `[]` — never
 			// collapse it to `undefined`, which would re-grant every tool. Only a
@@ -19047,7 +19170,7 @@ export class SessionManager {
 				? effective
 				: (effective.length > 0 ? effective : undefined);
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true);
+			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools, session.sandboxed === true, forceAbortToolRuntime);
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
@@ -19161,7 +19284,6 @@ export class SessionManager {
 			}
 			// Preserve the pre-abort activity timestamp across any late replay.
 			suppressSessionActivityUntilPrompt(session);
-			switchingSession = false;
 
 			// Replay completed: remaining attempts have proven no correlated start.
 			// Coordinator release owns their one exact redispatch.
@@ -19172,30 +19294,62 @@ export class SessionManager {
 				throw new Error(`Session ${id} force-abort replacement was superseded after rehydration`);
 			}
 
-			// Swap in the new bridge only after history rehydration.
-			session.rpcClient = rpcClient;
-			session.unsubscribe = unsub;
-			session.spawnPinnedModel = bridgeOptions.initialModel;
-			session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-
+			// Model verification belongs to the candidate runtime. Keep its bridge and
+			// Pi schema snapshot off the canonical SessionInfo until every fallible
+			// verification and ownership check succeeds.
+			const candidateRuntimePiExtensions = bridgeOptions.piExtensions;
+			const stagedSession = {
+				...session,
+				rpcClient,
+				runtimePiExtensions: candidateRuntimePiExtensions,
+				unsubscribe: unsub,
+				spawnPinnedModel: bridgeOptions.initialModel,
+				spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
+				_deferVerifiedTupleCommit: true,
+				clients: new Set<WebSocket>(),
+			} as SessionInfo;
+			let verifiedReplacementTuple: VerifiedSessionModelTuple | undefined;
 			try {
-				await this.tryAutoSelectModel(session);
-				try {
-					await this.tryApplyDefaultThinkingLevel(session);
-				} catch (err) {
-					if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
+				verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession);
+				if (!verifiedReplacementTuple) {
+					try {
+						verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
+					} catch (err) {
+						if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
+						console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
+					}
 				}
 			} catch (err) {
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
-			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session || session.rpcClient !== rpcClient) {
+			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
 			}
+
+			// Publish bridge identity and its schema snapshot together only after the
+			// candidate is complete and still owns the replacement token.
+			session.rpcClient = rpcClient;
+			session.runtimePiExtensions = candidateRuntimePiExtensions;
+			session.unsubscribe = unsub;
+			session.spawnPinnedModel = verifiedReplacementTuple
+				? `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`
+				: bridgeOptions.initialModel;
+			session.spawnPinnedThinkingLevel = verifiedReplacementTuple?.thinkingLevel
+				?? bridgeOptions.initialThinkingLevel;
+			if (verifiedReplacementTuple) {
+				this.persistSessionModel(
+					id,
+					verifiedReplacementTuple.provider,
+					verifiedReplacementTuple.modelId,
+					verifiedReplacementTuple.thinkingLevel,
+				);
+				this._writeModelNameFile(id, `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`);
+			}
+			switchingSession = false;
 
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
