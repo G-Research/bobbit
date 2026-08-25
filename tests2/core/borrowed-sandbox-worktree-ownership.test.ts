@@ -150,6 +150,10 @@ async function persistedReloadFixture(borrowed: boolean): Promise<{
 	manager.projectContextManager = {
 		all: () => [],
 		getAllLiveSessions: () => store2.getLive(),
+		getOrCreate: () => ({
+			toolManager: manager.toolManager,
+			toolGroupPolicyStore: manager.groupPolicyStore,
+		}),
 	};
 	manager.getSessionStore = () => store2;
 	manager.resolveStoreForSession = () => store2;
@@ -223,6 +227,10 @@ async function sandboxLifecycleFixture(records: PersistedSession[]): Promise<{
 		all: () => [],
 		getAllSessions: () => store.getAll(),
 		getAllLiveSessions: () => store.getLive(),
+		getOrCreate: () => ({
+			toolManager: manager.toolManager,
+			toolGroupPolicyStore: manager.groupPolicyStore,
+		}),
 	};
 	manager.getSessionStore = () => store;
 	manager.resolveStoreForSession = () => store;

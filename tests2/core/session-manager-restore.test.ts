@@ -152,9 +152,39 @@ describe("restoreSession source guard", () => {
 		assert.match(roleWindow, /await this\.tryApplyDefaultThinkingLevel\(stagedSession\)/);
 
 		const forceStart = src.indexOf("const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);");
-		const forceWindow = src.slice(forceStart, forceStart + 8_000);
-		assert.match(forceWindow, /forceRespawnPersisted\?\.effectiveThinkingLevel/);
-		assert.match(forceWindow, /await this\.tryApplyDefaultThinkingLevel\(session\)/);
+		assert.ok(forceStart >= 0, "force-abort replacement setup not found");
+		const forceWindow = src.slice(forceStart, forceStart + 9_000);
+		const initThinkingIdx = forceWindow.indexOf("const initThinking = forceRespawnHasDurableTuple");
+		const durableThinkingIdx = forceWindow.indexOf("forceRespawnPersisted?.effectiveThinkingLevel,", initThinkingIdx);
+		const assignedInitialThinkingIdx = forceWindow.indexOf("bridgeOptions.initialThinkingLevel = initThinking", durableThinkingIdx);
+		const stagedSessionIdx = forceWindow.indexOf("const stagedSession = {", assignedInitialThinkingIdx);
+		const stagedThinkingIdx = forceWindow.indexOf("spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel", stagedSessionIdx);
+		const deferredTupleIdx = forceWindow.indexOf("_deferVerifiedTupleCommit: true", stagedThinkingIdx);
+		const verifyModelIdx = forceWindow.indexOf("verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession)", deferredTupleIdx);
+		const verifyThinkingIdx = forceWindow.indexOf("verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession)", verifyModelIdx);
+		const ownershipRecheckIdx = forceWindow.indexOf("if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {", verifyThinkingIdx);
+		const bridgeCommitIdx = forceWindow.indexOf("session.rpcClient = rpcClient", ownershipRecheckIdx);
+		const piSnapshotCommitIdx = forceWindow.indexOf("session.runtimePiExtensions = candidateRuntimePiExtensions", bridgeCommitIdx);
+		const persistTupleIdx = forceWindow.indexOf("this.persistSessionModel(", piSnapshotCommitIdx);
+		const persistedProviderIdx = forceWindow.indexOf("verifiedReplacementTuple.provider", persistTupleIdx);
+		const persistedModelIdx = forceWindow.indexOf("verifiedReplacementTuple.modelId", persistedProviderIdx);
+		const persistedThinkingIdx = forceWindow.indexOf("verifiedReplacementTuple.thinkingLevel", persistedModelIdx);
+
+		assert.ok(initThinkingIdx >= 0, "force-abort candidate thinking selection not found");
+		assert.ok(durableThinkingIdx > initThinkingIdx, "force-abort must use durable effective thinking when selecting candidate thinking");
+		assert.ok(assignedInitialThinkingIdx > durableThinkingIdx, "force-abort must stage selected thinking on bridge options");
+		assert.ok(stagedSessionIdx > assignedInitialThinkingIdx, "force-abort must build a staged candidate before model verification");
+		assert.ok(stagedThinkingIdx > stagedSessionIdx, "force-abort candidate must inherit the staged thinking selection");
+		assert.ok(deferredTupleIdx > stagedThinkingIdx, "candidate tuple persistence must remain deferred until verification");
+		assert.ok(verifyModelIdx > deferredTupleIdx, "force-abort must read back the model on the staged candidate");
+		assert.ok(verifyThinkingIdx > verifyModelIdx, "force-abort must verify default thinking on the staged candidate after model read-back");
+		assert.ok(ownershipRecheckIdx > verifyThinkingIdx, "force-abort must recheck ownership after candidate tuple verification");
+		assert.ok(bridgeCommitIdx > ownershipRecheckIdx, "force-abort must not publish the candidate bridge before ownership recheck");
+		assert.ok(piSnapshotCommitIdx > bridgeCommitIdx, "force-abort must commit the candidate Pi snapshot with the verified bridge");
+		assert.ok(persistTupleIdx > piSnapshotCommitIdx, "force-abort must persist the verified tuple only after publishing the owned candidate runtime");
+		assert.ok(persistedProviderIdx > persistTupleIdx, "force-abort must persist the verified provider");
+		assert.ok(persistedModelIdx > persistedProviderIdx, "force-abort must persist the verified model id");
+		assert.ok(persistedThinkingIdx > persistedModelIdx, "force-abort must persist verified effective thinking with the model tuple");
 
 		const delegateStart = src.indexOf("async createDelegateSession(parentSessionId: string");
 		const delegateWindow = src.slice(delegateStart, delegateStart + 12_000);

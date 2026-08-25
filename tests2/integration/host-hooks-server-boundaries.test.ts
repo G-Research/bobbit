@@ -1,9 +1,11 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import WebSocket from "ws";
+import { Type } from "@sinclair/typebox";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectContext } from "../../src/server/agent/project-context.js";
 import { broadcastStatus } from "../../src/server/agent/session-status.js";
+import type { PiExtensionExternalTool, ScopedToolContext } from "../../src/server/agent/tool-manager.js";
 import type { RegisteredProject } from "../../src/server/agent/project-registry.js";
 import { TaskManager } from "../../src/server/agent/task-manager.js";
 import {
@@ -151,13 +153,18 @@ async function waitForInboxCount(gw: GatewayFixture, staffId: string, count: num
 	}, `${count} inbox entries for ${staffId}`, 5_000);
 }
 
-async function refreshServerPackIndex(gw: GatewayFixture): Promise<void> {
-	const current = await gw.apiJson<{ order: string[] }>("/api/marketplace/pack-order?scope=server");
+async function refreshPackIndex(gw: GatewayFixture, scope: "server" | "project", projectId?: string): Promise<void> {
+	const projectQuery = projectId ? `&projectId=${encodeURIComponent(projectId)}` : "";
+	const current = await gw.apiJson<{ order: string[] }>(`/api/marketplace/pack-order?scope=${scope}${projectQuery}`);
 	const response = await gw.api("/api/marketplace/pack-order", {
 		method: "PUT",
-		body: JSON.stringify({ scope: "server", order: current.order }),
+		body: JSON.stringify({ scope, order: current.order, ...(projectId ? { projectId } : {}) }),
 	});
 	expect(response.status, await response.clone().text()).toBe(200);
+}
+
+async function refreshServerPackIndex(gw: GatewayFixture): Promise<void> {
+	await refreshPackIndex(gw, "server");
 }
 
 function writeSessionAuthorityPack(gw: GatewayFixture, packName: string) {
@@ -216,6 +223,82 @@ function writeInterceptorAuditPack(gw: GatewayFixture, packName: string): string
 	].join("\n") + "\n");
 	writeFileSync(path.join(packDir, "lib", "hooks.mjs"), "export default { projectImported: async () => { throw new Error('private worker failure sentinel'); } };\n");
 	return packDir;
+}
+
+function writeToolMutationPack(gw: GatewayFixture, packName: string): string {
+	const packDir = path.join(gw.bobbitDir, "config", "market-packs", packName);
+	mkdirSync(path.join(packDir, "hooks"), { recursive: true });
+	mkdirSync(path.join(packDir, "lib"), { recursive: true });
+	writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2", `name: ${packName}`, "description: Tool mutation validation fixture", "version: 1.0.0",
+		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  hooks: [tool-mutation]",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
+		"sourceUrl: integration", "sourceRef: local", "commit: test", `packName: ${packName}`, "version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "hooks", "tool-mutation.yaml"), [
+		"id: tool.mutation", "module: ../lib/hooks.mjs", "kind: interceptor",
+		"interceptors: [beforeToolCall, afterToolResult]", "failurePolicy: failClosed", "capabilities: []",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "lib", "hooks.mjs"), [
+		"export default {",
+		"  beforeToolCall: async (_ctx, input) => ({ action: 'replaceArgs', args: { approved: input.args?.forceInvalid ? 'invalid' : true } }),",
+		"  afterToolResult: async (_ctx, input) => {",
+		"    let result = { approved: input.result?.approved === true, replaced: true };",
+		"    if (input.result?.generateDeep === true) { result = 'leaf'; for (let depth = 0; depth < 9; depth++) result = { child: result }; }",
+		"    return { action: 'replaceResult', result };",
+		"  },",
+		"};",
+	].join("\n") + "\n");
+	return packDir;
+}
+
+function writePiToolPack(root: string, packName: string, scope: "server" | "project", toolName: string): string {
+	const packDir = path.join(root, scope === "server" ? "config" : ".bobbit/config", "market-packs", packName);
+	mkdirSync(path.join(packDir, "pi-extensions", "fixture"), { recursive: true });
+	writeFileSync(path.join(packDir, "pack.yaml"), [
+		"schema: 2", `name: ${packName}`, "description: Active runtime Pi snapshot fixture", "version: 1.0.0",
+		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  pi-extensions: [fixture]",
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
+		"sourceRef: local", "commit: test", `packName: ${packName}`, "version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", `scope: ${scope}`,
+	].join("\n") + "\n");
+	writeFileSync(path.join(packDir, "pi-extensions", "fixture", "index.mjs"), [
+		"export default function activate(pi) {",
+		"  pi.registerTool({",
+		`    name: ${JSON.stringify(toolName)},`,
+		"    description: 'Claim-bound active runtime fixture',",
+		"    parameters: { type: 'object', properties: { approved: { const: true } }, required: ['approved'], additionalProperties: false },",
+		"    execute: async () => ({ content: [{ type: 'text', text: 'ok' }] }),",
+		"  });",
+		"}",
+	].join("\n") + "\n");
+	return packDir;
+}
+
+function scopedPiTool(name: string, packName: string): PiExtensionExternalTool {
+	return {
+		name,
+		runtimeName: name,
+		description: `${name} scoped fixture`,
+		group: "Pi Extensions",
+		inputSchema: Type.Object({ approved: Type.Literal(true) }, { additionalProperties: false }),
+		providerKey: `pi-ext:fixture:${packName}:${name}`,
+		packName,
+		packId: `market:fixture:${packName}`,
+		listName: "fixture",
+		scope: "fixture",
+	};
+}
+
+function toolScope(projectId: string | undefined, cwd: string): ScopedToolContext {
+	return {
+		...(projectId ? { projectId } : {}),
+		cwd,
+		scopeKey: projectId ? `project:${projectId}` : `cwd:${path.resolve(cwd)}`,
+	};
 }
 
 describe("gateway-owned host hook boundaries", () => {
@@ -390,6 +473,240 @@ describe("real gateway notification authority", () => {
 			expect(JSON.stringify(diagnostic)).not.toContain("private worker failure sentinel");
 		} finally {
 			log.mockRestore();
+			rmSync(packDir, { recursive: true, force: true });
+			await refreshServerPackIndex(gw);
+		}
+	});
+
+	it("keeps a project Pi runtime schema snapshot claim-bound across marketplace invalidation and replacement", async () => {
+		const suffix = `${process.pid}-${Date.now()}`;
+		const hookPackName = `host-tool-runtime-${suffix}`;
+		const piPackName = `project-pi-runtime-${suffix}`;
+		const toolName = `project_runtime_pi_${Date.now()}`;
+		const hookPackDir = writeToolMutationPack(gw, hookPackName);
+		const projectContext = gw.projectContextManager.getOrCreate(gw.defaultProjectId);
+		const projectManager = projectContext.toolManager;
+		const serverManager = (gw.sessionManager as any).toolManager;
+		const cwd = projectContext.project.rootPath as string;
+		const projectScope = toolScope(gw.defaultProjectId, cwd);
+		const piPackDir = writePiToolPack(cwd, piPackName, "project", toolName);
+		const originalPiResolver = (gw.sessionManager as any).marketplacePiExtensionResolver;
+		let finalizeSpawnOptions: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			// Tier-1 forbids the discovery probe's child process. Preserve the production
+			// marketplace resolver and replace only this fixture's blocked probe result
+			// with the schema the on-disk extension declares.
+			gw.sessionManager.setMarketplacePiExtensionResolver((receivedScope: { projectId?: string; cwd?: string }, selectedManager?: any) => {
+				const rows = originalPiResolver(receivedScope, selectedManager);
+				const enabled = rows.some((row: any) => row.origin.packName === piPackName
+					&& row.diagnostic.status !== "disabled" && row.diagnostic.status !== "unresolved");
+				if (enabled) selectedManager?.registerScopedPiExtensionTools(
+					toolScope(receivedScope.projectId, receivedScope.cwd ?? cwd),
+					[scopedPiTool(toolName, piPackName)],
+				);
+				return rows.map((row: any) => row.origin.packName === piPackName && enabled
+					? { ...row, discovery: { ...row.discovery, status: "ok", tools: [{
+						name: toolName,
+						description: "Claim-bound active runtime fixture",
+						inputSchema: Type.Object({ approved: Type.Literal(true) }, { additionalProperties: false }),
+					}] } }
+					: row);
+			});
+			await refreshServerPackIndex(gw);
+			await refreshPackIndex(gw, "project", gw.defaultProjectId);
+			expect(projectManager).not.toBe(serverManager);
+			expect(serverManager.getToolByName(toolName, projectScope)).toBeUndefined();
+
+			const session = await scope.createSession({ cwd, sandboxed: false, worktree: false, allowedTools: [] });
+			await waitForIdle(gw, session.id);
+			const live = gw.sessionManager.getSession(session.id);
+			const runtimeSnapshot = live.runtimePiExtensions;
+			expect(runtimeSnapshot?.flatMap((extension: any) => extension.tools ?? [])).toContainEqual(expect.objectContaining({
+				name: toolName,
+				inputSchema: expect.objectContaining({ required: ["approved"], additionalProperties: false }),
+			}));
+			expect(projectManager.getToolByName(toolName, projectScope)).toBeDefined();
+			expect(serverManager.getToolByName(toolName, projectScope)).toBeUndefined();
+
+			const exactContext = {
+				projectId: gw.defaultProjectId,
+				sessionId: session.id,
+				cwd,
+				signal: new AbortController().signal,
+			};
+			const before = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "project-runtime-before",
+				toolName,
+				args: { approved: false },
+			}, exactContext);
+			expect(before.value.args).toEqual({ approved: true });
+			expect(before.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			const after = await gw.hostInterceptorRouter.dispatch("afterToolResult", {
+				toolCallId: "project-runtime-after",
+				toolName,
+				result: { approved: true },
+			}, exactContext);
+			expect(after.value.result).toEqual({ approved: true, replaced: true });
+			expect(after.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			const invalidProposal = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "project-runtime-invalid-schema",
+				toolName,
+				args: { forceInvalid: true },
+			}, exactContext);
+			expect(invalidProposal.terminal).toEqual({ action: "block", reasonCode: "not_permitted" });
+			expect(invalidProposal.decisions).toMatchObject([{ outcome: "failed-closed", valid: false, applied: false }]);
+
+			const registry = (gw.hostInterceptorRouter as any).options.registry;
+			const epochBefore = registry.getActivationEpoch();
+			const disabled = await gw.api("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({
+					scope: "project",
+					projectId: gw.defaultProjectId,
+					packName: piPackName,
+					disabled: { piExtensions: ["fixture"] },
+				}),
+			});
+			expect(disabled.status, await disabled.clone().text()).toBe(200);
+			expect(registry.getActivationEpoch()).toBeGreaterThan(epochBefore);
+			expect(projectManager.resolveScopedPiExtensionTools(projectScope)).toEqual([]);
+			expect(projectManager.getToolByName(toolName, projectScope)).toBeUndefined();
+			expect(projectManager.getToolByName(toolName)).toBeUndefined();
+			expect(serverManager.getToolByName(toolName, projectScope)).toBeUndefined();
+			expect(serverManager.getToolByName(toolName)).toBeUndefined();
+
+			const foreignRoot = path.join(path.dirname(gw.bobbitDir), `host-hooks-pi-foreign-${suffix}`);
+			tempRoots.push(foreignRoot);
+			mkdirSync(foreignRoot, { recursive: true });
+			const foreignProject = await gw.apiJson("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: `host-hooks-pi-foreign-${suffix}`, rootPath: foreignRoot }),
+			});
+			scope.trackProject(foreignProject.id);
+			const foreignManager = gw.projectContextManager.getOrCreate(foreignProject.id).toolManager;
+			expect(foreignManager.getToolByName(toolName, toolScope(foreignProject.id, foreignRoot))).toBeUndefined();
+
+			for (const [label, context] of [
+				["session", { ...exactContext, sessionId: `${session.id}-wrong` }],
+				["project", { ...exactContext, projectId: foreignProject.id }],
+				["cwd", { ...exactContext, cwd: path.join(cwd, "wrong-cwd") }],
+			] as const) {
+				const rejected = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+					toolCallId: `project-runtime-wrong-${label}`,
+					toolName,
+					args: {},
+				}, context);
+				expect(rejected.terminal, label).toEqual({ action: "block", reasonCode: "not_permitted" });
+				expect(rejected.decisions, label).toMatchObject([{ outcome: "failed-closed", valid: false, applied: false }]);
+			}
+
+			await gw.sessionManager.grantToolPermission(
+				session.id,
+				"removed_pi_permission_request",
+				"group",
+				"Pi Extensions",
+				"session-only",
+			);
+			expect(live.sessionOnlyGrantedTools ?? []).not.toContain(toolName);
+
+			// A failed staged role replacement must not overwrite the still-live runtime
+			// snapshot with its newly computed (now disabled) provider surface.
+			finalizeSpawnOptions = vi.spyOn(gw.sessionManager as any, "finalizeSpawnOptions")
+				.mockRejectedValueOnce(new Error("replacement fixture rejected"));
+			const failedReplacement = await gw.api(`/api/sessions/${encodeURIComponent(session.id)}`, {
+				method: "PATCH",
+				body: JSON.stringify({ roleId: "coder" }),
+			});
+			expect(failedReplacement.status).toBe(400);
+			finalizeSpawnOptions.mockRestore();
+			finalizeSpawnOptions = undefined;
+			expect(gw.sessionManager.getSession(session.id).runtimePiExtensions).toBe(runtimeSnapshot);
+			const afterFailedReplacement = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "project-runtime-after-failed-replacement",
+				toolName,
+				args: {},
+			}, exactContext);
+			expect(afterFailedReplacement.value.args).toEqual({ approved: true });
+			expect(afterFailedReplacement.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			const replacement = await gw.api(`/api/sessions/${encodeURIComponent(session.id)}`, {
+				method: "PATCH",
+				body: JSON.stringify({ roleId: "coder" }),
+			});
+			expect(replacement.status, await replacement.clone().text()).toBe(200);
+			expect(gw.sessionManager.getSession(session.id).runtimePiExtensions
+				?.flatMap((extension: any) => extension.tools ?? []).map((tool: any) => tool.name)).not.toContain(toolName);
+			const replacedRuntime = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "project-runtime-after-successful-replacement",
+				toolName,
+				args: {},
+			}, exactContext);
+			expect(replacedRuntime.terminal).toEqual({ action: "block", reasonCode: "not_permitted" });
+
+			const fresh = await scope.createSession({ cwd, sandboxed: false, worktree: false });
+			await waitForIdle(gw, fresh.id);
+			expect(gw.sessionManager.getSession(fresh.id).runtimePiExtensions
+				?.flatMap((extension: any) => extension.tools ?? []).map((tool: any) => tool.name)).not.toContain(toolName);
+			expect(projectManager.getToolByName(toolName, projectScope)).toBeUndefined();
+		} finally {
+			finalizeSpawnOptions?.mockRestore();
+			gw.sessionManager.setMarketplacePiExtensionResolver(originalPiResolver);
+			rmSync(piPackDir, { recursive: true, force: true });
+			await refreshPackIndex(gw, "project", gw.defaultProjectId);
+			rmSync(hookPackDir, { recursive: true, force: true });
+			await refreshServerPackIndex(gw);
+		}
+	});
+
+	it("uses the server-owned runtime snapshot for an active projectless claim", async () => {
+		const packName = `host-tool-projectless-${process.pid}-${Date.now()}`;
+		const packDir = writeToolMutationPack(gw, packName);
+		const serverManager = (gw.sessionManager as any).toolManager;
+		const cwd = path.join(path.dirname(gw.bobbitDir), `host-tool-projectless-cwd-${Date.now()}`);
+		const sessionId = `projectless-runtime-${Date.now()}`;
+		const toolName = `projectless_runtime_pi_${Date.now()}`;
+		const serverScope = toolScope(undefined, cwd);
+		mkdirSync(cwd, { recursive: true });
+		tempRoots.push(cwd);
+		try {
+			await refreshServerPackIndex(gw);
+			serverManager.setScopedPiExtensionTools(serverScope, [scopedPiTool(toolName, packName)]);
+			const runtimeExtensions = [{
+				listName: "fixture",
+				entryPath: path.join(packDir, "fixture.mjs"),
+				packRoot: packDir,
+				tools: [{ name: toolName, inputSchema: Type.Object({ approved: Type.Literal(true) }, { additionalProperties: false }) }],
+				origin: { scope: "server", packName, packId: `market:server:${packName}` },
+			}];
+			(gw.sessionManager as any).sessions.set(sessionId, { id: sessionId, cwd, projectId: undefined, runtimePiExtensions: runtimeExtensions });
+			serverManager.clearScopedPiExtensionTools(serverScope);
+			expect(serverManager.getToolByName(toolName, serverScope)).toBeUndefined();
+
+			const exact = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+				toolCallId: "projectless-runtime-exact",
+				toolName,
+				args: {},
+			}, { sessionId, cwd, signal: new AbortController().signal });
+			expect(exact.value.args).toEqual({ approved: true });
+			expect(exact.decisions).toMatchObject([{ outcome: "applied", valid: true, applied: true }]);
+
+			for (const context of [
+				{ sessionId: `${sessionId}-wrong`, cwd },
+				{ sessionId, cwd: path.join(cwd, "wrong") },
+				{ sessionId, cwd, projectId: gw.defaultProjectId },
+			]) {
+				const rejected = await gw.hostInterceptorRouter.dispatch("beforeToolCall", {
+					toolCallId: "projectless-runtime-wrong-claim",
+					toolName,
+					args: {},
+				}, { ...context, signal: new AbortController().signal });
+				expect(rejected.terminal).toEqual({ action: "block", reasonCode: "not_permitted" });
+			}
+		} finally {
+			(gw.sessionManager as any).sessions.delete(sessionId);
+			serverManager.clearScopedPiExtensionTools(serverScope);
 			rmSync(packDir, { recursive: true, force: true });
 			await refreshServerPackIndex(gw);
 		}

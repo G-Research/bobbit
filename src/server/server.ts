@@ -92,7 +92,7 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
-import { HostInterceptorRouter } from "./extension-host/host-interceptor-router.js";
+import { HostInterceptorRouter, type HostInterceptorContext } from "./extension-host/host-interceptor-router.js";
 import { hostInterceptorAuditSink } from "./extension-host/host-interceptor-audit.js";
 import {
 	HostNotificationDispatcher,
@@ -738,7 +738,7 @@ import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from 
 import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
-import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
+import { scopedToolContext, type MarketplacePiExtensionResolver, type ResolvedPiExtensionContribution, type PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
@@ -2833,7 +2833,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const configCascade = new ConfigCascade(builtinConfigProvider, {
 		getRoles: () => roleStore.getAllLocal(),
 		getTools: () => toolManager.getLocalTools(),
-		getToolGroupPolicies: () => groupPolicyStore.getAll(),
+		// ConfigCascade owns the builtin layer; expose only server overrides here.
+		getToolGroupPolicies: () => groupPolicyStore.getAllLocal(),
 	}, projectContextManager);
 	// Keep the cascade's first-party pack band aligned with the runtime tool loader
 	// (buildMarketToolRootsForProject below also resolves via config.builtinPacksDir).
@@ -2924,6 +2925,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// roots (server < global-user < project) — applied to existing + future ctxs.
 	projectContextManager.setContextConfigurator((ctx) => {
 		ctx.toolManager.setMarketToolRootsProvider(() => marketToolRoots(ctx.project.id));
+		// Keep the project store local-only. Builtin and server policies are
+		// composed at read time by ConfigCascade, preserving layer precedence.
+		ctx.toolGroupPolicyStore.setSubgoalsEnabledGetter(() => preferencesStore.get("subgoalsEnabled") === true);
 		// Goal-metadata lifecycle wiring: connect this project's GoalManager to the
 		// shared LifecycleHub `goalProvisioned` dispatcher so every worktree
 		// provisioning in the goal subtree fans out to extension providers with the
@@ -3053,10 +3057,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const source = marketplaceSourceStore.getByUrl(sourceUrl);
 		return typeof source?.trustedAt === "string" && source.trustedAt.trim().length > 0;
 	};
-	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope) => {
+	const marketplacePiExtensionResolver: MarketplacePiExtensionResolver = (scope, selectedToolManager) => {
 		const contributions: ResolvedPiExtensionContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
-		const scopedContext = piExtensionToolScopeContext(scope);
+		// Headquarters aliases server scope only when the selected manager is also
+		// the server manager. A project manager must retain the session's exact key.
+		const scopedContext = selectedToolManager === toolManager
+			? piExtensionToolScopeContext(scope)
+			: scopedToolContext(scope.projectId, scope.cwd);
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
 			const manifest = entry.manifest;
@@ -3117,7 +3125,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.warn(`[pi-extension] failed to load Marketplace pi extension contributions from ${entry.path}:`, (err as Error).message);
 			}
 		}
-		toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
+		// Discovery is part of session authorization: register names only into the
+		// exact manager that will compute this session's policy and guard surface.
+		selectedToolManager?.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
 		return contributions;
 	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
@@ -3884,14 +3894,29 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// verb registered). Mirrors SessionManager.resolveEffectiveAllowedTools.
 		resolveEffectiveTools: (sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
-			if (session?.allowedTools && session.allowedTools.length > 0) return session.allowedTools;
 			const ps = sessionManager.getPersistedSession(sessionId);
+			if (session?.allowedTools !== undefined) return session.allowedTools;
+			if (ps?.allowedTools !== undefined) return ps.allowedTools;
+			const projectId = session?.projectId ?? ps?.projectId;
+			const cwd = session?.cwd ?? ps?.cwd;
 			const roleName = session?.role ?? ps?.role
 				?? ((session?.assistantType ?? ps?.assistantType) ? "assistant" : "general");
-			const role = resolveRoleForProject(roleName, session?.projectId ?? ps?.projectId);
+			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
+			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+			const scopedToolManager = projectId ? projectContext?.toolManager : toolManager;
+			if (!scopedToolManager) return undefined;
+			const scopedGroupPolicyStore = projectId
+				? configCascade.createToolGroupPolicyProvider(projectId, groupPolicyStore)
+				: groupPolicyStore;
 			const mcpManager = sessionManager.getMcpManagerForSession(sessionId);
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
+			return computeEffectiveAllowedTools(
+				scopedToolManager,
+				role,
+				scopedGroupPolicyStore,
+				mcpManager ?? undefined,
+				scopedToolContext(projectId, cwd),
+			).map(e => e.name);
 		},
 		// Resolve a ROLE's effective tool grants for role-carrying spawns
 		// (orchestration-core Decision A.2 — FAIL CLOSED). Resolves pack-contributed
@@ -3900,11 +3925,23 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// falls back to roleManager so EVERY built-in role still resolves (backward
 		// compat: a role-carrying team_delegate spawn must not fail closed). Mirrors
 		// the resolveEffectiveTools grant pipeline above.
-		resolveRoleAllowedTools: (roleName: string, projectId?: string) => {
+		resolveRoleAllowedTools: (roleName: string, projectId?: string, cwd?: string) => {
 			const role = resolveRoleForProject(roleName, projectId);
 			if (!role) return undefined;
-			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId }) : null;
-			return computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager ?? undefined).map(e => e.name);
+			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+			const scopedToolManager = projectId ? projectContext?.toolManager : toolManager;
+			if (!scopedToolManager) return undefined;
+			const scopedGroupPolicyStore = projectId
+				? configCascade.createToolGroupPolicyProvider(projectId, groupPolicyStore)
+				: groupPolicyStore;
+			const mcpManager = projectId ? sessionManager.getMcpManager({ projectId, cwd }) : null;
+			return computeEffectiveAllowedTools(
+				scopedToolManager,
+				role,
+				scopedGroupPolicyStore,
+				mcpManager ?? undefined,
+				scopedToolContext(projectId, cwd),
+			).map(e => e.name);
 		},
 	});
 	sessionManager.setOrchestrationCore(orchestrationCore);
@@ -4294,10 +4331,30 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		});
 	};
 
-	const validateBoundedToolResult = (toolName: string, result: unknown): boolean => {
-		const knownTool = toolManager.resolveScopedPiExtensionTools().some(tool =>
-			(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
-		) || toolManager.getToolByName(toolName) !== undefined;
+	const resolveHostInterceptorToolScope = (context: HostInterceptorContext) => ({
+		toolManager: context.projectId !== undefined
+			? projectContextManager.getOrCreate(context.projectId)?.toolManager
+			: toolManager,
+		scopedContext: scopedToolContext(context.projectId, context.cwd),
+	});
+	const resolveActiveRuntimePiTool = (toolName: string, context: HostInterceptorContext) => {
+		if (!context.sessionId) return undefined;
+		const session = sessionManager.getSession(context.sessionId);
+		// The session id is claim-derived in production. Keep the scope equality
+		// explicit so a synthetic/direct router caller cannot borrow another runtime.
+		if (!session || session.projectId !== context.projectId || session.cwd !== context.cwd) return undefined;
+		const normalizedName = toolName.toLowerCase();
+		return session.runtimePiExtensions
+			?.flatMap(extension => extension.tools ?? [])
+			.find(tool => tool.name.toLowerCase() === normalizedName);
+	};
+	const validateBoundedToolResult = (toolName: string, result: unknown, context: HostInterceptorContext): boolean => {
+		const { toolManager: scopedToolManager, scopedContext } = resolveHostInterceptorToolScope(context);
+		const knownTool = resolveActiveRuntimePiTool(toolName, context) !== undefined
+			|| scopedToolManager?.resolveScopedPiExtensionTools(scopedContext).some(tool =>
+				(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
+			) === true
+			|| scopedToolManager?.getToolByName(toolName, scopedContext) !== undefined;
 		if (!knownTool) return false;
 		let nodes = 0;
 		const visit = (value: unknown, depth: number): boolean => {
@@ -4320,14 +4377,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		lifecycleHub: sessionManager.lifecycleHub,
 		createHostApi: ({ context, packId, contributionId, capabilities }) =>
 			createHookHostApi(context, packId, contributionId, capabilities),
-		validateToolArgs: (toolName, args) => {
+		validateToolArgs: (toolName, args, context) => {
 			try {
 				if (!args || typeof args !== "object" || Array.isArray(args)) return false;
-				const piTool = toolManager.resolveScopedPiExtensionTools().find(tool =>
+				const runtimePiTool = resolveActiveRuntimePiTool(toolName, context);
+				if (runtimePiTool) {
+					return runtimePiTool.inputSchema
+						? Value.Check(runtimePiTool.inputSchema as never, args)
+						: Object.keys(args).length === 0;
+				}
+				const { toolManager: scopedToolManager, scopedContext } = resolveHostInterceptorToolScope(context);
+				if (!scopedToolManager) return false;
+				const piTool = scopedToolManager.resolveScopedPiExtensionTools(scopedContext).find(tool =>
 					(tool.runtimeName ?? tool.name).toLowerCase() === toolName.toLowerCase(),
 				);
 				if (piTool?.inputSchema) return Value.Check(piTool.inputSchema as never, args);
-				const params = toolManager.getToolByName(toolName)?.params;
+				const params = scopedToolManager.getToolByName(toolName, scopedContext)?.params;
 				if (!params) return Object.keys(args).length === 0;
 				const allowed = new Set(params.map(param => param.replace(/\?$/, "")));
 				const required = params.filter(param => !param.endsWith("?")).map(param => param.replace(/\?$/, ""));
@@ -5923,7 +5988,20 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => {
+		invalidateMarketPackScanCache();
+		invalidateBuiltinPackScanCache();
+		invalidateSlashSkillsCache();
+		__resetToolScanCache();
+		const toolManagers = new Set([toolManager, ...Array.from(projectContextManager.all(), context => context.toolManager)]);
+		for (const scopedToolManager of toolManagers) scopedToolManager.clearScopedPiExtensionTools();
+		piExtensionDiscoveryCache.clear();
+		dispatcher.invalidate();
+		routeDispatcher.invalidate();
+		routeRegistry.invalidate();
+		packContributionRegistry.invalidate();
+		closeUnavailableExtensionChannels();
+	};
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -19524,10 +19602,17 @@ async function handleApiRoute(
 		const parts = sessionManager.getPromptParts(id);
 		if (!parts) { json({ error: "Session not found or no prompt data" }, 404); return; }
 
-		// Ensure tool docs are populated (they may have been injected at assemblePrompt time,
-		// but re-inject if missing to handle edge cases)
-		if (!parts.toolDocs && toolManager) {
-			parts.toolDocs = toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
+		// Ensure tool docs are populated from the same project scope as the session.
+		if (!parts.toolDocs) {
+			const liveSession = sessionManager.getSession(id);
+			const persistedSession = sessionManager.getPersistedSession(id);
+			const projectId = liveSession?.projectId ?? persistedSession?.projectId;
+			const cwd = liveSession?.cwd ?? persistedSession?.cwd;
+			const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+			const promptToolManager = projectId ? projectContext?.toolManager : toolManager;
+			if (promptToolManager) {
+				parts.toolDocs = promptToolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir(), scopedToolContext(projectId, cwd));
+			}
 		}
 
 		const sections = getPromptSections(parts);
@@ -20366,10 +20451,28 @@ async function handleApiRoute(
 			// after the meta-tool is granted wholesale.
 			if (toolStr.startsWith("mcp__")) {
 				const roleName = mcpSession?.role ?? (persistedSession as any)?.role;
-				const role = roleName ? resolveRoleForProject(roleName, mcpSession?.projectId ?? (persistedSession as any)?.projectId) : undefined;
+				const projectId = mcpSession?.projectId ?? (persistedSession as any)?.projectId;
+				const sessionCwd = mcpSession?.cwd ?? (persistedSession as any)?.cwd;
+				const role = roleName ? resolveRoleForProject(roleName, projectId) : undefined;
 				const parsed = parseMcpToolName(toolStr);
 				const opGroup = parsed?.server ? `MCP: ${parsed.server}` : undefined;
-				const policy = resolveGrantPolicy(toolStr, opGroup, role, toolManager, groupPolicyStore);
+				const projectContext = projectId ? projectContextManager.getOrCreate(projectId) : null;
+				const policyToolManager = projectId ? projectContext?.toolManager : toolManager;
+				const policyStore = projectId
+					? configCascade.createToolGroupPolicyProvider(projectId, groupPolicyStore)
+					: groupPolicyStore;
+				if (!policyToolManager) {
+					json({ error: `tool ${toolStr} denied: project tool scope unavailable`, tool: toolStr }, 403);
+					return;
+				}
+				const policy = resolveGrantPolicy(
+					toolStr,
+					opGroup,
+					role,
+					policyToolManager,
+					policyStore,
+					scopedToolContext(projectId, sessionCwd),
+				);
 				if (policy === "never") {
 					json({ error: `tool ${toolStr} denied by policy`, tool: toolStr, reason: "policy=never" }, 403);
 					return;

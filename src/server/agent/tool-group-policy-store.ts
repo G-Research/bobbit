@@ -47,8 +47,8 @@ export class ToolGroupPolicyStore {
 		this.builtinPolicies = { ...policies };
 	}
 
-	/** Read all group policies from disk. */
-	private getLocal(): Record<string, GrantPolicy> {
+	/** Read only this store's local overrides from disk (no builtin layer). */
+	getAllLocal(): Record<string, GrantPolicy> {
 		const filePath = this.policyFile;
 		const result: Record<string, GrantPolicy> = {};
 		try {
@@ -69,7 +69,7 @@ export class ToolGroupPolicyStore {
 
 	/** Read all group policies from disk, merged over builtin defaults. */
 	getAll(): Record<string, GrantPolicy> {
-		return { ...this.builtinPolicies, ...this.getLocal() };
+		return { ...this.builtinPolicies, ...this.getAllLocal() };
 	}
 
 	/** Get the default policy for a specific group. Returns null if not set. */
@@ -80,7 +80,7 @@ export class ToolGroupPolicyStore {
 
 	/** Set or clear the default policy for a group. Pass null to remove. */
 	setGroupPolicy(group: string, policy: GrantPolicy | null): void {
-		const all = this.getLocal();
+		const all = this.getAllLocal();
 		if (policy === null) {
 			delete all[group];
 		} else {
