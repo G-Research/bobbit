@@ -40,7 +40,7 @@
     },
     {
       "path": "tests2/core/uploaded-attachment-store.test.ts",
-      "reason": "Core coverage for immutable exact-byte attachment persistence, idempotent occurrence ownership, bounded ranges, authorization, validation, and purge.",
+      "reason": "Core coverage for immutable exact-byte persistence, cumulative session quota rebuild and idempotence, parallel admission and purge synchronization, bounded ranges, authorization, validation, and cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

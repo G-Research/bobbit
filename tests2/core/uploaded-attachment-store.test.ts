@@ -10,7 +10,11 @@ import {
 	persistUploadedAttachmentOccurrence,
 	purgeUploadedAttachments,
 	readUploadedAttachmentRange,
+	resetUploadedAttachmentUsageForTesting,
 	setUploadedAttachmentRootForTesting,
+	setUploadedAttachmentSessionQuotaForTesting,
+	setUploadedAttachmentStoreHooksForTesting,
+	sweepUploadedAttachments,
 } from "../../src/server/agent/uploaded-attachment-store.js";
 
 const SESSION_A = "11111111-1111-4111-8111-111111111111";
@@ -230,6 +234,126 @@ describe("immutable uploaded attachment store", () => {
 			...document("a", "../not-a-path", "application/octet-stream", Buffer.from("abc")),
 			unexpected: true,
 		}]), "UPLOADED_ATTACHMENT_INVALID");
+		expect(fs.readdirSync(root)).toEqual([]);
+	});
+
+	it("enforces a cumulative per-session quota without charging idempotent retries", async () => {
+		setUploadedAttachmentSessionQuotaForTesting(0);
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "quota-no-side-effect", [
+			document("blocked", "blocked.bin", "application/octet-stream", Buffer.from("x")),
+		]), "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED");
+		expect(fs.readdirSync(root)).toEqual([]);
+
+		setUploadedAttachmentSessionQuotaForTesting(10);
+		const sixBytes = document("six", "six.bin", "application/octet-stream", Buffer.from("123456"));
+		const first = await persistUploadedAttachmentOccurrence(SESSION_A, "quota-first", [sixBytes]);
+		expect(await persistUploadedAttachmentOccurrence(SESSION_A, "quota-first", [{ ...sixBytes }])).toEqual(first);
+		await persistUploadedAttachmentOccurrence(SESSION_A, "quota-second", [
+			document("four", "four.bin", "application/octet-stream", Buffer.from("7890")),
+		]);
+
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "quota-rejected", [
+			document("one", "one.bin", "application/octet-stream", Buffer.from("x")),
+		]), "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED");
+		const readable = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: first.attachments[0].pointer });
+		expect(Buffer.from(readable.data, "base64").toString()).toBe("123456");
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).some((entry) => entry.includes(".tmp-"))).toBe(false);
+	});
+
+	it("serializes parallel admissions so committed bytes cannot exceed the quota", async () => {
+		setUploadedAttachmentSessionQuotaForTesting(6);
+		let releaseCommit!: () => void;
+		let reachedCommit!: () => void;
+		const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
+		const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+		setUploadedAttachmentStoreHooksForTesting({
+			beforeCommit: async () => {
+				reachedCommit();
+				await commitGate;
+			},
+		});
+
+		const first = persistUploadedAttachmentOccurrence(SESSION_A, "parallel-a", [
+			document("a", "a.bin", "application/octet-stream", Buffer.from("aaaa")),
+		]);
+		await atCommit;
+		const second = persistUploadedAttachmentOccurrence(SESSION_A, "parallel-b", [
+			document("b", "b.bin", "application/octet-stream", Buffer.from("bbbb")),
+		]);
+		releaseCommit();
+		const outcomes = await Promise.allSettled([first, second]);
+		setUploadedAttachmentStoreHooksForTesting(undefined);
+
+		expect(outcomes[0].status).toBe("fulfilled");
+		expect(outcomes[1]).toMatchObject({
+			status: "rejected",
+			reason: { code: "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED", retryable: false },
+		});
+		const accepted = (outcomes[0] as PromiseFulfilledResult<Awaited<typeof first>>).value;
+		const range = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: accepted.attachments[0].pointer });
+		expect(Buffer.from(range.data, "base64").toString()).toBe("aaaa");
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).some((entry) => entry.includes("parallel-b") || entry.includes(".tmp-"))).toBe(false);
+	});
+
+	it("releases failed writes and removes temporary data without consuming quota", async () => {
+		setUploadedAttachmentSessionQuotaForTesting(4);
+		setUploadedAttachmentStoreHooksForTesting({ beforeCommit: () => { throw new Error("injected commit failure"); } });
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "failed", [
+			document("failed", "failed.bin", "application/octet-stream", Buffer.from("fail")),
+		]), "UPLOADED_ATTACHMENT_PERSISTENCE_FAILED");
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).some((entry) => entry.includes(".tmp-"))).toBe(false);
+
+		setUploadedAttachmentStoreHooksForTesting(undefined);
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "after-failure", [
+			document("saved", "saved.bin", "application/octet-stream", Buffer.from("pass")),
+		]);
+		const range = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer });
+		expect(Buffer.from(range.data, "base64").toString()).toBe("pass");
+	});
+
+	it("rebuilds quota accounting from committed manifests after restart", async () => {
+		setUploadedAttachmentSessionQuotaForTesting(6);
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "before-restart", [
+			document("six", "six.bin", "application/octet-stream", Buffer.from("123456")),
+		]);
+		resetUploadedAttachmentUsageForTesting();
+		setUploadedAttachmentSessionQuotaForTesting(5);
+		const swept = await sweepUploadedAttachments([SESSION_A]);
+		expect(swept).toMatchObject({ removed: [], kept: [expect.stringMatching(/^[a-f0-9]{64}$/)] });
+
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "after-restart", [
+			document("one", "one.bin", "application/octet-stream", Buffer.from("x")),
+		]), "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED");
+		const range = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer });
+		expect(Buffer.from(range.data, "base64").toString()).toBe("123456");
+	});
+
+	it("serializes purge with persistence and permanently fences recreation", async () => {
+		let releaseCommit!: () => void;
+		let reachedCommit!: () => void;
+		const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
+		const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+		setUploadedAttachmentStoreHooksForTesting({
+			beforeCommit: async () => {
+				reachedCommit();
+				await commitGate;
+			},
+		});
+		const persisting = persistUploadedAttachmentOccurrence(SESSION_A, "purge-race", [
+			document("a", "a.bin", "application/octet-stream", Buffer.from("durable")),
+		]);
+		await atCommit;
+		const purging = purgeUploadedAttachments(SESSION_A);
+		releaseCommit();
+		const saved = await persisting;
+		await purging;
+		setUploadedAttachmentStoreHooksForTesting(undefined);
+
+		expect(fs.readdirSync(root)).toEqual([]);
+		await expectCode(readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer }), "UPLOADED_ATTACHMENT_NOT_FOUND");
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "after-purge", [
+			document("b", "b.bin", "application/octet-stream", Buffer.from("new")),
+		]), "UPLOADED_ATTACHMENT_NOT_FOUND");
 		expect(fs.readdirSync(root)).toEqual([]);
 	});
 
