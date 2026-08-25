@@ -27,6 +27,8 @@ const {
 	findSkillSidecarEntry,
 	purgeSkillSidecar,
 	mergeSidecarEntriesIntoMessages,
+	projectPromptDisplayMessage,
+	projectPromptDisplayMessagesForSession,
 } = await import("../../src/server/skills/skill-sidecar.ts");
 
 initSkillSidecarDir(stateDir);
@@ -214,5 +216,94 @@ describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
 		const messages = [{ role: "user", content: "no match here" }];
 		const out = mergeSidecarEntriesIntoMessages([fileMentionSample], messages);
 		assert.equal(out, messages); // same reference — unchanged
+	});
+
+	it("restores safe attachment tiles without bytes and preserves image blocks and author", () => {
+		const image = { type: "image", data: "image-bytes", mimeType: "image/png" };
+		const author = { kind: "user", id: "user:local", label: "User" };
+		const envelope = {
+			ts: 1,
+			modelText: "typed\n\n<attachment-context>secret excerpt</attachment-context>",
+			originalText: "typed",
+			skillExpansions: [],
+			attachments: [{
+				id: "attachment:v1:one",
+				type: "document" as const,
+				fileName: "notes.unknown",
+				mimeType: "application/octet-stream",
+				size: 12,
+				preview: "aGk=",
+			}],
+		};
+		const input = {
+			role: "user",
+			content: [{ type: "text", text: envelope.modelText }, image],
+			author,
+		};
+		const out = projectPromptDisplayMessage(input, envelope);
+		assert.equal(out.role, "user-with-attachments");
+		assert.equal(out.content[0].text, "typed");
+		assert.equal(out.content[1], image);
+		assert.equal(out.author, author);
+		assert.deepEqual(out.attachments, envelope.attachments);
+		assert.ok(!("content" in out.attachments[0]));
+		assert.ok(!("extractedText" in out.attachments[0]));
+	});
+
+	it("uses proven occurrence identity instead of equal-text FIFO", () => {
+		const entries = [
+			{ ts: 2, modelText: "same", originalText: "second", skillExpansions: [], transcriptEntryId: "entry-2" },
+			{ ts: 1, modelText: "same", originalText: "first", skillExpansions: [], transcriptEntryId: "entry-1" },
+		];
+		const out = mergeSidecarEntriesIntoMessages(entries, [
+			{ role: "user", entryId: "entry-1", content: "same" },
+			{ role: "user", entryId: "entry-2", content: "same" },
+			{ role: "user", content: "same" },
+		]);
+		assert.equal(out[0].content, "first");
+		assert.equal(out[1].content, "second");
+		assert.equal(out[2].content, "same", "bound envelopes must not fall back to text association");
+	});
+
+	it("provides a reusable session projection for title and copy sources", () => {
+		const sid = "session-outward-helper";
+		appendSkillSidecarEntry(sid, {
+			ts: 1,
+			modelText: "typed\n\nprivate model context",
+			originalText: "typed",
+			skillExpansions: [],
+			attachments: [{
+				id: "attachment:v1:title",
+				type: "document",
+				fileName: "title.bin",
+				mimeType: "application/octet-stream",
+				size: 3,
+				content: "cmF3LWJ5dGVz",
+				extractedText: "model-only text",
+			} as any],
+		});
+		const projected: any[] = projectPromptDisplayMessagesForSession(sid, [
+			{ role: "user", content: "typed\n\nprivate model context" },
+		]);
+		assert.equal(projected[0].content, "typed");
+		assert.equal(projected[0].attachments[0].fileName, "title.bin");
+		assert.ok(!("content" in projected[0].attachments[0]));
+		assert.ok(!("extractedText" in projected[0].attachments[0]));
+	});
+
+	it("drops unsafe presentation metadata instead of exposing paths or bytes", () => {
+		const out = projectPromptDisplayMessage(
+			{ role: "user", content: "model" },
+			{
+				ts: 1, modelText: "model", originalText: "typed", skillExpansions: [],
+				attachments: [{
+					id: "ok", type: "document", fileName: "C:\\secret.txt",
+					mimeType: "text/plain", size: 1,
+					content: "c2VjcmV0", extractedText: "secret",
+				} as any],
+			},
+		);
+		assert.equal(out.content, "typed");
+		assert.ok(!("attachments" in out));
 	});
 });
