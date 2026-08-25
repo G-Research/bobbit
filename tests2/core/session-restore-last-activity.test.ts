@@ -28,9 +28,12 @@ class RestoreBridge {
 	steerResponse: any = { success: true };
 	steerError?: Error;
 	steerEvents: any[] = [];
+	steerCalls = 0;
 	promptResponse: any = { success: true };
 	promptError?: Error;
 	promptEvents?: any[];
+	promptTexts: string[] = [];
+	messages: any[] = [];
 
 	constructor(readonly id: string) {}
 
@@ -45,12 +48,13 @@ class RestoreBridge {
 	async waitForReady(): Promise<void> {}
 	async abort(): Promise<any> { return { success: true }; }
 	async steer(): Promise<any> {
+		this.steerCalls += 1;
 		for (const event of this.steerEvents) this.emit(event);
 		if (this.steerError) throw this.steerError;
 		return this.steerResponse;
 	}
 	async compact(): Promise<any> { return { success: true }; }
-	async getMessages(): Promise<any> { return { success: true, data: { messages: [] } }; }
+	async getMessages(): Promise<any> { return { success: true, data: { messages: this.messages } }; }
 	async getState(): Promise<any> { return { success: true, data: {} }; }
 	async setModel(): Promise<any> { return { success: true }; }
 	async setThinkingLevel(): Promise<any> { return { success: true }; }
@@ -69,6 +73,7 @@ class RestoreBridge {
 	}
 
 	async prompt(text: string): Promise<any> {
+		this.promptTexts.push(text);
 		const events = this.promptEvents ?? [
 			{ type: "agent_start" },
 			{ type: "message_end", message: { role: "user", content: text } },
@@ -148,7 +153,12 @@ async function flushMicrotasks(): Promise<void> {
 	for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 }
 
-function makeManager(store: SessionStore, bridges: Map<string, RestoreBridge>, now: () => number): any {
+function makeManager(
+	store: SessionStore,
+	bridges: Map<string, RestoreBridge>,
+	now: () => number,
+	restoredMessages: ReadonlyMap<string, any[]> = new Map(),
+): any {
 	const stateDir = (store as any).storeDir as string;
 	// isolate:false workers retain author-sidecar module state across files. Give
 	// this fixture the same keyed, durable prompt-attempt binding as production
@@ -161,6 +171,7 @@ function makeManager(store: SessionStore, bridges: Map<string, RestoreBridge>, n
 		const id = options.env?.BOBBIT_SESSION_ID;
 		if (!id) return null;
 		const bridge = new RestoreBridge(id);
+		bridge.messages = restoredMessages.get(id) ?? [];
 		bridges.set(id, bridge);
 		return bridge as any;
 	});
@@ -211,6 +222,201 @@ const REPLAY_VISIBLE_EVENTS = [
 	{ type: "tool_execution_end", toolName: "read" },
 	{ type: "agent_end" },
 ];
+
+const RESTORE_QUESTIONS = [
+	{ question: "Restore this exact ask?", options: ["yes", "no"] },
+];
+
+function postedAskMessages(id: string, legacy = false): any[] {
+	return [
+		{
+			id: `call-${id}`,
+			role: "assistant",
+			content: [legacy
+				? { type: "tool_use", id, name: "ask_user_choices", input: { questions: RESTORE_QUESTIONS } }
+				: { type: "toolCall", id, name: "ask_user_choices", arguments: { questions: RESTORE_QUESTIONS } }],
+		},
+		{
+			id: `posted-${id}`,
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "ask_user_choices",
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: id }) }],
+		},
+	];
+}
+
+function answerEnvelope(id: string): string {
+	return `[ask_user_choices_response tool_use_id=${id}]\n${JSON.stringify({
+		answers: [{ question: RESTORE_QUESTIONS[0]!.question, selected: "yes", other_text: null }],
+	})}`;
+}
+
+function failNextPrimaryRename(storeFile: string): any {
+	let fail = true;
+	const promises = new Proxy(fs.promises, {
+		get(target, property) {
+			if (property === "rename") {
+				return async (from: fs.PathLike, to: fs.PathLike) => {
+					if (fail && path.resolve(String(to)) === path.resolve(storeFile)) {
+						fail = false;
+						throw new Error("injected unanswered projection rename failure");
+					}
+					return target.rename(from, to);
+				};
+			}
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	return new Proxy(fs, {
+		get(target, property) {
+			if (property === "promises") return promises;
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
+describe("restore repairs durable unanswered-question projections", () => {
+	it("repairs stale false after a rejected live projection flush before publishing the restored session", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ask-projection-restore-failure-"));
+		roots.push(root);
+		const stateDir = path.join(root, "state");
+		const askId = "ask-restore-pending-exact";
+		const baseline = new SessionStore(stateDir);
+		const row = { ...makePersisted(root, "restore-stale-false-exact", 10_000, 11_000), hasUnansweredQuestion: false };
+		baseline.put(row);
+		await baseline.flushAsync();
+
+		const failingStore = new SessionStore(
+			stateDir,
+			failNextPrimaryRename(path.join(stateDir, "sessions.json")),
+		);
+		const liveManager = makeManager(failingStore, new Map(), () => 12_000);
+		liveManager.sessions.set(row.id, {
+			id: row.id,
+			rpcClient: { getMessages: async () => ({ success: true, data: { messages: postedAskMessages(askId) } }) },
+			promptQueue: { toArray: () => [] },
+			inFlightSteerTexts: [],
+		});
+		await expect(liveManager.recomputeHasUnansweredQuestion(row.id))
+			.rejects.toThrow("injected unanswered projection rename failure");
+
+		const restoreStore = new SessionStore(stateDir);
+		expect(restoreStore.get(row.id)?.hasUnansweredQuestion).toBe(false);
+		const bridges = new Map<string, RestoreBridge>();
+		const restoreManager = makeManager(
+			restoreStore,
+			bridges,
+			() => 13_000,
+			new Map([[row.id, postedAskMessages(askId)]]),
+		);
+		const projectionPublicationStates: boolean[] = [];
+		const update = restoreStore.update.bind(restoreStore);
+		restoreStore.update = ((id: string, patch: any) => {
+			if (id === row.id && "hasUnansweredQuestion" in patch) {
+				projectionPublicationStates.push(restoreManager.sessions.has(row.id));
+			}
+			update(id, patch);
+		}) as typeof restoreStore.update;
+
+		await restoreManager.restoreSession(restoreStore.get(row.id)!);
+		await restoreStore.flushAsync();
+
+		expect(projectionPublicationStates).toEqual([false]);
+		expect(restoreStore.get(row.id)?.hasUnansweredQuestion).toBe(true);
+		expect(new SessionStore(stateDir).get(row.id)?.hasUnansweredQuestion).toBe(true);
+		expect(restoreManager.listSessions().find((session: any) => session.id === row.id)?.hasUnansweredQuestion).toBe(true);
+		expect(bridges.get(row.id)?.promptTexts).toEqual([]);
+		expect(bridges.get(row.id)?.steerCalls).toBe(0);
+	});
+
+	it.each([
+		{
+			label: "canonical answer envelope",
+			rowId: "restore-stale-true-answered-exact",
+			askId: "ask-restore-answered-exact",
+			messages: (id: string) => [...postedAskMessages(id), { id: `answer-${id}`, role: "user", content: answerEnvelope(id) }],
+			dismissedAskToolUseIds: undefined,
+		},
+		{
+			label: "durable whole-card dismissal with a legacy imported call",
+			rowId: "restore-stale-true-dismissed-exact",
+			askId: "ask-restore-dismissed-exact",
+			messages: (id: string) => postedAskMessages(id, true),
+			dismissedAskToolUseIds: ["ask-restore-dismissed-exact"],
+		},
+		{
+			label: "accepted queued answer not yet echoed to the cloned transcript",
+			rowId: "restore-stale-true-queued-exact",
+			askId: "ask-restore-queued-exact",
+			messages: (id: string) => postedAskMessages(id, true),
+			dismissedAskToolUseIds: undefined,
+			messageQueue: [{
+				id: "queued-restore-answer-exact",
+				text: answerEnvelope("ask-restore-queued-exact"),
+				isSteered: false,
+				createdAt: 19_999,
+			}],
+		},
+	] as const)("repairs stale true from $label without dispatch", async (fixture) => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ask-projection-restore-terminal-"));
+		roots.push(root);
+		const stateDir = path.join(root, "state");
+		const store = new SessionStore(stateDir);
+		const messageQueue = "messageQueue" in fixture ? fixture.messageQueue : undefined;
+		const row = {
+			...makePersisted(root, fixture.rowId, 20_000, 21_000),
+			hasUnansweredQuestion: true,
+			...(fixture.dismissedAskToolUseIds ? { dismissedAskToolUseIds: [...fixture.dismissedAskToolUseIds] } : {}),
+			...(messageQueue ? { messageQueue: [...messageQueue] } : {}),
+		};
+		store.put(row);
+		await store.flushAsync();
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(
+			store,
+			bridges,
+			() => 22_000,
+			new Map([[row.id, fixture.messages(fixture.askId)]]),
+		);
+
+		await manager.restoreSession(row);
+		await store.flushAsync();
+
+		expect(store.get(row.id)?.hasUnansweredQuestion).toBe(false);
+		expect(manager.listSessions().find((session: any) => session.id === row.id)?.hasUnansweredQuestion).toBe(false);
+		expect(bridges.get(row.id)?.promptTexts).toEqual([]);
+		expect(bridges.get(row.id)?.steerCalls).toBe(0);
+		expect(store.get(row.id)?.dismissedAskToolUseIds).toEqual(fixture.dismissedAskToolUseIds);
+	});
+
+	it("projects a legacy cloned row with no boolean while preserving its exact ask ID", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ask-projection-restore-legacy-"));
+		roots.push(root);
+		const store = new SessionStore(path.join(root, "state"));
+		const askId = "ask-restore-legacy-clone-exact";
+		const row = makePersisted(root, "restore-legacy-clone-exact", 30_000, 31_000);
+		store.put(row);
+		await store.flushAsync();
+		const bridges = new Map<string, RestoreBridge>();
+		const manager = makeManager(
+			store,
+			bridges,
+			() => 32_000,
+			new Map([[row.id, postedAskMessages(askId, true)]]),
+		);
+
+		await manager.restoreSession(row);
+		await store.flushAsync();
+
+		expect(store.get(row.id)?.hasUnansweredQuestion).toBe(true);
+		expect(JSON.stringify(bridges.get(row.id)?.messages)).toContain(askId);
+		expect(bridges.get(row.id)?.promptTexts).toEqual([]);
+		expect(bridges.get(row.id)?.steerCalls).toBe(0);
+	});
+});
 
 describe("authoritative session activity attribution", () => {
 	it("classifies meaningful work but excludes restore/lifecycle, user projections, and retry frames", () => {

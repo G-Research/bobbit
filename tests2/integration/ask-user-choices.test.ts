@@ -286,6 +286,119 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 		}
 	});
 
+	for (const terminal of ["dismiss", "answer"] as const) {
+		test(`posted Ask B stays behind a stale Ask A ${terminal} projection`, async () => {
+			const sessionId = await createSession();
+			try {
+				const conn = await connectWs(sessionId);
+				try {
+					const askAId = await postAsk(conn);
+					// Drain A's fire-and-forget posted projection before arming the
+					// controlled terminal read, so the blocked snapshot belongs to A.
+					await gatewaySync().sessionManager.recomputeHasUnansweredQuestion(sessionId);
+					const session = gatewaySync().sessionManager.getSession(sessionId)!;
+					const rpcClient = session.rpcClient as any;
+					const originalGetMessages = rpcClient.getMessages.bind(rpcClient);
+					const originalPrompt = rpcClient.prompt.bind(rpcClient);
+					const originalPromptWhenReady = rpcClient.promptWhenReady?.bind(rpcClient);
+					const staleSnapshotEntered = deferred<void>();
+					const releaseStaleSnapshot = deferred<void>();
+					const projectionSnapshots: any[][] = [];
+					const dispatchedPrompts: string[] = [];
+					let terminalReads = 0;
+					let armed = false;
+
+					rpcClient.getMessages = async (...args: any[]) => {
+						const snapshot = await originalGetMessages(...args);
+						if (armed) {
+							terminalReads += 1;
+							const messages = snapshot.data?.messages || snapshot.data;
+							if (Array.isArray(messages)) projectionSnapshots.push(messages);
+							// The route validation is read one. Read two is the terminal
+							// whole-session projection captured before Ask B exists.
+							if (terminalReads === 2) {
+								staleSnapshotEntered.resolve();
+								await releaseStaleSnapshot.promise;
+							}
+						}
+						return snapshot;
+					};
+					rpcClient.prompt = async (text: string, ...args: any[]) => {
+						dispatchedPrompts.push(text);
+						return originalPrompt(text, ...args);
+					};
+					if (originalPromptWhenReady) {
+						rpcClient.promptWhenReady = async (text: string, ...args: any[]) => {
+							dispatchedPrompts.push(text);
+							return originalPromptWhenReady(text, ...args);
+						};
+					}
+
+					const answers = [
+						{ question: "Favorite color?", selected: "blue", other_text: null },
+						{ question: "Team size?", selected: "small", other_text: null },
+					];
+					armed = true;
+					const terminalResponse = terminal === "dismiss"
+						? postDismiss(sessionId, askAId)
+						: postSubmit(sessionId, askAId, answers);
+
+					try {
+						await staleSnapshotEntered.promise;
+						const askBId = await postAsk(conn);
+						expect(askBId).not.toBe(askAId);
+						releaseStaleSnapshot.resolve();
+						expect((await terminalResponse).status).toBe(200);
+
+						await expect.poll(() => terminalReads, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+						await expect.poll(
+							() => gatewaySync().sessionManager.getPersistedSession(sessionId)?.hasUnansweredQuestion,
+							{ timeout: 10_000 },
+						).toBe(true);
+						const sessionList = await apiFetch("/api/sessions");
+						const sessionRows = (await sessionList.json()).sessions;
+						expect(sessionRows.find((row: any) => row.id === sessionId)?.hasUnansweredQuestion).toBe(true);
+						expect(projectionSnapshots.some(snapshot => JSON.stringify(snapshot).includes(askBId))).toBe(true);
+
+						const transcript = await originalGetMessages();
+						const messages = transcript.data?.messages || transcript.data;
+						const askAEnvelopes = messages.filter((message: any) =>
+							messageText(message)?.startsWith(`[ask_user_choices_response tool_use_id=${askAId}]`)
+						);
+						expect(askAEnvelopes).toHaveLength(terminal === "answer" ? 1 : 0);
+						expect(messages.some((message: any) =>
+							messageText(message)?.startsWith(`[ask_user_choices_response tool_use_id=${askBId}]`)
+						)).toBe(false);
+						const askAEnvelopeDispatches = dispatchedPrompts.filter(text =>
+							text.startsWith(`[ask_user_choices_response tool_use_id=${askAId}]`)
+						);
+						expect(askAEnvelopeDispatches).toHaveLength(terminal === "answer" ? 1 : 0);
+						const dismissals = await getDismissals(sessionId).then(response => response.json());
+						expect(dismissals.dismissedToolUseIds).toEqual(terminal === "dismiss" ? [askAId] : []);
+
+						// A structurally valid but question-mismatched answer reaches B's
+						// cross-validation and returns 400, proving B is still actionable
+						// without resolving it or waking the agent.
+						const actionable = await postSubmit(sessionId, askBId, [
+							{ question: "Favorite color?", selected: "blue", other_text: null },
+						]);
+						expect(actionable.status).toBe(400);
+						expect(gatewaySync().sessionManager.getPersistedSession(sessionId)?.hasUnansweredQuestion).toBe(true);
+					} finally {
+						releaseStaleSnapshot.resolve();
+						rpcClient.getMessages = originalGetMessages;
+						rpcClient.prompt = originalPrompt;
+						if (originalPromptWhenReady) rpcClient.promptWhenReady = originalPromptWhenReady;
+					}
+				} finally {
+					conn.close();
+				}
+			} finally {
+				await deleteSession(sessionId);
+			}
+		});
+	}
+
 	for (const firstTerminal of ["answer", "dismiss"] as const) {
 		test(`cross-card ${firstTerminal}-first terminal snapshots converge durably`, async () => {
 			const sessionId = await createSession();
