@@ -57,11 +57,15 @@ function parseRawTranscript(file: string): any[] {
 		});
 }
 
-function rawPromptText(file: string, marker: string): string | undefined {
+function rawPrompt(file: string, marker: string): any | undefined {
 	return parseRawTranscript(file)
 		.filter(message => message?.role === "user" || message?.role === "user-with-attachments")
-		.map(messageText)
-		.find(text => text.includes(marker));
+		.find(message => messageText(message).includes(marker));
+}
+
+function rawPromptText(file: string, marker: string): string | undefined {
+	const message = rawPrompt(file, marker);
+	return message ? messageText(message) : undefined;
 }
 
 function countOccurrences(text: string, value: string): number {
@@ -239,6 +243,7 @@ test.describe.serial("message author prefix restart projection", () => {
 		const callerLabel = "Restart Relay";
 		const agentPrefix = `[${callerLabel} (${normalizeAgentId(callerId)})]: `;
 		const systemPrefix = "[System]: ";
+		const stableAgentMessageId = `message-author-agent-${nonce}`;
 		const stableSystemMessageId = `message-author-system-${nonce}`;
 		let conn: WsConnection | undefined;
 		let resumeConn: WsConnection | undefined;
@@ -260,6 +265,10 @@ test.describe.serial("message author prefix restart projection", () => {
 			const callerSecret = gateway.sessionManager?.sessionSecretStore?.getOrCreateSecret(callerId);
 			expect(callerSecret, "caller has a server-minted session secret").toBeTruthy();
 
+			// Keep the mock's live settlement identity identical to the durable Pi
+			// transcript identity. The old unowned adapter pinned only the system row,
+			// leaving the agent row dependent on a mock-only keyless fallback after restart.
+			restoreStableEcho = installStablePromptEcho(gateway, targetId, agentMarker, stableAgentMessageId);
 			conn = await connectWs(targetId);
 			const agentCursor = conn.messageCount();
 			const delivery = await apiFetch(`/api/sessions/${targetId}/prompt`, {
@@ -273,12 +282,15 @@ test.describe.serial("message author prefix restart projection", () => {
 				messageEndPredicate("user")(message)
 				&& messageText(message.data.message) === agentBaseText,
 			20_000);
+			expect(liveAgent.data.message.id).toBe(stableAgentMessageId);
 			expect(liveAgent.data.message.author).toEqual({
 				kind: "agent",
 				id: `session:${callerId}`,
 				label: callerLabel,
 			});
 			await waitForSessionStatus(targetId, "idle", 20_000);
+			restoreStableEcho();
+			restoreStableEcho = undefined;
 
 			restoreStableEcho = installStablePromptEcho(gateway, targetId, systemMarker, stableSystemMessageId);
 			const systemCursor = conn.messageCount();
@@ -310,6 +322,8 @@ test.describe.serial("message author prefix restart projection", () => {
 				`${agentPrefix}${agentBaseText}`,
 				`${systemPrefix}${systemBaseText}`,
 			]);
+			expect(rawPrompt(transcriptFile!, agentMarker)?.id).toBe(stableAgentMessageId);
+			expect(rawPrompt(transcriptFile!, systemMarker)?.id).toBe(stableSystemMessageId);
 			expect(countOccurrences(rawPromptText(transcriptFile!, agentMarker)!, agentPrefix)).toBe(1);
 			expect(countOccurrences(rawPromptText(transcriptFile!, systemMarker)!, systemPrefix)).toBe(2);
 
