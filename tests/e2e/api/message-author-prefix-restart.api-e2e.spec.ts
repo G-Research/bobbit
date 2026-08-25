@@ -131,6 +131,28 @@ async function searchLastRebuildAt(projectId: string): Promise<number | null> {
 	return typeof stats.lastRebuildAt === "number" ? stats.lastRebuildAt : null;
 }
 
+async function rebuildSearchAndWait(
+	projectId: string,
+	label: string,
+	timeoutMs: number,
+): Promise<void> {
+	const previousRebuildAt = await searchLastRebuildAt(projectId);
+	const rebuildStartedAt = Date.now();
+	const response = await apiFetch("/api/search/rebuild", {
+		method: "POST",
+		body: JSON.stringify({ projectId }),
+	});
+	expect(response.status, await response.clone().text()).toBe(202);
+	await pollUntil(async () => {
+		const rebuiltAt = await searchLastRebuildAt(projectId);
+		return rebuiltAt !== null
+			&& rebuiltAt >= rebuildStartedAt
+			&& (previousRebuildAt === null || rebuiltAt > previousRebuildAt)
+			? rebuiltAt
+			: null;
+	}, { timeoutMs, intervalMs: 150, label });
+}
+
 function stripHighlightMarkup(snippet: string): string {
 	return snippet.replace(/<\/?b>/g, "");
 }
@@ -223,16 +245,7 @@ test.describe.serial("message author prefix restart projection", () => {
 		// Activate the lazy SearchService and let its empty-index rebuild settle
 		// before the mock's live-only messages begin so this projection test cannot
 		// race a rebuild that read the mock transcript before get_state flushed it.
-		const initialRebuildStartedAt = Date.now();
-		const initialRebuild = await apiFetch("/api/search/rebuild", {
-			method: "POST",
-			body: JSON.stringify({ projectId: project.id }),
-		});
-		expect(initialRebuild.status, await initialRebuild.clone().text()).toBe(202);
-		await pollUntil(async () => {
-			const rebuiltAt = await searchLastRebuildAt(project.id);
-			return rebuiltAt !== null && rebuiltAt >= initialRebuildStartedAt ? rebuiltAt : null;
-		}, { timeoutMs: 20_000, intervalMs: 150, label: "initial search rebuild completion" });
+		await rebuildSearchAndWait(project.id, "initial search rebuild completion", 20_000);
 		const callerId = await createSession({ projectId: project.id });
 		const targetId = await createSession({ projectId: project.id });
 		const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -348,6 +361,11 @@ test.describe.serial("message author prefix restart projection", () => {
 			expect(rawSidecar).not.toContain(agentBaseText);
 			expect(rawSidecar).not.toContain(systemBaseText);
 
+			// get_state above durably flushed the transcript after both sidecar rows.
+			// Rebuild from that boundary before the first search assertion so no
+			// delayed incremental/rebuild work can observe an earlier transcript.
+			await rebuildSearchAndWait(project.id, "persisted prompt search rebuild completion", 30_000);
+
 			await expectVisibleProjections(
 				targetId,
 				conn,
@@ -414,21 +432,7 @@ test.describe.serial("message author prefix restart projection", () => {
 			expect(countOccurrences(rawPromptText(restartedTranscript, agentMarker)!, agentPrefix)).toBe(1);
 			expect(countOccurrences(rawPromptText(restartedTranscript, systemMarker)!, systemPrefix)).toBe(2);
 
-			const previousRebuildAt = await searchLastRebuildAt(project.id);
-			const rebuildStartedAt = Date.now();
-			const rebuild = await apiFetch("/api/search/rebuild", {
-				method: "POST",
-				body: JSON.stringify({ projectId: project.id }),
-			});
-			expect(rebuild.status, await rebuild.clone().text()).toBe(202);
-			await pollUntil(async () => {
-				const rebuiltAt = await searchLastRebuildAt(project.id);
-				return rebuiltAt !== null
-					&& rebuiltAt >= rebuildStartedAt
-					&& (previousRebuildAt === null || rebuiltAt > previousRebuildAt)
-					? rebuiltAt
-					: null;
-			}, { timeoutMs: 30_000, intervalMs: 150, label: "post-restart search rebuild completion" });
+			await rebuildSearchAndWait(project.id, "post-restart search rebuild completion", 30_000);
 			await expectSearchProjections(project.id, targetId, agentMarker, agentPrefix, systemMarker);
 		} finally {
 			restoreStableEcho?.();
