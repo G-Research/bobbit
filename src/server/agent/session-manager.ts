@@ -84,6 +84,7 @@ import {
 } from "../skills/skill-sidecar.js";
 import {
 	sanitizeAttachmentDisplayMetadata,
+	validateUploadedPromptAttachments,
 	type AttachmentDisplayMetadata,
 } from "./attachment-display.js";
 import { appendUploadedAttachmentContext } from "../../shared/uploaded-attachment-context.js";
@@ -586,6 +587,8 @@ export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedr
  */
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS = 3;
+/** Process-local proof that recursive admission is reusing an already validated snapshot. */
+const UPLOADED_ATTACHMENTS_ADMITTED = Symbol("uploaded-attachments-admitted");
 
 /** Pi/runtime cancellation has a small, stable terminal vocabulary. Keep this
  * whole-message matcher separate from provider retry classification: a provider
@@ -7783,40 +7786,37 @@ export class SessionManager {
 		modelText?: string;
 		intentId?: string;
 	}>(sessionId: string, text: string, opts: T | undefined): Promise<T | undefined> {
-		if (!opts?.attachments?.length) return opts;
-
-		let displayAttachments = sanitizeAttachmentDisplayMetadata(opts.attachments);
-		if (!displayAttachments) {
+		if (!opts) return opts;
+		const validated = validateUploadedPromptAttachments(opts.images, opts.attachments);
+		if (!validated) {
 			throw new UploadedAttachmentStoreError(
 				400,
 				"UPLOADED_ATTACHMENT_INVALID",
-				"Uploaded attachment presentation metadata is invalid",
+				"Uploaded attachment data is invalid",
 			);
 		}
-		const documents = opts.attachments.filter((candidate) =>
-			!!candidate && typeof candidate === "object" && !Array.isArray(candidate)
-				&& (candidate as { type?: unknown }).type === "document");
+
+		let displayAttachments = validated.attachments;
 		const occurrenceId = opts.intentId ?? randomUUID();
 		let contextAttachments: unknown[] = [];
-		if (documents.length > 0) {
-			const stored = await persistUploadedAttachmentOccurrence(sessionId, occurrenceId, documents);
+		if (validated.documents.length > 0) {
+			const stored = await persistUploadedAttachmentOccurrence(sessionId, occurrenceId, validated.documents);
 			contextAttachments = stored.attachments.map(({ trustedExtractedText, ...attachment }) => ({
 				type: "document",
 				...attachment,
 				...(trustedExtractedText === undefined ? {} : { extractedText: trustedExtractedText }),
 			}));
 			// Only store-admitted document previews may cross the later durable
-			// display-envelope boundary. Images retain their existing presentation
-			// path and are not duplicated into the immutable document store.
+			// display-envelope boundary. Pi transcript image blocks own image bytes.
 			let documentIndex = 0;
-			displayAttachments = displayAttachments.map((attachment) => attachment.type === "document"
+			displayAttachments = displayAttachments?.map((attachment) => attachment.type === "document"
 				? stored.displayAttachments[documentIndex++]!
 				: attachment);
 		}
 
 		const baseModelText = synthesizeAttachmentText(
 			opts.modelText ?? text,
-			opts.images,
+			validated.images,
 			displayAttachments,
 		);
 		let attachmentModelText = appendUploadedAttachmentContext(baseModelText, contextAttachments);
@@ -7837,12 +7837,15 @@ export class SessionManager {
 				attachmentModelText = attachmentModelText.replaceAll(alias, pointer);
 			}
 		}
-		return {
+		const admitted = {
 			...opts,
 			intentId: occurrenceId,
+			images: validated.images,
 			attachments: displayAttachments,
 			modelText: attachmentModelText,
-		};
+		} as T;
+		Object.defineProperty(admitted, UPLOADED_ATTACHMENTS_ADMITTED, { value: true });
+		return admitted;
 	}
 
 	private appendPromptDisplayEnvelope(
@@ -8188,16 +8191,18 @@ export class SessionManager {
 		// ownership can mutate. It also mints the accepted occurrence used by the
 		// immutable pointer when a legacy caller did not supply one. Trusted internal
 		// producers retain their established metadata-only attachment contract.
-		if ((opts?.attachments?.length || opts?.images?.length) && (opts.source ?? "user") === "user") {
+		if ((opts?.attachments !== undefined || opts?.images !== undefined)
+			&& (opts.source ?? "user") === "user"
+			&& !(opts as Record<PropertyKey, unknown>)[UPLOADED_ATTACHMENTS_ADMITTED]) {
+			// Measure the original browser frame before replacing it with safe display
+			// metadata, then validate every byte-bearing input before any admission state.
 			assertUploadedAttachmentSerializedSendWithinLimit({
 				text,
 				intentId: opts.intentId,
-				images: opts.images,
-				attachments: opts.attachments ?? [],
+				images: Array.isArray(opts.images) ? opts.images : undefined,
+				attachments: Array.isArray(opts.attachments) ? opts.attachments : [],
 				suppressTitleGen: opts.suppressTitleGen,
 			}, this.uploadedAttachmentSerializedSendLimitBytes);
-		}
-		if (opts?.attachments?.length && (opts.source ?? "user") === "user") {
 			opts = await this.admitUploadedAttachments(sessionId, text, opts);
 		}
 

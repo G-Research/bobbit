@@ -161,6 +161,49 @@ describe("skill-sidecar", () => {
 		assert.equal(entries[0].fileMentions, undefined);
 		assert.equal(entries[0].skillExpansions.length, 1);
 	});
+
+	it("persists repeated large images as metadata only while retaining document previews", () => {
+		const sid = "session-metadata-only-images";
+		const imageBytes = Buffer.alloc(1024 * 1024, 0x5a);
+		const imagePreview = imageBytes.toString("base64");
+		const documentPreview = Buffer.from("document preview").toString("base64");
+		assert.equal(appendSkillSidecarEntry(sid, {
+			ts: 1,
+			modelText: "model",
+			originalText: "typed",
+			skillExpansions: [],
+			attachments: [
+				{ id: "image", type: "image", fileName: "photo.png", mimeType: "image/png", size: imageBytes.length, preview: imagePreview },
+				{ id: "document", type: "document", fileName: "page.pdf", mimeType: "application/pdf", size: 16, preview: documentPreview },
+			],
+		}), true);
+		for (let index = 0; index < 2; index++) {
+			assert.equal(appendSkillSidecarEntry(sid, {
+				ts: index + 2,
+				modelText: `model-${index}`,
+				originalText: `typed-${index}`,
+				skillExpansions: [],
+				attachments: [{
+					id: `image-${index}`,
+					type: "image",
+					fileName: `photo-${index}.png`,
+					mimeType: "image/png",
+					size: imageBytes.length,
+					preview: imagePreview,
+				}],
+			}), true);
+		}
+
+		const [entry] = readSkillSidecarEntries(sid);
+		assert.deepEqual(entry.attachments, [
+			{ id: "image", type: "image", fileName: "photo.png", mimeType: "image/png", size: imageBytes.length },
+			{ id: "document", type: "document", fileName: "page.pdf", mimeType: "application/pdf", size: 16, preview: documentPreview },
+		]);
+		const raw = fs.readFileSync(path.join(stateDir, "skill-sidecar", `${sid}.jsonl`), "utf8");
+		assert.equal(raw.includes(imagePreview), false);
+		assert.equal(raw.includes(documentPreview), true);
+		assert.ok(Buffer.byteLength(raw, "utf8") < 2_000, "large image bytes must not accumulate in the sidecar");
+	});
 });
 
 describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
@@ -248,6 +291,38 @@ describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
 		assert.deepEqual(out.attachments, envelope.attachments);
 		assert.ok(!("content" in out.attachments[0]));
 		assert.ok(!("extractedText" in out.attachments[0]));
+	});
+
+	it("hydrates metadata-only image tiles from Pi blocks while preserving mixed attachment order", () => {
+		const first = Buffer.from("first image").toString("base64");
+		const second = Buffer.from("second image").toString("base64");
+		const attachments = [
+			{ id: "doc-a", type: "document" as const, fileName: "a.bin", mimeType: "application/octet-stream", size: 1 },
+			{ id: "image-a", type: "image" as const, fileName: "original-a.png", mimeType: "image/png", size: 11 },
+			{ id: "doc-b", type: "document" as const, fileName: "b.bin", mimeType: "application/octet-stream", size: 1 },
+			{ id: "image-b", type: "image" as const, fileName: "original-b.webp", mimeType: "image/webp", size: 12 },
+		];
+		const out = projectPromptDisplayMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "model" },
+				{ type: "image", data: first, mimeType: "image/png" },
+				{ type: "image", data: second, mimeType: "image/webp" },
+			],
+		}, {
+			ts: 1, modelText: "model", originalText: "typed", skillExpansions: [], attachments,
+		});
+
+		assert.equal(out.role, "user-with-attachments");
+		assert.deepEqual(out.attachments, [
+			attachments[0],
+			{ ...attachments[1], preview: first },
+			attachments[2],
+			{ ...attachments[3], preview: second },
+		]);
+		assert.deepEqual(out.attachments.map((attachment: any) => attachment.fileName), [
+			"a.bin", "original-a.png", "b.bin", "original-b.webp",
+		]);
 	});
 
 	it("uses proven occurrence identity instead of equal-text FIFO", () => {

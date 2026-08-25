@@ -26,6 +26,7 @@ import { isPiTranscriptEntryId } from "../../shared/message-author.js";
 import type { SkillExpansion } from "./resolve-skill-expansions.js";
 import type { FileMention } from "./resolve-file-mentions.js";
 import {
+	hydrateAttachmentDisplayImages,
 	sanitizeAttachmentDisplayMetadata,
 	type AttachmentDisplayMetadata,
 } from "../agent/attachment-display.js";
@@ -297,7 +298,10 @@ export function findSkillSidecarEntry(
 
 /** Project one model-facing prompt into its outward-only display form. */
 export function projectPromptDisplayMessage(msg: any, envelope: SkillSidecarEntry): any {
-	const attachments = sanitizeAttachmentDisplayMetadata(envelope.attachments);
+	const sanitizedAttachments = sanitizeAttachmentDisplayMetadata(envelope.attachments);
+	const attachments = sanitizedAttachments
+		? hydrateAttachmentDisplayImages(sanitizedAttachments, msg?.content)
+		: undefined;
 	let newContent: any;
 	if (typeof msg.content === "string") {
 		newContent = envelope.originalText;
