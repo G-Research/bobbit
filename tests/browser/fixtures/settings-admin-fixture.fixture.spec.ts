@@ -166,12 +166,6 @@ function visibleWorktreeRows(page: Page): Locator {
 	return page.locator('[data-testid="worktree-cleanup-row"]:visible');
 }
 
-async function clickWorktreeRowCheckbox(page: Page, id: string): Promise<void> {
-	const row = page.locator(`[data-testid="worktree-cleanup-row"][data-worktree-id="${id}"]`).first();
-	await expect(row).toBeVisible();
-	await row.locator('input[type="checkbox"]').click();
-}
-
 test.describe("Settings/admin UI fixture", () => {
 	test.beforeEach(async ({ page }) => {
 		await loadFixture(page);
