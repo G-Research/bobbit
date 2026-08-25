@@ -217,6 +217,11 @@ test.describe("Journey: Transcript history navigation", () => {
 			await expect(unansweredButton(page)).toHaveCount(0, { timeout: 20_000 });
 			await waitForSessionStatus(sessionId, "idle");
 
+			// Answering collapses the question card and can leave no prompt fully
+			// above the viewport, which intentionally hides the navigation shell.
+			// Return to the tail through the visible control before reopening history.
+			await page.getByTestId("jump-to-bottom").click();
+			await expect(historyButton(page)).toHaveAttribute("tabindex", "0");
 			await openHistory(page);
 			await dialog(page).getByRole("button", { name: "Questions", exact: true }).click();
 			await expect(dialog(page).locator('.transcript-history-question-status[data-status="answered"]')).toHaveText("Answered");
