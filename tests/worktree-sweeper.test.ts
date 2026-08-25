@@ -187,6 +187,16 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 	}
 
+	function nativePathIdentity(input: string): string {
+		let resolved = path.resolve(input);
+		try {
+			resolved = fs.realpathSync.native(resolved);
+		} catch {
+			// Missing paths have no native filesystem identity; compare lexically.
+		}
+		return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+	}
+
 	it("preserves archived-owned orphan worktrees and durable archived branches", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sweeper-archived-branch-"));
 		const repo = path.join(tmp, "repo");
@@ -211,7 +221,14 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 			assert.equal(result.cleaned, 0);
 			assert.equal(result.repaired, 0);
 			assert.equal(fs.existsSync(wt), true, "archived worktree must remain");
-			assert.equal(git(repo, ["worktree", "list", "--porcelain"]).replaceAll("\\", "/").includes(wt.replaceAll("\\", "/")), true, "archived worktree metadata must remain");
+			assert.equal(
+				git(repo, ["worktree", "list", "--porcelain"])
+					.split(/\r?\n/)
+					.some(line => line.startsWith("worktree ")
+						&& nativePathIdentity(line.slice("worktree ".length)) === nativePathIdentity(wt)),
+				true,
+				"archived worktree metadata must remain",
+			);
 			assert.doesNotThrow(() => git(repo, ["show-ref", "--verify", "--quiet", "refs/heads/session/arch"]), "durable archived branch must remain");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });

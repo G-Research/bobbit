@@ -531,6 +531,7 @@ const PURGE_CLEANUP_FILES = new Set([
 	"src/server/agent/session-store.ts",
 	"src/server/agent/system-prompt.ts",
 	"src/server/agent/team-store.ts",
+	"src/server/agent/worktree-reference-guard.ts",
 	"src/server/preview/artifacts.ts",
 	"src/server/preview/mount.ts",
 	"src/server/skills/git.ts",

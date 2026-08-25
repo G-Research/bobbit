@@ -10,7 +10,7 @@ import type { Component } from "./project-config-store.js";
 import type { GateStore } from "./gate-store.js";
 import type { TeamStore } from "./team-store.js";
 import type { SessionStore } from "./session-store.js";
-import { isWorktreePathReferencedByLiveSession, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { isWorktreePathReferencedByLiveSessionForCleanup, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { cleanupGateDiagnosticsForGoal } from "./gate-diagnostics-cleanup.js";
 import { resolveSetupTimeoutMs } from "../skills/worktree-setup.js";
 import { resolveGoalMetadata, type GoalMetadata } from "./goal-metadata.js";
@@ -1293,13 +1293,13 @@ export class GoalManager {
 			const { cleanupWorktree } = await import("../skills/git.js");
 			const entries = Object.entries(goal.repoWorktrees);
 			const sessions = this.getSessionsForWorktreeGuard();
-			Promise.allSettled(entries.map(([repo, wt]) => {
-				if (isWorktreePathReferencedByLiveSession(wt, sessions)) {
+			Promise.allSettled(entries.map(async ([repo, wt]) => {
+				if (await isWorktreePathReferencedByLiveSessionForCleanup(wt, sessions)) {
 					console.log(`[goal-manager] Skipping shared goal worktree cleanup for archived goal ${goal.id}: ${wt}`);
-					return Promise.resolve();
+					return;
 				}
 				const repoPath = repo === "." ? goal.repoPath! : path.join(goal.repoPath!, repo);
-				return cleanupWorktree(repoPath, wt, goal.branch, true, this.commandRunner, this.remotePolicy);
+				await cleanupWorktree(repoPath, wt, goal.branch, true, this.commandRunner, this.remotePolicy);
 			})).catch(() => { /* swallow — best-effort */ });
 		}
 		return archived;

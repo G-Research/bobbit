@@ -105,13 +105,24 @@ async function holdSessionListHydration(page: Page, sessionId: string): Promise<
 }
 
 async function waitForGoalDashboardRoute(page: Page, goalId: string): Promise<void> {
-	const dashboard = page.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first();
-	await expect(dashboard).toBeVisible({ timeout: 20_000 });
-	const routeOwnsDashboard = await page.evaluate((id) => {
+	await expect.poll(() => page.evaluate((id) => {
 		const state = (window as any).bobbitState;
-		return window.location.hash.includes(`/goal/${id}`) && state?.goalDashboardId === id;
-	}, goalId);
-	expect(routeOwnsDashboard, "goal route must own the visible dashboard").toBe(true);
+		const visibleDashboardMounted = Array.from(document.querySelectorAll<HTMLElement>(
+			".dashboard-container, .goal-dashboard, goal-dashboard",
+		)).some((dashboard) => {
+			const bounds = dashboard.getBoundingClientRect();
+			return dashboard.isConnected
+				&& getComputedStyle(dashboard).visibility !== "hidden"
+				&& bounds.width > 0
+				&& bounds.height > 0;
+		});
+		return window.location.hash === `#/goal/${id}`
+			&& state?.goalDashboardId === id
+			&& visibleDashboardMounted;
+	}, goalId), {
+		timeout: 20_000,
+		message: "goal route, state ownership, and visible mounted dashboard must settle together",
+	}).toBe(true);
 }
 
 test.describe("CT-13: URL routing and navigation", () => {

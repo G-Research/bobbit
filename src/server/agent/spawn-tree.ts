@@ -32,7 +32,7 @@
  * should prefer this helper over raw `spawn` to avoid orphan trees.
  */
 
-import { execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +51,13 @@ export interface SpawnTrackedOptions {
 	platform?: NodeJS.Platform;
 	/** Test seam for checking whether the detached POSIX process group remains live. */
 	isProcessGroupAlive?: (pgid: number) => boolean;
+	/**
+	 * Raw Darwin process-state snapshot used only to observe a group after its
+	 * single final signal. The operation has a fixed hard cap; each caller joins
+	 * the shared snapshot only through its own wait deadline. Unsupported
+	 * platforms deliberately ignore this seam.
+	 */
+	posixProcessStateSnapshot?: (budgetMs: number) => Promise<string>;
 	/** Test seam for sending a signal to the detached POSIX process group. */
 	signalProcessGroup?: (pgid: number, signal: NodeJS.Signals) => void;
 	/** Enable the POSIX same-group sentinel (production default). */
@@ -136,6 +143,8 @@ interface InternalTracked extends TrackedChild {
 	_closed: boolean;
 	/** Once a POSIX group is observed empty, its numeric PGID is no longer owned. */
 	_processGroupOwnershipLost: boolean;
+	/** One coalesced, read-only Darwin snapshot per child; never signal authority. */
+	_darwinFinalizedGroupObservation?: Promise<FinalizedProcessGroupState>;
 	/** A terminal POSIX group signal was sent; never signal that numeric PGID again. */
 	_posixFinalSignalSent: boolean;
 	/** Docker-exec handoff retains its exact sentinel after the CLI root exits. */
@@ -171,6 +180,8 @@ interface InternalTracked extends TrackedChild {
 
 const TREE_EXIT_POLL_MS = 25;
 const TREE_EXIT_SETTLE_MS = 1_500;
+const DARWIN_PROCESS_STATE_OBSERVER_MAX_MS = 250;
+const DARWIN_PROCESS_STATE_MAX_BUFFER = 256 * 1024;
 const POSIX_SENTINEL_READINESS_FAILURE = "POSIX sentinel ownership was not established";
 const WINDOWS_JOB_READINESS_FAILURE = "Windows Job ownership was not established";
 
@@ -184,6 +195,50 @@ function isProcessGroupAlive(pgid: number): boolean {
 	} catch (err: any) {
 		return err?.code === "EPERM";
 	}
+}
+
+type FinalizedProcessGroupState = "empty" | "zombie-only" | "live" | "unavailable";
+
+/** Strictly classify one global, headerless `ps` PGID/state snapshot. */
+function classifyFinalizedProcessGroupSnapshot(raw: string, targetPgid: number): FinalizedProcessGroupState {
+	const rows = raw.split(/\r?\n/).map(row => row.trim()).filter(Boolean);
+	if (rows.length === 0) return "unavailable";
+	let targetRows = 0;
+	let zombieRows = 0;
+	for (const row of rows) {
+		const match = /^(\d+)\s+(\S+)$/.exec(row);
+		if (!match) return "unavailable";
+		const pgid = Number(match[1]);
+		if (!Number.isSafeInteger(pgid) || pgid <= 0) return "unavailable";
+		if (pgid !== targetPgid) continue;
+		targetRows++;
+		if (match[2][0] === "Z") zombieRows++;
+	}
+	if (targetRows === 0) return "empty";
+	return zombieRows === targetRows ? "zombie-only" : "live";
+}
+
+/**
+ * Darwin can retain killed group members as zombies until launchd reaps them,
+ * making kill(0) report a live group even though no member can execute. This
+ * observer is read-only, shell-free, output-bounded, and operation-bounded.
+ */
+function readDarwinProcessStateSnapshot(budgetMs: number): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const controller = new AbortController();
+		const effectiveBudget = Math.max(0, Math.min(DARWIN_PROCESS_STATE_OBSERVER_MAX_MS, budgetMs));
+		const timer = setTimeout(() => controller.abort(), effectiveBudget);
+		timer.unref?.();
+		execFile("ps", ["-axo", "pgid=,state="], {
+			encoding: "utf8",
+			env: { ...process.env, LC_ALL: "C" },
+			maxBuffer: DARWIN_PROCESS_STATE_MAX_BUFFER,
+			signal: controller.signal,
+		}, (error, stdout) => {
+			clearTimeout(timer);
+			if (error) reject(error); else resolve(stdout);
+		});
+	});
 }
 
 function inspectPosixSentinelIdentity(pid: number, platform: NodeJS.Platform): { pgid: number; startTokenKind: string; startToken: string; sentinelNonce?: string } | undefined {
@@ -207,8 +262,8 @@ function inspectPosixSentinelIdentity(pid: number, platform: NodeJS.Platform): {
 	return undefined;
 }
 
-function delay(ms: number): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, ms));
+function delay(ms: number, clock: Clock = realClock): Promise<void> {
+	return new Promise(resolve => { clock.setTimeout(resolve, ms); });
 }
 
 function unrefTimer(timer: NodeJS.Timeout | undefined): void {
@@ -289,17 +344,17 @@ function createWindowsJobReadiness(): WindowsJobReadiness {
 }
 
 /** A bounded wait that never leaves its losing timeout referenced. */
-function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number): Promise<boolean> {
+function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number, clock: Clock = realClock): Promise<boolean> {
 	return new Promise(resolve => {
 		let settled = false;
 		const finish = (value: boolean) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
+			clock.clearTimeout(timer);
 			resolve(value);
 		};
-		const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
-		timer.unref?.();
+		const timer = clock.setTimeout(() => finish(false), Math.max(0, timeoutMs));
+		unrefTimer(timer);
 		void promise.then(finish, () => finish(false));
 	});
 }
@@ -399,11 +454,17 @@ export function spawnTracked(
 	args: readonly string[],
 	opts: SpawnTrackedOptions = {},
 ): TrackedChild {
-	const isWin = (opts.platform ?? process.platform) === "win32";
+	const platform = opts.platform ?? process.platform;
+	const isWin = platform === "win32";
 	const spawnImpl = opts.spawnImpl ?? spawn;
 	const killGraceMs = opts.killGraceMs ?? 5000;
 	const clock = opts.clock ?? realClock;
 	const groupIsAlive = opts.isProcessGroupAlive ?? isProcessGroupAlive;
+	// Darwin alone needs zombie-state observation after the final owned signal.
+	// Linux and unsupported POSIX platforms retain kill(0) as their boundary.
+	const processStateSnapshot = platform === "darwin"
+		? (opts.posixProcessStateSnapshot ?? readDarwinProcessStateSnapshot)
+		: undefined;
 	const signalProcessGroup = opts.signalProcessGroup ?? ((pgid, signal) => {
 		process.kill(-pgid, signal);
 	});
@@ -533,14 +594,23 @@ export function spawnTracked(
 			}, () => { tracked._survivesShutdown = false; });
 		},
 		async waitForTreeExit(timeoutMs?: number): Promise<boolean> {
-			// Once the root's exit event fired without completion already observed,
-			// neither a POSIX PGID nor a Windows PID remains an owned identity. Do not
-			// turn a later numeric lookup into evidence for a recycled process tree.
-			if (tracked._treeCompletionUnverified) return false;
+			// Completion is monotonic, but unverifiable ownership always wins. Every
+			// asynchronous observation/delay rejoins through this ordering so stale
+			// negative evidence cannot override another waiter's authoritative result.
+			const convergedCompletion = (): boolean | undefined => {
+				if (tracked._treeCompletionUnverified) return false;
+				if (tracked._processGroupOwnershipLost) return true;
+				return undefined;
+			};
+			const initialCompletion = convergedCompletion();
+			if (initialCompletion != null) return initialCompletion;
 			const pid = tracked._pid;
 			if (pid == null) return true;
 			const timeout = Math.max(0, timeoutMs ?? killGraceMs + TREE_EXIT_SETTLE_MS);
-			const deadline = Date.now() + timeout;
+			// Only Darwin routes tree-exit accounting through the injected clock. Linux
+			// kill(0) and Windows Job waits retain their existing real-clock behavior.
+			const treeExitClock = platform === "darwin" ? clock : realClock;
+			const deadline = treeExitClock.now() + timeout;
 
 			if (isWin) {
 				// The supervisor owns a Job handle from before the payload first runs.
@@ -551,34 +621,124 @@ export function spawnTracked(
 				return waitWithTimeout(tracked._windowsSupervisorClosed.then(() => true), timeout);
 			}
 
+			// This is observation after the one ownership-safe final signal, never
+			// authority to signal the numeric PGID. Concurrent callers share one
+			// classification, while each joins it only through its own deadline.
+			const observeFinalizedDarwinGroup = async (): Promise<FinalizedProcessGroupState | undefined> => {
+				if (!processStateSnapshot) return undefined;
+				let observation = tracked._darwinFinalizedGroupObservation;
+				if (!observation) {
+					try {
+						// The snapshot belongs to the child, not to its initiating waiter. A
+						// short caller may stop joining it without aborting evidence that a
+						// longer concurrent caller can still use.
+						observation = processStateSnapshot(DARWIN_PROCESS_STATE_OBSERVER_MAX_MS).then(
+							raw => classifyFinalizedProcessGroupSnapshot(raw, pid),
+							() => "unavailable" as const,
+						);
+					} catch {
+						observation = Promise.resolve("unavailable");
+					}
+					tracked._darwinFinalizedGroupObservation = observation;
+					// Publish accepted observation monotonically even if its initiating
+					// caller's shorter join deadline has already expired.
+					void observation.then(state => {
+						if (!tracked._treeCompletionUnverified && (state === "empty" || state === "zombie-only")) {
+							tracked._processGroupOwnershipLost = true;
+						}
+						if (tracked._darwinFinalizedGroupObservation === observation) {
+							tracked._darwinFinalizedGroupObservation = undefined;
+						}
+					}, () => {
+						if (tracked._darwinFinalizedGroupObservation === observation) {
+							tracked._darwinFinalizedGroupObservation = undefined;
+						}
+					});
+				}
+				const joined = await waitWithTimeout(observation.then(() => true), Math.max(0, deadline - treeExitClock.now()), treeExitClock);
+				return joined ? observation : undefined;
+			};
+
 			// SIGKILL delivery is asynchronous. Once it has been dispatched, later
 			// checks are observation only: they never signal this numeric PGID again,
 			// so a future reuse can at worst produce an unverified result, never
 			// retarget an unrelated tree.
 			if (tracked._posixFinalSignalSent) {
-				while (Date.now() < deadline) {
+				if (!groupIsAlive(pid)) {
+					tracked._processGroupOwnershipLost = true;
+					return convergedCompletion() ?? false;
+				}
+				// Always attempt one immediate observation, including a zero-budget wait.
+				const immediateObservation = await observeFinalizedDarwinGroup();
+				let completion = convergedCompletion();
+				if (completion != null) return completion;
+				// SIGKILL delivery can still be transitioning when the immediate snapshot
+				// reports a live group, and an unavailable snapshot is not negative proof.
+				// Cross one existing lifecycle-poll boundary before one prompt retry. The
+				// child-owned slot still coalesces concurrent callers to one observer.
+				if ((immediateObservation === "live" || immediateObservation === "unavailable") && treeExitClock.now() < deadline) {
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - treeExitClock.now())), treeExitClock);
+					completion = convergedCompletion();
+					if (completion != null) return completion;
 					if (!groupIsAlive(pid)) {
 						tracked._processGroupOwnershipLost = true;
-						return true;
+						return convergedCompletion() ?? false;
 					}
-					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+					if (treeExitClock.now() < deadline) {
+						await observeFinalizedDarwinGroup();
+						completion = convergedCompletion();
+						if (completion != null) return completion;
+					}
 				}
+				const permitFinalObservation = timeout > DARWIN_PROCESS_STATE_OBSERVER_MAX_MS;
+				let finalObservationAttempted = false;
+				while (treeExitClock.now() < deadline) {
+					completion = convergedCompletion();
+					if (completion != null) return completion;
+					if (!groupIsAlive(pid)) {
+						tracked._processGroupOwnershipLost = true;
+						return convergedCompletion() ?? false;
+					}
+					const remaining = deadline - treeExitClock.now();
+					// Admit the last observer before the deadline edge, while its complete
+					// fixed operation cap still fits inside this caller's unchanged deadline.
+					// Opening at two observer caps leaves a full cap for execution even under a
+					// delayed lifecycle turn. Any remaining window at least as large as the
+					// fixed cap is admissible; shorter evidence stays fail-closed.
+					if (permitFinalObservation && !finalObservationAttempted &&
+						remaining >= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS &&
+						remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS * 2) {
+						finalObservationAttempted = true;
+						await observeFinalizedDarwinGroup();
+						completion = convergedCompletion();
+						if (completion != null) return completion;
+						continue;
+					}
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, remaining)), treeExitClock);
+					completion = convergedCompletion();
+					if (completion != null) return completion;
+				}
+				completion = convergedCompletion();
+				if (completion != null) return completion;
 				if (!groupIsAlive(pid)) {
 					tracked._processGroupOwnershipLost = true;
-					return true;
+					return convergedCompletion() ?? false;
 				}
-				return false;
+				return convergedCompletion() ?? false;
 			}
 
-			while (!tracked._processGroupOwnershipLost) {
+			while (true) {
+				const completion = convergedCompletion();
+				if (completion != null) return completion;
 				if (!groupIsAlive(pid)) {
 					tracked._processGroupOwnershipLost = true;
-					return true;
+					return convergedCompletion() ?? false;
 				}
-				if (Date.now() >= deadline) return false;
-				await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+				if (treeExitClock.now() >= deadline) return convergedCompletion() ?? false;
+				await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - treeExitClock.now())), treeExitClock);
+				const postDelayCompletion = convergedCompletion();
+				if (postDelayCompletion != null) return postDelayCompletion;
 			}
-			return true;
 		},
 		killTree(signal: "SIGTERM" | "SIGKILL" = "SIGTERM", graceMsOverride?: number) {
 			if (isWin) {
@@ -622,7 +782,7 @@ export function spawnTracked(
 				let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startTokenKind?: unknown; startToken?: unknown } | undefined;
 				try { record = identity ? JSON.parse(readFileSync(identity.file, "utf8")) : undefined; } catch { /* fail closed below */ }
 				const sentinelPid = Number(record?.pid);
-				const inspector = opts.posixSentinelIdentityInspector ?? (candidate => inspectPosixSentinelIdentity(candidate, opts.platform ?? process.platform));
+				const inspector = opts.posixSentinelIdentityInspector ?? (candidate => inspectPosixSentinelIdentity(candidate, platform));
 				const current = Number.isFinite(sentinelPid) && sentinelPid > 0 ? inspector(sentinelPid) : undefined;
 				const darwinNonceMatches = record?.startTokenKind !== "darwin-lstart-argv-nonce" || current?.sentinelNonce === identity?.nonce;
 				if (!identity || record?.nonce !== identity.nonce || Number(record?.pgid) !== pid ||

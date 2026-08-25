@@ -1,6 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type StdioOptions } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { spawnTracked, type TrackedChild } from "../../../src/server/agent/spawn-tree.js";
+
+export type SourceProcessTreeAuthority = Pick<TrackedChild, "killTree" | "ownershipReady" | "waitForTreeExit">;
 
 export interface RunningSourceProcess {
 	child: ChildProcess;
@@ -16,18 +19,23 @@ export interface RunningSourceProcess {
 	posixGroupOwned: boolean;
 	/** A final POSIX group signal was dispatched at the root-exit boundary. */
 	finalTreeSignalSent: boolean;
+	/** Spawn-time Windows Job ownership; absent for raw fixture and POSIX processes. */
+	trackedAuthority?: SourceProcessTreeAuthority;
+	/** Coalesces repeated teardown onto the authority's single Job-close request. */
+	trackedStop?: Promise<void>;
 }
 
 export interface StopSourceProcessOptions {
 	/** Test seam: production teardown keeps a ten-second graceful shutdown window. */
 	gracefulStopTimeoutMs?: number;
+	/** Test seam: an authoritative signal receipt may gate forced escalation instead of elapsed time. */
+	gracefulSignalReceipt?: Promise<void>;
 	/** Test seam: bounds how long teardown waits for close after force-killing. */
 	forceStopTimeoutMs?: number;
 }
 
 const SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS = 2_000;
-const WINDOWS_TASKKILL_TIMEOUT_MS = 2_000;
 
 export interface SourceGatewayOptions {
 	repoRoot: string;
@@ -180,7 +188,11 @@ function isolatedEnvironment(tempRoot: string): NodeJS.ProcessEnv {
 	};
 }
 
-export function captureSourceProcess(child: ChildProcess, label: string): RunningSourceProcess {
+export function captureSourceProcess(
+	child: ChildProcess,
+	label: string,
+	trackedAuthority?: SourceProcessTreeAuthority,
+): RunningSourceProcess {
 	const runtime: RunningSourceProcess = {
 		child,
 		label,
@@ -191,6 +203,7 @@ export function captureSourceProcess(child: ChildProcess, label: string): Runnin
 		shutdownStarted: false,
 		posixGroupOwned: false,
 		finalTreeSignalSent: false,
+		trackedAuthority,
 	};
 	child.stdout?.on("data", chunk => runtime.stdout.push(String(chunk)));
 	child.stderr?.on("data", chunk => runtime.stderr.push(String(chunk)));
@@ -206,9 +219,23 @@ export function captureSourceProcess(child: ChildProcess, label: string): Runnin
 	return runtime;
 }
 
+function startOwnedSourceProcess(
+	file: string,
+	args: readonly string[],
+	options: { cwd: string; env: NodeJS.ProcessEnv; stdio: StdioOptions; windowsHide: boolean },
+	label: string,
+): RunningSourceProcess {
+	if (process.platform === "win32") {
+		const tracked = spawnTracked(file, args, options);
+		return captureSourceProcess(tracked.child, label, tracked);
+	}
+	const child = spawn(file, args, { ...options, detached: true });
+	return captureSourceProcess(child, label);
+}
+
 export function startIsolatedSourceGateway(options: SourceGatewayOptions): RunningSourceProcess {
 	const cliPath = resolve(options.repoRoot, "dist", "server", "cli.js");
-	const child = spawn(process.execPath, [
+	return startOwnedSourceProcess(process.execPath, [
 		cliPath,
 		"--cwd", options.workspaceDir,
 		"--host", "127.0.0.1",
@@ -220,10 +247,8 @@ export function startIsolatedSourceGateway(options: SourceGatewayOptions): Runni
 		cwd: options.repoRoot,
 		env: isolatedEnvironment(options.tempRoot),
 		windowsHide: true,
-		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
-	});
-	return captureSourceProcess(child, "isolated Bobbit gateway");
+	}, "isolated Bobbit gateway");
 }
 
 export function startSourceVite(options: SourceViteOptions): RunningSourceProcess {
@@ -235,7 +260,7 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 	// This smoke proves the canonical bridge is loaded from Vite's source module
 	// graph. The normal dev server remains bundled; only this owned fixture opts out.
 	env.BOBBIT_VITE_SOURCE_GRAPH = "1";
-	const child = spawn(process.execPath, [
+	return startOwnedSourceProcess(process.execPath, [
 		viteCli,
 		"--host", "127.0.0.1",
 		"--port", String(options.port),
@@ -244,14 +269,32 @@ export function startSourceVite(options: SourceViteOptions): RunningSourceProces
 		cwd: options.repoRoot,
 		env,
 		windowsHide: true,
-		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
-	});
-	return captureSourceProcess(child, "Vite source server");
+	}, "Vite source server");
+}
+
+async function joinSourceOwnership(runtime: RunningSourceProcess, deadline: number): Promise<void> {
+	const ownershipReady = runtime.trackedAuthority?.ownershipReady;
+	if (!ownershipReady) return;
+	const remainingMs = Math.max(0, deadline - Date.now());
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			ownershipReady,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(() => reject(new Error("ownership readiness timed out")), remainingMs);
+			}),
+		]);
+	} catch (error) {
+		throw processFailure(runtime, `failed before ownership readiness: ${String(error)}`);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
 }
 
 export async function waitForSourceGateway(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
+	await joinSourceOwnership(runtime, deadline);
 	let lastError = "not attempted";
 	while (Date.now() < deadline) {
 		if (runtime.child.exitCode !== null) throw processFailure(runtime, `exited ${runtime.child.exitCode} before readiness`);
@@ -269,6 +312,7 @@ export async function waitForSourceGateway(baseUrl: string, runtime: RunningSour
 
 export async function waitForSourceVite(baseUrl: string, runtime: RunningSourceProcess, timeoutMs = 120_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
+	await joinSourceOwnership(runtime, deadline);
 	let lastError = "not attempted";
 	while (Date.now() < deadline) {
 		if (runtime.child.exitCode !== null) throw processFailure(runtime, `exited ${runtime.child.exitCode} before readiness`);
@@ -294,13 +338,9 @@ function signalOwnedProcessTree(runtime: RunningSourceProcess, signal: NodeJS.Si
 	const child = runtime.child;
 	if (!child.pid) return false;
 	if (process.platform === "win32") {
-		// taskkill is Windows' process-tree equivalent. Its own execution must not
-		// turn an already-failing test cleanup into an unbounded worker hang.
-		spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-			stdio: "ignore",
-			windowsHide: true,
-			timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
-		});
+		// Raw fixture processes deliberately retain root-only termination. Real
+		// Windows source runtimes use their spawn-time tracked Job authority above.
+		try { child.kill(signal); } catch { /* root exited between observations */ }
 		return true;
 	}
 	try {
@@ -341,6 +381,40 @@ function waitForProcessClose(runtime: RunningSourceProcess, timeoutMs: number): 
 	});
 }
 
+type GracefulStopBoundary = "closed" | "receipt" | "deadline";
+
+function waitForGracefulStopBoundary(
+	runtime: RunningSourceProcess,
+	receipt: Promise<void>,
+	timeoutMs: number,
+): Promise<GracefulStopBoundary> {
+	if (runtime.closed) return Promise.resolve("closed");
+	return new Promise((resolveBoundary, rejectBoundary) => {
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timeout) clearTimeout(timeout);
+			runtime.child.removeListener("close", onClose);
+		};
+		const finish = (boundary: GracefulStopBoundary) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolveBoundary(boundary);
+		};
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			rejectBoundary(error);
+		};
+		const onClose = () => finish("closed");
+		runtime.child.once("close", onClose);
+		timeout = setTimeout(() => finish("deadline"), timeoutMs);
+		void receipt.then(() => finish("receipt"), fail);
+	});
+}
+
 function releaseProcessStdio(child: ChildProcess): void {
 	for (const stream of [child.stdin, child.stdout, child.stderr]) {
 		try { stream?.destroy(); } catch { /* best-effort cleanup after a failed OS close */ }
@@ -350,16 +424,68 @@ function releaseProcessStdio(child: ChildProcess): void {
 	try { child.unref(); } catch { /* child may have exited between checks */ }
 }
 
+function waitForTrackedTreeExit(authority: SourceProcessTreeAuthority, timeoutMs: number): Promise<boolean> {
+	return new Promise((resolveCompletion, rejectCompletion) => {
+		let settled = false;
+		const finish = (result: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			resolveCompletion(result);
+		};
+		const fail = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			rejectCompletion(error);
+		};
+		const timeout = setTimeout(() => finish(false), timeoutMs);
+		void Promise.resolve().then(() => authority.waitForTreeExit(timeoutMs)).then(finish, fail);
+	});
+}
+
+function stopTrackedSourceProcess(
+	runtime: RunningSourceProcess,
+	gracefulStopTimeoutMs: number,
+	forceStopTimeoutMs: number,
+): Promise<void> {
+	if (runtime.trackedStop) return runtime.trackedStop;
+	if (runtime.closed) return Promise.resolve();
+	const authority = runtime.trackedAuthority!;
+	const completionTimeoutMs = gracefulStopTimeoutMs + forceStopTimeoutMs;
+	runtime.trackedStop = Promise.resolve().then(async () => {
+		runtime.shutdownStarted = true;
+		authority.killTree("SIGKILL");
+		let completed: boolean;
+		try {
+			completed = await waitForTrackedTreeExit(authority, completionTimeoutMs);
+		} catch (error) {
+			releaseProcessStdio(runtime.child);
+			throw processFailure(runtime, `tree completion failed: ${String(error)}`);
+		}
+		if (!completed || !runtime.closed) {
+			releaseProcessStdio(runtime.child);
+			throw processFailure(runtime, completed
+				? "tree completion was reported before process close"
+				: `tree completion was not verified within ${completionTimeoutMs}ms`);
+		}
+	});
+	return runtime.trackedStop;
+}
+
 export async function stopSourceProcess(
 	runtime: RunningSourceProcess,
 	options: StopSourceProcessOptions = {},
 ): Promise<void> {
-	if (runtime.closed) return;
 	const gracefulStopTimeoutMs = options.gracefulStopTimeoutMs ?? SOURCE_PROCESS_GRACEFUL_STOP_TIMEOUT_MS;
 	const forceStopTimeoutMs = options.forceStopTimeoutMs ?? SOURCE_PROCESS_FORCE_STOP_TIMEOUT_MS;
+	if (runtime.trackedAuthority) {
+		return stopTrackedSourceProcess(runtime, gracefulStopTimeoutMs, forceStopTimeoutMs);
+	}
+	if (runtime.closed) return;
 
 	// Root exit is a hard PID/PGID ownership boundary. Do not send a late
-	// taskkill or negative-PID signal that could hit a reused numeric identity.
+	// numeric signal that could hit a reused process identity.
 	if (rootExited(runtime)) {
 		releaseProcessStdio(runtime.child);
 		return;
@@ -369,7 +495,19 @@ export async function stopSourceProcess(
 	// exits while descendants retain stdio, captureSourceProcess sends the final
 	// POSIX group signal synchronously at that exit boundary.
 	runtime.shutdownStarted = signalOwnedProcessTree(runtime, "SIGTERM");
-	if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) return;
+	if (options.gracefulSignalReceipt) {
+		// A fixture that proves its handler is installed can fence escalation on the
+		// actual signal receipt. A lost IPC receipt still yields at the same bounded
+		// grace deadline, and every losing close/deadline listener is removed.
+		const boundary = await waitForGracefulStopBoundary(
+			runtime,
+			options.gracefulSignalReceipt,
+			gracefulStopTimeoutMs,
+		);
+		if (boundary === "closed") return;
+	} else if (await waitForProcessClose(runtime, gracefulStopTimeoutMs)) {
+		return;
+	}
 
 	// SIGTERM is deliberately not retried here: a stuck gateway may ignore it.
 	// Force-kill only an identity still owned by this runtime, then wait for close

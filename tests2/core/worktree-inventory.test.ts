@@ -628,7 +628,14 @@ describe("worktree inventory classifier", () => {
 		try {
 			const candidatePaths = ["session-z", "session-a", "session-m", "session-b", "session-y"]
 				.map(name => path.join(root, "repo-wt", name));
-			for (const candidatePath of candidatePaths) fs.mkdirSync(candidatePath, { recursive: true });
+			const adminPaths = new Map<string, string>();
+			for (const candidatePath of candidatePaths) {
+				const adminPath = path.join(repo, ".git", "worktrees", path.basename(candidatePath));
+				fs.mkdirSync(adminPath, { recursive: true });
+				fs.mkdirSync(candidatePath, { recursive: true });
+				fs.writeFileSync(path.join(candidatePath, ".git"), `gitdir: ${adminPath}\n`, "utf8");
+				adminPaths.set(candidatePath, adminPath);
+			}
 			const attached = new Set(candidatePaths);
 			const removed = new Set<string>();
 			const pending: Array<{ path: string; release: () => void }> = [];
@@ -664,9 +671,21 @@ describe("worktree inventory classifier", () => {
 			const commandRunner: CommandRunner = {
 				execFile: async (_file, args) => {
 					if (args[0] === "show-ref") throw new Error("branch missing");
+					if (args[0] === "worktree" && args[1] === "list") {
+						assert.deepEqual(args, ["worktree", "list", "--porcelain", "-z"]);
+						const records = [
+							{ path: repo, branch: "master" },
+							...[...attached].map(candidatePath => ({ path: candidatePath, branch: `session/${path.basename(candidatePath)}` })),
+						];
+						return {
+							stdout: records.map(record => `worktree ${record.path}\0HEAD ${"0".repeat(40)}\0branch refs/heads/${record.branch}\0\0`).join(""),
+							stderr: "",
+						};
+					}
 					if (args[0] === "worktree" && args[1] === "remove") {
 						const candidatePath = args[2]!;
 						await fs.promises.rm(candidatePath, { recursive: true, force: true });
+						await fs.promises.rm(adminPaths.get(candidatePath)!, { recursive: true, force: true });
 						attached.delete(candidatePath);
 						removed.add(candidatePath);
 					}

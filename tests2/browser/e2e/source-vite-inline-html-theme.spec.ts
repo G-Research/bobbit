@@ -1,7 +1,7 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -20,7 +20,10 @@ import {
 	waitForSourceVite,
 	writeSourceViteAgent,
 	type RunningSourceProcess,
+	type SourceProcessTreeAuthority,
+	type StopSourceProcessOptions,
 } from "./source-vite-runtime-helpers.js";
+import { _trackedCount, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const SOURCE_MODULE_PATHS = {
@@ -141,46 +144,401 @@ async function attachReport(testInfo: TestInfo, report: RuntimeReport): Promise<
 	});
 }
 
+interface SourceRuntimeFinalizationOptions {
+	vite?: RunningSourceProcess;
+	gateway?: RunningSourceProcess;
+	stopOptions?: StopSourceProcessOptions;
+	bodyFailure?: { reason: unknown };
+	report: () => Promise<void>;
+	removeTemp: () => Promise<void>;
+}
+
+function cleanupStageFailure(label: string, reason: unknown): Error {
+	const detail = reason instanceof Error ? reason.message : String(reason);
+	return new Error(`${label} failed: ${detail}`, { cause: reason });
+}
+
+/**
+ * Stop every owned source runtime before diagnostics and temporary files are
+ * finalized. No stage may prevent the next one from being attempted.
+ */
+async function finalizeSourceRuntimes(options: SourceRuntimeFinalizationOptions): Promise<void> {
+	const failures: unknown[] = options.bodyFailure ? [options.bodyFailure.reason] : [];
+	const runtimes = [
+		options.vite ? { label: `${options.vite.label} stop`, runtime: options.vite } : undefined,
+		options.gateway ? { label: `${options.gateway.label} stop`, runtime: options.gateway } : undefined,
+	].filter((entry): entry is { label: string; runtime: RunningSourceProcess } => entry !== undefined);
+	const stopResults = await Promise.allSettled(
+		runtimes.map(({ runtime }) => stopSourceProcess(runtime, options.stopOptions)),
+	);
+	for (const [index, result] of stopResults.entries()) {
+		if (result.status === "rejected") failures.push(cleanupStageFailure(runtimes[index].label, result.reason));
+	}
+
+	try {
+		await options.report();
+	} catch (error) {
+		failures.push(cleanupStageFailure("source runtime report", error));
+	} finally {
+		try {
+			await options.removeTemp();
+		} catch (error) {
+			failures.push(cleanupStageFailure("source runtime temporary-root removal", error));
+		}
+	}
+
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "source runtime finalization failed");
+}
+
+function waitForFixtureMessage(child: ChildProcess, expectedType: string): Promise<void> {
+	return new Promise((resolveMessage, rejectMessage) => {
+		const cleanup = () => {
+			child.removeListener("message", onMessage);
+			child.removeListener("error", onError);
+			child.removeListener("close", onClose);
+		};
+		const onMessage = (message: unknown) => {
+			if (!message || typeof message !== "object" || !("type" in message) || message.type !== expectedType) return;
+			cleanup();
+			resolveMessage();
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			rejectMessage(error);
+		};
+		const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+			cleanup();
+			rejectMessage(new Error(`fixture closed before ${expectedType}: code=${code} signal=${signal}`));
+		};
+		child.on("message", onMessage);
+		child.once("error", onError);
+		child.once("close", onClose);
+	});
+}
+
 // This is a real source-runtime smoke. It intentionally owns both child
 // processes rather than relying on Playwright's compiled-dist gateway fixture.
 test.describe("source Vite inline HTML theme runtime", () => {
 	test.describe.configure({ retries: 0 });
+	let trackedBaseline = 0;
+
+	test.beforeEach(() => { trackedBaseline = _trackedCount(); });
+	test.afterEach(() => {
+		expect(_trackedCount(), "source-runtime teardown must release every spawnTracked registry owner").toBe(trackedBaseline);
+	});
+
+	test("Windows source ownership gates readiness before the first health response", async () => {
+		test.setTimeout(10_000);
+		let resolveOwnership!: () => void;
+		const ownershipReady = new Promise<void>(resolve => { resolveOwnership = resolve; });
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		let killRequests = 0;
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady,
+			killTree: () => {
+				killRequests++;
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: async () => {
+				await childClosed;
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "ownership-gated source fixture", authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response('{"status":"ok"}', { status: 200 });
+		}) as typeof fetch;
+		try {
+			const readiness = waitForSourceGateway("http://source.invalid", runtime, 1_000);
+			await new Promise<void>(resolveTurn => setImmediate(resolveTurn));
+			expect(fetchCalls, "health must remain behind spawn-time Job ownership").toBe(0);
+			resolveOwnership();
+			await readiness;
+			expect(fetchCalls).toBe(1);
+		} finally {
+			globalThis.fetch = originalFetch;
+			await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 1_000 });
+		}
+		expect(killRequests, "owned teardown must request one Job close").toBe(1);
+	});
+
+	test("Windows source ownership failure is diagnostic and prevents health publication", async () => {
+		test.setTimeout(10_000);
+		let rejectOwnership!: (error: Error) => void;
+		const ownershipReady = new Promise<void>((_resolve, reject) => { rejectOwnership = reject; });
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady,
+			killTree: () => { child.kill("SIGKILL"); },
+			waitForTreeExit: async () => {
+				await childClosed;
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "ownership-failed source fixture", authority);
+		const originalFetch = globalThis.fetch;
+		let fetchCalls = 0;
+		globalThis.fetch = (async () => {
+			fetchCalls++;
+			return new Response('{"status":"ok"}', { status: 200 });
+		}) as typeof fetch;
+		try {
+			const readiness = waitForSourceGateway("http://source.invalid", runtime, 1_000);
+			rejectOwnership(new Error("fixture Job assignment failed"));
+			await expect(readiness).rejects.toThrow("ownership-failed source fixture failed before ownership readiness");
+			expect(fetchCalls, "failed Job ownership must never publish health readiness").toBe(0);
+		} finally {
+			globalThis.fetch = originalFetch;
+			await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 1_000 });
+		}
+	});
+
+	test("tracked teardown coalesces repeated stops and joins the exact tree-completion bound", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		const signals: string[] = [];
+		const waitBounds: number[] = [];
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				signals.push(signal ?? "SIGTERM");
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: async timeoutMs => {
+				waitBounds.push(timeoutMs ?? -1);
+				await childClosed;
+				return true;
+			},
+		};
+		const runtime = captureSourceProcess(child, "coalesced tracked source fixture", authority);
+		const options = { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 2_000 };
+		await Promise.all([stopSourceProcess(runtime, options), stopSourceProcess(runtime, options)]);
+		await stopSourceProcess(runtime, options);
+
+		expect(signals, "the Windows Job authority must receive one close request").toEqual(["SIGKILL"]);
+		expect(waitBounds, "tree completion must use the existing grace plus force lifecycle bound").toEqual([2_100]);
+		expect(runtime.closed).toBe(true);
+	});
+
+	test("an unverified tracked completion stays event-loop bounded and preserves its failure across repeated stop", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const childClosed = once(child, "close");
+		let killRequests = 0;
+		let waitRequests = 0;
+		const authority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: () => {
+				killRequests++;
+				child.kill("SIGKILL");
+			},
+			waitForTreeExit: () => {
+				waitRequests++;
+				return new Promise<boolean>(() => {});
+			},
+		};
+		const runtime = captureSourceProcess(child, "unverified tracked source fixture", authority);
+		const options = { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 };
+		const firstStop = stopSourceProcess(runtime, options);
+		await new Promise<void>(resolveTurn => setImmediate(resolveTurn));
+		await expect(firstStop).rejects.toThrow("tree completion was not verified within 50ms");
+		await childClosed;
+		await expect(stopSourceProcess(runtime, options)).rejects.toThrow("tree completion was not verified within 50ms");
+		expect(killRequests, "a failed completion proof must not retarget the process").toBe(1);
+		expect(waitRequests, "repeated stop must join the original completion attempt").toBe(1);
+		expect(runtime.child.stdout?.destroyed).toBe(true);
+		expect(runtime.child.stderr?.destroyed).toBe(true);
+	});
+
+	test("source finalization attempts both tracked stops, reporting, and removal before surfacing exact failures", async () => {
+		test.setTimeout(10_000);
+		const firstChild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const secondChild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
+		});
+		const firstClosed = once(firstChild, "close");
+		const secondClosed = once(secondChild, "close");
+		const events: string[] = [];
+		let firstKills = 0;
+		let firstWaits = 0;
+		let secondKills = 0;
+		let secondWaits = 0;
+		const firstAuthority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				firstKills++;
+				events.push(`first-stop:${signal}`);
+				firstChild.kill("SIGKILL");
+			},
+			waitForTreeExit: () => {
+				firstWaits++;
+				return new Promise<boolean>(() => {});
+			},
+		};
+		const secondAuthority: SourceProcessTreeAuthority = {
+			ownershipReady: Promise.resolve(),
+			killTree: signal => {
+				secondKills++;
+				events.push(`second-stop:${signal}`);
+				secondChild.kill("SIGKILL");
+			},
+			waitForTreeExit: async () => {
+				secondWaits++;
+				await secondClosed;
+				return true;
+			},
+		};
+		const firstRuntime = captureSourceProcess(firstChild, "unverified first source runtime", firstAuthority);
+		const secondRuntime = captureSourceProcess(secondChild, "verified second source runtime", secondAuthority);
+		const bodyFailure = new Error("fixture body assertion failed");
+		const reportFailure = new Error("fixture report attachment failed");
+		const removalFailure = new Error("fixture temporary removal failed");
+		const baseline = _trackedCount();
+
+		let finalizationFailure: unknown;
+		try {
+			await finalizeSourceRuntimes({
+				vite: firstRuntime,
+				gateway: secondRuntime,
+				stopOptions: { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 },
+				bodyFailure: { reason: bodyFailure },
+				report: async () => {
+					events.push("report");
+					expect(firstRuntime.stdout.join("")).toBe("");
+					expect(secondRuntime.stderr.join("")).toBe("");
+					throw reportFailure;
+				},
+				removeTemp: async () => {
+					events.push("remove-temp");
+					throw removalFailure;
+				},
+			});
+		} catch (error) {
+			finalizationFailure = error;
+		}
+
+		await Promise.all([firstClosed, secondClosed]);
+		await expect(stopSourceProcess(firstRuntime, { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 }))
+			.rejects.toThrow("tree completion was not verified within 50ms");
+		await stopSourceProcess(secondRuntime, { gracefulStopTimeoutMs: 20, forceStopTimeoutMs: 30 });
+		expect(firstKills).toBe(1);
+		expect(firstWaits).toBe(1);
+		expect(secondKills).toBe(1);
+		expect(secondWaits).toBe(1);
+		expect(firstRuntime.closed).toBe(true);
+		expect(secondRuntime.closed).toBe(true);
+		expect(events).toEqual(["first-stop:SIGKILL", "second-stop:SIGKILL", "report", "remove-temp"]);
+		expect(_trackedCount()).toBe(baseline);
+		expect(finalizationFailure).toBeInstanceOf(AggregateError);
+		const failures = (finalizationFailure as AggregateError).errors as Error[];
+		expect(failures).toHaveLength(4);
+		expect(failures[0]).toBe(bodyFailure);
+		expect(failures[1].message).toContain("unverified first source runtime stop failed");
+		expect(failures[1].message).toContain("tree completion was not verified within 50ms");
+		expect((failures[1].cause as Error).message).toContain("unverified first source runtime");
+		expect(failures[2].cause).toBe(reportFailure);
+		expect(failures[3].cause).toBe(removalFailure);
+	});
+
+	test("source-runtime cleanup contains no synchronous Windows process-tree utility", async () => {
+		const source = await readFile(new URL("./source-vite-runtime-helpers.ts", import.meta.url), "utf8");
+		expect(source).not.toMatch(/spawnSync|taskkill/i);
+		expect(source).toContain("spawnTracked(file, args, options)");
+		expect(source.match(/return startOwnedSourceProcess\(/g)).toHaveLength(2);
+		expect(source).toContain('process.platform === "win32"');
+	});
 
 	test("teardown escalates a SIGTERM-ignoring detached source process and awaits close", async () => {
 		test.setTimeout(10_000);
 		const child = spawn(process.execPath, ["--input-type=module", "--eval", [
-			'process.stdout.write("ready\\n");',
-			'process.on("SIGTERM", () => process.stdout.write("SIGTERM ignored\\n"));',
+			'process.on("SIGTERM", () => process.send?.({ type: "sigterm-received" }));',
+			'process.send?.({ type: "handler-ready" });',
 			"setInterval(() => {}, 1_000);",
 		].join("")], {
 			detached: process.platform !== "win32",
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
 			windowsHide: true,
 		});
+		const handlerReady = waitForFixtureMessage(child, "handler-ready");
 		const runtime = captureSourceProcess(child, "SIGTERM-ignoring source helper fixture");
 		try {
-			await new Promise<void>((resolveReady, rejectReady) => {
-				const timeout = setTimeout(() => rejectReady(new Error("SIGTERM-ignoring fixture did not become ready")), 2_000);
-				child.stdout?.on("data", chunk => {
-					if (!String(chunk).includes("ready")) return;
-					clearTimeout(timeout);
-					resolveReady();
-				});
-				child.once("error", error => {
-					clearTimeout(timeout);
-					rejectReady(error);
-				});
-			});
+			await handlerReady;
+			let gracefulSignalReceived = false;
+			const gracefulSignalReceipt = process.platform === "win32"
+				? undefined
+				: waitForFixtureMessage(child, "sigterm-received").then(() => { gracefulSignalReceived = true; });
 
 			await stopSourceProcess(runtime, {
 				gracefulStopTimeoutMs: 100,
+				gracefulSignalReceipt,
 				forceStopTimeoutMs: 2_000,
 			});
 
 			expect(runtime.closed, "teardown must wait for close after forced termination").toBe(true);
 			if (process.platform !== "win32") {
-				expect(runtime.stdout.join(""), "fixture must receive graceful SIGTERM before escalation").toContain("SIGTERM ignored");
+				expect(gracefulSignalReceived, "fixture must acknowledge graceful SIGTERM before escalation").toBe(true);
 				expect(child.signalCode, "detached POSIX process must be force-killed after grace").toBe("SIGKILL");
+			}
+		} finally {
+			if (!runtime.closed) {
+				await stopSourceProcess(runtime, { gracefulStopTimeoutMs: 100, forceStopTimeoutMs: 2_000 });
+			}
+		}
+	});
+
+	test("teardown falls back to the grace deadline when its pre-armed IPC receipt is lost", async () => {
+		test.setTimeout(10_000);
+		const child = spawn(process.execPath, ["--input-type=module", "--eval", [
+			'process.on("SIGTERM", () => {});',
+			'process.send?.({ type: "handler-ready" });',
+			"setInterval(() => {}, 1_000);",
+		].join("")], {
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "pipe", "ipc"],
+			windowsHide: true,
+		});
+		const handlerReady = waitForFixtureMessage(child, "handler-ready");
+		const runtime = captureSourceProcess(child, "lost graceful receipt fixture");
+		try {
+			await handlerReady;
+			const lostReceipt = waitForFixtureMessage(child, "sigterm-received");
+
+			await stopSourceProcess(runtime, {
+				gracefulStopTimeoutMs: 100,
+				gracefulSignalReceipt: lostReceipt,
+				forceStopTimeoutMs: 2_000,
+			});
+
+			expect(runtime.closed, "the grace deadline must still lead to an awaited close").toBe(true);
+			await expect(lostReceipt).rejects.toThrow("fixture closed before sigterm-received");
+			expect(child.listenerCount("message"), "the lost IPC receipt listener must be removed").toBe(0);
+			expect(child.listenerCount("error"), "the lost IPC error listener must be removed").toBe(0);
+			expect(child.listenerCount("close"), "temporary close listeners must be removed").toBe(0);
+			if (process.platform !== "win32") {
+				expect(child.signalCode, "the detached POSIX process must be force-killed after the deadline").toBe("SIGKILL");
 			}
 		} finally {
 			if (!runtime.closed) {
@@ -191,19 +549,24 @@ test.describe("source Vite inline HTML theme runtime", () => {
 
 	test("reaps an inherited-stdio descendant at the owned root-exit boundary", async () => {
 		test.setTimeout(5_000);
-		const child = spawn(process.execPath, ["-e", [
+		const fixtureArgs = ["-e", [
 			'const { spawn } = require("node:child_process");',
 			'const descendant = spawn(process.execPath, ["-e", "process.on(\\\"SIGTERM\\\", () => {}); setInterval(() => {}, 1000);"], { stdio: "inherit" });',
 			'process.stdout.write("ready\\n");',
 			'process.on("SIGTERM", () => process.exit(0));',
-		].join("")], {
-			detached: process.platform !== "win32",
+		].join("")];
+		const tracked = process.platform === "win32"
+			? spawnTracked(process.execPath, fixtureArgs, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
+			: undefined;
+		const child = tracked?.child ?? spawn(process.execPath, fixtureArgs, {
+			detached: true,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		const runtime = captureSourceProcess(child, "root-exit boundary fixture");
+		const runtime = captureSourceProcess(child, "root-exit boundary fixture", tracked);
 		const actualExit = once(child, "exit");
 		const actualClose = once(child, "close");
+		await tracked?.ownershipReady;
 		await once(child.stdout!, "data");
 
 		try {
@@ -228,6 +591,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 		const report: RuntimeReport = { requests: [], responses: [] };
 		let gateway: RunningSourceProcess | undefined;
 		let vite: RunningSourceProcess | undefined;
+		let bodyFailure: { reason: unknown } | undefined;
 
 		try {
 			await mkdir(workspaceDir, { recursive: true });
@@ -414,21 +778,30 @@ test.describe("source Vite inline HTML theme runtime", () => {
 				for (const response of sourceResponses) expect(response.status, `${response.path} must be served by Vite`).toBe(200);
 			}
 		} catch (error) {
-			if (gateway && gateway.child.exitCode !== null) throw processFailure(gateway, `failed during test: ${String(error)}`);
-			if (vite && vite.child.exitCode !== null) throw processFailure(vite, `failed during test: ${String(error)}`);
-			throw error;
+			if (gateway && gateway.child.exitCode !== null) {
+				bodyFailure = { reason: processFailure(gateway, `failed during test: ${String(error)}`) };
+			} else if (vite && vite.child.exitCode !== null) {
+				bodyFailure = { reason: processFailure(vite, `failed during test: ${String(error)}`) };
+			} else {
+				bodyFailure = { reason: error };
+			}
 		} finally {
 			await page.close().catch(() => undefined);
-			if (vite) await stopSourceProcess(vite);
-			if (gateway) await stopSourceProcess(gateway);
-			const gatewayLog = processLog(gateway);
-			const viteLog = processLog(vite);
-			report.gatewayStdout = gatewayLog.stdout;
-			report.gatewayStderr = gatewayLog.stderr;
-			report.viteStdout = viteLog.stdout;
-			report.viteStderr = viteLog.stderr;
-			await attachReport(testInfo, report);
-			await rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 });
+			await finalizeSourceRuntimes({
+				vite,
+				gateway,
+				bodyFailure,
+				report: async () => {
+					const gatewayLog = processLog(gateway);
+					const viteLog = processLog(vite);
+					report.gatewayStdout = gatewayLog.stdout;
+					report.gatewayStderr = gatewayLog.stderr;
+					report.viteStdout = viteLog.stdout;
+					report.viteStderr = viteLog.stderr;
+					await attachReport(testInfo, report);
+				},
+				removeTemp: () => rm(tempRoot, { recursive: true, force: true, maxRetries: 6, retryDelay: 250 }),
+			});
 		}
 	});
 });
