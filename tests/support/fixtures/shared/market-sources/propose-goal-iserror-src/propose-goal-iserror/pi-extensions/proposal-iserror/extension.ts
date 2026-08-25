@@ -1,4 +1,4 @@
-type GoalInput = { title?: string; spec?: string; workflow?: string; __sessionId?: string };
+type GoalInput = { title?: string; spec?: string; workflow?: string; __sessionId?: string; __sessionSecret?: string };
 
 function env(name: string): string {
 	const value = process.env[name];
@@ -19,8 +19,9 @@ export default function activate(pi: any) {
 			},
 		},
 	}, async (input: GoalInput = {}) => {
-		const { __sessionId, ...args } = input;
+		const { __sessionId, __sessionSecret, ...args } = input;
 		const sessionId = __sessionId || env("BOBBIT_SESSION_ID");
+		const sessionSecret = __sessionSecret || env("BOBBIT_SESSION_SECRET");
 		const gatewayUrl = env("BOBBIT_GATEWAY_URL");
 		const token = env("BOBBIT_TOKEN");
 		const response = await fetch(`${gatewayUrl}/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/seed`, {
@@ -28,6 +29,7 @@ export default function activate(pi: any) {
 			headers: {
 				"Authorization": `Bearer ${token}`,
 				"Content-Type": "application/json",
+				"X-Bobbit-Session-Secret": sessionSecret,
 			},
 			body: JSON.stringify({ args }),
 		});
