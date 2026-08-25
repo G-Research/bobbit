@@ -262,8 +262,8 @@ function inspectPosixSentinelIdentity(pid: number, platform: NodeJS.Platform): {
 	return undefined;
 }
 
-function delay(ms: number): Promise<void> {
-	return new Promise(resolve => setTimeout(resolve, ms));
+function delay(ms: number, clock: Clock = realClock): Promise<void> {
+	return new Promise(resolve => { clock.setTimeout(resolve, ms); });
 }
 
 function unrefTimer(timer: NodeJS.Timeout | undefined): void {
@@ -344,17 +344,17 @@ function createWindowsJobReadiness(): WindowsJobReadiness {
 }
 
 /** A bounded wait that never leaves its losing timeout referenced. */
-function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number): Promise<boolean> {
+function waitWithTimeout(promise: Promise<boolean>, timeoutMs: number, clock: Clock = realClock): Promise<boolean> {
 	return new Promise(resolve => {
 		let settled = false;
 		const finish = (value: boolean) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
+			clock.clearTimeout(timer);
 			resolve(value);
 		};
-		const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs));
-		timer.unref?.();
+		const timer = clock.setTimeout(() => finish(false), Math.max(0, timeoutMs));
+		unrefTimer(timer);
 		void promise.then(finish, () => finish(false));
 	});
 }
@@ -607,7 +607,10 @@ export function spawnTracked(
 			const pid = tracked._pid;
 			if (pid == null) return true;
 			const timeout = Math.max(0, timeoutMs ?? killGraceMs + TREE_EXIT_SETTLE_MS);
-			const deadline = Date.now() + timeout;
+			// Only Darwin routes tree-exit accounting through the injected clock. Linux
+			// kill(0) and Windows Job waits retain their existing real-clock behavior.
+			const treeExitClock = platform === "darwin" ? clock : realClock;
+			const deadline = treeExitClock.now() + timeout;
 
 			if (isWin) {
 				// The supervisor owns a Job handle from before the payload first runs.
@@ -652,7 +655,7 @@ export function spawnTracked(
 						}
 					});
 				}
-				const joined = await waitWithTimeout(observation.then(() => true), Math.max(0, deadline - Date.now()));
+				const joined = await waitWithTimeout(observation.then(() => true), Math.max(0, deadline - treeExitClock.now()), treeExitClock);
 				return joined ? observation : undefined;
 			};
 
@@ -669,33 +672,49 @@ export function spawnTracked(
 				const immediateObservation = await observeFinalizedDarwinGroup();
 				let completion = convergedCompletion();
 				if (completion != null) return completion;
-				// Unavailable evidence is retryable while this caller still owns time.
-				// Retry once promptly rather than deferring recovery to the unrelated
-				// deadline-edge observation. Settled exact-slot cleanup preserves one
-				// snapshot in flight even when another waiter starts the retry first.
-				if (immediateObservation === "unavailable" && Date.now() < deadline) {
-					await observeFinalizedDarwinGroup();
-					completion = convergedCompletion();
-					if (completion != null) return completion;
-				}
-				const permitFinalObservation = timeout > DARWIN_PROCESS_STATE_OBSERVER_MAX_MS;
-				let finalObservationAttempted = false;
-				while (Date.now() < deadline) {
+				// SIGKILL delivery can still be transitioning when the immediate snapshot
+				// reports a live group, and an unavailable snapshot is not negative proof.
+				// Cross one existing lifecycle-poll boundary before one prompt retry. The
+				// child-owned slot still coalesces concurrent callers to one observer.
+				if ((immediateObservation === "live" || immediateObservation === "unavailable") && treeExitClock.now() < deadline) {
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - treeExitClock.now())), treeExitClock);
 					completion = convergedCompletion();
 					if (completion != null) return completion;
 					if (!groupIsAlive(pid)) {
 						tracked._processGroupOwnershipLost = true;
 						return convergedCompletion() ?? false;
 					}
-					const remaining = deadline - Date.now();
-					if (permitFinalObservation && !finalObservationAttempted && remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS) {
+					if (treeExitClock.now() < deadline) {
+						await observeFinalizedDarwinGroup();
+						completion = convergedCompletion();
+						if (completion != null) return completion;
+					}
+				}
+				const permitFinalObservation = timeout > DARWIN_PROCESS_STATE_OBSERVER_MAX_MS;
+				let finalObservationAttempted = false;
+				while (treeExitClock.now() < deadline) {
+					completion = convergedCompletion();
+					if (completion != null) return completion;
+					if (!groupIsAlive(pid)) {
+						tracked._processGroupOwnershipLost = true;
+						return convergedCompletion() ?? false;
+					}
+					const remaining = deadline - treeExitClock.now();
+					// Admit the last observer before the deadline edge, while its complete
+					// fixed operation cap still fits inside this caller's unchanged deadline.
+					// Opening at two observer caps leaves a full cap for execution even under a
+					// delayed lifecycle turn. Any remaining window at least as large as the
+					// fixed cap is admissible; shorter evidence stays fail-closed.
+					if (permitFinalObservation && !finalObservationAttempted &&
+						remaining >= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS &&
+						remaining <= DARWIN_PROCESS_STATE_OBSERVER_MAX_MS * 2) {
 						finalObservationAttempted = true;
 						await observeFinalizedDarwinGroup();
 						completion = convergedCompletion();
 						if (completion != null) return completion;
 						continue;
 					}
-					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, remaining)));
+					await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, remaining)), treeExitClock);
 					completion = convergedCompletion();
 					if (completion != null) return completion;
 				}
@@ -715,8 +734,8 @@ export function spawnTracked(
 					tracked._processGroupOwnershipLost = true;
 					return convergedCompletion() ?? false;
 				}
-				if (Date.now() >= deadline) return convergedCompletion() ?? false;
-				await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - Date.now())));
+				if (treeExitClock.now() >= deadline) return convergedCompletion() ?? false;
+				await delay(Math.min(TREE_EXIT_POLL_MS, Math.max(1, deadline - treeExitClock.now())), treeExitClock);
 				const postDelayCompletion = convergedCompletion();
 				if (postDelayCompletion != null) return postDelayCompletion;
 			}
