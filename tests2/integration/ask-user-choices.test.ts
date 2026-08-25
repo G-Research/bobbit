@@ -51,6 +51,36 @@ async function getDismissals(sessionId: string) {
 	return apiFetch(`/api/internal/user-question/dismissals?sessionId=${encodeURIComponent(sessionId)}`);
 }
 
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((next) => { resolve = next; });
+	return { promise, resolve };
+}
+
+async function postAsk(conn: Awaited<ReturnType<typeof connectWs>>): Promise<string> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "prompt", text: "please use ask_user_choices" });
+	await conn.waitForFrom(cursor, toolStartPredicate("ask_user_choices"), 10_000);
+	const stubResult = await conn.waitForFrom(
+		cursor,
+		(m) => messageEndPredicate("toolResult")(m)
+			&& m.data?.message?.toolName === "ask_user_choices",
+		15_000,
+	);
+	const toolUseId = JSON.parse(stubResult.data.message.content[0].text).tool_use_id as string;
+	await conn.waitForFrom(
+		cursor,
+		(m) => m.type === "session_status" && (m as any).status === "idle",
+		10_000,
+	);
+	return toolUseId;
+}
+
+function messageText(message: any): string | undefined {
+	if (typeof message?.content === "string") return message.content;
+	return message?.content?.find?.((block: any) => block?.type === "text")?.text;
+}
+
 test.describe("ask_user_choices non-blocking REST", () => {
 	test("legacy /api/internal/user-question POST is removed (404)", async () => {
 		const sessionId = await createSession();
@@ -255,6 +285,114 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 			await deleteSession(sessionId);
 		}
 	});
+
+	for (const firstTerminal of ["answer", "dismiss"] as const) {
+		test(`cross-card ${firstTerminal}-first terminal snapshots converge durably`, async () => {
+			const sessionId = await createSession();
+			try {
+				const conn = await connectWs(sessionId);
+				try {
+					const answerToolUseId = await postAsk(conn);
+					const dismissToolUseId = await postAsk(conn);
+					expect(dismissToolUseId).not.toBe(answerToolUseId);
+
+					const session = gatewaySync().sessionManager.getSession(sessionId)!;
+					const rpcClient = session.rpcClient as any;
+					const originalGetMessages = rpcClient.getMessages.bind(rpcClient);
+					const originalPrompt = rpcClient.prompt.bind(rpcClient);
+					const originalPromptWhenReady = rpcClient.promptWhenReady?.bind(rpcClient);
+					const entered = [deferred<void>(), deferred<void>()];
+					const releases = [deferred<void>(), deferred<void>()];
+					const dispatchedPrompts: string[] = [];
+					let capturedSnapshots = 0;
+					rpcClient.getMessages = async (...args: any[]) => {
+						const snapshot = await originalGetMessages(...args);
+						const index = capturedSnapshots++;
+						if (index < 2) {
+							entered[index]!.resolve();
+							await releases[index]!.promise;
+						}
+						return snapshot;
+					};
+					rpcClient.prompt = async (text: string, ...args: any[]) => {
+						dispatchedPrompts.push(text);
+						return originalPrompt(text, ...args);
+					};
+					if (originalPromptWhenReady) {
+						rpcClient.promptWhenReady = async (text: string, ...args: any[]) => {
+							dispatchedPrompts.push(text);
+							return originalPromptWhenReady(text, ...args);
+						};
+					}
+
+					const answers = [
+						{ question: "Favorite color?", selected: "blue", other_text: null },
+						{ question: "Team size?", selected: "small", other_text: null },
+					];
+					const begin = (terminal: "answer" | "dismiss") => terminal === "answer"
+						? postSubmit(sessionId, answerToolUseId, answers)
+						: postDismiss(sessionId, dismissToolUseId);
+					const secondTerminal = firstTerminal === "answer" ? "dismiss" : "answer";
+					const eventCursor = conn.messageCount();
+
+					try {
+						const firstResponse = begin(firstTerminal);
+						await entered[0]!.promise;
+						const secondResponse = begin(secondTerminal);
+						await entered[1]!.promise;
+						// Both route-level transcript snapshots now predate either terminal
+						// mutation. Release them one at a time to pin both operation orders.
+						releases[0]!.resolve();
+						expect((await firstResponse).status).toBe(200);
+						releases[1]!.resolve();
+						expect((await secondResponse).status).toBe(200);
+					} finally {
+						releases[0]!.resolve();
+						releases[1]!.resolve();
+						rpcClient.getMessages = originalGetMessages;
+						rpcClient.prompt = originalPrompt;
+						if (originalPromptWhenReady) rpcClient.promptWhenReady = originalPromptWhenReady;
+					}
+
+					await conn.waitForFrom(
+						eventCursor,
+						(m) => messageEndPredicate("assistant")(m)
+							&& JSON.stringify(m.data?.message?.content ?? "").includes(answerToolUseId),
+						10_000,
+					);
+					await conn.waitForFrom(
+						eventCursor,
+						(m) => m.type === "session_status" && (m as any).status === "idle",
+						10_000,
+					);
+
+					const durable = await getDismissals(sessionId).then(response => response.json());
+					expect(durable).toEqual({ dismissedToolUseIds: [dismissToolUseId] });
+					const transcript = await session.rpcClient.getMessages();
+					const messages = transcript.data?.messages || transcript.data;
+					const answerEnvelopes = messages.filter((message: any) =>
+						messageText(message)?.startsWith(`[ask_user_choices_response tool_use_id=${answerToolUseId}]`)
+					);
+					expect(answerEnvelopes).toHaveLength(1);
+					expect(messages.some((message: any) =>
+						messageText(message)?.startsWith(`[ask_user_choices_response tool_use_id=${dismissToolUseId}]`)
+					)).toBe(false);
+					expect(dispatchedPrompts).toHaveLength(1);
+					expect(dispatchedPrompts[0]?.startsWith(
+						`[ask_user_choices_response tool_use_id=${answerToolUseId}]`,
+					)).toBe(true);
+
+					const settledList = await apiFetch("/api/sessions");
+					const settledRows = (await settledList.json()).sessions;
+					expect(settledRows.find((row: any) => row.id === sessionId)?.hasUnansweredQuestion).toBe(false);
+				} finally {
+					conn.close();
+				}
+			} finally {
+				await deleteSession(sessionId);
+			}
+		});
+	}
 
 	test("concurrent answer and dismissal linearize to exactly one terminal winner", async () => {
 		const sessionId = await createSession();

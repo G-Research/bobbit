@@ -13,6 +13,9 @@ import type { ToolRenderContext } from "../../src/ui/tools/types.js";
 import "../../src/ui/components/AskUserChoicesWidget.js";
 import {
 	applyAskQuestionDismissed,
+	clearAskQuestionDismissals,
+	dismissedAskToolUseIds,
+	loadAskQuestionDismissals,
 	resetAskDismissalsForTests,
 } from "../../src/app/ask-dismissals.js";
 
@@ -60,6 +63,55 @@ afterEach(() => {
 	state.archivedSessions = [];
 	resetAskDismissalsForTests();
 	vi.restoreAllMocks();
+});
+
+describe("ask dismissal cache ordering", () => {
+	function deferred<T>() {
+		let resolve!: (value: T) => void;
+		const promise = new Promise<T>((next) => { resolve = next; });
+		return { promise, resolve };
+	}
+
+	it("merges a forced stale GET without erasing a newer dismissal event", async () => {
+		const release = deferred<void>();
+		const staleResponse = new Response(
+			JSON.stringify({ dismissedToolUseIds: [] }),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			await release.promise;
+			return staleResponse;
+		});
+
+		const load = loadAskQuestionDismissals("session-race", true);
+		await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+		applyAskQuestionDismissed("session-race", "ask-1");
+		release.resolve();
+
+		await expect(load).resolves.toEqual(new Set(["ask-1"]));
+		expect(dismissedAskToolUseIds("session-race")).toEqual(new Set(["ask-1"]));
+	});
+
+	it("keeps an explicit clear authoritative over an older forced GET", async () => {
+		applyAskQuestionDismissed("session-clear", "ask-known-before-clear");
+		const release = deferred<void>();
+		const staleResponse = new Response(
+			JSON.stringify({ dismissedToolUseIds: ["ask-from-older-response"] }),
+			{ status: 200, headers: { "Content-Type": "application/json" } },
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			await release.promise;
+			return staleResponse;
+		});
+
+		const load = loadAskQuestionDismissals("session-clear", true);
+		await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+		clearAskQuestionDismissals("session-clear");
+		release.resolve();
+
+		await expect(load).resolves.toEqual(new Set());
+		expect(dismissedAskToolUseIds("session-clear")).toEqual(new Set());
+	});
 });
 
 describe("AskUserChoicesRenderer error-vs-interactive gating", () => {
