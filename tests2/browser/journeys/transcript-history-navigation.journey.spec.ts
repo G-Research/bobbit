@@ -72,7 +72,7 @@ async function completeQuestion(page: Page): Promise<void> {
 }
 
 test.describe("Journey: Transcript history navigation", () => {
-	test("searches, filters, jumps, resolves unanswered questions, reloads, and stays usable on narrow screens", async ({ page }) => {
+	test("searches, filters, jumps, resolves unanswered questions, reloads, and stays usable on narrow screens", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const sessionId = await createSession();
 		try {
@@ -86,20 +86,20 @@ test.describe("Journey: Transcript history navigation", () => {
 			await sendMessage(page, longPrompt);
 			await waitForAgentResponse(page);
 			await waitForSessionStatus(sessionId, "idle");
-			await sendMessage(page, "ask_user_choices transcript navigation journey");
-			const widget = page.locator("ask-user-choices-widget").first();
-			await expect(widget).toBeVisible({ timeout: 20_000 });
-			await waitForSessionStatus(sessionId, "idle");
-
-			// An unread session with an unanswered ask replaces the generic dot with
-			// the question-circle attention icon.
+			// Dispatch in the background: active sessions are marked read when they
+			// become idle, while this assertion specifically covers an unread ask.
 			await navigateToHash(page, "#/");
+			const askResult = await gateway.sessionManager.enqueuePrompt(sessionId, "ask_user_choices transcript navigation journey");
+			expect(askResult.status).toBe("dispatched");
+			await waitForSessionStatus(sessionId, "idle");
 			const sidebarRow = page.locator(`[data-session-id="${sessionId}"]`).first();
 			await expect(sidebarRow).toBeVisible({ timeout: 20_000 });
 			await expect(sidebarRow.locator(".unanswered-question-indicator")).toHaveCount(1);
 			await expect(sidebarRow.locator(".unseen-dot")).toHaveCount(0);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			const widget = page.locator("ask-user-choices-widget").first();
+			await expect(widget).toBeVisible({ timeout: 20_000 });
 
 			const navigation = page.locator("[role='group'][aria-label='Transcript navigation']");
 			await expect(navigation).toBeVisible();
