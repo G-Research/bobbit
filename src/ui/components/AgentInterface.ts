@@ -6,7 +6,7 @@ import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import { html, LitElement, nothing } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { AlertTriangle, ArrowDown, ArrowUp, Brain, Check, ChevronsDown, Copy, Image as ImageIcon, Sparkles } from "lucide";
+import { AlertTriangle, ArrowDown, ArrowUp, Brain, Check, ChevronDown, ChevronsDown, CircleHelp, Copy, Image as ImageIcon, ListFilter, Sparkles } from "lucide";
 import type { ModelSelector } from "../dialogs/ModelSelector.js";
 import type { ImageModelSelector } from "../dialogs/ImageModelSelector.js";
 
@@ -26,7 +26,9 @@ async function openImageModelSelector(...args: Parameters<typeof ImageModelSelec
 }
 import type { MessageEditor, QueuedMessage } from "./MessageEditor.js";
 import "./MessageEditor.js";
+import type { MessageList } from "./MessageList.js";
 import "./MessageList.js";
+import "./TranscriptHistoryPopover.js";
 // <git-status-widget> is loaded on demand via `app/lazy-widgets.ts` to
 // keep its 52 kB chunk out of the entry bundle. AgentInterface's
 // connectedCallback fires the import; goal-dashboard mirrors the same
@@ -67,6 +69,12 @@ import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 import type { GitRepoKnown } from "../../app/git-status-refresh.js";
 import { selectPromptAuthorDisplayMode } from "../message-author-presentation.js";
+import {
+	deriveTranscriptNavigation,
+	selectUnansweredTarget,
+	type TranscriptHistoryEntry,
+} from "../transcript-history.js";
+import type { TranscriptHistorySelectDetail } from "./TranscriptHistoryPopover.js";
 
 interface PromptHistoryForkDetail {
 	entryId: string;
@@ -367,6 +375,17 @@ export class AgentInterface extends LitElement {
 	 * `<user-message>` has its top edge below the scroll container's bottom
 	 * edge. */
 	private _showSplitBottom = false;
+
+	private _transcriptHistoryOpen = false;
+	private _transcriptHistoryTrigger: HTMLElement | null = null;
+	@state() private _transcriptHistoryAvailableHeight = 535;
+	private _transcriptBoundsResizeObserver?: ResizeObserver;
+	private _transcriptJumpStatus = "";
+	private _transcriptHighlightElement: HTMLElement | null = null;
+	private _transcriptHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly _handleTranscriptBoundsResize = (): void => {
+		if (this._transcriptHistoryOpen) this._measureTranscriptHistoryAvailableHeight();
+	};
 
 	// --- Legacy backward-compat shims ---
 	// Several E2E tests directly poke `ai._stickToBottom = true` and push
@@ -760,6 +779,10 @@ export class AgentInterface extends LitElement {
 		if (!this._scrollContainer) return Promise.resolve();
 		const el = this._scrollContainer;
 		const readTarget = typeof targetGetter === "function" ? targetGetter : () => targetGetter;
+		if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+			this._writeScrollTop(readTarget());
+			return Promise.resolve();
+		}
 		const DAMPING = 0.7;
 		const STIFFNESS = 0.05;
 		const MASS = 1.25;
@@ -934,6 +957,10 @@ export class AgentInterface extends LitElement {
 		if (changedProperties.has("session")) {
 			this.setupSessionSubscription();
 			this._preCompactionPromptAuthorSlices = new Map();
+			this._transcriptHistoryOpen = false;
+			this._transcriptHistoryTrigger = null;
+			this._transcriptJumpStatus = "";
+			this._clearTranscriptHighlight();
 			const newSid = this.session?.sessionId;
 			// Restore the per-session composer attachment draft (lifted out of the
 			// transient <message-editor>) whenever the bound session changes —
@@ -1082,6 +1109,9 @@ export class AgentInterface extends LitElement {
 
 		// Subscribe to external session if provided
 		this.setupSessionSubscription();
+		this._setupTranscriptBoundsObserver();
+		window.addEventListener("resize", this._handleTranscriptBoundsResize);
+		window.visualViewport?.addEventListener("resize", this._handleTranscriptBoundsResize);
 
 		// Track host container width so the prompt-bar row compacts when the chat
 		// column is narrowed (mobile viewport OR desktop side-panel-open).
@@ -1123,6 +1153,9 @@ export class AgentInterface extends LitElement {
 			}
 		}
 		this._cancelAnimation();
+		this._clearTranscriptHighlight();
+		this._transcriptHistoryOpen = false;
+		this._transcriptHistoryTrigger = null;
 		if (this._scrollDeferTimer) {
 			clearTimeout(this._scrollDeferTimer);
 			this._scrollDeferTimer = null;
@@ -1141,6 +1174,12 @@ export class AgentInterface extends LitElement {
 			this._narrowResizeObserver.disconnect();
 			this._narrowResizeObserver = undefined;
 		}
+		if (this._transcriptBoundsResizeObserver) {
+			this._transcriptBoundsResizeObserver.disconnect();
+			this._transcriptBoundsResizeObserver = undefined;
+		}
+		window.removeEventListener("resize", this._handleTranscriptBoundsResize);
+		window.visualViewport?.removeEventListener("resize", this._handleTranscriptBoundsResize);
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
 		document.removeEventListener("keydown", this._handleGlobalEscape, true);
@@ -1610,8 +1649,136 @@ export class AgentInterface extends LitElement {
 		// and the no-gesture re-pin branch don't yank us back mid-spring.
 		this._isAtBottom = false;
 		this._escapedFromLock = true;
-		void this._scrollUserMessageIntoView(target);
+		void this._scrollTranscriptElementIntoView(target);
 	};
+
+	private _handleTranscriptHistoryToggle = (event: Event): void => {
+		this._transcriptHistoryTrigger = event.currentTarget instanceof HTMLElement
+			? event.currentTarget
+			: null;
+		const opening = !this._transcriptHistoryOpen;
+		if (opening) this._measureTranscriptHistoryAvailableHeight();
+		this._transcriptHistoryOpen = opening;
+		this.requestUpdate();
+	};
+
+	private _measureTranscriptHistoryAvailableHeight(): void {
+		const messagesArea = this.querySelector<HTMLElement>("[data-messages-area]");
+		const inputArea = this.querySelector<HTMLElement>("[data-input-area]");
+		const anchor = this.querySelector<HTMLElement>("[data-transcript-navigation-anchor]");
+		if (!messagesArea || !anchor) return;
+		const messagesRect = messagesArea.getBoundingClientRect();
+		const anchorRect = anchor.getBoundingClientRect();
+		if (messagesRect.height <= 0 || anchorRect.height <= 0) return;
+		const inputTop = inputArea?.getBoundingClientRect().top;
+		const boundary = typeof inputTop === "number" && Number.isFinite(inputTop)
+			? Math.min(messagesRect.bottom, inputTop)
+			: messagesRect.bottom;
+		const available = Math.max(0, Math.floor(boundary - anchorRect.bottom - 6));
+		if (Math.abs(available - this._transcriptHistoryAvailableHeight) >= 1) {
+			this._transcriptHistoryAvailableHeight = available;
+		}
+	}
+
+	private _setupTranscriptBoundsObserver(): void {
+		this._transcriptBoundsResizeObserver?.disconnect();
+		this._transcriptBoundsResizeObserver = undefined;
+		if (typeof ResizeObserver === "undefined") return;
+		const observer = new ResizeObserver(this._handleTranscriptBoundsResize);
+		for (const selector of ["[data-messages-area]", "[data-input-area]", "[data-transcript-navigation-anchor]"]) {
+			const target = this.querySelector<HTMLElement>(selector);
+			if (target) observer.observe(target);
+		}
+		this._transcriptBoundsResizeObserver = observer;
+	}
+
+	private _handleTranscriptHistoryClose = (): void => {
+		if (!this._transcriptHistoryOpen) return;
+		this._transcriptHistoryOpen = false;
+		this.requestUpdate();
+	};
+
+	private _handleTranscriptEntrySelect = (event: CustomEvent<TranscriptHistorySelectDetail>): void => {
+		const entry = event.detail?.entry;
+		if (!entry) return;
+		this._transcriptHistoryOpen = false;
+		this.requestUpdate();
+		void this._scrollToTranscriptTarget(entry.targetId, entry);
+	};
+
+	private _handleJumpToUnansweredClick = async (): Promise<void> => {
+		if (!this._scrollContainer) return;
+		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? []);
+		if (navigation.unresolvedQuestions.length === 0) return;
+
+		// Release tail-following before deferred rows materialize so their anchor-
+		// preserving height changes cannot re-pin the viewport.
+		this._isAtBottom = false;
+		this._escapedFromLock = true;
+		const list = this._scrollContainer.querySelector<MessageList>("message-list");
+		await list?.resolveTranscriptTargets(navigation.unresolvedQuestions.map((entry) => entry.targetId));
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		if (!this._scrollContainer) return;
+
+		const rects = new Map<string, DOMRect>();
+		for (const entry of navigation.unresolvedQuestions) {
+			const target = this._findTranscriptTargetNode(entry.targetId, false);
+			if (target) rects.set(entry.targetId, target.getBoundingClientRect());
+		}
+		const viewportTop = this._scrollContainer.getBoundingClientRect().top;
+		const target = selectUnansweredTarget(navigation.unresolvedQuestions, rects, viewportTop);
+		if (target) await this._scrollToTranscriptTarget(target.targetId, target);
+	};
+
+	private _findTranscriptTargetNode(targetId: string, includeDeferred: boolean): HTMLElement | null {
+		if (!this._scrollContainer) return null;
+		let deferred: HTMLElement | null = null;
+		const candidates = this._scrollContainer.querySelectorAll<HTMLElement>("[data-transcript-target]");
+		for (const candidate of candidates) {
+			if (candidate.dataset.transcriptTarget !== targetId) continue;
+			if (candidate.localName !== "deferred-block") return candidate;
+			if (includeDeferred) deferred = candidate;
+		}
+		return deferred;
+	}
+
+	private async _scrollToTranscriptTarget(
+		targetId: string,
+		entry: TranscriptHistoryEntry,
+	): Promise<void> {
+		if (!this._scrollContainer) return;
+		this._isAtBottom = false;
+		this._escapedFromLock = true;
+		const list = this._scrollContainer.querySelector<MessageList>("message-list");
+		const resolved = await list?.resolveTranscriptTarget(targetId);
+		const target = resolved ?? this._findTranscriptTargetNode(targetId, false);
+		if (!target) return;
+		await this._scrollTranscriptElementIntoView(target, true);
+		this._transcriptJumpStatus = entry.kind === "question" && entry.unresolved
+			? `Jumped to unanswered question: ${entry.excerpt}`
+			: `Jumped to ${entry.authorLabel}: ${entry.excerpt}`;
+		this.requestUpdate();
+	}
+
+	private _clearTranscriptHighlight(): void {
+		if (this._transcriptHighlightTimer) {
+			clearTimeout(this._transcriptHighlightTimer);
+			this._transcriptHighlightTimer = null;
+		}
+		this._transcriptHighlightElement?.classList.remove("transcript-navigation-highlight");
+		this._transcriptHighlightElement = null;
+	}
+
+	private _highlightTranscriptTarget(target: HTMLElement): void {
+		this._clearTranscriptHighlight();
+		target.classList.add("transcript-navigation-highlight");
+		this._transcriptHighlightElement = target;
+		this._transcriptHighlightTimer = setTimeout(() => {
+			target.classList.remove("transcript-navigation-highlight");
+			if (this._transcriptHighlightElement === target) this._transcriptHighlightElement = null;
+			this._transcriptHighlightTimer = null;
+		}, 1300);
+	}
 
 	/** Jump-to-next-prompt click handler (split-bottom left half). Walks the
 	 * DOM live to find the top-most `<user-message>` whose top edge is below
@@ -1634,13 +1801,15 @@ export class AgentInterface extends LitElement {
 		if (!target) return;
 		this._isAtBottom = false;
 		this._escapedFromLock = true;
-		void this._scrollUserMessageIntoView(target);
+		void this._scrollTranscriptElementIntoView(target);
 	};
 
-	/** Spring-scroll the given `<user-message>` so its top edge lands
-	 * `TOP_MARGIN` below the scroll container's top. Cancels any in-flight
-	 * spring before starting. Stateless — no walk-cursor is maintained. */
-	private async _scrollUserMessageIntoView(targetEl: HTMLElement): Promise<void> {
+	/** Spring-scroll the given transcript target so its top edge lands below
+	 * visible top chrome. Cancels any in-flight spring before starting. */
+	private async _scrollTranscriptElementIntoView(
+		targetEl: HTMLElement,
+		highlight = false,
+	): Promise<void> {
 		if (!this._scrollContainer) return;
 		this._cancelAnimation();
 		const container = this._scrollContainer;
@@ -1656,6 +1825,7 @@ export class AgentInterface extends LitElement {
 		// (the click handler already set it).
 		this._ignoreScrollToTop = targetScrollTop;
 		await this._springScrollTo(targetScrollTop);
+		if (highlight && targetEl.isConnected) this._highlightTranscriptTarget(targetEl);
 		this._refreshJumpButton();
 	}
 
@@ -2161,11 +2331,17 @@ export class AgentInterface extends LitElement {
 			...Array.from(this._preCompactionPromptAuthorSlices.values()).flat(),
 		]);
 		const canForkSource = !!this._historyForkSource();
+		const messageOrdinals = new Map<object, number>();
+		for (let ordinal = 0; ordinal < state.messages.length; ordinal++) {
+			const message = state.messages[ordinal];
+			if (message && typeof message === "object") messageOrdinals.set(message as object, ordinal);
+		}
 		return html`
 			<div class="flex flex-col gap-3">
 				<!-- Stable messages list - won't re-render during streaming -->
 				<message-list
 					.messages=${visibleMessages}
+					.messageOrdinals=${messageOrdinals}
 					.sessionId=${this.session?.sessionId ?? ""}
 					.capabilityMode=${"active"}
 					.canForkSource=${canForkSource}
@@ -2642,16 +2818,17 @@ export class AgentInterface extends LitElement {
 		return html`
 			<div class="flex flex-col h-full bg-background text-foreground min-w-0">
 				<!-- Messages Area -->
-				<div class="flex-1 min-h-0 relative">
+				<div class="flex-1 min-h-0 relative" data-messages-area>
 					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
 					</div>
 					${this._renderJumpToLastPrompt()}
 					${this._renderJumpToBottom()}
+					<div class="sr-only" role="status" aria-live="polite">${this._transcriptJumpStatus}</div>
 				</div>
 
 				<!-- Input Area -->
-				<div class="shrink-0 pt-0 pb-1 agent-input-area">
+				<div class="shrink-0 pt-0 pb-1 agent-input-area" data-input-area>
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this._renderPinnedPermissions()}
 						${this.bgProcesses.length > 0 || this._showGitStatusWidget || this.goalId || this.teamGoalId ? html`
@@ -2830,28 +3007,84 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
-	// Jump-to-previous-prompt floating button. Mirror of jump-to-bottom,
-	// anchored to the TOP-CENTRE of the visible messages region. On mobile
-	// the app header is fixed over the chat, so offset below
-	// --mobile-header-height as well as the normal 16px breathing room.
-	// Visible iff at least one `<user-message>` is fully above the viewport.
+	// Segmented transcript navigation, anchored to the TOP-CENTRE of the
+	// visible messages region. The previous-prompt segment retains the original
+	// test id and geometry; unresolved asks keep the group discoverable while
+	// later output is streaming.
 	private _renderJumpToLastPrompt() {
-		const show = this._showJumpToLastPrompt;
+		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? []);
+		const unresolvedCount = navigation.unresolvedQuestions.length;
+		const show = this._showJumpToLastPrompt || unresolvedCount > 0 || this._transcriptHistoryOpen;
 		const topOffset = this._getTopPromptNavOffsetCss();
-		const text = "Jump to previous prompt";
+		const previousLabel = "Jump to previous prompt";
+		const unansweredLabel = unresolvedCount === 1
+			? "Jump to unanswered question, 1 unanswered question"
+			: `Jump to unanswered question, ${unresolvedCount} unanswered questions`;
 		return html`
-			<button
-				type="button"
-				data-testid="jump-to-previous-prompt"
-				aria-label=${text}
-				class="absolute left-1/2 -translate-x-1/2 z-10 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-full bg-background hover:bg-muted text-foreground border border-input shadow-sm whitespace-nowrap"
+			<div
+				data-transcript-navigation-anchor
+				class="absolute left-1/2 -translate-x-1/2 z-20 whitespace-nowrap"
 				style="top:${topOffset};opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, top 150ms ease-out"
-				tabindex="${show ? "0" : "-1"}"
-				@click=${this._handleJumpToLastPromptClick}
+				?inert=${!show}
+				aria-hidden=${show ? nothing : "true"}
 			>
-				${icon(ArrowUp, "sm")}
-				<span>${text}</span>
-			</button>
+				<div
+					class="inline-flex items-stretch rounded-full bg-background text-foreground border border-input shadow-sm overflow-hidden"
+					role="group"
+					aria-label="Transcript navigation"
+				>
+					<button
+						type="button"
+						data-testid="jump-to-previous-prompt"
+						aria-label=${previousLabel}
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50 disabled:cursor-default"
+						style="top:${topOffset};opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, top 150ms ease-out"
+						?disabled=${!this._showJumpToLastPrompt}
+						tabindex="${show ? "0" : "-1"}"
+						@click=${this._handleJumpToLastPromptClick}
+					>
+						${icon(ArrowUp, "sm")}
+						<span class=${this._isNarrow ? "sr-only" : ""}>Previous prompt</span>
+					</button>
+					${unresolvedCount > 0 ? html`
+						<button
+							type="button"
+							data-testid="jump-to-unanswered-question"
+							aria-label=${unansweredLabel}
+							class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted border-l border-input"
+							tabindex="${show ? "0" : "-1"}"
+							@click=${this._handleJumpToUnansweredClick}
+						>
+							${icon(CircleHelp, "sm")}
+							<span class=${this._isNarrow ? "sr-only" : ""}>Unanswered question</span>
+							<span class="transcript-unanswered-count" aria-hidden="true">${unresolvedCount}</span>
+						</button>
+					` : nothing}
+					<button
+						type="button"
+						data-testid="jump-to-transcript-history"
+						aria-label="Jump to transcript history"
+						aria-haspopup="dialog"
+						aria-expanded=${this._transcriptHistoryOpen ? "true" : "false"}
+						aria-controls="transcript-history-popover"
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted border-l border-input"
+						tabindex="${show ? "0" : "-1"}"
+						@click=${this._handleTranscriptHistoryToggle}
+					>
+						${icon(ListFilter, "sm")}
+						<span class=${this._isNarrow ? "sr-only" : ""}>Jump to…</span>
+						${icon(ChevronDown, "xs")}
+					</button>
+				</div>
+				<transcript-history-popover
+					.entries=${navigation.entries}
+					.open=${this._transcriptHistoryOpen}
+					.anchorEl=${this._transcriptHistoryTrigger}
+					.availableHeight=${this._transcriptHistoryAvailableHeight}
+					@close=${this._handleTranscriptHistoryClose}
+					@transcript-entry-select=${this._handleTranscriptEntrySelect}
+				></transcript-history-popover>
+			</div>
 		`;
 	}
 

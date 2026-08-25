@@ -91,15 +91,8 @@ describe("bobbit compact projections", () => {
 		for (const dropped of ["spec", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
 			"sandboxed", "subgoalsAllowed", "autoStartTeam", "generation", "colorIndex"]) expect(data.goals[0][dropped], dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped).toBeUndefined();
 		for (const dropped of ["providerMetadata", "filesystemPath", "workflowSnapshot"]) expect(data[dropped]).toBeUndefined();
-		expect(data.archivedSessions[0]).toMatchObject({
-			id: archivedSession.id,
-			title: archivedSession.title,
-			status: archivedSession.status,
-			role: archivedSession.role,
-			archived: true,
-		});
-		expect(data.archivedSessions[0].cwd).toBeUndefined();
-		expect(data.archivedSessions[0].clientCount).toBeUndefined();
+		expect(data.archivedSessions).toBeUndefined();
+		expect("archivedSessions" in data).toBe(false);
 		expect(data.pagination).toMatchObject({
 			limit: 1,
 			total: 25,

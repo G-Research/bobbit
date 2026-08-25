@@ -157,10 +157,10 @@ auxiliary arrays the REST endpoints attach for the UI:
 - `list_sessions` — drops `archived: true` session rows and strips the
   `archivedDelegates` array. Pass `include=archived` to get archived sessions
   plus the `archivedDelegates` delegate-chain enrichment.
-- `list_goals` — drops `archived: true` goal rows and strips the
-  `archivedSessions` array. Pass `archived=true` to select the archived path,
-  which returns archived goals plus the `archivedSessions` affiliated-session
-  enrichment.
+- `list_goals` — drops `archived: true` goal rows by default. The tool always
+  strips the REST-only `archivedSessions` array, including when `archived=true`
+  selects archived goals. Use `list_sessions(include=archived)` to retrieve
+  archived sessions.
 - `search` — drops archived hits from `results`. Pass `include=archived` (or
   the REST-style `includeArchived=true`) to include archived rows.
 

@@ -19,7 +19,7 @@ import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types
 // the user is waiting for that round-trip anyway. Lit upgrades the
 // tag once the chunk lands; property bindings are preserved.
 import { ensureAskUserChoicesWidget } from "../../../app/lazy-widgets.js";
-import type { AskAnswer } from "../../components/AskUserChoicesWidget.js";
+import { classifyAskUserChoicesState } from "../ask-user-choices-state.js";
 
 /** Read the tool_result's content as a string. */
 function getResultText(result: ToolResultMessage | undefined): string {
@@ -28,38 +28,6 @@ function getResultText(result: ToolResultMessage | undefined): string {
 		?.filter((c: any) => c.type === "text")
 		.map((c: any) => c.text)
 		.join("\n") || "";
-}
-
-/** True when the tool_result is the `{ status: "posted" }` stub (non-blocking flow). */
-function isPostedStub(result: ToolResultMessage | undefined): boolean {
-	if (!result || result.isError) return false;
-	const text = getResultText(result);
-	if (!text) return false;
-	try {
-		const data = JSON.parse(text);
-		return data && typeof data === "object" && data.status === "posted";
-	} catch { return false; }
-}
-
-/** Legacy fallback: extract `{ answers: [...] }` from the tool_result content.
- *  Retained for sessions that predate the non-blocking flow (stub has no answers). */
-function extractLegacyAnswers(result: ToolResultMessage | undefined): AskAnswer[] | null {
-	if (!result || result.isError) return null;
-	const text = getResultText(result);
-	if (!text) return null;
-	try {
-		const data = JSON.parse(text);
-		if (data && Array.isArray(data.answers)) {
-			const valid = data.answers.every((a: any) =>
-				a && typeof a === "object" &&
-				typeof a.question === "string" &&
-				(typeof a.selected === "string"
-					|| (Array.isArray(a.selected) && a.selected.every((s: any) => typeof s === "string"))) &&
-				(a.other_text === null || typeof a.other_text === "string"));
-			return valid ? data.answers as AskAnswer[] : null;
-		}
-	} catch { /* not JSON */ }
-	return null;
 }
 
 function getErrorText(result: ToolResultMessage | undefined): string {
@@ -110,23 +78,12 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 			};
 		}
 
-		const posted = isPostedStub(result);
 		const historyMode = ctx?.capabilityMode === "history";
-		// Preferred path: the tool returned the `{status:"posted"}` stub and the
-		// user has submitted; answers live in a later envelope user message.
-		const fromTranscript = posted && ctx?.toolUseId && ctx?.getAskResponseAnswers
-			? ctx.getAskResponseAnswers(ctx.toolUseId) as AskAnswer[] | null
+		const fromTranscript = ctx?.toolUseId && ctx?.getAskResponseAnswers
+			? ctx.getAskResponseAnswers(ctx.toolUseId)
 			: null;
-		// Legacy path: pre-redesign sessions where the tool_result itself carried answers.
-		const legacy = posted ? null : extractLegacyAnswers(result);
-		const answers: AskAnswer[] | null = fromTranscript ?? legacy;
-		// Defense-in-depth: a completed tool result that is neither the posted stub
-		// nor carries legacy answers must be a failure — even if `isError` was not
-		// set on the result. This guards against tool extensions that forget to set
-		// `isError: true` on validation failures (would otherwise render the full
-		// interactive widget for a dead call).
-		const errored = Boolean(result?.isError)
-			|| (state !== "inprogress" && Boolean(result) && !posted && !legacy);
+		const askState = classifyAskUserChoicesState(result, fromTranscript);
+		const { posted, answers, failed: errored } = askState;
 
 		// Interactive mode: tool posted, no envelope yet, not errored.
 		//   - If `posted` is false but the tool has produced a non-stub result,

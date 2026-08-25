@@ -71,10 +71,10 @@ detail_docs: >-
   return archived sessions plus the `archivedDelegates` delegate-chain
   enrichment.
 
-  - `list_goals` — default calls drop any `archived: true` goal rows and strip
-  the `archivedSessions` auxiliary array. Pass `archived: true` to select the
-  archived path, which returns archived goals plus the `archivedSessions`
-  affiliated-session enrichment.
+  - `list_goals` — default calls drop any `archived: true` goal rows. The tool
+  always strips the REST-only `archivedSessions` auxiliary array, including
+  when `archived: true` selects archived goals. Use `list_sessions` with
+  `include: "archived"` to retrieve archived sessions.
 
   - `search` — default calls drop any archived hit from `results`. Pass
   `include: "archived"` (or the REST-style `includeArchived: true`) to include
