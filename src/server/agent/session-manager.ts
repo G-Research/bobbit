@@ -79,7 +79,18 @@ import type { FileMention } from "../skills/resolve-file-mentions.js";
 import {
 	appendIdentifiedSkillSidecarEntry,
 	appendSkillSidecarTranscriptBinding,
+	projectPromptDisplayMessage,
+	projectPromptDisplayMessagesForSession,
 } from "../skills/skill-sidecar.js";
+import {
+	sanitizeAttachmentDisplayMetadata,
+	type AttachmentDisplayMetadata,
+} from "./attachment-display.js";
+import { appendUploadedAttachmentContext } from "../../shared/uploaded-attachment-context.js";
+import {
+	persistUploadedAttachmentOccurrence,
+	UploadedAttachmentStoreError,
+} from "./uploaded-attachment-store.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -1318,6 +1329,7 @@ interface PendingSkillSidecarEnvelope {
 	originalText: string;
 	skillExpansions: SkillExpansion[];
 	fileMentions?: FileMention[];
+	attachments?: AttachmentDisplayMetadata[];
 	recordId?: string;
 	promptId?: string;
 }
@@ -1690,10 +1702,11 @@ export function projectPromptAuthorMessagesForTitle<T extends object>(
 	identity: AgentSessionIdentity = { id: sessionId },
 	agentDeps: AgentAuthorDependencies = {},
 ): T[] {
-	return mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
+	const withAuthors = mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
 		session: identity,
 		agentDeps,
 	}) as T[];
+	return projectPromptDisplayMessagesForSession(sessionId, withAuthors);
 }
 
 /**
@@ -2323,23 +2336,6 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		});
 	}
 	return before - (session.inFlightSteerTexts?.length ?? 0) + restoredDirectAttempts;
-}
-
-/** Helper: rewrite the text body of a user message in place (returns a new object). */
-function rewriteUserMessageText(message: any, newText: string): any {
-	if (!message) return message;
-	if (typeof message.content === "string") return { ...message, content: newText };
-	if (Array.isArray(message.content)) {
-		const content = message.content.map((c: any) =>
-			c?.type === "text" ? { ...c, text: newText } : c,
-		);
-		// If no text block was present, prepend one.
-		if (!content.some((c: any) => c?.type === "text")) {
-			content.unshift({ type: "text", text: newText });
-		}
-		return { ...message, content };
-	}
-	return { ...message, content: newText };
 }
 
 /**
@@ -3126,11 +3122,14 @@ function spliceSkillExpansionsIntoEvent(
 	const idx = pending.findIndex((p) => p.modelText === body);
 	if (idx === -1) return event;
 	const envelope = pending.splice(idx, 1)[0];
-	const rewrittenMsg = rewriteUserMessageText(msg, envelope.originalText);
-	rewrittenMsg.skillExpansions = envelope.skillExpansions;
-	if (envelope.fileMentions && envelope.fileMentions.length > 0) {
-		rewrittenMsg.fileMentions = envelope.fileMentions;
-	}
+	const rewrittenMsg = projectPromptDisplayMessage(msg, {
+		ts: 0,
+		modelText: envelope.modelText,
+		originalText: envelope.originalText,
+		skillExpansions: envelope.skillExpansions,
+		...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
+		...(envelope.attachments?.length ? { attachments: envelope.attachments } : {}),
+	});
 	return { ...ev, message: rewrittenMsg };
 }
 
@@ -7626,6 +7625,114 @@ export class SessionManager {
 		});
 	}
 
+	/**
+	 * Validate and snapshot browser-supplied attachments before any reliable row,
+	 * display envelope, or Pi dispatch is admitted. The returned attachments are
+	 * presentation-only metadata; exact document bytes live exclusively in the
+	 * immutable occurrence store and model text carries only bounded context.
+	 */
+	private async admitUploadedAttachments<T extends {
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		modelText?: string;
+		intentId?: string;
+	}>(sessionId: string, text: string, opts: T | undefined): Promise<T | undefined> {
+		if (!opts?.attachments?.length) return opts;
+
+		const displayAttachments = sanitizeAttachmentDisplayMetadata(opts.attachments);
+		if (!displayAttachments) {
+			throw new UploadedAttachmentStoreError(
+				400,
+				"UPLOADED_ATTACHMENT_INVALID",
+				"Uploaded attachment presentation metadata is invalid",
+			);
+		}
+		const documents = opts.attachments.filter((candidate) =>
+			!!candidate && typeof candidate === "object" && !Array.isArray(candidate)
+				&& (candidate as { type?: unknown }).type === "document");
+		const occurrenceId = opts.intentId ?? randomUUID();
+		let contextAttachments: unknown[] = [];
+		if (documents.length > 0) {
+			const stored = await persistUploadedAttachmentOccurrence(sessionId, occurrenceId, documents);
+			contextAttachments = stored.attachments.map((attachment, index) => {
+				const extractedText = (documents[index] as { extractedText?: unknown }).extractedText;
+				return {
+					type: "document",
+					...attachment,
+					...(typeof extractedText === "string" ? { extractedText } : {}),
+				};
+			});
+		}
+
+		const baseModelText = synthesizeAttachmentText(
+			opts.modelText ?? text,
+			opts.images,
+			displayAttachments,
+		);
+		let attachmentModelText = appendUploadedAttachmentContext(baseModelText, contextAttachments);
+		if (contextAttachments.length > 0 && attachmentModelText === baseModelText) {
+			// The context helper's public pointer grammar predates the immutable
+			// store's namespaced `bobbit-attachment:v1:` pointers. Adapt only the
+			// already store-validated opaque values, then restore the exact resolvable
+			// pointer after bounded/escaped context construction. The longer alias
+			// keeps budget accounting conservative.
+			const aliases = contextAttachments.map((candidate) => {
+				const attachment = candidate as { pointer: string };
+				return { ...attachment, pointer: `attachment:${attachment.pointer}` };
+			});
+			attachmentModelText = appendUploadedAttachmentContext(baseModelText, aliases);
+			for (let index = 0; index < aliases.length; index++) {
+				const alias = (aliases[index] as { pointer: string }).pointer;
+				const pointer = (contextAttachments[index] as { pointer: string }).pointer;
+				attachmentModelText = attachmentModelText.replaceAll(alias, pointer);
+			}
+		}
+		return {
+			...opts,
+			intentId: occurrenceId,
+			attachments: displayAttachments,
+			modelText: attachmentModelText,
+		};
+	}
+
+	private appendPromptDisplayEnvelope(
+		session: SessionInfo,
+		text: string,
+		dispatchText: string,
+		opts: {
+			modelText?: string;
+			skillExpansions?: SkillExpansion[];
+			fileMentions?: FileMention[];
+			attachments?: unknown[];
+			intentId?: string;
+		} | undefined,
+	): void {
+		const attachments = sanitizeAttachmentDisplayMetadata(opts?.attachments);
+		const hasSkillExpansions = !!opts?.skillExpansions?.length;
+		const hasFileMentions = !!opts?.fileMentions?.length;
+		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
+		if (!hasSkillExpansions && !hasFileMentions && !hasModelTextOverride && !attachments?.length) return;
+
+		const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
+			ts: this.clock.now(),
+			modelText: dispatchText,
+			originalText: text,
+			skillExpansions: opts?.skillExpansions ?? [],
+			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			...(attachments?.length ? { attachments } : {}),
+		});
+		if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
+		session.pendingSkillExpansions.push({
+			modelText: dispatchText,
+			originalText: text,
+			skillExpansions: opts?.skillExpansions ?? [],
+			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			...(attachments?.length ? { attachments } : {}),
+			...(recordId ? { recordId } : {}),
+			...(opts?.intentId ? { promptId: opts.intentId } : {}),
+		});
+	}
+
 	/** Apply a synchronously persisted exact echo/cancellation that preceded RPC acknowledgement. */
 	private pruneTerminalInFlightAttempt(session: SessionInfo, intentId: string, attemptId: string): boolean {
 		const terminal = readAuthorSidecar(session.id).some((binding) =>
@@ -7702,26 +7809,7 @@ export class SessionManager {
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-		const hasSkillExpansions = !!opts?.skillExpansions?.length;
-		const hasFileMentions = !!opts?.fileMentions?.length;
-		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
-		if (hasSkillExpansions || hasFileMentions || hasModelTextOverride) {
-			const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
-				ts: this.clock.now(),
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-			});
-			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
-			session.pendingSkillExpansions.push({
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-				...(recordId ? { recordId } : {}),
-			});
-		}
+		this.appendPromptDisplayEnvelope(session, text, dispatchText, opts);
 		// Server-generated work entered the occurrence lifecycle before any sidecar
 		// persistence above; now persist the delivery carrier itself.
 		if (reliableIntentId) {
@@ -7890,6 +7978,13 @@ export class SessionManager {
 		// recovery the coordinator's promptOwner remains the conditioned capsule until
 		// the verified replacement commits and ownership is released.
 		this._assertModelSelectionReady(sessionId);
+		// Attachment admission is authoritative here, before replacement/queue/RPC
+		// ownership can mutate. It also mints the accepted occurrence used by the
+		// immutable pointer when a legacy caller did not supply one. Trusted internal
+		// producers retain their established metadata-only attachment contract.
+		if (opts?.attachments?.length && (opts.source ?? "user") === "user") {
+			opts = await this.admitUploadedAttachments(sessionId, text, opts);
+		}
 
 		// Replacement ownership is the first ordinary dispatch fence — before
 		// poison/error classification, revive logic, or any RPC. Every prompt accepted
@@ -7924,26 +8019,7 @@ export class SessionManager {
 				const author = resolveAcceptedPromptAuthor(source, opts?.author);
 				rollback.lastPromptSource = source;
 				const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-				const hasSkillExpansions = !!opts?.skillExpansions?.length;
-				const hasFileMentions = !!opts?.fileMentions?.length;
-				const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
-				if (hasSkillExpansions || hasFileMentions || hasModelTextOverride) {
-					const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
-						ts: this.clock.now(),
-						modelText: dispatchText,
-						originalText: text,
-						skillExpansions: opts?.skillExpansions ?? [],
-						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-					});
-					if (!rollback.pendingSkillExpansions) rollback.pendingSkillExpansions = [];
-					rollback.pendingSkillExpansions.push({
-						modelText: dispatchText,
-						originalText: text,
-						skillExpansions: opts?.skillExpansions ?? [],
-						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-						...(recordId ? { recordId } : {}),
-					});
-				}
+				this.appendPromptDisplayEnvelope(rollback, text, dispatchText, opts);
 				if (opts?.intentId) {
 					this.enqueueReliableIntent(rollback, this.makeReliableIntentRow(
 						rollback,
@@ -8086,29 +8162,7 @@ export class SessionManager {
 				return { status: duplicate && (duplicate as ReliableQueuedMessage).deliveryState === "queued" ? "queued" : "dispatched" };
 			}
 		}
-		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
-		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
-		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
-		if (hasSkillExpansions || hasFileMentions || hasModelTextOverride) {
-			const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
-				ts: this.clock.now(),
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-			});
-			// Stash the envelope so when the agent echoes the user message
-			// back via `message_end`, we can splice the original text +
-			// chip metadata onto the broadcast event before clients see it.
-			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
-			session.pendingSkillExpansions.push({
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-				...(recordId ? { recordId } : {}),
-			});
-		}
+		this.appendPromptDisplayEnvelope(session, text, dispatchText, opts);
 
 		// Stable-ID admission has one durable boundary: persist the exact occurrence
 		// before any Pi RPC, even when the session currently appears idle.

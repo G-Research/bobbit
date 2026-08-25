@@ -30,12 +30,48 @@
       }
     },
     {
+      "path": "tests2/core/uploaded-attachment-admission-repro.test.ts",
+      "reason": "Focused admission lifecycle coverage proving immutable pointers and bounded excerpts reach model dispatch while visible, title, queue, binary, and equal-text occurrence projections remain isolated.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/uploaded-attachment-store.test.ts",
+      "reason": "Core coverage for immutable exact-byte attachment persistence, idempotent occurrence ownership, bounded ranges, authorization, validation, and purge.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/attachment-upload.test.ts",
       "reason": "Real composer and browser File coverage for unrestricted file selection, unknown-extension UTF-8 extraction, and arbitrary binary attachment retention.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/uploaded-attachment-binary-text-repro.test.ts",
+      "reason": "DOM regression coverage proving binary-looking bytes are never trusted as text solely from their filename or claimed MIME type.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/uploaded-attachment-tool.test.ts",
+      "reason": "Integration coverage for session-scoped attachment list/read routing, exact bounded bytes, foreign-session rejection, restart persistence, and cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     },
     {
