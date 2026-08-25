@@ -14,6 +14,7 @@ import type { Workflow } from "./workflow-store.js";
 import type { ToolInfo } from "./tool-manager.js";
 import type { BuiltinConfigProvider } from "./builtin-config.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
+import type { GroupPolicyProvider } from "./tool-activation.js";
 import type { LoadedEntity, PackEntry, PackScope, ResolvedEntity } from "./pack-types.js";
 import { scopePaths } from "./pack-types.js";
 import { PackResolver, RoleLoader, ToolLoader } from "./pack-resolver.js";
@@ -342,7 +343,7 @@ export class ConfigCascade {
 		if (normalizedProjectId) {
 			const projectCtx = this.projectContextManager.getOrCreate(normalizedProjectId);
 			if (projectCtx) {
-				for (const [group, policy] of Object.entries(projectCtx.toolGroupPolicyStore.getAll())) {
+				for (const [group, policy] of Object.entries(projectCtx.toolGroupPolicyStore.getAllLocal())) {
 					const existing = merged.get(group);
 					merged.set(group, {
 						policy,
@@ -354,6 +355,27 @@ export class ConfigCascade {
 		}
 
 		return Object.fromEntries(merged);
+	}
+
+	/**
+	 * Adapt the resolved builtin → server → project cascade to the narrow policy
+	 * interface consumed by tool activation. The adapter is deliberately live:
+	 * each read observes current YAML without introducing another cache or store.
+	 */
+	createToolGroupPolicyProvider(
+		projectId?: string,
+		featureProvider?: Pick<GroupPolicyProvider, "getSubgoalsEnabled">,
+	): GroupPolicyProvider {
+		const getAll = (): Record<string, GrantPolicy> => Object.fromEntries(
+			Object.entries(this.resolveToolGroupPolicies(projectId)).map(([group, resolved]) => [group, resolved.policy]),
+		);
+		return {
+			getAll,
+			getGroupPolicy: (group: string) => getAll()[group] ?? null,
+			...(featureProvider?.getSubgoalsEnabled
+				? { getSubgoalsEnabled: () => featureProvider.getSubgoalsEnabled!() }
+				: {}),
+		};
 	}
 
 	// ── Generic resolution adapter (over the single PackResolver) ──

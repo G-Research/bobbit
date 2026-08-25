@@ -17,6 +17,11 @@ const {
 } = await import("../../src/server/mcp/mcp-manager.ts");
 const { parseMcpToolName } = await import("../../src/server/mcp/mcp-meta.ts");
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { ConfigCascade } = await import("../../src/server/agent/config-cascade.ts");
+const { ToolManager, __resetToolScanCache } = await import("../../src/server/agent/tool-manager.ts");
+const { ToolGroupPolicyStore } = await import("../../src/server/agent/tool-group-policy-store.ts");
+const { computeEffectiveAllowedTools } = await import("../../src/server/agent/tool-activation.ts");
+const { scopedToolContext } = await import("../../src/server/agent/session-setup.ts");
 const { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } = await import("../../src/server/agent/mcp-gateway-runtime-identity.ts");
 const { ProjectConfigStore } = await import("../../src/server/agent/project-config-store.ts");
 const { ProjectContextManager } = await import("../../src/server/agent/project-context-manager.ts");
@@ -896,6 +901,156 @@ describe("SessionManager scoped MCP manager creation", () => {
     const projectStateDir = path.join(projectRoot, ".bobbit", "state");
     assert.equal(fs.existsSync(path.join(projectStateDir, "goals.sqlite")), false);
     assert.equal(fs.existsSync(path.join(projectStateDir, "tasks.sqlite")), false);
+  });
+
+  it("routes project-only marketplace tools through pipeline, policy, docs, and activation", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-project-tool-route-"));
+    const registryStateDir = path.join(root, "state");
+    const projectRoot = path.join(root, "project");
+    const projectConfigDir = path.join(projectRoot, ".bobbit", "config");
+    const serverConfigDir = path.join(root, "server-config");
+    const marketToolsDir = path.join(projectConfigDir, "market-packs", "project-scanner", "tools");
+    const toolGroupDir = path.join(marketToolsDir, "project-scanner");
+    fs.mkdirSync(toolGroupDir, { recursive: true });
+    fs.mkdirSync(registryStateDir, { recursive: true });
+    fs.mkdirSync(serverConfigDir, { recursive: true });
+    fs.writeFileSync(path.join(toolGroupDir, "scan_reconcile.yaml"), [
+      "name: project_scan_reconcile",
+      "description: Reconcile project scanner coverage.",
+      "group: Project Scanner",
+      "provider:",
+      "  type: bobbit-extension",
+      "  extension: extension.ts",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(toolGroupDir, "extension.ts"), "export default function extension() {}\n");
+
+    const projectId = "project-tool-route";
+    fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([{
+      id: projectId,
+      name: "Project Tool Route",
+      rootPath: projectRoot,
+      createdAt: Date.now(),
+      colorLight: "#3b82f6",
+      colorDark: "#60a5fa",
+    }]));
+
+    const registry = new ProjectRegistry(registryStateDir);
+    const pcm = new ProjectContextManager(registry, {
+      goalPersistence: "json",
+      taskPersistence: "json",
+      gatePersistence: "json",
+    });
+    const serverToolManager = new ToolManager(serverConfigDir);
+    const serverGroupPolicyStore = new ToolGroupPolicyStore(serverConfigDir);
+    serverGroupPolicyStore.setSubgoalsEnabledGetter(() => true);
+    serverGroupPolicyStore.setGroupPolicy("Project Scanner", "never");
+    const builtinPolicies = { "Project Scanner": "ask" as const };
+    const configCascade = new ConfigCascade({
+      getRoles: () => [],
+      getTools: () => [],
+      getToolGroupPolicies: () => builtinPolicies,
+    } as any, {
+      getRoles: () => [],
+      getTools: () => serverToolManager.getLocalTools(),
+      getToolGroupPolicies: () => serverGroupPolicyStore.getAllLocal(),
+    }, pcm);
+    const sessionManager = new SessionManager({
+      projectContextManager: pcm,
+      toolManager: serverToolManager,
+      groupPolicyStore: serverGroupPolicyStore,
+    });
+    sessionManager.configCascade = configCascade;
+
+    try {
+      const projectContext = pcm.getOrCreate(projectId);
+      assert.ok(projectContext);
+      const projectToolManager = projectContext.toolManager;
+      projectToolManager.setMarketToolRootsProvider(() => [marketToolsDir]);
+      __resetToolScanCache();
+
+      const pipeline = sessionManager.buildPipelineContext(projectId, projectRoot);
+      assert.equal(pipeline.toolManager, projectToolManager);
+      assert.ok(pipeline.groupPolicyStore);
+      assert.notEqual(pipeline.groupPolicyStore, projectContext.toolGroupPolicyStore,
+        "the pipeline must use the live ConfigCascade policy provider");
+      assert.equal(pipeline.groupPolicyStore.getSubgoalsEnabled?.(), true,
+        "project policy cascading must retain the server-owned subgoals feature flag");
+      assert.notEqual(projectToolManager, serverToolManager);
+      assert.equal((sessionManager as any).getToolManagerForProject(undefined), serverToolManager,
+        "projectless sessions retain the server ToolManager");
+      assert.equal(serverToolManager.getToolByName("project_scan_reconcile"), undefined);
+      assert.ok(projectToolManager.getToolByName("project_scan_reconcile"));
+
+      const role = { name: "scanner", toolPolicies: {} };
+      const effectiveNames = () => (sessionManager as any)
+        .resolveEffectiveAllowedTools(role, projectId, projectRoot)
+        .map((tool: { name: string }) => tool.name);
+      const pipelineEffectiveNames = () => computeEffectiveAllowedTools(
+        projectToolManager,
+        role,
+        pipeline.groupPolicyStore ?? undefined,
+        undefined,
+        scopedToolContext(projectId, projectRoot),
+      ).map((tool: { name: string }) => tool.name);
+
+      assert.deepEqual(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"], {
+        policy: "never",
+        origin: "server",
+        overrides: "builtin",
+      });
+      assert.ok(!effectiveNames().includes("project_scan_reconcile"),
+        "a server never policy must exclude a project tool when no project override exists");
+      assert.ok(!pipelineEffectiveNames().includes("project_scan_reconcile"));
+
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "allow");
+      assert.deepEqual(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"], {
+        policy: "allow",
+        origin: "project",
+        overrides: "server",
+      });
+      assert.ok(effectiveNames().includes("project_scan_reconcile"),
+        "a project allow override must restore the project tool");
+      assert.ok(pipelineEffectiveNames().includes("project_scan_reconcile"),
+        "the already-built pipeline provider must observe live project policy updates");
+
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "never");
+      assert.ok(!pipelineEffectiveNames().includes("project_scan_reconcile"),
+        "live project policy changes must not be cached by the pipeline provider");
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", null);
+      assert.equal(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"].origin, "server");
+      serverGroupPolicyStore.setGroupPolicy("Project Scanner", null);
+      assert.deepEqual(configCascade.resolveToolGroupPolicies(projectId)["Project Scanner"], {
+        policy: "ask",
+        origin: "builtin",
+      });
+      serverGroupPolicyStore.setGroupPolicy("Project Scanner", "never");
+      projectContext.toolGroupPolicyStore.setGroupPolicy("Project Scanner", "allow");
+
+      const effective = (sessionManager as any).resolveEffectiveAllowedTools(role, projectId, projectRoot);
+      assert.ok(effective.some((tool: { name: string }) => tool.name === "project_scan_reconcile"));
+
+      const docs = projectToolManager.getToolDocsForPrompt(
+        ["project_scan_reconcile"],
+        path.join(root, "prompt-state"),
+        scopedToolContext(projectId, projectRoot),
+      );
+      assert.match(docs, /project_scan_reconcile/);
+      assert.doesNotMatch(serverToolManager.getToolDocsForPrompt(["project_scan_reconcile"]), /project_scan_reconcile/);
+
+      const activation = (sessionManager as any).buildToolActivationArgs(
+        "project-tool-session",
+        effective.filter((tool: { name: string }) => tool.name === "project_scan_reconcile"),
+        role,
+        projectRoot,
+        projectId,
+      );
+      const extensionPath = path.join(toolGroupDir, "extension.ts");
+      assert.ok(activation.args.includes(extensionPath), `expected callable activation to include ${extensionPath}`);
+    } finally {
+      await pcm.closeAll();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("fails closed for no-project MCP sessions without cwd/default fallback", async () => {

@@ -290,6 +290,7 @@ export interface OrchestrationSessionLike {
 	title?: string;
 	role?: string;
 	staffId?: string;
+	projectId?: string;
 	cwd?: string;
 	allowedTools?: string[];
 	/** Pending prompt-queue rows — drives the `queued` status mapping (M3). */
@@ -401,7 +402,7 @@ export interface OrchestrationCoreDeps {
 	 * tools and NEVER falls back to the owner's — if this dep is absent or returns
 	 * empty, the spawn throws `ROLE_TOOLS_UNRESOLVED` (FAIL CLOSED).
 	 */
-	resolveRoleAllowedTools?: (roleName: string, projectId?: string) => string[] | undefined;
+	resolveRoleAllowedTools?: (roleName: string, projectId?: string, cwd?: string) => string[] | undefined;
 	audit?: (event: OrchestrationAuditEvent) => void;
 	/** Optional reader for the `read` verb (delegates to read_session machinery). */
 	readTranscript?: (sessionId: string, opts?: ReadTranscriptLike) => Promise<unknown>;
@@ -468,12 +469,13 @@ export class OrchestrationCore {
 		// broader tools. The owner-derived fallback below is reached ONLY for
 		// role-LESS delegate/team spawns.
 		if (role) {
-			// Thread the OWNER's projectId so a project-scoped/custom role resolves via
-			// the owner's project cascade (mirrors the full-lifecycle path which reads
-			// `ownerPs?.projectId`); otherwise a role that only exists in the owner's
-			// project would fail closed with ROLE_TOOLS_UNRESOLVED.
-			const projectId = this.deps.sessionManager.getPersistedSession(ownerId)?.projectId;
-			const roleTools = this.deps.resolveRoleAllowedTools?.(role, projectId);
+			// Thread the OWNER's project/cwd scope before the role allow-list freezes;
+			// project-only marketplace tools cannot be recovered later by child setup.
+			const owner = this.deps.sessionManager.getPersistedSession(ownerId);
+			const liveOwner = this.deps.sessionManager.getSession(ownerId);
+			const projectId = liveOwner?.projectId ?? owner?.projectId;
+			const cwd = liveOwner?.cwd ?? owner?.cwd;
+			const roleTools = this.deps.resolveRoleAllowedTools?.(role, projectId, cwd);
 			if (!roleTools || roleTools.length === 0) {
 				throw new OrchestrationCoreError(
 					`Cannot resolve tool grants for role ${role}`, "ROLE_TOOLS_UNRESOLVED");

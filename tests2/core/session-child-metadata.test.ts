@@ -48,6 +48,12 @@ describe("child session metadata wiring", () => {
 		// bobbit.disabledTools). Restore reads `Array.isArray(...) ? ... : undefined`.
 		assert.match(managerSrc, /const persistedAllowedTools = Array\.isArray\(ps\.allowedTools\) \? ps\.allowedTools : undefined;/, "restoreSession must read persisted allowedTools without a .length > 0 gate so `[]` survives as no-tools");
 		assert.doesNotMatch(managerSrc, /Array\.isArray\(ps\.allowedTools\) && ps\.allowedTools\.length > 0 \? ps\.allowedTools : undefined/, "restoreSession must NOT gate persisted allowedTools on length > 0 (empty `[]` must be preserved)");
-		assert.match(managerSrc, /tagAllowedTools\(persistedAllowedTools, this\.toolManager\)/, "restoreSession must prefer persisted allowedTools before role defaults and classify one allowlist from one provider snapshot");
+		const restoreRuntimePreparation = "const restoredToolRuntime = this.prepareScopedToolRuntime(ps.projectId, ps.cwd);";
+		const restoreRuntimePreparationIndex = managerSrc.indexOf(restoreRuntimePreparation);
+		const explicitRestoreClassification = /const effectiveAllowed: EffectiveTool\[\] = overrideAllowedTools\s*\? tagAllowedTools\(overrideAllowedTools, restoredToolRuntime\.toolManager, restoredToolRuntime\.toolScope\)\s*:\s*persistedAllowedTools\s*\? tagAllowedTools\(persistedAllowedTools, restoredToolRuntime\.toolManager, restoredToolRuntime\.toolScope\)\s*:\s*this\.resolveEffectiveAllowedTools\(restoredRole, ps\.projectId, ps\.cwd, restoredToolRuntime\);/;
+		const explicitRestoreMatch = managerSrc.match(explicitRestoreClassification);
+		assert.ok(restoreRuntimePreparationIndex >= 0, "restoreSession must prepare the project-scoped tool runtime before classifying restored allowlists");
+		assert.ok(explicitRestoreMatch, "restoreSession must prefer persisted allowedTools before role defaults and classify explicit allowlists with the prepared runtime's ToolManager and ScopedToolContext");
+		assert.ok(restoreRuntimePreparationIndex < (explicitRestoreMatch.index ?? -1), "restoreSession must discover the prepared scoped runtime before tagging restored allowedTools");
 	});
 });

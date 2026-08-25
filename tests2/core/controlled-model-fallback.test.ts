@@ -1501,12 +1501,34 @@ describe("controlled model fallback policy — restore/respawn lifecycle", () =>
 		assert.ok(coordinatorIdleIdx > operationIdx, "role assignment: coordinator must not broadcast idle before verification completes");
 
 		const forceBody = extractMethodBody(src, "private async _forceAbortOwned(");
-		const forcePinnedIdx = forceBody.indexOf("session.spawnPinnedModel = bridgeOptions.initialModel");
-		const forceVerifyIdx = forceBody.indexOf("await this.tryAutoSelectModel(session)", forcePinnedIdx);
-		const forceIdleIdx = forceBody.indexOf('broadcastStatus(session, "idle")', forceVerifyIdx);
-		assert.ok(forcePinnedIdx >= 0, "force abort: respawn must carry initialModel as spawnPinnedModel");
-		assert.ok(forceVerifyIdx > forcePinnedIdx, "force abort: respawn must verify spawn-pinned model");
-		assert.ok(forceIdleIdx > forceVerifyIdx, "force abort: respawn must verify model before broadcasting idle");
+		const forceCandidateIdx = forceBody.indexOf("const candidateRuntimePiExtensions = bridgeOptions.piExtensions");
+		const forceStagedIdx = forceBody.indexOf("const stagedSession = {", forceCandidateIdx);
+		const forceStagedBridgeIdx = forceBody.indexOf("rpcClient,", forceStagedIdx);
+		const forceStagedSnapshotIdx = forceBody.indexOf("runtimePiExtensions: candidateRuntimePiExtensions", forceStagedIdx);
+		const forceStagedPinnedIdx = forceBody.indexOf("spawnPinnedModel: bridgeOptions.initialModel", forceStagedIdx);
+		const forceVerifyIdx = forceBody.indexOf("await this.tryAutoSelectModel(stagedSession)", forceStagedPinnedIdx);
+		const forceOwnershipIdx = forceBody.indexOf(
+			"if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session)",
+			forceVerifyIdx,
+		);
+		const forceBridgeCommitIdx = forceBody.indexOf("session.rpcClient = rpcClient", forceOwnershipIdx);
+		const forceSnapshotCommitIdx = forceBody.indexOf("session.runtimePiExtensions = candidateRuntimePiExtensions", forceBridgeCommitIdx);
+		const forcePinnedCommitIdx = forceBody.indexOf("session.spawnPinnedModel = verifiedReplacementTuple", forceSnapshotCommitIdx);
+		const forceIdleIdx = forceBody.indexOf('broadcastStatus(session, "idle")', forcePinnedCommitIdx);
+		assert.ok(forceCandidateIdx >= 0, "force abort: replacement must retain its candidate Pi snapshot off the canonical session");
+		assert.ok(forceStagedIdx > forceCandidateIdx, "force abort: model verification must use a staged replacement session");
+		assert.ok(forceStagedBridgeIdx > forceStagedIdx, "force abort: staged session must own the candidate bridge");
+		assert.ok(forceStagedSnapshotIdx > forceStagedBridgeIdx, "force abort: staged bridge and Pi snapshot must remain paired");
+		assert.ok(forceStagedPinnedIdx > forceStagedSnapshotIdx, "force abort: staged respawn must carry initialModel as spawnPinnedModel");
+		assert.ok(forceVerifyIdx > forceStagedPinnedIdx, "force abort: staged respawn must verify spawn-pinned model");
+		assert.ok(forceOwnershipIdx > forceVerifyIdx, "force abort: replacement ownership must be rechecked after model verification");
+		assert.ok(forceBridgeCommitIdx > forceOwnershipIdx, "force abort: canonical bridge must not change before verification and ownership succeed");
+		assert.equal(forceBody.indexOf("session.rpcClient = rpcClient"), forceBridgeCommitIdx, "force abort: candidate bridge must have no earlier canonical mutation");
+		assert.ok(forceSnapshotCommitIdx > forceBridgeCommitIdx, "force abort: canonical Pi snapshot must commit with the verified bridge");
+		assert.equal(forceBody.indexOf("session.runtimePiExtensions ="), forceSnapshotCommitIdx, "force abort: candidate Pi snapshot must have no earlier canonical mutation");
+		assert.ok(forcePinnedCommitIdx > forceSnapshotCommitIdx, "force abort: verified spawn pin must commit only after bridge and snapshot");
+		assert.equal(forceBody.indexOf("session.spawnPinnedModel ="), forcePinnedCommitIdx, "force abort: candidate spawn pin must have no earlier canonical mutation");
+		assert.ok(forceIdleIdx > forcePinnedCommitIdx, "force abort: respawn must commit verified state before broadcasting idle");
 	});
 });
 

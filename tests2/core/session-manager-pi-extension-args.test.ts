@@ -4,14 +4,23 @@
 
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import path from "node:path";
+import ts from "typescript";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { resolveMarketplacePiExtensionActivation, resolveToolActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
+import {
+	executePlan,
+	resolveMarketplacePiExtensionActivation,
+	resolveToolActivation,
+	scopedToolContext,
+	type MarketplacePiExtensionResolver,
+	type ResolvedPiExtensionContribution,
+} from "../../src/server/agent/session-setup.ts";
 import { BOBBIT_PACK_LOCAL_DATA_ENV } from "../../src/server/agent/pack-local-data-runtime.ts";
-import { packLocalDataDockerExecArgs } from "../../src/server/agent/rpc-bridge.ts";
-import type { ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
+import { packLocalDataDockerExecArgs, registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.ts";
+import { ToolManager, type ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 import { installMemoryFs } from "./helpers/memory-fs-spies.js";
 import type { MemFs } from "../harness/mem-fs.js";
@@ -24,7 +33,10 @@ beforeEach(() => {
 	({ fs: memoryFs, restore: restoreFs } = installMemoryFs());
 });
 
-afterEach(() => restoreFs());
+afterEach(() => {
+	registerRpcBridgeFactory(null);
+	restoreFs();
+});
 
 function fixtureRoot(label: string): string {
 	const root = path.resolve("/memfs/pi-extension-args", `${label}-${fixtureSequence++}`);
@@ -52,24 +64,336 @@ function extensionPaths(args: string[]): string[] {
 	return out;
 }
 
-function scopedPiToolManager() {
-	const providers = new Map<string, any>([
-		["read", { type: "builtin", tool: "read", groupDir: "filesystem", baseDir: "/mock/tools" }],
-		["pi_demo", { type: "pi-extension", providerKey: "pi-ext:project:project-1:pack:demo:pi_demo", groupDir: "", baseDir: "" }],
-	]);
-	const baseTools = [{ name: "read", description: "Read", group: "File System", hasRenderer: false }];
-	const piTool = { name: "pi_demo", description: "Pi demo", group: "Pi Extensions", hasRenderer: false, providerType: "pi-extension", origin: "marketplace-pi-extension" };
-	const inScope = (scopedContext?: ScopedToolContext) => scopedContext?.scopeKey === "project:project-1";
+const require = createRequire(import.meta.url);
+
+function dangerousContribution(entryPath: string, scope: "project" | "server" = "project"): ResolvedPiExtensionContribution {
 	return {
-		getAvailableTools: (scopedContext?: ScopedToolContext) => inScope(scopedContext) ? [...baseTools, piTool] : baseTools,
-		getToolByName: (name: string, scopedContext?: ScopedToolContext) => (inScope(scopedContext) ? [...baseTools, piTool] : baseTools).find((tool) => tool.name === name),
-		getToolProvider: (name: string, scopedContext?: ScopedToolContext) => inScope(scopedContext) ? providers.get(name) : (name === "read" ? providers.get("read") : undefined),
-		getToolProviders: (scopedContext?: ScopedToolContext) => inScope(scopedContext) ? providers : new Map([["read", providers.get("read")]]),
-		getExtensionPath: (groupDir: string, filename: string) => path.join("/mock/tools", groupDir, filename),
+		listName: "dangerous",
+		entryPath,
+		entryRelativePath: "extension.ts",
+		packRoot: path.dirname(entryPath),
+		origin: { scope, packName: "Dangerous Fixture", packId: `market:${scope}:dangerous-fixture` },
+		diagnostic: { status: "ok", code: "ok", message: "loaded", updatedAt: "2026-01-01T00:00:00.000Z" },
+		discovery: {
+			status: "ok",
+			tools: [{ name: "pi_dangerous_tool", description: "Host-affecting fixture tool" }],
+		},
+	};
+}
+
+function registerDangerousTool(manager: ToolManager, scope: ScopedToolContext, sourcePath: string): void {
+	manager.setScopedPiExtensionTools(scope, [{
+		name: "pi_dangerous_tool",
+		description: "Host-affecting fixture tool",
+		group: "Pi Extensions",
+		providerKey: `pi-ext:${scope.scopeKey}:dangerous:pi_dangerous_tool`,
+		packName: "Dangerous Fixture",
+		packId: "market:project:dangerous-fixture",
+		listName: "dangerous",
+		scope: scope.projectId ? "project" : "server",
+		sourcePath,
+	}]);
+}
+
+function realToolManager(label: string): ToolManager {
+	const root = fixtureRoot(label);
+	const builtinRoot = path.join(root, "builtins");
+	memoryFs.mkdirSync(path.join(root, "tools"), { recursive: true });
+	memoryFs.mkdirSync(builtinRoot, { recursive: true });
+	return new ToolManager(root, builtinRoot);
+}
+
+function guardPath(args: string[]): string {
+	const result = extensionPaths(args).find((candidate) => candidate.replace(/\\/g, "/").includes("/tool-guard/"));
+	assert.ok(result, "expected generated tool guard extension");
+	return result;
+}
+
+function evaluateGuard(source: string): (event: { toolName: string }) => Promise<any> {
+	const transpiled = ts.transpileModule(source, {
+		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+		reportDiagnostics: true,
+	});
+	const errors = (transpiled.diagnostics ?? []).filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
+	assert.equal(errors.length, 0, "guard source must transpile");
+	const module = { exports: {} as { default?: (pi: any) => void } };
+	new Function("module", "exports", "require", transpiled.outputText)(module, module.exports, require);
+	let handler: ((event: { toolName: string }) => Promise<any>) | undefined;
+	module.exports.default?.({ on: (event: string, callback: typeof handler) => {
+		assert.equal(event, "tool_call");
+		handler = callback;
+	} });
+	assert.ok(handler, "guard must register a tool_call handler");
+	return handler;
+}
+
+function fakeBridge() {
+	return {
+		async start() {},
+		async stop() {},
+		onEvent() { return () => {}; },
+	};
+}
+
+type SecurityRole = {
+	name: string;
+	promptTemplate: string;
+	accessory: string;
+	toolPolicies: Record<string, "ask" | "never">;
+};
+
+function initialPipelineContext(
+	toolManager: ToolManager,
+	role: SecurityRole,
+	resolver: MarketplacePiExtensionResolver,
+): any {
+	return {
+		roleManager: { getRole: (name: string) => name === role.name ? role : undefined },
+		toolManager,
+		mcpManager: null,
+		marketplacePiExtensionResolver: resolver,
+		goalManager: {},
+		taskManager: { assignTask() {} },
+		projectConfigStore: null,
+		preferencesStore: null,
+		sandboxManager: null,
+		sandboxTokenStore: null,
+		sessionSecretStore: { getOrCreateSecret: () => "fixture-secret" },
+		groupPolicyStore: null,
+		configCascade: null,
+		costTracker: {},
+		store: { put() {}, update() {} },
+		searchIndex: {},
+		sessions: new Map(),
+		assemblePrompt: () => undefined,
+		applySandboxWiring: async () => false,
+		handleAgentLifecycle() {},
+		trackCostFromEvent() {},
+		broadcast() {},
+		tryAutoSelectModel: async () => {},
+		tryApplyDefaultThinkingLevel: async () => {},
+		buildWorkflowList: () => "",
+		resolveInitialModel: () => undefined,
+		resolveInitialThinkingLevel: () => undefined,
+		prStatusStore: {},
+	};
+}
+
+function coldProjectReplacementFixture(label: string) {
+	const cwd = fixtureRoot(label);
+	const extensionPath = path.join(cwd, "project-market", "dangerous", "extension.ts");
+	const serverManager = realToolManager(`${label}-server`);
+	const projectManager = realToolManager(`${label}-project`);
+	const role: SecurityRole = {
+		name: "security-fixture",
+		promptTemplate: "Security fixture",
+		accessory: "none",
+		toolPolicies: { pi_dangerous_tool: "ask" },
+	};
+	const manager: any = new SessionManager({
+		toolManager: serverManager,
+		roleManager: { getRole: (name: string) => name === role.name ? role : undefined } as any,
+	});
+	const persisted: any = {
+		id: `${label}-session`,
+		title: "Cold replacement fixture",
+		cwd,
+		projectId: "project-security",
+		role: role.name,
+		createdAt: Date.now(),
+		lastActivity: Date.now(),
+		sandboxed: false,
+	};
+	const store = {
+		get: () => persisted,
+		getLive: () => [persisted],
+		put() {},
+		update(_id: string, patch: Record<string, unknown>) { Object.assign(persisted, patch); },
+		flushAsync: async () => {},
+	};
+	manager._testStore = store;
+	manager.resolveStoreForSession = () => store;
+	manager.projectContextManager = {
+		getOrCreate: (id: string) => id === "project-security"
+			? {
+				project: { id: "project-security", rootPath: cwd },
+				toolManager: projectManager,
+				toolGroupPolicyStore: undefined,
+			}
+			: undefined,
+	};
+	manager.applyScopedGatewayCredentials = () => {};
+	manager.ensureMcpManagerForContext = async () => null;
+	let discoveryCount = 0;
+	manager.setMarketplacePiExtensionResolver((receivedScope: { projectId?: string; cwd?: string }, receivedManager?: ToolManager) => {
+		discoveryCount += 1;
+		assert.equal(receivedManager, projectManager);
+		assert.deepEqual(receivedScope, { projectId: "project-security", cwd });
+		registerDangerousTool(receivedManager!, scopedToolContext(receivedScope.projectId, receivedScope.cwd), extensionPath);
+		return [dangerousContribution(extensionPath)];
+	});
+	return {
+		cwd,
+		extensionPath,
+		serverManager,
+		projectManager,
+		role,
+		manager,
+		persisted,
+		store,
+		discoveryCount: () => discoveryCount,
 	};
 }
 
 describe("marketplace pi extension activation args", () => {
+	it.each(["never", "ask"] as const)(
+		"initial project setup discovers into the selected manager before %s guard computation",
+		async (policy) => {
+			const cwd = fixtureRoot(`initial-${policy}`);
+			const extensionPath = path.join(cwd, "project-market", "dangerous", "extension.ts");
+			memoryFs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+			memoryFs.writeFileSync(extensionPath, "export default function extension() {}\n");
+			const serverManager = realToolManager(`initial-${policy}-server`);
+			const projectManager = realToolManager(`initial-${policy}-project`);
+			const scope = scopedToolContext("project-security", cwd);
+			const resolverCalls: Array<{ projectId?: string; cwd?: string; manager?: ToolManager }> = [];
+			const resolver: MarketplacePiExtensionResolver = (receivedScope, selectedManager) => {
+				resolverCalls.push({ ...receivedScope, manager: selectedManager });
+				assert.equal(selectedManager, projectManager, "initial setup must pass the project ToolManager to discovery");
+				registerDangerousTool(selectedManager!, scope, extensionPath);
+				return [dangerousContribution(extensionPath)];
+			};
+			const role = {
+				name: "security-fixture",
+				promptTemplate: "Security fixture",
+				accessory: "none",
+				toolPolicies: { pi_dangerous_tool: policy },
+			};
+			let bridgeOptions: any;
+			registerRpcBridgeFactory((options) => {
+				bridgeOptions = options;
+				return fakeBridge() as any;
+			});
+			const plan: any = {
+				id: `initial-${policy}`,
+				mode: "normal",
+				title: "Initial policy fixture",
+				cwd,
+				projectId: "project-security",
+				roleName: role.name,
+				effectiveAllowedTools: undefined,
+				bridgeOptions: {},
+				skipAutoModel: true,
+				skipAutoThinking: true,
+			};
+
+			await executePlan(plan, initialPipelineContext(projectManager, role, resolver));
+
+			assert.deepEqual(resolverCalls, [{ projectId: "project-security", cwd, manager: projectManager }]);
+			assert.ok(bridgeOptions.args.includes(extensionPath), "the discovered Pi extension must reach the initial callable argv");
+			assert.ok(projectManager.getToolByName("pi_dangerous_tool", scope));
+			assert.equal(projectManager.getToolByName("pi_dangerous_tool"), undefined,
+				"project discovery must not leak into that manager's default scope");
+			assert.equal(serverManager.getToolByName("pi_dangerous_tool", scope), undefined,
+				"project discovery must not register into the server manager");
+			assert.equal(plan.effectiveAllowedTools.some((tool: { name: string }) => tool.name === "pi_dangerous_tool"), policy === "ask");
+
+			const previousSessionId = process.env.BOBBIT_SESSION_ID;
+			delete process.env.BOBBIT_SESSION_ID;
+			try {
+				const callGuard = evaluateGuard(memoryFs.readFileSync(guardPath(bridgeOptions.args), "utf-8"));
+				const decision = await callGuard({ toolName: "pi_dangerous_tool" });
+				assert.equal(decision?.block, true, `${policy} must block before the tool implementation runs`);
+				assert.match(decision.reason, policy === "never" ? /not permitted/ : /missing BOBBIT_SESSION_ID/);
+				assert.equal(await callGuard({ toolName: "unregistered_tool" }), undefined,
+					"the fixture must distinguish guarded tools from unknown-tool pass-through");
+			} finally {
+				if (previousSessionId === undefined) delete process.env.BOBBIT_SESSION_ID;
+				else process.env.BOBBIT_SESSION_ID = previousSessionId;
+			}
+		},
+	);
+
+	it("preserves an explicit empty initial allowlist while still guarding a loaded project Pi extension", async () => {
+		const cwd = fixtureRoot("initial-empty");
+		const extensionPath = path.join(cwd, "project-market", "dangerous", "extension.ts");
+		const projectManager = realToolManager("initial-empty-project");
+		const role = {
+			name: "security-fixture",
+			promptTemplate: "Security fixture",
+			accessory: "none",
+			toolPolicies: { pi_dangerous_tool: "ask" as const },
+		};
+		const resolver: MarketplacePiExtensionResolver = (receivedScope, selectedManager) => {
+			registerDangerousTool(selectedManager!, scopedToolContext(receivedScope.projectId, receivedScope.cwd), extensionPath);
+			return [dangerousContribution(extensionPath)];
+		};
+		let bridgeOptions: any;
+		registerRpcBridgeFactory((options) => {
+			bridgeOptions = options;
+			return fakeBridge() as any;
+		});
+		const plan: any = {
+			id: "initial-explicit-empty",
+			mode: "normal",
+			title: "Explicit empty fixture",
+			cwd,
+			projectId: "project-security",
+			roleName: role.name,
+			effectiveAllowedTools: [],
+			bridgeOptions: {},
+			skipAutoModel: true,
+			skipAutoThinking: true,
+		};
+
+		await executePlan(plan, initialPipelineContext(projectManager, role, resolver));
+
+		assert.deepEqual(plan.effectiveAllowedTools, [], "[] must remain no tools rather than widening to the role surface");
+		assert.ok(bridgeOptions.args.includes(extensionPath));
+		assert.ok(guardPath(bridgeOptions.args));
+	});
+
+	it("projectless initial setup discovers and guards through the server ToolManager", async () => {
+		const cwd = fixtureRoot("initial-projectless");
+		const extensionPath = path.join(cwd, "server-market", "dangerous", "extension.ts");
+		const serverManager = realToolManager("initial-projectless-server");
+		const untouchedProjectManager = realToolManager("initial-projectless-project");
+		const role = {
+			name: "server-security-fixture",
+			promptTemplate: "Server security fixture",
+			accessory: "none",
+			toolPolicies: { pi_dangerous_tool: "never" as const },
+		};
+		const resolver: MarketplacePiExtensionResolver = (receivedScope, selectedManager) => {
+			assert.equal(selectedManager, serverManager);
+			assert.equal(receivedScope.projectId, undefined);
+			registerDangerousTool(selectedManager!, scopedToolContext(undefined, receivedScope.cwd), extensionPath);
+			return [dangerousContribution(extensionPath, "server")];
+		};
+		let bridgeOptions: any;
+		registerRpcBridgeFactory((options) => {
+			bridgeOptions = options;
+			return fakeBridge() as any;
+		});
+		const plan: any = {
+			id: "initial-projectless",
+			mode: "normal",
+			title: "Projectless fixture",
+			cwd,
+			roleName: role.name,
+			bridgeOptions: {},
+			skipAutoModel: true,
+			skipAutoThinking: true,
+		};
+
+		await executePlan(plan, initialPipelineContext(serverManager, role, resolver));
+
+		assert.ok(serverManager.getToolByName("pi_dangerous_tool", scopedToolContext(undefined, cwd)));
+		assert.equal(untouchedProjectManager.getToolByName("pi_dangerous_tool", scopedToolContext(undefined, cwd)), undefined);
+		assert.ok(bridgeOptions.args.includes(extensionPath));
+		assert.ok(guardPath(bridgeOptions.args));
+	});
+
 	it("emits enabled resolved entries and omits disabled/unresolved entries", () => {
 		const a = path.resolve("/virtual/pi-ext-a/extension.ts");
 		const b = path.resolve("/virtual/pi-ext-b/extension.ts");
@@ -273,20 +597,192 @@ describe("marketplace pi extension activation args", () => {
 		}
 	});
 
-	it("uses project-scoped pi-extension tool policies when rebuilding guard args after restore or respawn", () => {
-		const tmp = fixtureRoot("session-scope");
-		const manager: any = new SessionManager();
-		manager.toolManager = scopedPiToolManager();
-		const { args } = manager.buildToolActivationArgs(
-			"session-scoped-guard",
-			undefined,
-			{ toolPolicies: { pi_demo: "ask" } },
-			tmp,
-			"project-1",
+	it("cold restore discovers project Pi tools before tagging the replacement allowlist", async () => {
+		const fixture = coldProjectReplacementFixture("cold-restore-order");
+		let activationAllowed: Array<{ name: string }> | undefined;
+		fixture.manager.preparePersistedIntentRestore = (ps: any) => ({
+			ps,
+			store: fixture.store,
+			bindings: [],
+			changed: false,
+		});
+		fixture.manager.buildToolActivationArgs = (_id: string, allowed: Array<{ name: string }> | undefined) => {
+			activationAllowed = allowed;
+			throw new Error("stop-after-restore-allowlist");
+		};
+
+		await assert.rejects(
+			fixture.manager.restoreSession(fixture.persisted),
+			/stop-after-restore-allowlist/,
 		);
-		const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
-		assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
-		const code = memoryFs.readFileSync(guardPath!, "utf-8");
-		assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
+
+		assert.equal(fixture.discoveryCount(), 1, "cold restore must discover before tagging or computing tools");
+		assert.deepEqual(activationAllowed?.map((tool) => tool.name), ["pi_dangerous_tool"]);
+		assert.equal(fixture.serverManager.getToolByName(
+			"pi_dangerous_tool",
+			scopedToolContext("project-security", fixture.cwd),
+		), undefined);
+	});
+
+	it("role replacement discovers project Pi tools before assembling prompt docs", async () => {
+		const fixture = coldProjectReplacementFixture("cold-role-order");
+		let promptAllowed: string[] | undefined;
+		fixture.manager.assemblePrompt = (_id: string, parts: { allowedTools?: string[] }) => {
+			promptAllowed = parts.allowedTools;
+			throw new Error("stop-after-role-prompt");
+		};
+		const oldBridge = {
+			running: true,
+			async getState() { return { success: true, data: {} }; },
+			async stop() {},
+		};
+		fixture.manager.sessions.set(fixture.persisted.id, {
+			id: fixture.persisted.id,
+			title: fixture.persisted.title,
+			cwd: fixture.cwd,
+			projectId: fixture.persisted.projectId,
+			role: fixture.role.name,
+			status: "idle",
+			statusVersion: 0,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: { isEmpty: true, toArray: () => [] },
+			rpcClient: oldBridge,
+			unsubscribe() {},
+		});
+
+		await assert.rejects(
+			fixture.manager.assignRole(fixture.persisted.id, fixture.role),
+			/stop-after-role-prompt/,
+		);
+
+		assert.equal(fixture.discoveryCount(), 1, "role replacement must discover before effective tools and prompt docs");
+		assert.deepEqual(promptAllowed, ["pi_dangerous_tool"]);
+	});
+
+	it("force-abort discovers project Pi tools before computing the replacement allowlist", async () => {
+		const fixture = coldProjectReplacementFixture("cold-force-order");
+		let activationAllowed: Array<{ name: string }> | undefined;
+		fixture.manager.buildToolActivationArgs = (_id: string, allowed: Array<{ name: string }> | undefined) => {
+			activationAllowed = allowed;
+			throw new Error("stop-after-force-allowlist");
+		};
+		fixture.manager.handleAgentLifecycle = () => {};
+		fixture.manager._replacementTokenIsCurrent = () => true;
+		const eventBuffer = new EventBuffer();
+		const oldBridge = {
+			running: true,
+			onEvent() { return () => {}; },
+			async abort() {},
+			async getState() { return { success: true, data: {} }; },
+			async stop() {},
+		};
+		const live: any = {
+			id: fixture.persisted.id,
+			title: fixture.persisted.title,
+			titleGenerated: true,
+			cwd: fixture.cwd,
+			projectId: fixture.persisted.projectId,
+			role: fixture.role.name,
+			status: "streaming",
+			statusVersion: 0,
+			streamingStartedAt: Date.now(),
+			isCompacting: false,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: { isEmpty: true, toArray: () => [] },
+			eventBuffer,
+			rpcClient: oldBridge,
+			unsubscribe() {},
+		};
+		fixture.manager.sessions.set(fixture.persisted.id, live);
+		const token: any = {
+			coordinator: {
+				active: { kind: "force-abort" },
+				promptOwner: live,
+			},
+		};
+
+		await assert.rejects(
+			fixture.manager._forceAbortOwned(fixture.persisted.id, 0, token),
+			/stop-after-force-allowlist/,
+		);
+
+		assert.equal(fixture.discoveryCount(), 1, "force-abort must discover before effective tools are frozen");
+		assert.deepEqual(activationAllowed?.map((tool) => tool.name), ["pi_dangerous_tool"]);
+	});
+
+	it.each([
+		{ projectId: "project-security" as string | undefined, expectedManager: "project" as const },
+		{ projectId: undefined, expectedManager: "server" as const },
+	])("replacement activation discovers and guards through the $expectedManager manager", async ({ projectId, expectedManager }) => {
+		const cwd = fixtureRoot(`replacement-${expectedManager}`);
+		const extensionPath = path.join(cwd, `${expectedManager}-market`, "dangerous", "extension.ts");
+		const serverManager = realToolManager(`replacement-${expectedManager}-server`);
+		const projectManager = realToolManager(`replacement-${expectedManager}-project`);
+		const manager: any = new SessionManager({ toolManager: serverManager });
+		manager.projectContextManager = {
+			getOrCreate: (id: string) => id === "project-security"
+				? { toolManager: projectManager, toolGroupPolicyStore: undefined }
+				: undefined,
+		};
+		const selectedManager = expectedManager === "project" ? projectManager : serverManager;
+		const selectedScope = scopedToolContext(projectId, cwd);
+		const calls: unknown[] = [];
+		manager.setMarketplacePiExtensionResolver((receivedScope: { projectId?: string; cwd?: string }, receivedManager?: ToolManager) => {
+			calls.push({ ...receivedScope, manager: receivedManager });
+			assert.equal(receivedManager, selectedManager);
+			registerDangerousTool(receivedManager!, selectedScope, extensionPath);
+			return [dangerousContribution(extensionPath, projectId ? "project" : "server")];
+		});
+
+		const activation = manager.buildToolActivationArgs(
+			`replacement-${expectedManager}`,
+			undefined,
+			{ toolPolicies: { pi_dangerous_tool: "ask" } },
+			cwd,
+			projectId,
+		);
+
+		assert.deepEqual(calls, [{ projectId, cwd, manager: selectedManager }]);
+		assert.ok(activation.args.includes(extensionPath));
+		assert.ok(selectedManager.getToolByName("pi_dangerous_tool", selectedScope));
+		assert.equal((expectedManager === "project" ? serverManager : projectManager).getToolByName("pi_dangerous_tool", selectedScope), undefined);
+		const previousSessionId = process.env.BOBBIT_SESSION_ID;
+		delete process.env.BOBBIT_SESSION_ID;
+		try {
+			const callGuard = evaluateGuard(memoryFs.readFileSync(guardPath(activation.args), "utf-8"));
+			assert.match((await callGuard({ toolName: "pi_dangerous_tool" })).reason, /missing BOBBIT_SESSION_ID/);
+			assert.equal(await callGuard({ toolName: "unknown_tool" }), undefined);
+		} finally {
+			if (previousSessionId === undefined) delete process.env.BOBBIT_SESSION_ID;
+			else process.env.BOBBIT_SESSION_ID = previousSessionId;
+		}
+	});
+
+	it("cold restart restore preserves an explicit empty allowlist after Pi discovery", async () => {
+		const fixture = coldProjectReplacementFixture("cold-restore-empty");
+		fixture.persisted.allowedTools = [];
+		let activationAllowed: Array<{ name: string }> | undefined;
+		fixture.manager.preparePersistedIntentRestore = (ps: any) => ({
+			ps,
+			store: fixture.store,
+			bindings: [],
+			changed: false,
+		});
+		fixture.manager.buildToolActivationArgs = (_id: string, allowed: Array<{ name: string }> | undefined) => {
+			activationAllowed = allowed;
+			throw new Error("stop-after-empty-restore-allowlist");
+		};
+
+		await assert.rejects(
+			fixture.manager.restoreSession(fixture.persisted),
+			/stop-after-empty-restore-allowlist/,
+		);
+
+		assert.equal(fixture.discoveryCount(), 1);
+		assert.deepEqual(activationAllowed, [], "persisted [] must remain no tools rather than widening to the role surface");
 	});
 });

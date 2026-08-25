@@ -49,7 +49,6 @@ import type { SearchService } from "../search/search-service.js";
 import type { CostTracker } from "./cost-tracker.js";
 import type { RoleManager } from "./role-manager.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
-import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext } from "./system-prompt.js";
@@ -62,7 +61,7 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -166,7 +165,11 @@ export interface ResolvedPiExtensionContribution {
 	};
 }
 
-export type MarketplacePiExtensionResolver = (scope: { projectId?: string; cwd?: string }) => ResolvedPiExtensionContribution[];
+export type MarketplacePiExtensionResolver = (
+	scope: { projectId?: string; cwd?: string },
+	/** Exact manager selected for the session. Undefined is valid only when no manager exists. */
+	toolManager: ToolManager | undefined,
+) => ResolvedPiExtensionContribution[];
 
 export interface MarketplacePiExtensionActivation {
 	args: string[];
@@ -186,9 +189,10 @@ export function resolveMarketplacePiExtensionActivation(
 	resolver: MarketplacePiExtensionResolver | null | undefined,
 	projectId: string | undefined,
 	cwd: string | undefined,
+	toolManager?: ToolManager,
 ): MarketplacePiExtensionActivation {
 	if (!resolver) return { args: [], tools: [], diagnostics: [], runtimeExtensions: [] };
-	const contributions = resolver({ projectId, cwd });
+	const contributions = resolver({ projectId, cwd }, toolManager);
 	const args: string[] = [];
 	const tools: PiExtensionToolInfo[] = [];
 	const diagnostics: PiExtensionDiagnostic[] = [];
@@ -207,6 +211,9 @@ export function resolveMarketplacePiExtensionActivation(
 				entryPath: contribution.entryPath,
 				...(contribution.entryRelativePath ? { entryRelativePath: contribution.entryRelativePath } : {}),
 				packRoot: contribution.packRoot,
+				// Retain the schema catalogue beside the exact runtime activation. Discovery
+				// caches may be invalidated while this already-loaded Pi process keeps running.
+				tools: (contribution.discovery?.tools ?? []).map((tool) => ({ ...tool })),
 				origin: contribution.origin,
 			});
 		}
@@ -363,6 +370,8 @@ export interface SessionSetupPlan {
 	// Computed during planning
 	bridgeOptions: RpcBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
+	/** One discovery snapshot reused for policy/guard generation and Pi argv. */
+	piExtensionActivation?: MarketplacePiExtensionActivation;
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
 
@@ -433,7 +442,7 @@ export interface PipelineContext {
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	/** S1 — per-session capability secret store (see session-secret.ts). */
 	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
-	groupPolicyStore: ToolGroupPolicyStore | null;
+	groupPolicyStore: GroupPolicyProvider | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
 	/** Additive typed interceptor port. Its implementation composes legacy providers. */
@@ -759,6 +768,22 @@ function _resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): v
 	}
 }
 
+/**
+ * Discover Marketplace Pi extensions into the exact manager selected for this
+ * session. This must run before effective policy, prompt docs, and guard output.
+ */
+function resolvePiExtensions(plan: SessionSetupPlan, ctx: PipelineContext): MarketplacePiExtensionActivation {
+	if (!plan.piExtensionActivation) {
+		plan.piExtensionActivation = resolveMarketplacePiExtensionActivation(
+			ctx.marketplacePiExtensionResolver,
+			plan.projectId,
+			plan.cwd,
+			ctx.toolManager ?? undefined,
+		);
+	}
+	return plan.piExtensionActivation;
+}
+
 /** Step 3: Compute effectiveAllowedTools, filter host-only tools for sandbox. */
 export function resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	return profile("resolveTools", () => _resolveTools(plan, ctx));
@@ -1070,6 +1095,10 @@ export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
 }
 function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+	// Usually populated before resolveTools so Pi tools participate in effective
+	// policy and prompt docs. Keep this fallback for isolated/direct callers.
+	const piExtensionActivation = resolvePiExtensions(plan, ctx);
+
 	// Resolve the role cascade-first (pack-shipped roles like `pr-reviewer` live in
 	// the config cascade, NOT the in-memory RoleManager). Resolving via roleManager
 	// alone returns `undefined` for a pack role, which makes the guard fall through
@@ -1093,7 +1122,6 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
-	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 	const packLocalDataEnv = resolvePackLocalDataEnvironment(
 		ctx.packLocalDataBindingsResolver,
 		plan.projectId,
@@ -1271,6 +1299,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
 	resolveGoalExtensions(plan, ctx);
+	resolvePiExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
@@ -1523,6 +1552,7 @@ export async function executeWorktreeAsync(
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
 	resolveGoalExtensions(plan, ctx);
+	resolvePiExtensions(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
@@ -1584,6 +1614,7 @@ export async function executeWorktreeAsync(
 	// Create real RpcBridge (replacing placeholder)
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
+	session.runtimePiExtensions = plan.bridgeOptions.piExtensions;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	// resolveTools may have applied the role's accessory (generic role-accessory
 	// application); mirror it onto the live worktree session so the sidebar
@@ -1768,6 +1799,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		lastActivity: now,
 		clients: new Set(),
 		rpcClient,
+		runtimePiExtensions: plan.bridgeOptions.piExtensions,
 		eventBuffer,
 		unsubscribe: () => {},
 		isCompacting: false,

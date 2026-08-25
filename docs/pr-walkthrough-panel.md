@@ -1018,9 +1018,9 @@ validated YAML submission.
 ### Trusted GitHub hosts
 
 A walkthrough fetches PR metadata and diffs over the network, so Bobbit only contacts
-hosts in one server-authoritative effective set. Centralizing the decision keeps PR
-Walkthrough launch, fetch, and posting aligned with Git status PR polling, permission
-checks, and merge actions.
+hosts in one server-authoritative effective set. Centralizing the listed-host decision
+keeps PR Walkthrough launch, fetch, and posting aligned with permission checks, merge
+actions, and the primary trust path used by PR-status polling.
 
 The effective set is the union of:
 
@@ -1034,6 +1034,14 @@ The effective set is the union of:
 - **Local `gh` configuration.** Host keys explicitly present in the GitHub CLI's
   host-specific auth configuration are trusted automatically. A user who already ran
   `gh auth login --hostname <host>` therefore does not have to configure Bobbit again.
+
+PR status can separately vouch for an otherwise-unlisted, structurally valid enterprise
+host from the operator's local Git credential helpers. That fallback is intentionally
+absent here: it does not add the host to this effective set and cannot authorize
+walkthrough launch, metadata or diff fetches, persistence, or review posting. To use PR
+Walkthrough with such a host, add it through managed preferences or local `gh`
+`hosts.yml`. See
+[Credential-derived PR-status eligibility](remote-state-coordinator.md#credential-derived-pr-status-eligibility).
 
 `GithubTrustedHostResolver` reads only host keys from the local `gh` configuration and
 normalizes them through the same hostname validator used for managed preferences. It

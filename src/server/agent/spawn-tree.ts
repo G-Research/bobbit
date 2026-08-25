@@ -38,8 +38,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
-import type { Clock } from "../gateway-deps.js";
-import { realClock } from "../gateway-deps.js";
+import { realClock, type Clock } from "../clock.js";
 
 export interface SpawnTrackedOptions {
 	cwd?: string;

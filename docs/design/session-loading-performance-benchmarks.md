@@ -1,5 +1,7 @@
 # Session-loading performance benchmarks
 
+> Historical record: this page documents transcribed, isolated hot-path measurements. Use the project-owned [Bobbit journey benchmarks](../benchmarks.md) for current production-boundary session-open, gateway-startup, and event-stream comparisons.
+
 Measured 2026-07-18 on the integrated candidate. These are deterministic, source-equivalent microbenchmarks of the three changed hot paths, not end-to-end browser timings.
 
 ## Revisions and environment

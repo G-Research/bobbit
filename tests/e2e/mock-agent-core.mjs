@@ -19,6 +19,10 @@
  *                           tool_execution_* lifecycle. Stable block id
  *                           so RemoteAgent's _processedProposalIds dedup
  *                           engages.
+ *  BENCHMARK_EVENT_STREAM:<n>:<intervalMs>
+ *                           Emit the project-owned deterministic benchmark
+ *                           sequence: cumulative assistant updates, proposal,
+ *                           successful tool, failed tool, and final marker.
  *  BG_WAIT:<ms>             Drive the real gateway BgProcessManager:
  *                           POST a `sleep <ceil(ms/1000)>` bg process,
  *                           long-poll wait. abortAllWaits resolves it on
@@ -105,6 +109,7 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { execSync } from "node:child_process";
+import { createEventStreamFixture } from "../../scripts/benchmarks/event-stream/fixture.mjs";
 
 // Keep explicitly aligned with src/shared/ask-envelope.ts. This file is .mjs
 // and is used directly by E2E mock-agent processes, so it cannot import the TS
@@ -1334,6 +1339,25 @@ export class MockAgentCore {
 				return;
 			}
 			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
+			this.currentAbortController = null;
+			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
+			this.emit({ type: "session_status", status: "idle" });
+			return;
+		}
+
+		// Project-owned event-stream benchmark. The fixture helper is shared with
+		// the benchmark oracle so stable ids, order and marker counts cannot drift.
+		const benchmarkStreamMatch = text.match(/BENCHMARK_EVENT_STREAM:(\d+):(\d+)/);
+		if (benchmarkStreamMatch) {
+			await this._handleBenchmarkEventStream(
+				parseInt(benchmarkStreamMatch[1], 10),
+				parseInt(benchmarkStreamMatch[2], 10),
+			);
+			if (!this.currentAbortController || this.currentAbortController.signal.aborted) {
+				this.currentAbortController = null;
+				return;
+			}
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end" });
 			this.emit({ type: "agent_settled" });
@@ -2972,6 +2996,21 @@ export class MockAgentCore {
 		emitOne(firstInput, "first");
 		await this.tick(60);
 		emitOne(secondInput, "second");
+	}
+
+	/** Emit the deterministic production-shape event fixture used by the durable
+	 * event-stream benchmark. Only the test-owned mock gains this trigger; the
+	 * gateway, WebSocket, reducer and render paths remain production code. */
+	async _handleBenchmarkEventStream(updateCount, intervalMs) {
+		const fixture = createEventStreamFixture({ updateCount, intervalMs });
+		for (const entry of fixture.events) {
+			if (this.currentAbortController?.signal.aborted) return;
+			if (entry.persistMessage && entry.data?.message) {
+				this.conversationMessages.push(entry.data.message);
+			}
+			this.emit(entry.data);
+			if (entry.delayAfterMs > 0) await this.tick(entry.delayAfterMs);
+		}
 	}
 
 	/** Stream a propose_<type> tool_use across N message_update deltas, then

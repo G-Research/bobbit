@@ -68,11 +68,19 @@ export const CONTAINER_HOME = "/home/node";
 /** Container-side agent directory prefix (always forward slashes) */
 export const CONTAINER_AGENT_DIR = "/home/node/.bobbit/agent/";
 
+export interface RuntimePiExtensionToolInfo {
+	name: string;
+	description?: string;
+	inputSchema?: Record<string, unknown>;
+}
+
 export interface RuntimePiExtensionInfo {
 	listName: string;
 	entryPath: string;
 	entryRelativePath?: string;
 	packRoot: string;
+	/** Session-owned discovery metadata for the tools loaded into this exact Pi runtime. */
+	tools?: RuntimePiExtensionToolInfo[];
 	origin: {
 		scope: "server" | "global-user" | "project" | "builtin";
 		packName: string;
