@@ -335,38 +335,70 @@ export function mergeSidecarEntriesIntoMessages(
 	if (!Array.isArray(messages) || messages.length === 0) return messages;
 	if (!Array.isArray(entries) || entries.length === 0) return messages;
 
+	const messageBody = (msg: any): string => {
+		if (typeof msg?.content === "string") return msg.content;
+		if (Array.isArray(msg?.content)) {
+			return msg.content.find((block: any) => block?.type === "text")?.text ?? "";
+		}
+		return "";
+	};
+	const unidentifiedBodyCounts = new Map<string, number>();
+	for (const msg of messages) {
+		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")
+			|| isPiTranscriptEntryId(msg.entryId)) continue;
+		const body = messageBody(msg);
+		unidentifiedBodyCounts.set(body, (unidentifiedBodyCounts.get(body) ?? 0) + 1);
+	}
+
 	const boundGroups = new Map<string, SkillSidecarEntry[]>();
+	const boundTextGroups = new Map<string, SkillSidecarEntry[]>();
 	const legacyQueues = new Map<string, SkillSidecarEntry[]>();
 	for (const entry of entries) {
 		if (isPiTranscriptEntryId(entry.transcriptEntryId)) {
 			const group = boundGroups.get(entry.transcriptEntryId) ?? [];
 			group.push(entry);
 			boundGroups.set(entry.transcriptEntryId, group);
+			const textGroup = boundTextGroups.get(entry.modelText) ?? [];
+			textGroup.push(entry);
+			boundTextGroups.set(entry.modelText, textGroup);
 		} else {
 			const queue = legacyQueues.get(entry.modelText) ?? [];
 			queue.push(entry);
 			legacyQueues.set(entry.modelText, queue);
 		}
 	}
+	// Some outward projections intentionally omit Pi entry ids. A proven envelope
+	// may still be projected when both sides have exactly one possible occurrence;
+	// any duplicate message, binding, or legacy candidate remains unassociated.
+	const uniqueBoundFallbacks = new Map<string, SkillSidecarEntry>();
+	for (const [modelText, group] of boundTextGroups) {
+		if (group.length === 1
+			&& unidentifiedBodyCounts.get(modelText) === 1
+			&& !legacyQueues.get(modelText)?.length) {
+			uniqueBoundFallbacks.set(modelText, group[0]);
+		}
+	}
 
 	let changed = false;
 	const out = messages.map((msg: any) => {
 		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
-		let body = "";
-		if (typeof msg.content === "string") body = msg.content;
-		else if (Array.isArray(msg.content)) {
-			body = msg.content.find((block: any) => block?.type === "text")?.text ?? "";
-		}
-
+		const body = messageBody(msg);
+		const hasIdentity = isPiTranscriptEntryId(msg.entryId);
 		let envelope: SkillSidecarEntry | undefined;
-		if (isPiTranscriptEntryId(msg.entryId)) {
+		if (hasIdentity) {
 			const exact = boundGroups.get(msg.entryId);
 			// Duplicate/conflicting occurrence bindings fail closed.
 			if (exact?.length === 1 && exact[0].modelText === body) envelope = exact[0];
 		}
 		if (!envelope) {
+			// Preserve old unbound sidecars' FIFO compatibility even when a modern
+			// transcript projection happens to carry an entry id.
 			const queue = legacyQueues.get(body);
 			envelope = queue?.shift();
+		}
+		if (!envelope && !hasIdentity) {
+			envelope = uniqueBoundFallbacks.get(body);
+			if (envelope) uniqueBoundFallbacks.delete(body);
 		}
 		if (!envelope) return msg;
 		changed = true;
