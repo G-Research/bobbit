@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/uploaded-attachment-text.test.ts",
+      "reason": "Pure regression coverage for rejecting dense valid UTF-8 C1 controls without changing the existing control-density allowance.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/uploaded-attachment-admission-repro.test.ts",
       "reason": "Focused admission lifecycle coverage proving immutable pointers and bounded excerpts reach model dispatch while visible, title, queue, binary, and equal-text occurrence projections remain isolated.",
       "execution": {

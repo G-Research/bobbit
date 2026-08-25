@@ -16,10 +16,13 @@ export function decodeLikelyUtf8Text(bytes: Uint8Array): string | undefined {
 	for (let i = 0; i < text.length; i++) {
 		const code = text.charCodeAt(i);
 		// Preserve whitespace controls used by ordinary text. NUL is a strong
-		// binary signal; judge other C0/DEL controls by density so an occasional
+		// binary signal; judge other C0/C1/DEL controls by density so an occasional
 		// form-feed does not make an otherwise readable file opaque.
 		if (code === 0) return undefined;
-		if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f) {
+		if (
+			(code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d)
+			|| (code >= 0x7f && code <= 0x9f)
+		) {
 			suspiciousControls++;
 		}
 	}

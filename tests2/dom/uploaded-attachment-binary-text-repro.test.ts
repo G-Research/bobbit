@@ -26,6 +26,13 @@ const cases = [
 		bytes: Uint8Array.from([0xc3, 0x28]),
 		expectedBase64: "wyg=",
 	},
+	{
+		label: "text/plain MIME with dense C1 controls",
+		name: "c1-controls.txt",
+		type: "text/plain",
+		bytes: Uint8Array.from([0xc2, 0x80, 0xc2, 0x81]),
+		expectedBase64: "woDCgQ==",
+	},
 ] as const;
 
 describe("shared uploaded attachment text classifier", () => {
@@ -35,9 +42,10 @@ describe("shared uploaded attachment text classifier", () => {
 		);
 	});
 
-	it("rejects NUL, dense controls, and malformed UTF-8", () => {
+	it("rejects NUL, dense C0 or C1 controls, and malformed UTF-8", () => {
 		expect(decodeLikelyUtf8Text(Uint8Array.from([0x66, 0x00]))).toBeUndefined();
 		expect(decodeLikelyUtf8Text(Uint8Array.from([0x66, 0x01]))).toBeUndefined();
+		expect(decodeLikelyUtf8Text(Uint8Array.from([0xc2, 0x80, 0xc2, 0x81]))).toBeUndefined();
 		expect(decodeLikelyUtf8Text(Uint8Array.from([0xc3, 0x28]))).toBeUndefined();
 	});
 });
