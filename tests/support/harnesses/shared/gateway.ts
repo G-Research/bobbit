@@ -35,8 +35,8 @@ import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
 import { createRunChild, getRunRoot } from "./run-isolation.js";
 
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
-const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
-const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
+const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..", "..");
+const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "_helpers", "mock-agent.mjs");
 const apiProfileRecords: Array<{ method: string; path: string; status: number; durationMs: number; endedAt: number }> = [];
 let apiProfileExitRegistered = false;
 let apiProfileExportSequence = 0;
