@@ -24,7 +24,12 @@ export class EventBuffer {
 	 *  replayed and only increases old-generation heap pressure. */
 	static readonly DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 
-	private buffer: RetainedEvent[] = [];
+	/** Minimum discarded prefix before compacting the backing array. */
+	private static readonly COMPACTION_MIN_PREFIX = 1024;
+
+	private buffer: Array<RetainedEvent | undefined> = [];
+	/** Index of the oldest live entry in `buffer`. Slots before it are cleared. */
+	private head = 0;
 	private readonly maxSize: number;
 	private readonly byteLimit: number;
 	private bytesRetained = 0;
@@ -54,10 +59,13 @@ export class EventBuffer {
 
 		this.buffer.push({ entry, bytes });
 		this.bytesRetained += bytes;
-		while (this.buffer.length > this.maxSize || this.bytesRetained > this.byteLimit) {
-			const evicted = this.buffer.shift();
+		while (this.size > this.maxSize || this.bytesRetained > this.byteLimit) {
+			const evicted = this.buffer[this.head];
+			// Release the evicted payload graph without shifting the live suffix.
+			this.buffer[this.head++] = undefined;
 			if (evicted) this.bytesRetained -= evicted.bytes;
 		}
+		this.compactIfNeeded();
 		return entry;
 	}
 
@@ -74,19 +82,25 @@ export class EventBuffer {
 
 	/** All buffered entries, oldest first. */
 	getAll(): BufferedEvent[] {
-		return this.buffer.map(retained => retained.entry);
+		const out: BufferedEvent[] = [];
+		for (let index = this.head; index < this.buffer.length; index++) {
+			const retained = this.buffer[index];
+			if (retained) out.push(retained.entry);
+		}
+		return out;
 	}
 
 	/** Return entries whose `seq > fromSeq`, preserving buffer order. */
 	since(fromSeq: number): BufferedEvent[] {
-		if (this.buffer.length === 0) return [];
+		const oldest = this.buffer[this.head];
+		if (!oldest) return [];
 		// If fromSeq is older than our oldest retained - 1, we cannot resume.
 		// Callers should check canResumeFrom first; we return all as a best-effort.
-		const first = this.buffer[0].entry.seq;
-		if (fromSeq < first - 1) return this.getAll();
+		if (fromSeq < oldest.entry.seq - 1) return this.getAll();
 		const out: BufferedEvent[] = [];
-		for (const retained of this.buffer) {
-			if (retained.entry.seq > fromSeq) out.push(retained.entry);
+		for (let index = this.head; index < this.buffer.length; index++) {
+			const retained = this.buffer[index];
+			if (retained && retained.entry.seq > fromSeq) out.push(retained.entry);
 		}
 		return out;
 	}
@@ -99,10 +113,11 @@ export class EventBuffer {
 		if (fromSeq < this.lastUnretainedSeq) return false;
 		// Empty buffer: resume is only safe if the client is already caught up
 		// (fromSeq === lastSeq). Otherwise events were evicted or never seen.
-		if (this.buffer.length === 0) return fromSeq === this.lastSeq;
+		const oldest = this.buffer[this.head];
+		if (!oldest) return fromSeq === this.lastSeq;
 		// Non-empty: we need at least seq === fromSeq + 1 retained,
 		// i.e. the oldest retained entry has seq <= fromSeq + 1.
-		return this.buffer[0].entry.seq <= fromSeq + 1;
+		return oldest.entry.seq <= fromSeq + 1;
 	}
 
 	clear(): void {
@@ -126,7 +141,7 @@ export class EventBuffer {
 	}
 
 	get size(): number {
-		return this.buffer.length;
+		return this.buffer.length - this.head;
 	}
 
 	/** Estimated serialized UTF-8 bytes currently retained. */
@@ -154,8 +169,19 @@ export class EventBuffer {
 		}
 	}
 
+	private compactIfNeeded(): void {
+		if (
+			this.head >= EventBuffer.COMPACTION_MIN_PREFIX
+			&& this.head >= this.size
+		) {
+			this.buffer = this.buffer.slice(this.head);
+			this.head = 0;
+		}
+	}
+
 	private dropAllRetained(): void {
 		this.buffer = [];
+		this.head = 0;
 		this.bytesRetained = 0;
 	}
 }
