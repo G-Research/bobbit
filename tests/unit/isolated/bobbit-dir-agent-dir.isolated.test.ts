@@ -21,7 +21,7 @@ type AgentDirResolution = {
 };
 
 async function loadAgentDirConfigModule(): Promise<Record<string, any>> {
-	for (const specifier of ["../../src/server/agent-dir-config.ts", "../../src/server/bobbit-dir.ts"]) {
+	for (const specifier of ["../../../src/server/agent-dir-config.ts", "../../../src/server/bobbit-dir.ts"]) {
 		try {
 			return await import(/* @vite-ignore */ specifier) as Record<string, any>;
 		} catch (err: any) {

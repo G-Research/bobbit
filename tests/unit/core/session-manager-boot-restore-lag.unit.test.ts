@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it, vi } from "vitest";
 
-vi.mock("../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
+vi.mock("../../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
 	const original = await importOriginal<typeof import("../../../src/server/agent/orphan-cleanup.ts")>();
 	return {
 		...original,

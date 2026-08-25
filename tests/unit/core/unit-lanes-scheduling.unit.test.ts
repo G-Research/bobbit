@@ -155,12 +155,16 @@ function projects(config: LoadedConfig): ProjectConfig["test"][] {
 }
 
 describe("direct unit-stage scheduling", () => {
-	it("runs test:unit as one direct Vitest command with no lane or ledger import", () => {
+	it("routes test:unit to one complete Vitest command with no lane or ledger import", () => {
+		assert.equal(packageJson.scripts["test:unit"], "npm run test:v2:core --");
 		assert.equal(
-			packageJson.scripts["test:unit"],
-			"vitest run --config vitest.config.ts --silent=passed-only",
+			packageJson.scripts["test:v2:core"],
+			"npm run test:layout && vitest run --config vitest.config.ts --silent=passed-only",
 		);
-		assert.doesNotMatch(packageJson.scripts["test:unit"], /run-unit-lanes|ledger/i);
+		assert.doesNotMatch(
+			`${packageJson.scripts["test:unit"]} ${packageJson.scripts["test:v2:core"]}`,
+			/run-unit-lanes|ledger/i,
+		);
 
 		const configImports = [...configSource.matchAll(/from\s+["']([^"']+)["']/g)]
 			.map((match) => match[1]);
@@ -214,7 +218,7 @@ describe("direct unit-stage scheduling", () => {
 	it("certifies Git handoff only for the complete inventory with the resolved worker count", async () => {
 		assert.match(
 			configSource,
-			/new GitTemplateHandoffReporter\(coordinatorGitTemplate, MAX_WORKERS, execution\.unit\)/,
+			/new GitTemplateHandoffReporter\(coordinatorGitTemplate, MAX_WORKERS, UNIT_TEST_FILES\)/,
 			"the coordinator must inject the resolved cap and exact canonical inventory",
 		);
 		assert.doesNotMatch(

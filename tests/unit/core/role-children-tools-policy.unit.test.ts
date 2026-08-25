@@ -27,7 +27,7 @@ const { resolveGrantPolicy } = await import("../../../src/server/agent/tool-acti
 import type { GroupPolicyProvider } from "../../../src/server/agent/tool-activation.ts";
 import type { GrantPolicy } from "../../../src/server/agent/role-store.ts";
 
-const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults");
+const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "..", "defaults");
 const ROLES_DIR = path.join(DEFAULTS_DIR, "roles");
 const GROUP_POLICIES_FILE = path.join(DEFAULTS_DIR, "tool-group-policies.yaml");
 

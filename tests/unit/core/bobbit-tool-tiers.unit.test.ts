@@ -17,7 +17,7 @@ import {
 } from "./_helpers/bobbit-harness.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(HERE, "..", "..");
+const ROOT = path.resolve(HERE, "..", "..", "..");
 const YAML_DIR = path.join(ROOT, "defaults", "tools", "bobbit");
 
 // Design §5 catalogue — pinned so YAML/code changes that add or drop an

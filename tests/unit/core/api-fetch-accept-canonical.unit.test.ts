@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 /**
- * BUG: `tests/e2e/e2e-setup.ts::maybeInjectProjectId` silently flips an
+ * BUG: `tests/e2e/_helpers/e2e-setup.ts::maybeInjectProjectId` silently flips an
  *      explicit `acceptCanonical: false` to `true`.
  *
  * Background
@@ -15,7 +15,7 @@
  * `apiFetch(POST /api/projects)`, inject `acceptCanonical: true` so
  * existing tests don't need to know about the macOS quirk.
  *
- * Production condition (tests/e2e/e2e-setup.ts ~L244):
+ * Production condition (tests/e2e/_helpers/e2e-setup.ts ~L244):
  *
  *     if (parsed && typeof parsed === "object" && !parsed.acceptCanonical) {
  *         body = JSON.stringify({ ...parsed, acceptCanonical: true });
@@ -52,7 +52,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SRC = fs.readFileSync(
-	path.resolve(process.cwd(), "tests", "e2e", "e2e-setup.ts"),
+	path.resolve(process.cwd(), "tests", "e2e", "_helpers", "e2e-setup.ts"),
 	"utf8",
 );
 
