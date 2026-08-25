@@ -228,8 +228,10 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await page.locator('review-pane button.review-tab[title="Document A"]').click();
 		await expect(page.locator("review-document").getByText("First document content").first()).toBeVisible({ timeout: 10_000 });
 
-		await page.locator('review-pane button.review-tab[title="Document B"] .review-tab-close').click();
-		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 5_000 });
+		await reviewPanelTab(page, "Document B").locator(".goal-tab-close").click();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().groups.map((group: any) => group.title)), { timeout: 10_000 })
+			.toEqual(["Document A", "Document C"]);
+		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 10_000 });
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document B", "Document C"]);
 	});
 
@@ -351,14 +353,15 @@ test.describe("Proposal/review lightweight fixture", () => {
 			"Annotated Doc": [{ id: "ann-1", quote: "Some important text", comment: "Inline fixture comment", start: 17, end: 36 }],
 		}, { persist: true }));
 		await reviewPanelTab(page, "Annotated Doc").click();
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await expect(page.locator(".review-submit-count")).toHaveText("1 inline comment across this review", { timeout: 5_000 });
 		await reloadAndRehydrateFixture(page);
 		await reviewPanelTab(page, "Annotated Doc").click();
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await expect(page.locator(".review-submit-count")).toHaveText("1 inline comment across this review", { timeout: 5_000 });
 		await pane.getByRole("button", { name: "Reject" }).click();
 		await expect.poll(async () => page.evaluate(() => (window as any).__getProposalReviewPromptLog().at(-1) || ""), { timeout: 10_000 })
 			.toContain("Inline fixture comment");
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewAnnotationCount("Annotated Doc"))).toBe(0);
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().groups)).toEqual([]);
 
 		await page.evaluate(() => (window as any).__resetProposalReviewFixture());
 		await page.evaluate(() => (window as any).__setReviewFixture([{ title: "Approve Doc", markdown: "# Approve Doc\n\nLooks good." }]));

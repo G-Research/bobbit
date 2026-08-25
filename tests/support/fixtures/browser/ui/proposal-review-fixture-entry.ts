@@ -5,6 +5,7 @@ import { clearProposalDismissed, isProposalDismissed, markProposalDismissed } fr
 import { PROPOSAL_TYPE_REGISTRY, type ProposalType } from "../../../../../src/app/proposal-registry.js";
 import { resetProposalAnnCount } from "../../../../../src/app/proposal-panels.js";
 import { addAnnotation, clearAllAnnotations, clearReviewSubmitted, getAnnotations, getDocumentAnnotationCount, isReviewSubmitted } from "../../../../../src/ui/components/review/AnnotationStore.js";
+import type { ReviewGroupModel } from "../../../../../src/ui/components/review/review-types.js";
 
 type FetchLogEntry = { url: string; method: string; body: any };
 type ReviewDoc = { title: string; markdown: string; source?: any };
@@ -30,6 +31,8 @@ type ResetOptions = {
 const SESSION_ID = "proposal-review-fixture-session";
 const PROJECT_ID = "proposal-review-fixture-project";
 const PROJECT_ROOT = "/tmp/proposal-review-fixture";
+const FIXTURE_GATEWAY_URL = "http://fixture.localhost";
+const FIXTURE_GATEWAY_TOKEN = "fixture-token";
 const PROPOSAL_STORE_KEY = `bobbit-proposal-review-fixture-proposals-${SESSION_ID}`;
 const REVIEW_STORE_KEY = `bobbit-proposal-review-fixture-reviews-${SESSION_ID}`;
 const REVIEW_SUBMITTED_KEY = `bobbit-proposal-review-fixture-review-submitted-${SESSION_ID}`;
@@ -248,6 +251,10 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		return response({ staff: [] });
 	}
 	if (url.includes("/review/annotations")) return response({ annotations: {}, submitted: persistedReviewSubmitted() });
+	if (url.includes("/review/tombstones/")) {
+		if (method === "PUT") setPersistedReviewSubmitted(body?.state === "submitted");
+		return response({ ok: true });
+	}
 	if (url.includes("/review/submitted")) {
 		if (method === "PUT") setPersistedReviewSubmitted(!!body?.submitted);
 		return response({ submitted: persistedReviewSubmitted() });
@@ -280,6 +287,10 @@ function resetState(options: ResetOptions = {}): void {
 	staffCreateGate = null;
 	releaseStaffCreateGate = null;
 	staffCreateFailureStatus = 0;
+	// Install a valid gateway pair before annotation cleanup reaches the strict
+	// browser URL boundary; the file:// fixture's origin is not a gateway URL.
+	localStorage.setItem("gateway.url", FIXTURE_GATEWAY_URL);
+	localStorage.setItem("gateway.token", FIXTURE_GATEWAY_TOKEN);
 	clearAllAnnotations(SESSION_ID);
 	if (clearPersisted) clearReviewSubmitted(SESSION_ID);
 	for (const type of ["goal", "role", "staff"] as const) resetProposalAnnCount(type);
@@ -339,6 +350,11 @@ function resetState(options: ResetOptions = {}): void {
 		activePanelTabId: "chat",
 		panelWorkspaceActiveBySession: {},
 		panelWorkspacePreviewKeyBySession: {},
+		sidePanelWorkspaceBySession: {},
+		lastWorkspaceRevisionBySession: {},
+		reviewGroupsBySession: {},
+		reviewGroups: new Map(),
+		reviewActiveReviewId: "",
 		reviewDocuments: new Map(),
 		reviewActiveTab: "",
 		reviewPanelOpen: false,
@@ -354,9 +370,8 @@ function resetState(options: ResetOptions = {}): void {
 			summarizeGoalTitle: () => {},
 		},
 	});
+	delete (state as any).panelWorkspace;
 	window.location.hash = `#/session/${SESSION_ID}`;
-	localStorage.setItem("gateway.url", window.location.origin);
-	localStorage.setItem("gateway.token", "fixture-token");
 	addFixtureStyle();
 	if (options.hydrateProposals) rehydratePersistedProposals();
 }
@@ -430,11 +445,27 @@ function activeSlot(type: ProposalType): Record<string, unknown> | null {
 }
 
 function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}, opts: { persist?: boolean } = {}): void {
-	const normalizedDocs = docs.map((doc) => ({
-		...doc,
-		source: doc.source || { kind: "markdown-review", sessionId: SESSION_ID },
+	const source = { kind: "markdown-review" as const, sessionId: SESSION_ID };
+	const normalizedDocs = docs.map((doc) => ({ ...doc, source: doc.source || source }));
+	const files = normalizedDocs.map((doc) => ({ fileId: doc.title, title: doc.title, markdown: doc.markdown }));
+	// Each legacy fixture document remains a primary workspace review while its
+	// pane exposes the complete ordered document set as secondary file tabs.
+	const groups: ReviewGroupModel[] = normalizedDocs.map((doc) => ({
+		reviewId: `proposal-review-fixture-${encodeURIComponent(doc.title)}`,
+		title: doc.title,
+		files: files.map((file) => ({ ...file })),
+		activeFileId: doc.title,
+		source,
 	}));
-	state.reviewDocuments = new Map(normalizedDocs.map((doc) => [doc.title, doc]));
+	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [SESSION_ID]: groups };
+	state.reviewGroups = new Map(groups.map((group) => [group.reviewId, group]));
+	state.reviewActiveReviewId = groups[0]?.reviewId ?? "";
+	state.reviewDocuments = new Map(normalizedDocs.map((doc) => [doc.title, {
+		...doc,
+		documentId: doc.title,
+		fileId: doc.title,
+		reviewId: groups[0]?.reviewId,
+	}]));
 	state.reviewActiveTab = normalizedDocs[0]?.title ?? "";
 	state.reviewPanelOpen = normalizedDocs.length > 0;
 	state.previewPanelActiveTab = "review";
@@ -492,6 +523,7 @@ document.addEventListener("proposal-open", (event) => {
 	open: state.reviewPanelOpen,
 	active: state.reviewActiveTab,
 	titles: [...state.reviewDocuments.keys()],
+	groups: [...state.reviewGroups.values()].map((group) => ({ reviewId: group.reviewId, title: group.title })),
 	submitted: isReviewSubmitted(SESSION_ID) || persistedReviewSubmitted(),
 });
 (window as any).__getReviewAnnotationCount = (title: string) => getDocumentAnnotationCount(SESSION_ID, title);
