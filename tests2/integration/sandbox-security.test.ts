@@ -17,6 +17,10 @@ import { EventBuffer } from "../../src/server/agent/event-buffer.js";
 import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
 import { emitSessionEvent } from "../../src/server/agent/session-manager.js";
+import {
+	persistUploadedAttachmentOccurrence,
+	purgeUploadedAttachments,
+} from "../../src/server/agent/uploaded-attachment-store.js";
 import { broadcastStatus } from "../../src/server/agent/session-status.js";
 import type { PersistedTask } from "../../src/server/agent/task-store.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -168,7 +172,7 @@ test.describe("Sandbox Security Boundaries", () => {
 	let restoreSessionFixture: () => void;
 
 	test.beforeEach(({ gateway }) => {
-		sessionId = `sandbox-security-${fixtureSequence++}`;
+		sessionId = `00000000-0000-4000-8000-${String(fixtureSequence++).padStart(12, "0")}`;
 		gateway.sessionManager.sandboxTokenStore.remove(projectId);
 		restoreSessionFixture = installSyntheticSession(gateway, sessionId);
 		scopedToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
@@ -237,6 +241,59 @@ test.describe("Sandbox Security Boundaries", () => {
 	});
 
 	// ── ALLOWED endpoints ──────────────────────────────────────────────
+
+	test("a pooled sandbox cannot read uploaded bytes with the owning session secret", async ({ gateway }) => {
+		const marker = `POOLED_ATTACHMENT_SECRET_${sessionId}`;
+		const manager = gateway.sessionManager as any;
+		const live = manager.getSession(sessionId);
+		const originalSandboxed = live.sandboxed;
+		const originalContainerId = live.containerId;
+		const originalAllowedTools = live.allowedTools;
+		Object.assign(live, {
+			sandboxed: true,
+			containerId: "shared-project-pool",
+			allowedTools: ["session_attachment"],
+		});
+		const saved = await persistUploadedAttachmentOccurrence(sessionId, "pooled-sandbox-occurrence", [{
+			id: "private-upload",
+			type: "document",
+			fileName: "private.opaque",
+			mimeType: "application/octet-stream",
+			size: Buffer.byteLength(marker),
+			content: Buffer.from(marker).toString("base64"),
+		}]);
+		const secret = manager.sessionSecretStore.getOrCreateSecret(sessionId);
+		try {
+			const response = await sandboxFetch(
+				gateway.baseURL,
+				`/api/sessions/${sessionId}/uploaded-attachments/query`,
+				scopedToken,
+				{
+					method: "POST",
+					headers: { "X-Bobbit-Session-Secret": secret },
+					body: JSON.stringify({
+						operation: "read",
+						pointer: saved.attachments[0].pointer,
+						offset: 0,
+						length: 64 * 1024,
+					}),
+				},
+			);
+			const responseText = await response.text();
+			expect(response.status).toBe(403);
+			expect(JSON.parse(responseText)).toMatchObject({
+				code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
+				retryable: false,
+			});
+			expect(responseText).not.toContain(marker);
+			expect(responseText).not.toContain(Buffer.from(marker).toString("base64"));
+		} finally {
+			await purgeUploadedAttachments(sessionId);
+			live.sandboxed = originalSandboxed;
+			live.containerId = originalContainerId;
+			live.allowedTools = originalAllowedTools;
+		}
+	});
 
 	test("valid-secret tool callbacks still require exact current Pi lifecycle provenance", async ({ gateway }) => {
 		const manager = gateway.sessionManager as any;

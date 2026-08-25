@@ -66,6 +66,19 @@ export async function handleUploadedAttachmentToolRoute(
 		json(res, 403, { error: "Uploaded attachment access is forbidden", code: "UPLOADED_ATTACHMENT_FORBIDDEN", retryable: false });
 		return true;
 	}
+	// Today's Docker sandbox is a same-UID, per-project pool: another session in
+	// the container can read both this capability secret and the transcript-held
+	// pointer. Reject before parsing the body or consulting the attachment store;
+	// possession of those values is not an isolation attestation. Direct agents
+	// remain supported because they do not share this pooled sandbox boundary.
+	if (liveSession.sandboxed === true) {
+		json(res, 403, {
+			error: "Uploaded attachment reads are unavailable in shared sandbox sessions",
+			code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
+			retryable: false,
+		});
+		return true;
+	}
 	if (liveSession.allowedTools !== undefined
 		&& !liveSession.allowedTools.some((tool) => tool.toLowerCase() === UPLOADED_ATTACHMENT_TOOL_NAME)) {
 		json(res, 403, { error: "Uploaded attachment tool is not allowed for this session", code: "UPLOADED_ATTACHMENT_FORBIDDEN", retryable: false });

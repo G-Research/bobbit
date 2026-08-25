@@ -88,7 +88,72 @@ describe("uploaded attachment remote-agent tool integration", () => {
 		expect(JSON.stringify(captured[3])).not.toContain("gateway-token");
 	});
 
-	it("reads exact persisted bytes through the registered extension and authenticated server route", async () => {
+	it("rejects a shared pooled sandbox before request-body or attachment-store access", async () => {
+		const marker = "POOLED_SANDBOX_PRIVATE_MARKER";
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_ID, "sandbox-occurrence", [{
+			id: "sandbox-file",
+			type: "document",
+			fileName: "private.bin",
+			mimeType: "application/octet-stream",
+			size: Buffer.byteLength(marker),
+			content: Buffer.from(marker).toString("base64"),
+		}]);
+		const pointer = saved.attachments[0].pointer;
+		let readBodyCalls = 0;
+		const sessionManager = {
+			sessionSecretStore: {
+				resolveSessionIdBySecret: (secret: string | undefined) => secret === "session-secret" ? SESSION_ID : undefined,
+			},
+			getSession: (sessionId: string) => sessionId === SESSION_ID
+				? { id: SESSION_ID, sandboxed: true, containerId: "shared-project-pool", allowedTools: ["session_attachment"] }
+				: undefined,
+		};
+		const server = http.createServer(async (req, res) => {
+			const handled = await handleUploadedAttachmentToolRoute(
+				new URL(req.url ?? "/", "http://127.0.0.1"),
+				req,
+				res,
+				{
+					sessionManager: sessionManager as any,
+					readBody: async () => {
+						readBodyCalls += 1;
+						throw new Error("sandbox rejection must precede body parsing");
+					},
+				},
+			);
+			if (!handled) {
+				res.writeHead(404);
+				res.end();
+			}
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("missing test server address");
+			const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${SESSION_ID}/uploaded-attachments/query`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Bobbit-Session-Secret": "session-secret",
+				},
+				body: JSON.stringify({ operation: "read", pointer, offset: 0, length: 64 * 1024 }),
+			});
+			const responseText = await response.text();
+			expect(response.status).toBe(403);
+			expect(JSON.parse(responseText)).toEqual({
+				error: "Uploaded attachment reads are unavailable in shared sandbox sessions",
+				code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
+				retryable: false,
+			});
+			expect(readBodyCalls).toBe(0);
+			expect(responseText).not.toContain(marker);
+			expect(responseText).not.toContain(Buffer.from(marker).toString("base64"));
+		} finally {
+			await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+		}
+	});
+
+	it("preserves exact persisted reads for a non-sandbox session", async () => {
 		const bytes = Buffer.from([0xde, 0xad, 0x00, 0xbe, 0xef]);
 		const saved = await persistUploadedAttachmentOccurrence(SESSION_ID, "accepted-occurrence", [{
 			id: "client-file",
@@ -104,7 +169,7 @@ describe("uploaded attachment remote-agent tool integration", () => {
 				resolveSessionIdBySecret: (secret: string | undefined) => secret === "session-secret" ? SESSION_ID : undefined,
 			},
 			getSession: (sessionId: string) => sessionId === SESSION_ID
-				? { id: SESSION_ID, allowedTools: ["session_attachment"] }
+				? { id: SESSION_ID, sandboxed: false, allowedTools: ["session_attachment"] }
 				: undefined,
 		};
 		const server = http.createServer(async (req, res) => {

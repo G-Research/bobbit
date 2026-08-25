@@ -67,7 +67,7 @@
     },
     {
       "path": "tests2/integration/uploaded-attachment-tool.test.ts",
-      "reason": "Integration coverage for session-scoped attachment list/read routing, exact bounded bytes, foreign-session rejection, restart persistence, and cleanup.",
+      "reason": "Integration coverage for session-scoped attachment list/read routing, exact bounded bytes, pooled-sandbox fail-closed ordering, non-sandbox reads, foreign-session rejection, restart persistence, and cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
