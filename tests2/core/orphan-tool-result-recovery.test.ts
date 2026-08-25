@@ -796,6 +796,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(queued[0], {
 			id: intentId,
 			text: "expanded mockup instructions\n\nhero",
+			displayText: "/mockup hero",
 			isSteered: true,
 			createdAt: queued[0].createdAt,
 			kind: "steer",
