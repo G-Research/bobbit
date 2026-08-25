@@ -18,12 +18,12 @@ Install into the current Bobbit project only. Use gateway tools directly; never 
 
 Use one `ask_user_choices` call containing all four questions. Each question has an `Other` escape hatch for a custom value.
 
-- **Scanner schedule:** `Every 15 minutes (*/15 * * * *)`, `Hourly (0 * * * *)`, `Daily at 02:00 (0 2 * * *)`.
-- **Director schedule:** `Hourly (15 * * * *)`, `Every 4 hours (15 */4 * * *)`, `Daily at 03:00 (0 3 * * *)`.
+- **Scanner schedule:** `Manual only (manual)`, `Every 15 minutes (*/15 * * * *)`, `Hourly (0 * * * *)`, `Daily at 02:00 (0 2 * * *)`.
+- **Director schedule:** `Manual only (manual)`, `Hourly (15 * * * *)`, `Every 4 hours (15 */4 * * *)`, `Daily at 03:00 (0 3 * * *)`.
 - **Ideator parallelism:** `2`, `4`, `6`.
 - **Active-goal target:** `1`, `2`, `3`, `4`.
 
-Validate custom schedules as standard five-field cron expressions and custom counts as positive bounded integers accepted by `perf_programme_set_settings`. Use the current project timezone when authoritative project configuration supplies one; otherwise explicitly use and report `UTC`. Do not silently repair invalid input: ask again with the validation error.
+Accept the exact sentinel `manual` (including a user's unambiguous “Manual only” answer) or validate a custom schedule as a standard five-field cron expression. Validate custom counts as positive bounded integers accepted by `perf_programme_set_settings`. Use the current project timezone when authoritative project configuration supplies one; otherwise explicitly use and report `UTC`. Do not silently repair invalid input: ask again with the validation error.
 
 Call `perf_programme_set_settings` with exactly `{ scannerSchedule: <scanner cron>, directorSchedule: <director cron>, maxParallelIdeators: <count>, targetActiveGoals: <count> }`. The timezone belongs on the staff schedule triggers and in the report; it is not a programme-setting field. Report a tool failure and stop rather than claiming configuration succeeded.
 
@@ -74,7 +74,7 @@ For each create-needed identity, call `bobbit_orchestrate(operation: "create_sta
 - `body.projectId`: the authoritative project ID
 - `body.cwd`: the authoritative project root returned by `get_project`
 - `body.worktree`: `false`
-- `body.triggers`: one enabled schedule trigger with `config: { cron: <scanner cron>, timezone: <timezone> }` and prompt `Refresh performance coverage, reconcile outstanding attempts, and fill available Ideator capacity.`
+- `body.triggers`: when the Scanner schedule is `manual`, an empty array; otherwise one enabled schedule trigger with `config: { cron: <scanner cron>, timezone: <timezone> }` and prompt `Refresh performance coverage, reconcile outstanding attempts, and fill available Ideator capacity.`
 
 ### Optimisation Director
 
@@ -84,9 +84,9 @@ For each create-needed identity, call `bobbit_orchestrate(operation: "create_sta
 - `body.projectId`: the authoritative project ID
 - `body.cwd`: the authoritative project root returned by `get_project`
 - `body.worktree`: `false`
-- `body.triggers`: one enabled schedule trigger with `config: { cron: <director cron>, timezone: <timezone> }` and prompt `Reconcile direct performance goal creation and active goals, then fill available optimisation capacity.`
+- `body.triggers`: when the Director schedule is `manual`, an empty array; otherwise one enabled schedule trigger with `config: { cron: <director cron>, timezone: <timezone> }` and prompt `Reconcile direct performance goal creation and active goals, then fill available optimisation capacity.`
 
-Use schedule-trigger objects compatible with the gateway contract: `{ type: "schedule", config: { cron, timezone }, prompt, enabled: true }`. Never invoke any staff deletion or update operation.
+Use schedule-trigger objects compatible with the gateway contract: `{ type: "schedule", config: { cron, timezone }, prompt, enabled: true }`. Manual-only staff receive `triggers: []` and are run explicitly from their Staff action; never invent a cron schedule for them. Never invoke any staff deletion or update operation.
 
 ## 6. Persist IDs and report
 

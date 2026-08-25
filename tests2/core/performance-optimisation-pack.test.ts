@@ -174,6 +174,8 @@ describe("performance optimisation first-party pack", () => {
 		expect(INSTALL_SKILL).toContain("must not create, edit, or execute benchmark commands");
 		expect(INSTALL_SKILL).toContain("Never guess measurement semantics");
 		expect(INSTALL_SKILL).toContain("commandName` is the script key");
+		expect(INSTALL_SKILL).toContain("Manual only (manual)");
+		expect(INSTALL_SKILL).toContain("Manual-only staff receive `triggers: []`");
 		expect(BUILD_SOURCE).toContain('pack: "performance-optimisation"');
 		expect(BUILD_SOURCE).toContain('{ in: "performance-panel.ts", out: "lib/performance-panel.js" }');
 		expect(COPY_SOURCE).toMatch(/FIRST_PARTY_PACKS\s*=\s*\[[^\]]*"performance-optimisation"/);
