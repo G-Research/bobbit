@@ -29,6 +29,7 @@ export class TranscriptHistoryPopover extends LitElement {
 	@property({ attribute: false }) entries: TranscriptHistoryEntry[] = [];
 	@property({ type: Boolean, reflect: true }) open = false;
 	@property({ attribute: false }) anchorEl: HTMLElement | null = null;
+	@property({ type: Number, attribute: false }) availableHeight = 535;
 
 	@state() private _query = "";
 	@state() private _filter: TranscriptHistoryFilter = "all";
@@ -177,13 +178,14 @@ export class TranscriptHistoryPopover extends LitElement {
 			<style>
 				transcript-history-popover .transcript-history-dialog {
 					position: absolute;
+					box-sizing: border-box;
 					top: calc(100% + 6px);
 					left: 50%;
 					transform: translateX(-50%);
 					z-index: 50;
 					display: flex;
 					width: min(475px, calc(100vw - 24px));
-					max-height: min(535px, calc(100dvh - 168px));
+					max-height: min(535px, var(--transcript-history-available-height, 535px));
 					flex-direction: column;
 					overflow: hidden;
 					border: 1px solid var(--border);
@@ -312,13 +314,13 @@ export class TranscriptHistoryPopover extends LitElement {
 				@media (max-width: 639px) {
 					transcript-history-popover .transcript-history-dialog {
 						width: calc(100vw - 24px);
-						max-height: calc(100dvh - 150px);
 					}
 				}
 			</style>
 			<section
 				id="transcript-history-popover"
 				class="transcript-history-dialog"
+				style="--transcript-history-available-height: ${Math.max(0, Math.floor(this.availableHeight))}px"
 				role="dialog"
 				aria-modal="false"
 				aria-labelledby="transcript-history-title"

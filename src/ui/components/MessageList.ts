@@ -398,18 +398,40 @@ export class MessageList extends LitElement {
 		return transcriptMessageTargetId(message, this._messageOrdinal(message, fallback));
 	}
 
-	/** Resolve only the deferred row that owns a requested transcript target. */
-	public async resolveTranscriptTarget(targetId: string): Promise<HTMLElement | null> {
-		const existing = this._findResolvedTranscriptTarget(targetId);
-		if (existing) return existing;
+	/** Resolve only the deferred rows that own requested transcript targets. */
+	public async resolveTranscriptTargets(
+		targetIds: Iterable<string>,
+	): Promise<ReadonlyMap<string, HTMLElement>> {
+		const requested = new Set(targetIds);
+		const resolved = new Map<string, HTMLElement>();
+		for (const targetId of requested) {
+			const existing = this._findResolvedTranscriptTarget(targetId);
+			if (existing) resolved.set(targetId, existing);
+		}
+
+		const pending: DeferredBlock[] = [];
+		const scheduled = new Set<string>();
 		const blocks = this.querySelectorAll<DeferredBlock>("deferred-block[data-transcript-target]");
 		for (const block of blocks) {
-			if (block.dataset.transcriptTarget !== targetId) continue;
+			const targetId = block.dataset.transcriptTarget;
+			if (!targetId || !requested.has(targetId) || resolved.has(targetId) || scheduled.has(targetId)) continue;
+			scheduled.add(targetId);
 			block.forceResolve();
-			await block.updateComplete;
-			return this._findResolvedTranscriptTarget(targetId);
+			pending.push(block);
 		}
-		return null;
+		await Promise.all(pending.map((block) => block.updateComplete));
+
+		for (const targetId of requested) {
+			if (resolved.has(targetId)) continue;
+			const target = this._findResolvedTranscriptTarget(targetId);
+			if (target) resolved.set(targetId, target);
+		}
+		return resolved;
+	}
+
+	/** Resolve only the deferred row that owns a requested transcript target. */
+	public async resolveTranscriptTarget(targetId: string): Promise<HTMLElement | null> {
+		return (await this.resolveTranscriptTargets([targetId])).get(targetId) ?? null;
 	}
 
 	private _findResolvedTranscriptTarget(targetId: string): HTMLElement | null {

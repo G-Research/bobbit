@@ -70,10 +70,12 @@ async function settle(element?: TranscriptHistoryPopover): Promise<void> {
 async function mount(options: {
 	entries?: TranscriptHistoryEntry[];
 	anchor?: HTMLElement;
+	availableHeight?: number;
 } = {}): Promise<TranscriptHistoryPopover> {
 	const popover = document.createElement("transcript-history-popover") as TranscriptHistoryPopover;
 	popover.entries = options.entries ?? ENTRIES;
 	popover.anchorEl = options.anchor ?? null;
+	popover.availableHeight = options.availableHeight ?? 535;
 	popover.open = true;
 	document.body.appendChild(popover);
 	await settle(popover);
@@ -93,13 +95,15 @@ function clickFilter(popover: ParentNode, label: string): void {
 
 describe("TranscriptHistoryPopover", () => {
 	it("renders an accessible light-DOM dialog in transcript order without groups or shortcuts", async () => {
-		const popover = await mount();
+		const popover = await mount({ availableHeight: 240 });
 		const dialog = popover.querySelector<HTMLElement>("[role='dialog']");
 		const search = popover.querySelector<HTMLInputElement>(".transcript-history-search");
 
 		expect(popover.shadowRoot).toBeNull();
 		expect(dialog?.getAttribute("aria-modal")).toBe("false");
 		expect(dialog?.getAttribute("aria-labelledby")).toBe("transcript-history-title");
+		expect(dialog?.style.getPropertyValue("--transcript-history-available-height")).toBe("240px");
+		expect(popover.querySelector("style")?.textContent).not.toContain("100dvh");
 		expect(popover.querySelector("label[for='transcript-history-search']")?.textContent).toBe("Search transcript");
 		expect(document.activeElement).toBe(search);
 		expect(rows(popover).map((row) => row.dataset.entryId)).toEqual([

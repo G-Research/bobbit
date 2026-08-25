@@ -4,6 +4,7 @@ __syncBeforeAll(() => __syncCE());
 
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildAskResponseEnvelope } from "../../src/shared/ask-envelope.js";
+import { deriveTranscriptNavigation } from "../../src/ui/transcript-history.js";
 import { ensureBgProcessPill, ensureContinueSessionChooser, ensureCostPopover, ensureGitStatusWidget, ensureGoalStatusWidget } from "../../src/app/lazy-widgets.js";
 import "../../src/ui/components/AgentInterface.js";
 import "../../src/ui/components/MessageList.js";
@@ -150,28 +151,128 @@ describe("AgentInterface transcript navigation integration", () => {
 		expect(session.state.isStreaming).toBe(true);
 	});
 
-	it("resolves only the selected deferred target and escapes follow-tail before spring targeting with highlight", async () => {
+	it("hides every navigation action from keyboard and AT until the shell is visible", async () => {
+		const session = new FixtureSession();
+		session.state.messages = [];
+		const element = document.createElement("agent-interface") as any;
+		element.session = session;
+		element.gitRepoKnown = "no";
+		document.body.appendChild(element);
+		await settle(element);
+
+		let shell = element.querySelector("[data-transcript-navigation-anchor]") as HTMLElement;
+		expect(shell.getAttribute("aria-hidden")).toBe("true");
+		expect(shell.hasAttribute("inert")).toBe(true);
+		expect(Array.from(shell.querySelectorAll<HTMLButtonElement>("button")).map((button) => button.tabIndex))
+			.toEqual([-1, -1]);
+
+		element._showJumpToLastPrompt = true;
+		element.requestUpdate();
+		await settle(element);
+		shell = element.querySelector("[data-transcript-navigation-anchor]") as HTMLElement;
+		expect(shell.hasAttribute("aria-hidden")).toBe(false);
+		expect(shell.hasAttribute("inert")).toBe(false);
+		expect(Array.from(shell.querySelectorAll<HTMLButtonElement>("button")).map((button) => button.tabIndex))
+			.toEqual([0, 0]);
+	});
+
+	it("materializes only unresolved candidates before selecting by real geometry", async () => {
+		const list = document.createElement("message-list") as any;
+		const targetA = document.createElement("assistant-message");
+		targetA.dataset.transcriptTarget = "message:a";
+		const targetB = document.createElement("assistant-message");
+		targetB.dataset.transcriptTarget = "message:b";
+		const materialized = new Set<string>();
+		const block = (targetId: string) => ({
+			localName: "deferred-block",
+			dataset: { transcriptTarget: targetId },
+			forceResolve: vi.fn(() => materialized.add(targetId)),
+			updateComplete: Promise.resolve(true),
+		});
+		const blockA = block("message:a");
+		const blockB = block("message:b");
+		const unrelatedBlock = block("message:unrelated");
+		list.querySelectorAll = vi.fn((selector: string) => selector.startsWith("deferred-block")
+			? [unrelatedBlock, blockB, blockA]
+			: [
+				...(materialized.has("message:a") ? [targetA] : []),
+				...(materialized.has("message:b") ? [targetB] : []),
+			]);
+
+		const resolved = await list.resolveTranscriptTargets(["message:a", "message:b"]);
+		expect(resolved.get("message:a")).toBe(targetA);
+		expect(resolved.get("message:b")).toBe(targetB);
+		expect(blockA.forceResolve).toHaveBeenCalledTimes(1);
+		expect(blockB.forceResolve).toHaveBeenCalledTimes(1);
+		expect(unrelatedBlock.forceResolve).not.toHaveBeenCalled();
+
+		const ask = (id: string, toolId: string) => ({
+			id,
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolId, name: "ask_user_choices", arguments: { questions: QUESTIONS } }],
+		});
+		const result = (id: string, toolId: string) => ({
+			id,
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "ask_user_choices",
+			content: [{ type: "text", text: JSON.stringify({ status: "posted", tool_use_id: toolId }) }],
+			isError: false,
+		});
+		const messages = [
+			ask("ask-nearest", "tool-nearest"),
+			result("result-nearest", "tool-nearest"),
+			ask("ask-newest", "tool-newest"),
+			result("result-newest", "tool-newest"),
+		];
+		const navigation = deriveTranscriptNavigation(messages as any[]);
+		expect(navigation.unresolvedQuestions).toHaveLength(2);
+		const [nearestEntry, newestEntry] = navigation.unresolvedQuestions;
+		const nearestTarget = document.createElement("assistant-message");
+		nearestTarget.dataset.transcriptTarget = nearestEntry.targetId;
+		nearestTarget.getBoundingClientRect = () => ({ top: 50, bottom: 95 } as DOMRect);
+		const newestTarget = document.createElement("assistant-message");
+		newestTarget.dataset.transcriptTarget = newestEntry.targetId;
+		newestTarget.getBoundingClientRect = () => ({ top: 20, bottom: 70 } as DOMRect);
+		const nearestPlaceholder = document.createElement("deferred-block");
+		nearestPlaceholder.dataset.transcriptTarget = nearestEntry.targetId;
+		nearestPlaceholder.getBoundingClientRect = () => ({ top: 0, bottom: 20 } as DOMRect);
+		const newestPlaceholder = document.createElement("deferred-block");
+		newestPlaceholder.dataset.transcriptTarget = newestEntry.targetId;
+		newestPlaceholder.getBoundingClientRect = () => ({ top: 40, bottom: 99 } as DOMRect);
+
+		let candidatesResolved = false;
+		const candidateList = {
+			resolveTranscriptTargets: vi.fn(async () => { candidatesResolved = true; return new Map(); }),
+		};
+		const scrollContainer = document.createElement("div") as any;
+		scrollContainer.getBoundingClientRect = () => ({ top: 100, bottom: 700 } as DOMRect);
+		scrollContainer.querySelector = (selector: string) => selector === "message-list" ? candidateList : null;
+		scrollContainer.querySelectorAll = () => candidatesResolved
+			? [nearestTarget, newestTarget]
+			: [nearestPlaceholder, newestPlaceholder];
+
+		const element = document.createElement("agent-interface") as any;
+		element.session = { state: { messages } };
+		element._scrollContainer = scrollContainer;
+		element._isAtBottom = true;
+		element._escapedFromLock = false;
+		element._scrollToTranscriptTarget = vi.fn(async () => undefined);
+		await element._handleJumpToUnansweredClick();
+
+		expect(candidateList.resolveTranscriptTargets).toHaveBeenCalledWith(
+			navigation.unresolvedQuestions.map((entry) => entry.targetId),
+		);
+		expect(element._scrollToTranscriptTarget).toHaveBeenCalledWith(nearestEntry.targetId, nearestEntry);
+		expect(element._isAtBottom).toBe(false);
+		expect(element._escapedFromLock).toBe(true);
+	});
+
+	it("escapes follow-tail before spring targeting with highlight", async () => {
 		const list = document.createElement("message-list") as any;
 		const target = document.createElement("assistant-message");
 		target.dataset.transcriptTarget = "message:selected";
-		let selectedResolved = false;
-		const selectedBlock = {
-			dataset: { transcriptTarget: "message:selected" },
-			forceResolve: vi.fn(() => { selectedResolved = true; }),
-			updateComplete: Promise.resolve(true),
-		};
-		const otherBlock = {
-			dataset: { transcriptTarget: "message:other" },
-			forceResolve: vi.fn(),
-			updateComplete: Promise.resolve(true),
-		};
-		list.querySelectorAll = vi.fn(() => [otherBlock, selectedBlock]);
-		list.querySelector = vi.fn((selector: string) => selectedResolved && selector.includes("message\\:selected") ? target : null);
-		list._findResolvedTranscriptTarget = () => selectedResolved ? target : null;
-
-		await expect(list.resolveTranscriptTarget("message:selected")).resolves.toBe(target);
-		expect(selectedBlock.forceResolve).toHaveBeenCalledTimes(1);
-		expect(otherBlock.forceResolve).not.toHaveBeenCalled();
+		list.resolveTranscriptTarget = vi.fn(async () => target);
 
 		const element = document.createElement("agent-interface") as any;
 		const scrollContainer = document.createElement("div");

@@ -378,9 +378,14 @@ export class AgentInterface extends LitElement {
 
 	private _transcriptHistoryOpen = false;
 	private _transcriptHistoryTrigger: HTMLElement | null = null;
+	@state() private _transcriptHistoryAvailableHeight = 535;
+	private _transcriptBoundsResizeObserver?: ResizeObserver;
 	private _transcriptJumpStatus = "";
 	private _transcriptHighlightElement: HTMLElement | null = null;
 	private _transcriptHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+	private readonly _handleTranscriptBoundsResize = (): void => {
+		if (this._transcriptHistoryOpen) this._measureTranscriptHistoryAvailableHeight();
+	};
 
 	// --- Legacy backward-compat shims ---
 	// Several E2E tests directly poke `ai._stickToBottom = true` and push
@@ -1104,6 +1109,9 @@ export class AgentInterface extends LitElement {
 
 		// Subscribe to external session if provided
 		this.setupSessionSubscription();
+		this._setupTranscriptBoundsObserver();
+		window.addEventListener("resize", this._handleTranscriptBoundsResize);
+		window.visualViewport?.addEventListener("resize", this._handleTranscriptBoundsResize);
 
 		// Track host container width so the prompt-bar row compacts when the chat
 		// column is narrowed (mobile viewport OR desktop side-panel-open).
@@ -1166,6 +1174,12 @@ export class AgentInterface extends LitElement {
 			this._narrowResizeObserver.disconnect();
 			this._narrowResizeObserver = undefined;
 		}
+		if (this._transcriptBoundsResizeObserver) {
+			this._transcriptBoundsResizeObserver.disconnect();
+			this._transcriptBoundsResizeObserver = undefined;
+		}
+		window.removeEventListener("resize", this._handleTranscriptBoundsResize);
+		window.visualViewport?.removeEventListener("resize", this._handleTranscriptBoundsResize);
 
 		document.removeEventListener("click", this._handleMoreClickOutside, true);
 		document.removeEventListener("keydown", this._handleGlobalEscape, true);
@@ -1642,9 +1656,41 @@ export class AgentInterface extends LitElement {
 		this._transcriptHistoryTrigger = event.currentTarget instanceof HTMLElement
 			? event.currentTarget
 			: null;
-		this._transcriptHistoryOpen = !this._transcriptHistoryOpen;
+		const opening = !this._transcriptHistoryOpen;
+		if (opening) this._measureTranscriptHistoryAvailableHeight();
+		this._transcriptHistoryOpen = opening;
 		this.requestUpdate();
 	};
+
+	private _measureTranscriptHistoryAvailableHeight(): void {
+		const messagesArea = this.querySelector<HTMLElement>("[data-messages-area]");
+		const inputArea = this.querySelector<HTMLElement>("[data-input-area]");
+		const anchor = this.querySelector<HTMLElement>("[data-transcript-navigation-anchor]");
+		if (!messagesArea || !anchor) return;
+		const messagesRect = messagesArea.getBoundingClientRect();
+		const anchorRect = anchor.getBoundingClientRect();
+		if (messagesRect.height <= 0 || anchorRect.height <= 0) return;
+		const inputTop = inputArea?.getBoundingClientRect().top;
+		const boundary = typeof inputTop === "number" && Number.isFinite(inputTop)
+			? Math.min(messagesRect.bottom, inputTop)
+			: messagesRect.bottom;
+		const available = Math.max(0, Math.floor(boundary - anchorRect.bottom - 6));
+		if (Math.abs(available - this._transcriptHistoryAvailableHeight) >= 1) {
+			this._transcriptHistoryAvailableHeight = available;
+		}
+	}
+
+	private _setupTranscriptBoundsObserver(): void {
+		this._transcriptBoundsResizeObserver?.disconnect();
+		this._transcriptBoundsResizeObserver = undefined;
+		if (typeof ResizeObserver === "undefined") return;
+		const observer = new ResizeObserver(this._handleTranscriptBoundsResize);
+		for (const selector of ["[data-messages-area]", "[data-input-area]", "[data-transcript-navigation-anchor]"]) {
+			const target = this.querySelector<HTMLElement>(selector);
+			if (target) observer.observe(target);
+		}
+		this._transcriptBoundsResizeObserver = observer;
+	}
 
 	private _handleTranscriptHistoryClose = (): void => {
 		if (!this._transcriptHistoryOpen) return;
@@ -1660,18 +1706,28 @@ export class AgentInterface extends LitElement {
 		void this._scrollToTranscriptTarget(entry.targetId, entry);
 	};
 
-	private _handleJumpToUnansweredClick = (): void => {
+	private _handleJumpToUnansweredClick = async (): Promise<void> => {
 		if (!this._scrollContainer) return;
 		const navigation = deriveTranscriptNavigation(this.session?.state.messages ?? []);
 		if (navigation.unresolvedQuestions.length === 0) return;
+
+		// Release tail-following before deferred rows materialize so their anchor-
+		// preserving height changes cannot re-pin the viewport.
+		this._isAtBottom = false;
+		this._escapedFromLock = true;
+		const list = this._scrollContainer.querySelector<MessageList>("message-list");
+		await list?.resolveTranscriptTargets(navigation.unresolvedQuestions.map((entry) => entry.targetId));
+		await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		if (!this._scrollContainer) return;
+
 		const rects = new Map<string, DOMRect>();
 		for (const entry of navigation.unresolvedQuestions) {
-			const target = this._findTranscriptTargetNode(entry.targetId, true);
+			const target = this._findTranscriptTargetNode(entry.targetId, false);
 			if (target) rects.set(entry.targetId, target.getBoundingClientRect());
 		}
 		const viewportTop = this._scrollContainer.getBoundingClientRect().top;
 		const target = selectUnansweredTarget(navigation.unresolvedQuestions, rects, viewportTop);
-		if (target) void this._scrollToTranscriptTarget(target.targetId, target);
+		if (target) await this._scrollToTranscriptTarget(target.targetId, target);
 	};
 
 	private _findTranscriptTargetNode(targetId: string, includeDeferred: boolean): HTMLElement | null {
@@ -2762,7 +2818,7 @@ export class AgentInterface extends LitElement {
 		return html`
 			<div class="flex flex-col h-full bg-background text-foreground min-w-0">
 				<!-- Messages Area -->
-				<div class="flex-1 min-h-0 relative">
+				<div class="flex-1 min-h-0 relative" data-messages-area>
 					<div class="absolute inset-0 overflow-y-auto overflow-x-hidden" style="overflow-anchor: none;">
 						<div class="max-w-5xl mx-auto p-2 sm:p-4 pb-0 min-w-0">${this.renderMessages()}</div>
 					</div>
@@ -2772,7 +2828,7 @@ export class AgentInterface extends LitElement {
 				</div>
 
 				<!-- Input Area -->
-				<div class="shrink-0 pt-0 pb-1 agent-input-area">
+				<div class="shrink-0 pt-0 pb-1 agent-input-area" data-input-area>
 					<div data-input-container class="max-w-5xl mx-auto px-2 relative">
 						${this._renderPinnedPermissions()}
 						${this.bgProcesses.length > 0 || this._showGitStatusWidget || this.goalId || this.teamGoalId ? html`
@@ -2966,8 +3022,11 @@ export class AgentInterface extends LitElement {
 			: `Jump to unanswered question, ${unresolvedCount} unanswered questions`;
 		return html`
 			<div
+				data-transcript-navigation-anchor
 				class="absolute left-1/2 -translate-x-1/2 z-20 whitespace-nowrap"
 				style="top:${topOffset};opacity:${show ? "1" : "0"};pointer-events:${show ? "auto" : "none"};transition:opacity 150ms ease-out, top 150ms ease-out"
+				?inert=${!show}
+				aria-hidden=${show ? nothing : "true"}
 			>
 				<div
 					class="inline-flex items-stretch rounded-full bg-background text-foreground border border-input shadow-sm overflow-hidden"
@@ -2993,6 +3052,7 @@ export class AgentInterface extends LitElement {
 							data-testid="jump-to-unanswered-question"
 							aria-label=${unansweredLabel}
 							class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted border-l border-input"
+							tabindex="${show ? "0" : "-1"}"
 							@click=${this._handleJumpToUnansweredClick}
 						>
 							${icon(CircleHelp, "sm")}
@@ -3008,6 +3068,7 @@ export class AgentInterface extends LitElement {
 						aria-expanded=${this._transcriptHistoryOpen ? "true" : "false"}
 						aria-controls="transcript-history-popover"
 						class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs hover:bg-muted border-l border-input"
+						tabindex="${show ? "0" : "-1"}"
 						@click=${this._handleTranscriptHistoryToggle}
 					>
 						${icon(ListFilter, "sm")}
@@ -3019,6 +3080,7 @@ export class AgentInterface extends LitElement {
 					.entries=${navigation.entries}
 					.open=${this._transcriptHistoryOpen}
 					.anchorEl=${this._transcriptHistoryTrigger}
+					.availableHeight=${this._transcriptHistoryAvailableHeight}
 					@close=${this._handleTranscriptHistoryClose}
 					@transcript-entry-select=${this._handleTranscriptEntrySelect}
 				></transcript-history-popover>

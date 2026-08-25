@@ -34,6 +34,27 @@ function rows(page: Page): Locator {
 	return dialog(page).locator(".transcript-history-row");
 }
 
+async function popoverBounds(page: Page): Promise<{
+	dialogBottom: number;
+	boundary: number;
+	left: number;
+	right: number;
+}> {
+	return page.evaluate(() => {
+		const popover = document.querySelector<HTMLElement>("transcript-history-popover [role='dialog']");
+		const messages = document.querySelector<HTMLElement>("agent-interface [data-messages-area]");
+		const input = document.querySelector<HTMLElement>("agent-interface [data-input-area]");
+		if (!popover || !messages || !input) throw new Error("Transcript bounds are unavailable");
+		const dialogRect = popover.getBoundingClientRect();
+		return {
+			dialogBottom: dialogRect.bottom,
+			boundary: Math.min(messages.getBoundingClientRect().bottom, input.getBoundingClientRect().top),
+			left: dialogRect.left,
+			right: dialogRect.right,
+		};
+	});
+}
+
 async function openHistory(page: Page): Promise<void> {
 	await historyButton(page).click();
 	await expect(dialog(page)).toBeVisible();
@@ -133,10 +154,42 @@ test.describe("Journey: Transcript history navigation", () => {
 			expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(MOBILE.width);
 			await expect(previousButton(page).locator("span").first()).toHaveClass(/sr-only/);
 			await openHistory(page);
-			const dialogBox = await dialog(page).boundingBox();
-			expect(dialogBox).not.toBeNull();
-			expect(dialogBox!.x).toBeGreaterThanOrEqual(12);
-			expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(MOBILE.width - 12);
+			await page.evaluate(async () => {
+				const popover = document.querySelector("transcript-history-popover");
+				if (!popover) throw new Error("Transcript history popover is unavailable");
+				const source = [...popover.entries];
+				popover.entries = Array.from({ length: 40 }, (_, index) => ({
+					...source[index % source.length],
+					id: `mobile-bounds-${index}`,
+					ordinal: index,
+				}));
+				await popover.updateComplete;
+			});
+			await expect(rows(page)).toHaveCount(40);
+			await expect.poll(async () => {
+				const bounds = await popoverBounds(page);
+				return bounds.dialogBottom <= bounds.boundary + 1;
+			}, { message: "history dialog stays above the composer boundary" }).toBe(true);
+			let bounds = await popoverBounds(page);
+			expect(bounds.left).toBeGreaterThanOrEqual(12);
+			expect(bounds.right).toBeLessThanOrEqual(MOBILE.width - 12);
+
+			await page.evaluate(() => {
+				const input = document.querySelector<HTMLElement>("agent-interface [data-input-area]");
+				if (input) input.style.minHeight = "240px";
+			});
+			await page.setViewportSize({ width: MOBILE.width, height: 600 });
+			await expect.poll(async () => {
+				const resized = await popoverBounds(page);
+				return resized.dialogBottom <= resized.boundary + 1;
+			}, { message: "history dialog rebudgets after viewport and composer resize" }).toBe(true);
+			bounds = await popoverBounds(page);
+			expect(bounds.left).toBeGreaterThanOrEqual(12);
+			expect(bounds.right).toBeLessThanOrEqual(MOBILE.width - 12);
+			await page.evaluate(() => {
+				const input = document.querySelector<HTMLElement>("agent-interface [data-input-area]");
+				input?.style.removeProperty("min-height");
+			});
 			await page.keyboard.press("Escape");
 			expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
