@@ -102,9 +102,13 @@ test.describe("active read-only delegate interaction", () => {
 			await composer.press("Enter");
 			await expect(page.getByText(followUp, { exact: true }).first(), "accepted follow-up should render in the transcript")
 				.toBeVisible({ timeout: 10_000 });
-			await waitForSessionStatus(delegateId, "idle");
-			const transcript = await gateway.sessionManager.getSession(delegateId)?.rpcClient.getMessages();
-			expect(JSON.stringify(transcript), "direct follow-up must reach the delegate transport, not only optimistic UI").toContain(followUp);
+			await expect.poll(async () => {
+				const transcript = await gateway.sessionManager.getSession(delegateId)?.rpcClient.getMessages();
+				return JSON.stringify(transcript);
+			}, {
+				timeout: 15_000,
+				message: "direct follow-up must reach the delegate transport, not only optimistic UI",
+			}).toContain(followUp);
 
 			// Cached-panel navigation is a distinct projection path.
 			await navigateToHash(page, `#/session/${ownerId}`);
