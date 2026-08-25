@@ -2293,7 +2293,7 @@
     },
     {
       "path": "tests2/core/pi-packed-consumer-offline.test.ts",
-      "reason": "Pins the real clean-consumer tarball install to strict npm offline mode using the workflow-restored cache populated by npm ci, while retaining the unchanged safety timeout, normal retries, generated lockfile, dependency-owned shrinkwrap and tree/binary security assertions.",
+      "reason": "Pins the all-OS owned real-tarball cache prewarm after npm ci, including inherited npm configuration, bounded process-tree lifecycle and cleanup/failure behavior, while retaining the authoritative distinct clean-consumer strict-offline install, normal retries, generated lockfile, dependency-owned shrinkwrap and tree/binary security assertions.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

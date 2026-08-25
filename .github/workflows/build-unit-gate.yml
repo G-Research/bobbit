@@ -128,6 +128,12 @@ jobs:
       - name: Install
         run: npm ci
 
+      # npm ci caches locked content, but not every packument/artifact selected by
+      # a fresh lock-free consumer. Registry access stays in dependency preparation;
+      # the authoritative packed-consumer E2E remains strict offline.
+      - name: Warm packed-consumer npm cache
+        run: node scripts/testing-v2/prewarm-packed-consumer-cache.mjs
+
       - name: Install Chromium with dependencies
         if: runner.os == 'Linux'
         run: npx playwright install --with-deps chromium
