@@ -15,7 +15,7 @@
  * The publish is fail-open and env-gated (BOBBIT_E2E_PWTEST_CACHE_OWNED=1,
  * v2 namespace only); BOBBIT_KEEP_PWTEST_CACHE=1 keeps its existing
  * "don't delete the per-run dir" semantics in the delegated teardown.
- * tests/e2e/e2e-teardown.ts itself is NOT modified so legacy e2e runs are
+ * tests/e2e/_helpers/e2e-teardown.ts itself is not modified, so E2E runs are
  * unaffected.
  */
 import legacyTeardown from "../../../e2e/_helpers/e2e-teardown.js";

@@ -9,7 +9,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const FIXTURE = `file://${path.resolve("tests/message-editor-queue.html").replace(/\\/g, "/")}`;
+const FIXTURE = `file://${path.resolve("tests/support/fixtures/browser/pages/message-editor-queue.html").replace(/\\/g, "/")}`;
 
 test.describe("Queue pill rendering", () => {
 	test.beforeEach(async ({ page }) => {

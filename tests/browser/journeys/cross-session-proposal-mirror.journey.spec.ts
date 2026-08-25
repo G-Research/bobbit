@@ -21,7 +21,7 @@
  *
  * This spec creates a plain session (NOT a role/tool/staff assistant) and drives
  * the unified path directly — the exact path a server "seed" broadcast takes
- * (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts). It
+ * (same technique as tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts). It
  * then asserts the form-mirror is populated and the primary submit is
  * enabled/rendered.
  *

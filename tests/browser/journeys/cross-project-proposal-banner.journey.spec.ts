@@ -247,7 +247,7 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			.toBe("registered");
 		// The `projectId` routing key is never persisted into project config on
 		// accept (buildProjectConfigDiff excludes it) — pinned by the focused unit
-		// test tests2/core/project-proposal-diff.test.ts.
+		// test tests/unit/core/project-proposal-diff.unit.test.ts.
 	});
 
 	test("STALE MODE (PR #1005 P1): a project slot re-evaluates mode when a LATER revision adds a cross-project target", async ({ page }) => {

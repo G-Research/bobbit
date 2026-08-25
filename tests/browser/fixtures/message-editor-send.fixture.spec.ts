@@ -4,7 +4,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 
-const FIXTURE = `file://${path.resolve("tests/message-editor-send.html").replace(/\\/g, "/")}`;
+const FIXTURE = `file://${path.resolve("tests/support/fixtures/browser/pages/message-editor-send.html").replace(/\\/g, "/")}`;
 
 test.describe("Sending messages", () => {
 	test.beforeEach(async ({ page }) => {

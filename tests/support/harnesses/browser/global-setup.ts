@@ -1,7 +1,7 @@
 /**
  * Global setup for v2 browser tests.
  *
- * Mirrors tests/e2e/e2e-global-setup.ts but:
+ * Mirrors tests/e2e/_helpers/e2e-global-setup.ts but:
  *   - Skips the no-new-sleeps guard (run separately by the e2e suite)
  *   - Skips BOBBIT_E2E_SKIP_GUARDS logic (not needed here)
  *   - Ensures dist/server and dist/ui match the current build inputs via the
