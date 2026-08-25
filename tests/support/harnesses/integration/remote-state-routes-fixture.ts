@@ -178,7 +178,7 @@ export function installRemoteStateRouteHooks(): void {
 	});
 
 	test.beforeEach(() => {
-		forceRequestedAt += 251;
+		forceRequestedAt = performance.now() + 251;
 		serverModule.__setRemoteStateForceNowFake(() => forceRequestedAt);
 		serverModule.__setGitStatusFake(async (_cwd: string, _containerId?: string, opts?: { untracked?: boolean }) => deterministicGitStatus(opts));
 	});
