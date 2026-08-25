@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
+import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import {
@@ -12,8 +12,11 @@ import {
 	projectPromptAuthorMessagesForTitle,
 	SessionManager,
 } from "../../src/server/agent/session-manager.ts";
-import { setUploadedAttachmentRootForTesting } from "../../src/server/agent/uploaded-attachment-store.ts";
-import { initSkillSidecarDir } from "../../src/server/skills/skill-sidecar.ts";
+import {
+	setUploadedAttachmentRootForTesting,
+	setUploadedAttachmentSessionQuotaForTesting,
+} from "../../src/server/agent/uploaded-attachment-store.ts";
+import { initSkillSidecarDir, readSkillSidecarEntries } from "../../src/server/skills/skill-sidecar.ts";
 
 const SESSION_ID = "83749600-0000-4000-8000-000000000001";
 const TYPED_TEXT = "Summarize the uploaded notes.";
@@ -291,6 +294,58 @@ describe("uploaded attachment prompt admission", () => {
 		})).rejects.toMatchObject({ code: "UPLOADED_ATTACHMENT_INVALID" });
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(manager.projectDeliveryOutbox(session.id)).toHaveLength(queueLength);
+	});
+
+	it("rejects session quota overflow before bridge, outbox, or sidecar admission", async () => {
+		const quotaSessionId = "83749600-0000-4000-8000-000000000005";
+		const quotaManager: any = new SessionManager({ skipTitleGeneration: true });
+		clearInterval(quotaManager._statusHeartbeatTimer);
+		quotaManager._statusHeartbeatTimer = null;
+		const quotaPrompt = vi.fn(async () => ({ success: true }));
+		const quotaSteer = vi.fn(async () => ({ success: true }));
+		const quotaSession: any = {
+			...session,
+			id: quotaSessionId,
+			title: "Attachment quota admission",
+			status: "idle",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			pendingSkillExpansions: undefined,
+			pendingSkillTranscriptBindings: undefined,
+			pendingPromptAuthors: undefined,
+			promptAuthorMessageBindings: undefined,
+			promptAuthorReplayBindings: undefined,
+			promptAuthorAmbiguityFences: undefined,
+			inFlightSteerTexts: undefined,
+			lastPromptDisplay: undefined,
+			rpcClient: { ...session.rpcClient, prompt: quotaPrompt, steer: quotaSteer },
+		};
+		quotaManager.sessions.set(quotaSessionId, quotaSession);
+		const beforeStoreEntries = fs.readdirSync(path.join(stateDir, "uploaded-attachments"), { recursive: true });
+		setUploadedAttachmentSessionQuotaForTesting(0);
+		try {
+			await expect(quotaManager.enqueuePrompt(quotaSessionId, "over quota", {
+				intentId: "quota-overflow-occurrence",
+				attachments: [ATTACHMENT],
+			})).rejects.toMatchObject({
+				statusCode: 413,
+				code: "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED",
+				retryable: false,
+			});
+			expect(quotaPrompt).not.toHaveBeenCalled();
+			expect(quotaSteer).not.toHaveBeenCalled();
+			expect(quotaSession.promptQueue.toArray()).toEqual([]);
+			expect(quotaManager.projectDeliveryOutbox(quotaSessionId)).toEqual([]);
+			expect(quotaSession.pendingSkillExpansions).toBeUndefined();
+			expect(quotaSession.inFlightSteerTexts).toBeUndefined();
+			expect(readSkillSidecarEntries(quotaSessionId)).toEqual([]);
+			expect(readAuthorSidecar(quotaSessionId)).toEqual([]);
+			expect(fs.readdirSync(path.join(stateDir, "uploaded-attachments"), { recursive: true })).toEqual(beforeStoreEntries);
+		} finally {
+			setUploadedAttachmentSessionQuotaForTesting(undefined);
+			quotaManager.sessions.clear();
+		}
 	});
 
 	it("keeps recovery and explicit retry envelopes occurrence-safe with a stable pointer", async () => {

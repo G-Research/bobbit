@@ -504,7 +504,7 @@ export async function persistUploadedAttachmentOccurrence(
 		if (!Number.isFinite(usage) || occurrenceBytes > sessionQuotaBytes() - usage) {
 			throw new UploadedAttachmentStoreError(
 				413,
-				"UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED",
+				"UPLOADED_ATTACHMENT_QUOTA_EXCEEDED",
 				"Uploaded attachment session storage quota exceeded",
 			);
 		}

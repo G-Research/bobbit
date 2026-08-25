@@ -241,7 +241,7 @@ describe("immutable uploaded attachment store", () => {
 		setUploadedAttachmentSessionQuotaForTesting(0);
 		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "quota-no-side-effect", [
 			document("blocked", "blocked.bin", "application/octet-stream", Buffer.from("x")),
-		]), "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED");
+		]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
 		expect(fs.readdirSync(root)).toEqual([]);
 
 		setUploadedAttachmentSessionQuotaForTesting(10);
@@ -254,7 +254,7 @@ describe("immutable uploaded attachment store", () => {
 
 		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "quota-rejected", [
 			document("one", "one.bin", "application/octet-stream", Buffer.from("x")),
-		]), "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED");
+		]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
 		const readable = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: first.attachments[0].pointer });
 		expect(Buffer.from(readable.data, "base64").toString()).toBe("123456");
 		expect((fs.readdirSync(root, { recursive: true }) as string[]).some((entry) => entry.includes(".tmp-"))).toBe(false);
@@ -287,7 +287,7 @@ describe("immutable uploaded attachment store", () => {
 		expect(outcomes[0].status).toBe("fulfilled");
 		expect(outcomes[1]).toMatchObject({
 			status: "rejected",
-			reason: { code: "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED", retryable: false },
+			reason: { statusCode: 413, code: "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED", retryable: false },
 		});
 		const accepted = (outcomes[0] as PromiseFulfilledResult<Awaited<typeof first>>).value;
 		const range = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: accepted.attachments[0].pointer });
@@ -323,7 +323,7 @@ describe("immutable uploaded attachment store", () => {
 
 		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "after-restart", [
 			document("one", "one.bin", "application/octet-stream", Buffer.from("x")),
-		]), "UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED");
+		]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
 		const range = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer });
 		expect(Buffer.from(range.data, "base64").toString()).toBe("123456");
 	});
