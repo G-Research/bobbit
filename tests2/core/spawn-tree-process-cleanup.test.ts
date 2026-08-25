@@ -234,6 +234,7 @@ const IDENTITY_FAILURE_PROBE = String.raw`
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sentinel-write-fail-"));
 const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
@@ -241,16 +242,43 @@ const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
   posixSentinelIdentity: { file: path.join(dir, "missing", "sentinel.json"), nonce: "write-fail" },
   timeoutMs: 10_000,
 });
+const rootPid = tracked.child.pid;
+if (!Number.isSafeInteger(rootPid) || rootPid <= 0) throw new Error("missing root PID");
+// Arm the physical lifecycle join before the sentinel can report failure. This
+// is intentionally separate from waitForTreeExit(), whose false result is the
+// fail-closed verification verdict after an unacknowledged ownership barrier.
+const childClosed = new Promise((resolve, reject) => {
+  tracked.child.once("close", resolve);
+  tracked.child.once("error", reject);
+});
 const ready = tracked.child.stdio[3];
 let acknowledged = false;
-await new Promise((resolve, reject) => {
+const readyClosed = new Promise((resolve, reject) => {
   if (!ready) return reject(new Error("missing readiness pipe"));
   ready.on("data", () => { acknowledged = true; });
   ready.once("close", resolve);
   ready.once("error", reject);
 });
-const reaped = await tracked.waitForTreeExit(1_500);
-process.stdout.write(JSON.stringify({ acknowledged, reaped }) + "\n", () => {
+let ownershipError;
+try { await tracked.ownershipReady; }
+catch (error) { ownershipError = error?.message; }
+await readyClosed;
+await childClosed;
+const completionVerified = await tracked.waitForTreeExit(0);
+const rootAlive = (() => { try { process.kill(rootPid, 0); return true; } catch (error) { return error?.code === "EPERM"; } })();
+const groupAlive = (() => { try { process.kill(-rootPid, 0); return true; } catch (error) { return error?.code === "EPERM"; } })();
+// Darwin may retain non-executable zombies after the physical kill. Inspect the
+// exact original PGID once so those are distinguished from a leaked process;
+// Linux must report the group itself absent.
+let executableGroupMember = groupAlive;
+if (process.platform === "darwin" && groupAlive) {
+  const snapshot = execFileSync("ps", ["-axo", "pgid=,state="], { encoding: "utf8" });
+  executableGroupMember = snapshot.split(/\r?\n/).some((row) => {
+    const match = /^\s*(\d+)\s+(\S+)\s*$/.exec(row);
+    return Number(match?.[1]) === rootPid && match?.[2]?.[0] !== "Z";
+  });
+}
+process.stdout.write(JSON.stringify({ acknowledged, ownershipError, completionVerified, rootAlive, groupAlive, executableGroupMember }) + "\n", () => {
   fs.rmSync(dir, { recursive: true, force: true });
   process.exit(0);
 });
@@ -738,7 +766,14 @@ describe("spawnTracked timeout cleanup", () => {
 			return;
 		}
 		const result = await runNativeJsonProbe(IDENTITY_FAILURE_PROBE);
-		expect(result).toEqual({ acknowledged: false, reaped: true });
+		expect(result).toMatchObject({
+			acknowledged: false,
+			ownershipError: "POSIX sentinel ownership was not established",
+			completionVerified: false,
+			rootAlive: false,
+			executableGroupMember: false,
+		});
+		if (process.platform === "linux") expect(result.groupAlive).toBe(false);
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
@@ -929,6 +964,37 @@ describe("spawnTracked timeout cleanup", () => {
 		await expect(tracked.ownershipReady).rejects.toThrow("POSIX sentinel ownership was not established");
 		expect(_trackedCount()).toBe(before);
 		root.emit("close", 0, null);
+	});
+
+	it("force-cleans a failed POSIX handshake once while completion stays unverified", async () => {
+		const root = fakeChild(123_471);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let groupAlive = true;
+		const closed = new Promise<void>(resolve => root.once("close", () => resolve()));
+		const before = _trackedCount();
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => groupAlive,
+			signalProcessGroup: (pgid, signal) => {
+				signals.push({ pgid, signal });
+				queueMicrotask(() => {
+					groupAlive = false;
+					root.emit("exit", null, signal);
+					root.emit("close", null, signal);
+				});
+			},
+		});
+
+		root.readyPipe.emit("close");
+		await expect(tracked.ownershipReady).rejects.toThrow("POSIX sentinel ownership was not established");
+		await closed;
+		expect(signals).toEqual([{ pgid: 123_471, signal: "SIGKILL" }]);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(_trackedCount()).toBe(before);
+		tracked.killTree("SIGKILL");
+		expect(signals).toHaveLength(1);
 	});
 
 	it("reaps a POSIX survival child before readiness but preserves it after readiness", () => {

@@ -3122,7 +3122,7 @@
     },
     {
       "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
-      "reason": "Pins exact process-tree ownership and completion across platforms: container cleanup requires a stable Linux start token before signalling a reusable PID/PGID; overlapping Darwin waiters coalesce one fixed-cap post-final observation per child independently of caller order, preserve per-caller deadlines, promptly retry unavailable evidence without observer overlap, and publish only monotonic exact empty or zombie-only completion while mixed, malformed, empty, or unavailable evidence fails closed; Linux retains kill(0) and Windows retains Job-close completion.",
+      "reason": "Pins exact process-tree ownership and completion across platforms: failed POSIX ownership handshakes reject and initiate one force cleanup whose physical child/group reaping is observed separately from the fail-closed verification verdict; container cleanup requires a stable Linux start token before signalling a reusable PID/PGID; overlapping Darwin waiters coalesce one fixed-cap post-final observation per child independently of caller order, preserve per-caller deadlines, promptly retry unavailable evidence without observer overlap, and publish only monotonic exact empty or zombie-only completion while mixed, malformed, empty, or unavailable evidence fails closed; Linux retains kill(0) and Windows retains Job-close completion.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
