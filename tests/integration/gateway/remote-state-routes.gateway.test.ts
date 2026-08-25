@@ -521,8 +521,11 @@ test.describe("remote-state coordinator routes", () => {
 		}> = [];
 		const routeRequests: Array<Promise<Response>> = [];
 		const waitForCount = async (read: () => number, expected: number) => {
-			for (let attempt = 0; attempt < 100 && read() < expected; attempt++) {
-				await new Promise<void>(resolve => setImmediate(resolve));
+			// Count event-loop time, not turns: under a loaded full lane, 100 empty
+			// setImmediate turns can finish before the route's filesystem work does.
+			const deadline = Date.now() + 5_000;
+			while (read() < expected && Date.now() < deadline) {
+				await new Promise<void>(resolve => setTimeout(resolve, 1));
 			}
 			expect(read()).toBe(expected);
 		};
@@ -653,13 +656,17 @@ test.describe("remote-state coordinator routes", () => {
 				"repo", "view", "--repo", `${host}/acme/widget`, "--json", "viewerPermission",
 			]);
 		} finally {
-			// Completing one stale tree may schedule its serialized successor in a
-			// microtask, so drain twice before awaiting any still-pending routes.
-			for (let pass = 0; pass < 3; pass++) {
+			// Keep releasing helper trees until every route has settled. A failed
+			// precondition can occur before the first tree is created; a fixed number
+			// of drain turns would then await an unreleased late tree and contaminate
+			// the retry with this test's runner overrides.
+			let routesSettled = false;
+			const settlingRoutes = Promise.allSettled(routeRequests).then(() => { routesSettled = true; });
+			while (!routesSettled) {
 				for (const probe of probes) probe.complete(false);
-				await new Promise<void>(resolve => setImmediate(resolve));
+				await new Promise<void>(resolve => setTimeout(resolve, 1));
 			}
-			await Promise.allSettled(routeRequests);
+			await settlingRoutes;
 			runner.execFile = originalExecFile;
 			runner.spawn = originalSpawn;
 			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
