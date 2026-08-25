@@ -14,6 +14,8 @@ export const MAX_UPLOADED_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_AGGREGATE_BYTES = 200 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_READ_BYTES = 64 * 1024;
+/** Durable exact-byte snapshots retained by one session across prompt occurrences. */
+export const MAX_UPLOADED_ATTACHMENT_SESSION_BYTES = 1024 * 1024 * 1024;
 
 const VERSION = 1 as const;
 const MANIFEST_FILE = "manifest.json";
@@ -102,10 +104,57 @@ export class UploadedAttachmentStoreError extends Error {
 	}
 }
 
+export interface UploadedAttachmentStoreTestHooks {
+	/** Runs after temporary bytes are written but before the occurrence is committed. */
+	beforeCommit?: (input: { sessionId: string; occurrenceId: string }) => void | Promise<void>;
+}
+
 let rootOverride: string | undefined;
+let sessionQuotaOverride: number | undefined;
+let testHooks: UploadedAttachmentStoreTestHooks | undefined;
+const sessionUsageBytes = new Map<string, number>();
+const purgedSessionKeys = new Set<string>();
+const sessionOperationTails = new Map<string, Promise<unknown>>();
+
+function withSessionOperation<T>(sessionKey: string, operation: () => Promise<T>): Promise<T> {
+	const previous = (sessionOperationTails.get(sessionKey) ?? Promise.resolve()).then(
+		() => undefined,
+		() => undefined,
+	);
+	const running = previous.then(operation);
+	const settled = running.then(
+		() => undefined,
+		() => undefined,
+	);
+	sessionOperationTails.set(sessionKey, settled);
+	void settled.then(() => {
+		if (sessionOperationTails.get(sessionKey) === settled) sessionOperationTails.delete(sessionKey);
+	});
+	return running;
+}
 
 export function setUploadedAttachmentRootForTesting(root: string | undefined): void {
 	rootOverride = root;
+	sessionQuotaOverride = undefined;
+	testHooks = undefined;
+	sessionUsageBytes.clear();
+	purgedSessionKeys.clear();
+	sessionOperationTails.clear();
+}
+
+/** Narrow test seam for exercising the cumulative quota without large fixtures. */
+export function setUploadedAttachmentSessionQuotaForTesting(bytes: number | undefined): void {
+	if (bytes !== undefined && (!Number.isSafeInteger(bytes) || bytes < 0)) invalid("Invalid uploaded attachment session quota");
+	sessionQuotaOverride = bytes;
+}
+
+/** Simulate process-local accounting loss; committed manifests remain authoritative. */
+export function resetUploadedAttachmentUsageForTesting(): void {
+	sessionUsageBytes.clear();
+}
+
+export function setUploadedAttachmentStoreHooksForTesting(hooks: UploadedAttachmentStoreTestHooks | undefined): void {
+	testHooks = hooks;
 }
 
 export function uploadedAttachmentRoot(): string {
@@ -274,6 +323,10 @@ function occurrenceDir(sessionKey: string, occurrenceKey: string): string {
 	return path.join(sessionDir(sessionKey), occurrenceKey);
 }
 
+function sessionQuotaBytes(): number {
+	return sessionQuotaOverride ?? MAX_UPLOADED_ATTACHMENT_SESSION_BYTES;
+}
+
 function coerceManifest(value: unknown): Manifest | null {
 	if (!isPlainObject(value)
 		|| value.version !== VERSION
@@ -350,6 +403,40 @@ async function loadManifest(sessionId: string, parsed: { sessionKey: string; occ
 	}
 }
 
+async function rebuildSessionUsage(sessionId: string, sessionKey: string): Promise<number> {
+	let entries: fs.Dirent[];
+	try {
+		entries = await fs.promises.readdir(sessionDir(sessionKey), { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+		throw error;
+	}
+	let total = 0;
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.isSymbolicLink() || !VALID_HASH.test(entry.name)) continue;
+		try {
+			const manifest = await loadManifest(sessionId, { sessionKey, occurrenceKey: entry.name });
+			for (const attachment of manifest.attachments) {
+				if (total > Number.MAX_SAFE_INTEGER - attachment.size) return Number.POSITIVE_INFINITY;
+				total += attachment.size;
+			}
+		} catch (error) {
+			// Only validated, byte-complete committed manifests own quota. Corrupt
+			// occurrences are already unreadable and cannot become valid by adding data.
+			if (!(error instanceof UploadedAttachmentStoreError) || error.statusCode !== 404) throw error;
+		}
+	}
+	return total;
+}
+
+async function currentSessionUsage(sessionId: string, sessionKey: string): Promise<number> {
+	const cached = sessionUsageBytes.get(sessionKey);
+	if (cached !== undefined) return cached;
+	const rebuilt = await rebuildSessionUsage(sessionId, sessionKey);
+	sessionUsageBytes.set(sessionKey, rebuilt);
+	return rebuilt;
+}
+
 function publicOccurrence(manifest: Manifest): {
 	occurrenceId: string;
 	attachments: StoredUploadedAttachmentMetadata[];
@@ -380,77 +467,101 @@ export async function persistUploadedAttachmentOccurrence(
 ): Promise<StoredUploadedAttachmentOccurrence> {
 	validateSessionId(sessionId);
 	validateOccurrenceId(occurrenceId);
-	const inputs = await canonicalInputs(rawAttachments);
 	const { sessionKey, occurrenceKey } = keys(sessionId, occurrenceId);
-	const digest = contentDigest(sessionId, occurrenceId, inputs);
-	const finalDir = occurrenceDir(sessionKey, occurrenceKey);
-	const ownerDir = sessionDir(sessionKey);
+	return withSessionOperation(sessionKey, async () => {
+		if (purgedSessionKeys.has(sessionKey)) unavailable();
+		const inputs = await canonicalInputs(rawAttachments);
+		const occurrenceBytes = inputs.reduce((total, input) => total + input.size, 0);
+		const digest = contentDigest(sessionId, occurrenceId, inputs);
+		const finalDir = occurrenceDir(sessionKey, occurrenceKey);
+		const ownerDir = sessionDir(sessionKey);
 
-	const loadExisting = async (): Promise<StoredUploadedAttachmentOccurrence> => {
-		const existing = await loadManifest(sessionId, { sessionKey, occurrenceKey });
-		if (existing.contentDigest !== digest) {
-			throw new UploadedAttachmentStoreError(409, "UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT", "Attachment occurrence was already accepted with different content");
-		}
-		return admittedOccurrence(existing);
-	};
+		const loadExisting = async (): Promise<StoredUploadedAttachmentOccurrence> => {
+			const existing = await loadManifest(sessionId, { sessionKey, occurrenceKey });
+			if (existing.contentDigest !== digest) {
+				throw new UploadedAttachmentStoreError(409, "UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT", "Attachment occurrence was already accepted with different content");
+			}
+			return admittedOccurrence(existing);
+		};
 
-	try {
-		await fs.promises.mkdir(ownerDir, { recursive: true, mode: 0o700 });
 		try {
 			await fs.promises.access(finalDir);
 			return await loadExisting();
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+			if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+				if (error instanceof UploadedAttachmentStoreError) throw error;
+				throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_PERSISTENCE_FAILED", "Uploaded attachment could not be saved", true);
+			}
 		}
-	} catch (error) {
-		if (error instanceof UploadedAttachmentStoreError) throw error;
-		throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_PERSISTENCE_FAILED", "Uploaded attachment could not be saved", true);
-	}
 
-	const fileKeys = inputs.map(() => randomBytes(18).toString("base64url"));
-	const manifest: Manifest = {
-		version: VERSION,
-		sessionId,
-		occurrenceId,
-		sessionKey,
-		occurrenceKey,
-		contentDigest: digest,
-		createdAt: Date.now(),
-		attachments: inputs.map((input, index) => ({
-			id: input.id,
-			fileKey: fileKeys[index],
-			pointer: pointerFor(sessionKey, occurrenceKey, fileKeys[index]),
-			fileName: input.fileName,
-			mimeType: input.mimeType,
-			size: input.size,
-			sha256: input.sha256,
-			...(input.trustedExtractedText === undefined ? {} : { trustedExtractedText: input.trustedExtractedText }),
-		})),
-	};
-	// Excerpts are best-effort context, while exact bytes and their pointer are
-	// authoritative. Extremely escape-heavy metadata must never produce a
-	// manifest the loader will reject, so shed excerpts from the end if needed.
-	let serializedManifest = JSON.stringify(manifest);
-	for (let index = manifest.attachments.length - 1; Buffer.byteLength(serializedManifest, "utf8") > MAX_MANIFEST_BYTES && index >= 0; index--) {
-		delete manifest.attachments[index].trustedExtractedText;
-		serializedManifest = JSON.stringify(manifest);
-	}
-	if (Buffer.byteLength(serializedManifest, "utf8") > MAX_MANIFEST_BYTES) invalid("Uploaded attachment metadata exceeds the manifest limit");
-
-	const tmpDir = path.join(ownerDir, `.tmp-${occurrenceKey}-${process.pid}-${randomBytes(8).toString("hex")}`);
-	try {
-		await fs.promises.mkdir(tmpDir, { recursive: false, mode: 0o700 });
-		for (let index = 0; index < inputs.length; index++) {
-			await fs.promises.writeFile(path.join(tmpDir, `${fileKeys[index]}.bin`), inputs[index].bytes, { flag: "wx", mode: 0o600 });
+		let usage: number;
+		try {
+			usage = await currentSessionUsage(sessionId, sessionKey);
+		} catch (error) {
+			if (error instanceof UploadedAttachmentStoreError) throw error;
+			throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_PERSISTENCE_FAILED", "Uploaded attachment could not be saved", true);
 		}
-		await fs.promises.writeFile(path.join(tmpDir, MANIFEST_FILE), serializedManifest, { encoding: "utf8", flag: "wx", mode: 0o600 });
-		await fs.promises.rename(tmpDir, finalDir);
-		return admittedOccurrence(manifest);
-	} catch (error) {
-		await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-		if ((error as NodeJS.ErrnoException)?.code === "EEXIST" || (error as NodeJS.ErrnoException)?.code === "ENOTEMPTY") return loadExisting();
-		throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_PERSISTENCE_FAILED", "Uploaded attachment could not be saved", true);
-	}
+		if (!Number.isFinite(usage) || occurrenceBytes > sessionQuotaBytes() - usage) {
+			throw new UploadedAttachmentStoreError(
+				413,
+				"UPLOADED_ATTACHMENT_SESSION_QUOTA_EXCEEDED",
+				"Uploaded attachment session storage quota exceeded",
+			);
+		}
+		const committedUsage = usage + occurrenceBytes;
+		const fileKeys = inputs.map(() => randomBytes(18).toString("base64url"));
+		const manifest: Manifest = {
+			version: VERSION,
+			sessionId,
+			occurrenceId,
+			sessionKey,
+			occurrenceKey,
+			contentDigest: digest,
+			createdAt: Date.now(),
+			attachments: inputs.map((input, index) => ({
+				id: input.id,
+				fileKey: fileKeys[index],
+				pointer: pointerFor(sessionKey, occurrenceKey, fileKeys[index]),
+				fileName: input.fileName,
+				mimeType: input.mimeType,
+				size: input.size,
+				sha256: input.sha256,
+				...(input.trustedExtractedText === undefined ? {} : { trustedExtractedText: input.trustedExtractedText }),
+			})),
+		};
+		// Excerpts are best-effort context, while exact bytes and their pointer are
+		// authoritative. Extremely escape-heavy metadata must never produce a
+		// manifest the loader will reject, so shed excerpts from the end if needed.
+		let serializedManifest = JSON.stringify(manifest);
+		for (let index = manifest.attachments.length - 1; Buffer.byteLength(serializedManifest, "utf8") > MAX_MANIFEST_BYTES && index >= 0; index--) {
+			delete manifest.attachments[index].trustedExtractedText;
+			serializedManifest = JSON.stringify(manifest);
+		}
+		if (Buffer.byteLength(serializedManifest, "utf8") > MAX_MANIFEST_BYTES) invalid("Uploaded attachment metadata exceeds the manifest limit");
+
+		const tmpDir = path.join(ownerDir, `.tmp-${occurrenceKey}-${process.pid}-${randomBytes(8).toString("hex")}`);
+		try {
+			await fs.promises.mkdir(ownerDir, { recursive: true, mode: 0o700 });
+			await fs.promises.mkdir(tmpDir, { recursive: false, mode: 0o700 });
+			for (let index = 0; index < inputs.length; index++) {
+				await fs.promises.writeFile(path.join(tmpDir, `${fileKeys[index]}.bin`), inputs[index].bytes, { flag: "wx", mode: 0o600 });
+			}
+			await fs.promises.writeFile(path.join(tmpDir, MANIFEST_FILE), serializedManifest, { encoding: "utf8", flag: "wx", mode: 0o600 });
+			await testHooks?.beforeCommit?.({ sessionId, occurrenceId });
+			await fs.promises.rename(tmpDir, finalDir);
+			sessionUsageBytes.set(sessionKey, committedUsage);
+			return admittedOccurrence(manifest);
+		} catch (error) {
+			await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+			await fs.promises.rmdir(ownerDir).catch(() => undefined);
+			if ((error as NodeJS.ErrnoException)?.code === "EEXIST" || (error as NodeJS.ErrnoException)?.code === "ENOTEMPTY") {
+				sessionUsageBytes.delete(sessionKey);
+				return loadExisting();
+			}
+			if (error instanceof UploadedAttachmentStoreError) throw error;
+			throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_PERSISTENCE_FAILED", "Uploaded attachment could not be saved", true);
+		}
+	});
 }
 
 export async function listUploadedAttachments(
@@ -523,11 +634,21 @@ export async function readUploadedAttachmentRange(input: {
 export async function purgeUploadedAttachments(sessionId: string): Promise<void> {
 	if (!VALID_SESSION_ID.test(sessionId)) return;
 	const { sessionKey } = keys(sessionId, "placeholder");
-	await fs.promises.rm(sessionDir(sessionKey), { recursive: true, force: true });
+	await withSessionOperation(sessionKey, async () => {
+		// The permanent process-lifetime fence is installed before deletion so a
+		// persist already queued behind this purge cannot recreate the owner dir.
+		purgedSessionKeys.add(sessionKey);
+		await fs.promises.rm(sessionDir(sessionKey), { recursive: true, force: true });
+		sessionUsageBytes.delete(sessionKey);
+	});
 }
 
 export async function sweepUploadedAttachments(knownSessionIds: Iterable<string>): Promise<{ removed: string[]; kept: string[] }> {
-	const knownKeys = new Set([...knownSessionIds].filter((id) => VALID_SESSION_ID.test(id)).map((id) => keys(id, "placeholder").sessionKey));
+	const knownByKey = new Map(
+		[...knownSessionIds]
+			.filter((id) => VALID_SESSION_ID.test(id))
+			.map((id) => [keys(id, "placeholder").sessionKey, id] as const),
+	);
 	const removed: string[] = [];
 	const kept: string[] = [];
 	let entries: fs.Dirent[];
@@ -535,18 +656,34 @@ export async function sweepUploadedAttachments(knownSessionIds: Iterable<string>
 	for (const entry of entries) {
 		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
 		const candidate = path.join(uploadedAttachmentRoot(), entry.name);
-		if (!VALID_HASH.test(entry.name) || !knownKeys.has(entry.name)) {
-			await fs.promises.rm(candidate, { recursive: true, force: true });
+		const knownSessionId = knownByKey.get(entry.name);
+		if (!VALID_HASH.test(entry.name) || !knownSessionId) {
+			const remove = async () => {
+				if (VALID_HASH.test(entry.name)) purgedSessionKeys.add(entry.name);
+				await fs.promises.rm(candidate, { recursive: true, force: true });
+				sessionUsageBytes.delete(entry.name);
+			};
+			if (VALID_HASH.test(entry.name)) await withSessionOperation(entry.name, remove);
+			else await remove();
 			removed.push(entry.name);
 			continue;
 		}
-		kept.push(entry.name);
-		const children = await fs.promises.readdir(candidate, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
-		for (const child of children) {
-			if (child.name.startsWith(".tmp-") && child.isDirectory() && !child.isSymbolicLink()) {
-				await fs.promises.rm(path.join(candidate, child.name), { recursive: true, force: true });
+		await withSessionOperation(entry.name, async () => {
+			if (purgedSessionKeys.has(entry.name)) {
+				await fs.promises.rm(candidate, { recursive: true, force: true });
+				sessionUsageBytes.delete(entry.name);
+				removed.push(entry.name);
+				return;
 			}
-		}
+			const children = await fs.promises.readdir(candidate, { withFileTypes: true }).catch(() => [] as fs.Dirent[]);
+			for (const child of children) {
+				if (child.name.startsWith(".tmp-") && child.isDirectory() && !child.isSymbolicLink()) {
+					await fs.promises.rm(path.join(candidate, child.name), { recursive: true, force: true });
+				}
+			}
+			sessionUsageBytes.set(entry.name, await rebuildSessionUsage(knownSessionId, entry.name));
+			kept.push(entry.name);
+		});
 	}
 	return { removed: removed.sort(), kept: kept.sort() };
 }
