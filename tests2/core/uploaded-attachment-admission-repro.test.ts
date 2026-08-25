@@ -6,6 +6,8 @@ import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import {
+	emitSessionEvent,
+	prepareVisibleAgentEvent,
 	projectPromptAuthorMessagesForTitle,
 	SessionManager,
 } from "../../src/server/agent/session-manager.ts";
@@ -23,7 +25,7 @@ const ATTACHMENT = {
 	mimeType: "text/plain",
 	size: ATTACHMENT_BYTES.byteLength,
 	content: ATTACHMENT_BYTES.toString("base64"),
-	extractedText: ATTACHMENT_BYTES.toString("utf8"),
+	extractedText: "FORGED_TEXT_EXCERPT_MUST_NOT_REACH_MODEL",
 };
 const BINARY_BYTES = Buffer.from([0, 1, 2, 0xff]);
 const BINARY_ATTACHMENT = {
@@ -33,6 +35,7 @@ const BINARY_ATTACHMENT = {
 	mimeType: "application/octet-stream",
 	size: BINARY_BYTES.byteLength,
 	content: BINARY_BYTES.toString("base64"),
+	extractedText: "FORGED_BINARY_EXCERPT_MUST_NOT_REACH_MODEL",
 };
 const STABLE_POINTER = /\bbobbit-attachment:v1:[A-Za-z0-9:_-]+/;
 
@@ -102,6 +105,7 @@ describe("uploaded attachment prompt admission", () => {
 		expect(prompt, "ATTACHMENT_MODEL_DISPATCH_MISSING: accepted prompt was not dispatched").toHaveBeenCalledTimes(1);
 		const modelText = prompt.mock.calls[0][0] as string;
 		expect(modelText, "ATTACHMENT_MODEL_EXCERPT_MISSING").toContain(EXTRACTED_MARKER);
+		expect(modelText).not.toContain(ATTACHMENT.extractedText);
 		const pointer = modelText.match(STABLE_POINTER)?.[0];
 		expect(pointer, "ATTACHMENT_STABLE_POINTER_MISSING").toBeTruthy();
 		expect(modelText).not.toContain(ATTACHMENT.content);
@@ -129,6 +133,7 @@ describe("uploaded attachment prompt admission", () => {
 		expect(queued.text).toMatch(STABLE_POINTER);
 		expect(queued.text).toContain("Binary content is not embedded in the prompt");
 		expect(queued.text).not.toContain(BINARY_ATTACHMENT.content);
+		expect(queued.text).not.toContain(BINARY_ATTACHMENT.extractedText);
 		expect(queued.attachments).toEqual([{
 			id: BINARY_ATTACHMENT.id,
 			type: "document",
@@ -159,5 +164,133 @@ describe("uploaded attachment prompt admission", () => {
 		})).rejects.toMatchObject({ code: "UPLOADED_ATTACHMENT_INVALID" });
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(manager.projectDeliveryOutbox(session.id)).toHaveLength(queueLength);
+	});
+
+	it("keeps recovery and explicit retry envelopes occurrence-safe with a stable pointer", async () => {
+		const recoveryManager: any = new SessionManager({ skipTitleGeneration: true });
+		clearInterval(recoveryManager._statusHeartbeatTimer);
+		recoveryManager._statusHeartbeatTimer = null;
+		const recoveryPrompt = vi.fn(async (_text: string) => ({ success: true }));
+		const recoverySession: any = {
+			...session,
+			id: "83749600-0000-4000-8000-000000000003",
+			status: "idle",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			pendingSkillExpansions: undefined,
+			pendingSkillTranscriptBindings: undefined,
+			pendingPromptAuthors: undefined,
+			promptAuthorMessageBindings: undefined,
+			promptAuthorReplayBindings: undefined,
+			promptAuthorAmbiguityFences: undefined,
+			inFlightSteerTexts: undefined,
+			lastPromptDisplay: undefined,
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "provider interrupted the previous turn",
+			consecutiveErrorTurns: 1,
+			turnHadToolCalls: false,
+			rpcClient: { ...session.rpcClient, prompt: recoveryPrompt },
+		};
+		recoveryManager.sessions.set(recoverySession.id, recoverySession);
+		try {
+			await recoveryManager.enqueuePrompt(recoverySession.id, TYPED_TEXT, {
+				attachments: [ATTACHMENT],
+				intentId: "recovery-attachment-occurrence",
+			});
+			const recoveryModelText = recoveryPrompt.mock.calls[0][0] as string;
+			const pointer = recoveryModelText.match(STABLE_POINTER)?.[0];
+			expect(recoveryModelText).toContain("[SYSTEM: previous turn failed with:");
+			expect(recoveryModelText).toContain(EXTRACTED_MARKER);
+			expect(pointer).toBeTruthy();
+
+			const firstPrepared = prepareVisibleAgentEvent(recoverySession, {
+				type: "message_end",
+				message: { id: "pi-recovery-occurrence", role: "user", content: recoveryModelText },
+			});
+			const firstLive = emitSessionEvent(recoverySession, firstPrepared).event as any;
+			expect(visibleText(firstLive.message)).toBe(TYPED_TEXT);
+			expect(firstLive.message.attachments?.[0].fileName).toBe(ATTACHMENT.fileName);
+
+			recoverySession.status = "idle";
+			recoverySession.lastTurnErrored = true;
+			recoverySession.lastTurnErrorMessage = "fresh response failed";
+			recoverySession.consecutiveErrorTurns = 1;
+			recoverySession.turnHadToolCalls = false;
+			await recoveryManager.retryLastPrompt(recoverySession.id);
+
+			const retryPiText = recoveryPrompt.mock.calls[1][0] as string;
+			expect(retryPiText).toContain(pointer);
+			expect(retryPiText).toContain(EXTRACTED_MARKER);
+			const retryPrepared = prepareVisibleAgentEvent(recoverySession, {
+				type: "message_end",
+				message: { id: "pi-explicit-retry-occurrence", role: "user", content: retryPiText },
+			});
+			const retryLive = emitSessionEvent(recoverySession, retryPrepared).event as any;
+			expect(visibleText(retryLive.message)).toBe(TYPED_TEXT);
+			expect(retryLive.message.attachments?.[0].fileName).toBe(ATTACHMENT.fileName);
+
+			recoverySession.status = "idle";
+			recoverySession.lastTurnErrored = true;
+			recoverySession.lastTurnErrorMessage = "automatic retryable failure";
+			recoverySession.turnHadToolCalls = false;
+			await recoveryManager.retryLastPrompt(recoverySession.id, { auto: true });
+			const autoRetryPiText = recoveryPrompt.mock.calls[2][0] as string;
+			expect(autoRetryPiText).toContain(pointer);
+			const autoPrepared = prepareVisibleAgentEvent(recoverySession, {
+				type: "message_end",
+				message: { id: "pi-auto-retry-occurrence", role: "user", content: autoRetryPiText },
+			});
+			const autoLive = emitSessionEvent(recoverySession, autoPrepared).event as any;
+			expect(visibleText(autoLive.message)).toBe(TYPED_TEXT);
+			expect(autoLive.message.attachments?.[0].fileName).toBe(ATTACHMENT.fileName);
+
+			const raw = [
+				{ id: "pi-recovery-occurrence", role: "user", content: recoveryModelText },
+				{ id: "pi-explicit-retry-occurrence", role: "user", content: retryPiText },
+				{ id: "pi-auto-retry-occurrence", role: "user", content: autoRetryPiText },
+			];
+			const restored = recoveryManager.buildVisibleMessageSnapshot(recoverySession.id, raw) as any[];
+			expect(restored.map(visibleText)).toEqual([TYPED_TEXT, TYPED_TEXT, TYPED_TEXT]);
+			expect(restored.map((message) => message.attachments?.[0]?.fileName)).toEqual([
+				ATTACHMENT.fileName,
+				ATTACHMENT.fileName,
+				ATTACHMENT.fileName,
+			]);
+			const titled = projectPromptAuthorMessagesForTitle(recoverySession.id, raw) as any[];
+			expect(titled.map(visibleText)).toEqual([TYPED_TEXT, TYPED_TEXT, TYPED_TEXT]);
+		} finally {
+			recoveryManager.sessions.clear();
+		}
+	});
+
+	it("rejects a serialized prompt frame over the authoritative cap without side effects", async () => {
+		const cappedManager: any = new SessionManager({
+			skipTitleGeneration: true,
+			uploadedAttachmentSerializedSendLimitBytes: 128,
+		});
+		clearInterval(cappedManager._statusHeartbeatTimer);
+		cappedManager._statusHeartbeatTimer = null;
+		const cappedPrompt = vi.fn(async () => ({ success: true }));
+		const cappedSession: any = {
+			...session,
+			id: "83749600-0000-4000-8000-000000000002",
+			status: "idle",
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			rpcClient: { ...session.rpcClient, prompt: cappedPrompt },
+		};
+		cappedManager.sessions.set(cappedSession.id, cappedSession);
+		try {
+			await expect(cappedManager.enqueuePrompt(cappedSession.id, "over cap", {
+				intentId: "serialized-over-cap",
+				attachments: [ATTACHMENT],
+			})).rejects.toMatchObject({ code: "UPLOADED_ATTACHMENT_INVALID" });
+			expect(cappedPrompt).not.toHaveBeenCalled();
+			expect(cappedManager.projectDeliveryOutbox(cappedSession.id)).toEqual([]);
+		} finally {
+			cappedManager.sessions.clear();
+		}
 	});
 });

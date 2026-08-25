@@ -78,11 +78,19 @@ describe("immutable uploaded attachment store", () => {
 		expect(tail).toMatchObject({ bytesRead: 2, nextOffset: 6, eof: true });
 	});
 
-	it("reuses the immutable pointer for an idempotent occurrence and rejects mutation", async () => {
-		const original = document("a", "same.bin", "application/octet-stream", Buffer.from("first"));
+	it("derives trusted text from exact bytes and reuses it with the immutable pointer", async () => {
+		const original = {
+			...document("a", "same.unknown", "application/octet-stream", Buffer.from("trusted bytes")),
+			extractedText: "FORGED CLIENT TEXT",
+		};
 		const first = await persistUploadedAttachmentOccurrence(SESSION_A, "same-occurrence", [original]);
 		const restored = await persistUploadedAttachmentOccurrence(SESSION_A, "same-occurrence", [{ ...original }]);
 		expect(restored).toEqual(first);
+		expect(first.attachments[0].trustedExtractedText).toBe("trusted bytes");
+		expect(JSON.stringify(first)).not.toContain("FORGED CLIENT TEXT");
+
+		const listed = await listUploadedAttachments(SESSION_A, first.attachments[0].pointer);
+		expect(listed[0]).not.toHaveProperty("trustedExtractedText");
 
 		await expectCode(
 			persistUploadedAttachmentOccurrence(SESSION_A, "same-occurrence", [
@@ -90,6 +98,18 @@ describe("immutable uploaded attachment store", () => {
 			]),
 			"UPLOADED_ATTACHMENT_OCCURRENCE_CONFLICT",
 		);
+	});
+
+	it("keeps binary, malformed UTF-8, and specialized documents pointer-only despite forged text", async () => {
+		const inputs = [
+			{ ...document("nul", "nul.bin", "text/plain", Buffer.from([0x41, 0x00, 0x42])), extractedText: "FORGED NUL" },
+			{ ...document("utf8", "bad.custom", "text/plain", Buffer.from([0xc3, 0x28])), extractedText: "FORGED UTF8" },
+			{ ...document("pdf", "claimed.pdf", "application/pdf", Buffer.from("ordinary UTF-8 bytes")), extractedText: "FORGED PDF" },
+		];
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "pointer-only", inputs);
+		expect(saved.attachments).toHaveLength(3);
+		for (const attachment of saved.attachments) expect(attachment).not.toHaveProperty("trustedExtractedText");
+		expect(JSON.stringify(saved)).not.toMatch(/FORGED/);
 	});
 
 	it("rejects malformed, foreign-session, foreign-occurrence and invalid range access", async () => {
