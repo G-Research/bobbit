@@ -1506,6 +1506,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/skill-sidecar.test.ts",
+		allowReason: "test-owned temporary skill-sidecar JSONL output read to prove raw persistence excludes image base64 while retaining document previews",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"skill-sidecar\", `${sid}.jsonl`)", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/session-manager-delegate-restore.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
