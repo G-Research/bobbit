@@ -14,8 +14,6 @@ import { test, expect } from "../../_helpers/gateway-harness.js";
 import { apiFetch, defaultProject } from "../../_helpers/e2e-setup.js";
 import { openApp } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
-const STAFF_SECTION_LOCATOR = (page: Page) =>
-	page.locator("[data-testid='sidebar-expanded'] span.uppercase").filter({ hasText: /^Staff$/i });
 const STAFF_HEADER_FOR_PROJECT = (page: Page, projectId: string) =>
 	page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${projectId}"]`).first();
 

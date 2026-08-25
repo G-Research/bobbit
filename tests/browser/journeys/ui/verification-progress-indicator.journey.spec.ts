@@ -35,8 +35,6 @@ const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),12000)"`;
 
 const GATE_ID = "slow-multi";
 const GATE_NAME = "Slow Multi-Step Gate";
-const EXPECTED_STEP_NAMES = ["Slow build", "Type check", "Unit tests"];
-
 function makeWorkflowId(): string {
 	return `progress-indicator-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }

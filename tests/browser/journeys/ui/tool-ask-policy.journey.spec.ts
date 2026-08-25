@@ -8,10 +8,7 @@
 import { test, expect } from "../../_helpers/gateway-harness.js";
 import {
 	apiFetch,
-	createSession,
 	deleteSession,
-	nonGitCwd,
-	waitForSessionStatus,
 } from "../../_helpers/e2e-setup.js";
 import { openApp, createSessionViaUI } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 

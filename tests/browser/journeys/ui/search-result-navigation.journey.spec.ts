@@ -45,7 +45,7 @@ async function waitForSearchHit(
 ): Promise<any[]> {
 	let lastResults: any[] = [];
 	try {
-		return await pollUntil(
+		const results = await pollUntil(
 			async () => {
 				const resp = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=50`);
 				if (!resp.ok) return null;
@@ -55,6 +55,8 @@ async function waitForSearchHit(
 			},
 			{ timeoutMs, intervalMs: 150, label: `search hit for "${query}"` },
 		);
+		if (!results) throw new Error(`search hit for "${query}" returned no results`);
+		return results;
 	} catch (err) {
 		throw new Error(
 			`waitForSearchHit timed out for "${query}" after ${timeoutMs}ms; last results: ${JSON.stringify(lastResults.map((r) => ({ type: r.type, id: r.id, title: r.title })))} (${(err as Error).message})`,
