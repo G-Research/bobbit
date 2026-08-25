@@ -149,7 +149,10 @@ async function createHeadquartersSessionViaSplash(page: Page): Promise<{ id: str
 }
 
 async function openHeadquartersGeneralSettings(page: Page): Promise<Locator> {
-	await navigateToHash(page, "#/settings/system/general");
+	// Use the stable user-facing Headquarters scope rather than the legacy
+	// `system` alias. The explicit scope remains routable while Headquarters is
+	// hidden from normal project lists and across a gateway restart.
+	await navigateToHash(page, `#/settings/${HEADQUARTERS_PROJECT_ID}/general`);
 	await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible({ timeout: 15_000 });
 	const checkbox = page
 		.getByLabel("Show Headquarters in project lists")

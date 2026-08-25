@@ -48,6 +48,67 @@ async function openProjectSession(page: Page, project: TestProject): Promise<str
 	return sessionId;
 }
 
+function projectProposalTab(page: Page) {
+	return page.locator('.goal-tab-pill[data-panel-tab-id="proposal:project"]').first();
+}
+
+async function authenticateMockProposalTools(gateway: any, sessionId: string): Promise<void> {
+	const agent = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!agent || typeof agent._gatewayPost !== "function") {
+		throw new Error("mid-session proposal journey requires the in-process mock agent gateway adapter");
+	}
+	const sessionSecret = agent.env?.BOBBIT_SESSION_SECRET;
+	if (typeof sessionSecret !== "string" || !sessionSecret) {
+		throw new Error("mid-session proposal mock session is missing its owner capability");
+	}
+	const gatewayPost = agent._gatewayPost.bind(agent);
+	agent._gatewayPost = (pathname: string, body: unknown, headers: Record<string, string> = {}) => gatewayPost(
+		pathname,
+		body,
+		{ ...headers, "X-Bobbit-Session-Secret": sessionSecret },
+	);
+}
+
+async function emitRegisteredProjectProposal(page: Page, gateway: any, project: TestProject): Promise<void> {
+	const sessionId = await openProjectSession(page, project);
+	await authenticateMockProposalTools(gateway, sessionId);
+	await sendMessage(page, "Please emit a project_proposal for testing");
+	await page.waitForFunction(
+		() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.project?.fields?.build_command === "npm run build";
+		},
+		null,
+		{ timeout: 20_000 },
+	);
+
+	// Project proposal intent is now explicit: a normal source session does not
+	// imply edit mode. Retarget the mock's generic create draft through the
+	// operator-authenticated edit endpoint so the current projectId/root contract
+	// is persisted and broadcast before the UI assertions continue.
+	const targetEdit = await page.evaluate(async ({ sessionId, projectId, rootPath }) => {
+		const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/project/edit`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				old_text: "root_path: /tmp/test-project",
+				new_text: `root_path: ${JSON.stringify(rootPath)}\nprojectId: ${projectId}`,
+			}),
+		});
+		return { status: response.status, text: await response.text() };
+	}, { sessionId, projectId: project.id, rootPath: project.rootPath });
+	expect(targetEdit.status, `explicit project target edit failed: ${targetEdit.text}`).toBe(200);
+	await page.waitForFunction(
+		(projectId) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return state?.activeProposals?.project?.fields?.projectId === projectId
+				&& state?.activeProposals?.project?.mode === "registered";
+		},
+		project.id,
+		{ timeout: 15_000 },
+	);
+}
+
 test.describe("Mid-session project proposal (non-assistant session)", () => {
 	test.afterEach(async () => {
 		for (const id of Array.from(createdSessions).reverse()) await deleteSession(id).catch(() => {});
@@ -58,7 +119,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		createdDirs.clear();
 	});
 
-	test("propose → diff rendered → Accept writes config → reload persists", async ({ page }) => {
+	test("propose → diff rendered → Accept writes config → reload persists", async ({ page, gateway }) => {
 		const project = await createNormalProject("accept");
 		const projectId = project.id;
 
@@ -69,15 +130,13 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 
 		await openApp(page);
-		await openProjectSession(page, project);
-
 		// Mock agent recognizes the "project_proposal" trigger phrase and emits
 		// a propose_project tool call with canned fields (see
-		// tests/e2e/mock-agent-core.mjs respondToPrompt).
-		await sendMessage(page, "Please emit a project_proposal for testing");
+		// tests/e2e/_helpers/mock-agent-core.mjs respondToPrompt).
+		await emitRegisteredProjectProposal(page, gateway, project);
 
 		// The Project tab should appear in the unified preview panel.
-		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
 
 		// The panel renders with data-panel="project-proposal" in registered mode.
@@ -123,7 +182,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		expect(cfgAfter.build_command).toBe("npm run build");
 	});
 
-	test("Dismiss clears the proposal without writing config", async ({ page }) => {
+	test("Dismiss clears the proposal without writing config", async ({ page, gateway }) => {
 		const project = await createNormalProject("dismiss");
 		const projectId = project.id;
 
@@ -134,10 +193,9 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 
 		await openApp(page);
-		await openProjectSession(page, project);
-		await sendMessage(page, "Please emit a project_proposal for testing");
+		await emitRegisteredProjectProposal(page, gateway, project);
 
-		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
 
 		const panel = page.locator('[data-panel="project-proposal"]').first();
@@ -156,7 +214,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		expect(cfg.build_command).toBe("dismiss-baseline");
 	});
 
-	test("Settings tab reflects accepted proposal without a hard reload", async ({ page }) => {
+	test("Settings tab reflects accepted proposal without a hard reload", async ({ page, gateway }) => {
 		const project = await createNormalProject("settings-cache");
 		const projectId = project.id;
 
@@ -197,10 +255,9 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("settings-cache-baseline");
 
 		// 2. Open a session, trigger a propose_project, click Apply Changes.
-		await openProjectSession(page, project);
-		await sendMessage(page, "Please emit a project_proposal for testing");
+		await emitRegisteredProjectProposal(page, gateway, project);
 
-		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
 		const panel = page.locator('[data-panel="project-proposal"]').first();
 		await expect(panel).toBeVisible({ timeout: 10_000 });
