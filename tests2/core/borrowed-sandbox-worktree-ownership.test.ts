@@ -124,6 +124,7 @@ async function persistedReloadFixture(borrowed: boolean): Promise<{
 	};
 	const sandboxManager = {
 		get: vi.fn(() => sandbox),
+		releaseSessionRuntime: vi.fn(async () => {}),
 	};
 	let bridgeOptions: Record<string, any> = {};
 	const bridge = {
@@ -222,7 +223,10 @@ async function sandboxLifecycleFixture(records: PersistedSession[]): Promise<{
 		stateDir: path.join(root, "manager"),
 	});
 	managers.push(manager);
-	manager.sandboxManager = { get: vi.fn(() => sandbox) };
+	manager.sandboxManager = {
+		get: vi.fn(() => sandbox),
+		releaseSessionRuntime: vi.fn(async () => {}),
+	};
 	manager.projectContextManager = {
 		all: () => [],
 		getAllSessions: () => store.getAll(),

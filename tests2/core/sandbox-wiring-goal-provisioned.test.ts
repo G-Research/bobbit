@@ -95,11 +95,15 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 		const createSpy = vi.fn(async () => CONTAINER_WORKTREE);
 		const sandbox = {
 			getContainerId: async () => "container-xyz",
+			getStatus: () => ({ status: "ready", containerId: "container-xyz" }),
 			createWorktree: createSpy,
 		};
 		sm.sandboxManager = {
 			ensureForProject: async () => {},
 			get: () => sandbox,
+			ensureSessionRuntime: async (_projectId: string, sessionId: string) => `runtime-${sessionId}`,
+			isSessionRuntimeIsolated: async (_projectId: string, sessionId: string, id: string) => id === `runtime-${sessionId}`,
+			releaseSessionRuntime: async () => {},
 		};
 
 		// Spy on the shared dispatcher so we assert the call without needing a
@@ -186,6 +190,149 @@ describe("applySandboxWiring — goalProvisioned dispatch uses host coordinates"
 	});
 });
 
+describe("SessionManager isolated execution runtime wiring", () => {
+	function runtimeFixture(overrides?: {
+		ensureRuntime?: (projectId: string, sessionId: string, expected?: string) => Promise<string>;
+	}): { manager: any; restoreEnv: () => void; releases: string[]; ensureCalls: Array<[string, string, string | undefined]> } {
+		const stateRoot = makeTmpDir("session-runtime-wiring-");
+		const prevBobbitDir = process.env.BOBBIT_DIR;
+		process.env.BOBBIT_DIR = stateRoot;
+		const stateDir = path.join(stateRoot, "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, "gateway-url"), "https://127.0.0.1:3001\n");
+		const restoreSecrets = seedAdminToken(stateRoot, stateDir);
+		const manager: any = new SessionManager();
+		manager.projectContextManager = null;
+		manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [],
+		};
+		manager.preferencesStore = undefined;
+		manager.sandboxTokenStore = null;
+		const ensureCalls: Array<[string, string, string | undefined]> = [];
+		const releases: string[] = [];
+		const runtimes = new Map<string, string>();
+		manager.sandboxManager = {
+			ensureForProject: async () => {},
+			get: () => ({
+				getContainerId: async () => "control-exact",
+				getStatus: () => ({ status: "ready", containerId: "control-exact" }),
+			}),
+			ensureSessionRuntime: async (projectId: string, sessionId: string, expected?: string) => {
+				ensureCalls.push([projectId, sessionId, expected]);
+				if (overrides?.ensureRuntime) return overrides.ensureRuntime(projectId, sessionId, expected);
+				const runtime = runtimes.get(sessionId) ?? `runtime-${sessionId}`;
+				if (expected && expected !== runtime) throw new Error("Unexpected session runtime identity");
+				runtimes.set(sessionId, runtime);
+				return runtime;
+			},
+			isSessionRuntimeIsolated: async (_projectId: string, sessionId: string, id: string) => id === (runtimes.get(sessionId) ?? `runtime-${sessionId}`),
+			releaseSessionRuntime: async (_projectId: string, sessionId: string) => {
+				releases.push(sessionId);
+				runtimes.delete(sessionId);
+			},
+		};
+		return {
+			manager,
+			releases,
+			ensureCalls,
+			restoreEnv: () => {
+				restoreSecrets();
+				if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+				else process.env.BOBBIT_DIR = prevBobbitDir;
+			},
+		};
+	}
+
+	it("gives same-project sessions unique execution containers while retaining the control owner", async () => {
+		const fixture = runtimeFixture();
+		try {
+			const first: any = { cwd: "/host/a", env: {} };
+			const second: any = { cwd: "/host/b", env: {} };
+			await fixture.manager.applySandboxWiring(first, "session-a", { projectId: "project-a" });
+			await fixture.manager.applySandboxWiring(second, "session-b", { projectId: "project-a" });
+			assert.equal(first.containerId, "runtime-session-a");
+			assert.equal(second.containerId, "runtime-session-b");
+			assert.notEqual(first.containerId, second.containerId);
+			assert.notEqual(first.containerId, "control-exact");
+			assert.deepEqual(fixture.ensureCalls, [
+				["project-a", "session-a", undefined],
+				["project-a", "session-b", undefined],
+			]);
+		} finally { fixture.restoreEnv(); }
+	});
+
+	it("reuses an exact persisted runtime and migrates only the exact legacy control identity", async () => {
+		const fixture = runtimeFixture();
+		try {
+			const reused: any = { cwd: "/workspace", env: {} };
+			await fixture.manager.applySandboxWiring(reused, "session-a", {
+				projectId: "project-a",
+				expectedExistingContainerId: "runtime-session-a",
+			});
+			assert.equal(reused.containerId, "runtime-session-a");
+			assert.equal(fixture.ensureCalls[0][2], "runtime-session-a");
+
+			const migrated: any = { cwd: "/workspace", env: {} };
+			await fixture.manager.applySandboxWiring(migrated, "session-legacy", {
+				projectId: "project-a",
+				expectedExistingContainerId: "control-exact",
+				allowLegacyControlMigration: true,
+			});
+			assert.equal(migrated.containerId, "runtime-session-legacy");
+			assert.equal(fixture.ensureCalls[1][2], undefined);
+
+			await assert.rejects(() => fixture.manager.applySandboxWiring({ cwd: "/workspace", env: {} }, "session-promoted", {
+				projectId: "project-a",
+				expectedExistingContainerId: "control-exact",
+			}), /project control container/);
+		} finally { fixture.restoreEnv(); }
+	});
+
+	it("replaces only an expected runtime proven absent and rejects arbitrary identity transfer", async () => {
+		let attempts = 0;
+		const fixture = runtimeFixture({
+			ensureRuntime: async (_projectId, sessionId, expected) => {
+				attempts++;
+				if (sessionId === "missing" && expected) throw new Error("Expected session runtime was not found for missing");
+				if (sessionId === "forged") throw new Error("Unexpected session runtime identity for forged");
+				return `replacement-${sessionId}`;
+			},
+		});
+		fixture.manager.sandboxManager.isSessionRuntimeIsolated = async (_projectId: string, sessionId: string, id: string) => id === `replacement-${sessionId}`;
+		try {
+			const replaced: any = { cwd: "/workspace", env: {} };
+			await fixture.manager.applySandboxWiring(replaced, "missing", {
+				projectId: "project-a",
+				expectedExistingContainerId: "runtime-dead",
+				allowMissingRuntimeReplacement: true,
+			});
+			assert.equal(replaced.containerId, "replacement-missing");
+			assert.deepEqual(fixture.releases, ["missing"]);
+			assert.equal(attempts, 2);
+
+			await assert.rejects(() => fixture.manager.applySandboxWiring({ cwd: "/workspace", env: {} }, "forged", {
+				projectId: "project-a",
+				expectedExistingContainerId: "attacker-container",
+				allowMissingRuntimeReplacement: true,
+			}), /Unexpected session runtime identity/);
+			assert.deepEqual(fixture.releases, ["missing"], "arbitrary mismatches never authorize release/replacement");
+		} finally { fixture.restoreEnv(); }
+	});
+
+	it("runtime release is exact, idempotent, and ignores stale cleanup after identity advances", async () => {
+		const fixture = runtimeFixture();
+		try {
+			fixture.manager.sessions.set("session-a", { containerId: "runtime-new" });
+			assert.equal(await fixture.manager.releaseSessionExecutionRuntime("project-a", "session-a", "runtime-old"), false);
+			assert.deepEqual(fixture.releases, []);
+			assert.equal(await fixture.manager.releaseSessionExecutionRuntime("project-a", "session-a", "runtime-new"), true);
+			assert.equal(await fixture.manager.releaseSessionExecutionRuntime("project-a", "session-a", "runtime-new"), true);
+			assert.deepEqual(fixture.releases, ["session-a", "session-a"]);
+		} finally { fixture.restoreEnv(); }
+	});
+});
+
 // A marker provider must ACTUALLY write its file into the host worktree — not
 // merely have the dispatcher called. Keep the production SessionManager →
 // LifecycleHub routing, but inject ModuleHost's documented invocation seam and a
@@ -255,8 +402,12 @@ describe("applySandboxWiring — goalProvisioned marker actually writes host-sid
 				ensureForProject: async () => {},
 				get: () => ({
 					getContainerId: async () => "container-xyz",
+					getStatus: () => ({ status: "ready", containerId: "container-xyz" }),
 					createWorktree: async () => CONTAINER_WORKTREE,
 				}),
+				ensureSessionRuntime: async (_projectId: string, sessionId: string) => `runtime-${sessionId}`,
+				isSessionRuntimeIsolated: async (_projectId: string, sessionId: string, id: string) => id === `runtime-${sessionId}`,
+				releaseSessionRuntime: async () => {},
 			};
 
 			const registry = { listProviders: () => [fixtureProvider(providerRoot)] } as unknown as PackContributionRegistry;
