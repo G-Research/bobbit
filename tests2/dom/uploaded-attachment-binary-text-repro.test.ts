@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from "vitest";
+import { decodeLikelyUtf8Text } from "../../src/shared/uploaded-attachment-text.ts";
 import { loadAttachment } from "../../src/ui/utils/attachment-utils.ts";
 
 const cases = [
@@ -26,6 +27,20 @@ const cases = [
 		expectedBase64: "wyg=",
 	},
 ] as const;
+
+describe("shared uploaded attachment text classifier", () => {
+	it("derives readable text from bytes without metadata", () => {
+		expect(decodeLikelyUtf8Text(new TextEncoder().encode("shared UTF-8 marker ©"))).toBe(
+			"shared UTF-8 marker ©",
+		);
+	});
+
+	it("rejects NUL, dense controls, and malformed UTF-8", () => {
+		expect(decodeLikelyUtf8Text(Uint8Array.from([0x66, 0x00]))).toBeUndefined();
+		expect(decodeLikelyUtf8Text(Uint8Array.from([0x66, 0x01]))).toBeUndefined();
+		expect(decodeLikelyUtf8Text(Uint8Array.from([0xc3, 0x28]))).toBeUndefined();
+	});
+});
 
 describe("binary-looking files declared as text", () => {
 	for (const testCase of cases) {
