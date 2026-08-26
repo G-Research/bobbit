@@ -41,6 +41,21 @@ test.describe("Journey: remote-state coordinator recovery", () => {
 			scenario.releaseHeldPrRead();
 			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({ branch: "master", prState: "OPEN" });
 			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({ branch: "master", prState: "OPEN" });
+			// A remote-state snapshot can render while connectToSession is still
+			// draining its authoritative hydration pipeline. Wait for that lifecycle
+			// owner to settle so its final polling setup cannot re-anchor the interval
+			// after the fake clock has already crossed the automatic-refresh boundary.
+			await expect.poll(
+				() => sessionPage.evaluate((expectedSessionId) => {
+					const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+					return state?.selectedSessionId === expectedSessionId
+						&& state?.connectingSessionId === null
+						&& state?.connectionStatus === "connected"
+						&& state?.remoteAgent?.gatewaySessionId === expectedSessionId
+						&& state?.remoteAgent?.connected === true;
+				}, sessionId),
+				{ timeout: 10_000, message: "session lifecycle should finish before advancing its polling clock" },
+			).toBe(true);
 
 			scenario.advanceNow(20_000);
 			await Promise.all([
