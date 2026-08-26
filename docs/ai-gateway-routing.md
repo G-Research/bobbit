@@ -175,11 +175,11 @@ Disconnect removes only a marked block.
 
 Publication uses localized Pi-compatible JSONC edits followed by temp-file-plus-rename replacement. Comments, formatting outside edited values, unknown fields, non-AIGW providers, and user `modelOverrides` remain intact. Malformed JSONC, duplicate `providers`/`providers.aigw` paths, or duplicate managed fields are ambiguous and fail closed without changing any byte or saving the new gateway preference. When AIGW publication is not configured, startup does not normalize `models.json` at all.
 
-Because `models.json` can contain provider credentials, writes never widen its permissions. `rename()` publishes a new inode, so the replacement carries the target file's existing POSIX mode across the swap; a file Bobbit creates itself is owner-only (`0o600`). The staging file receives that mode at creation, before any content is written into it, so it is never readable at a wider mode even transiently.
+Because `models.json` can contain provider credentials, writes never widen its permissions. `rename()` publishes a new inode, so the replacement carries every existing regular target's POSIX mode across the swap, including `0o000`; a file Bobbit creates itself is owner-only (`0o600`). The staging file receives that mode at creation, before any content is written into it, so it is never readable at a wider mode even transiently.
 
 ### Adopting a pre-v0.17.0 publication
 
-The ownership marker was introduced in v0.17.0. Blocks written by v0.16.3 and earlier have none, so on upgrade they used to be classified `unmarked-user` — permanently, and with no way back. For anyone who had only ever let Bobbit manage the file, that protection was destructive rather than safe:
+The ownership marker was introduced in v0.17.0. The published releases whose generated blocks carried the canonical two-header signature — v0.12.0, v0.13.0, v0.13.1, v0.14.0, v0.14.1, v0.14.2, v0.15.0, v0.15.1, v0.16.1, v0.16.2, and v0.16.3 — wrote no marker, so on upgrade they used to be classified `unmarked-user` permanently. For anyone who had only ever let Bobbit manage the file, that protection was destructive rather than safe:
 
 - the model list froze at whatever was published before the upgrade, so models the gateway later added never appeared and removed ones never disappeared;
 - Settings → Default Models and the model picker lost their `[openai]` / `[aws]` provider tags, because `upstreamProvider` provenance is only carried through for a managed publication;
@@ -191,7 +191,7 @@ Adoption is deliberately conservative, because a wrong adoption means Bobbit tak
 
 - exactly the generated key set (`baseUrl`, `apiKey`, `api`, `headers`, `models`) and no others;
 - the generated constants `apiKey: "none"` and `api: "openai-completions"`;
-- exactly the two generated provider headers — the `Bobbit/<version>` user agent and the `x-opencode-session` command-form resolver literal;
+- exactly the two generated provider headers — a `User-Agent` equal to one of the published pre-marker versions listed above (not an arbitrary `Bobbit/` suffix), and the `x-opencode-session` command-form resolver literal;
 - a `models` array whose entries are all plain objects;
 - a `baseUrl` that compares equal to the configured `aigw.url` under the shared URL comparison (trailing slashes and host casing are insignificant; anything unparsable or non-HTTP never matches);
 - no comments and no trailing commas inside the `providers.aigw` value itself. Comments, formatting, and unknown fields anywhere *outside* that byte range — document-level comments, sibling providers, `modelOverrides` — are irrelevant to the decision and are preserved byte-for-byte.

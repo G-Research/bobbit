@@ -313,10 +313,7 @@ const MODELS_JSON_FALLBACK_MODE = 0o600;
 function resolveModelsJsonMode(target: string): number {
 	try {
 		const stat = fs.statSync(target);
-		if (stat.isFile()) {
-			const mode = stat.mode & 0o777;
-			if (mode) return mode;
-		}
+		if (stat.isFile()) return stat.mode & 0o777;
 	} catch { /* absent or unreadable — fall through to owner-only */ }
 	return MODELS_JSON_FALLBACK_MODE;
 }

@@ -25,7 +25,12 @@ import {
 	adoptLegacyAigwProvider,
 	inspectAigwTargetRealm,
 } from "../../src/server/agent/aigw-models-json.js";
-import { writeAigwModelsJson, type AigwModel } from "../../src/server/agent/aigw-manager.js";
+import {
+	writeAigwModelsJson,
+	writeModelsJsonText,
+	type AigwModel,
+} from "../../src/server/agent/aigw-manager.js";
+import { BOBBIT_AIGW_USER_AGENT } from "../../src/server/agent/aigw-user-agent.js";
 
 /** Every assertion in this file carries this token so the gate can match the failure. */
 const NOT_ADOPTED = "legacy AIGW publication was not adopted";
@@ -73,7 +78,7 @@ function startGateway(): Promise<{ url: string; requests: string[]; close: () =>
  * deterministic generated key set and headers, model rows carrying
  * `upstreamProvider`, and NO `x-bobbit-managed` marker.
  */
-function legacyPublication(gatewayUrl: string): string {
+function legacyPublication(gatewayUrl: string, userAgent = "Bobbit/0.16.3"): string {
 	return `${JSON.stringify({
 		providers: {
 			aigw: {
@@ -81,7 +86,7 @@ function legacyPublication(gatewayUrl: string): string {
 				apiKey: "none",
 				api: "openai-completions",
 				headers: {
-					"User-Agent": "Bobbit/0.16.3",
+					"User-Agent": userAgent,
 					"x-opencode-session": SESSION_HEADER,
 				},
 				models: [{
@@ -262,6 +267,15 @@ describe("AIGW legacy block adoption", () => {
 		fs.writeFileSync(modelsPath, handAuthored);
 		assert.throws(() => writeAigwModelsJson(gatewayUrl, published), /refusing|user-owned/);
 		assert.equal(fs.readFileSync(modelsPath, "utf-8"), handAuthored);
+
+		const unsupportedRelease = legacyPublication(gatewayUrl, "Bobbit/0.17.0");
+		fs.writeFileSync(modelsPath, unsupportedRelease);
+		assert.throws(() => writeAigwModelsJson(gatewayUrl, published), /refusing|user-owned/);
+		assert.equal(
+			fs.readFileSync(modelsPath, "utf-8"),
+			unsupportedRelease,
+			"publication must refuse and preserve an unsupported User-Agent byte-for-byte",
+		);
 	});
 });
 
@@ -304,6 +318,21 @@ describe("models.json permission preservation", () => {
 		else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
 		resetAgentDirStateForTests();
 		fs.rmSync(agentDir, { recursive: true, force: true });
+	});
+
+	it.skipIf(!POSIX_MODES)("preserves an existing 0o000 models.json across direct atomic replacement", () => {
+		const modelsPath = path.join(agentDir, "models.json");
+		fs.writeFileSync(modelsPath, "original\n", { mode: 0o600 });
+		fs.chmodSync(modelsPath, 0o000);
+
+		writeModelsJsonText("replacement\n");
+		const replacementMode = modeOf(modelsPath);
+		// Restore owner access only after observing the replacement's mode so the
+		// content assertion can verify the write completed through the open fd.
+		fs.chmodSync(modelsPath, 0o600);
+
+		assert.equal(fs.readFileSync(modelsPath, "utf-8"), "replacement\n");
+		assert.equal(replacementMode, 0o000, "atomic replacement must preserve a valid zero mode");
 	});
 
 	it("keeps a 0o600 models.json owner-only when the read path adopts a legacy block", async () => {
@@ -416,7 +445,7 @@ const CONFIGURED = "http://aigw.example.test/v1";
  * *outside* the `providers.aigw` object. None of that may affect adoption, and
  * every byte of it must survive untouched.
  */
-function legacyJsoncDocument(baseUrl = CONFIGURED): string {
+function legacyJsoncDocument(baseUrl = CONFIGURED, userAgent = "Bobbit/0.16.3"): string {
 	return `{
   // retained root comment
   "unknownRoot": { "keep": true },
@@ -428,7 +457,7 @@ function legacyJsoncDocument(baseUrl = CONFIGURED): string {
       "apiKey": "none",
       "api": "openai-completions",
       "headers": {
-        "User-Agent": "Bobbit/0.16.3",
+        "User-Agent": ${JSON.stringify(userAgent)},
         "x-opencode-session": ${JSON.stringify(SESSION_HEADER)}
       },
       "models": [
@@ -477,6 +506,37 @@ describe("adoptLegacyAigwProvider", () => {
 			const source = legacyJsoncDocument();
 			const result = adoptLegacyAigwProvider(source, configured);
 			assert.equal(result.adopted, true, `${NOT_ADOPTED}: equivalent gateway URL ${configured} was rejected`);
+		}
+	});
+
+	it("adopts every published pre-marker User-Agent and no other release boundary", () => {
+		const publishedLegacyUserAgents = [
+			"Bobbit/0.12.0",
+			"Bobbit/0.13.0",
+			"Bobbit/0.13.1",
+			"Bobbit/0.14.0",
+			"Bobbit/0.14.1",
+			"Bobbit/0.14.2",
+			"Bobbit/0.15.0",
+			"Bobbit/0.15.1",
+			"Bobbit/0.16.1",
+			"Bobbit/0.16.2",
+			"Bobbit/0.16.3",
+		];
+		for (const userAgent of publishedLegacyUserAgents) {
+			const result = adoptLegacyAigwProvider(legacyJsoncDocument(CONFIGURED, userAgent), CONFIGURED);
+			assert.equal(result.adopted, true, `${NOT_ADOPTED}: published legacy ${userAgent} was rejected`);
+			assert.equal(result.realm.kind, "managed");
+		}
+	});
+
+	it("keeps arbitrary, marker-era, and current Bobbit User-Agents user-owned and byte-identical", () => {
+		for (const userAgent of ["Bobbit/not-a-release", "Bobbit/0.17.0", BOBBIT_AIGW_USER_AGENT]) {
+			const source = legacyJsoncDocument(CONFIGURED, userAgent);
+			const result = adoptLegacyAigwProvider(source, CONFIGURED);
+			assert.equal(result.adopted, false, `${userAgent} must not be adopted`);
+			assert.equal(result.realm.kind, "unmarked-user", `${userAgent} must remain user-owned`);
+			assert.equal(result.text, source, `${userAgent} must remain byte-identical`);
 		}
 	});
 

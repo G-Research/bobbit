@@ -162,6 +162,26 @@ const LEGACY_PROVIDER_KEYS = ["baseUrl", "apiKey", "api", "headers", "models"] a
 const LEGACY_SESSION_HEADER = `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
 
 /**
+ * Published releases whose unmarked AIGW writer emitted both canonical headers.
+ * The User-Agent first shipped in v0.12.0; v0.17.0 introduced the ownership
+ * marker. An explicit release allowlist prevents current, unreleased, or
+ * hand-authored `Bobbit/*` strings from becoming ownership evidence.
+ */
+const LEGACY_BOBBIT_AIGW_USER_AGENTS = new Set([
+	"Bobbit/0.12.0",
+	"Bobbit/0.13.0",
+	"Bobbit/0.13.1",
+	"Bobbit/0.14.0",
+	"Bobbit/0.14.1",
+	"Bobbit/0.14.2",
+	"Bobbit/0.15.0",
+	"Bobbit/0.15.1",
+	"Bobbit/0.16.1",
+	"Bobbit/0.16.2",
+	"Bobbit/0.16.3",
+]);
+
+/**
  * True when the exact byte range of the `providers.aigw` value contains no
  * comment and no trailing comma. Comments, trailing commas, and unknown fields
  * anywhere *outside* that range (root comments, sibling providers, the comma
@@ -199,7 +219,7 @@ function isLegacyBobbitPublication(source: string, aigw: JsoncNode, configuredAi
 	if (provider.apiKey !== "none" || provider.api !== "openai-completions") return false;
 
 	const headers = provider.headers as Record<string, unknown>;
-	if (typeof headers["User-Agent"] !== "string" || !/^Bobbit\//.test(headers["User-Agent"] as string)) return false;
+	if (typeof headers["User-Agent"] !== "string" || !LEGACY_BOBBIT_AIGW_USER_AGENTS.has(headers["User-Agent"])) return false;
 	if (headers["x-opencode-session"] !== LEGACY_SESSION_HEADER) return false;
 
 	if (!Array.isArray(provider.models)) return false;
