@@ -1,5 +1,12 @@
 # Cross-OS residual reconciliation ledger
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 **Reference extraction:** `e3051de63cf611143a989f7928bd9f9a7ed9beae^2..e3051de63cf611143a989f7928bd9f9a7ed9beae`
 
 **Authoritative production baseline:** `origin/main` at **`89ec9bbd73e076a40321e282583f1a1c180b2513`**, refreshed and confirmed with `git fetch origin main && git rev-parse origin/main`. This exact production commit—not the goal branch—is the authority for the delivered tree. The original 50-row classification was semantically rechecked against `fd25842abf5fe982946ef397fe5b5698c6fea950`; the earlier delivery base `186781fc4d534fbde47d5fd1c56e92ae53ab98c4`, that commit, and `5c7c2e4997ba78cb7c9268443a52a6427a97ca17`, `a870161aad23a704761a4528f43d898c2792c800`, and `0299fe6b8268f01f136d2a6787983e662e0fdc94` remain provenance for earlier refreshes only.
@@ -95,7 +102,7 @@ These changes were found while preparing the required exact-head matrix. They pr
 | Blocker | Resolution and ownership | Residual-manifest relationship |
 |---|---|---|
 | Simultaneous E2E coordinators could overwrite Playwright's checkout-local `test-results/.last-run.json`. | `playwright-e2e.config.ts` puts `outputDir` beneath the coordinator root; `tests2/core/run-isolation.test.ts` pins two distinct owned outputs. | Both paths are net-new qualification-blocker paths. |
-| Pi's process-global Anthropic callback listener binds fixed loopback port `53692`, so physical listener coverage cannot run concurrently in unit or integration coordinators. | The installed Pi source contract remains authoritative for redirect URI and scopes. Core retains Pi callback, lease, and compare-and-swap coverage through a non-listening HTTP harness; integration retains real gateway routes with a deterministic Pi-shaped facade for callback parsing, state validation, cancellation, and credential persistence. The browser journey uses deterministic UI routes. | The browser journey, Pi source-contract repro, OAuth adapter, and gateway lifecycle paths are focused qualification-blocker coverage; `tests2/tests-map.json` retains the mapped deterministic seam. |
+| Pi's process-global Anthropic callback listener binds fixed loopback port `53692`, so physical listener coverage cannot run concurrently in unit or integration coordinators. | The installed Pi source contract remained authoritative for redirect URI and scopes. Core retained Pi callback, lease, and compare-and-swap coverage through a non-listening HTTP harness; integration retained real gateway routes with a deterministic Pi-shaped facade for callback parsing, state validation, cancellation, and credential persistence. | At this snapshot, the browser journey, Pi source-contract repro, OAuth adapter, and gateway lifecycle paths supplied focused blocker coverage, and the former `tests2/tests-map.json` recorded the deterministic seam. |
 | Windows reports `ENOENT` as well as `ENOTDIR` when an invalid packed-consumer audit root is used. | `tests2/core/release-skill-preflight-order.test.ts` accepts only those two platform-equivalent errors and retains explicit assertions that neither the supplied root nor its parent is removed. | Existing residual-manifest path for item 2; no net-new path. |
 
 Final qualification evidence is recorded in [the qualification record](cross-os-qualification-record.md). Its predecessor broad matrix is historical evidence; the focused final proof is at `8c15c37407ed177d7f114af11a3db8151e0aa5cb` after the fixed-port correction.

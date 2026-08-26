@@ -1,5 +1,12 @@
 # Browser-dimension Chaos Comparison — Test Suite v2
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 Generated: 2026-07-08T05:52:48.650Z  |  Run duration: 134.7 min
 
 Adversarial proof that the consolidated v2 **journeys** catch every browser-only

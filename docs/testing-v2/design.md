@@ -1,5 +1,12 @@
 # Test Suite v2 Migration Design
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 > **Historical design.** This document records the migration decisions and measurements that produced Test Suite v2. Its lane, ledger, worker-allocation, retry, and daily-run descriptions are not the current unit-gate contract. See [`unit-gate.md`](unit-gate.md) and [`../../vitest.config.ts`](../../vitest.config.ts) for the implemented unit architecture.
 
 This document was the authoritative architecture for the Test Suite v2 migration. It recorded the settled decisions D1-D6: Vitest forks with `isolate:false`, happy-dom for non-geometry component fixtures, one source-booted gateway per worker, hybrid IO with fenced command/fetch plus store `fsImpl`, browser-E2E consolidation, and automated review gates only.

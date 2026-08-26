@@ -1,11 +1,15 @@
 # Concurrency: global-budget implementation + efficiency proof — HANDOFF
 
-Fresh-agent brief. Prior de-flake agent (test-engineer-8605) dismissed after diagnosis;
-its branch `goal/6c956ecf/test-engineer-8605` persists for reference (measurement notes in
-its `concurrency-proof.md`, `measure-tier2.mjs`, ledger split experiments — REFERENCE ONLY,
-do not assume its split changes are kept).
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
 
-## Where we are
+This frozen handoff records an intermediate de-flaking and concurrency-budget investigation. The cited branches, ledger experiments, commands, and next steps are provenance only and must not be resumed as current work.
+
+## Historical checkpoint
 - Command-step DI seam: DONE (tier-1 command-step spawn exhaustion solved).
 - Browser porting (D8): DONE (0 real holes, v2≥legacy). 
 - Concurrency-proof is the last open gate. Single-run v2 = **299.7s wall / ~13 CPU-min** (vs legacy baseline ~2 CPU-hours/loop — the ~8× CPU win, from vitest shared-worker replacing per-file spawn+tsx transform tax).

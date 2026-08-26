@@ -7,6 +7,13 @@
 
 # Browser-chaos porting — Cluster A tally (UI-surface)
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 Cluster A journeys (STRICT OWNERSHIP): `app-smoke`, `misc`, `sidebar-nav`,
 `prompt-interaction`, `stories-registry`.
 

@@ -1,5 +1,12 @@
 # Measurement gates 1–4
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 > **Historical evidence.** These gates measured the retired lane/shard topology. The current unit runner has four direct projects and is documented in [`../unit-gate.md`](../unit-gate.md).
 
 **Date:** 2026-07-15

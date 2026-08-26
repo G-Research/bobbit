@@ -1,5 +1,12 @@
 # Per-file Coverage Delta — Test Suite v2
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 Generated: 2026-07-07T18:06:41.714Z
 Mode: **baseline**  |  Threshold: 0.01%  |  Baseline: `tests2/v2-baseline-coverage-per-file.json`  |  Current: `.profiles/testing-v2/coverage/coverage-summary.json`
 

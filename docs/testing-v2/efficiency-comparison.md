@@ -1,5 +1,12 @@
 # Efficiency comparison — v2 vs legacy (per-commit + daily)
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 **Author:** test-engineer-9069 · task 47507884.
 **Question (user, strategic):** *"Is v2 genuinely more efficient than legacy —
 including the daily lane — on CPU-min/loop, wall, and concurrency headroom? If

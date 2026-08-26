@@ -1,5 +1,12 @@
 # Loader, extension, package, and tool I/O boundary audit
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 ## Baseline and proof rule
 
 This re-audit is pinned to merge base `4df9a35e2bd1ac5b662382189e12973fc4e1c4c2`. Every file and assertion cited as proof below was checked with `git show`/`git cat-file` at that commit. Working-tree, branch-head, and other post-merge-base tests are not evidence.

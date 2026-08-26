@@ -1,13 +1,15 @@
 # Browser-chaos porting pass — HANDOFF
 
-Comprehensive bounded pass: mutation-test every distinct audit-flagged browser
-behaviour (`consolidation-assertion-parity.md`), port every confirmed real hole
-into the owning v2 journey, end with a full-verify campaign at **0 real holes**.
-This doc hands off mid-pass so fresh coder(s) can continue (and parallelise).
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
 
-Branch: `goal/6c956ecf/coder-9092`. Corpus: `tests2/chaos/browser-mutants.json`
-(50 entries = 49 content + 1 null, ids BR00–BR49). Tally source of truth:
-`docs/testing-v2/browser-chaos-porting-tally.md`.
+This frozen handoff records a mid-migration mutation-testing pass. It directed the team to port each confirmed browser-coverage hole into the then-owning v2 journey and finish with a zero-hole verification campaign. The pass is complete; no work should be resumed from this file.
+
+The historical working branch was `goal/6c956ecf/coder-9092`; its corpus and tally paths below belong to that snapshot.
 
 ---
 

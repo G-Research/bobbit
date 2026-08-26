@@ -1,5 +1,12 @@
 # Filesystem and persistence I/O boundary audit
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 **Audit date:** 2026-07-15
 
 **Evidence cutoff:** merge base `4df9a35e2bd1ac5b662382189e12973fc4e1c4c2` only
@@ -82,7 +89,7 @@ This covers goals, gates, inbox, plan mutations, preferences, PR status, annotat
 
 **Keep real FS.** One real restart owner per distinct durability/recovery contract is enough; API permutations should not all use real disk. Browser reload alone is not disk durability.
 
-**Post-audit coverage note.** After this audit's fixed evidence cutoff, goal and task production persistence moved to native SQLite while injected/memfs fixtures retained JSON. Focused real-filesystem tests now own migration, transaction, recovery, retirement, corruption, and native-handle behavior. The daily `tests/e2e/goal-task-sqlite-upgrade-restart.spec.ts` journey boots from legacy JSON, exercises supported API mutations and deletion, gracefully restarts against the same state directory, and verifies authoritative SQLite rows after shutdown. This note does not retroactively change the merge-base classification above; it records the current owner for the new durability contract. See [Goal and task store SQLite persistence](../../design/goal-task-store-sqlite-persistence.md#test-ownership).
+**Historical post-audit coverage note.** After this audit's fixed evidence cutoff, goal and task production persistence moved to native SQLite while injected/memfs fixtures retained JSON. At that revision, focused real-filesystem tests owned migration, transaction, recovery, retirement, corruption, and native-handle behavior. The then-daily `tests/e2e/goal-task-sqlite-upgrade-restart.spec.ts` journey booted from legacy JSON, exercised supported API mutations and deletion, restarted against the same state directory, and verified SQLite rows after shutdown. This note does not retroactively change the merge-base classification above. See [Goal and task store SQLite persistence](../../design/goal-task-store-sqlite-persistence.md#test-ownership).
 
 ### P-04 — native project-YAML serialization seam — **PARTIAL**
 

@@ -1,5 +1,12 @@
 # Browser-dimension adversarial evidence (switchover prereq D8)
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 The node-tier chaos proof (`scripts/testing-v2/chaos.mjs`, `docs/testing-v2/chaos-report.md`)
 never touches browser/Playwright code — every one of its mutants targets logic,
 store, scheduler, or reducer paths. Aggregate parity (`scripts/testing-v2/parity.mjs`)
