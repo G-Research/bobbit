@@ -46,7 +46,7 @@ export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
-import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
+import { PrStatusStore, projectHostPullRequestSummary, type PrStatusEntry } from "./agent/pr-status-store.js";
 import { PromotedSessionLifecycleConflictError, SessionManager, SessionPinNotFoundError, SharedWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
@@ -90,7 +90,17 @@ import { PackLocalDataError, PackLocalDataResolver } from "./extension-host/pack
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
-import type { StorePutOptions } from "../shared/extension-host/host-api.js";
+import {
+	HostProjectReadInputError,
+	parseHostProjectSelector,
+	projectHostGateSummary,
+	projectHostGoalSummary,
+	projectHostSessionSummary,
+	projectHostStaffSummary,
+	projectHostTaskSummary,
+	selectHostProjectRead,
+} from "./extension-host/project-read.js";
+import type { HostProjectSelector, StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { HostInterceptorRouter, type HostInterceptorContext } from "./extension-host/host-interceptor-router.js";
 import { hostInterceptorAuditSink } from "./extension-host/host-interceptor-audit.js";
@@ -4304,15 +4314,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
-	const resolveHostNotificationSessionProject = (sessionId: string): string | undefined => {
-		const liveProjectId = sessionManager.getSession(sessionId)?.projectId;
-		const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
-		// Both are host-owned authorities. Refuse an ambiguous transition rather than
-		// choosing a partition; a completed live reassignment may temporarily have no
-		// row in the destination store, in which case the live owner is authoritative.
-		if (liveProjectId && persistedProjectId && liveProjectId !== persistedProjectId) return undefined;
-		return liveProjectId ?? persistedProjectId;
-	};
+	const resolveHostSessionProject = (sessionId: string): string | undefined =>
+		resolveHostNotificationSessionProject(sessionManager, sessionId);
 
 	const createHookHostApi = (
 		context: { projectId?: string; sessionId?: string; cwd: string },
@@ -4323,7 +4326,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		const localDataDirectory = resolveDeclaredPackLocalData(context.projectId, packId);
 		const isSessionAuthorized = context.sessionId
 			? () => typeof context.projectId === "string"
-				&& resolveHostNotificationSessionProject(context.sessionId!) === context.projectId
+				&& resolveHostSessionProject(context.sessionId!) === context.projectId
 			: undefined;
 		return createServerHostApi({
 			sessionId: context.sessionId ?? `project:${context.projectId ?? "unbound"}`,
@@ -4446,7 +4449,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const contribution = (handler as RuntimeNotificationHandler).contribution;
 			return handler.projectId === notification.projectId
 				&& (!notification.sessionId
-					|| resolveHostNotificationSessionProject(notification.sessionId) === notification.projectId)
+					|| resolveHostSessionProject(notification.sessionId) === notification.projectId)
 				&& packContributionRegistry.isHookAuthorized(
 					notification.projectId,
 					contribution.packId,
@@ -4459,7 +4462,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		invoke: (handler, notification, signal) => {
 			const contribution = (handler as RuntimeNotificationHandler).contribution;
 			if (notification.sessionId
-				&& resolveHostNotificationSessionProject(notification.sessionId) !== notification.projectId) {
+				&& resolveHostSessionProject(notification.sessionId) !== notification.projectId) {
 				throw new Error("notification session authority is no longer valid");
 			}
 			const persisted = notification.sessionId
@@ -4497,12 +4500,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const hostNotificationDispatcher = new HostNotificationDispatcher({
 		adapters: [
 			new HostNotificationSocketRouter(() => wss.clients, {
-				resolveSessionProject: resolveHostNotificationSessionProject,
+				resolveSessionProject: resolveHostSessionProject,
 			}),
 			notificationModuleAdapter,
 			notificationStaffDispatcher,
 		],
-		resolveSessionProject: resolveHostNotificationSessionProject,
+		resolveSessionProject: resolveHostSessionProject,
 	});
 	projectContextManager.setHostNotificationDispatcher(hostNotificationDispatcher);
 	sessionManager.setHostNotificationPublisher(hostNotificationDispatcher as any);
@@ -5875,6 +5878,17 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 
 const activeMarkdownImageReads = new Map<string, number>();
 const MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION = 8;
+
+/** Resolve one unambiguous session-owned project without choosing between authorities. */
+function resolveHostNotificationSessionProject(
+	sessionManager: SessionManager,
+	sessionId: string,
+): string | undefined {
+	const liveProjectId = sessionManager.getSession(sessionId)?.projectId;
+	const persistedProjectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+	if (liveProjectId && persistedProjectId && liveProjectId !== persistedProjectId) return undefined;
+	return liveProjectId ?? persistedProjectId;
+}
 
 async function handleApiRoute(
 	url: URL,
@@ -10758,6 +10772,180 @@ async function handleApiRoute(
 		const token = mintSurfaceToken({ sessionId: guard.sessionId, packId: ident.packId, contributionId: ident.contributionId, tool });
 		console.log(`[ext-surface-token] tool=${tool} packId=${ident.packId} session=${guard.sessionId} outcome=ok`);
 		json({ token });
+		return;
+	}
+
+	// POST /api/ext/project/read — six fixed, redacted on-demand reads bound to
+	// the authenticated session's exact project. The caller supplies no project,
+	// pack, tool, session target, URL, projection, or include selector.
+	if (url.pathname === "/api/ext/project/read" && req.method === "POST") {
+		const body = (await readBody(req)) ?? {};
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "invalid project read request" }, 400);
+			return;
+		}
+		const request = body as Record<string, unknown>;
+		if ("projectId" in request || "packId" in request || "tool" in request || "url" in request) {
+			json({ error: "caller-selected project identity is not allowed" }, 400);
+			return;
+		}
+		const rawHeaderSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
+		const headerSessionId = typeof rawHeaderSessionId === "string" ? rawHeaderSessionId : undefined;
+		if (!headerSessionId) {
+			json({ error: "missing session" }, 403);
+			return;
+		}
+
+		// Both live and persisted rows are host-owned authorities. Any disagreement
+		// is an in-flight project move and fails closed rather than choosing a store.
+		const projectId = resolveHostNotificationSessionProject(sessionManager, headerSessionId);
+		if (!projectId) {
+			json({ error: "session project authority is unavailable" }, 403);
+			return;
+		}
+		const projectContext = projectContextManager.getOrCreate(projectId);
+		if (!projectContext) {
+			json({ error: "session project authority is unavailable" }, 403);
+			return;
+		}
+		const projectToolManager = resolveActionToolManager(toolManager, projectContext.toolManager);
+		const resolveSession = (id: string): ActionGuardSession | undefined => {
+			const live = sessionManager.getSession(id);
+			if (live) return { allowedTools: live.allowedTools };
+			const persisted = sessionManager.getPersistedSession(id);
+			return persisted ? { allowedTools: persisted.allowedTools } : undefined;
+		};
+		const surface = resolveSurfaceIdentity({
+			token: request.surfaceToken,
+			headerSessionId,
+			resolver: projectToolManager,
+			contributions: packContributionRegistry,
+			projectId,
+		});
+		if (!surface.ok) {
+			json({ error: surface.error }, surface.status);
+			return;
+		}
+		// Tool surfaces layer the canonical allowedTools guard. Pack-bound panels,
+		// entrypoints, and routes were already re-resolved as installed + active.
+		// codeql[js/user-controlled-bypass] Signed surface kind selects one of two complete authorization contracts.
+		const guard = surface.tool !== undefined
+			? authorizeScopedRequest({
+				tool: surface.tool,
+				headerSessionId: rawHeaderSessionId,
+				bodySessionId: request.sessionId,
+				resolveSession,
+			})
+			: packBoundScopedGuard(headerSessionId, request.sessionId, resolveSession);
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
+			return;
+		}
+		// Project-move fence: token validation and scoped authorization may consult
+		// stores. Re-resolve immediately before touching any project record.
+		if (resolveHostNotificationSessionProject(sessionManager, guard.sessionId) !== projectId) {
+			json({ error: "session project authority changed" }, 403);
+			return;
+		}
+
+		const operation = request.operation;
+		const allowedOperations = new Set([
+			"staff", "sessions", "goals", "goal-tasks", "goal-gates", "goal-pull-request",
+		]);
+		if (typeof operation !== "string" || !allowedOperations.has(operation)) {
+			json({ error: "unknown project read operation" }, 400);
+			return;
+		}
+		try {
+			const foreignStaff = (id: string): "not-found" | "unauthorized" => {
+				const found = staffManager.getStaff(id);
+				return found && found.projectId !== projectId ? "unauthorized" : "not-found";
+			};
+			const foreignSession = (id: string): "not-found" | "unauthorized" => {
+				const liveProject = sessionManager.getSession(id)?.projectId;
+				const persistedProject = sessionManager.getPersistedSession(id)?.projectId;
+				return (liveProject && liveProject !== projectId) || (persistedProject && persistedProject !== projectId)
+					? "unauthorized"
+					: "not-found";
+			};
+			const foreignGoal = (id: string): "not-found" | "unauthorized" => {
+				const owner = projectContextManager.getContextForGoal(id);
+				return owner && owner.project.id !== projectId ? "unauthorized" : "not-found";
+			};
+			const foreignTask = (id: string): "not-found" | "unauthorized" => {
+				for (const context of projectContextManager.all()) {
+					if (context.project.id !== projectId && context.taskStore.getAll().some(task => task.id === id)) {
+						return "unauthorized";
+					}
+				}
+				return "not-found";
+			};
+			const selector = operation === "goal-pull-request"
+				? undefined
+				: parseHostProjectSelector(request.selector) as HostProjectSelector;
+
+			if (operation === "staff") {
+				const items = staffManager.listStaff(projectId).map(projectHostStaffSummary);
+				json(selectHostProjectRead(items, selector, item => item.id, foreignStaff));
+				return;
+			}
+			if (operation === "sessions") {
+				const byId = new Map<string, ReturnType<typeof projectHostSessionSummary>>();
+				for (const session of sessionManager.listSessions()) {
+					if (session.projectId !== projectId) continue;
+					byId.set(session.id, projectHostSessionSummary(session));
+				}
+				for (const session of projectContext.sessionStore.getArchived()) {
+					byId.set(session.id, projectHostSessionSummary({ ...session, status: "archived", archived: true }));
+				}
+				const items = [...byId.values()].filter((item): item is NonNullable<typeof item> => item !== undefined);
+				json(selectHostProjectRead(items, selector, item => item.id, foreignSession));
+				return;
+			}
+			if (operation === "goals") {
+				const items = projectContext.goalStore.getAll().map(projectHostGoalSummary);
+				json(selectHostProjectRead(items, selector, item => item.id, foreignGoal));
+				return;
+			}
+
+			const goalId = request.goalId;
+			if (typeof goalId !== "string") throw new HostProjectReadInputError("goalId is required");
+			// Reuse the exact bounded-ID validator rather than introducing a second ID grammar.
+			parseHostProjectSelector({ mode: "ids", ids: [goalId] });
+			const goal = projectContext.goalStore.get(goalId);
+			if (!goal) {
+				json({ goalId, status: foreignGoal(goalId) });
+				return;
+			}
+			if (operation === "goal-tasks") {
+				const items = projectContext.taskStore.getByGoalId(goalId).map(projectHostTaskSummary);
+				json(selectHostProjectRead(items, selector, item => item.id, foreignTask));
+				return;
+			}
+			if (operation === "goal-gates") {
+				const summary = buildGateStatusSummary({
+					workflow: goal.workflow,
+					gates: projectContext.gateStore.getGatesForGoal(goalId),
+					activeVerifications: verificationHarness.getActiveVerifications(goalId),
+				});
+				const items = summary.gates.map(projectHostGateSummary);
+				json(selectHostProjectRead(items, selector, item => item.gateId));
+				return;
+			}
+			const cached = prStatusStore.get(goalId);
+			const value = cached ? projectHostPullRequestSummary(goalId, cached) : null;
+			if (cached && value === undefined) {
+				json({ error: "pull request status is unavailable" }, 503);
+				return;
+			}
+			json({ id: goalId, status: "found", value });
+		} catch (error) {
+			if (error instanceof HostProjectReadInputError) {
+				json({ error: error.message, code: error.code }, error.statusCode);
+				return;
+			}
+			throw error;
+		}
 		return;
 	}
 
