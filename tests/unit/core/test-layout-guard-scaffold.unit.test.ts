@@ -16,7 +16,7 @@ import {
 } from "../../../scripts/testing/create-test.mjs";
 import { TEST_LAYOUT, validateTestPath } from "../../../scripts/testing/layout-policy.mjs";
 
-type Convention = { semantic: string; directory: string; suffix: string };
+type Convention = { semantic: string; lane: string; directory: string; suffix: string; pattern: string };
 type Diagnostic = { code: string };
 
 const temporaryRoots: string[] = [];
@@ -115,6 +115,24 @@ describe("test layout repository guard", () => {
 		const forwardedArgs = "--project api tests/e2e/api/sample.api-e2e.spec.ts --grep smoke";
 		const invocationSteps = `${manifest.scripts["test:e2e:run"]} ${forwardedArgs}`.split(/\s*&&\s*/);
 		expect(invocationSteps.at(-1)).toBe(`node scripts/run-playwright-e2e.mjs ${forwardedArgs}`);
+	});
+
+	it("type-checks every automated semantic cell without enrolling manual or inert fixture roots", () => {
+		const config = JSON.parse(readFileSync(new URL("../../../tsconfig.tests.json", import.meta.url), "utf8")) as {
+			include: string[];
+			exclude?: string[];
+		};
+		const conventions = TEST_LAYOUT as readonly Convention[];
+		const automatedPatterns = conventions
+			.filter(({ lane }) => lane !== "manual")
+			.map(({ pattern }) => pattern);
+		const runnableIncludes = config.include.filter((entry) => /\.(?:test|spec)\.ts$/.test(entry));
+
+		expect(runnableIncludes).toEqual(automatedPatterns);
+		expect(config.include).not.toContain("tests/**/*.ts");
+		expect(config.include).not.toContain(conventions.find(({ lane }) => lane === "manual")?.pattern);
+		expect(config.include.some((entry) => entry.startsWith("tests/support/fixtures/"))).toBe(false);
+		expect(config.exclude?.some((entry) => entry.startsWith("tests/")) ?? false).toBe(false);
 	});
 });
 

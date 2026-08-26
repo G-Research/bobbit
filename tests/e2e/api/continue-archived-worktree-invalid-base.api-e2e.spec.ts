@@ -13,6 +13,13 @@ import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn
 
 test.use({ enableWorktreePool: false });
 
+function requireSessionId(value: unknown): string {
+	if (typeof value !== "object" || value === null || !("id" in value) || typeof value.id !== "string" || value.id.length === 0) {
+		throw new Error("source session creation must return a non-empty string id");
+	}
+	return value.id;
+}
+
 async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	const ws = await connectWs(id);
 	try {
@@ -84,7 +91,7 @@ test.describe("Continue-Archived worktree base-ref failure", () => {
 				body: JSON.stringify({ cwd: repoPath, worktree: true, projectId }),
 			});
 			expect(sourceResp.status).toBe(201);
-			srcId = (await sourceResp.json()).id;
+			srcId = requireSessionId(await sourceResp.json());
 
 			const srcRec = await pollUntil(async () => {
 				const recResp = await apiFetch(`/api/sessions/${srcId}`);

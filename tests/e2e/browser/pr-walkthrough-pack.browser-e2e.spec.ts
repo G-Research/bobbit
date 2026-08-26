@@ -47,6 +47,7 @@ import { execFileSync } from "node:child_process";
 import { test, expect } from "../_helpers/gateway-harness.js";
 import type { Page, Response } from "@playwright/test";
 import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../_helpers/e2e-setup.js";
+import { importBuiltServerModule } from "../_helpers/import-built-server-module.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // Within-file serial: a single end-to-end lifecycle test in describe 1; the
@@ -754,7 +755,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		// Seed ONLY a child binding (jobId set, NO submitted/<jobId>): the pane is a
 		// bound reviewer child still producing the walkthrough. No git repo needed —
 		// the pending state does not recompute; the status poll returns running.
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const { getPackStore } = await importBuiltServerModule<typeof import("../../../src/server/extension-host/pack-store.js")>("../../../dist/server/extension-host/pack-store.js");
 		const pendingJobId = "prw-t3-pending";
 		await getPackStore().put(PACK, `binding/${sid}`, {
 			jobId: pendingJobId,
@@ -789,7 +790,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		expect(sessionWorktree, "the bound session must have a resolvable working dir").toBeTruthy();
 		setupSessionGitRepo(sessionWorktree!);
 
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const { getPackStore } = await importBuiltServerModule<typeof import("../../../src/server/extension-host/pack-store.js")>("../../../dist/server/extension-host/pack-store.js");
 		await getPackStore().put(PACK, `submitted/${jobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
 		await getPackStore().put(PACK, `binding/${sid}`, {
 			jobId,
@@ -872,7 +873,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		// recovers from its OWN binding/<child>. Seed binding/<sid> (the CHILD key) +
 		// submitted/<jobId> (NO owner pointer): a successful recover proves the child
 		// self-recover branch (binding/<me> → submitted) fired.
-		const { getPackStore } = await import("../../../dist/server/extension-host/pack-store.js");
+		const { getPackStore } = await importBuiltServerModule<typeof import("../../../src/server/extension-host/pack-store.js")>("../../../dist/server/extension-host/pack-store.js");
 		const childJobId = "prw-t4-child-recover";
 		await getPackStore().put(PACK, `submitted/${childJobId}`, { yaml: submitYaml(), baseSha, headSha, submittedAt: Date.now() });
 		await getPackStore().put(PACK, `binding/${sid}`, {

@@ -297,6 +297,7 @@ test.describe("gate verification resume after restart", () => {
 					timeoutMs: 10_000,
 					message: "resumeInterruptedVerifications to settle",
 				});
+				expect(terminatedSessionId, "resume cleanup should terminate the resumed reviewer session").toBe(reviewerId);
 				reviewerSession.rpcClient.prompt = origPrompt;
 			} finally {
 				sm.terminateSession = origTerminate;

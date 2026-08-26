@@ -23,6 +23,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, tr
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { importBuiltServerModule } from "../_helpers/import-built-server-module.js";
 
 // Deliberately do not enable Node's on-disk V8 compile cache here. The E2E
 // workers cold-import dist/server once per process, so a per-worker cache gives
@@ -97,11 +98,11 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { setProjectRoot } = await importBuiltServerModule<typeof import("../../../src/server/bobbit-dir.js")>("../../../dist/server/bobbit-dir.js");
+	const { scaffoldBobbitDir } = await importBuiltServerModule<typeof import("../../../src/server/scaffold.js")>("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await importBuiltServerModule<typeof import("../../../src/server/auth/token.js")>("../../../dist/server/auth/token.js");
+	const { createGateway } = await importBuiltServerModule<typeof import("../../../src/server/server.js")>("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await importBuiltServerModule<typeof import("../../../src/server/agent/rpc-bridge.js")>("../../../dist/server/agent/rpc-bridge.js");
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../_helpers/in-process-mock-bridge.mjs");
 	registerRpcBridgeFactory((rpcOpts: any) => {
 		if (shouldUseInProcessMock(rpcOpts.cliPath)) return new InProcessMockBridge(rpcOpts);

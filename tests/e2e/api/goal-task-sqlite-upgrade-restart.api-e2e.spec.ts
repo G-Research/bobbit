@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { importBuiltServerModule } from "../_helpers/import-built-server-module.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "..", "_helpers", "mock-agent.mjs");
@@ -92,12 +93,12 @@ async function prepareFixture(): Promise<Fixture> {
 	process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 	process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 
-	const bobbitDirModule = await import("../../../dist/server/bobbit-dir.js");
+	const bobbitDirModule = await importBuiltServerModule<typeof import("../../../src/server/bobbit-dir.js")>("../../../dist/server/bobbit-dir.js");
 	const previousProjectRoot = bobbitDirModule.getProjectRoot?.();
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { scaffoldBobbitDir } = await importBuiltServerModule<typeof import("../../../src/server/scaffold.js")>("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await importBuiltServerModule<typeof import("../../../src/server/auth/token.js")>("../../../dist/server/auth/token.js");
+	const { createGateway } = await importBuiltServerModule<typeof import("../../../src/server/server.js")>("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await importBuiltServerModule<typeof import("../../../src/server/agent/rpc-bridge.js")>("../../../dist/server/agent/rpc-bridge.js");
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../_helpers/in-process-mock-bridge.mjs");
 
 	bobbitDirModule.setProjectRoot(bobbitDir);

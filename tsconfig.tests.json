@@ -25,17 +25,13 @@
     "tests/integration/gateway/**/*.gateway.test.ts",
     "tests/browser/fixtures/**/*.fixture.spec.ts",
     "tests/browser/journeys/**/*.journey.spec.ts",
+    "tests/e2e/node/**/*.node-e2e.test.ts",
     "tests/e2e/vitest/**/*.vitest-e2e.test.ts",
+    "tests/e2e/api/**/*.api-e2e.spec.ts",
+    "tests/e2e/browser/**/*.browser-e2e.spec.ts",
     "tests/support/harnesses/browser/**/*.ts",
     "tests/support/harnesses/shared/**/*.ts",
     "src/app/qrcode.d.ts",
     "src/ui/speech-recognition.d.ts"
-  ],
-  "exclude": [
-    "tests/e2e/api/**/*.ts",
-    "tests/e2e/browser/**/*.ts",
-    "tests/e2e/node/**/*.ts",
-    "tests/manual/**/*.ts",
-    "tests/support/fixtures/**/*.ts"
   ]
 }

@@ -28,6 +28,7 @@ import module from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { importBuiltServerModule } from "../_helpers/import-built-server-module.js";
 
 // Per-worker V8 compile cache (mirrors in-process-harness.ts).
 {
@@ -127,13 +128,13 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const bobbitDirMod = await import("../../../dist/server/bobbit-dir.js");
+	const bobbitDirMod = await importBuiltServerModule<typeof import("../../../src/server/bobbit-dir.js")>("../../../dist/server/bobbit-dir.js");
 	const { setProjectRoot } = bobbitDirMod;
 	const prevProjectRoot = bobbitDirMod.getProjectRoot?.();
-	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { scaffoldBobbitDir } = await importBuiltServerModule<typeof import("../../../src/server/scaffold.js")>("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await importBuiltServerModule<typeof import("../../../src/server/auth/token.js")>("../../../dist/server/auth/token.js");
+	const { createGateway } = await importBuiltServerModule<typeof import("../../../src/server/server.js")>("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await importBuiltServerModule<typeof import("../../../src/server/agent/rpc-bridge.js")>("../../../dist/server/agent/rpc-bridge.js");
 	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../_helpers/in-process-mock-bridge.mjs");
 	// registerRpcBridgeFactory is a singleton setter — the in-process-harness
 	// worker fixture installs its own factory at worker startup, so capture
