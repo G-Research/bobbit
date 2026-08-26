@@ -17,7 +17,7 @@
  *    tab switches, and preserves the final rows through acceptance + reload;
  *  - the optional Sub-goals tab follows the Settings sub-goals flag.
  *
- * Mirrors tests/e2e/ui/goal-creation.spec.ts (assistant proposal flow + mock
+ * Mirrors the historical tests/e2e/ui/goal-creation.spec.ts (assistant proposal flow + mock
  * agent). Persistence is asserted against the server-side goal via the API,
  * which is the durable record that survives a reload.
  */

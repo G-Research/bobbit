@@ -11,7 +11,7 @@
  *    isolated E2E env has no `google-gemini-cli` credential in auth.json).
  *
  * The success path (token + project) is exercised by unit tests over
- * getGoogleAccessToken/ensureCodeAssistProject and the manual-integration suite.
+ * getGoogleAccessToken/ensureCodeAssistProject and the `tests/manual/` suite.
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { readE2EToken, apiFetch, createSession, deleteSession } from "./_helpers/e2e/e2e-setup.js";

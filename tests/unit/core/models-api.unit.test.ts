@@ -6,7 +6,7 @@
  * Unit tests for the model registry (GET /api/models equivalent).
  *
  * Validates model structure from built-in providers without needing
- * a full gateway. Replaces the slower E2E version in tests/e2e/models-api.spec.ts.
+ * a full gateway. Replaces the historical slower E2E version in tests/e2e/models-api.spec.ts.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

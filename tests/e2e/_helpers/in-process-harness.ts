@@ -179,7 +179,7 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		// Default the system-scope Subgoals (Experimental) flag ON for E2E tests so
 		// existing nested-goal specs keep working unchanged. The flag's OFF path
-		// is covered by tests/e2e/ui/subgoals-experimental-toggle.spec.ts and the
+		// is covered by tests/browser/journeys/ui/subgoals-experimental-toggle.journey.spec.ts and the
 		// server-unit + helper unit tests. See
 		// docs/design/subgoals-experimental-toggle.md §9. Register the mock agent's
 		// exact tuple through the same manual-provider preferences that production

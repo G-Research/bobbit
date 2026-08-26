@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 const TESTS_DIR = new URL(".", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const SELF = "no-dist-imports.test.ts";
-const EXCLUDED_DIRS = new Set(["e2e", "fullstack", "manual-integration"]);
+const EXCLUDED_DIRS = new Set<string>();
 const PATTERN = /from\s+["']\.\.\/(\.\.\/)?dist\//;
 
 function collect(dir: string, out: string[] = []): string[] {

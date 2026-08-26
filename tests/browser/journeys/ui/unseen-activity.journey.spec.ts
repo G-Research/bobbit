@@ -87,5 +87,5 @@ test.describe("Unseen-activity dot (server-backed read state)", () => {
 		await expect(unseenDot).toHaveCount(0);
 	});
 
-	// Unknown-session endpoint coverage lives in tests/e2e/unseen-activity-api.spec.ts.
+	// Unknown-session endpoint coverage lives in tests/integration/gateway/unseen-activity-api.gateway.test.ts.
 });

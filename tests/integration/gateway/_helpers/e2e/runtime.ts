@@ -19,7 +19,7 @@ export async function ensureGateway(): Promise<GatewayFixture> {
 }
 
 export function gatewaySync(): GatewayFixture {
-	if (!_gw) throw new Error("[tests2/e2e-compat] gateway not booted — call helpers from within the compat `test`/hooks (they await getGateway first)");
+	if (!_gw) throw new Error("[tests/integration/gateway/_helpers/e2e] gateway not booted — call helpers from within the compat `test`/hooks (they await getGateway first)");
 	return _gw;
 }
 

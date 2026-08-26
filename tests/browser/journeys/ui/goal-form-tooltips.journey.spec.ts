@@ -1,7 +1,7 @@
 /**
  * Goal form tooltip E2E tests — verify ⓘ tooltip icons on optional step toggles.
  *
- * Field-level workflow metadata is covered in tests/e2e/goal-workflow-api.spec.ts;
+ * Field-level workflow metadata is covered in tests/integration/gateway/goal-workflow-api.gateway.test.ts;
  * this browser spec keeps the real assistant/form render path only once.
  */
 import { test, expect } from "../../_helpers/journey-fixture.js";

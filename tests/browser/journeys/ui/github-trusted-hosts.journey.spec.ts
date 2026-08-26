@@ -8,8 +8,8 @@
  *      dialog; confirming adds the host to preferences and the launch proceeds
  *      (no untrusted error); cancelling creates no walkthrough tab.
  *
- * Pattern: tests/e2e/ui/settings.spec.ts (settings) +
- *          tests/e2e/ui/pr-walkthrough-panel.spec.ts (launch).
+ * Pattern: tests/browser/journeys/project-settings.journey.spec.ts (settings) +
+ *          tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts (launch).
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../../_helpers/journey-fixture.js";
@@ -104,5 +104,5 @@ test.describe("Trusted GitHub hosts — settings", () => {
 // PR-walkthrough viewer/launcher deletion. The launch flow no longer has a
 // client launcher (`/walkthrough-pr`); the first-party pack provides the
 // entrypoints, and the server `/api/pr-walkthrough/launch` route + its trusted-
-// host enforcement are covered by tests/e2e/pr-walkthrough-api.spec.ts. The
+// host enforcement are covered by tests/integration/gateway/pr-walkthrough-api.gateway.test.ts. The
 // trusted-hosts SETTINGS surface (above) is unaffected and still verified here.

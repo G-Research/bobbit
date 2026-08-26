@@ -11,7 +11,7 @@ import { readE2EToken, defaultProject, apiFetch, connectWs, createSession, delet
  * Wake cycles enqueue prompts on the existing session instead of creating new ones.
  *
  * Run with:
- *   npm run build:server && npx playwright test tests/e2e/staff.spec.ts --config playwright-e2e.config.ts
+ *   npm run test:unit -- tests/integration/gateway/staff.gateway.test.ts
  */
 
 
@@ -337,7 +337,7 @@ test.describe("Staff Agents — REST API", () => {
 
 	// NOTE: `POST /api/staff/:id/wake` was removed by the staff-inbox migration
 	// (docs/design/staff-inbox.md §7.2). The equivalent surface is
-	// `POST /api/staff/:id/inbox` — covered by `tests/e2e/inbox-api.spec.ts`.
+	// `POST /api/staff/:id/inbox` — covered by `tests/integration/gateway/inbox-api.gateway.test.ts`.
 
 	test("GET /api/staff/:id/sessions returns 410 (deprecated)", async () => {
 		const histRes = await apiFetch(`/api/staff/${sharedStaff.id}/sessions`, {

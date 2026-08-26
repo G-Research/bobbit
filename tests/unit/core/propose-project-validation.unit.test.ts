@@ -9,8 +9,8 @@
  * The extension `execute()` is a thin ack — the authoritative validation
  * of legacy top-level `qa_*` keys and per-component `config` maps lives
  * server-side at the REST PUT boundary (see
- * `tests/e2e/project-config-component-config.spec.ts` and
- * `tests/e2e/project-config-native-yaml.spec.ts`). These tests pin the
+ * `tests/integration/gateway/project-config-component-config.gateway.test.ts` and
+ * `tests/integration/gateway/project-config-native-yaml.gateway.test.ts`). These tests pin the
  * pi-coding-agent calling convention `(toolCallId, params, …)` so the
  * tool doesn't crash regardless of payload shape.
  */

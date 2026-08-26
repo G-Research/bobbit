@@ -17,8 +17,9 @@
  * because the mechanisms they asserted are deleted.
  *
  * The Jump-to-bottom button click flow is covered by
- * tests/e2e/ui/jump-to-bottom.spec.ts. The vibration regression
- * (delta === 0 RO no-op) is covered by tests/agent-interface-scroll.spec.ts.
+ * tests/browser/fixtures/jump-to-last-prompt.fixture.spec.ts. The vibration
+ * regression (delta === 0 RO no-op) is covered by
+ * tests/browser/fixtures/agent-interface-scroll.fixture.spec.ts.
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";

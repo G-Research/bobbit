@@ -1,7 +1,7 @@
 // Test entry — bundles FindRenderer so we can render it in a file:// fixture.
 //
-// This fixture exists to give the design doc's "Browser E2E for find tool"
-// (tests/e2e/ui/find-tool.spec.ts) a fully deterministic surface to assert
+// This fixture gives tests/dom/ui-fixtures/find-tool.dom.test.ts a fully
+// deterministic surface to assert
 // against. The bundled fd/rg work guarantees binaries are available; the
 // renderer is the visible contract the user sees when the tool fires.
 import { render } from "lit";

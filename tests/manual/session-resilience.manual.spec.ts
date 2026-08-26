@@ -53,7 +53,7 @@ function projectRegistrationBody(name: string, rootPath: string, opts: { upsert?
 	return { name, rootPath, components, workflows, ...opts };
 }
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
-const RESULTS_DIR = join(PROJECT_ROOT, "test-results", "manual-integration");
+const RESULTS_DIR = join(PROJECT_ROOT, "test-results", "manual");
 const WANT_SCREENSHOTS = !!process.env.SCREENSHOTS;
 
 // ---------------------------------------------------------------------------

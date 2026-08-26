@@ -17,7 +17,7 @@
  * of scripts/testing-v2/ledger.mjs (ledger dir including BOBBIT_V2_LEDGER_DIR
  * override, lock file + steal rule, leases file name + entry shape
  * {id,pool,pid,at,forced}, per-pool max-hold, cap resolution).
- * tests2/ledger-lease-bridge-interop.test.ts pins that agreement.
+ * tests/unit/core/ledger-lease-bridge-interop.unit.test.ts pins that agreement.
  */
 import { openSync, closeSync, writeSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";

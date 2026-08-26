@@ -24,7 +24,7 @@ async function withRetry(fn: () => Promise<void>, label: string): Promise<void> 
 		try { await fn(); return; } catch (err) { lastErr = err; await sleep(CLEANUP_RETRY_DELAY_MS * (attempt + 1)); }
 	}
 	// Cleanup failures must not silently corrupt later tests — surface loudly.
-	throw new Error(`[tests2/scope] cleanup failed for ${label} after ${CLEANUP_RETRIES} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
+	throw new Error(`[tests/support/harnesses/shared/scope] cleanup failed for ${label} after ${CLEANUP_RETRIES} attempts: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
 }
 
 export interface TestScope {

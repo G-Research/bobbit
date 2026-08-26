@@ -9,7 +9,7 @@
  *
  * Mirrors the scenario in design \u00a716.2 (restart-resume preserves branch).
  * The full restart-resume E2E lives in
- * `tests/manual-integration/restart-minimal.spec.ts` (real gateway + hard
+ * `tests/manual/restart-minimal.manual.spec.ts` (real gateway + hard
  * kill + re-spawn).
  */
 import { describe, it } from "vitest";

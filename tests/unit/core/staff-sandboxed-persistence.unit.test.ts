@@ -15,7 +15,7 @@ guardProcessEnv();
  *   - Legacy records without the field normalise to `false` on load.
  *   - StaffManager.updateStaff's TypeScript signature omits `sandboxed`, so
  *     no legitimate caller can flip it. The user-facing API allow-list
- *     (PUT /api/staff/:id) is pinned by the E2E test in tests/e2e/staff.spec.ts.
+ *     (PUT /api/staff/:id) is pinned by tests/integration/gateway/staff.gateway.test.ts.
  *
  * Mirrors the test pattern used by tests/staff-orphan-reassign.test.ts:
  * exercise the real StaffStore against file://-style tmp directories.

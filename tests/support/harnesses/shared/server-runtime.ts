@@ -49,7 +49,7 @@ export function loadServerTestRuntime(): Promise<ServerTestRuntime> {
 	if (!runtimePromise) {
 		const bundle = process.env.BOBBIT_V2_SERVER_PREBUNDLE;
 		if (bundle) {
-			if (!existsSync(bundle)) throw new Error(`[tests2/server-runtime] configured prebundle does not exist: ${bundle}`);
+			if (!existsSync(bundle)) throw new Error(`[tests/support/harnesses/shared/server-runtime] configured prebundle does not exist: ${bundle}`);
 			runtimePromise = import(/* @vite-ignore */ pathToFileURL(bundle).href) as Promise<ServerTestRuntime>;
 		} else {
 			runtimePromise = loadSourceRuntime();

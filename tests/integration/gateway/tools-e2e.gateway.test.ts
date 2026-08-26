@@ -9,7 +9,7 @@
  * Agent tool invocations (Read, Write, Edit, Bash) that spawn real agent
  * subprocesses have been moved to agent-tools-e2e.spec.ts (excluded by default).
  *
- * Run with: npm run build:server && npx playwright test --config playwright-e2e.config.ts tests/e2e/tools-e2e.spec.ts
+ * Run with: npm run test:unit -- tests/integration/gateway/tools-e2e.gateway.test.ts
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import WebSocket from "ws";

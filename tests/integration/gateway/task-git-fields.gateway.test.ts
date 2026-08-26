@@ -9,7 +9,7 @@
  * - The old commitSha field is absent from task responses
  *
  * Run with:
- *   npm run build:server && npx playwright test tests/e2e/task-git-fields.spec.ts --config playwright-e2e.config.ts
+ *   npm run test:unit -- tests/integration/gateway/task-git-fields.gateway.test.ts
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import {

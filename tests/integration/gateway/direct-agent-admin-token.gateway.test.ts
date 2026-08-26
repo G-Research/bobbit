@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// Native gateway integration coverage in the canonical semantic test layout.
 //
 /**
  * Pinning test for the "Direct-agent admin token" interim rollback.

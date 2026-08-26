@@ -13,7 +13,7 @@
  * Harness constraint (§8 R2): the browser harness has no real GitHub PR and
  * `execFile("gh")` resolves the real binary, so a click-driven `run` resolves
  * `NO_PR` and mints no reviewer in-browser. Reviewer-spawn / lifecycle assertions
- * live in the API spec (tests/e2e/pr-walkthrough-host-agents.spec.ts) with an
+ * live in the API spec (tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts) with an
  * explicit github target. Here we pin the BROWSER-only seams: the NO_PR inline error
  * via the GitStatusWidget (T-2), the bound-child pending state (T-3), and the
  * child-session pane's submit→cards + reload→recover (T-4) — the latter two by
@@ -620,7 +620,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 // pending state (T-3) and submit→cards + reload→recover (T-4) are pinned by SEEDING
 // the binding/<self> (+ submitted/<jobId>) the run flow would have written, then
 // driving the panel as the bound (child) session. Reviewer-spawn + lifecycle
-// assertions live in the API spec (tests/e2e/pr-walkthrough-host-agents.spec.ts).
+// assertions live in the API spec (tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts).
 test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)", () => {
 	/** Open the app, create + select a session, reconcile pack renderers. Returns sid. */
 	async function freshSessionWithPanel(page: import("@playwright/test").Page): Promise<string> {

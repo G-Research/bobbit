@@ -19,7 +19,7 @@
  *   finally completes it silently mutates `state.previewSpec = "BODY"`
  *   but — without this render — never repaints, leaving the panel stuck
  *   on `_No spec content yet_`. The companion E2E
- *   `tests/e2e/ui/proposal-spec-survives-navigate.spec.ts` exercises the
+ *   `tests/browser/journeys/ui/proposal-spec-survives-navigate.journey.spec.ts` exercises the
  *   full user journey; this unit pin keeps the contract testable at the
  *   layer where it's defined and immune to fast-path refactors.
  *

@@ -4,7 +4,7 @@
  * The widget's multi-repo rendering is driven by the `repos` envelope returned
  * by `GET /api/sessions/:id/git-status`. Here we route-mock that endpoint (and
  * the per-repo `git-diff` endpoint) so the test is deterministic — the server
- * envelope itself is covered by `tests/e2e/session-git-status-multi-repo.spec.ts`.
+ * envelope itself is covered by `tests/e2e/api/session-git-status-multi-repo.api-e2e.spec.ts`.
  *
  * Asserts:
  *   - pill shows aggregated dirty + ahead/insertion stats summed across repos,

@@ -10,7 +10,7 @@
  *
  * It is deliberately self-contained (raw `fetch`, no import of the unbuilt pack
  * client) so it can run the moment a Hindsight is reachable, independent of the
- * pack build. The pack's own unit suite (`tests/hindsight-client.test.ts`) pins
+ * pack build. The pack's own unit suite (`tests/unit/core/hindsight-client.unit.test.ts`) pins
  * the client wrapper against the in-process stub.
  *
  * Environment:

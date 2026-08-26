@@ -6,7 +6,7 @@
  * Unit tests for proposal-renderer pure helpers.
  *
  * These cover marker parsing only — full DOM rendering is exercised by the
- * E2E suite (tests/e2e/ui/proposal-revision-snapshots.spec.ts).
+ * browser fixture suite (tests/browser/fixtures/proposal-revision-snapshots.fixture.spec.ts).
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

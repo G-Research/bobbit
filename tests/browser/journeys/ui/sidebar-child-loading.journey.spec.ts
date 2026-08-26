@@ -3,7 +3,7 @@
  *
  * Verifies that expanding a goal in the sidebar shows children. API-only
  * coverage for GET /api/goals/:id/team/agents?include=archived lives in
- * tests/e2e/sidebar-api.spec.ts.
+ * tests/integration/gateway/sidebar-api.gateway.test.ts.
  */
 import { test, expect } from "../../_helpers/gateway-harness.js";
 import {

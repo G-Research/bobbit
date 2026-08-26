@@ -8,7 +8,7 @@
  *
  * A faithful runtime simulation would need a real browser context (parent
  * frame + cross-origin checks), which is the territory of the existing
- * Playwright `tests/e2e/ui/preview-new-tab.spec.ts` "standalone tab" test.
+ * Playwright `tests/browser/fixtures/preview-panel.fixture.spec.ts` standalone-tab coverage.
  * Here we just pin two structural invariants that the runtime guard depends
  * on:
  *

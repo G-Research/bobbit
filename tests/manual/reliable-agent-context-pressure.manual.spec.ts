@@ -3,7 +3,7 @@
  * context compaction.
  *
  * Exact invocation:
- *   npm run test:manual -- tests/manual-integration/reliable-agent-context-pressure.spec.ts --project=manual-integration --workers=1
+ *   npm run test:manual -- tests/manual/reliable-agent-context-pressure.manual.spec.ts --project=manual --workers=1
  *
  * Prerequisite (no provider fallback): either set MANUAL_TEST_MODEL together
  * with credentials for that exact provider, or explicitly inherit the live

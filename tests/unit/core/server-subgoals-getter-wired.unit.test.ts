@@ -28,7 +28,7 @@
  *
  * The runtime contract is independently pinned by:
  *   - tests/tool-activation-subgoals-flag.test.ts (resolver behaviour)
- *   - tests/e2e/api-subgoals-disabled.spec.ts (server REST gate)
+ *   - tests/integration/gateway/api-subgoals-disabled.gateway.test.ts (server REST gate)
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

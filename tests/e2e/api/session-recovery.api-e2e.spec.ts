@@ -13,7 +13,7 @@
  *      from `sessions.json.bak.1` (the rotation written by the previous
  *      `saveNow()` cycle).
  *
- * Pattern follows tests/e2e/aigw-startup-refresh.spec.ts: each test owns
+ * Pattern follows tests/e2e/api/aigw-startup-refresh.api-e2e.spec.ts: each test owns
  * its own gateway (so we can shut it down and restart against the same
  * BOBBIT_DIR within a single test). The standard in-process-harness
  * fixture is worker-scoped and not suited for restart cycles.

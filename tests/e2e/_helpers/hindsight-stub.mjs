@@ -3,8 +3,9 @@
  * HTTP API used by the Hindsight memory pack (EP G2 / external mode).
  *
  * Reused by every later Hindsight goal: the client unit test
- * (tests/hindsight-client.test.ts), the provider unit test, and the API E2E
- * (tests/e2e/hindsight-external.spec.ts) all drive this same stub so the wire
+ * (tests/unit/core/hindsight-client.unit.test.ts), the provider unit test, and
+ * tests/integration/gateway/hindsight-external.gateway.test.ts all drive this
+ * same stub so the wire
  * contract is exercised end-to-end without a real server.
  *
  * Canned JSON matches the upstream `openapi.json` response shapes (Hindsight

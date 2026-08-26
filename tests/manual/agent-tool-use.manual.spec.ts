@@ -48,7 +48,7 @@ import { manualTmpRoot } from "./_helpers/manual-test-paths.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
-const RESULTS_DIR = join(PROJECT_ROOT, "test-results", "manual-integration");
+const RESULTS_DIR = join(PROJECT_ROOT, "test-results", "manual");
 const WANT_SCREENSHOTS = !!process.env.SCREENSHOTS;
 
 // ---------------------------------------------------------------------------

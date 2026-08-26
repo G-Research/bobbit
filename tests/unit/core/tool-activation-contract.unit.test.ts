@@ -6,7 +6,7 @@
  * Unit-level pin on the post-`fdfee7c5` `--tools` activation contract.
  *
  * Layer 4 of the hardened tool-use canary (see design-doc gate). The integration
- * canary (`tests/manual-integration/agent-tool-use.spec.ts`) is the end-to-end
+ * canary (`tests/manual/agent-tool-use.manual.spec.ts`) is the end-to-end
  * proof; this file pins the same contract at unit speed so a future pi upgrade
  * that breaks the flag semantics fails CI in seconds instead of via a real LLM
  * run.

@@ -1,4 +1,5 @@
 {
+  "artifactStatus": "Historical pre-canonical-layout concurrency evidence; embedded paths and command output are preserved verbatim.",
   "pass": false,
   "model": "multi-worktree",
   "violations": [

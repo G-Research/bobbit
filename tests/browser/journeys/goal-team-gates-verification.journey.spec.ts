@@ -16,7 +16,7 @@ import { connectWs, signalAndWaitForGate } from "../../e2e/_helpers/e2e-setup.js
 import { navigateToGoalDashboard } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 // ── Behavioral assertions ported from the master gate-verification-UX specs ──
-// Sources: tests/e2e/ui/gate-list-slim-projection.spec.ts (Issue #1) and
+// Historical sources: tests/e2e/ui/gate-list-slim-projection.spec.ts (Issue #1) and
 // tests/e2e/ui/gate-verification-stale-reconcile.spec.ts (Issue #2 alive-path
 // baseline). The stale-death scenario in the source spec is `test.fixme` there
 // (needs an un-built server hook to kill an active verification without a

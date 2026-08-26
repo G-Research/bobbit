@@ -45,7 +45,7 @@
  * Why this is a pinning regex test
  * --------------------------------
  * Demonstrating the blast radius end-to-end needs a real Docker daemon
- * (see `tests/manual-integration/`). The over-broad pattern is
+ * (see `tests/manual/`). The over-broad pattern is
  * unambiguous in source — once the fix lands, the `-1` will be gone and
  * this test will pass. A real-docker behavioural test belongs alongside
  * the existing per-project sandbox integration tests.

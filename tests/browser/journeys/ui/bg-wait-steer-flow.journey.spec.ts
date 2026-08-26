@@ -2,7 +2,7 @@
  * Browser E2E — full user flow: send-while-`bash_bg wait`-is-blocking + steer.
  *
  * Closes the gap between the two existing specs:
- *   - tests/e2e/bg-wait-steer-abort.spec.ts  — server-only: pokes
+ *   - tests/integration/gateway/bg-wait-steer-abort.gateway.test.ts — server-only: pokes
  *     `bgProcessManager.abortAllWaits()` directly, no UI.
  *   - queue-ui.journey.spec.ts (PI-10) — UI steer pill flow, but no bg
  *     process and no wait-abort assertion.

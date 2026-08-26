@@ -1,6 +1,6 @@
 /**
  * Project Management browser coverage.
- * API-only registry add/remove checks live in tests/e2e/project-ui-api.spec.ts.
+ * API-only registry add/remove checks live in tests/integration/gateway/project-ui-api.gateway.test.ts.
  */
 import { test, expect } from "../../_helpers/journey-fixture.js";
 import { apiFetch, registerProject } from "../../_helpers/e2e-setup.js";

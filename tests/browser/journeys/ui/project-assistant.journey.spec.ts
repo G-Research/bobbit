@@ -1,7 +1,7 @@
 /**
  * Project assistant UX E2E tests â€” consolidated.
  *
- * API basics coverage lives in tests/e2e/project-assistant-api.spec.ts.
+ * API basics coverage lives in tests/integration/gateway/project-assistant-api.gateway.test.ts.
  */
 import { test, expect } from "../../_helpers/journey-fixture.js";
 import { apiFetch, deleteSession } from "../../_helpers/e2e-setup.js";
@@ -340,5 +340,5 @@ test.describe("Project assistant UX (consolidated)", () => {
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
 
-	// API basics â€” session types and provisional flag â€” moved to tests/e2e/project-assistant-api.spec.ts.
+	// API basics â€” session types and provisional flag â€” live in tests/integration/gateway/project-assistant-api.gateway.test.ts.
 });

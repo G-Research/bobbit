@@ -38,8 +38,8 @@ test.describe("Journey: BG Wait Steer", () => {
 	test("bg-processes API responds with empty list for a fresh session", async () => {
 		// Tests the bg-process API surface without spawning a real process
 		// (bash.exe unavailable in the verification environment — ENOENT).
-		// Coverage of full bg-process lifecycle (create→poll→exited→exitCode)
-		// is in tests/e2e/ui/bg-process-persistence.spec.ts in the legacy suite.
+		// Coverage of the full bg-process lifecycle (create→poll→exited→exitCode)
+		// is in tests/browser/journeys/ui/bg-process-persistence.journey.spec.ts.
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		try {

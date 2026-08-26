@@ -5,8 +5,9 @@
  * This spec maximises *real* browser coverage of the user-visible orchestration
  * flows; the granular route mechanics (model inheritance, terminal/timeout
  * mapping, caller→owner authz, etc.) stay pinned in the API specs
- * (tests/e2e/team-delegate.spec.ts, team-wait-semantics.spec.ts,
- * orchestrate-restart.spec.ts) which this file deliberately does NOT duplicate.
+ * (tests/integration/gateway/team-delegate.gateway.test.ts,
+ * team-wait-semantics.gateway.test.ts, and orchestrate-restart.gateway.test.ts)
+ * which this file deliberately does NOT duplicate.
  *
  * Coverage here:
  *   1. Blocking one-shot team_delegate → the single completed DelegateRenderer
@@ -28,10 +29,10 @@
  * full team/goal browser setup — a team-lead's team_delegate produces the
  * IDENTICAL DelegateRenderer card asserted in tests 1–2 (the renderer is
  * caller-agnostic), and the team-lead delegate mechanics + own-child /team/*
- * fallback are pinned in the API spec tests/e2e/team-delegate.spec.ts. The
+ * fallback are pinned in tests/integration/gateway/team-delegate.gateway.test.ts. The
  * restart reminder is driven via the public boot hook rather than a real
  * gateway reboot, because that hook is exactly what restoreSessions() invokes
- * (see tests/e2e/orchestrate-restart.spec.ts) and keeps the browser assertion
+ * (see tests/integration/gateway/orchestrate-restart.gateway.test.ts) and keeps the browser assertion
  * deterministic.
  */
 import { test, expect } from "../../_helpers/gateway-harness.js";
