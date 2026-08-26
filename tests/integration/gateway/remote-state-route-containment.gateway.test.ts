@@ -21,10 +21,112 @@ import {
 	ownedHeadEvidence,
 	createRemoteStateSession,
 	installRemoteStateRouteHooks,
+	handoffRemoteStateRouteRunner,
 } from "../../support/harnesses/integration/remote-state-routes-fixture.js";
 
 test.describe("remote-state coordinator routes", () => {
 	installRemoteStateRouteHooks();
+
+	test("hands final-binding predecessor work to the asserted PR runner", async ({ gateway }) => {
+		const ownedCwd = gitCwd();
+		const goal = await createGoal({
+			title: `PR runner handoff ${Date.now()}`,
+			cwd: ownedCwd,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = String(goal.id);
+		if (typeof goal.projectId !== "string") throw new Error("fixture goal project unavailable");
+		gateway.sessionManager.getGoalStoreForProject(goal.projectId).update(goalId, {
+			cwd: ownedCwd,
+			repoPath: ownedCwd,
+			worktreePath: ownedCwd,
+			branch: "fixture/final-binding-handoff",
+			setupStatus: "ready",
+		});
+
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const defaultExecFile = runner.execFile;
+		let predecessorActive = false;
+		let predecessorStartedResolve!: () => void;
+		const predecessorStarted = new Promise<void>(resolve => { predecessorStartedResolve = resolve; });
+		let releasePredecessor!: () => void;
+		const predecessorGate = new Promise<void>(resolve => { releasePredecessor = resolve; });
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://github.com/acme/predecessor.git\n", stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
+				predecessorActive = true;
+				predecessorStartedResolve();
+				await predecessorGate;
+				predecessorActive = false;
+				return { stdout: "[]", stderr: "" };
+			}
+			const probe = standardSingleRepositoryProbe(file, args, ownedCwd);
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
+		};
+
+		let assertedPrReads = 0;
+		const assertedExecFile = async (file: string, args: readonly string[], options?: any) => {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://github.com/acme/asserted.git\n", stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
+				assertedPrReads += 1;
+				return { stdout: JSON.stringify([{
+					number: 71,
+					url: "https://github.com/acme/asserted/pull/71",
+					title: "asserted runner owns first read",
+					state: "OPEN",
+					mergeable: "MERGEABLE",
+					headRefName: "fixture/final-binding-handoff",
+					baseRefName: "main",
+					...ownedHeadEvidence("acme", "asserted"),
+				}]), stderr: "" };
+			}
+			const probe = standardSingleRepositoryProbe(file, args, ownedCwd);
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
+		};
+
+		const predecessorRequest = apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit&optional=1`);
+		let restoreRunner: (() => void) | undefined;
+		try {
+			await predecessorStarted;
+			let handoffSettled = false;
+			const handoff = handoffRemoteStateRouteRunner(
+				gateway,
+				[{ owner: "goals", id: goalId }],
+				assertedExecFile,
+			).then(restore => {
+				handoffSettled = true;
+				return restore;
+			});
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(handoffSettled, "runner handoff must join predecessor PR work").toBe(false);
+			expect(predecessorActive).toBe(true);
+			releasePredecessor();
+			restoreRunner = await handoff;
+			expect(predecessorActive).toBe(false);
+			expect((await predecessorRequest).status).toBe(204);
+
+			const status = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			expect(status.status).toBe(200);
+			expect(await status.json()).toMatchObject({
+				stale: false,
+				data: { number: 71, title: "asserted runner owns first read" },
+			});
+			expect(assertedPrReads).toBe(1);
+		} finally {
+			releasePredecessor();
+			await predecessorRequest.catch(() => undefined);
+			restoreRunner?.();
+			runner.execFile = defaultExecFile;
+			await deleteGoal(goalId);
+		}
+	});
 
 	test("rejects caller-injected and ambient repositories for numeric goal, session, and sandbox PR routes", async ({ gateway }) => {
 		test.setTimeout(30_000);
@@ -89,13 +191,11 @@ test.describe("remote-state coordinator routes", () => {
 			connectWs(normalSessionId),
 			connectWs(sandboxSessionId, sandboxToken),
 		]);
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		const probedCwds: string[] = [];
 		let ghCalls = 0;
 		const privateSentinel = "PRIVATE OUTSIDE PR SENTINEL";
 
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		const routeExecFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
 			const cwd = String(options?.cwd ?? "");
 			if (cwd) probedCwds.push(cwd);
@@ -122,6 +222,11 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			return unexpectedRunnerCommand(file, args, options);
 		};
+		const restoreRunner = await handoffRemoteStateRouteRunner(gateway, [
+			{ owner: "goals", id: goalId },
+			{ owner: "sessions", id: normalSessionId },
+			{ owner: "sessions", id: sandboxSessionId },
+		], routeExecFile);
 
 		try {
 			const observerCursor = observerWs.messageCount();
@@ -159,7 +264,7 @@ test.describe("remote-state coordinator routes", () => {
 			expect(observerWs.messages.slice(observerCursor).filter(message => message.type === "remote_state_snapshot" && message.resource === "pr")).toHaveLength(0);
 			expect(sandboxWs.messages.slice(sandboxCursor).filter(message => message.type === "remote_state_snapshot" && message.resource === "pr")).toHaveLength(0);
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreRunner();
 			observerWs.close();
 			sandboxWs.close();
 			gateway.sessionManager.sandboxTokenStore.removeSession(sandboxProjectId, sandboxSessionId);
@@ -185,15 +290,13 @@ test.describe("remote-state coordinator routes", () => {
 		const goalId = String(goal.id);
 		if (typeof goal.projectId !== "string") throw new Error("fixture goal project unavailable");
 		const goalStore = gateway.sessionManager.getGoalStoreForProject(goal.projectId);
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		const ghCalls: string[][] = [];
 		const outsideSentinel = "PRIVATE REPOSITORY SENTINEL";
 		const credentialSentinel = "PRIVATE-PR-CREDENTIAL";
 		let returnOutsideResult = false;
 		let unsafeUrl: string | undefined;
 
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		const routeExecFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
 			if (command === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://github.com/acme/owned-selector.git\n", stderr: "" };
@@ -244,6 +347,11 @@ test.describe("remote-state coordinator routes", () => {
 			if (probe) return probe;
 			return unexpectedRunnerCommand(file, args, options);
 		};
+		const restoreRunner = await handoffRemoteStateRouteRunner(
+			gateway,
+			[{ owner: "goals", id: goalId }],
+			routeExecFile,
+		);
 
 		try {
 			for (const attacker of [
@@ -319,7 +427,7 @@ test.describe("remote-state coordinator routes", () => {
 			const publicOutput = JSON.stringify({ numericLookup, ghCalls });
 			expect(publicOutput).not.toContain(outsideSentinel);
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreRunner();
 			await deleteGoal(goalId);
 		}
 	});
@@ -340,14 +448,12 @@ test.describe("remote-state coordinator routes", () => {
 		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
 		gateway.sessionManager.sandboxTokenStore.addSession(projectId, sessionId);
 		const sandboxWs = await connectWs(sessionId, sandboxToken);
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		const ambientCwd = process.cwd();
 		const ghCwds: string[] = [];
 		let prReads = 0;
 		let prMerges = 0;
 
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		const routeExecFile = async (file: string, args: readonly string[], options?: any) => {
 			const cwd = String(options?.cwd ?? "");
 			if (commandName(file) === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
 				return { stdout: `${branch}\n`, stderr: "" };
@@ -390,6 +496,11 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			return unexpectedRunnerCommand(file, args, options);
 		};
+		const restoreRunner = await handoffRemoteStateRouteRunner(
+			gateway,
+			[{ owner: "sessions", id: sessionId }],
+			routeExecFile,
+		);
 
 		try {
 			const cursor = sandboxWs.messageCount();
@@ -412,7 +523,7 @@ test.describe("remote-state coordinator routes", () => {
 			expect(ghCwds.every(cwd => cwd === ownedRepo)).toBe(true);
 			expect(ghCwds).not.toContain(ambientCwd);
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreRunner();
 			sandboxWs.close();
 			await deleteSession(sessionId);
 		}

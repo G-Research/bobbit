@@ -125,6 +125,8 @@ function ownedHeadEvidenceForSlug(slug: string): Record<string, unknown> {
 	return ownedHeadEvidence(owner, repository);
 }
 
+type RemoteStateRouteOwner = { owner: "goals" | "sessions"; id: string };
+
 async function completeRemoteStateRouteHandoff(owner: "goals" | "sessions", id: string): Promise<void> {
 	// An explicit route read is the coordinator's public blocking join boundary:
 	// it waits for existing refresh work (or its own) before replying. Complete
@@ -140,6 +142,28 @@ async function completeRemoteStateRouteHandoff(owner: "goals" | "sessions", id: 
 		expect([200, 204], "remote-state fixture PR lifecycle handoff failed").toContain(prHandoff.status);
 	}
 	await Promise.all([gitHandoff.arrayBuffer(), prHandoff.arrayBuffer()]);
+}
+
+async function handoffRemoteStateRouteRunner(
+	gateway: any,
+	owners: readonly RemoteStateRouteOwner[],
+	replacement: (file: string, args: readonly string[], options?: any) => Promise<any>,
+): Promise<() => void> {
+	const runner = gateway.sessionManager.commandRunner;
+	const predecessor = runner.execFile;
+	// Final route bindings can enqueue PR work after createGoal or createSession
+	// drained its bootstrap. Join that work while its original runner still owns
+	// it, then replace the mutable runner without another await. Do not re-probe
+	// Git here: containment scenarios intentionally finish with broken worktrees.
+	const handoffs = await Promise.all(owners.map(({ owner, id }) =>
+		apiFetch(`/api/${owner}/${id}/pr-status?intent=explicit&optional=1`),
+	));
+	await Promise.all(handoffs.map(response => response.arrayBuffer()));
+	expect(runner.execFile, "remote-state runner changed during lifecycle handoff").toBe(predecessor);
+	runner.execFile = replacement;
+	return () => {
+		if (runner.execFile === replacement) runner.execFile = predecessor;
+	};
 }
 
 async function createGoal(
@@ -267,4 +291,5 @@ export {
 	createCommandSpawnAdapter, crossForceCoalescingWindow, unexpectedRunnerCommand,
 	standardSingleRepositoryProbe, commandName, credentialHelperResult, ownedHeadEvidence,
 	ownedHeadEvidenceForSlug, createRemoteStateSession, removeSiblingWorktree,
+	handoffRemoteStateRouteRunner,
 };
