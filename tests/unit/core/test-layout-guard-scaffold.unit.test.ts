@@ -42,6 +42,23 @@ describe("test layout repository guard", () => {
 		);
 	});
 
+	it("rejects a tracked, staged, or untracked executable placed directly under tests", () => {
+		const diagnostics = collectLayoutDiagnostics({
+			root: "synthetic-root",
+			listFiles: () => parseGitFileList(Buffer.from("tests/code-review-e2e.ts\0")),
+			fileExists: () => true,
+			readSource: () => 'import { WebSocket } from "ws";',
+		});
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				code: "direct-tests-root-executable",
+				path: "tests/code-review-e2e.ts",
+			}),
+		]);
+		expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/manual/**/*.manual.spec.ts");
+		expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/e2e/node/**/*.node-e2e.test.ts");
+	});
+
 	it("validates untracked sources and inventory collisions", () => {
 		const files = [
 			"tests/dom/good.dom.test.ts",

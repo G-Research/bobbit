@@ -20,6 +20,19 @@ describe("test layout diagnostics", () => {
 		});
 	}
 
+	it("rejects executable sources directly under the tests root with semantic destinations", () => {
+		for (const filePath of ["tests/code-review-e2e.ts", "tests/standalone.js", "tests/runner.mjs", "tests/panel.tsx"]) {
+			const diagnostics = validateTestPath(filePath);
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]).toMatchObject({ code: "direct-tests-root-executable", path: filePath });
+			expect(diagnostics[0].message).toContain("tests/manual/**/*.manual.spec.ts");
+			expect(diagnostics[0].message).toContain("tests/e2e/node/**/*.node-e2e.test.ts");
+			expect(diagnostics[0].message).toContain("tests/support/{harnesses,helpers,fixtures,data,templates}/<lane>/");
+		}
+		expect(validateTestPath("tests/test-types.d.ts")).toEqual([]);
+		expect(validateTestPath("tests/notes/layout.md")).toEqual([]);
+	});
+
 	it("rejects generic suffixes, suffix-directory disagreement, support tests, and tests outside the root", () => {
 		expect(validateTestPath("tests/dom/panel.test.ts")[0]).toMatchObject({
 			code: "wrong-suffix",

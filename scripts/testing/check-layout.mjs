@@ -75,7 +75,7 @@ export function main() {
 		console.error(formatLayoutDiagnostics(diagnostics));
 		return 1;
 	}
-	console.log("test-layout: PASS — every runnable test has exactly one canonical owner.");
+	console.log("test-layout: PASS — every test source is canonically placed and every runnable test has exactly one owner.");
 	return 0;
 }
 
