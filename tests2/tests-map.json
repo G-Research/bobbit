@@ -31,7 +31,7 @@
     },
     {
       "path": "tests2/core/uploaded-specialized-document-extractor.test.ts",
-      "reason": "Core coverage for isolated bounded PDF extraction, normal specialized extraction, timeout and capacity fallback, and continued server responsiveness.",
+      "reason": "Core coverage for isolated bounded PDF extraction, bounded linear OOXML scanning and malformed fallback, normal specialized extraction, timeout and capacity fallback, and continued server responsiveness.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -58,7 +58,7 @@
     },
     {
       "path": "tests2/core/uploaded-attachment-store.test.ts",
-      "reason": "Core coverage for immutable digest-verified exact bytes, TOCTOU-safe bounded ranges, durable-preview quota accounting, idempotent occurrence ownership, authorization, validation, and purge.",
+      "reason": "Core coverage for immutable digest-verified exact bytes, TOCTOU-safe bounded ranges, adversarial OOXML pointer-only admission, durable-preview quota accounting, idempotent occurrence ownership, authorization, validation, and purge.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

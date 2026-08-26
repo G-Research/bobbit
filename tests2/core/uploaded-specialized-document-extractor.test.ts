@@ -185,4 +185,38 @@ describe("uploaded specialized document extractor", () => {
 		await expect(deriveSpecializedDocumentText({ fileName: "a.pptx", mimeType: "", bytes: pptx }))
 			.resolves.toEqual({ recognized: true, text: "[Slide 1]\nPPTX_UNCHANGED_MARKER" });
 	});
+
+	it("fails repeated unmatched DOCX and PPTX text openings to pointer-only without blocking the event loop", async () => {
+		const cases = [
+			{
+				fileName: "unmatched.docx",
+				entryName: "word/document.xml",
+				xml: `<w:document xmlns:w="urn:w">${"<w:t>".repeat(100_000)}</w:document>`,
+			},
+			{
+				fileName: "unmatched.pptx",
+				entryName: "ppt/slides/slide1.xml",
+				xml: `<p:sld xmlns:p="urn:p" xmlns:a="urn:a">${"<a:t>".repeat(100_000)}</p:sld>`,
+			},
+		];
+
+		for (const testCase of cases) {
+			expect(Buffer.byteLength(testCase.xml, "utf8")).toBeLessThan(1024 * 1024);
+			const archive = await ooxml({ [testCase.entryName]: testCase.xml });
+			let heartbeat = false;
+			const timer = setTimeout(() => { heartbeat = true; }, 0);
+			const started = Date.now();
+			const result = await deriveSpecializedDocumentText({
+				fileName: testCase.fileName,
+				mimeType: "",
+				bytes: archive,
+			});
+			const elapsed = Date.now() - started;
+			clearTimeout(timer);
+
+			expect(result).toEqual({ recognized: true });
+			expect(heartbeat).toBe(true);
+			expect(elapsed).toBeLessThan(5_000);
+		}
+	}, 15_000);
 });

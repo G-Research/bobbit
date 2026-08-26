@@ -259,6 +259,27 @@ describe("immutable uploaded attachment store", () => {
 		expect(saved.attachments[1]).not.toHaveProperty("trustedExtractedText");
 	});
 
+	it("admits repeated unmatched OOXML openings as an exact pointer-only snapshot", async () => {
+		const malformedDocx = await ooxml({
+			"word/document.xml": `<w:document xmlns:w="urn:w">${"<w:t>".repeat(100_000)}</w:document>`,
+		});
+		const started = Date.now();
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "unmatched-ooxml", [
+			document("unmatched", "unmatched.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", malformedDocx),
+		]);
+		expect(Date.now() - started).toBeLessThan(5_000);
+		expect(saved.attachments[0]).not.toHaveProperty("trustedExtractedText");
+
+		const range = await readUploadedAttachmentRange({
+			sessionId: SESSION_A,
+			pointer: saved.attachments[0].pointer,
+			offset: 0,
+			length: malformedDocx.length,
+		});
+		expect(range.eof).toBe(true);
+		expect(Buffer.from(range.data, "base64")).toEqual(malformedDocx);
+	}, 10_000);
+
 	it("keeps binary, malformed UTF-8, and malformed specialized documents pointer-only despite forged text", async () => {
 		const inputs = [
 			{ ...document("nul", "nul.bin", "text/plain", Buffer.from([0x41, 0x00, 0x42])), extractedText: "FORGED NUL" },

@@ -110,14 +110,62 @@ function decodeXmlText(value: string): string {
 	});
 }
 
+function matchesAsciiCaseInsensitiveAt(value: string, expected: string, offset: number): boolean {
+	if (offset < 0 || offset + expected.length > value.length) return false;
+	for (let index = 0; index < expected.length; index++) {
+		const actualCode = value.charCodeAt(offset + index);
+		const expectedCode = expected.charCodeAt(index);
+		const foldedActual = actualCode >= 65 && actualCode <= 90 ? actualCode + 32 : actualCode;
+		const foldedExpected = expectedCode >= 65 && expectedCode <= 90 ? expectedCode + 32 : expectedCode;
+		if (foldedActual !== foldedExpected) return false;
+	}
+	return true;
+}
+
+function isXmlWhitespace(value: string | undefined): boolean {
+	return value === " " || value === "\t" || value === "\n" || value === "\r";
+}
+
+function findClosingTag(xml: string, closingTag: string, from: number): number {
+	let cursor = from;
+	while (cursor < xml.length) {
+		const candidate = xml.indexOf("<", cursor);
+		if (candidate < 0) return -1;
+		if (matchesAsciiCaseInsensitiveAt(xml, closingTag, candidate)) return candidate;
+		cursor = candidate + 1;
+	}
+	return -1;
+}
+
 function extractXmlText(xml: string, tag: "w:t" | "a:t"): string {
-	const escapedTag = tag.replace(":", "\\:");
-	const matcher = new RegExp(`<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapedTag}>`, "gi");
+	const openingTag = `<${tag}`;
+	const closingTag = `</${tag}>`;
 	const parts: string[] = [];
-	let match: RegExpExecArray | null;
-	while ((match = matcher.exec(xml)) !== null && parts.length < MAX_XML_TEXT_NODES) {
-		const text = decodeXmlText(match[1]).trim();
+	let cursor = 0;
+	let nodes = 0;
+
+	while (cursor < xml.length && nodes < MAX_XML_TEXT_NODES) {
+		const candidate = xml.indexOf("<", cursor);
+		if (candidate < 0) break;
+		cursor = candidate + 1;
+		if (!matchesAsciiCaseInsensitiveAt(xml, openingTag, candidate)) continue;
+
+		const boundary = xml[candidate + openingTag.length];
+		if (boundary !== ">" && !isXmlWhitespace(boundary)) continue;
+		const openingEnd = xml.indexOf(">", candidate + openingTag.length);
+		const nestedOpening = xml.indexOf("<", candidate + openingTag.length);
+		if (openingEnd < 0 || (nestedOpening >= 0 && nestedOpening < openingEnd)) {
+			throw new Error("Malformed OOXML text opening tag");
+		}
+
+		const contentStart = openingEnd + 1;
+		const closingStart = findClosingTag(xml, closingTag, contentStart);
+		if (closingStart < 0) throw new Error("Unclosed OOXML text node");
+
+		nodes++;
+		const text = decodeXmlText(xml.slice(contentStart, closingStart)).trim();
 		if (text) parts.push(text);
+		cursor = closingStart + closingTag.length;
 	}
 	return parts.join(" ");
 }
