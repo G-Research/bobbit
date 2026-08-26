@@ -16,6 +16,7 @@ import {
 	normalizeContextClearBoundaries,
 	type ContextClearBoundary,
 } from "./context-clear-boundary.js";
+import { normalizeDismissedAskToolUseIds } from "./ask-user-choices-dismissal.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -188,6 +189,10 @@ export interface PersistedSession {
 	lastReadAt?: number;
 	/** Durable user-owned session metadata. Missing legacy values normalize to an empty array. */
 	user_tags?: string[];
+	/** Opaque ask_user_choices tool-use IDs whose cards the user dismissed. */
+	dismissedAskToolUseIds?: string[];
+	/** Server-projected sidebar attention state; true while any ask remains unresolved. */
+	hasUnansweredQuestion?: boolean;
 	/** Optional goal this session belongs to */
 	goalId?: string;
 	/** Whether the agent was actively streaming when the server last knew about it */
@@ -310,6 +315,8 @@ export type UpdatableSessionFields = Pick<
 	| "lastActivity"
 	| "lastReadAt"
 	| "user_tags"
+	| "dismissedAskToolUseIds"
+	| "hasUnansweredQuestion"
 	| "agentSessionFile"
 	| "goalId"
 	| "wasStreaming"
@@ -500,6 +507,18 @@ export class SessionStore {
 					this.loadedStructuralMigration = true;
 				}
 				s.contextClearBoundaries = normalizedBoundaries;
+			}
+			const rawDismissals = (s as unknown as { dismissedAskToolUseIds?: unknown }).dismissedAskToolUseIds;
+			if (rawDismissals !== undefined) {
+				const normalizedDismissals = normalizeDismissedAskToolUseIds(rawDismissals);
+				if (JSON.stringify(rawDismissals) !== JSON.stringify(normalizedDismissals)) {
+					this.loadedStructuralMigration = true;
+				}
+				s.dismissedAskToolUseIds = normalizedDismissals;
+			}
+			if (s.hasUnansweredQuestion !== undefined && typeof s.hasUnansweredQuestion !== "boolean") {
+				delete s.hasUnansweredQuestion;
+				this.loadedStructuralMigration = true;
 			}
 			this.sessions.set(s.id, s);
 		}
@@ -885,7 +904,7 @@ export class SessionStore {
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
 		"messageQueue", "manualRetryRequired", "inFlightSteerTexts", "user_tags",
-		"sidePanelWorkspace", "contextClearBoundaries",
+		"dismissedAskToolUseIds", "hasUnansweredQuestion", "sidePanelWorkspace", "contextClearBoundaries",
 	];
 
 	/** Update a subset of fields for an existing session */
@@ -924,6 +943,36 @@ export class SessionStore {
 			(existing as unknown as { user_tags: unknown }).user_tags = value;
 		} else {
 			delete existing.user_tags;
+		}
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
+		this.saveNow();
+		return true;
+	}
+
+	/** Restore the exact ask-dismissal field shape after a failed durability fence. */
+	restoreDismissedAskToolUseIdsShape(id: string, present: boolean, value: unknown): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		this.generation++;
+		if (present) {
+			(existing as unknown as { dismissedAskToolUseIds: unknown }).dismissedAskToolUseIds = value;
+		} else {
+			delete existing.dismissedAskToolUseIds;
+		}
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
+		this.saveNow();
+		return true;
+	}
+
+	/** Restore the exact unanswered-question field shape after a failed durability fence. */
+	restoreHasUnansweredQuestionShape(id: string, present: boolean, value: unknown): boolean {
+		const existing = this.sessions.get(id);
+		if (!existing) return false;
+		this.generation++;
+		if (present) {
+			(existing as unknown as { hasUnansweredQuestion: unknown }).hasUnansweredQuestion = value;
+		} else {
+			delete existing.hasUnansweredQuestion;
 		}
 		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 		this.saveNow();

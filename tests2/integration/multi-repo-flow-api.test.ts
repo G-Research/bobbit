@@ -11,10 +11,32 @@ import path from "node:path";
 
 let restoreCommandRunner: (() => void) | undefined;
 
+type CannedWorktree = { path: string; branch: string; adminPath?: string };
+const cannedWorktrees = new Map<string, Map<string, CannedWorktree>>();
+
+function repoKey(dir: string): string {
+	const resolved = path.resolve(dir);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function worktreeKey(dir: string): string {
+	return repoKey(dir);
+}
+
 function fakeRepo(dir: string): void {
 	fs.mkdirSync(path.join(dir, ".git"), { recursive: true });
 	fs.writeFileSync(path.join(dir, ".git", "HEAD"), "ref: refs/heads/master\n");
 	fs.writeFileSync(path.join(dir, "README.md"), "fixture\n");
+	const root = path.resolve(dir);
+	cannedWorktrees.set(repoKey(root), new Map([[worktreeKey(root), { path: root, branch: "master" }]]));
+}
+
+function cannedWorktreeList(cwd: string): string {
+	const worktrees = cannedWorktrees.get(repoKey(cwd));
+	if (!worktrees) throw new Error(`missing canned repository: ${cwd}`);
+	return [...worktrees.values()]
+		.map(worktree => `worktree ${worktree.path}\0HEAD ${"a".repeat(40)}\0branch refs/heads/${worktree.branch}\0\0`)
+		.join("");
 }
 
 function cannedGit(cwd: string, args: readonly string[]): string {
@@ -24,14 +46,28 @@ function cannedGit(cwd: string, args: readonly string[]): string {
 	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify origin/master") return "a".repeat(40);
 	if (key === "symbolic-ref refs/remotes/origin/HEAD") return "refs/remotes/origin/master";
 	if (args[0] === "rev-parse" && args[1] === "--verify") throw new Error(`missing ref: ${args[2]}`);
+	if (args[0] === "worktree" && args[1] === "list" && args[2] === "--porcelain" && args[3] === "-z") {
+		return cannedWorktreeList(cwd);
+	}
 	if (args[0] === "worktree" && args[1] === "add") {
-		const wtPath = args[2] === "-b" ? args[4] : args[2];
+		const wtPath = path.resolve(args[2] === "-b" ? args[4]! : args[2]!);
+		const branch = args[2] === "-b" ? args[3]! : path.basename(wtPath);
+		const worktrees = cannedWorktrees.get(repoKey(cwd));
+		if (!worktrees) throw new Error(`missing canned repository: ${cwd}`);
+		const adminPath = path.join(path.resolve(cwd), ".git", "worktrees", path.basename(wtPath));
+		fs.mkdirSync(adminPath, { recursive: true });
 		fs.mkdirSync(wtPath, { recursive: true });
-		fs.writeFileSync(path.join(wtPath, ".git"), "gitdir: canned\n");
+		fs.writeFileSync(path.join(wtPath, ".git"), `gitdir: ${adminPath}\n`);
+		worktrees.set(worktreeKey(wtPath), { path: wtPath, branch, adminPath });
 		return "";
 	}
 	if (args[0] === "worktree" && args[1] === "remove") {
-		fs.rmSync(args[2], { recursive: true, force: true });
+		const wtPath = path.resolve(args[2]!);
+		const worktrees = cannedWorktrees.get(repoKey(cwd));
+		const registered = worktrees?.get(worktreeKey(wtPath));
+		fs.rmSync(wtPath, { recursive: true, force: true });
+		if (registered?.adminPath) fs.rmSync(registered.adminPath, { recursive: true, force: true });
+		worktrees?.delete(worktreeKey(wtPath));
 		return "";
 	}
 	if (args[0] === "branch" || args[0] === "push" || args[0] === "fetch") return "";

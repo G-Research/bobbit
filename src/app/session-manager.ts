@@ -453,7 +453,7 @@ function shouldRevealProposalForSource(source: ProposalSource | undefined): bool
 
 function revealActiveProposalPanel(type: ProposalType, sessionId: string): void {
 	const isMatchingAssistant = isAssistantProposalType(type);
-	revealProposalPanel(type, { sessionId }, {
+	void revealProposalPanel(type, { sessionId }, {
 		isAssistant: isMatchingAssistant,
 		isMobile: !isDesktop(),
 	});
@@ -2278,7 +2278,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			const shouldRevealProposal = shouldRevealProposalForSource(source);
 			if (isFirstEmit) {
 				if (shouldRevealProposal) {
-					plugin.onFirstEmit(slot, {
+					void plugin.onFirstEmit(slot, {
 						isAssistant: isMatchingAssistant,
 						isMobile: !isDesktop(),
 					});
@@ -2291,7 +2291,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 				// Content-only sources (`rehydrate`, ordinary `edit`) still update the
 				// active proposal slot above, so already-open panels refresh naturally
 				// without resurrecting tabs the user closed.
-				revealProposalPanel(type, { sessionId }, {
+				void revealProposalPanel(type, { sessionId }, {
 					isAssistant: isMatchingAssistant,
 					isMobile: !isDesktop(),
 				});

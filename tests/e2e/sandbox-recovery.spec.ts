@@ -11,7 +11,7 @@ import { test, expect } from "./in-process-harness.js";
 import { globalAgentDir } from "../../src/server/bobbit-dir.js";
 import { projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
 import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
-import { isDockerAvailable } from "./test-utils/docker.js";
+import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "./test-utils/docker.js";
 import {
 	apiFetch,
 	nonGitCwd,
@@ -22,13 +22,14 @@ import {
 
 // ---------------------------------------------------------------------------
 // Live Docker inode-remount contract. The v2 E2E runner reports this file as
-// Docker-gated, while this case self-skips only when no usable daemon is
-// reachable. With Docker available, every container and remount assertion runs.
+// Docker-gated, while this case self-skips unless both the daemon and the local
+// sandbox image are available. With that capability, every container and remount
+// assertion runs.
 // ---------------------------------------------------------------------------
 
 test.describe("atomic models.json bind mount", () => {
 	test("refresh restores exact managed AIGW publication without disturbing a sibling run", async () => {
-		test.skip(!isDockerAvailable(), "Docker not available");
+		test.skip(!isDockerSandboxAvailable(), "Docker sandbox unavailable (daemon or bobbit-agent image missing)");
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
 		const source = path.join(root, "source");
 		const projectId = `remount-${randomUUID()}`;
@@ -97,7 +98,7 @@ test.describe("atomic models.json bind mount", () => {
 		};
 		try {
 			mkdirSync(source, { recursive: true });
-			docker(["image", "inspect", "bobbit-agent"]);
+			docker(["image", "inspect", SANDBOX_IMAGE]);
 			execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
 			writeFileSync(path.join(source, "README.md"), "sandbox source\n");
 			execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "ignore" });
@@ -152,7 +153,7 @@ test.describe("atomic models.json bind mount", () => {
 				projectDir: root,
 				repoUrl: "file:///workspace-src",
 				cloneSource: { kind: "mounted", hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
-				image: "bobbit-agent",
+				image: SANDBOX_IMAGE,
 			});
 			process.env.BOBBIT_E2E_RUN_ID = runA;
 			const sandboxA = createSandbox();
@@ -234,7 +235,7 @@ test.describe("atomic models.json bind mount", () => {
 
 test.describe("sandbox ownership recovery", () => {
 	test("repairs a pre-created empty root-owned worktrees volume", async () => {
-		test.skip(!isDockerAvailable(), "Docker not available");
+		test.skip(!isDockerSandboxAvailable(), "Docker sandbox unavailable (daemon or bobbit-agent image missing)");
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-worktrees-recovery-"));
 		const source = path.join(root, "source");
 		const projectId = `worktrees-recovery-${randomUUID()}`;
@@ -244,7 +245,7 @@ test.describe("sandbox ownership recovery", () => {
 		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf-8" }).trim();
 		let sandbox: ProjectSandbox | undefined;
 		try {
-			docker(["image", "inspect", "bobbit-agent"]);
+			docker(["image", "inspect", SANDBOX_IMAGE]);
 			mkdirSync(source, { recursive: true });
 			execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
 			writeFileSync(path.join(source, "README.md"), "sandbox source\n");
@@ -267,7 +268,7 @@ test.describe("sandbox ownership recovery", () => {
 				projectDir: root,
 				repoUrl: "file:///workspace-src",
 				cloneSource: { kind: "mounted", hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
-				image: "bobbit-agent",
+				image: SANDBOX_IMAGE,
 			});
 			await sandbox.init();
 			const containerId = await sandbox.getContainerId();

@@ -76,7 +76,7 @@ export interface ProposalFirstEmitOpts {
 export interface ProposalTypePlugin {
 	type: ProposalType;
 	mergeFields(prev: Record<string, unknown>, incoming: Record<string, unknown>): Record<string, unknown>;
-	onFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): void;
+	onFirstEmit(slot: ProposalSlot, opts: ProposalFirstEmitOpts): Promise<void>;
 	validate(fields: Record<string, unknown>): string[];
 	accept(slot: ProposalSlot): Promise<void>;
 	renderPanel(): unknown;
@@ -156,7 +156,7 @@ const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 	staff: "Staff Proposal",
 };
 
-function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): void {
+function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): Promise<void> {
 	const id = proposalPanelTabId(type);
 	const s = getState();
 	if (s?.panelTabsBySession && Array.isArray(s.panelTabsBySession[sessionId])) {
@@ -164,16 +164,20 @@ function dropCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string):
 	}
 	if (s?.panelWorkspaceActiveBySession?.[sessionId] === id) s.panelWorkspaceActiveBySession[sessionId] = "";
 	if (s?.activePanelTabId === id) s.activePanelTabId = "";
-	void import("./proposal-workspace-actions.js")
-		.then((mod) => mod.closeProposalWorkspaceTab(id, sessionId))
+	return import("./proposal-workspace-actions.js")
+		.then(async (mod) => { await mod.closeProposalWorkspaceTab(id, sessionId); })
 		.catch(() => { /* optional browser-only integration */ });
 }
 
-function openCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): boolean {
+interface ProposalWorkspaceOpenResult {
+	opened: boolean;
+	completion: Promise<void>;
+}
+
+function openCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string): ProposalWorkspaceOpenResult {
 	const s = getState();
 	if (!hasCurrentProposalSlotForSession(s, type, sessionId)) {
-		dropCurrentProposalWorkspaceTab(type, sessionId);
-		return false;
+		return { opened: false, completion: dropCurrentProposalWorkspaceTab(type, sessionId) };
 	}
 	const tab = {
 		id: proposalPanelTabId(type),
@@ -183,21 +187,23 @@ function openCurrentProposalWorkspaceTab(type: ProposalType, sessionId: string):
 		source: { type: "proposal" as const, proposalType: type, sessionId },
 		updatedAt: Date.now(),
 	};
-	void import("./proposal-workspace-actions.js")
-		.then((mod) => mod.openProposalWorkspaceTab(tab))
+	const completion = import("./proposal-workspace-actions.js")
+		.then(async (mod) => { await mod.openProposalWorkspaceTab(tab); })
 		.catch(() => { /* optional browser-only integration */ });
 	try {
 		if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
 			window.dispatchEvent(new CustomEvent("bobbit-panel-workspace:select", { detail: { action: "select", tab, activeTabId: tab.id } }));
 		}
 	} catch { /* ignore */ }
-	return true;
+	return { opened: true, completion };
 }
 
-function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAssistantTab: boolean): void {
-	if (!openCurrentProposalWorkspaceTab(type, sessionId)) return;
+function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAssistantTab: boolean): Promise<void> {
+	const { opened, completion } = openCurrentProposalWorkspaceTab(type, sessionId);
+	if (!opened) return completion;
 	const s = getState();
 	if (setAssistantTab && s.assistantType) s.assistantTab = "preview";
+	return completion;
 }
 
 /**
@@ -205,7 +211,7 @@ function selectProposalWorkspaceTab(type: ProposalType, sessionId: string, setAs
  * mobile `assistantTab` compatibility while also selecting the typed proposal
  * tab for the dynamic workspace.
  */
-export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot, "sessionId">, opts: ProposalFirstEmitOpts): void {
+export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot, "sessionId">, opts: ProposalFirstEmitOpts): Promise<void> {
 	const s = getState();
 	if (opts.isAssistant) {
 		s.assistantHasProposal = true;
@@ -216,7 +222,7 @@ export function revealProposalPanel(type: ProposalType, slot: Pick<ProposalSlot,
 
 	s.previewPanelActiveTab = type;
 	s.previewPanelTab = type;
-	selectProposalWorkspaceTab(type, slot.sessionId, !opts.isAssistant || opts.isMobile);
+	return selectProposalWorkspaceTab(type, slot.sessionId, !opts.isAssistant || opts.isMobile);
 }
 
 function proposalFirstEmit(type: ProposalType): ProposalTypePlugin["onFirstEmit"] {

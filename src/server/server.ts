@@ -181,7 +181,7 @@ import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
-import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
+import { BgProcessCreateError, BgProcessManager, type SpawnFn as BgProcessSpawnFn } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import {
 	canonicalContainerAgentSessionPath,
@@ -585,20 +585,17 @@ import {
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
-import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
+import { validateAnswers, crossValidate } from "./agent/ask-user-choices-validation.js";
+import { AskQuestionTerminalGuard, findAskUserChoicesQuestions } from "./agent/ask-user-choices-dismissal.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
 import { normalizeBasePath, stripBasePath } from "../shared/base-path.js";
 import { rewriteManifestForBasePath, rewriteSpaShell } from "./base-path-http.js";
 import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 
-// In-memory dedup guard for ask_user_choices /submit. Keyed by
-// `${sessionId}::${toolUseId}`. Populated synchronously before enqueuing the
-// response envelope so a concurrent duplicate /submit returns alreadySubmitted
-// even when the transcript hasn't yet reflected the first envelope.
-// Entries are also refilled from the transcript check, so survive process
-// restarts via the transcript fallback in findAskResponseAnswers.
-const askSubmittedToolUseIds = new Set<string>();
+// Linearizes answer-vs-dismiss terminal mutations. Durable transcript/session
+// metadata remains authoritative across process restarts.
+const askQuestionTerminalGuard = new AskQuestionTerminalGuard();
 // One process-wide reservation per exact history-fork request tuple.
 const historyForkReservations = new Set<string>();
 
@@ -2511,6 +2508,8 @@ export interface GatewayConfig {
 	skipRemotePush?: boolean;
 	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_REMOTE/BOBBIT_TEST_NO_EXTERNAL behavior. */
 	skipNonLocalRemoteGit?: boolean;
+	/** Narrow constructor seam for an isolated gateway's background-process spawner. */
+	bgProcessSpawnFn?: BgProcessSpawnFn;
 	/**
 	 * Override for the builtin `defaults/` tree. Defaults to undefined, in which
 	 * case BuiltinConfigProvider uses its dist-relative default. Used by the v2
@@ -4003,7 +4002,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const session = sessionManager.getSession(sessionId);
 			return session?.clients;
 		},
-		undefined,
+		config.bgProcessSpawnFn,
 		(sessionId: string) => {
 			// Resolve the per-project bg-process store for this session.
 			try {
@@ -4949,6 +4948,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.error(`[review-payloads] remove failed for ${sessionId}:`, reviewPayloadResult.reason);
 			}
 		}
+	});
+
+	sessionManager.setOnSessionQuestionStateChanged((sessionId) => {
+		const projectId = sessionManager.getPersistedSession(sessionId)?.projectId;
+		broadcastToUi({ type: "sessions_changed", sessionId, projectId });
 	});
 
 	sessionManager.setOnPrCreationDetected((session) => {
@@ -8252,7 +8256,7 @@ async function handleApiRoute(
 				const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
 					[...liveIdSet, ...liveGoalIds],
 					visibleArchivedRaw(),
-					(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+					(s) => ({ ...s, hasUnansweredQuestion: s.hasUnansweredQuestion === true, colorIndex: colorStore.get(s.id), archived: true } as any),
 				);
 
 				json({ generation: currentGen, sessions: [...sessions, ...sliced], total, limit: paging.limit, offset: !hasCursor ? paging.offset : undefined, hasMore, nextCursor, ...(nextOffset !== undefined ? { nextOffset } : {}), archivedDelegates: archivedDelegatesOfLive });
@@ -8262,7 +8266,7 @@ async function handleApiRoute(
 				const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
 					[...liveIdSet, ...liveGoalIds],
 					visibleArchivedRaw(),
-					(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+					(s) => ({ ...s, hasUnansweredQuestion: s.hasUnansweredQuestion === true, colorIndex: colorStore.get(s.id), archived: true } as any),
 				);
 
 				// Backward compatible: return all archived sessions
@@ -8283,7 +8287,7 @@ async function handleApiRoute(
 			const archivedDelegatesOfLive = bfsEnrichArchivedIndexed(
 				[...liveIdSet, ...liveGoalIdsNonPaginated],
 				visibleArchivedRaw(),
-				(s) => ({ ...s, colorIndex: colorStore.get(s.id), archived: true } as any),
+				(s) => ({ ...s, hasUnansweredQuestion: s.hasUnansweredQuestion === true, colorIndex: colorStore.get(s.id), archived: true } as any),
 			);
 			const paging = readOffsetPaging();
 			if (paging.enabled) {
@@ -20685,6 +20689,93 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/internal/user-question/dismissals — durable ask-card dismissals for one session.
+	if (url.pathname === "/api/internal/user-question/dismissals" && req.method === "GET") {
+		const sessionId = url.searchParams.get("sessionId");
+		if (!sessionId) { json({ error: "Missing required query parameter: sessionId" }, 400); return; }
+		const dismissedToolUseIds = sessionManager.getDismissedAskToolUseIds(sessionId);
+		if (!dismissedToolUseIds) { json({ error: "Unknown session" }, 404); return; }
+		json({ dismissedToolUseIds });
+		return;
+	}
+
+	// POST /api/internal/user-question/dismiss — persistently hide an entire ask card.
+	// This path deliberately does not enqueue a prompt or otherwise wake the agent.
+	if (url.pathname === "/api/internal/user-question/dismiss" && req.method === "POST") {
+		const body = await readBody(req);
+		const { sessionId, toolUseId } = body || {};
+		if (typeof sessionId !== "string" || typeof toolUseId !== "string" || !sessionId || !toolUseId) {
+			json({ error: "Missing required fields: sessionId, toolUseId" }, 400);
+			return;
+		}
+		const existingDismissals = sessionManager.getDismissedAskToolUseIds(sessionId);
+		if (!existingDismissals) { json({ error: "Unknown session" }, 404); return; }
+		if (existingDismissals.includes(toolUseId)) {
+			askQuestionTerminalGuard.observeDismissed(sessionId, toolUseId);
+			json({ ok: true, alreadyDismissed: true });
+			return;
+		}
+		const session = sessionManager.getSession(sessionId);
+		if (!session) { json({ error: "Session is not active" }, 409); return; }
+
+		let messages: unknown[] = [];
+		try {
+			const msgsResp = await session.rpcClient.getMessages();
+			const raw = msgsResp?.data?.messages || msgsResp?.data;
+			if (Array.isArray(raw)) messages = raw;
+		} catch (e: any) {
+			json({ error: `Could not load transcript: ${e?.message || String(e)}` }, 500);
+			return;
+		}
+		if (!findAskUserChoicesQuestions(messages, toolUseId)) {
+			json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
+			return;
+		}
+		if (sessionManager.durableQueuedAskResponseIds(sessionId).has(toolUseId)
+			|| findAskResponseAnswers(messages as any[], toolUseId)) {
+			askQuestionTerminalGuard.observeAnswered(sessionId, toolUseId);
+			json({ error: "Question was already answered" }, 409);
+			return;
+		}
+
+		const reservation = askQuestionTerminalGuard.reserveDismiss(sessionId, toolUseId);
+		if (!reservation.acquired) {
+			if (reservation.state === "dismissed") {
+				json({ ok: true, alreadyDismissed: true });
+			} else if (reservation.state === "answered") {
+				json({ error: "Question was already answered" }, 409);
+			} else if (reservation.state === "submitting") {
+				json({ error: "Answer submission is in progress" }, 409);
+			} else {
+				json({ error: "Question dismissal is in progress" }, 409);
+			}
+			return;
+		}
+
+		try {
+			const result = await sessionManager.dismissAskToolUse(sessionId, toolUseId);
+			askQuestionTerminalGuard.completeDismiss(sessionId, toolUseId);
+			if (!result.alreadyDismissed) {
+				const event: Extract<ServerMessage, { type: "ask_question_dismissed" }> = {
+					type: "ask_question_dismissed",
+					sessionId,
+					toolUseId,
+				};
+				const data = JSON.stringify(event);
+				for (const client of session.clients) {
+					if ((client as any).authenticated === true
+						&& hasUiWebSocketPrincipal(client)
+						&& isSocketSendable(client)) client.send(data);
+				}
+			}
+			json(result.alreadyDismissed ? { ok: true, alreadyDismissed: true } : { ok: true });
+		} catch (e: any) {
+			askQuestionTerminalGuard.rollbackDismiss(sessionId, toolUseId);
+			json({ error: `Failed to persist dismissal: ${e?.message || String(e)}` }, 500);
+		}
+		return;
+	}
+
 	// POST /api/internal/user-question/submit  — called by the UI widget with answers.
 	// Non-blocking model: appends a tagged user message to the session transcript
 	// via `enqueuePrompt` (the normal user-prompt path), which persists to .jsonl,
@@ -20715,41 +20806,44 @@ async function handleApiRoute(
 			return;
 		}
 
-		// Idempotency: if a response envelope for this toolUseId already exists,
-		// return success without appending again. Check in-memory guard first
-		// (covers the race where a duplicate /submit arrives before the first
-		// envelope has propagated into the transcript), then the transcript
-		// (covers process restart / external writers).
-		const dedupKey = `${sessionId}::${toolUseId}`;
-		if (askSubmittedToolUseIds.has(dedupKey)) {
+		// The shared guard is the linearization point for answer-vs-dismiss. Check
+		// process-local state first, then seed terminal state from durable evidence.
+		const terminalState = askQuestionTerminalGuard.state(sessionId, toolUseId);
+		if (terminalState === "dismissing") {
+			json({ error: "Question dismissal is in progress" }, 409);
+			return;
+		}
+		if (terminalState === "dismissed") {
+			json({ error: "Question was dismissed" }, 409);
+			return;
+		}
+		if (terminalState === "submitting") {
 			json({ ok: true, alreadySubmitted: true });
 			return;
 		}
+		if (terminalState === "answered") {
+			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
+			json({ ok: true, alreadySubmitted: true });
+			return;
+		}
+
+		if (sessionManager.getDismissedAskToolUseIds(sessionId)?.includes(toolUseId)) {
+			askQuestionTerminalGuard.observeDismissed(sessionId, toolUseId);
+			json({ error: "Question was dismissed" }, 409);
+			return;
+		}
+
+		const queuedResponse = sessionManager.durableQueuedAskResponseIds(sessionId).has(toolUseId);
 		const existing = findAskResponseAnswers(messages, toolUseId);
-		if (existing) {
-			askSubmittedToolUseIds.add(dedupKey);
+		if (queuedResponse || existing) {
+			askQuestionTerminalGuard.observeAnswered(sessionId, toolUseId);
+			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
 			json({ ok: true, alreadySubmitted: true });
 			return;
 		}
 
 		// Locate the ask_user_choices tool_use block; use its input to cross-validate.
-		let matchedQuestions: UserQuestion[] | null = null;
-		for (const m of messages) {
-			if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
-			for (const b of m.content) {
-				if (!b) continue;
-				const isToolUse = b.type === "toolCall" || b.type === "tool_use";
-				if (!isToolUse) continue;
-				if (b.name !== "ask_user_choices") continue;
-				if (b.id !== toolUseId) continue;
-				const args = b.arguments ?? b.input;
-				if (args && Array.isArray(args.questions)) {
-					matchedQuestions = args.questions as UserQuestion[];
-				}
-				break;
-			}
-			if (matchedQuestions) break;
-		}
+		const matchedQuestions = findAskUserChoicesQuestions(messages, toolUseId);
 		if (!matchedQuestions) {
 			json({ error: "No matching ask_user_choices tool call in transcript" }, 404);
 			return;
@@ -20757,19 +20851,38 @@ async function handleApiRoute(
 		const crossErr = crossValidate(matchedQuestions, answers);
 		if (crossErr) { json({ error: crossErr }, 400); return; }
 
+		const reservation = askQuestionTerminalGuard.reserveSubmit(sessionId, toolUseId);
+		if (!reservation.acquired) {
+			if (reservation.state === "dismissed") {
+				json({ error: "Question was dismissed" }, 409);
+			} else if (reservation.state === "dismissing") {
+				json({ error: "Question dismissal is in progress" }, 409);
+			} else if (reservation.state === "answered") {
+				json({ ok: true, alreadySubmitted: true });
+			} else {
+				json({ ok: true, alreadySubmitted: true });
+			}
+			return;
+		}
+
 		const envelope = buildAskResponseEnvelope(toolUseId, answers);
-		// Mark as submitted BEFORE awaiting enqueuePrompt so a concurrent
-		// duplicate /submit is rejected deterministically.
-		askSubmittedToolUseIds.add(dedupKey);
 		try {
 			await sessionManager.enqueuePrompt(sessionId, envelope, {
 				source: "user",
 				author: LOCAL_USER_AUTHOR,
 			});
+			askQuestionTerminalGuard.completeSubmit(sessionId, toolUseId);
 		} catch (e: any) {
-			// Roll back the dedup flag so the caller can retry.
-			askSubmittedToolUseIds.delete(dedupKey);
+			askQuestionTerminalGuard.rollbackSubmit(sessionId, toolUseId);
 			json({ error: `Failed to enqueue response: ${e?.message || String(e)}` }, 500);
+			return;
+		}
+		try {
+			await sessionManager.recomputeHasUnansweredQuestion(sessionId, toolUseId);
+		} catch (e: any) {
+			// The answer is already in the transcript. Keep the dedup reservation; a
+			// retry takes the idempotent path and heals this projected metadata.
+			json({ error: `Failed to persist question state: ${e?.message || String(e)}` }, 500);
 			return;
 		}
 		json({ ok: true });

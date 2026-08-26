@@ -19,21 +19,86 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import { isWorktreePathReferencedByLiveSessionForCleanup } from "../../src/server/agent/worktree-reference-guard.ts";
 
+const nativeRealpath = promisify(fs.realpath.native) as (value: string) => Promise<string>;
+
+type FakeWorktree = { path: string; branch: string; adminPath?: string };
 const fakeGitState = {
 	commands: [] as Array<{ args: string[]; cwd?: string }>,
+	registrations: new Map<string, Map<string, FakeWorktree>>(),
+	branchDeletionWaiters: new Map<string, () => void>(),
 };
+
+function fakePathKey(filePath: string): string {
+	let resolved = path.resolve(filePath);
+	try {
+		// Model Git's native filesystem identity while the coordinate exists. On
+		// hosted Windows the fixture root can arrive as RUNNER~1 while production
+		// passes the long spelling back to this fake runner.
+		resolved = fs.realpathSync.native(resolved);
+	} catch {
+		// Deleted and synthetic coordinates retain deterministic lexical identity.
+	}
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function registeredWorktrees(repoPath: string): Map<string, FakeWorktree> {
+	const root = path.resolve(repoPath);
+	const repoKey = fakePathKey(root);
+	let worktrees = fakeGitState.registrations.get(repoKey);
+	if (!worktrees) {
+		worktrees = new Map([[fakePathKey(root), { path: root, branch: "master" }]]);
+		fakeGitState.registrations.set(repoKey, worktrees);
+	}
+	return worktrees;
+}
+
+function branchDeletionKey(repoPath: string, branch: string): string {
+	return `${fakePathKey(repoPath)}\0${branch}`;
+}
+
+function waitForFakeBranchDeletion(repoPath: string, branch: string): Promise<void> {
+	return new Promise(resolve => {
+		fakeGitState.branchDeletionWaiters.set(branchDeletionKey(repoPath, branch), resolve);
+	});
+}
+
+function nulPorcelain(worktrees: Iterable<FakeWorktree>): string {
+	return [...worktrees]
+		.map(worktree => `worktree ${worktree.path}\0HEAD ${"0".repeat(40)}\0branch refs/heads/${worktree.branch}\0\0`)
+		.join("");
+}
 
 const fakeGitRunner: CommandRunner = {
 	async execFile(command, args, options) {
 		assert.equal(command, "git");
-		fakeGitState.commands.push({
-			args: [...args],
-			cwd: options?.cwd === undefined ? undefined : String(options.cwd),
-		});
+		const cwd = options?.cwd === undefined ? undefined : String(options.cwd);
+		fakeGitState.commands.push({ args: [...args], cwd });
+		if (args[0] === "worktree" && args[1] === "list") {
+			assert.deepEqual(args, ["worktree", "list", "--porcelain", "-z"]);
+			return { stdout: nulPorcelain(registeredWorktrees(cwd ?? stateRoot).values()), stderr: "" };
+		}
 		if (args[0] === "worktree" && args[1] === "remove") {
-			fs.rmSync(String(args[2]), { recursive: true, force: true });
+			const requestedPath = path.resolve(String(args[2]));
+			const worktrees = registeredWorktrees(cwd ?? stateRoot);
+			// Resolve identity before removal: once the directory disappears, a
+			// RUNNER~1 coordinate can no longer expand to Git's long spelling.
+			const worktreeKey = fakePathKey(requestedPath);
+			const registered = worktrees.get(worktreeKey);
+			// Git removes its registered coordinate even when cleanup invoked it via
+			// an equivalent short/long alias. Model that transition using the exact
+			// spelling captured by the registration rather than the caller's alias.
+			fs.rmSync(registered?.path ?? requestedPath, { recursive: true, force: true });
+			if (registered?.adminPath) fs.rmSync(registered.adminPath, { recursive: true, force: true });
+			worktrees.delete(worktreeKey);
+		}
+		if (args[0] === "branch" && args[1] === "-D" && cwd) {
+			const key = branchDeletionKey(cwd, String(args[2]));
+			fakeGitState.branchDeletionWaiters.get(key)?.();
+			fakeGitState.branchDeletionWaiters.delete(key);
 		}
 		return { stdout: "", stderr: "" };
 	},
@@ -49,35 +114,63 @@ const [
 	{ SessionStore },
 	{ GoalManager },
 	{ GoalStore },
+	{ StaffManager },
 	{ handleSetupFailure },
 	{ initPromptDirs },
 ] = await Promise.all([
 	import("../../src/server/agent/session-store.ts"),
 	import("../../src/server/agent/goal-manager.ts"),
 	import("../../src/server/agent/goal-store.ts"),
+	import("../../src/server/agent/staff-manager.ts"),
 	import("../../src/server/agent/session-setup.ts"),
 	import("../../src/server/agent/system-prompt.ts"),
 ]);
 initPromptDirs(importStateRoot);
 
 const managers: any[] = [];
+const stores: any[] = [];
 let prevBobbitDir: string | undefined;
 let stateRoot = "";
 
 function makeRepo(root: string): string {
 	const repo = path.join(root, "repo");
 	fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+	registeredWorktrees(repo);
 	return repo;
 }
 
-function makeWorktree(worktreePath: string): void {
-	fs.mkdirSync(worktreePath, { recursive: true });
-	fs.writeFileSync(path.join(worktreePath, ".git"), "gitdir: test-marker\n", "utf8");
+function makeWorktree(repoPath: string, worktreePath: string): void {
+	const resolvedPath = path.resolve(worktreePath);
+	const adminPath = path.join(path.resolve(repoPath), ".git", "worktrees", path.basename(resolvedPath));
+	fs.mkdirSync(adminPath, { recursive: true });
+	fs.mkdirSync(resolvedPath, { recursive: true });
+	fs.writeFileSync(path.join(resolvedPath, ".git"), `gitdir: ${adminPath}\n`, "utf8");
+	registeredWorktrees(repoPath).set(fakePathKey(resolvedPath), {
+		path: resolvedPath,
+		branch: `session/${path.basename(resolvedPath)}`,
+		adminPath,
+	});
 }
 
 function equivalentPath(worktreePath: string): string {
 	const normalized = worktreePath.replace(/\\/g, "/");
 	return process.platform === "win32" ? normalized.toUpperCase() : normalized;
+}
+
+function explicitDotAlias(worktreePath: string): string {
+	return `${path.dirname(worktreePath)}${path.sep}hop${path.sep}..${path.sep}${path.basename(worktreePath)}`;
+}
+
+async function traversableDotAlias(worktreePath: string): Promise<string> {
+	const alias = explicitDotAlias(worktreePath);
+	await fs.promises.mkdir(path.join(path.dirname(worktreePath), "hop"), { recursive: true });
+	const comparable = (value: string) => process.platform === "win32" ? value.toLowerCase() : value;
+	assert.equal(
+		comparable(await nativeRealpath(alias)),
+		comparable(await nativeRealpath(worktreePath)),
+		`fixture alias must resolve through a real sibling hop to ${worktreePath}`,
+	);
+	return alias;
 }
 
 function makeSession(id: string, extra: Record<string, any>): any {
@@ -90,6 +183,12 @@ function makeSession(id: string, extra: Record<string, any>): any {
 		lastActivity: Date.now(),
 		...extra,
 	};
+}
+
+function makeStore(): any {
+	const store = new SessionStore(stateRoot);
+	stores.push(store);
+	return store;
 }
 
 function makeManager(store: any, commandRunner: any = fakeGitRunner): any {
@@ -120,14 +219,17 @@ function cleanupManager(manager: any): void {
 describe("shared worktree guard reproductions", () => {
 	beforeEach(() => {
 		fakeGitState.commands.length = 0;
+		fakeGitState.registrations.clear();
+		fakeGitState.branchDeletionWaiters.clear();
 		stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-state-"));
 		prevBobbitDir = process.env.BOBBIT_DIR;
 		process.env.BOBBIT_DIR = stateRoot;
 		initPromptDirs(stateRoot);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (managers.length > 0) cleanupManager(managers.pop());
+		await Promise.allSettled(stores.splice(0).map(store => store.flushAsync()));
 		if (prevBobbitDir === undefined) delete process.env.BOBBIT_DIR;
 		else process.env.BOBBIT_DIR = prevBobbitDir;
 		fs.rmSync(stateRoot, { recursive: true, force: true });
@@ -137,15 +239,41 @@ describe("shared worktree guard reproductions", () => {
 		fs.rmSync(importStateRoot, { recursive: true, force: true });
 	});
 
+	it("resolves only explicit aliases and fails closed when their identity is unavailable", async () => {
+		const fixtureRoot = path.join(stateRoot, "identity-fixture");
+		fs.mkdirSync(fixtureRoot, { recursive: true });
+		const canonicalRoot = await nativeRealpath(fixtureRoot);
+		const candidate = path.join(canonicalRoot, "worktrees", "shared");
+		const child = path.join(candidate, "packages", "api");
+		const distinct = path.join(canonicalRoot, "different");
+		fs.mkdirSync(child, { recursive: true });
+		fs.mkdirSync(distinct, { recursive: true });
+		const candidateAlias = await traversableDotAlias(candidate);
+		const childAlias = await traversableDotAlias(child);
+		const realpathNative = vi.fn(async (value: string) => fs.promises.realpath(value));
+
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: candidate }], { realpathNative }), true);
+		assert.equal(realpathNative.mock.calls.length, 0, "ordinary sync matches perform no native filesystem I/O");
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: path.join(canonicalRoot, "missing") }], { realpathNative }), false);
+		assert.equal(realpathNative.mock.calls.length, 0, "ordinary missing mismatches perform no native filesystem I/O");
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: candidateAlias }], { realpathNative }), true);
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ repoWorktrees: { api: candidateAlias } }], { realpathNative }), true);
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ cwd: childAlias }], { realpathNative }), true);
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: explicitDotAlias(path.join(canonicalRoot, "other")) }], { realpathNative }), true,
+			"an unresolved explicit alias must conservatively preserve cleanup candidates");
+		assert.equal(await isWorktreePathReferencedByLiveSessionForCleanup(candidate, [{ worktreePath: await traversableDotAlias(distinct) }], { realpathNative }), false,
+			"proven-distinct alias identities remain cleanable");
+	});
+
 	it("purging an archived session must not remove a worktree referenced by a live session cwd", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-purge-single-"));
 		try {
 			const repo = makeRepo(tmp);
 			const sharedWorktree = path.join(tmp, "repo-wt", "session-shared");
 			const branch = "session/shared-single";
-			makeWorktree(sharedWorktree);
+			makeWorktree(repo, sharedWorktree);
 
-			const store = new SessionStore(stateRoot);
+			const store = makeStore();
 			store.put(makeSession("archived-a", {
 				archived: true,
 				archivedAt: Date.now(),
@@ -155,7 +283,7 @@ describe("shared worktree guard reproductions", () => {
 				cwd: sharedWorktree,
 			}));
 			store.put(makeSession("live-b", {
-				cwd: equivalentPath(sharedWorktree),
+				cwd: await traversableDotAlias(sharedWorktree),
 				worktreePath: undefined,
 				branch: "session/live-different-branch",
 			}));
@@ -177,31 +305,34 @@ describe("shared worktree guard reproductions", () => {
 	it("purging an archived multi-repo session must keep shared repoWorktrees and may clean unshared ones", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-purge-multi-"));
 		try {
-			const root = path.join(tmp, "project");
+			const canonicalRoot = await nativeRealpath(tmp);
+			const root = path.join(canonicalRoot, "project");
 			const api = path.join(root, "api");
 			const web = path.join(root, "web");
 			fs.mkdirSync(path.join(api, ".git"), { recursive: true });
 			fs.mkdirSync(path.join(web, ".git"), { recursive: true });
 
 			const branch = "session/shared-multi";
-			const apiWorktree = path.join(tmp, "project-wt", "session-shared", "api");
-			const webWorktree = path.join(tmp, "project-wt", "session-shared", "web");
-			makeWorktree(apiWorktree);
-			makeWorktree(webWorktree);
+			const apiWorktree = path.join(canonicalRoot, "project-wt", "session-shared", "api");
+			const webWorktree = path.join(canonicalRoot, "project-wt", "session-shared", "web");
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
 
-			const store = new SessionStore(stateRoot);
+			const store = makeStore();
 			store.put(makeSession("archived-multi", {
 				archived: true,
 				archivedAt: Date.now(),
 				repoPath: root,
 				branch,
-				worktreePath: path.join(tmp, "project-wt", "session-shared"),
+				worktreePath: path.join(canonicalRoot, "project-wt", "session-shared"),
 				repoWorktrees: { api: apiWorktree, web: webWorktree },
 			}));
+			const unrelatedCwd = path.join(canonicalRoot, "unrelated-live-cwd");
+			fs.mkdirSync(unrelatedCwd, { recursive: true });
 			store.put(makeSession("live-api-owner", {
-				cwd: apiWorktree,
+				cwd: unrelatedCwd,
 				branch: "session/live-api-owner",
-				repoWorktrees: { api: equivalentPath(apiWorktree) },
+				repoWorktrees: { api: await traversableDotAlias(apiWorktree) },
 			}));
 
 			const manager = makeManager(store);
@@ -214,7 +345,171 @@ describe("shared worktree guard reproductions", () => {
 			);
 			assert.equal(fs.existsSync(webWorktree), false, "unshared multi-repo worktree should remain cleanable");
 			assert.deepEqual(
-				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
+				fakeGitState.commands.filter(call => call.args[0] === "worktree" && call.args[1] === "remove").map(call => call.args[2]),
+				[webWorktree],
+			);
+			assert.deepEqual(
+				fakeGitState.commands.filter(call => call.args[0] === "branch" && call.args[1] === "-D").map(call => call.cwd),
+				[web],
+				"the shared API component must issue no branch deletion while unshared web deletes exactly once",
+			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("adopted workspace purge fails closed when a live borrower uses an alias", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-adopted-"));
+		try {
+			const root = path.join(tmp, "project");
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			fs.mkdirSync(path.join(api, ".git"), { recursive: true });
+			fs.mkdirSync(path.join(web, ".git"), { recursive: true });
+			const container = path.join(tmp, "project-wt", "adopted");
+			const apiWorktree = path.join(container, "api");
+			const webWorktree = path.join(container, "web");
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
+
+			const store = makeStore();
+			const owner = makeSession("adopted-owner", {
+				archived: true,
+				archivedAt: Date.now(),
+				goalId: "adopted-goal",
+				teamGoalId: "adopted-goal",
+				role: "team-lead",
+				repoPath: root,
+				branch: "goal/adopted",
+				worktreePath: container,
+				repoWorktrees: { api: apiWorktree, web: webWorktree },
+			});
+			store.put(owner);
+			store.put(makeSession("live-borrower", {
+				cwd: await traversableDotAlias(apiWorktree),
+				branch: "session/live-borrower",
+			}));
+			const manager = makeManager(store);
+			manager.resolveGoal = () => ({
+				id: "adopted-goal",
+				archived: true,
+				worktreeOwnerSessionId: owner.id,
+				repoPath: root,
+				branch: owner.branch,
+				worktreePath: container,
+				repoWorktrees: owner.repoWorktrees,
+			});
+
+			assert.equal(await manager.purgeArchivedSession(owner.id), true);
+			assert.ok(store.get(owner.id), "adopted owner record must remain for an all-or-nothing retry");
+			assert.ok(fs.existsSync(apiWorktree));
+			assert.ok(fs.existsSync(webWorktree));
+			assert.deepEqual(fakeGitState.commands, []);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("destructive orphan cleanup preserves a live aliased worktree", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-orphan-"));
+		try {
+			const repo = makeRepo(tmp);
+			const sharedWorktree = path.join(tmp, "repo-wt", "session-orphan-shared");
+			makeWorktree(repo, sharedWorktree);
+			const branch = `session/${path.basename(sharedWorktree)}`;
+			const store = makeStore();
+			store.put(makeSession("live-owner", {
+				cwd: await traversableDotAlias(sharedWorktree),
+				branch: "session/unrelated-branch",
+			}));
+			const porcelain = `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${sharedWorktree}\nbranch refs/heads/${branch}\n`;
+			const execFile = vi.fn(async (command: string, args: readonly string[]) => {
+				assert.equal(command, "git");
+				assert.deepEqual(args, ["worktree", "list", "--porcelain"]);
+				return { stdout: porcelain, stderr: "" };
+			});
+			const manager = makeManager(store, { execFile });
+
+			await manager.cleanupOrphanedSessionWorktrees(repo);
+
+			assert.ok(fs.existsSync(sharedWorktree));
+			assert.equal(execFile.mock.calls.length, 1, "cleanup must stop before any Git removal command");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("archived cleanup rechecks a fresh live alias after a stale removable scan", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-archived-recheck-"));
+		try {
+			const candidate = path.join(tmp, "repo-wt", "archived-candidate");
+			fs.mkdirSync(candidate, { recursive: true });
+			const store = makeStore();
+			store.put(makeSession("archived-owner", { archived: true, archivedAt: Date.now(), worktreePath: candidate }));
+			store.put(makeSession("new-live-owner", { cwd: await traversableDotAlias(candidate) }));
+			const manager = makeManager(store);
+			const item = {
+				key: "archived-owner:.:candidate",
+				sessionId: "archived-owner",
+				title: "archived owner",
+				repo: ".",
+				repoPath: path.join(tmp, "repo"),
+				path: candidate,
+				branch: "session/archived-owner",
+				status: "removable",
+				reason: "safe-archived-session-worktree",
+			};
+			manager.listArchivedSessionWorktrees = vi.fn(async () => ({
+				sessions: [{ id: "archived-owner", title: "archived owner", worktrees: [item] }],
+				items: [item],
+				selectionPresets: [],
+			}));
+
+			const result = await manager.cleanupArchivedSessionWorktrees({ mode: "all" });
+
+			assert.equal(result.results[0]?.status, "skipped");
+			assert.equal(result.results[0]?.reason, "referenced-by-live-session");
+			assert.ok(fs.existsSync(candidate));
+			assert.deepEqual(fakeGitState.commands, []);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("staff cleanup preserves an aliased shared component while removing an unshared component once", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-staff-"));
+		try {
+			const root = path.join(tmp, "project");
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			fs.mkdirSync(path.join(api, ".git"), { recursive: true });
+			fs.mkdirSync(path.join(web, ".git"), { recursive: true });
+			const container = path.join(tmp, "project-wt", "staff");
+			const apiWorktree = path.join(container, "api");
+			const webWorktree = path.join(container, "web");
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
+			const pcm = { getOrCreate: () => ({ project: { rootPath: root } }), all: () => [] };
+			const staffManager = new StaffManager(pcm as any, {
+				commandRunner: fakeGitRunner,
+				remotePolicy: { skipRemotePush: true },
+			});
+			const staff = {
+				id: "staff-alias",
+				projectId: "project-staff",
+				repoPath: root,
+				branch: "staff/alias",
+				worktreePath: container,
+				repoWorktrees: { api: apiWorktree, web: webWorktree },
+			};
+
+			await (staffManager as any).cleanupStaffWorktree(staff, staff.projectId, [{ cwd: await traversableDotAlias(apiWorktree) }]);
+
+			assert.ok(fs.existsSync(apiWorktree));
+			assert.ok(fs.existsSync(container), "shared component must also preserve its container");
+			assert.equal(fs.existsSync(webWorktree), false);
+			assert.deepEqual(
+				fakeGitState.commands.filter(call => call.args[0] === "worktree" && call.args[1] === "remove").map(call => call.args[2]),
 				[webWorktree],
 			);
 		} finally {
@@ -229,7 +524,7 @@ describe("shared worktree guard reproductions", () => {
 			const sharedWorktree = path.join(tmp, "repo-wt", "session-shared-api");
 			fs.mkdirSync(sharedWorktree, { recursive: true });
 
-			const store = new SessionStore(stateRoot);
+			const store = makeStore();
 			store.put(makeSession("live-repo-owner", {
 				cwd: path.join(tmp, "elsewhere"),
 				branch: "session/live-different-branch",
@@ -262,8 +557,8 @@ describe("shared worktree guard reproductions", () => {
 			const branch = "goal/archive-shared";
 			const apiWorktree = path.join(tmp, "project-wt", "goal-archive", "api");
 			const webWorktree = path.join(tmp, "project-wt", "goal-archive", "web");
-			makeWorktree(apiWorktree);
-			makeWorktree(webWorktree);
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
 
 			const goalState = path.join(tmp, "goal-state");
 			const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
@@ -271,8 +566,9 @@ describe("shared worktree guard reproductions", () => {
 				commandRunner: fakeGitRunner,
 				remotePolicy: { skipRemotePush: true },
 			});
+			const apiAlias = await traversableDotAlias(apiWorktree);
 			goalManager.setLiveSessionResolver(() => [makeSession("live-api-owner", {
-				cwd: equivalentPath(apiWorktree),
+				cwd: apiAlias,
 				branch: "session/live-api-owner",
 			})]);
 			goalStore.put({
@@ -290,8 +586,12 @@ describe("shared worktree guard reproductions", () => {
 				repoWorktrees: { api: apiWorktree, web: webWorktree },
 			});
 
+			// Goal cleanup is deliberately best-effort background work. Arm the
+			// terminal fake-Git event before archive so native short/long alias
+			// resolution cannot race the assertions or the next fixture reset.
+			const webCleanupFinished = waitForFakeBranchDeletion(web, branch);
 			const archived = await goalManager.archiveGoal("goal-archive");
-			await Promise.resolve();
+			await webCleanupFinished;
 			assert.equal(archived, true, "goal should be archived by the test setup");
 			assert.ok(
 				fs.existsSync(apiWorktree),
@@ -299,7 +599,7 @@ describe("shared worktree guard reproductions", () => {
 			);
 			assert.equal(fs.existsSync(webWorktree), false, "unshared goal repoWorktree should remain cleanable");
 			assert.deepEqual(
-				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
+				fakeGitState.commands.filter(call => call.args[0] === "worktree" && call.args[1] === "remove").map(call => call.args[2]),
 				[webWorktree],
 			);
 		} finally {
@@ -319,8 +619,8 @@ describe("shared worktree guard reproductions", () => {
 				fs.mkdirSync(path.join(web, ".git"), { recursive: true });
 				const apiWorktree = path.join(tmp, "project-wt", "recovered-team", "api");
 				const webWorktree = path.join(tmp, "project-wt", "recovered-team", "web");
-				makeWorktree(apiWorktree);
-				makeWorktree(webWorktree);
+				makeWorktree(api, apiWorktree);
+				makeWorktree(web, webWorktree);
 
 				const goalState = path.join(tmp, "goal-state");
 				const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
@@ -374,8 +674,8 @@ describe("shared worktree guard reproductions", () => {
 		try {
 			const repo = makeRepo(tmp);
 			const worktree = path.join(tmp, "repo-wt", "quiesced-session");
-			makeWorktree(worktree);
-			const store = new SessionStore(stateRoot);
+			makeWorktree(repo, worktree);
+			const store = makeStore();
 			const persisted = makeSession("quiesced-session", {
 				archived: false,
 				projectId: "project-evidence",
@@ -459,8 +759,8 @@ describe("shared worktree guard reproductions", () => {
 
 			const apiWorktree = path.join(tmp, "project-wt", "team-goal", "api");
 			const webWorktree = path.join(tmp, "project-wt", "team-goal", "web");
-			makeWorktree(apiWorktree);
-			makeWorktree(webWorktree);
+			makeWorktree(api, apiWorktree);
+			makeWorktree(web, webWorktree);
 
 			const goalStore = new GoalStore(path.join(tmp, "goal-state"), undefined, { persistence: "json" });
 			const goalManager = new GoalManager(goalStore, undefined, undefined, {
@@ -497,15 +797,15 @@ describe("shared worktree guard reproductions", () => {
 		}
 	});
 
-	it("setup failure must not clean a worktree path already owned by another live persisted session", () => {
+	it("setup failure must not clean a worktree path already owned by another live persisted session", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-setup-failure-"));
 		try {
 			const repo = makeRepo(tmp);
 			const sharedWorktree = path.join(tmp, "repo-wt", "session-shared-setup");
 			const branch = "session/setup-failed";
-			makeWorktree(sharedWorktree);
+			makeWorktree(repo, sharedWorktree);
 
-			const store = new SessionStore(stateRoot);
+			const store = makeStore();
 			const failedSession = makeSession("setup-failed", {
 				cwd: sharedWorktree,
 				repoPath: repo,
@@ -514,7 +814,7 @@ describe("shared worktree guard reproductions", () => {
 			});
 			store.put(failedSession);
 			store.put(makeSession("live-owner", {
-				cwd: equivalentPath(sharedWorktree),
+				cwd: await traversableDotAlias(sharedWorktree),
 				branch: "session/live-owner",
 				worktreePath: undefined,
 			}));
@@ -531,7 +831,7 @@ describe("shared worktree guard reproductions", () => {
 				clients: new Set(),
 			});
 
-			handleSetupFailure(
+			await handleSetupFailure(
 				sessions.get(failedSession.id),
 				{ mode: "worktree", repoPath: repo, worktreePath: sharedWorktree, branch } as any,
 				new Error("intentional setup failure repro"),

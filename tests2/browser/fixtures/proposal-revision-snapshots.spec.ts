@@ -80,6 +80,26 @@ async function createGoalAssistantSessionViaApi(page: Page): Promise<string> {
 	return sessionId;
 }
 
+async function holdProposalStream(page: Page, gateway: any, type: string): Promise<{ entered: Promise<unknown>; release: () => void }> {
+	const sessionId = await activeSessionId(page);
+	const core = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!core || typeof core.armBarrier !== "function" || typeof core.waitForBarrier !== "function") {
+		throw new Error("proposal stream fixture requires the in-process mock agent barrier seam");
+	}
+	const boundary = `proposal-stream:${type}:intermediate-delta`;
+	core.armBarrier(boundary);
+	const entered = Promise.resolve(core.waitForBarrier(boundary)).then((details: any) => {
+		if (details?.proposalType !== type || details?.delta !== 1 || typeof details?.toolId !== "string") {
+			throw new Error(`proposal stream reached an uncorrelated intermediate barrier: ${JSON.stringify(details)}`);
+		}
+		return details;
+	});
+	return {
+		entered,
+		release: () => { core.releaseBarrier(boundary); },
+	};
+}
+
 async function activeSessionId(page: Page): Promise<string> {
 	// Wait for the selected session id to land in state. This used to read
 	// `bobbitState.activeSessionId` (which never existed — it's a function,
@@ -222,23 +242,39 @@ test.describe("Proposal revision snapshots", () => {
 		await expect(page.locator('input[placeholder="Goal title"]').first()).toHaveValue("Parity Goal A", { timeout: 5_000 });
 	});
 
-	test("streaming proposal previews do not synthesize snapshot revisions", async ({ page }) => {
+	test("streaming proposal previews do not synthesize snapshot revisions", async ({ page, gateway }) => {
 		test.setTimeout(60_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 
-		await sendMessage(page, "STAY_BUSY:propose_goal:8");
-		await page.waitForFunction(
-			() => String((window as any).bobbitState?.activeProposals?.goal?.fields?.spec ?? "").includes("Paragraph 4"),
-			null,
-			{ timeout: 15_000 },
-		);
-		await expect(page.locator('[data-testid="proposal-streaming-badge"]').first()).toBeVisible({ timeout: 5_000 });
+		const stream = await holdProposalStream(page, gateway, "goal");
+		try {
+			await sendMessage(page, "STAY_BUSY:propose_goal:8:0");
+			await stream.entered;
+			await page.waitForFunction(
+				() => String((window as any).bobbitState?.activeProposals?.goal?.fields?.spec ?? "").includes("Paragraph 1"),
+				null,
+				{ timeout: 15_000 },
+			);
+			await expect(page.locator('[data-testid="proposal-streaming-badge"]').first()).toBeVisible({ timeout: 5_000 });
+			await expect.poll(
+				() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
+				{ timeout: 5_000, message: "PROPOSAL_STREAMING_REV_BUG: streaming preview deltas must not increment immutable proposal revs" },
+			).toBe(0);
+			await expect(page.locator('[data-testid="proposal-panel-rev"]')).toHaveCount(0);
+		} finally {
+			stream.release();
+		}
+
 		await expect.poll(
-			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal?.rev ?? 0),
-			{ timeout: 5_000, message: "PROPOSAL_STREAMING_REV_BUG: streaming preview deltas must not increment immutable proposal revs" },
-		).toBe(0);
-		await expect(page.locator('[data-testid="proposal-panel-rev"]')).toHaveCount(0);
+			() => page.evaluate(() => (window as any).bobbitState?.remoteAgent?.state?.status ?? ""),
+			{ timeout: 15_000, message: "proposal stream should reach its terminal idle state after release" },
+		).toBe("idle");
+		await expect(page.locator('[data-testid="proposal-streaming-badge"]')).toHaveCount(0);
+		await expect.poll(
+			() => page.evaluate(() => String((window as any).bobbitState?.activeProposals?.goal?.fields?.spec ?? "")),
+			{ timeout: 5_000, message: "terminal proposal projection should contain the final streamed delta" },
+		).toContain("Paragraph 8");
 	});
 
 	test("goal assistant draft restore preserves the latest server revision", async ({ page }) => {

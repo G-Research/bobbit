@@ -1,3 +1,4 @@
+import { icon } from "@mariozechner/mini-lit";
 import type {
 	AssistantMessage as AssistantMessageType,
 	ImageContent,
@@ -9,6 +10,7 @@ import type {
 import { html, LitElement, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import { Settings2 } from "lucide";
 import { ensureMarkdownBlock } from "../lazy/markdown-block.js";
 import { renderTool } from "../tools/index.js";
 import { TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
@@ -16,6 +18,7 @@ import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
 import { fetchToolContentByToolCall } from "../utils/fetch-tool-content.js";
 import { state as appState, renderApp } from "../../app/state.js";
+import { ASK_DISMISSALS_CHANGED_EVENT } from "../../app/ask-dismissals.js";
 import { getHostApi } from "../../app/host-api.js";
 import { packHasLocalDataForTool, packIdForTool } from "../../app/pack-renderers.js";
 import "./ThinkingBlock.js";
@@ -390,11 +393,11 @@ export class UserMessage extends LitElement {
 			<span class="prompt-author-divider" aria-hidden="true">|</span>
 			<span class="prompt-author-kind">Agent</span>
 		` : html`
-			<span
-				class="prompt-author-initial"
-				aria-hidden="true"
-				data-initial=${presentation.kind === "user" ? "U" : "S"}
-			></span>
+			${presentation.kind === "system" ? html`
+				<span class="prompt-author-system-icon" aria-hidden="true">${icon(Settings2, "xs")}</span>
+			` : html`
+				<span class="prompt-author-initial" aria-hidden="true" data-initial="U"></span>
+			`}
 			<span class="prompt-author-name">${presentation.visibleName}</span>
 		`;
 		const originSessionId = isAgent ? this.authorAppearance?.sessionId : undefined;
@@ -798,6 +801,7 @@ export class ToolMessage extends LitElement {
 		this._liveSubscriptionsConnected = true;
 		document.addEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.addEventListener("bobbit-transcript-message", this._onTranscriptMessage);
+		document.addEventListener(ASK_DISMISSALS_CHANGED_EVENT, this._onTranscriptMessage);
 		document.addEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		document.addEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 		document.addEventListener("bobbit-review-open-state", this._onReviewOpenState);
@@ -809,6 +813,7 @@ export class ToolMessage extends LitElement {
 		this._liveSubscriptionsConnected = false;
 		document.removeEventListener("bobbit-tool-preview-ready", this._onPreviewReady);
 		document.removeEventListener("bobbit-transcript-message", this._onTranscriptMessage);
+		document.removeEventListener(ASK_DISMISSALS_CHANGED_EVENT, this._onTranscriptMessage);
 		document.removeEventListener(TOOL_RENDERER_LOADED_EVENT, this._onRendererLoaded);
 		document.removeEventListener(TOOL_RENDER_REQUESTED_EVENT, this._onRenderRequested);
 		document.removeEventListener("bobbit-review-open-state", this._onReviewOpenState);

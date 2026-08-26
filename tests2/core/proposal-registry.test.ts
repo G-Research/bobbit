@@ -149,7 +149,7 @@ describe("hasCurrentProposalSlotForSession", () => {
 		assert.equal(hasCurrentProposalSlotForSession(stateLike, "project", "s1"), true);
 	});
 
-	it("drops stale current proposal tabs instead of reselecting them", () => {
+	it("drops stale current proposal tabs instead of reselecting them", async () => {
 		const previous = (globalThis as any).bobbitState;
 		const stateLike = {
 			activeProposals: {
@@ -169,8 +169,11 @@ describe("hasCurrentProposalSlotForSession", () => {
 		};
 		try {
 			(globalThis as any).bobbitState = stateLike;
-			PROPOSAL_TYPE_REGISTRY.tool.onFirstEmit({ sessionId: "s1", fields: {}, streaming: false, rev: 1 }, { isAssistant: false, isMobile: false });
+			const completion = PROPOSAL_TYPE_REGISTRY.tool.onFirstEmit({ sessionId: "s1", fields: {}, streaming: false, rev: 1 }, { isAssistant: false, isMobile: false });
 
+			assert.deepEqual(stateLike.panelTabsBySession.s1.map((tab) => tab.id), []);
+			assert.equal(stateLike.panelWorkspaceActiveBySession.s1, "");
+			await completion;
 			assert.deepEqual(stateLike.panelTabsBySession.s1.map((tab) => tab.id), []);
 			assert.equal(stateLike.panelWorkspaceActiveBySession.s1, "");
 		} finally {
