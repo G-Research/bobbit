@@ -6,14 +6,17 @@ import JSZip from "jszip";
 import { MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES } from "../../src/server/agent/uploaded-specialized-document-extractor.js";
 import {
 	MAX_UPLOADED_ATTACHMENT_BYTES,
+	MAX_UPLOADED_ATTACHMENT_OCCURRENCES_PER_SESSION,
 	MAX_UPLOADED_ATTACHMENT_READ_BYTES,
 	MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVATIONS,
+	UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES,
 	listUploadedAttachments,
 	persistUploadedAttachmentOccurrence,
 	purgeUploadedAttachments,
 	readUploadedAttachmentRange,
 	resetUploadedAttachmentUsageForTesting,
 	setUploadedAttachmentRootForTesting,
+	setUploadedAttachmentSessionOccurrenceLimitForTesting,
 	setUploadedAttachmentSessionQuotaForTesting,
 	setUploadedAttachmentStoreHooksForTesting,
 	sweepUploadedAttachments,
@@ -327,7 +330,9 @@ describe("immutable uploaded attachment store", () => {
 			...document("pdf", "preview.pdf", "application/pdf", Buffer.from("x")),
 			preview: preview.toString("base64"),
 		};
-		setUploadedAttachmentSessionQuotaForTesting(accepted.size + preview.length);
+		setUploadedAttachmentSessionQuotaForTesting(
+			accepted.size + preview.length + UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES,
+		);
 		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "preview-before-restart", [accepted]);
 		expect(saved.displayAttachments).toEqual([{
 			id: accepted.id,
@@ -366,7 +371,9 @@ describe("immutable uploaded attachment store", () => {
 		]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
 		expect(fs.readdirSync(root)).toEqual([]);
 
-		setUploadedAttachmentSessionQuotaForTesting(10);
+		setUploadedAttachmentSessionQuotaForTesting(
+			10 + (2 * UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES),
+		);
 		const sixBytes = document("six", "six.bin", "application/octet-stream", Buffer.from("123456"));
 		const first = await persistUploadedAttachmentOccurrence(SESSION_A, "quota-first", [sixBytes]);
 		expect(await persistUploadedAttachmentOccurrence(SESSION_A, "quota-first", [{ ...sixBytes }])).toEqual(first);
@@ -382,8 +389,96 @@ describe("immutable uploaded attachment store", () => {
 		expect((fs.readdirSync(root, { recursive: true }) as string[]).some((entry) => entry.includes(".tmp-"))).toBe(false);
 	});
 
+	it("charges a deterministic nonzero record cost for repeated zero-byte occurrences", async () => {
+		setUploadedAttachmentSessionOccurrenceLimitForTesting(10);
+		setUploadedAttachmentSessionQuotaForTesting(UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
+		const empty = document("empty", "empty.bin", "application/octet-stream", Buffer.alloc(0));
+		await persistUploadedAttachmentOccurrence(SESSION_A, "zero-record-first", [empty]);
+		const beforeRejectedAdmission = (fs.readdirSync(root, { recursive: true }) as string[]).sort();
+
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "zero-record-second", [{ ...empty }]),
+			"UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).sort()).toEqual(beforeRejectedAdmission);
+	});
+
+	it("caps zero-byte committed occurrences without charging idempotent replay", async () => {
+		expect(MAX_UPLOADED_ATTACHMENT_OCCURRENCES_PER_SESSION).toBe(512);
+		setUploadedAttachmentSessionOccurrenceLimitForTesting(2);
+		setUploadedAttachmentSessionQuotaForTesting(10 * UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
+		const empty = document("empty", "empty.bin", "application/octet-stream", Buffer.alloc(0));
+		const first = await persistUploadedAttachmentOccurrence(SESSION_A, "zero-count-first", [empty]);
+		expect(await persistUploadedAttachmentOccurrence(SESSION_A, "zero-count-first", [{ ...empty }])).toEqual(first);
+		await persistUploadedAttachmentOccurrence(SESSION_A, "zero-count-second", [{ ...empty, id: "empty-two" }]);
+		const beforeRejectedAdmission = (fs.readdirSync(root, { recursive: true }) as string[]).sort();
+
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "zero-count-third", [{ ...empty, id: "empty-three" }]),
+			"UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).sort()).toEqual(beforeRejectedAdmission);
+	});
+
+	it("serializes concurrent zero-byte and ordinary admissions at the occurrence cap", async () => {
+		setUploadedAttachmentSessionOccurrenceLimitForTesting(1);
+		setUploadedAttachmentSessionQuotaForTesting(10 * UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
+		let releaseCommit!: () => void;
+		let reachedCommit!: () => void;
+		const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
+		const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+		setUploadedAttachmentStoreHooksForTesting({
+			beforeCommit: async () => {
+				reachedCommit();
+				await commitGate;
+			},
+		});
+
+		const zero = persistUploadedAttachmentOccurrence(SESSION_A, "mixed-parallel-zero", [
+			document("zero", "zero.bin", "application/octet-stream", Buffer.alloc(0)),
+		]);
+		await atCommit;
+		const ordinary = persistUploadedAttachmentOccurrence(SESSION_A, "mixed-parallel-ordinary", [
+			document("ordinary", "ordinary.bin", "application/octet-stream", Buffer.from("ordinary")),
+		]);
+		releaseCommit();
+		const outcomes = await Promise.allSettled([zero, ordinary]);
+		setUploadedAttachmentStoreHooksForTesting(undefined);
+
+		expect(outcomes[0].status).toBe("fulfilled");
+		expect(outcomes[1]).toMatchObject({
+			status: "rejected",
+			reason: { statusCode: 413, code: "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED", retryable: false },
+		});
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).some((entry) => entry.includes(".tmp-"))).toBe(false);
+	});
+
+	it("rebuilds the occurrence cap, fails closed on corrupt records, and releases it on purge", async () => {
+		setUploadedAttachmentSessionOccurrenceLimitForTesting(1);
+		setUploadedAttachmentSessionQuotaForTesting(10 * UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
+		const empty = document("empty", "empty.bin", "application/octet-stream", Buffer.alloc(0));
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "zero-before-rebuild", [empty]);
+		resetUploadedAttachmentUsageForTesting();
+		expect(await sweepUploadedAttachments([SESSION_A])).toMatchObject({ removed: [], kept: [expect.any(String)] });
+		expect(await persistUploadedAttachmentOccurrence(SESSION_A, "zero-before-rebuild", [{ ...empty }])).toEqual(saved);
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "zero-after-rebuild", [{ ...empty, id: "next" }]),
+			"UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
+
+		fs.unlinkSync(findStoredByteFile(root));
+		resetUploadedAttachmentUsageForTesting();
+		const beforeCorruptRejection = (fs.readdirSync(root, { recursive: true }) as string[]).sort();
+		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "zero-after-corruption", [{ ...empty, id: "corrupt-next" }]),
+			"UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
+		expect((fs.readdirSync(root, { recursive: true }) as string[]).sort()).toEqual(beforeCorruptRejection);
+		await expectCode(readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer }),
+			"UPLOADED_ATTACHMENT_NOT_FOUND");
+
+		await purgeUploadedAttachments(SESSION_A);
+		expect(fs.readdirSync(root)).toEqual([]);
+		setUploadedAttachmentRootForTesting(root);
+		setUploadedAttachmentSessionOccurrenceLimitForTesting(1);
+		setUploadedAttachmentSessionQuotaForTesting(10 * UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
+		await persistUploadedAttachmentOccurrence(SESSION_A, "zero-after-purge-reset", [{ ...empty }]);
+	});
+
 	it("serializes parallel admissions so committed bytes cannot exceed the quota", async () => {
-		setUploadedAttachmentSessionQuotaForTesting(6);
+		setUploadedAttachmentSessionQuotaForTesting(6 + UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
 		let releaseCommit!: () => void;
 		let reachedCommit!: () => void;
 		const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
@@ -418,7 +513,7 @@ describe("immutable uploaded attachment store", () => {
 	});
 
 	it("releases failed writes and removes temporary data without consuming quota", async () => {
-		setUploadedAttachmentSessionQuotaForTesting(4);
+		setUploadedAttachmentSessionQuotaForTesting(4 + UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
 		setUploadedAttachmentStoreHooksForTesting({ beforeCommit: () => { throw new Error("injected commit failure"); } });
 		await expectCode(persistUploadedAttachmentOccurrence(SESSION_A, "failed", [
 			document("failed", "failed.bin", "application/octet-stream", Buffer.from("fail")),
@@ -434,12 +529,12 @@ describe("immutable uploaded attachment store", () => {
 	});
 
 	it("rebuilds quota accounting from committed manifests after restart", async () => {
-		setUploadedAttachmentSessionQuotaForTesting(6);
+		setUploadedAttachmentSessionQuotaForTesting(6 + UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
 		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "before-restart", [
 			document("six", "six.bin", "application/octet-stream", Buffer.from("123456")),
 		]);
 		resetUploadedAttachmentUsageForTesting();
-		setUploadedAttachmentSessionQuotaForTesting(5);
+		setUploadedAttachmentSessionQuotaForTesting(5 + UPLOADED_ATTACHMENT_OCCURRENCE_RECORD_BYTES);
 		const swept = await sweepUploadedAttachments([SESSION_A]);
 		expect(swept).toMatchObject({ removed: [], kept: [expect.stringMatching(/^[a-f0-9]{64}$/)] });
 
