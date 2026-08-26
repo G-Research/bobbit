@@ -63,7 +63,7 @@ Selecting a history row resolves only the deferred block that owns that target. 
 
 ## Search and filters
 
-**Jump to…** opens a non-modal dialog below the segmented control. Entries remain oldest-to-newest, and the list opens at the newest matching entry. The available filters are **All**, **User**, **System**, **Agents**, and **Questions**.
+**Jump to…** opens a non-modal dialog below the segmented control. Entries remain oldest-to-newest, and the list opens at the newest matching entry. The available filters are **All**, **User**, **System**, **Agents**, and **Questions**. Filter chips wrap within the dialog at narrow widths, and the active chip uses a distinct bordered tint without adding a separate ordering footer. The dialog shares the Git status dropdown's card surface, compact spacing, border, radius, shadow, and typography. Each result uses trusted prompt-author metadata to reuse the main chat's Bobbit agent avatar or **U** author initial. Both surfaces use the same compact settings avatar for system-authored messages instead of an ambiguous **S**, and the history type reads **System Message** rather than **System prompt**. Entries without author metadata fall back to a kind-specific icon.
 
 Search is case-insensitive and whitespace-normalized across author label, type label, and excerpt. Search and the selected filter compose; no matches produces **No matching prompts**. Changing either search or filter scrolls the result list to its newest match.
 
@@ -80,7 +80,7 @@ An ask is unresolved when it has valid parameters and:
 - no valid later matching response envelope or legacy result answers exist; and
 - no terminal failure result exists.
 
-This includes a call with no result yet and a successful `{ "status": "posted" }` result waiting for the user's response. A valid later `[ask_user_choices_response ...]` envelope or legacy blocking-tool answers mark it answered. An explicit error result, or a completed non-posted result without valid legacy answers, marks it failed. Answered and failed questions remain searchable under **Questions**, but they leave the unresolved count and remove the direct **Unanswered question** segment when the count reaches zero.
+This includes a call with no result yet and a successful `{ "status": "posted" }` result waiting for the user's response. A valid later `[ask_user_choices_response ...]` envelope or legacy blocking-tool answers mark it **Answered**. **Dismiss All** durably marks the whole ask card **Dismissed** without waking the agent. An explicit error result, or a completed non-posted result without valid legacy answers, marks it failed. Answered, dismissed, and failed questions remain searchable under **Questions** with their status shown, but they leave the unresolved count and remove the direct **Unanswered question** segment when the count reaches zero.
 
 Only later, matching evidence applies. A malformed envelope, an envelope for another tool-use id, or an envelope that precedes the call does not resolve the question. The response envelope remains in the authoritative transcript for model conversion even though the visible message list and history projection hide the relationship-only row.
 
@@ -97,7 +97,7 @@ Hidden navigation shells are inert, excluded from the accessibility tree, and re
 ## Implementation ownership
 
 - The transcript-history UI module owns pure entry derivation, filtering, stable target identity, and unanswered target selection.
-- The shared ask-state module owns pending, posted, answered, legacy-answer, and failure classification.
+- The shared ask-state module owns pending, posted, answered, legacy-answer, and failure classification; durable session metadata owns dismissals.
 - `TranscriptHistoryPopover` owns search/filter rendering and accessible open/dismiss/focus behavior.
 - `MessageList` stamps target identities and performs targeted deferred resolution.
 - `AgentInterface` owns viewport geometry, segmented-control visibility, history open state, follow-tail release, spring scrolling, highlighting, and live announcements.
@@ -107,10 +107,10 @@ Hidden navigation shells are inert, excluded from the accessibility tree, and re
 
 All feature tests are registered in `tests2/tests-map.json`.
 
-- [`tests2/core/transcript-history.test.ts`](../tests2/core/transcript-history.test.ts) pins strict transcript chronology, trusted author/type classification, mixed rows, bounded excerpts, stable identity, valid and malformed asks, shared ask lifecycle, composed search/filter behavior, and nearest-above/newest unanswered selection.
+- [`tests2/core/transcript-history.test.ts`](../tests2/core/transcript-history.test.ts) pins strict transcript chronology, trusted author/type classification, mixed rows, bounded excerpts, stable identity, valid and malformed asks, answered/dismissed/failed status, composed search/filter behavior, and nearest-above/newest unanswered selection.
 - [`tests2/dom/transcript-history-popover.test.ts`](../tests2/dom/transcript-history-popover.test.ts) pins dialog semantics, focus, open-to-newest behavior, filters plus search, empty state, live-tail preservation, selection, outside dismissal, and Escape dismissal.
 - [`tests2/dom/transcript-navigation-integration.test.ts`](../tests2/dom/transcript-navigation-integration.test.ts) pins committed updates during streaming, immediate envelope-driven resolution, hidden-shell accessibility, targeted deferred materialization, real-geometry unanswered selection, follow-tail release, highlighting, and live announcements.
-- [`tests2/browser/journeys/transcript-history-navigation.journey.spec.ts`](../tests2/browser/journeys/transcript-history-navigation.journey.spec.ts) exercises the real segmented controls, chronology, search/filter/empty state, jumping, focus restoration, unresolved answer submission, reload derivation, responsive bounds, and cleanup.
+- [`tests2/browser/journeys/transcript-history-navigation.journey.spec.ts`](../tests2/browser/journeys/transcript-history-navigation.journey.spec.ts) exercises the real segmented controls, chronology, search/filter/empty state, jumping, focus restoration, answered and durably dismissed status, the sidebar question-circle unread indicator, reload derivation, responsive bounds, and cleanup.
 - The existing chat-scroll fixture and broader tail-chat coverage continue to pin prompt geometry, spring landing, mobile header offset, streaming growth, and return-to-tail behavior.
 
 When changing this feature, run the focused core and DOM files first, then the registered browser journey. Run `npm run check` and `npm run test:unit` before completion; broader browser and end-to-end gates remain the regression authority for shared scroll behavior.

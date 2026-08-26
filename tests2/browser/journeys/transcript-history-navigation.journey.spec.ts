@@ -10,6 +10,7 @@ import {
 	waitForAgentResponse,
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
+import { waitForStableScroll } from "../_helpers/stable-wait.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 360, height: 720 };
@@ -72,7 +73,72 @@ async function completeQuestion(page: Page): Promise<void> {
 }
 
 test.describe("Journey: Transcript history navigation", () => {
-	test("searches, filters, jumps, resolves unanswered questions, reloads, and stays usable on narrow screens", async ({ page }) => {
+	test("keeps a downward history target visible while earlier tall turns materialize", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		const sessionId = await createSession();
+		const marker = "DOWNWARD_LATER_MARKER";
+		const scrollSelector = "agent-interface [data-messages-area] > .overflow-y-auto";
+		try {
+			await waitForSessionStatus(sessionId, "idle");
+			for (let turn = 0; turn < 10; turn += 1) {
+				const heading = turn === 7 ? marker : `TALL_TRANSCRIPT_TURN_${turn + 1}`;
+				const prompt = [
+					heading,
+					...Array.from({ length: 55 }, (_, line) => `Turn ${turn + 1} detail line ${line + 1}`),
+				].join("\n\n");
+				const result = await gateway.sessionManager.enqueuePrompt(sessionId, prompt);
+				expect(result.status).toBe("dispatched");
+				await waitForSessionStatus(sessionId, "idle");
+			}
+
+			await page.setViewportSize(DESKTOP);
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await waitForStableScroll(page, scrollSelector, { timeout: 20_000, sampleMs: 200 });
+
+			await openHistory(page);
+			const targetRow = rows(page).filter({ hasText: marker });
+			await expect(targetRow).toHaveCount(1);
+			const targetId = await targetRow.getAttribute("data-target-id");
+			if (!targetId) throw new Error("History row has no transcript target ID");
+
+			const beforeScrollTop = await page.locator(scrollSelector).evaluate((container) => {
+				container.scrollTop = 0;
+				container.dispatchEvent(new Event("scroll"));
+				return container.scrollTop;
+			});
+			expect(beforeScrollTop).toBe(0);
+
+			await targetRow.click();
+			await expect(dialog(page)).toHaveCount(0);
+			const highlightedTarget = page.locator(
+				`[data-transcript-target="${targetId}"].transcript-navigation-highlight`,
+			);
+			await expect(highlightedTarget).toHaveCount(1, { timeout: 20_000 });
+			await waitForStableScroll(page, scrollSelector, { timeout: 20_000, sampleMs: 200 });
+
+			const settled = await page.evaluate(({ selector, selectedTargetId }) => {
+				const container = document.querySelector<HTMLElement>(selector);
+				const target = [...document.querySelectorAll<HTMLElement>("[data-transcript-target]")]
+					.find((candidate) => candidate.dataset.transcriptTarget === selectedTargetId
+						&& candidate.localName !== "deferred-block");
+				if (!container || !target) throw new Error("Selected transcript target is unavailable");
+				const viewportRect = container.getBoundingClientRect();
+				const targetRect = target.getBoundingClientRect();
+				return {
+					scrollTop: container.scrollTop,
+					intersects: targetRect.bottom > viewportRect.top && targetRect.top < viewportRect.bottom,
+				};
+			}, { selector: scrollSelector, selectedTargetId: targetId });
+			expect(settled.scrollTop).toBeGreaterThan(beforeScrollTop);
+			expect(settled.intersects).toBe(true);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+
+	test("searches, filters, jumps, resolves unanswered questions, reloads, and stays usable on narrow screens", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const sessionId = await createSession();
 		try {
@@ -86,10 +152,20 @@ test.describe("Journey: Transcript history navigation", () => {
 			await sendMessage(page, longPrompt);
 			await waitForAgentResponse(page);
 			await waitForSessionStatus(sessionId, "idle");
-			await sendMessage(page, "ask_user_choices transcript navigation journey");
+			// Dispatch in the background: active sessions are marked read when they
+			// become idle, while this assertion specifically covers an unread ask.
+			await navigateToHash(page, "#/");
+			const askResult = await gateway.sessionManager.enqueuePrompt(sessionId, "ask_user_choices transcript navigation journey");
+			expect(askResult.status).toBe("dispatched");
+			await waitForSessionStatus(sessionId, "idle");
+			const sidebarRow = page.locator(`[data-session-id="${sessionId}"]`).first();
+			await expect(sidebarRow).toBeVisible({ timeout: 20_000 });
+			await expect(sidebarRow.locator(".unanswered-question-indicator")).toHaveCount(1);
+			await expect(sidebarRow.locator(".unseen-dot")).toHaveCount(0);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			const widget = page.locator("ask-user-choices-widget").first();
 			await expect(widget).toBeVisible({ timeout: 20_000 });
-			await waitForSessionStatus(sessionId, "idle");
 
 			const navigation = page.locator("[role='group'][aria-label='Transcript navigation']");
 			await expect(navigation).toBeVisible();
@@ -106,8 +182,13 @@ test.describe("Journey: Transcript history navigation", () => {
 			expect(oldestIndex).toBeGreaterThanOrEqual(0);
 			expect(askPromptIndex).toBeGreaterThan(oldestIndex);
 			expect(questionIndex).toBeGreaterThan(askPromptIndex);
+			await expect(dialog(page)).not.toContainText("Oldest → newest");
 			await expect(dialog(page)).not.toContainText("Recent");
 			await expect(dialog(page)).not.toContainText("Earlier today");
+			await expect(dialog(page).locator(".transcript-history-footer")).toHaveCount(0);
+			await expect(rows(page).locator(
+				".transcript-history-row-icon > :is(svg, .prompt-author-avatar, .prompt-author-initial, .prompt-author-system-icon)",
+			)).toHaveCount(await rows(page).count());
 			await expect(dialog(page).locator("kbd")).toHaveCount(0);
 			expect(await dialog(page).locator(".transcript-history-list").evaluate((list) =>
 				list.scrollTop + list.clientHeight >= list.scrollHeight - 4)).toBe(true);
@@ -166,6 +247,8 @@ test.describe("Journey: Transcript history navigation", () => {
 				await popover.updateComplete;
 			});
 			await expect(rows(page)).toHaveCount(40);
+			expect(await dialog(page).locator(".transcript-history-filters").evaluate((filters) =>
+				filters.scrollWidth <= filters.clientWidth)).toBe(true);
 			await expect.poll(async () => {
 				const bounds = await popoverBounds(page);
 				return bounds.dialogBottom <= bounds.boundary + 1;
@@ -198,10 +281,37 @@ test.describe("Journey: Transcript history navigation", () => {
 			await expect(page.locator(".transcript-navigation-highlight")).toHaveCount(1);
 			await completeQuestion(page);
 			await expect(unansweredButton(page)).toHaveCount(0, { timeout: 20_000 });
+			await waitForSessionStatus(sessionId, "idle");
+
+			// Answering collapses the question card and can leave no prompt fully
+			// above the viewport, which intentionally hides the navigation shell.
+			// Return to the tail through the visible control before reopening history.
+			await page.getByTestId("jump-to-bottom").click();
+			await expect(historyButton(page)).toHaveAttribute("tabindex", "0");
+			await openHistory(page);
+			await dialog(page).getByRole("button", { name: "Questions", exact: true }).click();
+			await expect(dialog(page).locator('.transcript-history-question-status[data-status="answered"]')).toHaveText("Answered");
+			await page.keyboard.press("Escape");
+
+			// A second ask can be dismissed durably without waking the idle agent.
+			await sendMessage(page, "ask_user_choices dismissal journey");
+			const secondWidget = page.locator("ask-user-choices-widget").last();
+			await expect(secondWidget).toBeVisible({ timeout: 20_000 });
+			await waitForSessionStatus(sessionId, "idle");
+			await secondWidget.locator(".ask-dismiss-all").click();
+			await expect(page.locator(".ask-dismissed-badge").last()).toContainText("Dismissed", { timeout: 20_000 });
+			await expect(unansweredButton(page)).toHaveCount(0);
+
+			await openHistory(page);
+			await dialog(page).getByRole("button", { name: "Questions", exact: true }).click();
+			await expect(dialog(page).locator('.transcript-history-question-status[data-status="answered"]')).toHaveCount(1);
+			await expect(dialog(page).locator('.transcript-history-question-status[data-status="dismissed"]')).toHaveCount(1);
+			await page.keyboard.press("Escape");
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator(".ask-answered-badge").first()).toHaveText("Answered", { timeout: 20_000 });
+			await expect(page.locator(".ask-dismissed-badge").last()).toContainText("Dismissed", { timeout: 20_000 });
 			await expect(unansweredButton(page)).toHaveCount(0);
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
