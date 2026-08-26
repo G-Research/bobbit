@@ -40,6 +40,7 @@ import {
 	sessionFileDelete,
 	sessionFileExists,
 	sessionFileRead,
+	sessionFileWriteAtomic,
 	sessionFsContextForAgentFile,
 	sessionSidecarDelete,
 } from "./session-fs.js";
@@ -4316,7 +4317,7 @@ export class SessionManager {
 		}
 	}
 
-	private _legacySandboxTranscriptMapping(ps: PersistedSession, filePath: string): { source: string; container: string; destination: string } {
+	private _legacySandboxTranscriptMapping(ps: PersistedSession, filePath: string): { source: string; container: string } {
 		let relative = containerTranscriptRelativePath(filePath);
 		let source: string | undefined;
 		const ownerRoot = path.resolve(sessionTranscriptRoot(ps.id));
@@ -4359,68 +4360,61 @@ export class SessionManager {
 		}
 		const container = relative ? sessionTranscriptContainerPath(relative) : null;
 		if (!container || !source) throw new Error("Sandbox transcript migration source is invalid");
-		const destination = sessionTranscriptHostPath(ps.id, container);
-		if (!destination) throw new Error("Sandbox transcript migration destination is invalid");
-		return { source, container, destination };
+		return { source, container };
 	}
 
-	private async _publishLegacySandboxFile(source: string, destination: string, ownerRoot: string): Promise<void> {
+	private async _publishLegacySandboxFile(
+		ps: PersistedSession,
+		source: string,
+		destinationContainerPath: string,
+	): Promise<void> {
 		const MAX_LEGACY_MIGRATION_BYTES = 256 * 1024 * 1024;
 		let sourceStat: fs.Stats;
 		try { sourceStat = await fsp.lstat(source); }
 		catch (error: any) { if (error?.code === "ENOENT") return; throw error; }
 		if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error("Legacy sandbox transcript source is unsafe");
 		if (sourceStat.size > MAX_LEGACY_MIGRATION_BYTES) throw new Error("Legacy sandbox transcript exceeds the migration limit");
-		const relative = path.relative(path.resolve(ownerRoot), path.resolve(destination));
-		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Sandbox transcript migration destination escapes its owner root");
-		let cursor = path.resolve(ownerRoot);
-		for (const component of relative.split(path.sep).slice(0, -1)) {
-			cursor = path.join(cursor, component);
-			try {
-				const stat = await fsp.lstat(cursor);
-				if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Sandbox transcript migration parent is unsafe");
-			} catch (error: any) {
-				if (error?.code !== "ENOENT") throw error;
-				await fsp.mkdir(cursor, { mode: 0o700 });
-				const created = await fsp.lstat(cursor);
-				if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("Sandbox transcript migration parent creation was replaced");
-			}
-		}
-		const content = await fsp.readFile(source);
+
+		// Legacy sources are read only during restore, before an agent process is
+		// started for this session. Bind the allowed source leaf to one handle and
+		// verify its identity; the destination owner root may have been writable in
+		// an earlier runtime, so destination I/O always uses an exact session runtime.
+		const sourceHandle = await fsp.open(source, "r");
+		let content: Buffer;
 		try {
-			const existing = await fsp.readFile(destination);
-			if (!existing.equals(content)) throw new Error("Sandbox transcript migration destination conflicts with legacy bytes");
-			return;
-		} catch (error: any) {
-			if (error?.code !== "ENOENT") throw error;
-		}
-		const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.bobbit-migrate-${randomUUID()}.tmp`);
-		let handle: fs.promises.FileHandle | undefined;
-		try {
-			handle = await fsp.open(temporary, "wx", 0o600);
-			await handle.writeFile(content);
-			await handle.sync();
-			await handle.close();
-			handle = undefined;
-			try { await fsp.link(temporary, destination); }
-			catch (error: any) {
-				if (error?.code !== "EEXIST") throw error;
-				const winner = await fsp.readFile(destination);
-				if (!winner.equals(content)) throw new Error("Sandbox transcript migration raced with conflicting bytes");
+			const openedStat = await sourceHandle.stat();
+			if (!openedStat.isFile()
+				|| openedStat.dev !== sourceStat.dev
+				|| openedStat.ino !== sourceStat.ino
+				|| openedStat.size !== sourceStat.size) {
+				throw new Error("Legacy sandbox transcript changed during migration");
 			}
+			content = await sourceHandle.readFile();
 		} finally {
-			if (handle) await handle.close().catch(() => {});
-			await fsp.unlink(temporary).catch(() => {});
+			await sourceHandle.close();
 		}
+		if (content.length !== sourceStat.size) throw new Error("Legacy sandbox transcript changed during migration");
+		const fsContext = sessionFsContextForAgentFile(ps, destinationContainerPath);
+		const existing = await sessionFileRead(fsContext, destinationContainerPath, this.sandboxManager);
+		if (existing !== null) {
+			if (!Buffer.from(existing, "utf8").equals(content)) {
+				throw new Error("Sandbox transcript migration destination conflicts with legacy bytes");
+			}
+			return;
+		}
+		await sessionFileWriteAtomic(fsContext, destinationContainerPath, content, this.sandboxManager);
 	}
 
 	private async _prepareSandboxTranscriptPersistence(ps: PersistedSession, store: SessionStore): Promise<PersistedSession> {
 		if (!ps.sandboxed || !ps.agentSessionFile) return ps;
-		const ownerRoot = ensurePrivateSessionRoot(sessionTranscriptRoot(ps.id), activeAgentSessionsDir());
+		ensurePrivateSessionRoot(sessionTranscriptRoot(ps.id), activeAgentSessionsDir());
 		const migrate = async (filePath: string): Promise<string> => {
 			const mapping = this._legacySandboxTranscriptMapping(ps, filePath);
-			await this._publishLegacySandboxFile(mapping.source, mapping.destination, ownerRoot);
-			await this._publishLegacySandboxFile(sidecarPathFor(mapping.source), sidecarPathFor(mapping.destination), ownerRoot);
+			await this._publishLegacySandboxFile(ps, mapping.source, mapping.container);
+			const sidecarContainer = mapping.container.endsWith(".jsonl")
+				? `${mapping.container.slice(0, -".jsonl".length)}.bobbit.json`
+				: `${mapping.container}.bobbit.json`;
+			await this._publishLegacySandboxFile(ps, sidecarPathFor(mapping.source), sidecarContainer);
 			return mapping.container;
 		};
 		const agentSessionFile = await migrate(ps.agentSessionFile);
@@ -14181,10 +14175,12 @@ export class SessionManager {
 				let transcriptRollbackVerified = !candidateRestoreStarted;
 				if (candidateRestoreStarted) {
 					try {
-						transcriptRollbackVerified = restoreAgentTranscriptSnapshot(
+						transcriptRollbackVerified = await restoreAgentTranscriptSnapshot(
 							transcriptFileCtx,
 							persisted.agentSessionFile,
 							transcriptSnapshot,
+							undefined,
+							this.sandboxManager,
 						) === true;
 					} catch (rollbackError) {
 						transcriptRollbackVerified = false;

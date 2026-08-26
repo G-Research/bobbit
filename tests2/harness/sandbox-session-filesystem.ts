@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { createRequire } from "node:module";
+import type { SessionTranscriptRuntimeOperation } from "../../src/server/agent/project-sandbox.ts";
+import { sessionTranscriptHostPath } from "../../src/server/agent/agent-session-path.ts";
 
 const requireForScript = createRequire(import.meta.url);
 const AGENT_PREFIX = "/home/node/.bobbit/agent/sessions";
@@ -63,6 +65,54 @@ export class SandboxSessionFilesystem {
 			return this.hostPath(value);
 		}
 		return value;
+	}
+
+	getStatus(): { projectId: string; status: "ready"; containerId: string } {
+		return { projectId: "fixture", status: "ready", containerId: "fixture-control" };
+	}
+
+	async ensureSessionRuntime(sessionId: string): Promise<string> {
+		return `fixture-runtime:${sessionId}`;
+	}
+
+	async removeSessionRuntime(_sessionId: string): Promise<void> {}
+
+	async runSessionTranscriptOperation(
+		sessionId: string,
+		containerId: string,
+		operation: SessionTranscriptRuntimeOperation,
+	): Promise<string | boolean | void> {
+		if (containerId !== `fixture-runtime:${sessionId}`) throw new Error("fixture exact runtime attestation failed");
+		const runtimePath = (containerPath: string): string =>
+			sessionTranscriptHostPath(sessionId, containerPath) ?? this.hostPath(containerPath);
+		const paths = operation.kind === "renameAtomic"
+			? [operation.sourcePath, operation.targetPath]
+			: [operation.path];
+		const args = ["runtime", operation.kind, ...paths];
+		await this.beforeExec?.(args, this);
+		const mappedArgs = args.map(value => paths.includes(value) ? runtimePath(value) : value);
+		this.calls.push({ args, mappedArgs });
+		if (operation.kind === "exists") {
+			const target = runtimePath(operation.path);
+			return fs.existsSync(target) && fs.statSync(target).isFile();
+		}
+		if (operation.kind === "read") return fs.readFileSync(runtimePath(operation.path), "utf8");
+		if (operation.kind === "writeAtomic") {
+			const target = runtimePath(operation.path);
+			fs.mkdirSync(path.dirname(target), { recursive: true });
+			const temporary = `${target}.fixture-stage`;
+			fs.writeFileSync(temporary, operation.content);
+			fs.renameSync(temporary, target);
+			return;
+		}
+		if (operation.kind === "renameAtomic") {
+			const target = runtimePath(operation.targetPath);
+			fs.mkdirSync(path.dirname(target), { recursive: true });
+			fs.renameSync(runtimePath(operation.sourcePath), target);
+			return;
+		}
+		try { fs.unlinkSync(runtimePath(operation.path)); }
+		catch (error: any) { if (error?.code !== "ENOENT") throw error; }
 	}
 
 	async exec(args: string[]): Promise<string> {

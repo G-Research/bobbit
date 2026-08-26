@@ -11,6 +11,8 @@ import {
 	sessionTranscriptStorageKey,
 } from "../../src/server/agent/agent-session-path.ts";
 import { buildDockerRunArgs } from "../../src/server/agent/docker-args.ts";
+import type { SandboxManager } from "../../src/server/agent/sandbox-manager.ts";
+import type { SessionTranscriptRuntimeOperation } from "../../src/server/agent/project-sandbox.ts";
 import { getSessionTranscriptMountStaleness } from "../../src/server/agent/project-sandbox.ts";
 import { containerPathToHost, toDockerPath } from "../../src/server/agent/rpc-bridge.ts";
 import { sessionFileRead, sessionFileWriteAtomic } from "../../src/server/agent/session-fs.ts";
@@ -78,14 +80,32 @@ describe("deterministic session transcript roots", () => {
 		]) expect(getSessionTranscriptMountStaleness(forged, expected).stale).toBe(true);
 	});
 
-	it("reads and publishes the same canonical path only inside its trusted owner root", async () => {
+	it("reads and publishes the same canonical path only through its exact owner runtime", async () => {
+		const runtimeFiles = new Map<string, string>();
+		const calls: Array<{ projectId: string; sessionId: string; operation: SessionTranscriptRuntimeOperation }> = [];
+		const manager = {
+			runSessionTranscriptOperation: async (projectId: string, sessionId: string, operation: SessionTranscriptRuntimeOperation) => {
+				calls.push({ projectId, sessionId, operation });
+				const key = `${sessionId}\0${"path" in operation ? operation.path : operation.targetPath}`;
+				if (operation.kind === "writeAtomic") {
+					runtimeFiles.set(key, Buffer.isBuffer(operation.content) ? operation.content.toString("utf8") : operation.content);
+					return;
+				}
+				if (operation.kind === "read") {
+					const content = runtimeFiles.get(key);
+					if (content === undefined) throw new Error("missing");
+					return content;
+				}
+			},
+		} as unknown as SandboxManager;
 		const ctxA = { sandboxed: true, projectId: "project", sessionId: "owner-a" };
 		const ctxB = { sandboxed: true, projectId: "project", sessionId: "owner-b" };
-		await sessionFileWriteAtomic(ctxA, containerFile, "owner-a marker", null);
-		await sessionFileWriteAtomic(ctxB, containerFile, "owner-b marker", null);
-		expect(await sessionFileRead(ctxA, containerFile, null)).toBe("owner-a marker");
-		expect(await sessionFileRead(ctxB, containerFile, null)).toBe("owner-b marker");
+		await sessionFileWriteAtomic(ctxA, containerFile, "owner-a marker", manager);
+		await sessionFileWriteAtomic(ctxB, containerFile, "owner-b marker", manager);
+		expect(await sessionFileRead(ctxA, containerFile, manager)).toBe("owner-a marker");
+		expect(await sessionFileRead(ctxB, containerFile, manager)).toBe("owner-b marker");
+		expect(calls.every(call => call.projectId === "project" && ["owner-a", "owner-b"].includes(call.sessionId))).toBe(true);
 		expect(containerPathToHost(containerFile, { sessionId: "owner-a" })).toBe(sessionTranscriptHostPath("owner-a", containerFile));
-		await expect(sessionFileWriteAtomic({ sandboxed: true, projectId: "project" }, containerFile, "missing owner", null)).rejects.toThrow(/owner/i);
+		await expect(sessionFileWriteAtomic({ sandboxed: true, projectId: "project" }, containerFile, "missing owner", manager)).rejects.toThrow(/authority/i);
 	});
 });

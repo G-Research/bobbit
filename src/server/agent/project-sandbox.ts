@@ -61,8 +61,52 @@ export const SESSION_RUNTIME_SESSION_LABEL = "bobbit-runtime-session";
 export const SESSION_RUNTIME_MEMORY_LIMIT = "4g";
 export const SESSION_RUNTIME_CPU_LIMIT = "2";
 export const SESSION_RUNTIME_PIDS_LIMIT = "256";
+/** Hard ceiling for one gateway-owned transcript operation. */
+export const MAX_SESSION_TRANSCRIPT_OPERATION_BYTES = 256 * 1024 * 1024;
+
+export type SessionTranscriptRuntimeOperation =
+	| { kind: "exists"; path: string }
+	| { kind: "read"; path: string }
+	| { kind: "writeAtomic"; path: string; content: string | Buffer }
+	| { kind: "renameAtomic"; sourcePath: string; targetPath: string }
+	| { kind: "delete"; path: string };
 
 const SAFE_RUNTIME_LABEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SESSION_TRANSCRIPT_ROOT = "/home/node/.bobbit/agent/sessions";
+
+const SESSION_TRANSCRIPT_OPERATION_SCRIPT = [
+	'const fs=require("node:fs"),path=require("node:path");',
+	'const [kind,...args]=process.argv.slice(1);',
+	'const limit=Number(args.at(-1));',
+	'const regular=p=>{try{const s=fs.lstatSync(p);return s.isFile()&&!s.isSymbolicLink();}catch{return false;}};',
+	'if(kind==="exists"){process.stdout.write(regular(args[0])?"1":"0");}',
+	'else if(kind==="read"){',
+	'  if(!regular(args[0])) process.exit(44);',
+	'  const fd=fs.openSync(args[0],"r");',
+	'  try { const s=fs.fstatSync(fd); if(!s.isFile()||s.size>limit) process.exit(45);',
+	'    const b=Buffer.allocUnsafe(s.size); let n=0,r; while(n<s.size&&(r=fs.readSync(fd,b,n,s.size-n,n))>0)n+=r; process.stdout.write(b.subarray(0,n));',
+	'  } finally { fs.closeSync(fd); }',
+	'}',
+	'else if(kind==="writeAtomic"){',
+	'  const [target,temp]=args; const chunks=[]; let size=0,settled=false;',
+	'  const fail=()=>{if(!settled){settled=true;process.exitCode=46;process.stdin.resume();}};',
+	'  process.stdin.on("data",c=>{size+=c.length;if(size>limit)fail();else chunks.push(c);});',
+	'  process.stdin.on("end",()=>{if(settled)return;settled=true;let fd;',
+	'    try{fs.mkdirSync(path.dirname(target),{recursive:true});fd=fs.openSync(temp,"wx",0o600);for(const c of chunks)fs.writeSync(fd,c);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(temp,target);}',
+	'    finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{};try{fs.unlinkSync(temp);}catch{}}',
+	'  });',
+	'}',
+	'else if(kind==="renameAtomic"){const [source,target]=args;fs.mkdirSync(path.dirname(target),{recursive:true});fs.renameSync(source,target);}',
+	'else if(kind==="delete"){try{fs.unlinkSync(args[0]);}catch(e){if(e?.code!=="ENOENT")throw e;}}',
+	'else process.exit(47);',
+].join("\n");
+
+function canonicalSessionTranscriptRuntimePath(value: string): string | null {
+	if (!value || /[\u0000-\u001f\u007f]/.test(value) || value.includes("\\")) return null;
+	const normalized = path.posix.normalize(value);
+	return normalized === value && normalized.startsWith(`${SESSION_TRANSCRIPT_ROOT}/`) ? normalized : null;
+}
+
 const SESSION_RUNTIME_SECRET_ENV_KEYS = new Set([
 	"BOBBIT_TOKEN",
 	"BOBBIT_SESSION_SECRET",
@@ -746,6 +790,63 @@ export class ProjectSandbox {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Execute fixed, bounded transcript code only in the exact registered and
+	 * freshly attested session runtime. No host path is accepted or returned.
+	 */
+	async runSessionTranscriptOperation(
+		sessionId: string,
+		containerId: string,
+		operation: SessionTranscriptRuntimeOperation,
+	): Promise<string | boolean | void> {
+		validatedSessionRuntimeLabel("session", sessionId);
+		return this._withSessionRuntimeLifecycle(sessionId, async () => {
+			if (this._sessionRuntimes.get(sessionId) !== containerId
+				|| !(await this._isSessionRuntimeCandidateValid(sessionId, containerId))) {
+				throw new Error(`[project-sandbox] Session transcript runtime failed exact isolation attestation for ${sessionId}`);
+			}
+
+			const paths = operation.kind === "renameAtomic"
+				? [operation.sourcePath, operation.targetPath]
+				: [operation.path];
+			if (paths.some(candidate => !canonicalSessionTranscriptRuntimePath(candidate))) {
+				throw new Error("[project-sandbox] Session transcript operation path is invalid");
+			}
+			if (operation.kind === "writeAtomic"
+				&& (Buffer.isBuffer(operation.content)
+					? operation.content.length
+					: Buffer.byteLength(operation.content, "utf8")) > MAX_SESSION_TRANSCRIPT_OPERATION_BYTES) {
+				throw new Error("[project-sandbox] Session transcript operation exceeds the byte limit");
+			}
+
+			const scriptArgs = operation.kind === "renameAtomic"
+				? [operation.kind, operation.sourcePath, operation.targetPath]
+				: operation.kind === "writeAtomic"
+					? [operation.kind, operation.path, path.posix.join(
+						path.posix.dirname(operation.path),
+						`.${path.posix.basename(operation.path)}.bobbit-stage-${randomUUID()}.tmp`,
+					)]
+					: [operation.kind, operation.path];
+			const dockerArgs = [
+				"exec",
+				...(operation.kind === "writeAtomic" ? ["-i"] : []),
+				containerId,
+				"node", "-e", SESSION_TRANSCRIPT_OPERATION_SCRIPT, "--",
+				...scriptArgs,
+				String(MAX_SESSION_TRANSCRIPT_OPERATION_BYTES),
+			];
+			const output = operation.kind === "writeAtomic"
+				? await this._dockerExecWithInput(dockerArgs, operation.content)
+				: String((await this.execDocker(dockerArgs, {
+					timeout: 60_000,
+					env: DOCKER_ENV,
+					maxBuffer: MAX_SESSION_TRANSCRIPT_OPERATION_BYTES + 1024,
+				})).stdout);
+			if (operation.kind === "exists") return output === "1";
+			if (operation.kind === "read") return output;
+		});
 	}
 
 	/**
@@ -2230,6 +2331,59 @@ export class ProjectSandbox {
 				env: DOCKER_ENV,
 			});
 		} catch { /* already gone */ }
+	}
+
+	private async _dockerExecWithInput(dockerArgs: string[], input: string | Buffer): Promise<string> {
+		const spawn = this.commandRunner.spawn;
+		if (!spawn) throw new Error("[project-sandbox] Command runner cannot stream transcript input");
+		return await new Promise<string>((resolve, reject) => {
+			const child = spawn(DOCKER_BIN, dockerArgs, {
+				stdio: ["pipe", "pipe", "pipe"],
+				env: DOCKER_ENV,
+				windowsHide: true,
+			});
+			const stdout: Buffer[] = [];
+			const stderr: Buffer[] = [];
+			let stdoutBytes = 0;
+			let stderrBytes = 0;
+			let settled = false;
+			const timer = this.clock.setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				child.kill("SIGKILL");
+				reject(new Error("[project-sandbox] Session transcript operation timed out"));
+			}, 60_000);
+			child.stdout?.on("data", (chunk: Buffer | string) => {
+				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				stdoutBytes += bytes.length;
+				if (stdoutBytes <= 1024) stdout.push(bytes);
+			});
+			child.stderr?.on("data", (chunk: Buffer | string) => {
+				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				stderrBytes += bytes.length;
+				if (stderrBytes <= 64 * 1024) stderr.push(bytes);
+			});
+			child.once("error", (error) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				reject(error);
+			});
+			// A bounded script can close stdin early on rejection; consume EPIPE so
+			// the child close/error boundary below remains authoritative.
+			child.stdin?.on("error", () => {});
+			child.once("close", (code) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				if (code === 0 && stdoutBytes <= 1024 && stderrBytes <= 64 * 1024) {
+					resolve(Buffer.concat(stdout).toString("utf8"));
+				} else {
+					reject(new Error(`[project-sandbox] Session transcript operation failed (${code ?? "signal"}): ${Buffer.concat(stderr).toString("utf8").trim()}`));
+				}
+			});
+			child.stdin?.end(input, "utf8");
+		});
 	}
 
 	private async _dockerExec(

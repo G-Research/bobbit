@@ -35,8 +35,8 @@
  */
 
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
-import { sessionFileRead, type SessionFsContext } from "./session-fs.js";
-import { sessionTranscriptHostPath, sessionTranscriptRoot, trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { sessionFileRead, sessionFileWriteAtomic, type SessionFsContext } from "./session-fs.js";
+import { trustedAgentSessionsRoots } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -781,14 +781,19 @@ export function restoreAgentTranscriptSnapshot(
 	filePath: string,
 	content: string,
 	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
-): boolean {
+	sandboxManager: SandboxManager | null = null,
+): boolean | Promise<boolean> {
+	if (ctx.sandboxed) {
+		return sessionFileWriteAtomic(ctx, filePath, content, sandboxManager).then(
+			() => true,
+			(err) => {
+				console.warn(`[transcript-sanitizer] Failed to restore recovery snapshot ${filePath}:`, err);
+				return false;
+			},
+		);
+	}
 	try {
-		const hostPath = ctx.sandboxed && ctx.sessionId ? sessionTranscriptHostPath(ctx.sessionId, filePath) : filePath;
-		if (!hostPath) return false;
-		const effectivePolicy = ctx.sandboxed && ctx.sessionId
-			? createTranscriptRootPolicy([sessionTranscriptRoot(ctx.sessionId)])
-			: rootPolicy;
-		const realPath = resolveSafeSessionsPath(hostPath, effectivePolicy);
+		const realPath = resolveSafeSessionsPath(filePath, rootPolicy);
 		if (realPath === null) return false;
 		replaceTranscriptSnapshotAtomic(realPath, content);
 		return true;
@@ -833,26 +838,15 @@ async function transformAgentTranscriptFile(
 	rootPolicy: TranscriptRootPolicy,
 ): Promise<number> {
 	try {
-		// Resolve the host-side path. Non-sandboxed: filePath is already a host
-		// path and is what the read+write both touch. Sandboxed: the read runs
-		// in-container (docker exec); only the write is host-side, via the
-		// bind-mounted sessions dir (container path → host path).
-		const hostPath = ctx.sandboxed && ctx.sessionId ? sessionTranscriptHostPath(ctx.sessionId, filePath) : filePath;
-		if (!hostPath) return 0;
-		const effectivePolicy = ctx.sandboxed && ctx.sessionId
-			? createTranscriptRootPolicy([sessionTranscriptRoot(ctx.sessionId)])
-			: rootPolicy;
-
-		// For non-sandboxed sessions, validate the real host path BEFORE reading.
-		// Exact persisted paths outside trusted roots are read-compatible only; they
-		// must never become sanitizer write/truncate targets.
-		let writableRealPath: string | null = null;
-		let readAllowed = true;
+		// Direct-host sessions retain the trusted-root boundary. Sandboxed reads
+		// and writes both route through the exact attested session runtime, so no
+		// writable owner-root pathname is ever resolved in the gateway process.
 		if (!ctx.sandboxed) {
-			writableRealPath = resolveSafeSessionsPath(hostPath, effectivePolicy);
-			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath, effectivePolicy) !== null;
+			const writableRealPath = resolveSafeSessionsPath(filePath, rootPolicy);
+			const readAllowed = writableRealPath !== null
+				|| resolveReadablePersistedAgentSessionFile(filePath, rootPolicy) !== null;
 			if (!readAllowed) {
-				console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
+				console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${filePath}`);
 				return 0;
 			}
 		}
@@ -863,17 +857,17 @@ async function transformAgentTranscriptFile(
 		const result = transform(content);
 		if (!result.changed) return 0;
 
-		// Re-resolve + re-validate the real path immediately before writing
-		// (TOCTOU) and write with O_NOFOLLOW so a symlink swapped in after the
-		// check is not followed. A malformed/hostile agentSessionFile must never
-		// let us clobber an arbitrary file.
-		const realPath = resolveSafeSessionsPath(hostPath, effectivePolicy);
-		if (realPath === null) {
-			console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`);
-			return 0;
+		if (ctx.sandboxed) {
+			await sessionFileWriteAtomic(ctx, filePath, result.content, sandboxManager);
+		} else {
+			// Re-resolve immediately before direct-host writes and retain no-follow.
+			const realPath = resolveSafeSessionsPath(filePath, rootPolicy);
+			if (realPath === null) {
+				console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${filePath}`);
+				return 0;
+			}
+			writeFileNoFollow(realPath, result.content);
 		}
-
-		writeFileNoFollow(realPath, result.content);
 		console.log(`[transcript-sanitizer] ${logMessage(filePath, result.rewritten)}`);
 		return result.rewritten;
 	} catch (err) {
