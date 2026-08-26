@@ -80,6 +80,9 @@ describe("test layout repository guard", () => {
 			'import { test } from "@playwright/test"; test("bad", async function ({ page }) { await page.goto("/"); });',
 			'import { test } from "@playwright/test"; test("bad", async ({ context }: Fixtures) => context.close());',
 			'import * as playwright from "@playwright/test"; playwright.chromium.launch();',
+			'import { test as baseTest } from "@playwright/test"; const browserJourney = baseTest; browserJourney("bad", async ({ page }) => page.goto("/"));',
+			'import * as playwright from "@playwright/test"; const { test: browserJourney } = playwright; browserJourney("bad", async ({ browser }) => browser.close());',
+			'import { test } from "@playwright/test"; const browserJourney = test.extend({}); browserJourney("bad", async ({ context }) => context.close());',
 		] as const;
 		for (const source of sources) {
 			const diagnostics = collectLayoutDiagnostics({
