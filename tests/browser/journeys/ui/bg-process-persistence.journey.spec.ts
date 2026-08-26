@@ -14,7 +14,7 @@
  *      until the user explicitly dismisses it.
  *
  * Mechanics:
- *  - The worker-scoped `gateway` fixture (tests/e2e/gateway-harness.ts) runs the
+ *  - The worker-scoped `gateway` fixture (`tests/browser/_helpers/gateway-harness.ts`) runs the
  *    real in-process gateway with the real BgProcessManager (no SpawnFn mock),
  *    so `bash_bg` processes are real OS processes whose output + status live in
  *    durable per-process files under the isolated state dir. `gateway.crash()` +
@@ -32,6 +32,9 @@
  * the existing real-bg-process tests (BG_WAIT uses `sleep`).
  */
 import type { Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test, expect } from "../../_helpers/journey-fixture.js";
 import type { GatewayInfo } from "../../_helpers/gateway-harness.js";
 import { apiFetch } from "../../_helpers/e2e-setup.js";
@@ -39,12 +42,21 @@ import { openApp, createSessionViaUI } from "../../../support/harnesses/browser/
 
 test.describe.configure({ mode: "serial" });
 
-// A finite POSIX loop that prints `<prefix>-N` every 250ms then exits 0. Long
-// enough (≈12.5s) that it is still running when we crash+restart early, so we
-// can observe streaming RESUME after the gateway comes back, then watch it
-// finish with a real exit code.
-function streamingCommand(prefix: string, count: number): string {
-	return `i=1; while [ "$i" -le ${count} ]; do echo "${prefix}-$i"; i=$((i+1)); sleep 0.25; done; exit 0`;
+// A controlled POSIX loop that cannot finish naturally while the gateway is
+// restarting. The test creates the unique marker only after it has observed
+// post-restart output, then the process removes the marker and exits 0. This
+// keeps the lifecycle deterministic under whole-suite CPU/IO contention.
+function streamingCommand(prefix: string, releaseMarker: string): string {
+	return `i=1; while [ ! -f "${releaseMarker}" ]; do echo "${prefix}-$i"; i=$((i+1)); sleep 0.1; done; rm -f "${releaseMarker}"; exit 0`;
+}
+
+function createReleaseMarker(gateway: GatewayInfo, sessionId: string): { name: string; path: string } {
+	const cwd = gateway.sessionManager?.getSession(sessionId)?.cwd;
+	if (typeof cwd !== "string" || !cwd) {
+		throw new Error(`session ${sessionId} has no execution cwd for the bg-process release marker`);
+	}
+	const name = `.bobbit-bg-release-${randomUUID()}`;
+	return { name, path: join(cwd, name) };
 }
 
 // A long POSIX loop (≈60s) used for the kill flow — only needs to outlive the
@@ -163,38 +175,45 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 		const sessionId = await activeSessionId(page);
 		expect(sessionId, "active session id resolved from hash").toBeTruthy();
 
-		// Create a long-ish streaming process (≈12.5s) via the production REST path.
-		const bgId = await createBgProcess(sessionId, streamingCommand("tick", 50), "stream-task");
+		const release = createReleaseMarker(gateway, sessionId);
+		let bgId = "";
+		try {
+			// The process streams until this test explicitly authorizes completion.
+			bgId = await createBgProcess(sessionId, streamingCommand("tick", release.name), "stream-task");
 
-		// Pill appears for the active session.
-		await expect(pill(page, bgId)).toBeVisible({ timeout: 15_000 });
+			// Pill appears for the active session.
+			await expect(pill(page, bgId)).toBeVisible({ timeout: 15_000 });
 
-		// Pill is STREAMING before the restart (log grows past the first lines).
-		await expect
-			.poll(() => latestLine(sessionId, bgId, "tick"), { timeout: 15_000, intervals: [200] })
-			.toBeGreaterThanOrEqual(2);
+			// Pill is STREAMING before the restart (log grows past the first lines).
+			await expect
+				.poll(() => latestLine(sessionId, bgId, "tick"), { timeout: 15_000, intervals: [200] })
+				.toBeGreaterThanOrEqual(2);
 
-		// ── Crash + restart the gateway WHILE the process is still running. ──
-		await crashAndRestart(gateway, page);
+			// ── Crash + restart the gateway WHILE the process is still running. ──
+			await crashAndRestart(gateway, page);
 
-		// Pill is RESTORED after the restart (re-fetched on reconnect).
-		await expect(pill(page, bgId)).toBeVisible({ timeout: 20_000 });
+			// Pill is RESTORED after the restart (re-fetched on reconnect).
+			await expect(pill(page, bgId)).toBeVisible({ timeout: 20_000 });
 
-		// Still RUNNING (re-attached, not terminal) right after the reboot.
-		await expect
-			.poll(async () => (await findBg(sessionId, bgId))?.status ?? null, { timeout: 15_000, intervals: [200] })
-			.toBe("running");
+			// Still RUNNING (re-attached, not terminal) right after the reboot.
+			await expect
+				.poll(async () => (await findBg(sessionId, bgId))?.status ?? null, { timeout: 15_000, intervals: [200] })
+				.toBe("running");
 
-		// STILL STREAMING: capture the line count now, then assert NEW lines keep
-		// arriving — proving the re-attached tailer resumed live streaming, not
-		// merely that the orphan advanced during downtime.
-		const afterReboot = await latestLine(sessionId, bgId, "tick");
-		expect(afterReboot, "some output captured after reboot").toBeGreaterThanOrEqual(0);
-		await expect
-			.poll(() => latestLine(sessionId, bgId, "tick"), { timeout: 20_000, intervals: [250] })
-			.toBeGreaterThan(afterReboot);
+			// STILL STREAMING: capture the line count now, then assert NEW lines keep
+			// arriving — proving the re-attached tailer resumed live streaming, not
+			// merely that the orphan advanced during downtime.
+			const afterReboot = await latestLine(sessionId, bgId, "tick");
+			expect(afterReboot, "some output captured after reboot").toBeGreaterThanOrEqual(0);
+			await expect
+				.poll(() => latestLine(sessionId, bgId, "tick"), { timeout: 20_000, intervals: [250] })
+				.toBeGreaterThan(afterReboot);
+		} finally {
+			// Also release on assertion failure so a detached test process cannot leak.
+			writeFileSync(release.path, "release\n");
+		}
 
-		// Let it finish — the REAL exit code (0) is captured from the status file.
+		// The authorized completion writes the REAL exit code (0) to the status file.
 		await expect
 			.poll(async () => {
 				const p = await findBg(sessionId, bgId);
