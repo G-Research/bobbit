@@ -225,6 +225,75 @@ describe("Settings Models tab redesign", () => {
 		expect(anthropicKey.querySelectorAll('[data-testid="provider-key-present"]').length).toBe(0);
 	});
 
+	// Requirement 4 evidence for the "Adopt legacy AIGW models block" goal: when a
+	// legacy (unmarked) providers.aigw block was treated as user-owned, Bobbit
+	// dropped `upstreamProvider` from the published models, and these Default
+	// Models rows rendered bare model ids with no provider tag. renderModelRow()
+	// only renders the chip when the selected model has provider === "aigw" AND
+	// carries `upstreamProvider`, so these tests pin both directions.
+	//
+	// The chip has no data-testid in production code, so it is selected
+	// structurally via its title attribute inside the model-picker button. Adding
+	// a data-testid to the chip would be a worthwhile follow-up.
+	describe("Default Models upstream-provider chip", () => {
+		const OPUS = "us.anthropic.claude-opus-5";
+		const row = (label: string) => q(`[data-testid="model-row"][data-row-label="${label}"]`) as HTMLElement;
+		const pickerButton = (label: string) => row(label).querySelector('button[title="Choose model"]') as HTMLElement;
+		const chip = (label: string) => pickerButton(label).querySelector('span[title="AIGW provider"]') as HTMLElement | null;
+
+		it("renders the upstream provider chip for an aigw model carrying upstreamProvider", () => {
+			resetModelsTab({
+				aigwConfigured: true,
+				aigwUrl: "http://dummy/v1",
+				aigwModels: AIGW_MODELS,
+				allModels: [{ id: OPUS, provider: "aigw", reasoning: true, upstreamProvider: "aws" }],
+				prefSessionModel: `aigw/${OPUS}`,
+			});
+
+			expect(row("Session")).toBeTruthy();
+			const tag = chip("Session");
+			expect(tag, "provider chip missing: Default Models row rendered a bare id without its upstream provider tag").toBeTruthy();
+			expect((tag!.textContent || "").trim()).toBe("aws");
+
+			// The chip is separate from the model-id label: the row still shows the
+			// bare id, and the id text does not absorb the provider tag.
+			const idLabel = pickerButton("Session").querySelector("span.truncate") as HTMLElement;
+			expect((idLabel.textContent || "").trim()).toBe(OPUS);
+			expect(idLabel.contains(tag!)).toBe(false);
+
+			// It is a chip on this row only — untouched rows have no pref, no chip.
+			expect(chip("Review")).toBeNull();
+		});
+
+		it("renders no chip when the aigw model lacks upstreamProvider (the regression)", () => {
+			resetModelsTab({
+				aigwConfigured: true,
+				aigwUrl: "http://dummy/v1",
+				aigwModels: AIGW_MODELS,
+				allModels: [{ id: OPUS, provider: "aigw", reasoning: true }],
+				prefSessionModel: `aigw/${OPUS}`,
+			});
+
+			const button = pickerButton("Session");
+			expect((button.textContent || "").replace(/\s+/g, " ").trim()).toBe(OPUS);
+			expect(chip("Session")).toBeNull();
+			// The pref is a real available model, so this is a provenance gap and not
+			// a stale-pref "Unavailable" state.
+			expect(row("Session").querySelector('[data-testid="model-unavailable-badge"]')).toBeNull();
+		});
+
+		it("renders no chip for a non-aigw provider even when upstreamProvider is set", () => {
+			resetModelsTab({
+				aigwConfigured: false,
+				allModels: [{ id: "gpt-4o", provider: "openai", reasoning: false, upstreamProvider: "openai" }],
+				prefSessionModel: "openai/gpt-4o",
+			});
+
+			expect((pickerButton("Session").textContent || "").replace(/\s+/g, " ").trim()).toBe("gpt-4o");
+			expect(chip("Session")).toBeNull();
+		});
+	});
+
 	it("Provider API Keys section is discoverable with a Google key input", async () => {
 		resetModelsTab({ aigwConfigured: false, allModels: ALL_MODELS });
 
