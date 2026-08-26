@@ -36,6 +36,33 @@ async function authenticateMockProposalTools(
 	);
 }
 
+async function holdProposalStream(
+	page: import("@playwright/test").Page,
+	gateway: any,
+	type: string,
+): Promise<{ entered: Promise<unknown>; release: () => void }> {
+	const sessionId = await page.evaluate(() => {
+		const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+		return state?.selectedSessionId as string | undefined;
+	});
+	const core = sessionId ? gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent : undefined;
+	if (!core || typeof core.armBarrier !== "function" || typeof core.waitForBarrier !== "function") {
+		throw new Error("proposal journey requires the in-process mock agent barrier seam");
+	}
+	const boundary = `proposal-stream:${type}:intermediate-delta`;
+	core.armBarrier(boundary);
+	const entered = Promise.resolve(core.waitForBarrier(boundary)).then((details: any) => {
+		if (details?.proposalType !== type || details?.delta !== 1 || typeof details?.toolId !== "string") {
+			throw new Error(`proposal stream reached an uncorrelated intermediate barrier: ${JSON.stringify(details)}`);
+		}
+		return details;
+	});
+	return {
+		entered,
+		release: () => { core.releaseBarrier(boundary); },
+	};
+}
+
 async function waitForProposalSlot(page: import("@playwright/test").Page, type: string): Promise<void> {
 	await page.waitForFunction(
 		(t: string) => {
@@ -93,35 +120,21 @@ async function waitForGoalProposal(
 // ── Shell / navigation tests ────────────────────────────────────────────────
 
 test.describe("Journey: Proposals — shell", () => {
-	test("app shell renders on load", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
-		const title = await page.title();
-		expect(title).toBeTruthy();
-	});
-
-	test("proposal route is navigable", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("session with idle status shows proposal-compatible UI", async ({ page }) => {
+	test("app shell and an idle session render the proposal-compatible surface", async ({ page }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		try {
 			await openApp(page);
-			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
-		} finally {
-			await deleteSession(sessionId);
-		}
-	});
-
-	test("sidebar visible alongside session for proposal panel integration", async ({ page }) => {
-		const sessionId = await createSession();
-		await waitForSessionStatus(sessionId, "idle");
-		try {
-			await openApp(page);
+			await expect(page.locator("body")).toBeVisible({ timeout: 20_000 });
+			expect(await page.title()).toBeTruthy();
+			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
+			const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
+			await expect(newGoalBtn).toBeVisible({ timeout: 15_000 });
+			await newGoalBtn.click();
+			await expect(page.locator(
+				"dialog, [role='dialog'], [role='alertdialog'], goal-proposal-panel, [data-testid='goal-proposal'], input[placeholder*='title' i], input[placeholder*='goal' i]",
+			).first()).toBeVisible({ timeout: 20_000 });
+			await page.keyboard.press("Escape");
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
@@ -130,28 +143,13 @@ test.describe("Journey: Proposals — shell", () => {
 		}
 	});
 
-	test("New Goal button opens dialog or navigates to goal form", async ({ page }) => {
-		await openApp(page);
-		await expect(page.locator(".sidebar-edge").first()).toBeVisible({ timeout: 15_000 });
-		const newGoalBtn = page.locator("button[title='New goal (Alt+G)']").first();
-		if (await newGoalBtn.isVisible({ timeout: 15_000 }).catch(() => false)) {
-			await newGoalBtn.click();
-			const dialogOrForm = page.locator(
-				"dialog, [role='dialog'], [role='alertdialog'], " +
-				"goal-proposal-panel, [data-testid='goal-proposal'], " +
-				"input[placeholder*='title' i], input[placeholder*='goal' i]"
-			).first();
-			await expect(dialogOrForm).toBeVisible({ timeout: 20_000 });
-		} else {
-			test.skip(true, "New Goal button not found; proposals may surface differently in this gateway config");
-		}
-	});
 });
 
 // ── Behavioral: proposal slot + tab ────────────────────────────────────────
 
 test.describe("Journey: Proposals — behavioral", () => {
-	test("ROLE_PROPOSAL_PARITY trigger populates role proposal slot in app state", async ({ page }) => {
+	test("role and streaming goal proposals expose every intermediate and terminal state", async ({ page, gateway }) => {
+		test.setTimeout(90_000);
 		await openApp(page);
 		await createSessionViaUI(page);
 		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
@@ -163,71 +161,10 @@ test.describe("Journey: Proposals — behavioral", () => {
 		expect(fields).toBeTruthy();
 		expect(typeof fields).toBe("object");
 		expect(Object.keys(fields as object).length).toBeGreaterThan(0);
-	});
 
-	test("role proposal tab appears with dot after ROLE_PROPOSAL_PARITY", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
-		await waitForProposalSlot(page, "role");
 		const roleTab = page.locator('.goal-tab-pill[title="Role"]').first();
 		await expect(roleTab).toBeVisible({ timeout: 15_000 });
 		await expect(roleTab.locator(".goal-tab-dot")).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("goal proposal streaming badge visible during STAY_BUSY stream then disappears", async ({ page }) => {
-		test.setTimeout(90_000);
-		await openApp(page);
-		await createSessionViaUI(page);
-		// Five paced deltas retain the partial-stream lifecycle while avoiding
-		// redundant idle time in this per-spec wall-budgeted journey.
-		await sendMessage(page, "STAY_BUSY:propose_goal:5:100");
-		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
-		await expect(badge).toBeVisible({ timeout: 15_000 });
-		await expect(badge).toBeHidden({ timeout: 20_000 });
-	});
-
-	test("goal proposal submit disabled while streaming then enables", async ({ page }) => {
-		test.setTimeout(90_000);
-		await openApp(page);
-		await createSessionViaUI(page);
-		// Retain multiple streamed updates, but keep the deterministic fixture
-		// short enough for the journey's 60-second aggregate budget.
-		await sendMessage(page, "STAY_BUSY:propose_goal:5:100");
-		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
-		const submitWrap = page.locator('[data-testid="proposal-primary-submit"]').first();
-		await expect(submitWrap).toBeVisible({ timeout: 15_000 });
-		const submitBtn = submitWrap.locator("button").first();
-		await expect.poll(async () => {
-			const [badgeVisible, disabled] = await Promise.all([
-				badge.isVisible().catch(() => false),
-				submitBtn.isDisabled().catch(() => false),
-			]);
-			return badgeVisible && disabled;
-		}, { timeout: 15_000, intervals: [50, 100, 150] }).toBe(true);
-		await expect(badge).toBeHidden({ timeout: 20_000 });
-		await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
-	});
-
-	test("role proposal pane visible after clicking role tab", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
-		await waitForProposalSlot(page, "role");
-		const roleTab = page.locator('.goal-tab-pill[title="Role"]').first();
-		await expect(roleTab).toBeVisible({ timeout: 15_000 });
-		await roleTab.click();
-		const rolePane = page.locator('[data-panel="role-proposal"]').first();
-		await expect(rolePane).toBeVisible({ timeout: 15_000 });
-	});
-
-	test("role proposal dismiss clears the slot and hides the tab", async ({ page }) => {
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "ROLE_PROPOSAL_PARITY");
-		await waitForProposalSlot(page, "role");
-		const roleTab = page.locator('.goal-tab-pill[title="Role"]').first();
-		await expect(roleTab).toBeVisible({ timeout: 15_000 });
 		await roleTab.click();
 		const rolePane = page.locator('[data-panel="role-proposal"]').first();
 		await expect(rolePane).toBeVisible({ timeout: 15_000 });
@@ -243,29 +180,49 @@ test.describe("Journey: Proposals — behavioral", () => {
 			},
 			{ timeout: 20_000 },
 		);
-	});
 
-	test("goal proposal dismiss during streaming sticks after stream ends", async ({ page }) => {
-		test.setTimeout(90_000);
-		await openApp(page);
-		await createSessionViaUI(page);
-		// Enough updates to exercise a live, growing stream and its terminal
-		// restore path without spending three seconds in the mock fixture.
-		await sendMessage(page, "STAY_BUSY:propose_goal:8:100");
-		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 15_000 });
+		const stream = await holdProposalStream(page, gateway, "goal");
 		const badge = page.locator('[data-testid="proposal-streaming-badge"]').first();
-		await expect(badge).toBeVisible({ timeout: 15_000 });
-		const dismissBtn = page.locator("button").filter({ hasText: "Dismiss" }).first();
-		await expect(dismissBtn).toBeVisible({ timeout: 15_000 });
-		await expect(dismissBtn).toBeEnabled();
-		await dismissBtn.click();
-		await expect(titleInput).toBeHidden({ timeout: 15_000 });
+		const submitWrap = page.locator('[data-testid="proposal-primary-submit"]').first();
+		try {
+			await sendMessage(page, "STAY_BUSY:propose_goal:5:0");
+			await stream.entered;
+			await expect(submitWrap).toBeVisible({ timeout: 15_000 });
+			const submitBtn = submitWrap.locator("button").first();
+			await expect(badge).toBeVisible({ timeout: 15_000 });
+			await expect(submitBtn).toBeDisabled({ timeout: 15_000 });
+		} finally {
+			stream.release();
+		}
+		const submitBtn = submitWrap.locator("button").first();
+		await expect(badge).toBeHidden({ timeout: 20_000 });
+		await expect(submitBtn).toBeEnabled({ timeout: 15_000 });
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.remoteAgent?.state?.status ?? ""),
+			{ timeout: 15_000 },
+		).toBe("idle");
+
+		const dismissStream = await holdProposalStream(page, gateway, "goal");
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		try {
+			await sendMessage(page, "STAY_BUSY:propose_goal:8:0");
+			await dismissStream.entered;
+			await expect(titleInput).toBeVisible({ timeout: 15_000 });
+			await expect(badge).toBeVisible({ timeout: 15_000 });
+			const dismissBtn = page.locator("button").filter({ hasText: "Dismiss" }).first();
+			await expect(dismissBtn).toBeVisible({ timeout: 15_000 });
+			await expect(dismissBtn).toBeEnabled();
+			await dismissBtn.click();
+			await expect(titleInput).toBeHidden({ timeout: 15_000 });
+		} finally {
+			dismissStream.release();
+		}
 		await page.waitForFunction(
 			() => (window as any).bobbitState?.remoteAgent?.state?.status === "idle",
 			{ timeout: 15_000 },
 		);
 		await expect(titleInput).toBeHidden();
+		await expect(badge).toBeHidden();
 	});
 });
 
@@ -324,32 +281,168 @@ test.describe("Journey: Proposals — API error handling", () => {
 	});
 
 	test("page.route() session list 500 still lets app load gracefully", async ({ page }) => {
-		let firstCallDone = false;
-		await page.route("**/api/sessions", async (route) => {
-			if (route.request().method() === "GET" && !firstCallDone) {
-				firstCallDone = true;
-				await route.fulfill({ status: 500, body: "Internal Server Error" });
-				return;
-			}
-			return route.continue();
+		const sessionListRoute = /\/api\/sessions(?:\?.*)?$/;
+		let failedRequestUrl: string | undefined;
+		const failedListResponse = page.waitForResponse((response) => {
+			const request = response.request();
+			return request.method() === "GET"
+				&& new URL(response.url()).pathname === "/api/sessions"
+				&& response.status() === 500;
 		});
-		await openApp(page);
-		await expect(page.locator("body")).toBeVisible({ timeout: 15_000 });
+		await page.route(sessionListRoute, async (route) => {
+			const request = route.request();
+			const pathname = new URL(request.url()).pathname;
+			if (request.method() !== "GET" || pathname !== "/api/sessions" || failedRequestUrl) {
+				return route.fallback();
+			}
+			failedRequestUrl = request.url();
+			await route.fulfill({
+				status: 500,
+				contentType: "text/plain",
+				body: "Internal Server Error",
+			});
+		});
+
+		const appReady = openApp(page);
+		const failedResponse = await failedListResponse;
+		expect(failedResponse.url()).toBe(failedRequestUrl);
+		await appReady;
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible();
+		const mountedState = await page.evaluate(() => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return {
+				appView: state?.appView,
+				sessionsError: state?.sessionsError,
+				sessionsGeneration: state?.sessionsGeneration,
+				sessionsLoading: state?.sessionsLoading,
+			};
+		});
+		expect(mountedState).toMatchObject({
+			appView: "authenticated",
+			sessionsError: "",
+			sessionsLoading: false,
+		});
+		expect(mountedState.sessionsGeneration).toBeGreaterThanOrEqual(0);
 	});
 
-	// Ported from proposal-tools.spec.ts (audit: proposals PARTIAL): the goal
-	// proposal tool card must render an Open button (proposal-open-button).
-	test("goal proposal tool card renders the Open button", async ({ page }) => {
+	// Keep the related goal-assistant proposal lifecycle in one session. Besides
+	// preserving one continuous user journey, this avoids repeating expensive
+	// assistant creation solely to inspect another projection of the same draft.
+	test("goal assistant proposal survives navigation, editing and workflow changes, then stays dismissed after reload", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
+		const initialSpecTail = "It validates the goal creation UI.";
+		const editedSpecBody = "EDITED SPEC BODY for Mode A repro.";
 		await openApp(page);
 		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		await authenticateMockProposalTools(page, gateway);
 		const textarea = page.locator("textarea").first();
 		await expect(textarea).toBeVisible({ timeout: 30_000 });
 		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
-		// Tool card summary + Open button.
 		await expect(page.getByText("Goal Proposal").first()).toBeVisible({ timeout: 20_000 });
 		await expect(page.locator('[data-testid="proposal-open-button"]').first()).toBeVisible({ timeout: 15_000 });
+		const titleInput = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleInput).toBeVisible({ timeout: 20_000 });
+		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
+		const panel = page.locator('[data-panel="goal-proposal"]').first();
+		await expect(panel).toBeVisible({ timeout: 15_000 });
+		await expect.poll(
+			() => page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? ""),
+			{ timeout: 15_000 },
+		).toContain(initialSpecTail);
+
+		const getSpec = () => page.evaluate(() => {
+			const cm = document.querySelector("commentable-markdown") as any;
+			return (cm?.markdown as string) ?? "";
+		});
+		const originalSpec = await getSpec();
+		expect(originalSpec.length, "proposal spec must be non-empty before nav").toBeGreaterThan(20);
+		const sid = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId as string);
+		expect(sid).toBeTruthy();
+		const otherSessionId = await createSession();
+		try {
+			await navigateToHash(page, `#/session/${otherSessionId}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await navigateToHash(page, `#/session/${sid}`);
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await expect(panel).toBeVisible({ timeout: 15_000 });
+			await expect.poll(getSpec, { timeout: 15_000, intervals: [500, 1000, 2000] }).toBe(originalSpec);
+		} finally {
+			await deleteSession(otherSessionId).catch(() => {});
+		}
+
+		const workflowTab = page.locator("[data-testid='goal-proposal-tab-workflow']").first();
+		await workflowTab.click();
+		await expect(page.locator("[data-testid='goal-proposal-workflow-select']").first()).toBeVisible({ timeout: 15_000 });
+		const customise = page.locator("[data-testid='goal-proposal-workflow-customize']").first();
+		await expect(customise).toBeVisible({ timeout: 15_000 });
+		await expect(customise).toHaveText("Customise for this goal");
+		await customise.click();
+		const revert = page.locator("[data-testid='goal-proposal-workflow-reset']").first();
+		await expect(revert).toBeVisible({ timeout: 15_000 });
+		await expect(revert).toHaveText("Revert to project definition");
+		await expect(customise).toHaveCount(0);
+		await revert.click();
+		await expect(customise).toBeVisible({ timeout: 15_000 });
+		await expect(revert).toHaveCount(0);
+
+		await sendMessage(page, "Apply GOAL_EDITABLE_EDIT to the spec");
+		await page.waitForFunction(
+			(needle: string) => (((window as any).bobbitState?.activeProposals?.goal?.fields?.spec as string) ?? "").includes(needle),
+			editedSpecBody,
+			{ timeout: 20_000 },
+		);
+		await expect.poll(
+			() => page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? ""),
+			{ timeout: 15_000 },
+		).toContain(editedSpecBody);
+		expect(await page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? "")).not.toContain(initialSpecTail);
+		await waitForSessionStatus(sid, "idle");
+		await page.waitForFunction(async (sidArg: string) => {
+			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
+			const token = localStorage.getItem("gateway.token") ?? "";
+			const response = await fetch(`${url}/api/sessions/${sidArg}/draft?type=goal`, { headers: { Authorization: `Bearer ${token}` } });
+			if (!response.ok) return false;
+			const draft = (await response.json())?.data?.activeGoalProposal;
+			return draft?.title === "E2E Test Goal" && String(draft?.spec ?? "").includes("EDITED SPEC BODY for Mode A repro.");
+		}, sid, { timeout: 15_000 });
+		const goalTab = page.locator('.goal-tab-pill[title="Goal"]').first();
+		await expect(goalTab).toBeVisible();
+		await goalTab.click();
+		await expect(panel).toBeVisible();
+		const proposalDelete = page.waitForResponse((response) => {
+			const pathname = new URL(response.url()).pathname;
+			return response.request().method() === "DELETE"
+				&& pathname === `/api/sessions/${encodeURIComponent(sid)}/proposal/goal`;
+		});
+		const dismissButton = goalTab.getByRole("button", { name: "Dismiss Goal" });
+		await expect(dismissButton).toBeVisible();
+		await expect(dismissButton).toBeEnabled();
+		await dismissButton.click();
+		const deleteResponse = await proposalDelete;
+		expect(deleteResponse.status()).toBe(204);
+		const dismissalFingerprint = await page.evaluate(
+			(sidArg: string) => localStorage.getItem(`bobbit-goal-proposal-dismissed-${sidArg}`),
+			sid,
+		);
+		expect(dismissalFingerprint, "the real Dismiss action must persist its proposal fingerprint").toBeTruthy();
+		await expect.poll(
+			() => page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null),
+		).toBeNull();
+		await expect(titleInput).toBeHidden();
+		await page.reload();
+		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
+		await page.waitForFunction((sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg, sid, { timeout: 15_000 });
+		await expect.poll(() => page.evaluate(({ sidArg, fingerprint }) => {
+			const state = (window as any).bobbitState;
+			return state?.selectedSessionId === sidArg
+				&& !state.activeProposals?.goal
+				&& state.previewTitle === ""
+				&& localStorage.getItem(`bobbit-goal-proposal-dismissed-${sidArg}`) === fingerprint;
+		}, { sidArg: sid, fingerprint: dismissalFingerprint })).toBe(true);
+		const titleAfterReload = page.locator("input[placeholder='Goal title']").first();
+		await expect(titleAfterReload).toBeHidden({ timeout: 10_000 });
+		expect(await page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null)).toBeNull();
 	});
 });
 
@@ -665,201 +758,6 @@ test.describe("Journey: Goal Re-attempt — project binding", () => {
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			await apiFetch(`/api/goals/${origGoal.id}`, { method: "DELETE" }).catch(() => {});
 		}
-	});
-});
-
-// Ported from proposal-spec-survives-navigate.spec.ts (audit: proposals GAP,
-// mutant BR70): the goal-proposal spec body must survive navigating away to
-// another session and back (reconcileGoalSlotIntoFormMirror restores it).
-test.describe("Journey: Goal Proposal — spec survives navigate", () => {
-	test("spec body persists after nav to another session and back", async ({ page }) => {
-		test.setTimeout(120_000);
-		await openApp(page);
-		await createGoalAssistantViaUI(page, { timeout: 60_000 });
-		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 30_000 });
-		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
-		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 20_000 });
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
-		await expect(page.locator('[data-panel="goal-proposal"]').first()).toBeVisible({ timeout: 15_000 });
-
-		const getSpec = () => page.evaluate(() => {
-			const cm = document.querySelector("commentable-markdown") as any;
-			return (cm?.markdown as string) ?? "";
-		});
-		const originalSpec = await getSpec();
-		expect(originalSpec.length, "proposal spec must be non-empty before nav").toBeGreaterThan(20);
-
-		const sidA = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId as string);
-		expect(sidA).toBeTruthy();
-		const sidB = await createSession();
-		try {
-			await navigateToHash(page, `#/session/${sidB}`);
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-			await navigateToHash(page, `#/session/${sidA}`);
-			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-			await expect(page.locator('[data-panel="goal-proposal"]').first()).toBeVisible({ timeout: 15_000 });
-
-			// The rendered spec must equal the pre-nav body (not empty).
-			await expect.poll(getSpec, { timeout: 15_000, intervals: [500, 1000, 2000] }).toBe(originalSpec);
-		} finally {
-			await deleteSession(sidB).catch(() => {});
-		}
-	});
-});
-
-// Ported from goal-proposal-revision-autoupdate.spec.ts (audit: proposals GAP,
-// mutant BR69): an edit_proposal revision must auto-update the goal-assistant
-// panel form-mirror (previewSpec) in place, with no "Open proposal" click.
-test.describe("Journey: Goal Proposal — revision auto-update", () => {
-	const INITIAL_SPEC_TAIL = "It validates the goal creation UI.";
-	const EDITED_SPEC_BODY = "EDITED SPEC BODY for Mode A repro.";
-
-	test("edit_proposal auto-updates the assistant panel form-mirror in place", async ({ page, gateway }) => {
-		test.setTimeout(120_000);
-		await openApp(page);
-		await createGoalAssistantViaUI(page, { timeout: 60_000 });
-		await authenticateMockProposalTools(page, gateway);
-		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 30_000 });
-		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
-
-		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 20_000 });
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
-		// Initial spec is live in the form-mirror.
-		await expect.poll(
-			() => page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? ""),
-			{ timeout: 15_000 },
-		).toContain(INITIAL_SPEC_TAIL);
-
-		// Apply a surgical edit_proposal (not a propose_* tool, so it flows ONLY
-		// through the unified onProposal path — the mutant's target).
-		await sendMessage(page, "Apply GOAL_EDITABLE_EDIT to the spec");
-
-		// The unified slot reflects the edit (proves the server edit landed).
-		await page.waitForFunction(
-			(needle: string) => (((window as any).bobbitState?.activeProposals?.goal?.fields?.spec as string) ?? "").includes(needle),
-			EDITED_SPEC_BODY,
-			{ timeout: 20_000 },
-		);
-
-		// The assistant panel form-mirror (previewSpec) must reflect the edit with
-		// NO manual "Open proposal" click, and drop the replaced sentence.
-		await expect.poll(
-			() => page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? ""),
-			{ timeout: 15_000 },
-		).toContain(EDITED_SPEC_BODY);
-		const previewSpec = await page.evaluate(() => ((window as any).bobbitState?.previewSpec as string) ?? "");
-		expect(previewSpec).not.toContain(INITIAL_SPEC_TAIL);
-	});
-});
-
-// Ported from goal-proposal-workflow-tab.spec.ts (audit: proposals GAP, mutant
-// BR67): the goal-proposal Workflow tab exposes a workflow select + a
-// Customise/Revert toggle (Customise → editor + Revert; Revert → back).
-test.describe("Journey: Goal Proposal — Workflow tab", () => {
-	test("Workflow tab Customise reveals editor + Revert, then reverts", async ({ page }) => {
-		test.setTimeout(90_000);
-		await openApp(page);
-		await createSessionViaUI(page);
-		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
-
-		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 20_000 });
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
-
-		const workflowTab = page.locator("[data-testid='goal-proposal-tab-workflow']").first();
-		await expect(workflowTab).toBeVisible({ timeout: 15_000 });
-		await workflowTab.click();
-		await expect(page.locator("[data-testid='goal-proposal-workflow-select']").first()).toBeVisible({ timeout: 15_000 });
-
-		// Customise for this goal (the mutant target) → editor + Revert appears.
-		const customise = page.locator("[data-testid='goal-proposal-workflow-customize']").first();
-		await expect(customise).toBeVisible({ timeout: 15_000 });
-		await expect(customise).toHaveText("Customise for this goal");
-		await customise.click();
-
-		const revert = page.locator("[data-testid='goal-proposal-workflow-reset']").first();
-		await expect(revert).toBeVisible({ timeout: 15_000 });
-		await expect(revert).toHaveText("Revert to project definition");
-		await expect(page.locator("[data-testid='goal-proposal-workflow-customize']")).toHaveCount(0);
-
-		// Revert → inspector returns; Customise button comes back.
-		await revert.click();
-		await expect(page.locator("[data-testid='goal-proposal-workflow-customize']").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator("[data-testid='goal-proposal-workflow-reset']")).toHaveCount(0);
-	});
-});
-
-// Ported from goal-proposal-dismiss-reload.spec.ts (audit: proposals GAP,
-// mutant BR66): a dismissed goal proposal must stay hidden after a page reload
-// (the dismissal fingerprint suppresses the restore-path repopulation).
-test.describe("Journey: Goal Proposal — dismiss persists across reload", () => {
-	test("dismissed goal proposal stays hidden after reload (goal-assistant)", async ({ page }) => {
-		test.setTimeout(120_000);
-		await openApp(page);
-		await createGoalAssistantViaUI(page, { timeout: 60_000 });
-		const textarea = page.locator("textarea").first();
-		await expect(textarea).toBeVisible({ timeout: 30_000 });
-		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
-
-		const titleInput = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleInput).toBeVisible({ timeout: 20_000 });
-		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
-
-		const sid = await page.evaluate(() => (window as any).bobbitState?.selectedSessionId as string);
-		expect(sid).toBeTruthy();
-		await waitForSessionStatus(sid, "idle");
-
-		// The assistant's debounced saveGoalDraft must persist the proposal to the
-		// server so the reload restore-path has something to (wrongly) repopulate.
-		await page.waitForFunction(async (sidArg: string) => {
-			const url = (localStorage.getItem("gateway.url") ?? location.origin).replace(/\/$/, "");
-			const token = localStorage.getItem("gateway.token") ?? "";
-			const res = await fetch(`${url}/api/sessions/${sidArg}/draft?type=goal`, { headers: { Authorization: `Bearer ${token}` } });
-			if (!res.ok) return false;
-			const body = await res.json();
-			return !!body?.data?.activeGoalProposal?.title;
-		}, sid, { timeout: 15_000 });
-
-		// Simulate Dismiss: write the dismissal fingerprint (mirroring the
-		// production normalisation — goal spec right-trimmed, keys sorted) and
-		// clear the in-memory slot (the assistant panel has no Dismiss button).
-		await page.evaluate((sidArg: string) => {
-			const s = (window as any).bobbitState;
-			const fields = { ...(s?.activeProposals?.goal?.fields ?? {}) };
-			if (typeof fields.spec === "string") fields.spec = (fields.spec as string).replace(/\s+$/u, "");
-			const ordered: Record<string, unknown> = {};
-			for (const k of Object.keys(fields).sort()) ordered[k] = fields[k];
-			localStorage.setItem(`bobbit-goal-proposal-dismissed-${sidArg}`, JSON.stringify(ordered));
-			delete s.activeProposals.goal;
-			s.assistantHasProposal = false;
-		}, sid);
-
-		// Reload — the restore path runs; the dismissed proposal must stay hidden.
-		await page.reload();
-		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
-		await page.waitForFunction((sidArg: string) => (window as any).bobbitState?.selectedSessionId === sidArg, sid, { timeout: 15_000 });
-
-		// Negative-condition poll: the slot must NOT repopulate (on the mutant it
-		// reappears within ~hundreds of ms). One second covers that deterministic
-		// restore path without burning a fixed five-second per-spec budget.
-		await page.waitForFunction(
-			() => !!(window as any).bobbitState?.activeProposals?.goal?.fields?.title,
-			null,
-			{ timeout: 1_000 },
-		).catch(() => { /* expected: stays dismissed */ });
-
-		// The title input stays mounted (the assistant always renders its form)
-		// but must NOT be re-populated with the dismissed proposal's value.
-		const titleAfterReload = page.locator("input[placeholder='Goal title']").first();
-		await expect(titleAfterReload).toBeVisible({ timeout: 10_000 });
-		await expect(titleAfterReload).not.toHaveValue("E2E Test Goal", { timeout: 5_000 });
-		// And the in-memory slot must be empty.
-		const slotAfter = await page.evaluate(() => (window as any).bobbitState?.activeProposals?.goal ?? null);
-		expect(slotAfter, "dismissed goal proposal must NOT repopulate state.activeProposals.goal after reload").toBeNull();
 	});
 });
 

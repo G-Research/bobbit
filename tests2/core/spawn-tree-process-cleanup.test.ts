@@ -234,23 +234,126 @@ const IDENTITY_FAILURE_PROBE = String.raw`
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+
+const SENTINEL_ARG = "bobbit-posix-sentinel:write-fail";
+const SNAPSHOT_TIMEOUT_MS = 1_000;
+const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
+
+function handleIsClosed(handle) {
+  return !handle || handle.destroyed === true || handle.closed === true
+    || handle.readableEnded === true || handle.writableFinished === true;
+}
+
+// Subscribe and then recheck the terminal predicate. The first check handles an
+// event delivered before this probe obtained the handle; the second closes the
+// check-to-listener gap without treating a missed data event as acknowledgement.
+function joinTerminalClose(target, isTerminal, label) {
+  return new Promise((resolve, reject) => {
+    if (isTerminal()) return resolve();
+    let settled = false;
+    const cleanup = () => {
+      target.off("close", onClose);
+      target.off("error", onError);
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error); else resolve();
+    };
+    const onClose = () => finish();
+    const onError = (error) => finish(new Error(label + " failed: " + (error?.message ?? String(error))));
+    target.once("close", onClose);
+    target.once("error", onError);
+    if (isTerminal()) finish();
+  });
+}
+
+function readProcessSnapshot() {
+  return new Promise((resolve, reject) => {
+    execFile("ps", ["-axww", "-o", "pid=,pgid=,state=,args="], {
+      encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C" },
+      timeout: SNAPSHOT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      maxBuffer: SNAPSHOT_MAX_BYTES,
+    }, (error, stdout, stderr) => {
+      if (error) return reject(new Error("bounded process snapshot failed: " + error.message));
+      if (stderr.trim()) return reject(new Error("bounded process snapshot wrote stderr: " + stderr.trim()));
+      resolve(stdout);
+    });
+  });
+}
+
+// Only the process-held nonce identifies this fixture incarnation. A reused
+// numeric PGID without that nonce is unrelated. Missing/malformed/ambiguous
+// evidence fails closed; one absent or zombie nonce row proves no executable
+// sentinel remains after the root ChildProcess has physically closed.
+function nonceBoundSentinelExecutable(snapshot, targetPgid) {
+  if (typeof snapshot !== "string" || snapshot.length === 0 || snapshot.length >= SNAPSHOT_MAX_BYTES) {
+    throw new Error("bounded process snapshot was empty or truncated");
+  }
+  const rows = snapshot.split(/\r?\n/).filter((row) => row.trim().length > 0);
+  if (rows.length === 0) throw new Error("bounded process snapshot contained no rows");
+  const nonceRows = [];
+  for (const row of rows) {
+    const parsed = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/.exec(row);
+    if (!parsed) {
+      if (row.includes(SENTINEL_ARG)) throw new Error("nonce-bound process snapshot row was malformed");
+      continue;
+    }
+    const pid = Number(parsed[1]);
+    const pgid = Number(parsed[2]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(pgid) || pgid <= 0) {
+      if (row.includes(SENTINEL_ARG)) throw new Error("nonce-bound process snapshot identity was malformed");
+      continue;
+    }
+    if (pgid !== targetPgid) continue;
+    const state = parsed[3];
+    const argv = parsed[4];
+    const exactMatches = argv.match(new RegExp("(?:^|\\s)" + SENTINEL_ARG + "(?=\\s|$)", "g")) ?? [];
+    if (exactMatches.length === 0) {
+      if (argv.includes(SENTINEL_ARG)) throw new Error("nonce-bound process snapshot argv was ambiguous");
+      continue;
+    }
+    if (exactMatches.length !== 1) throw new Error("nonce-bound process snapshot contained ambiguous nonce evidence");
+    if (!/^\S+$/.test(state)) throw new Error("nonce-bound process snapshot state was malformed");
+    nonceRows.push({ pid, state });
+  }
+  if (nonceRows.length > 1) throw new Error("bounded process snapshot contained duplicate nonce evidence");
+  return nonceRows.some((row) => row.state[0] !== "Z");
+}
+
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sentinel-write-fail-"));
 const tracked = spawnTracked("/bin/sh", ["-c", "exec tail -f /dev/null"], {
   stdio: ["ignore", "ignore", "ignore", "pipe"],
   posixSentinelIdentity: { file: path.join(dir, "missing", "sentinel.json"), nonce: "write-fail" },
   timeoutMs: 10_000,
 });
+const rootPid = tracked.child.pid;
+if (!Number.isSafeInteger(rootPid) || rootPid <= 0) throw new Error("missing root PID");
+// Arm the direct root lifecycle join first. The already-terminal fallback still
+// proves an observed exit/signal plus closed stdio if even close was earlier.
+const childClosed = joinTerminalClose(tracked.child, () => {
+  const exited = tracked.child.exitCode !== null || tracked.child.signalCode !== null;
+  return exited && tracked.child.stdio.every(handleIsClosed);
+}, "root child");
 const ready = tracked.child.stdio[3];
-let acknowledged = false;
-await new Promise((resolve, reject) => {
-  if (!ready) return reject(new Error("missing readiness pipe"));
-  ready.on("data", () => { acknowledged = true; });
-  ready.once("close", resolve);
-  ready.once("error", reject);
-});
-const reaped = await tracked.waitForTreeExit(1_500);
-process.stdout.write(JSON.stringify({ acknowledged, reaped }) + "\n", () => {
+if (!ready) throw new Error("missing readiness pipe");
+// FD3 may already be destroyed/ended/closed by the time spawnTracked returns.
+const readyClosed = joinTerminalClose(ready, () => handleIsClosed(ready), "readiness pipe");
+let ownershipError;
+try { await tracked.ownershipReady; }
+catch (error) { ownershipError = error?.message; }
+const ownershipNotAcknowledged = ownershipError === "POSIX sentinel ownership was not established";
+await readyClosed;
+await childClosed;
+const completionVerified = await tracked.waitForTreeExit(0);
+const snapshot = await readProcessSnapshot();
+const nonceBoundSentinelLive = nonceBoundSentinelExecutable(snapshot, rootPid);
+process.stdout.write(JSON.stringify({ ownershipNotAcknowledged, ownershipError, completionVerified, rootChildClosed: true, nonceBoundSentinelLive }) + "\n", () => {
   fs.rmSync(dir, { recursive: true, force: true });
   process.exit(0);
 });
@@ -272,6 +375,10 @@ function fakeChild(pid: number): FakeChild {
 		stdio: [null, null, null, readyPipe],
 		kill: (signal: NodeJS.Signals) => { killCalls.push(signal); return true; },
 	}) as unknown as FakeChild;
+}
+
+async function flushMicrotasks(turns = 12): Promise<void> {
+	for (let turn = 0; turn < turns; turn++) await Promise.resolve();
 }
 
 function runProbe(): Promise<{ stdout: string; stderr: string; code: number | null }> {
@@ -738,7 +845,13 @@ describe("spawnTracked timeout cleanup", () => {
 			return;
 		}
 		const result = await runNativeJsonProbe(IDENTITY_FAILURE_PROBE);
-		expect(result).toEqual({ acknowledged: false, reaped: true });
+		expect(result).toEqual({
+			ownershipNotAcknowledged: true,
+			ownershipError: "POSIX sentinel ownership was not established",
+			completionVerified: false,
+			rootChildClosed: true,
+			nonceBoundSentinelLive: false,
+		});
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
@@ -929,6 +1042,37 @@ describe("spawnTracked timeout cleanup", () => {
 		await expect(tracked.ownershipReady).rejects.toThrow("POSIX sentinel ownership was not established");
 		expect(_trackedCount()).toBe(before);
 		root.emit("close", 0, null);
+	});
+
+	it("force-cleans a failed POSIX handshake once while completion stays unverified", async () => {
+		const root = fakeChild(123_471);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let groupAlive = true;
+		const closed = new Promise<void>(resolve => root.once("close", () => resolve()));
+		const before = _trackedCount();
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => groupAlive,
+			signalProcessGroup: (pgid, signal) => {
+				signals.push({ pgid, signal });
+				queueMicrotask(() => {
+					groupAlive = false;
+					root.emit("exit", null, signal);
+					root.emit("close", null, signal);
+				});
+			},
+		});
+
+		root.readyPipe.emit("close");
+		await expect(tracked.ownershipReady).rejects.toThrow("POSIX sentinel ownership was not established");
+		await closed;
+		expect(signals).toEqual([{ pgid: 123_471, signal: "SIGKILL" }]);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(_trackedCount()).toBe(before);
+		tracked.killTree("SIGKILL");
+		expect(signals).toHaveLength(1);
 	});
 
 	it("reaps a POSIX survival child before readiness but preserves it after readiness", () => {
@@ -1137,6 +1281,476 @@ describe("spawnTracked timeout cleanup", () => {
 		clock.advance(50);
 		tracked.killTree("SIGKILL");
 		expect(signals).toHaveLength(2);
+	});
+
+	it("observes Darwin process state only after the single final group signal", async () => {
+		const root = fakeChild(123_460);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let snapshots = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async () => { snapshots++; return "999 S\n"; },
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(snapshots).toBe(0);
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+		expect(signals).toEqual([{ pgid: 123_460, signal: "SIGKILL" }]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshots).toBe(1);
+		tracked.killTree("SIGKILL");
+		expect(signals).toHaveLength(1);
+		root.emit("close", 0, null);
+	});
+
+	it("coalesces overlapping Darwin completion observations per child", async () => {
+		const root = fakeChild(123_464);
+		const signals: NodeJS.Signals[] = [];
+		let snapshotCalls = 0;
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: () => {
+				snapshotCalls++;
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				return new Promise<string>(resolve => {
+					resolveSnapshot = snapshot => {
+						activeSnapshots--;
+						resolve(snapshot);
+					};
+				});
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const first = tracked.waitForTreeExit(1_000);
+		const second = tracked.waitForTreeExit(1_000);
+		expect(snapshotCalls).toBe(1);
+		expect(activeSnapshots).toBe(1);
+		resolveSnapshot("123464 Z+\n1 S\n");
+
+		expect(await Promise.all([first, second])).toEqual([true, true]);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(signals).toEqual(["SIGKILL"]);
+		// Accepted completion is monotonic and never launches another snapshot.
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshotCalls).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it("does not let an older negative Darwin observation override concurrent completion", async () => {
+		const root = fakeChild(123_465);
+		let groupAlive = true;
+		let snapshotCalls = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => groupAlive,
+			posixProcessStateSnapshot: () => {
+				snapshotCalls++;
+				return new Promise<string>(resolve => { resolveSnapshot = resolve; });
+			},
+			signalProcessGroup: () => {},
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const olderWait = tracked.waitForTreeExit(1_000);
+		expect(snapshotCalls).toBe(1);
+		groupAlive = false;
+		// kill(0) emptiness is an independent authoritative completion path.
+		expect(await tracked.waitForTreeExit(1_000)).toBe(true);
+		resolveSnapshot("123465 S\n");
+		expect(await olderWait).toBe(true);
+		expect(snapshotCalls).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it("bounds each Darwin observation join to its caller deadline", async () => {
+		const root = fakeChild(123_466);
+		let snapshotCalls = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: () => {
+				snapshotCalls++;
+				return new Promise<string>(resolve => { resolveSnapshot = resolve; });
+			},
+			signalProcessGroup: () => {},
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const longerWait = tracked.waitForTreeExit(1_000);
+		expect(snapshotCalls).toBe(1);
+		// This zero-budget caller shares the active snapshot but does not inherit
+		// the first caller's larger deadline.
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(snapshotCalls).toBe(1);
+		resolveSnapshot("123466 Z\n");
+		expect(await longerWait).toBe(true);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshotCalls).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it("keeps a shared Darwin observer independent when the zero-deadline waiter starts first", async () => {
+		const root = fakeChild(123_468);
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		let resolveSnapshot!: (snapshot: string) => void;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: budgetMs => {
+				observerBudgets.push(budgetMs);
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				return new Promise<string>(resolve => {
+					resolveSnapshot = snapshot => {
+						activeSnapshots--;
+						resolve(snapshot);
+					};
+				});
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const zeroDeadlineWait = tracked.waitForTreeExit(0);
+		const longerWait = tracked.waitForTreeExit(200);
+		expect(observerBudgets).toEqual([250]);
+		expect(activeSnapshots).toBe(1);
+		// The zero-deadline waiter stops joining without aborting the child-owned
+		// snapshot that the synchronously started longer waiter already shares.
+		expect(await zeroDeadlineWait).toBe(false);
+		expect(activeSnapshots).toBe(1);
+		resolveSnapshot("123468 Z+\n1 S\n");
+
+		expect(await longerWait).toBe(true);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toEqual([250]);
+		root.emit("close", 0, null);
+	});
+
+	it("promptly re-observes a Darwin group transitioning from live to zombie-only", async () => {
+		const clock = createManualClock(0);
+		const root = fakeChild(123_471);
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		const events: string[] = [];
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			clock,
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => { events.push("alive"); return true; },
+			posixProcessStateSnapshot: async budgetMs => {
+				observerBudgets.push(budgetMs);
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				events.push(`snapshot:${observerBudgets.length}`);
+				activeSnapshots--;
+				return observerBudgets.length === 1 ? `${root.pid} S\n1 S\n` : `${root.pid} Z+\n1 S\n`;
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const completion = tracked.waitForTreeExit(1_000);
+		await flushMicrotasks();
+		expect(clock.pending()).toBe(1);
+		clock.advance(25);
+		await flushMicrotasks();
+		expect(await completion).toBe(true);
+		expect(observerBudgets).toEqual([250, 250]);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(events).toEqual(["alive", "snapshot:1", "alive", "snapshot:2"]);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(clock.pending()).toBe(0);
+		// Accepted completion is monotonic and cannot re-observe or re-signal a
+		// numeric PGID that may subsequently be reused.
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toEqual([250, 250]);
+		expect(signals).toEqual(["SIGKILL"]);
+		root.emit("close", 0, null);
+	});
+
+	it("admits a final Darwin observer after a delayed lifecycle turn leaves 260 ms", async () => {
+		const clock = createManualClock(0);
+		const root = fakeChild(123_472);
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			clock,
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async budgetMs => {
+				observerBudgets.push(budgetMs);
+				return observerBudgets.length < 3 ? `${root.pid} S\n1 S\n` : `${root.pid} Z\n1 S\n`;
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const completion = tracked.waitForTreeExit(450);
+		await flushMicrotasks();
+		// The 25 ms poll becomes due, but its continuation does not run until this
+		// delayed virtual turn has advanced to 190 ms, leaving exactly 260 ms.
+		expect(clock.pending()).toBe(1);
+		clock.advance(190);
+		await flushMicrotasks();
+
+		expect(await completion).toBe(true);
+		expect(observerBudgets).toEqual([250, 250, 250]);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(clock.pending()).toBe(0);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toHaveLength(3);
+		root.emit("close", 0, null);
+	});
+
+	it.each([
+		[250, true, 3],
+		[249, false, 2],
+	] as const)("admits a final Darwin observer with %i ms remaining: %s", async (remainingAtRetry, expected, expectedSnapshots) => {
+		const clock = createManualClock(0);
+		const root = fakeChild(expected ? 123_473 : 123_474);
+		const observerBudgets: number[] = [];
+		const signals: NodeJS.Signals[] = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			clock,
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async budgetMs => {
+				observerBudgets.push(budgetMs);
+				return observerBudgets.length < 3 ? `${root.pid} S\n1 S\n` : `${root.pid} Z\n1 S\n`;
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const timeoutMs = 450;
+		let settled: boolean | undefined;
+		const completion = tracked.waitForTreeExit(timeoutMs);
+		void completion.then(value => { settled = value; });
+		await flushMicrotasks();
+		clock.advance(timeoutMs - remainingAtRetry);
+		await flushMicrotasks();
+
+		while (settled == null && clock.now() < timeoutMs) {
+			clock.advance(Math.min(25, timeoutMs - clock.now()));
+			await flushMicrotasks();
+		}
+		expect(await completion).toBe(expected);
+		expect(observerBudgets).toHaveLength(expectedSnapshots);
+		expect(observerBudgets.every(budget => budget === 250)).toBe(true);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(clock.pending()).toBe(0);
+		root.emit("close", 0, null);
+	});
+
+	it.each(["unavailable", "rejected"] as const)("promptly retries a shared Darwin observation that settles %s", async firstOutcome => {
+		const root = fakeChild(firstOutcome === "unavailable" ? 123_469 : 123_470);
+		const targetPgid = root.pid!;
+		const signals: NodeJS.Signals[] = [];
+		const observerBudgets: number[] = [];
+		let activeSnapshots = 0;
+		let maxActiveSnapshots = 0;
+		let settleFirst!: () => void;
+		let resolveRetry!: (snapshot: string) => void;
+		let announceRetry!: () => void;
+		const retryStarted = new Promise<void>(resolve => { announceRetry = resolve; });
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: budgetMs => {
+				observerBudgets.push(budgetMs);
+				activeSnapshots++;
+				maxActiveSnapshots = Math.max(maxActiveSnapshots, activeSnapshots);
+				return new Promise<string>((resolve, reject) => {
+					if (observerBudgets.length === 1) {
+						settleFirst = () => {
+							activeSnapshots--;
+							if (firstOutcome === "rejected") reject(new Error("ps aborted"));
+							else resolve("\n");
+						};
+						return;
+					}
+					resolveRetry = snapshot => {
+						activeSnapshots--;
+						resolve(snapshot);
+					};
+					announceRetry();
+				});
+			},
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		const zeroDeadlineWait = tracked.waitForTreeExit(0);
+		const longerWait = tracked.waitForTreeExit(200);
+		expect(observerBudgets).toEqual([250]);
+		expect(await zeroDeadlineWait).toBe(false);
+		settleFirst();
+		await retryStarted;
+
+		// The longer waiter retries as soon as the exact shared slot clears. It
+		// does not wait for a 250 ms deadline edge, overlap the old observer, or
+		// claim completion before the retry supplies authoritative evidence.
+		expect(observerBudgets).toEqual([250, 250]);
+		expect(maxActiveSnapshots).toBe(1);
+		expect(activeSnapshots).toBe(1);
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(observerBudgets).toEqual([250, 250]);
+		resolveRetry(`${targetPgid} Z\n`);
+
+		expect(await longerWait).toBe(true);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(observerBudgets).toEqual([250, 250]);
+		root.emit("close", 0, null);
+	});
+
+	it("clears a settled unavailable Darwin observation so a later waiter can retry", async () => {
+		const root = fakeChild(123_467);
+		let snapshotCalls = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async () => {
+				snapshotCalls++;
+				if (snapshotCalls === 1) throw new Error("ps aborted");
+				return "123467 Z\n";
+			},
+			signalProcessGroup: () => {},
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshotCalls).toBe(2);
+		root.emit("close", 0, null);
+	});
+
+	it.each([
+		["no exact target rows", "999 S\n1000 R+\n"],
+		["only exact zombie rows with modifiers", "123461 Z\n999 S\n123461 Z+\n"],
+	] as const)("accepts a finalized Darwin group with %s", async (_caseName, snapshot) => {
+		const root = fakeChild(123_461);
+		const signals: NodeJS.Signals[] = [];
+		let snapshots = 0;
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: async () => { snapshots++; return snapshot; },
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(signals).toEqual(["SIGKILL"]);
+		expect(snapshots).toBe(1);
+		// Completion is monotonic even if the numeric PGID is subsequently reused.
+		expect(await tracked.waitForTreeExit(0)).toBe(true);
+		expect(snapshots).toBe(1);
+		root.emit("close", 0, null);
+	});
+
+	it.each([
+		["a mixed exact zombie and live group", async (): Promise<string> => "123462 Z\n123462 S\n999 Z\n"],
+		["a malformed row", async (): Promise<string> => "123462 Z\nmalformed\n"],
+		["an empty snapshot", async (): Promise<string> => "\n  \n"],
+		["an unavailable snapshot", async (): Promise<string> => { throw new Error("ps unavailable"); }],
+	] as const)("keeps finalized Darwin cleanup incomplete for %s", async (_caseName, snapshot) => {
+		const root = fakeChild(123_462);
+		const signals: NodeJS.Signals[] = [];
+		const tracked = spawnTracked("node", ["worker"], {
+			platform: "darwin",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: snapshot,
+			signalProcessGroup: (_pgid, signal) => { signals.push(signal); },
+		});
+		root.readyPipe.emit("data", Buffer.from("."));
+		root.emit("exit", 0, null);
+
+		expect(await tracked.waitForTreeExit(0)).toBe(false);
+		expect(signals).toEqual(["SIGKILL"]);
+		root.emit("close", 0, null);
+	});
+
+	it("does not use Darwin process-state observation on Linux or Windows", async () => {
+		let snapshots = 0;
+		const snapshot = async () => { snapshots++; return "123463 Z\n"; };
+		const linuxRoot = fakeChild(123_463);
+		const linux = spawnTracked("node", ["worker"], {
+			platform: "linux",
+			spawnImpl: (() => linuxRoot) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			isProcessGroupAlive: () => true,
+			posixProcessStateSnapshot: snapshot,
+			signalProcessGroup: () => {},
+		});
+		linuxRoot.readyPipe.emit("data", Buffer.from("."));
+		linuxRoot.emit("exit", 0, null);
+		expect(await linux.waitForTreeExit(0)).toBe(false);
+		linuxRoot.emit("close", 0, null);
+
+		const windowsRoot = fakeChild(2_147_483_640);
+		const windows = spawnTracked("node", ["worker"], {
+			platform: "win32",
+			spawnImpl: (() => windowsRoot) as unknown as NativeSpawn,
+			posixProcessStateSnapshot: snapshot,
+		});
+		windowsRoot.emit("exit", 0, null);
+		expect(await windows.waitForTreeExit(0)).toBe(false);
+		windowsRoot.emit("close", 0, null);
+		expect(snapshots).toBe(0);
 	});
 
 	it("retains only a container transport sentinel through root exit until the explicit handoff reap", async () => {

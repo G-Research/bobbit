@@ -337,7 +337,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			)).toHaveLength(1);
 			steerStart.release();
 			await expectOneCarrier(page, steerId, "transcript");
-			abort.beforeAgentEnd.release();
+			abort.release();
 			tool.release();
 			await queuedEcho.entered;
 			queuedEcho.release();
@@ -352,6 +352,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 	test("Stop near compaction completion leaves every accepted occurrence in one deterministic visible channel", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);
 		try {
+			const terminalIdle = scenario.runtime.holdNextPromptTerminalIdle();
 			const compaction = scenario.runtime.holdNextCompaction({ reason: "threshold" });
 			await submit(page, "RELIABLE_COMPACTION:threshold RAT_STOP_THRESHOLD");
 			await compaction.compaction.entered;
@@ -364,17 +365,21 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			await expectOneCarrier(page, id, "outbox");
 
 			compaction.compaction.release();
+			await terminalIdle.entered;
+			const terminalRevision = await scenario.runtime.joinCompactionTerminalProjection();
+			terminalIdle.release();
 			await steerStart.entered;
-			const firstStreamingVersion = scenario.runtime.surfaceActiveRun();
-			await waitForRemoteStatus(page, firstStreamingVersion);
-			const activeRunVersion = scenario.runtime.surfaceActiveRun();
-			await waitForRemoteStatus(page, activeRunVersion, "streaming");
+			await waitForRemoteStatus(page, terminalRevision);
+			const activeRunRevision = scenario.runtime.surfaceActiveRun();
+			await waitForRemoteStatus(page, activeRunRevision);
 			const abort = scenario.runtime.holdNextAbort();
 			const stop = page.getByRole("button", { name: "Stop current turn" });
-			await expect(stop).toBeVisible({ timeout: 15_000 });
-			await stop.click();
-			await abort.received;
-			await abort.beforeAgentEnd.entered;
+			await test.step("Stop control reaches its one owned abort occurrence", async () => {
+				await expect(stop).toBeVisible({ timeout: 15_000 });
+				await stop.click();
+				await abort.received;
+				await abort.beforeAgentEnd.entered;
+			});
 			await expectOneCarrier(page, id, "outbox");
 			await expectIntentState(page, id, "uncertain", /Awaiting delivery confirmation/);
 			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
@@ -390,7 +395,20 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			)).toHaveLength(1);
 			steerStart.release();
 			await expectOneCarrier(page, id, "transcript");
-			abort.beforeAgentEnd.release();
+
+			await test.step("Stop terminal lifecycle and replacement coordinator settle", async () => {
+				// Capture before releasing the held abort so a fast hosted runner cannot
+				// remove the already-installed coordinator before the fixture owns its tail.
+				const terminalProjection = scenario.runtime.joinAbortTerminalProjection(abort);
+				abort.beforeAgentEnd.release();
+				await abort.afterTerminalIdle.entered;
+				abort.afterTerminalIdle.release();
+				const terminalRevision = await terminalProjection;
+				await waitForRemoteStatus(page, terminalRevision);
+			});
+			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
+				abort.afterTerminalIdle.boundary,
+			]));
 			await expect(transcriptIntent(page, id)).toHaveCount(1);
 		} finally {
 			await scenario.cleanup();

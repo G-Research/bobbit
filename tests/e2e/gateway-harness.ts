@@ -22,6 +22,8 @@
  * contamination.
  */
 import { test as base } from "@playwright/test";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -137,6 +139,16 @@ async function closeServer(server: Server | undefined): Promise<void> {
 	});
 }
 
+function createAsyncSpawnErrorChild(code: "ENOENT"): ChildProcess {
+	const child = new EventEmitter() as ChildProcess;
+	Object.assign(child, { pid: undefined, unref: () => undefined });
+	queueMicrotask(() => {
+		const error = Object.assign(new Error(`background process spawn failed: ${code}`), { code });
+		child.emit("error", error);
+	});
+	return child;
+}
+
 // Inside Docker containers, /workspace is a bind-mount with ~10-20x slower I/O
 // (9P/gRPC layer on Docker Desktop). Put write-heavy temp dirs on the container's
 // local overlay FS instead. The canonical run root also keeps the CWD outside
@@ -164,6 +176,11 @@ export interface GatewayInfo {
 	serverRoot: string;
 	sessionManager?: any;
 	teamManager?: any;
+	/**
+	 * Arm one command-matched background-process spawn failure. The returned
+	 * cleanup disarms the occurrence if it has not yet been consumed.
+	 */
+	armBgProcessSpawnError(command: string): () => void;
 	/** Server-side log ring buffer (last 200 lines), populated by the harness's
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
 	 * tail of this buffer into the test artifact directory. */
@@ -495,13 +512,15 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			loadOrCreateToken,
 			createGateway,
 			registerRpcBridgeFactory,
+			defaultBgProcessSpawn,
 		} = await withDistServerImportLock(async () => {
 			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
 			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
+			const { defaultBgProcessSpawn } = await import("../../dist/server/agent/bg-process-manager.js");
+			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory, defaultBgProcessSpawn };
 		});
 		// Register the in-process mock bridge factory before any sessions are
 		// created. See in-process-harness.ts for rationale — same story here.
@@ -543,6 +562,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Reusable gateway-construction args. Captured once on first boot,
 		// reused verbatim on restart() so the second instance is anchored
 		// at the same on-disk state and behaves identically.
+		let bgProcessSpawnErrorArm: { command: string; token: symbol } | undefined;
 		const gatewayConfig = {
 			host: "127.0.0.1",
 			authToken: token,
@@ -551,6 +571,14 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			agentCliPath: MOCK_AGENT,
 			staticDir: STATIC_DIR,
 			basePath,
+			bgProcessSpawnFn: (command: string, cwd: string, containerId: string | undefined, paths: any) => {
+				const armed = bgProcessSpawnErrorArm;
+				if (!armed || armed.command !== command) {
+					return defaultBgProcessSpawn(command, cwd, containerId, paths);
+				}
+				bgProcessSpawnErrorArm = undefined;
+				return createAsyncSpawnErrorChild("ENOENT");
+			},
 		};
 
 		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's
@@ -651,6 +679,14 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			serverRoot,
 			sessionManager: gw.sessionManager,
 			teamManager: gw.teamManager,
+			armBgProcessSpawnError(command: string) {
+				if (bgProcessSpawnErrorArm) throw new Error("a background-process spawn failure is already armed");
+				const armed = { command, token: Symbol(command) };
+				bgProcessSpawnErrorArm = armed;
+				return () => {
+					if (bgProcessSpawnErrorArm?.token === armed.token) bgProcessSpawnErrorArm = undefined;
+				};
+			},
 			logs: _serverLogs,
 			async crash() {
 				await gw.shutdown();
@@ -699,6 +735,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		};
 
 		await use(info);
+		bgProcessSpawnErrorArm = undefined;
 
 		// Teardown — use existing shutdown() for proper cleanup. Close the optional
 		// static-only UI origin first so no late browser request races directory

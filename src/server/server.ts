@@ -183,7 +183,7 @@ import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
-import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
+import { BgProcessCreateError, BgProcessManager, type SpawnFn as BgProcessSpawnFn } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import {
 	canonicalContainerAgentSessionPath,
@@ -2513,6 +2513,8 @@ export interface GatewayConfig {
 	skipRemotePush?: boolean;
 	/** Runtime boundary flag for legacy BOBBIT_TEST_NO_REMOTE/BOBBIT_TEST_NO_EXTERNAL behavior. */
 	skipNonLocalRemoteGit?: boolean;
+	/** Narrow constructor seam for an isolated gateway's background-process spawner. */
+	bgProcessSpawnFn?: BgProcessSpawnFn;
 	/**
 	 * Override for the builtin `defaults/` tree. Defaults to undefined, in which
 	 * case BuiltinConfigProvider uses its dist-relative default. Used by the v2
@@ -4005,7 +4007,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const session = sessionManager.getSession(sessionId);
 			return session?.clients;
 		},
-		undefined,
+		config.bgProcessSpawnFn,
 		(sessionId: string) => {
 			// Resolve the per-project bg-process store for this session.
 			try {

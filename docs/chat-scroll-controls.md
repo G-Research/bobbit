@@ -1,117 +1,116 @@
-# Chat scroll controls
+# Chat transcript navigation
 
-The chat transcript has floating buttons at the top and bottom of the viewport that help users navigate long, streaming conversations without having to fish through the scrollback by hand. The top button walks backwards through earlier user prompts; the bottom button returns to the tail (or, while walking history, also walks forwards one prompt at a time).
+The chat surface provides floating controls for two related jobs: staying oriented in a long, streaming transcript and returning to live output. The top-centre segmented control navigates prompts, unresolved questions, and searchable transcript history. The bottom-centre control moves toward the transcript tail.
 
-| Button | Position | Appears when | Click action |
-|---|---|---|---|
-| **Jump to bottom** (`↓`) | bottom-centre | viewport has drifted more than half a screen above the bottom, **or** the user is parked on a historical prompt | spring-animates to the tail; clears any history-nav state and re-pins follow-mode |
-| **Jump to last prompt** (`↑`) | top-centre | at least one user prompt exists, the most recent one has scrolled fully above the viewport, **and** the user is not already walking history | spring-animates the last user message to ~16 px below the top of the viewport, and begins history-nav |
-| **Jump to previous prompt** (`↑`) | top-centre — same slot as above | the user is walking history and there is an older prompt above the parked one | spring-animates the next-older user message to the same top position; advances one step deeper into history |
-| **Next prompt** \| **Bottom** (split pill) | bottom-centre — replaces single bottom button | history-nav is at least two steps deep (the parked prompt is not the most recent one) | left half walks forward one prompt; right half jumps to the tail and exits history-nav |
+The controls are projections of the active transcript and current viewport. They do not create a second history store or persist a navigation cursor.
 
-## Why these controls
+## Controls
 
-The transcript is a streaming conversation that can grow indefinitely while the user reads earlier content. The controls cover the three "where am I?" recoveries the user actually needs:
+| Control | Appears when | Action |
+|---|---|---|
+| **Previous prompt** | the segmented control is visible; enabled only when a user prompt is fully above the viewport | springs to the nearest user prompt above the viewport |
+| **Unanswered question** | at least one unresolved `ask_user_choices` call exists | springs to the nearest unresolved question fully above the viewport, or the newest unresolved question when none is above |
+| **Jump to…** | the segmented control is visible | opens the searchable transcript-history dialog beneath the control |
+| **Next prompt** | a user prompt is fully below the viewport | springs to the nearest user prompt below the viewport |
+| **Bottom** / **Jump to bottom** | a user prompt is below the viewport, or the viewport is more than half a screen from the tail | springs to the tail and re-engages follow-tail |
 
-- **"Take me back to live."** Jump-to-bottom returns the viewport to the tail so streaming tool output is visible again, and re-engages the tail-chat lock so the page tracks new content.
-- **"Take me back to what I just asked."** A long agent response — model thinking, multiple tool calls with expanded output, generated code — can easily push the prompt that started the turn many screens above the viewport. Scroll-fishing for the original question is fiddly, especially on mobile. Jump-to-last-prompt is a one-tap fix that re-anchors the reader at the start of the *current* turn.
-- **"Show me the previous turn… and the one before that."** Once the user has jumped back to the most recent prompt, repeated clicks should walk further back through the conversation one turn at a time — without forcing them to scroll-fish past long agent responses they've already read. This is what makes the up button a *navigator* rather than a single shortcut. The split bottom button is its mirror: once you've stepped back, you need a symmetric way to step forward again, plus a fast way back to live.
+The segmented control is visible when a user prompt is above the viewport, an unanswered question exists, or its history dialog is open. This preserves the original prompt-navigation visibility while ensuring a question remains discoverable if later streaming output pushes it away. When an unanswered question is the only reason the control is visible, **Previous prompt** remains present but disabled rather than becoming a dead action.
 
-## History-nav state
+On narrow layouts, the top control retains its icons, chevron, and unresolved count while moving visible text to screen-reader-only labels. Its top offset includes the fixed mobile header. The history dialog uses viewport gutters and is height-limited to the space above the composer, which is remeasured when the viewport, message area, composer, or navigation anchor changes.
 
-Progressive history walking is driven by a single piece of derived state on the chat surface: the index of the user prompt the up button currently "points at" — the prompt the user is parked on. `null` means "not walking history"; an integer `N` means "the Nth user-message is at the top of the viewport, and the next ↑ click goes to N-1".
+## Geometry and scrolling
 
-This index is intentionally derived, not persisted — it doesn't survive a session navigate, a reload, or any return to the tail. Three reasons:
+Prompt navigation is stateless. On every scroll, resize, and committed transcript update, `AgentInterface` classifies rendered `<user-message>` elements against the scroll container:
 
-- A new prompt invalidates any "depth from the end" interpretation; persisting it would either mean re-anchoring against the new last prompt (surprising) or pointing at a now-stale absolute index (also surprising).
-- The contract "return to the tail and you're back in live-follow mode" is simpler to reason about if there is no hidden walk-cursor that survives.
-- Cross-session walking has no obvious meaning — different transcripts, different prompts.
+- `rect.bottom < viewport.top` means a prompt is above the viewport;
+- `rect.top > viewport.bottom` means a prompt is below the viewport;
+- otherwise the prompt intersects the viewport.
 
-## Visibility rules
+**Previous prompt** selects the last prompt above the viewport. **Next prompt** selects the first prompt below it. There is no saved prompt index, depth, or last/previous label transition; live geometry is authoritative so content growth and reflow cannot stale a cursor.
 
-All three controls are pure functions of scroll geometry plus the history-nav index, recomputed on every scroll event, resize, and transcript mutation. They never linger after the condition that justifies them goes away.
+All explicit transcript jumps use the shared fixed-target spring in `AgentInterface`; they do not call native `scrollIntoView()`. The target lands below the top navigation offset, including the fixed mobile header when present. Jump-to-bottom uses the same spring but re-reads the tail on each animation frame so new output can move the goalpost. A new explicit jump cancels the current spring.
 
-**Jump to bottom** appears when `distance-from-bottom > 0.5 × clientHeight` **and** either `!_isAtBottom` (the user has escaped the tail) or history-nav is active. The half-viewport threshold is deliberately wider than the 70 px near-bottom band that auto-relocks the tail, so the button only shows when the user has clearly committed to scrolling away. See [internals.md — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant) for the full state machine and the rules around `_isAtBottom` / `_escapedFromLock`.
+A history or unanswered jump releases follow-tail before resolving or measuring its target by setting the existing scroll-intent flags to escaped. This prevents deferred materialization or subsequent streaming growth from pulling the reader back to live output. **Bottom** clears that escape and re-pins follow-tail. See [Internals — Chat scroll lock invariant](internals.md#chat-scroll-lock-invariant) for the underlying intent and resize lifecycle.
 
-The history-nav clause is a deliberate spec change from PR #639: walking back through prompts now reveals the bottom button so the user can return to live with one click, even though the click that started history-nav was programmatic and did *not* flip `_escapedFromLock`. This matches the user's mental model — "I deliberately scrolled away from live, give me a way back".
+History selections receive a brief `--ring` outline after landing. Reduced-motion mode skips the spring and highlight animation while preserving the final position and static focus outline.
 
-**Up button (last / previous prompt)** appears when there is at least one `<user-message>` in the transcript, **and** at least one of:
+## Transcript-history projection
 
-- We are *not* walking history yet, **and** the bottom edge of the most-recent `<user-message>` is above the top edge of the scroll viewport (a 1 px epsilon avoids sub-pixel flicker). Label reads **"Jump to last prompt"**.
-- We *are* walking history **and** the parked prompt is not the oldest one (`index > 0`). Label reads **"Jump to previous prompt"**.
+`deriveTranscriptNavigation` in the transcript-history UI module builds a client-only projection from `session.state.messages`, the authoritative ordered transcript. It makes one pass in array order and never sorts by timestamp. This matters because reducer order, not clocks, defines what the user saw.
 
-It is hidden when:
+The projection includes:
 
-- No user messages exist yet (a freshly opened session).
-- The user is not walking history and the most-recent prompt is partially or fully in view, **or** has been scrolled past so that it is below the viewport (e.g. browsing earlier history) — in that case the prompt is "in front of" the user already; jumping back to it would be disorienting.
-- The user is walking history and is parked on the oldest prompt (no older prompt to go to).
+- human prompts as **User** entries;
+- primary-assistant output and trusted agent-authored prompts as **Agents** entries;
+- trusted system-authored prompts plus relevant notifications, mutation summaries, errors, compaction, and context-clear events as **System** entries;
+- one **Questions** entry for each valid `ask_user_choices` tool call, even after it is answered or fails.
 
-**Split bottom pill ("Next prompt | Bottom")** replaces the single jump-to-bottom button when history-nav is at depth ≥ 2 — i.e. the parked prompt is not the most recent one. The visibility of the split pill as a whole follows the same `geoFar` test as the single bottom button. At depth 1 (parked on the most-recent prompt) the bottom button reverts to the unsplit jump-to-bottom — there is nothing to walk forward to, so the split would be a dead half. Sending a new prompt also collapses the split back, because the new last prompt becomes the natural "forward" target and the user immediately exits history-nav (see reset rules below).
+Authorship comes from validated `MessageAuthor.kind`, not the raw Pi role. This keeps agent-authored user-shaped handoffs out of the **User** filter and preserves system attribution. Ordinary tool calls, tool results, artifacts, and ask response envelopes are relationship data rather than navigable entries and are omitted. Mixed user rows still contribute visible text after their tool-result blocks are reconciled.
 
-Sending a new prompt synchronously clears history-nav state and re-runs the visibility computation: the new `<user-message>` is now the last one and lives at the bottom of the transcript, so the up button hides and the bottom button collapses to its single form (and itself hides once `_isAtBottom` re-engages).
+Excerpts collapse whitespace and are bounded for a compact list. Assistant text separated by a question or relevant system tool remains in content order as separate entries. The projection covers only the loaded active transcript. It does not merge unopened pre-compaction or cleared sidecars because those slices have no ordered boundary in `state.messages`.
 
-## Reset rules for history-nav
+### Stable targets and deferred rows
 
-The history-nav index returns to `null` (exiting history-nav and reverting all controls to their default labels and layout) whenever any of the following happens:
+History entries and rendered rows share the same target identity helpers:
 
-- **A new user prompt is sent.** The transcript's user-message count grows, the next visibility recompute notices, and clears the index.
-- **The user reaches the tail by any means.** That includes a jump-to-bottom click (single or the split's right half), a programmatic scroll-to-bottom, or the near-bottom auto-relock band kicking in after the user wheels down into the bottom 70 px.
-- **Session navigate / respawn / transcript reset.** Mirrors the existing cleanup of `_showJumpToBottom` and `_showJumpToLastPrompt` so a freshly loaded transcript never inherits a stale walk-cursor.
-- **The user wheels / touches / arrow-keys away from the parked prompt** such that it is either scrolled fully above the viewport, or more than 200 px below the top of the scroll container. The 200 px tolerance prevents the spring-landing itself from looking like "the user scrolled away" while still releasing nav promptly once a real gesture moves the viewport.
+1. prefer a durable message id;
+2. otherwise combine reducer origin, order, insertion tick, and authoritative transcript ordinal;
+3. prefix the result as a message target.
 
-The gesture-driven reset is gated on the deferred scroll handler's gesture-freshness classification and on the programmatic-scroll echo latch being clear, so the spring animation that just landed the user on the parked prompt cannot trigger its own reset.
+`AgentInterface` supplies authoritative ordinals because relationship-only rows are filtered before `MessageList` renders. Rendered message roots and any owning `<deferred-block>` receive the same `data-transcript-target` value.
 
-## Click behaviour
+Selecting a history row resolves only the deferred block that owns that target. Direct unanswered navigation resolves the unresolved candidate rows before comparing their live geometry, but it does not resolve unrelated history. After resolution, the code re-queries the real row and measures its current rectangle; placeholder estimates are never used as the final spring target.
 
-**Jump to bottom** (single or split-right) runs the spring rAF loop (`damping 0.7, stiffness 0.05, mass 1.25`) until the viewport lands within sub-pixel tolerance of `scrollHeight - clientHeight`. The target is re-read every tick so content that arrives during the animation moves the goalpost. The click clears `_escapedFromLock` and re-pins `_isAtBottom = true`, and clears history-nav, so subsequent content keeps the viewport at the tail.
+## Search and filters
 
-**Up button (Jump to last / previous prompt)** computes a target `scrollTop` such that the top of the target `<user-message>` lands ~16 px below the top of the scroll container (matching the button's own top offset, so the button is "replaced" by the prompt it points at). It then drives the same spring animation as jump-to-bottom for visual parity. The target prompt depends on history-nav state:
+**Jump to…** opens a non-modal dialog below the segmented control. Entries remain oldest-to-newest, and the list opens at the newest matching entry. The available filters are **All**, **User**, **System**, **Agents**, and **Questions**.
 
-- If not walking history yet, the target is the most-recent user message; history-nav begins with the index set to that prompt.
-- If already walking history, the target is one prompt older (`index - 1`); the index is decremented before the spring starts.
+Search is case-insensitive and whitespace-normalized across author label, type label, and excerpt. Search and the selected filter compose; no matches produces **No matching prompts**. Changing either search or filter scrolls the result list to its newest match.
 
-Unlike jump-to-bottom, the click is a programmatic scroll — it does **not** mutate `_isAtBottom` or `_escapedFromLock`, so the user remains "escaped" from the tail; they asked to read their own prompt, not to follow new output. The programmatic write is routed through the scroll-lock echo latch so the resulting browser scroll event isn't misclassified as user intent.
+While the dialog is open, committed transcript additions update the projection. The list follows those additions only if the reader was already at the filtered tail; otherwise the current reading position is preserved. Cumulative `message_update` token frames update only the streaming container and are not indexed independently. A completed message, tool result, or answer envelope arrives through the committed-message path and refreshes navigation immediately, even if a later assistant message is still streaming.
 
-If a second click lands while a previous spring is still animating (rapid history-walking), the in-flight spring is cancelled before the new one starts, so only one rAF loop is ever writing `scrollTop` at a time.
+No global command or keyboard shortcut is registered for transcript history. Standard control behavior remains available: Tab navigation, Enter/Space activation, Escape dismissal, and capture-phase outside-pointer dismissal.
 
-**Next prompt (split-left)** is the mirror of the up button: target is `index + 1`, spring animation, history-nav index incremented. If the increment would land on the most-recent prompt, the split collapses back to the single jump-to-bottom on the next visibility recompute (depth is now 1).
+## Unanswered-question lifecycle
 
-## Background-growth gating while walking history
+Question state is derived from the ask tool call and later transcript evidence. The shared ask classifier is used by both the widget renderer and transcript navigation so their definitions cannot drift.
 
-While the user is parked on a historical prompt, the transcript almost always continues to grow in the background — the agent is still streaming, tool results are still expanding, images are still decoding and reflowing. Without intervention, every one of those mutations would re-fire the tail-chat re-pin path and yank the viewport back to the bottom, defeating the point of history-nav.
+An ask is unresolved when it has valid parameters and:
 
-All programmatic re-pin sites therefore consult history-nav state before scrolling:
+- no valid later matching response envelope or legacy result answers exist; and
+- no terminal failure result exists.
 
-- **ResizeObserver positive-delta path** (content grew) skips the auto-pin while history-nav is active.
-- **ResizeObserver negative-delta path** (content shrank) skips the near-bottom auto-relock while history-nav is active.
-- **Image / iframe `load` handler** skips its synchronous bottom-pin while history-nav is active.
-- **No-gesture re-pin branch in the deferred scroll handler** (a non-user scroll while we're sticky and drifted) skips the rAF re-pin while history-nav is active.
+This includes a call with no result yet and a successful `{ "status": "posted" }` result waiting for the user's response. A valid later `[ask_user_choices_response ...]` envelope or legacy blocking-tool answers mark it answered. An explicit error result, or a completed non-posted result without valid legacy answers, marks it failed. Answered and failed questions remain searchable under **Questions**, but they leave the unresolved count and remove the direct **Unanswered question** segment when the count reaches zero.
 
-Returning to the tail by any means clears history-nav, so as soon as the user comes back to live the regular tail-chat contract resumes unchanged.
+Only later, matching evidence applies. A malformed envelope, an envelope for another tool-use id, or an envelope that precedes the call does not resolve the question. The response envelope remains in the authoritative transcript for model conversion even though the visible message list and history projection hide the relationship-only row.
 
-## Accessibility
+When several asks are unresolved, direct navigation chooses the candidate with the greatest bottom edge that is still fully above the viewport. If none is fully above, it chooses the newest unresolved entry by transcript ordinal. This makes repeated use predictable while prioritizing a question the user has already scrolled past.
 
-All controls share the same affordance contract:
+## Dialog and focus lifecycle
 
-- Visible label text alongside the icon (`Jump to bottom`, `Jump to last prompt` / `Jump to previous prompt`, `Next prompt`, `Bottom`) — no icon-only ambiguity.
-- `aria-label` matches the visible label and tracks the label transition on the up button.
-- `data-testid`s used by the browser E2E suite: `jump-to-bottom` (single or split-right half), `jump-to-last-prompt` (up button — its current label is also surfaced as `data-label="last"|"previous"`), `jump-to-next-prompt` (split-left half), `jump-to-bottom-split` (the split pill container).
-- **Keyboard-focusable only when visible.** The `tabindex` flips between `0` (visible) and `-1` (hidden) so the buttons are skipped by tab order while their fade-out is in flight or when they don't apply. Pointer events are also gated so they cannot be clicked while invisible. In the split layout each half carries its own tabindex / pointer-events / opacity so the two are independent focus targets.
-- Fade-in / fade-out is a 150 ms opacity transition; pointer-events and tabindex flip atomically so there is no "ghost clickable" window after they fade out.
+The history component owns only ephemeral query, filter, and dialog UI state. `AgentInterface` owns the open bit, authoritative entries, available height, and target-selection callback; the component does not subscribe to the session.
 
-## Layering
+On open, the dialog resets to **All**, clears the query, focuses its labelled search field, and scrolls to the newest match. Escape, an outside pointer, selecting a row, session change, or disconnect closes it. Focus returns to the **Jump to…** trigger after dismissal or selection. The trigger exposes `aria-haspopup="dialog"`, `aria-expanded`, and `aria-controls`; the segmented shell is a labelled group, filters expose `aria-pressed`, and completed jumps are announced through a polite live region.
 
-All controls sit at `z-10` inside the messages region. The bottom button (single or split) lifts above the pill strip when one is rendered (`_pillStripHeight + 8 px` breathing gap) so wrapped or stacked pills never obscure it; the split pill uses the same offset math so the transition between single and split forms doesn't shift the bottom edge. The top button uses a fixed 16 px offset — nothing renders above the transcript top that could conflict.
+Hidden navigation shells are inert, excluded from the accessibility tree, and removed from the tab order during their fade. The unresolved badge is decorative because the button's accessible label includes the count.
 
-## Where to look in code
+## Implementation ownership
 
-All controls live in [`src/ui/components/AgentInterface.ts`](../src/ui/components/AgentInterface.ts). Search for `_renderJumpToBottom` (which conditionally emits either the single jump-to-bottom or the split pill) and `_renderJumpToLastPrompt` for the render functions; `_refreshJumpButton` / `_refreshJumpToLastPromptButton` for the visibility / label / split-state recomputers; and `_handleJumpToBottomClick`, `_handleJumpToLastPromptClick`, `_handleJumpToNextPromptClick` for the click handlers. The shared scroll target helper is `_scrollUserMessageIntoView(index)`. Visibility is refreshed alongside the scroll-lock recompute, so any future scroll event or transcript mutation that already updates jump-to-bottom will automatically update the up button and split state.
+- The transcript-history UI module owns pure entry derivation, filtering, stable target identity, and unanswered target selection.
+- The shared ask-state module owns pending, posted, answered, legacy-answer, and failure classification.
+- `TranscriptHistoryPopover` owns search/filter rendering and accessible open/dismiss/focus behavior.
+- `MessageList` stamps target identities and performs targeted deferred resolution.
+- `AgentInterface` owns viewport geometry, segmented-control visibility, history open state, follow-tail release, spring scrolling, highlighting, and live announcements.
+- The message reducer remains the sole owner of authoritative transcript order. Transcript navigation must not introduce a persisted or independently subscribed history cache.
 
-State lifecycle — `_showJumpToBottom`, `_showJumpToLastPrompt`, `_showSplitBottom`, `_jumpToPromptLabel`, `_viewedPromptIdx`, `_lastSeenUserCount` — is cleared together on session navigate / respawn so a freshly loaded transcript never inherits stale walk-cursor state or a stale button from the previous session.
+## Regression coverage
 
-## Tests
+All feature tests are registered in `tests2/tests-map.json`.
 
-- [`tests/e2e/ui/jump-to-bottom.spec.ts`](../tests/e2e/ui/jump-to-bottom.spec.ts) — visibility threshold and click for the bottom button.
-- [`tests/e2e/ui/jump-to-last-prompt.spec.ts`](../tests/e2e/ui/jump-to-last-prompt.spec.ts) — top-button base states: hidden initially, hidden when the last prompt is in view, shown after the prompt scrolls above the viewport, click scrolls back, sending a new prompt resets the button. Per the spec change, the click now also reveals jump-to-bottom and leaves the up button visible with `data-label="previous"` when older prompts exist.
-- [`tests/e2e/ui/jump-to-prompt-navigation.spec.ts`](../tests/e2e/ui/jump-to-prompt-navigation.spec.ts) — the prompt-by-prompt walking suite: backward stepping through multiple prompts, label transition `last → previous`, up button hiding on the oldest prompt, jump-to-bottom revealing after the first nav click, split pill appearing at depth ≥ 2, the `Next prompt` half walking forward, the `Bottom` half jumping to the tail and clearing nav, reset on new prompt sent, reset on manual scroll past the parked prompt.
-- The broader `tests/e2e/ui/tail-chat-*.spec.ts` suite exercises the scroll-lock invariants all three controls share.
+- [`tests2/core/transcript-history.test.ts`](../tests2/core/transcript-history.test.ts) pins strict transcript chronology, trusted author/type classification, mixed rows, bounded excerpts, stable identity, valid and malformed asks, shared ask lifecycle, composed search/filter behavior, and nearest-above/newest unanswered selection.
+- [`tests2/dom/transcript-history-popover.test.ts`](../tests2/dom/transcript-history-popover.test.ts) pins dialog semantics, focus, open-to-newest behavior, filters plus search, empty state, live-tail preservation, selection, outside dismissal, and Escape dismissal.
+- [`tests2/dom/transcript-navigation-integration.test.ts`](../tests2/dom/transcript-navigation-integration.test.ts) pins committed updates during streaming, immediate envelope-driven resolution, hidden-shell accessibility, targeted deferred materialization, real-geometry unanswered selection, follow-tail release, highlighting, and live announcements.
+- [`tests2/browser/journeys/transcript-history-navigation.journey.spec.ts`](../tests2/browser/journeys/transcript-history-navigation.journey.spec.ts) exercises the real segmented controls, chronology, search/filter/empty state, jumping, focus restoration, unresolved answer submission, reload derivation, responsive bounds, and cleanup.
+- The existing chat-scroll fixture and broader tail-chat coverage continue to pin prompt geometry, spring landing, mobile header offset, streaming growth, and return-to-tail behavior.
+
+When changing this feature, run the focused core and DOM files first, then the registered browser journey. Run `npm run check` and `npm run test:unit` before completion; broader browser and end-to-end gates remain the regression authority for shared scroll behavior.

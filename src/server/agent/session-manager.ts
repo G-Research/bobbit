@@ -120,7 +120,7 @@ import {
 	type PersistedSession,
 } from "./session-store.js";
 import { activeTranscriptBranch, parseTranscript } from "./transcript-tree.js";
-import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { isWorktreePathReferencedByLiveSession, isWorktreePathReferencedByLiveSessionForCleanup, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -1176,6 +1176,10 @@ export interface SessionInfo {
 	lifecycleGeneration?: number;
 	/** True once this SessionInfo has been replaced or is being replaced by a restore/respawn. */
 	lifecycleFenced?: boolean;
+	/** Terminal teardown has closed metadata admission and cancelled RPC retry authority. */
+	terminalMetadataFenced?: boolean;
+	/** Existing metadata retry delays cancelled by the terminal admission fence. */
+	pendingMetadataRetryCancellations?: Set<() => void>;
 	/** Whether tool calls were executed during the current/last turn */
 	turnHadToolCalls?: boolean;
 	/** Timestamp when the current streaming turn started */
@@ -5981,13 +5985,16 @@ export class SessionManager {
 		return isNonSandboxedPolyrepoTeamLead(ps) && !this.isCanonicalAdoptedWorkspaceOwner(ps);
 	}
 
-	private adoptedWorkspaceHasLiveReference(ps: PersistedSession): boolean {
+	private async adoptedWorkspaceHasLiveReference(ps: PersistedSession): Promise<boolean> {
 		if (!this.isCanonicalAdoptedWorkspaceOwner(ps)) return false;
 		const records = this.getAllPersistedSessionsForWorktreeGuard();
 		const paths = ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0
 			? Object.values(ps.repoWorktrees)
 			: [ps.worktreePath];
-		return paths.some(candidate => isWorktreePathReferencedByLiveSession(candidate, records, { ignoreSessionId: ps.id }));
+		for (const candidate of paths) {
+			if (await isWorktreePathReferencedByLiveSessionForCleanup(candidate, records, { ignoreSessionId: ps.id })) return true;
+		}
+		return false;
 	}
 
 	/** Whether Docker sandbox mode is enabled in project config. */
@@ -10404,6 +10411,11 @@ export class SessionManager {
 			abortAttemptOutcome?: "ambiguous" | "proven-no-start";
 		},
 	): void {
+		// Terminal teardown fences the canonical listener before snapshotting its
+		// metadata lane. Ignore any event already queued by the bridge after that
+		// fence; coordinated Stop/context replacement replays its owned terminal
+		// evidence explicitly through replacementOwnedTerminal.
+		if (session.terminalMetadataFenced && !opts?.replacementOwnedTerminal) return;
 		if (!session.onStatusChanged || !session.onEventAccepted) this.attachHostLifecycleObservers(session);
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
@@ -10555,12 +10567,9 @@ export class SessionManager {
 					const persisted = this.resolveStoreForSession(session.id).get(session.id);
 					if (latestContextClearBoundary(persisted?.contextClearBoundaries)?.activatedTranscriptMaterialized === false
 						&& !session.pendingMetadataPersist) {
-						const pending = this.persistSessionMetadata(session).catch((error) => {
+						this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((error) => {
 							console.warn(`[session-manager] Failed to mark cleared transcript materialized for ${session.id}:`, error);
-						}).finally(() => {
-							if (session.pendingMetadataPersist === pending) session.pendingMetadataPersist = undefined;
-						});
-						session.pendingMetadataPersist = pending;
+						}));
 					}
 				} catch { /* a later lifecycle pass can retry metadata healing */ }
 			}
@@ -10771,14 +10780,16 @@ export class SessionManager {
 				if (!this.maybeAutoRetryTransient(session)) this.surfaceManualRetryRequired(session);
 			}
 
-			// Trigger deferred setup after the first agent turn completes.
-			// This runs model selection, thinking level, and metadata persistence
-			// without blocking the user's first prompt.
+			// Trigger deferred setup after the first agent turn completes. Register the
+			// finalizer synchronously in the session-owned metadata lane: project
+			// deletion and gateway shutdown must be able to join it before removing the
+			// store directory, and it must not race an earlier creation-time metadata
+			// write over the same SessionStore snapshot.
 			if (!session.setupComplete) {
 				session.setupComplete = true;
-				this._finishSessionSetup(session).catch((err) => {
+				this.trackSessionMetadataWork(session, () => this._finishSessionSetup(session).catch((err) => {
 					console.error(`[session-manager] Deferred setup error for session ${session.id}:`, err);
-				});
+				}));
 			}
 		} else if (event.type === "agent_settled") {
 			// Pi settling its run is not an echo. Any handoff without a correlated
@@ -14321,9 +14332,9 @@ export class SessionManager {
 				// already adopted a cloned transcript and may have sanitized runtime-only
 				// metadata in that file; avoid a redundant get_state that can drop it.
 				if (plan.preExistingAgentSessionFile) return;
-				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
-				}).finally(() => { session.pendingMetadataPersist = undefined; });
+				}));
 			}).catch(async (error) => {
 				try { session.unsubscribe?.(); } catch { /* best-effort */ }
 				await session.rpcClient?.stop?.().catch(() => {});
@@ -14431,9 +14442,9 @@ export class SessionManager {
 			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
 			// avoid a redundant get_state that can rewrite runtime-only metadata.
 			if (!plan.preExistingAgentSessionFile) {
-				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-				}).finally(() => { session.pendingMetadataPersist = undefined; });
+				}));
 			}
 
 			return session;
@@ -14704,9 +14715,9 @@ export class SessionManager {
 		}
 
 		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+		this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
+		}));
 
 		// Preserve an authenticated owner's identity for orchestration-created
 		// delegates. Direct/server-created delegates omit provenance and remain
@@ -15062,12 +15073,33 @@ export class SessionManager {
 	}
 
 	/**
+	 * Serialize metadata work owned by one live session. Registration happens
+	 * synchronously, before the work starts, so terminal lifecycle barriers can
+	 * join the complete lane. Promise identity prevents an older finalizer from
+	 * clearing a newer queued owner.
+	 */
+	private trackSessionMetadataWork(session: SessionInfo, work: () => Promise<void>): Promise<void> {
+		const predecessor = session.pendingMetadataPersist ?? Promise.resolve();
+		let tracked!: Promise<void>;
+		tracked = predecessor.then(work).finally(() => {
+			if (session.pendingMetadataPersist === tracked) session.pendingMetadataPersist = undefined;
+		});
+		session.pendingMetadataPersist = tracked;
+		return tracked;
+	}
+
+	/**
 	 * Runs metadata persistence (and retries model/thinking if early setup missed).
 	 * Called after the first agent turn completes.
 	 */
 	private async _finishSessionSetup(session: SessionInfo): Promise<void> {
 		try {
 			await this.persistSessionMetadata(session);
+			// persistSessionMetadata mutates SessionStore through its normal coalesced
+			// path. Keep the first-turn owner alive through the atomic publication so
+			// a terminal lifecycle caller cannot observe the metadata task settled
+			// while its tmp+rename still owns the project directory.
+			await this.resolveStoreForSession(session.id).flushAsync();
 		} catch (err) {
 			console.error(`[session-manager] Setup error for session ${session.id}:`, err);
 		}
@@ -15816,6 +15848,28 @@ export class SessionManager {
 		return verifiedTuple;
 	}
 
+	private waitForSessionMetadataRetry(session: SessionInfo, delayMs: number): Promise<boolean> {
+		if (session.terminalMetadataFenced) return Promise.resolve(false);
+		return new Promise<boolean>((resolve) => {
+			let settled = false;
+			let timer!: ReturnType<Clock["setTimeout"]>;
+			const finish = (retry: boolean) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				session.pendingMetadataRetryCancellations?.delete(cancel);
+				resolve(retry);
+			};
+			const cancel = () => finish(false);
+			session.pendingMetadataRetryCancellations ??= new Set();
+			session.pendingMetadataRetryCancellations.add(cancel);
+			timer = this.clock.setTimeout(() => finish(true), delayMs);
+			// No asynchronous work can interleave with registration, but keep the
+			// terminal predicate authoritative if a custom Clock invokes inline.
+			if (session.terminalMetadataFenced) cancel();
+		});
+	}
+
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
 		const maxRetries = 3;
 		const delays = [500, 1000, 2000];
@@ -15824,9 +15878,14 @@ export class SessionManager {
 			try {
 				const stateResp = await session.rpcClient.getState();
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
+					// Terminal process stop owns cancellation. Once teardown has fenced
+					// admission, a failed command is final rather than authority to start
+					// another backoff/RPC cycle against the stopped bridge.
+					if (session.terminalMetadataFenced) return;
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
-						await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
+						if (!await this.waitForSessionMetadataRetry(session, delays[attempt])
+							|| session.terminalMetadataFenced) return;
 						continue;
 					}
 					console.error(
@@ -15893,9 +15952,11 @@ export class SessionManager {
 				}
 				return; // success
 			} catch (err) {
+				if (session.terminalMetadataFenced) return;
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
-					await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
+					if (!await this.waitForSessionMetadataRetry(session, delays[attempt])
+						|| session.terminalMetadataFenced) return;
 				} else {
 					console.error(
 						`[session-manager] CRITICAL: persistSessionMetadata failed for ${session.id} after ${maxRetries + 1} attempts: ${err}\n` +
@@ -16040,9 +16101,9 @@ export class SessionManager {
 		this.sessions.set(id, session);
 
 		// Then update with agentSessionFile (tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+		this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 			console.error(`[session-manager] Failed to persist external session ${id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
+		}));
 
 		console.log(`[session-manager] Registered external session ${id}: ${opts.title}`);
 
@@ -17508,6 +17569,59 @@ export class SessionManager {
 	}
 
 	/**
+	 * Close lifecycle admission synchronously and snapshot the complete metadata
+	 * lane. JavaScript event delivery cannot interleave between the fence and
+	 * unsubscribe, and handleAgentLifecycle rejects any already-queued late frame.
+	 */
+	private fenceTerminalMetadataAdmission(session: SessionInfo): Promise<void> | undefined {
+		session.terminalMetadataFenced = true;
+		session.lifecycleFenced = true;
+		for (const cancel of [...(session.pendingMetadataRetryCancellations ?? [])]) cancel();
+		session.pendingMetadataRetryCancellations?.clear();
+		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
+		return session.pendingMetadataPersist;
+	}
+
+	/**
+	 * Ask Pi for one final best-effort state while it is live, then start process
+	 * stop immediately. Process exit is the authoritative cancellation signal for
+	 * any unresponsive RPC already in the metadata lane. Already-admitted durable
+	 * work is still joined; no promise is abandoned behind a timeout race.
+	 */
+	private async stopTerminalRuntime(
+		session: SessionInfo,
+		metadataOwner: Promise<void> | undefined,
+	): Promise<unknown | undefined> {
+		let finalState: Promise<void>;
+		try {
+			finalState = Promise.resolve(session.rpcClient.getState()).then(
+				() => undefined,
+				() => undefined,
+			);
+		} catch {
+			finalState = Promise.resolve();
+		}
+
+		let bridgeStopError: unknown;
+		let stop: Promise<void>;
+		try {
+			stop = Promise.resolve(session.rpcClient.stop()).catch((error) => {
+				bridgeStopError = error;
+			});
+		} catch (error) {
+			bridgeStopError = error;
+			stop = Promise.resolve();
+		}
+
+		await Promise.all([
+			metadataOwner?.catch(() => { /* metadata owner logged its failure */ }) ?? Promise.resolve(),
+			finalState,
+			stop,
+		]);
+		return bridgeStopError;
+	}
+
+	/**
 	 * Stop and detach a live runtime while deliberately leaving its persisted row
 	 * live. Archived-goal reconciliation uses this only when it cannot durably
 	 * publish the sticky team ownership marker: the row must remain available for
@@ -17534,23 +17648,16 @@ export class SessionManager {
 			throw new Error(`Session ${id} quiesce was superseded before start`);
 		}
 
-		// Fence dispatch before the first await, then stop the bridge even when an
-		// auxiliary cleanup hook is unhealthy. The durable SessionStore row is never
-		// mutated by this seam.
-		session.lifecycleFenced = true;
+		// Fence dispatch before the first await. The durable SessionStore row is
+		// never mutated by this seam, but already-admitted metadata work must finish
+		// before the live runtime is detached.
 		session.dormant = true;
 		session.staffNotificationTurnContext = undefined;
+		const metadataOwner = this.fenceTerminalMetadataAdmission(session);
 		this.clearToolCallProvenance(session);
 		this.cancelPendingAutoRetry(session, "terminated");
 		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
-		if (session.pendingMetadataPersist) {
-			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
-		}
-		try { await session.rpcClient.getState(); } catch { /* process may already be stopped */ }
-		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
-		let bridgeStopError: unknown;
-		try { await session.rpcClient.stop(); }
-		catch (err) { bridgeStopError = err; }
+		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
 		}
@@ -17660,6 +17767,11 @@ export class SessionManager {
 			throw new Error(`Session ${id} termination was superseded before start`);
 		}
 
+		// Close lifecycle admission before the first await. Cascade ordering remains
+		// child-before-parent; the parent bridge is stopped only after its children
+		// and extension channels have completed their existing teardown steps.
+		const metadataOwner = this.fenceTerminalMetadataAdmission(session);
+
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id, options);
 
@@ -17691,26 +17803,11 @@ export class SessionManager {
 		// Cancel any pending transient auto-retry so it doesn't fire after terminate
 		this.cancelPendingAutoRetry(session, "terminated");
 
-		// Wait for in-flight metadata persist so the agentSessionFile path is
-		// saved before we archive.  Without this, a quick terminate can race
-		// the fire-and-forget persist, leaving agentSessionFile as "" and the
-		// session's .jsonl history unreachable.
-		if (session.pendingMetadataPersist) {
-			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
-		}
-
-		// Final get_state to flush conversation history to the .jsonl file.
-		// persistSessionMetadata runs at creation time (fire-and-forget) when
-		// the conversation may still be empty. This ensures the latest messages
-		// are written before we archive.
-		try {
-			await session.rpcClient.getState();
-		} catch {
-			// Agent may already be stopped — best-effort flush
-		}
-
-		session.unsubscribe();
-		await session.rpcClient.stop();
+		// Issue the final best-effort get_state before stop, but do not put process
+		// cancellation behind an unresponsive metadata RPC. The snapshotted lane is
+		// joined before any archive or project-context removal can proceed.
+		const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+		if (bridgeStopError) throw bridgeStopError;
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} termination was superseded after bridge stop`);
 		}
@@ -18205,6 +18302,22 @@ export class SessionManager {
 			}
 
 			try {
+				const freshSessions: WorktreeReferenceRecord[] = [
+					...this.getAllPersistedSessionsForWorktreeGuard(),
+					...[...this.sessions.values()].map(session => ({
+						id: session.id,
+						worktreePath: session.worktreePath,
+						cwd: session.cwd,
+						repoWorktrees: session.repoWorktrees
+							? Object.fromEntries(session.repoWorktrees.map(worktree => [worktree.repo, worktree.worktreePath]))
+							: undefined,
+					})),
+				];
+				if (await isWorktreePathReferencedByLiveSessionForCleanup(item.path, freshSessions, { ignoreSessionId: item.sessionId })) {
+					recordResult({ ...base, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session now references this worktree.", worktreeRemoved: false, branchDeleted: false });
+					response.counts.skipped++;
+					continue;
+				}
 				const { cleanupWorktree } = await import("../skills/git.js");
 				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
 
@@ -18586,7 +18699,7 @@ export class SessionManager {
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
-		const sessionReferenced = isWorktreePathReferencedByLiveSession(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
+		const sessionReferenced = await isWorktreePathReferencedByLiveSessionForCleanup(spec.worktreePath, ctx.sessionPathRecords, { ignoreSessionId: ps.id });
 		if (sessionReferenced) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
 		}
@@ -18840,7 +18953,7 @@ export class SessionManager {
 		// Adopted multi-repo cleanup is all-or-nothing. If any component is still
 		// referenced, retain the archived owner record so a later purge can clean
 		// every component and the shared container exactly once.
-		if (this.adoptedWorkspaceHasLiveReference(ps)) {
+		if (await this.adoptedWorkspaceHasLiveReference(ps)) {
 			console.warn(`[session-manager] Refusing to purge adopted workspace owner ${ps.id}: another live session still references a component`);
 			return;
 		}
@@ -18939,7 +19052,7 @@ export class SessionManager {
 				// ceiling + delete the shared branch from each repo's remote (Phase 4a).
 				if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
 					await mapWithConcurrency(Object.entries(ps.repoWorktrees), BACKGROUND_IO_CONCURRENCY, async ([repo, wt]) => {
-						if (isWorktreePathReferencedByLiveSession(wt, allPersisted, { ignoreSessionId: ps.id })) {
+						if (await isWorktreePathReferencedByLiveSessionForCleanup(wt, allPersisted, { ignoreSessionId: ps.id })) {
 							console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${wt}`);
 							return;
 						}
@@ -18959,7 +19072,7 @@ export class SessionManager {
 					} catch (err) {
 						console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
 					}
-				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
+				} else if (!await isWorktreePathReferencedByLiveSessionForCleanup(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
@@ -19159,7 +19272,7 @@ export class SessionManager {
 				if (!pathMatch) continue;
 				const wtPath = pathMatch[1];
 				// Check if any active session uses this worktree (by path or branch)
-				const isActive = isWorktreePathReferencedByLiveSession(wtPath, allPathRecords) || persistedBranches.has(branch);
+				const isActive = await isWorktreePathReferencedByLiveSessionForCleanup(wtPath, allPathRecords) || persistedBranches.has(branch);
 				if (!isActive) {
 					console.log(`[session-manager] Cleaning up orphaned session worktree: ${wtPath} (branch: ${branch})`);
 					const { cleanupWorktree } = await import("../skills/git.js");
@@ -19916,6 +20029,10 @@ export class SessionManager {
 					this.resolveStoreForSession(id).update(id, { containerId: adoptedExpectedContainerId });
 				}
 			}
+			// Recovery failure makes the stopped old process permanently terminal. Close
+			// metadata admission and cancel any retry delay that process exit already
+			// made futile; later DELETE still joins the real admitted lane and store flush.
+			this.fenceTerminalMetadataAdmission(session);
 			// Without a complete closed-generation replay, neither delivery nor
 			// non-delivery is proven. Preserve the durable uncertain carrier and forbid
 			// automatic replay; explicit dismissal remains available through removeQueued.
@@ -19963,6 +20080,9 @@ export class SessionManager {
 			if (!session) continue;
 
 			this.clearToolCallProvenance(session);
+			// Fence lifecycle admission before the first per-session await, then retain
+			// the complete already-admitted metadata lane for the stop barrier below.
+			const metadataOwner = this.fenceTerminalMetadataAdmission(session);
 			await this.closeExtensionChannelsForSession(id, "gateway-shutdown");
 
 			// Snapshot the current active state before we kill the process.
@@ -19983,8 +20103,11 @@ export class SessionManager {
 			// closing in shutdown so suppress the cancellation broadcast.
 			this.cancelPendingAutoRetry(session, "shutdown");
 
-			session.unsubscribe();
-			await session.rpcClient.stop();
+			// Start stop alongside the final state request so process exit cancels any
+			// unresponsive metadata RPC. Durable work is still joined before the store
+			// flush and project-context teardown below.
+			const bridgeStopError = await this.stopTerminalRuntime(session, metadataOwner);
+			if (bridgeStopError) throw bridgeStopError;
 			// shutdown(): clients are being closed; broadcast is harmless but unnecessary.
 			// Status mutation here is the documented exception to the broadcastStatus rule.
 			session.status = "terminated";
