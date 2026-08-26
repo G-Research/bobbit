@@ -6,13 +6,15 @@
  *
  * Crash/restart is wired into the spec framework via
  * `event.server_crash()` / `event.server_restart()` (see
- * tests/e2e/ui/spec-framework.ts). The worker-scoped `gateway` fixture
- * exposes `crash()` / `restart()` helpers that re-bind the in-process
- * gateway to the same port, so the page's WebSocket reconnect logic
- * resumes against the same origin without a manual reload.
+ * tests/support/harnesses/browser/legacy-ui/spec-framework.ts). The
+ * worker-scoped `gateway` fixture exposes `crash()` / `restart()` helpers
+ * that re-bind the in-process gateway to the same port, so the page's
+ * WebSocket reconnect logic resumes against the same origin without a
+ * manual reload. The framework requires the stale socket to close and a
+ * newer authenticated connection epoch before returning from restart.
  *
  * RE-05 (Docker sandbox container recovery) is gated on Docker
- * availability via `isDockerAvailable()` from `../test-utils/docker.js`
+ * availability via `isDockerAvailable()` from the canonical E2E helpers
  * — mirroring `sandbox-recovery-docker.spec.ts`. RE-07 exercises plain
  * WS disconnect + page reload (no server crash).
  *
@@ -238,10 +240,9 @@ test.describe("CT-05: Resilience", () => {
 		await s.send_message("hello before disconnect");
 		await s.event.agent_finish("A");
 
-		// act — disconnect WebSocket, then reload the page.
-		// The reload tears down the page entirely, so we don't need to wait
-		// for the WS close to settle on the old context — the new page will
-		// reconnect fresh.
+		// act — close the active session's owned WebSocket and require the
+		// client lifecycle to observe the disconnect before reloading. The
+		// fresh page must then reconnect and hydrate the persisted transcript.
 		s.act();
 		await s.event.disconnect();
 		await s.reload();

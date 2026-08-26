@@ -15,7 +15,6 @@ import { expect } from "@playwright/test";
 import {
 	apiFetch,
 	createSession,
-	deleteSession,
 	navigateToHash,
 	openApp,
 	waitForSessionStatus,
@@ -823,6 +822,8 @@ export class SpecContext {
 
 	private _page: Page;
 	private _gateway?: GatewayInfo;
+	private _crashedSession?: { sessionId: string; connectionEpoch: number };
+	private _gatewayNeedsRecovery = false;
 
 	// Regions
 	readonly sidebar: SidebarRegion;
@@ -939,8 +940,35 @@ export class SpecContext {
 
 	async cleanup() {
 		this._phase = "cleanup";
+		const failures: Error[] = [];
+		if (this._gatewayNeedsRecovery && this._gateway) {
+			try {
+				const healthy = await apiFetch("/api/health", { method: "GET" })
+					.then((response) => response.ok)
+					.catch(() => false);
+				if (!healthy) await this._gateway.restart();
+				await pollUntil(async () => {
+					try { return (await apiFetch("/api/health", { method: "GET" })).ok; }
+					catch { return false; }
+				}, { timeoutMs: 20_000, intervalMs: 250, label: "SpecContext cleanup gateway recovery" });
+				this._gatewayNeedsRecovery = false;
+			} catch (error) {
+				failures.push(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
 		for (const [, handle] of this.sessions) {
-			try { await deleteSession(handle.sessionId); } catch { /* best effort */ }
+			try {
+				const response = await apiFetch(`/api/sessions/${handle.sessionId}`, { method: "DELETE" });
+				if (!response.ok && response.status !== 404) {
+					const detail = await response.text().catch(() => "");
+					throw new Error(`session ${handle.sessionId}: DELETE returned ${response.status}${detail ? `: ${detail}` : ""}`);
+				}
+			} catch (error) {
+				failures.push(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+		if (failures.length > 0) {
+			throw new AggregateError(failures, `SpecContext cleanup failed for ${failures.length} session(s)`);
 		}
 	}
 
@@ -974,16 +1002,43 @@ export class SpecContext {
 			if (!this._gateway) {
 				throw new Error("server_crash: SpecContext was constructed without a gateway fixture");
 			}
+			this._gatewayNeedsRecovery = true;
+			this._crashedSession = this._page.isClosed()
+				? undefined
+				: await this._page.evaluate(() => {
+					const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+					const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+					if (!routeSessionId) return undefined;
+					const remote = state?.remoteAgent;
+					if (remote?.gatewaySessionId !== routeSessionId || remote?.connected !== true) {
+						throw new Error(`server_crash: active session ${routeSessionId} has no connected WebSocket owner`);
+					}
+					return { sessionId: routeSessionId, connectionEpoch: remote._connectionEpoch ?? 0 };
+				});
 			await this._gateway.crash();
-			// Wait for the client to observe the disconnect. Best-effort —
-			// swallow timeouts AND page/context closures (a Playwright frame
-			// detach during rapid crash cycles surfaces as "Target closed";
-			// the assertion that follows the crash is the real contract).
-			if (!this._page.isClosed()) {
-				await this._page.waitForFunction(() => {
-					const s = (window as any).bobbitState;
-					return !!s && s.connectionStatus !== "connected";
-				}, undefined, { timeout: 5_000 }).catch(() => { /* best-effort */ });
+			if (this._crashedSession) {
+				// The in-process fixture performs a graceful shutdown rather than an
+				// OS process death. Graceful ws.Server.close() can leave an upgraded
+				// browser socket open, so explicitly close that browser-owned stale
+				// connection and require its lifecycle callback to run. The reconnect
+				// assertion below still has to establish a new authenticated epoch.
+				await this._page.evaluate((expectedSessionId) => {
+					const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+					const remote = state?.remoteAgent;
+					if (remote?.gatewaySessionId !== expectedSessionId) {
+						throw new Error(`server_crash: WebSocket owner changed before disconnecting ${expectedSessionId}`);
+					}
+					const socket = remote.ws as WebSocket | null;
+					if (socket && socket.readyState < WebSocket.CLOSING) {
+						socket.close(4000, "in-process gateway crash");
+					}
+				}, this._crashedSession.sessionId);
+				await this._page.waitForFunction((expectedSessionId) => {
+					const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+					return state?.remoteAgent?.gatewaySessionId === expectedSessionId
+						&& state.connectionStatus !== "connected"
+						&& state.remoteAgent.connected !== true;
+				}, this._crashedSession.sessionId, { timeout: 5_000 });
 			}
 		},
 		server_restart: async () => {
@@ -992,49 +1047,53 @@ export class SpecContext {
 				throw new Error("server_restart: SpecContext was constructed without a gateway fixture");
 			}
 			await this._gateway.restart();
-			// Wait for the client to reach the server again. Two-stage:
-			// (a) /api/health responds (server bound and accepting requests)
-			//     — polled from Node via apiFetch so page/context closure
-			//     during rapid crash-restart cycles cannot mask the signal.
-			//     This is the strict half: failure here = real bug.
-			// (b) if a session is active AND the page is still alive, the
-			//     session WebSocket reconnects (connectionStatus==="connected").
-			//     Best-effort: if Playwright reports the frame detached or the
-			//     page closed, we don't fail — subsequent UI assertions will
-			//     surface the real problem with a meaningful locator error.
+			this._gatewayNeedsRecovery = false;
 			await pollUntil(async () => {
 				try {
 					const r = await apiFetch("/api/health", { method: "GET" });
 					return r.ok;
 				} catch { return false; }
 			}, { timeoutMs: 20_000, intervalMs: 250, label: "server_restart /api/health" });
-			if (this._page.isClosed()) return;
-			try {
-				await this._page.waitForFunction(() => {
-					const s = (window as any).bobbitState;
-					const hash = window.location.hash || "";
-					const onSession = /^#\/session\//.test(hash);
-					if (onSession) return !!s && s.connectionStatus === "connected";
-					return true;
-				}, undefined, { timeout: 15_000, polling: 250 });
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				if (/Target (page|context|browser)|context or browser has been closed|Execution context was destroyed|frame was detached/i.test(msg)) {
-					// Page closed/detached mid-poll during rapid crash-restart
-					// cycles. /api/health already confirmed the server is back;
-					// downstream assertions will reopen or fail with a clearer
-					// message if the page truly is unusable.
-					return;
-				}
-				throw err;
+			if (this._page.isClosed()) {
+				throw new Error("server_restart: page closed before reconnect could be verified");
 			}
+			const crashedSession = this._crashedSession;
+			await this._page.waitForFunction((expected) => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+				if (!routeSessionId) return true;
+				if (!expected || routeSessionId !== expected.sessionId) return false;
+				const remote = state?.remoteAgent;
+				return state?.selectedSessionId === expected.sessionId
+					&& state.connectionStatus === "connected"
+					&& remote?.gatewaySessionId === expected.sessionId
+					&& remote?.connected === true
+					&& (remote?._connectionEpoch ?? 0) > expected.connectionEpoch;
+			}, crashedSession, { timeout: 15_000, polling: 250 });
+			this._crashedSession = undefined;
 		},
 		disconnect: async () => {
 			trackIntent(this._activeStory, this._phase, "disconnect");
-			await this._page.evaluate(() => {
-				// Force-close all WebSocket connections
-				(window as any).__bobbit_ws?.close();
+			const sessionId = await this._page.evaluate(() => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				const remote = state?.remoteAgent;
+				const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+				if (!routeSessionId || remote?.gatewaySessionId !== routeSessionId || remote?.connected !== true) {
+					throw new Error("disconnect: active route has no connected WebSocket owner");
+				}
+				const socket = remote.ws as WebSocket | null;
+				if (!socket || socket.readyState !== WebSocket.OPEN) {
+					throw new Error(`disconnect: session ${routeSessionId} WebSocket is not open`);
+				}
+				socket.close(4000, "resilience disconnect fixture");
+				return routeSessionId;
 			});
+			await this._page.waitForFunction((expectedSessionId) => {
+				const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return state?.remoteAgent?.gatewaySessionId === expectedSessionId
+					&& state.connectionStatus !== "connected"
+					&& state.remoteAgent.connected !== true;
+			}, sessionId, { timeout: 5_000 });
 		},
 		agent_finish: async (sessionName?: string) => {
 			trackIntent(this._activeStory, this._phase, "agent_finish");
