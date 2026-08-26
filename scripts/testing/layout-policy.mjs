@@ -338,17 +338,71 @@ function analyzePlaywrightApiUsage(filePath, source) {
 		}
 	}
 
-	const collectCallbacks = (node) => {
+	const variableDeclarations = [];
+	const collectBindings = (node) => {
 		if (ts.isFunctionDeclaration(node) && node.name) callbackBindings.set(node.name.text, node);
-		if (ts.isVariableDeclaration(node)
-			&& ts.isIdentifier(node.name)
-			&& node.initializer
-			&& (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
-			callbackBindings.set(node.name.text, node.initializer);
+		if (ts.isVariableDeclaration(node)) {
+			variableDeclarations.push(node);
+			if (ts.isIdentifier(node.name)
+				&& node.initializer
+				&& (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+				callbackBindings.set(node.name.text, node.initializer);
+			}
 		}
-		ts.forEachChild(node, collectCallbacks);
+		ts.forEachChild(node, collectBindings);
 	};
-	collectCallbacks(sourceFile);
+	collectBindings(sourceFile);
+
+	const isNamespaceReference = (expression) => {
+		const path = expressionPath(expression);
+		return Boolean(path && namespaceBindings.has(path.root) && path.parts.length === 0);
+	};
+	const isTestReference = (expression) => {
+		const path = expressionPath(expression);
+		return Boolean(path && (testBindings.has(path.root)
+			|| (namespaceBindings.has(path.root) && path.parts[0] === "test")));
+	};
+	const isExtendedTest = (expression) => {
+		const candidate = unwrapExpression(expression);
+		if (!ts.isCallExpression(candidate)) return false;
+		const callee = unwrapExpression(candidate.expression);
+		if (ts.isPropertyAccessExpression(callee)) {
+			return callee.name.text === "extend" && isTestReference(callee.expression);
+		}
+		return ts.isElementAccessExpression(callee)
+			&& Boolean(callee.argumentExpression)
+			&& ts.isStringLiteralLike(callee.argumentExpression)
+			&& callee.argumentExpression.text === "extend"
+			&& isTestReference(callee.expression);
+	};
+
+	// Test fixtures commonly wrap the imported binding before declaring cases. Resolve
+	// only static variable bindings, to a fixed point, so normal aliases remain visible
+	// without treating arbitrary helper calls or source text as Playwright tests.
+	let bindingsChanged = true;
+	while (bindingsChanged) {
+		bindingsChanged = false;
+		for (const declaration of variableDeclarations) {
+			if (!declaration.initializer) continue;
+			if (ts.isIdentifier(declaration.name)) {
+				if (!namespaceBindings.has(declaration.name.text) && isNamespaceReference(declaration.initializer)) {
+					namespaceBindings.add(declaration.name.text);
+					bindingsChanged = true;
+				}
+				if (!testBindings.has(declaration.name.text)
+					&& (isTestReference(declaration.initializer) || isExtendedTest(declaration.initializer))) {
+					testBindings.add(declaration.name.text);
+					bindingsChanged = true;
+				}
+			} else if (ts.isObjectBindingPattern(declaration.name) && isNamespaceReference(declaration.initializer)) {
+				for (const element of declaration.name.elements) {
+					if (bindingElementName(element) !== "test" || !ts.isIdentifier(element.name) || testBindings.has(element.name.text)) continue;
+					testBindings.add(element.name.text);
+					bindingsChanged = true;
+				}
+			}
+		}
+	}
 
 	let browserFixture = null;
 	const inspect = (node) => {
@@ -366,10 +420,7 @@ function analyzePlaywrightApiUsage(filePath, source) {
 			}
 		}
 		if (!browserFixture && ts.isCallExpression(node)) {
-			const callee = expressionPath(node.expression);
-			const isTestCall = callee && (testBindings.has(callee.root)
-				|| (namespaceBindings.has(callee.root) && callee.parts[0] === "test"));
-			if (isTestCall) {
+			if (isTestReference(node.expression)) {
 				for (const argument of node.arguments) {
 					const candidate = unwrapExpression(argument);
 					const callback = ts.isArrowFunction(candidate) || ts.isFunctionExpression(candidate)

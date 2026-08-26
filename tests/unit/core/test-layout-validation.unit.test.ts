@@ -88,6 +88,17 @@ describe("test layout diagnostics", () => {
 		expect(validateTestPath("tests/e2e/api/helper.api-e2e.spec.ts", helperFixture).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
 	});
 
+	it("propagates static Playwright test aliases before inspecting browser fixtures", () => {
+		const aliasCases = [
+			'import { test as baseTest } from "@playwright/test";\nconst first = baseTest; const browserJourney = first;\nbrowserJourney("direct", async ({ page }) => page.goto("/"));',
+			'import * as playwright from "@playwright/test";\nconst namespaceAlias = playwright; const { test: browserJourney } = namespaceAlias;\nbrowserJourney("namespace", async ({ browser }) => browser.close());',
+			'import { test as baseTest } from "@playwright/test";\nconst browserJourney = baseTest.extend<{ token: string }>({});\nbrowserJourney("extended", async ({ context }) => context.close());',
+		] as const;
+		for (const source of aliasCases) {
+			expect(validateTestPath("tests/e2e/api/aliased.api-e2e.spec.ts", source).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
+		}
+	});
+
 	it("rejects direct, namespace, default, and require access to Playwright browser primitives", () => {
 		const primitiveCases = [
 			'import { test, chromium as engine } from "@playwright/test";',
@@ -104,9 +115,14 @@ describe("test layout diagnostics", () => {
 	it("allows API request fixtures and ignores browser examples in comments and strings", () => {
 		const source = [
 			'import * as playwright from "@playwright/test";',
-			'playwright.test("api", async ({ request }) => request.get("/health"));',
-			'// playwright.test("example", async function ({ page }) { await page.goto("/"); });',
-			'const example = `playwright.chromium.launch(); async ({ browser }) => browser.close()`;',
+			'const { test: baseTest } = playwright;',
+			'const apiTest = baseTest.extend<{ token: string }>({});',
+			'apiTest("api", async ({ request }) => request.get("/health"));',
+			'// const browserTest = apiTest; browserTest("example", async ({ page }) => page.goto("/"));',
+			'const example = `const browserTest = apiTest; async ({ browser }) => browser.close()`;',
+			'const ordinaryHelper = (name: string, callback: unknown) => ({ name, callback });',
+			'const helperAlias = ordinaryHelper;',
+			'helperAlias("not a Playwright test", async ({ context }: Fixtures) => context.close());',
 		].join("\n");
 		expect(validateTestPath("tests/e2e/api/request.api-e2e.spec.ts", source)).toEqual([]);
 	});
