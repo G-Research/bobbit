@@ -159,11 +159,36 @@ async function openPillDropdown(page: Page, bgId: string) {
 	return dropdown;
 }
 
-// The pill's trailing inline button: skull (kill) while running, ✕ (dismiss)
-// once terminal. Driving these directly avoids the popover portal, keeping the
-// kill/dismiss flows robust across a restart's reconnect re-render.
-function pillActionButton(page: Page, bgId: string) {
-	return pill(page, bgId).locator("button").nth(1);
+// Resolve the action by its current lifecycle label instead of its position.
+// A reconnect/terminal reconciliation can replace the pill between assertions;
+// requiring the exact title proves the click owns the current process state.
+function pillActionButton(page: Page, bgId: string, title: "Kill process" | "Remove") {
+	return pill(page, bgId).getByTitle(title, { exact: true });
+}
+
+async function dismissTerminalPill(page: Page, sessionId: string, bgId: string): Promise<void> {
+	const action = pillActionButton(page, bgId, "Remove");
+	await expect(action, "current pill exposes its terminal Remove action").toBeVisible();
+	await expect(action).toBeEnabled();
+
+	// Observe the production DELETE before clicking so an optimistic DOM removal
+	// cannot masquerade as durable dismissal under reconnect contention.
+	const dismissal = page.waitForResponse((response) =>
+		response.url().includes(`/api/sessions/${sessionId}/bg-processes/${bgId}?action=dismiss`)
+			&& response.request().method() === "DELETE",
+		{ timeout: 15_000 },
+	);
+	await action.click();
+	const response = await dismissal;
+	expect(response.ok(), `dismiss request returned ${response.status()}`).toBe(true);
+
+	// Establish authoritative persistence removal before checking the animated
+	// projection. Reload/restart assertions at each call site then prove it stays gone.
+	await expect
+		.poll(async () => (await listBgProcesses(sessionId))?.some((p) => p.id === bgId) ?? null,
+			{ timeout: 15_000, intervals: [200] })
+		.toBe(false);
+	await expect(pill(page, bgId)).toHaveCount(0, { timeout: 10_000 });
 }
 
 test.describe("persistent bash_bg processes — restart re-attach, exit code, dismiss", () => {
@@ -232,12 +257,7 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 		await expect(page.locator("#bg-process-dropdown")).toBeHidden();
 
 		// ── Dismiss removes the pill AND purges the persisted files. ──
-		await pillActionButton(page, bgId).click();
-		await expect(pill(page, bgId)).toHaveCount(0, { timeout: 10_000 });
-		await expect
-			.poll(async () => (await listBgProcesses(sessionId))?.some((p) => p.id === bgId) ?? null,
-				{ timeout: 10_000, intervals: [200] })
-			.toBe(false);
+		await dismissTerminalPill(page, sessionId, bgId);
 
 		// Stays gone after a page reload (state re-fetched from the server).
 		await page.reload();
@@ -275,16 +295,28 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 			.toBeGreaterThanOrEqual(1);
 
 		// ── Kill via the pill UI: inline skull button → confirm dialog. ──
-		await pillActionButton(page, bgId).click();
+		const killAction = pillActionButton(page, bgId, "Kill process");
+		await expect(killAction, "current pill exposes its running Kill process action").toBeVisible();
+		await killAction.click();
 		await expect(page.getByText("This stops the running background process.")).toBeVisible({ timeout: 10_000 });
 		// The destructive confirm button is labelled exactly "Kill" (the pill's own
 		// skull button is "Kill process", so exact-name avoids ambiguity).
+		const killRequest = page.waitForResponse((response) =>
+			response.url().includes(`/api/sessions/${sessionId}/bg-processes/${bgId}?action=kill`)
+				&& response.request().method() === "DELETE",
+			{ timeout: 15_000 },
+		);
 		await page.getByRole("button", { name: "Kill", exact: true }).click();
+		const killResponse = await killRequest;
+		expect(killResponse.ok(), `kill request returned ${killResponse.status()}`).toBe(true);
 
-		// Becomes an EXITED (terminal) pill — no longer running.
+		// Becomes an EXITED, explicitly killed pill — no longer running.
 		await expect
-			.poll(async () => (await findBg(sessionId, bgId))?.status ?? null, { timeout: 15_000, intervals: [250] })
-			.toBe("exited");
+			.poll(async () => {
+				const process = await findBg(sessionId, bgId);
+				return process ? { status: process.status, terminalReason: process.terminalReason } : null;
+			}, { timeout: 15_000, intervals: [250] })
+			.toEqual({ status: "exited", terminalReason: "killed" });
 		await expect(pill(page, bgId)).toBeVisible();
 
 		// ── Restart — the exited (killed) pill SURVIVES. ──
@@ -295,12 +327,7 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 			.toBe("exited");
 
 		// ── Dismiss it — now it's gone for good (inline ✕ on the terminal pill). ──
-		await pillActionButton(page, bgId).click();
-		await expect(pill(page, bgId)).toHaveCount(0, { timeout: 10_000 });
-		await expect
-			.poll(async () => (await listBgProcesses(sessionId))?.some((p) => p.id === bgId) ?? null,
-				{ timeout: 15_000, intervals: [250] })
-			.toBe(false);
+		await dismissTerminalPill(page, sessionId, bgId);
 
 		// Stays gone after a reload.
 		await page.reload();
