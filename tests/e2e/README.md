@@ -1,130 +1,55 @@
-# tests/e2e — E2E test guide
+# Real-fidelity E2E tests
 
-## Test projects
+This subtree owns behavior whose defining requirement is real Git, worktree, process, restart, MCP, Docker, pack, port, or browser/process fidelity. Normal deterministic Chromium fixtures and app journeys belong under `tests/browser/`, not here. See [Testing strategy](../../docs/testing-strategy.md) for the complete placement table.
 
-The e2e config (`playwright-e2e.config.ts`) defines three Playwright projects:
+## Execution groups
 
-- **`api`** — In-process gateway, no browser. Runs API E2E specs. Workers: 2,
-  `fullyParallel: true`.
-- **`api-realpush`** — Same as `api` but with real `git push --delete`
-  (no `BOBBIT_TEST_NO_PUSH=1`). Owns `goal-archive-branch-cleanup`.
-- **`browser`** — In-process gateway + Chromium UI. Runs UI specs. Workers: 3,
-  `fullyParallel: false`.
+`npm run test:e2e` discovers four groups directly from directory and suffix conventions:
 
-The committed config defaults to `retries: 3` — see
-[Retries: developer/workflow protection](#retries-developerworkflow-protection).
+| Group | Canonical pattern | Runner | Purpose |
+|---|---|---|---|
+| A | `tests/e2e/node/**/*.node-e2e.test.ts` | `tsx --test` | Real Git, worktree, and process behavior |
+| B | `tests/e2e/api/**/*.api-e2e.spec.ts` | Playwright project `api` | API, MCP, port, restart, and Docker fidelity without a browser |
+| C | `tests/e2e/browser/**/*.browser-e2e.spec.ts` | Playwright project `browser` | Real Chromium plus process/restart/pack/Docker fidelity |
+| D | `tests/e2e/vitest/**/*.vitest-e2e.test.ts` | isolated Vitest project | Real-fidelity tests that need Vitest seams |
 
-## No quarantine, no skip-for-flake
+The coordinator serializes the gateway/worktree/browser-heavy A → B → C chain. The isolated one-worker D group runs independently. Use `node scripts/testing-v2/run-e2e-v2.mjs --list` to inspect discovery or `--group A|B|C|D` for focused development. A focused group is not complete gate evidence.
 
-There is no quarantine project and no `@quarantine` tag — and as of the
-flake-hardening effort, no spec carries one. Every flake gets
-root-caused and fixed in place. If a test is too flaky to fix
-immediately, the right move is to revert the change that introduced it
-— not to hide the failure behind a separate project.
+API E2E must not request Playwright's `page`, `browser`, or `context` fixtures or import browser-only helpers. The layout guard reports that mismatch and names `tests/e2e/browser/**/*.browser-e2e.spec.ts` as the destination.
 
-Do not add `test.skip("flaky…")`. Do not add `@quarantine` labels or a
-per-describe / per-project `retries: N` override. Do not bump a timeout
-to make a slow product faster. If you find yourself wanting to do any of
-these, file a goal and stop. The top-level `retries: 3` (below) is a
-resilience margin for concurrent runs, **not** a licence to leave a
-first-attempt flake un-root-caused.
+## Harnesses and support
 
-## Retries: developer/workflow protection
+Shared E2E support is non-runnable and lives under `tests/e2e/_helpers/`:
 
-The committed `retries: 3` default protects ordinary developer and workflow
-runs under concurrent load. It is a productivity margin, not evidence that a
-failure is acceptable or a substitute for root-causing a first-attempt flake.
+- `in-process-harness.ts` — API tests that do not require a browser or spawned-process boundary;
+- `gateway-harness.ts` — an in-process worker gateway plus the built UI for Chromium, restart fixtures, and opt-in MCP; use a test-local child process when process boundaries are themselves under test;
+- `e2e-setup.ts` — shared API, WebSocket, project, session, goal, and polling helpers;
+- `test-utils/` — cleanup, Docker capability, readiness, and other bounded utilities.
 
-Qualification uses the repository wrapper, not a direct Playwright command:
+Import the closest harness that provides the fidelity under test. Do not give helpers a runnable suffix; broadly shared cross-lane support belongs in the relevant `tests/support/` category instead.
+
+Every worker owns its Bobbit directory, temp space, token, ports, project registry, gateway state, caches, and output. A test must not depend on checkout `.bobbit/`, developer credentials/config, global Git state, or another worker's resources. Cleanup may remove only resources created by that test or coordinator.
+
+## Qualification and retries
+
+Ordinary developer and workflow runs retain the configured retry margin. It protects productivity under concurrent load; it is not evidence that a first-attempt failure is acceptable.
+
+Retry-free qualification uses the repository wrapper:
 
 ```bash
 BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
 ```
 
-The exact flag makes every retry-capable E2E group retry-free; Group A has no
-retry control. A qualification record must report zero observed retries for
-this invocation. Do not use a default-retry or retried run as qualification
-evidence.
+Groups B, C, and D then use zero retries. Group A is inherently retryless. Qualification evidence must report zero observed retries.
 
-Worker counts and the developer default are not tuned to chase a shorter
-single-suite wall: additional parallelism creates the contention this policy
-is intended to absorb.
+## Docker and external services
 
-## Profiler (`BOBBIT_E2E_PROFILE=1`)
+The automated E2E coordinator fences remote Git and outbound non-loopback services. Local bare repositories are allowed because real local push behavior is part of E2E fidelity. Docker-dependent cases report whether the daemon and required `bobbit-agent` image are available instead of silently disappearing.
 
-When the next flake cluster appears, before chasing symptoms, get data:
+Tests requiring real models, agents, credentials, or external services belong under `tests/manual/**/*.manual.spec.ts` and run only through `npm run test:manual`.
 
-```
-BOBBIT_E2E_PROFILE=1 npm run test:e2e
-```
+## No flake masking
 
-The gateway emits a per-worker timing table to stderr every 5s and on
-exit. Wrapped call sites today:
+Do not add quarantine projects, flaky tags, broad skips, retry overrides, sleeps, blind reloads, timeout increases, `force-exit`, or weaker assertions. Synchronize on the observable event that proves readiness or completion, and fix fixture ownership or lifecycle when that event does not arrive.
 
-- `POST /api/sessions` (whole route)
-- `executePlan.resolveConfig` (resolveBridgeOptions/Goal/Tools/Activation/Prompt)
-- `executePlan.spawnAgent` and `spawnAgent.rpcStart`
-- `executePlan.postSpawn`
-- `sessionManager.assemblePrompt`, `resolvePrompt`, `assembleSystemPrompt`,
-  `readAllAgentFiles`, `getAllConfigDirectories` (with `existsSync` count)
-- `loadToolDefinitions` (tool YAML scan)
-- `flexStore._doFlush`
-
-Each row reports `calls`, `p50`, `p95`, `p99`, `max`, `total` over the
-worker's lifetime. To wrap a new call site, import
-`profile`/`profileAsync`/`recordElapsed` from
-`src/server/agent/profiling.ts` and gate with the env var (the helpers
-are zero-cost when the flag is unset). Use `bumpCount("label.extra", n)`
-for sub-counters like "how many existsSync calls inside this region".
-
-Flush interval can be overridden with `BOBBIT_E2E_PROFILE_FLUSH_MS=ms`.
-
-## Sleep guard
-
-`tests/e2e/test-utils/no-new-sleeps.mjs` runs in `globalSetup` and rejects
-new hardcoded sleeps. The current baseline is `no-new-sleeps.baseline.json`
-(5 sleeps across 5 files, all intentional negative-window assertions or
-test-fixture latency). Replace inline sleeps with the helpers below.
-
-## Sleep replacement helpers
-
-From `tests/e2e/e2e-setup.ts`:
-
-- `pollUntil(predicate, { timeoutMs, intervalMs, label })` — canonical
-  replacement for `await sleep(N); assert(...)`. Polls until truthy.
-- `connectWs(sessionId)` → `{ waitFor(pred, ms?), waitForFrom(idx, pred, ms?) }`
-  — race-safe WS event waits.
-- `waitForGateStatus`, `waitForSessionStatus`, `signalAndWaitForGate` —
-  domain-specific event waits.
-
-For browser tests, prefer Playwright auto-retrying assertions:
-`expect(locator).toBeVisible()`, `toHaveText()`, `toHaveValue()`. They
-retry up to the timeout without explicit sleeps.
-
-## Server-side test hooks
-
-Some flakes need a deterministic signal the production code doesn't expose.
-Add a test-only export to the relevant module, gated on intent (no env
-flag needed — the export simply isn't called by production code):
-
-- `__setGitStatusFake`, `__getGitStatusInvocationCount`,
-  `__resetGitStatusInvocationCount`, `invalidateGitStatusCache`,
-  `__forceGitStatusCacheExpiry` (in `src/server/server.ts`) for
-  git-status caching tests.
-- `window.bobbitState` (in `src/app/state.ts`) — read-only state reference
-  for browser-side test diagnostics. Used in failure-diagnostic
-  `page.evaluate` blocks to dump actual client state on assertion timeout.
-
-## Known-skipped tests
-
-### project-bugs.spec.ts — Bug 2: Subdirectory project worktree CWD offset
-
-`goal.cwd` is not remapped into `worktreePath` after async worktree setup
-completes. After `setupStatus="ready"`, `readyGoal.cwd` still points at the
-originally-passed subdirectory path (e.g. `/tmp/repo/packages/my-app`)
-rather than the equivalent path inside the worktree
-(`/tmp/repo-wt/goal-…/packages/my-app`).
-
-This is a real production bug in `goal-manager`, not a flaky test. The
-test is skipped (`test.skip`) until the cwd-remap is implemented. See
-the TODO comment above the skipped test for the intended behaviour.
+Use Playwright's retrying assertions for browser conditions and the bounded helpers under `_helpers/test-utils/` for process/API readiness. A known product defect may be skipped only with a precise issue/TODO and retained assertion; a timing-dependent failure is not a known-product-defect exemption.
