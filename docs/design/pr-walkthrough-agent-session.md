@@ -1,5 +1,7 @@
 # PR walkthrough agent session architecture
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **⚠️ SUPERSEDED — launch, lifecycle & termination model.** Two parts of this
 > doc no longer reflect the shipped system:
 > 1. The auto-fullscreen-on-ready plumbing was **removed** — the walkthrough panel

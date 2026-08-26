@@ -1,5 +1,7 @@
 # Staff Inbox Queue — Design
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Historical design record.** Operational documentation lives in
 > [docs/staff-inbox.md](../staff-inbox.md). Older side-panel details about local
 > inbox-open booleans, preview-era shortcut gates, hardcoded source locations,
@@ -249,7 +251,7 @@ Mirrors `defaults/tools/tasks/` structure: one YAML manifest per tool + a single
 | `defaults/tools/inbox/inbox_dismiss.yaml` | manifest — params: `entry_id`, `outcome`, `reason` |
 | `defaults/tools/inbox/extension.ts` | runtime registration + HTTP calls to REST API |
 
-Target descriptions (≤ 150 chars each, per `tests/tool-description-budget.test.ts`):
+Target descriptions (≤ 150 chars each, per `tests/unit/core/tool-description-budget.unit.test.ts`):
 
 | Tool | description (≤150) |
 |---|---|
@@ -257,9 +259,9 @@ Target descriptions (≤ 150 chars each, per `tests/tool-description-budget.test
 | `inbox_complete` | `Mark an inbox entry as completed with an optional result summary.` (~66) |
 | `inbox_dismiss` | `Dismiss an inbox entry as failed or cancelled with a reason.` (~62) |
 
-Parameter descriptions ≤ 80 chars (per `tests/tool-description-budget.test.ts`).
+Parameter descriptions ≤ 80 chars (per `tests/unit/core/tool-description-budget.unit.test.ts`).
 
-Add `"inbox"` to `EXTENSION_FILES` in `tests/tool-description-budget.test.ts` so the new group is included in the budget pin.
+Add `"inbox"` to `EXTENSION_FILES` in `tests/unit/core/tool-description-budget.unit.test.ts` so the new group is included in the budget pin.
 
 Gating: §6.
 
@@ -281,11 +283,11 @@ Gating: §6.
 
 | File | Scenarios |
 |---|---|
-| `tests/inbox-store.spec.ts` | put/get/list/listPending/update/remove/removeAll round-trip; FIFO order; isolated tmp `stateDir`. |
-| `tests/inbox-manager.spec.ts` | enqueue creates pending entry + WS event; transitionToCompleted only allowed from pending; rejects unknown staff/entry; nudger.poke called once per enqueue. |
-| `tests2/core/inbox-nudger.test.ts` | All three policies and wake gating. Compact compacts before enqueue; Preserve skips both context operations; Clear awaits `clearContext`, never compacts, withholds the digest on clear/admission failure, and releases `nudgePending` for retry while entries remain pending. |
-| `tests/e2e/inbox-api.spec.ts` | REST: POST /api/staff/:id/inbox enqueues. GET ?state=pending returns it. DELETE prunes. Inbox tools (impersonated via direct HTTP) transition state. Modelled on `tests/e2e/staff.spec.ts`. |
-| `tests/e2e/ui/staff-inbox.spec.ts` | Browser E2E: navigate to staff session, open inbox panel, add manual entry, assert it appears, reload page, assert persistence, cancel entry, assert removal. Modelled on `tests/e2e/ui/settings.spec.ts`. |
+| `tests/unit/core/inbox-store.unit.test.ts` | put/get/list/listPending/update/remove/removeAll round-trip; FIFO order; isolated tmp `stateDir`. |
+| `tests/unit/core/inbox-manager.unit.test.ts` | enqueue creates pending entry + WS event; transitionToCompleted only allowed from pending; rejects unknown staff/entry; nudger.poke called once per enqueue. |
+| `tests/unit/core/inbox-nudger.unit.test.ts` | All three policies and wake gating. Compact compacts before enqueue; Preserve skips both context operations; Clear awaits `clearContext`, never compacts, withholds the digest on clear/admission failure, and releases `nudgePending` for retry while entries remain pending. |
+| `tests/integration/gateway/inbox-api.gateway.test.ts` | REST: POST /api/staff/:id/inbox enqueues. GET ?state=pending returns it. DELETE prunes. Inbox tools (impersonated via direct HTTP) transition state. Modelled on `tests/integration/gateway/staff.gateway.test.ts`. |
+| `tests/browser/fixtures/staff-inbox.fixture.spec.ts` | Browser E2E: navigate to staff session, open inbox panel, add manual entry, assert it appears, reload page, assert persistence, cancel entry, assert removal. Modelled on `tests/e2e/ui/settings.spec.ts`. |
 
 ---
 
@@ -806,17 +808,17 @@ Cross-references the goal spec's step 9.
 
 | File | Layer | Scenarios |
 |---|---|---|
-| `tests/inbox-store.spec.ts` | unit (file://) | `put`/`get`/`list`/`listPending`/`update`/`remove`/`removeAll` with isolated tmp `stateDir`. FIFO ordering. Reload from disk recovers state. Concurrent put on the same staff id collapses to last-writer-wins (mirrors `StaffStore` behaviour). |
-| `tests/inbox-manager.spec.ts` | unit | `enqueue` emits `inbox.entry.added` and calls `nudger.poke(staffId)` exactly once. `transitionToCompleted` rejects non-pending. `transitionToTerminal` rejects unknown id with 404 semantics. `remove` emits `inbox.entry.removed`. Reject unknown staff id. |
-| `tests2/core/inbox-nudger.test.ts` | core | Idle staff + pending wakes exactly once; busy/empty states skip. Compact awaits compaction; Preserve skips compact and clear; Clear awaits `clearContext` before enqueue, never compacts, and withholds/retries after clear or post-clear admission failure. |
-| `tests2/core/staff-context-policy-store.test.ts` | core | Compact, Preserve, and Clear round-trip; missing, legacy, unknown, and malformed stored values normalize to Compact. |
-| `tests2/integration/inbox-api.test.ts` | integration | All three policies round-trip through `PUT`; unknown tokens leave the prior policy unchanged; omitted creation defaults to Compact. |
-| `tests2/integration/staff-clear-context-policy.test.ts` | integration | Clear wake excludes prior model-facing user/assistant/tool/compaction history, makes the digest first, preserves identity/config, and persists the durable clear boundary and display-only history across reload. |
-| `tests2/browser/journeys/staff-context-policy.journey.spec.ts` | browser | Select/save/reload Compact, Preserve, and Clear; preserve staff/session identity; verify accessible radios and narrow-width wrapping. |
-| `tests/e2e/inbox-api.spec.ts` | API E2E (in-process gateway) | `POST /api/staff/:id/inbox` returns 201 with pending entry. `GET /api/staff/:id/inbox?state=pending` lists it. `GET ?state=completed` excludes it. `POST /api/staff/:id/inbox/:entryId/complete` (with valid `sessionId.staffId === :id`) transitions state. `…/dismiss` with `outcome="failed"` and `reason` transitions. `DELETE /api/staff/:id/inbox/:entryId` prunes. 403 on `sessionId` whose `staffId` doesn't match. 404 on unknown staff/entry. 409 on non-pending entry transition. |
-| `tests/e2e/ui/staff-inbox.spec.ts` | Browser E2E (spawned gateway) | Open app → navigate to a staff session (created via REST in the `beforeAll`) → explicitly open the `inbox` workspace tab → "+ Add to inbox" opens dialog → submit → entry appears in Pending section → reload page → entry still there (content persistence) and the tab/size state matches the server workspace → click Cancel on entry → entry moves to History section (state=cancelled) → click delete in history → entry removed. Close the `inbox` tab, reload, and assert it stays closed until explicitly reopened. Required by AGENTS.md ("every user-facing feature MUST have a browser E2E"). |
-| `tests/tool-description-budget.test.ts` | unit (existing — extended) | Add `"inbox"` to `EXTENSION_FILES`. Existing assertions automatically enforce the 150-char / 80-char budgets on the three new tools. |
-| `tests/staff-trigger-engine.test.ts` | unit (existing — updated) | Replace `wake()` assertions with `inboxManager.enqueue()` assertions. Confirm the streaming/starting skip is gone (trigger always enqueues regardless of session state). |
+| `tests/unit/core/inbox-store.unit.test.ts` | unit (file://) | `put`/`get`/`list`/`listPending`/`update`/`remove`/`removeAll` with isolated tmp `stateDir`. FIFO ordering. Reload from disk recovers state. Concurrent put on the same staff id collapses to last-writer-wins (mirrors `StaffStore` behaviour). |
+| `tests/unit/core/inbox-manager.unit.test.ts` | unit | `enqueue` emits `inbox.entry.added` and calls `nudger.poke(staffId)` exactly once. `transitionToCompleted` rejects non-pending. `transitionToTerminal` rejects unknown id with 404 semantics. `remove` emits `inbox.entry.removed`. Reject unknown staff id. |
+| `tests/unit/core/inbox-nudger.unit.test.ts` | core | Idle staff + pending wakes exactly once; busy/empty states skip. Compact awaits compaction; Preserve skips compact and clear; Clear awaits `clearContext` before enqueue, never compacts, and withholds/retries after clear or post-clear admission failure. |
+| `tests/unit/core/staff-context-policy-store.unit.test.ts` | core | Compact, Preserve, and Clear round-trip; missing, legacy, unknown, and malformed stored values normalize to Compact. |
+| `tests/integration/gateway/inbox-api.gateway.test.ts` | integration | All three policies round-trip through `PUT`; unknown tokens leave the prior policy unchanged; omitted creation defaults to Compact. |
+| `tests/integration/gateway/staff-clear-context-policy.gateway.test.ts` | integration | Clear wake excludes prior model-facing user/assistant/tool/compaction history, makes the digest first, preserves identity/config, and persists the durable clear boundary and display-only history across reload. |
+| `tests/browser/journeys/staff-context-policy.journey.spec.ts` | browser | Select/save/reload Compact, Preserve, and Clear; preserve staff/session identity; verify accessible radios and narrow-width wrapping. |
+| `tests/integration/gateway/inbox-api.gateway.test.ts` | API E2E (in-process gateway) | `POST /api/staff/:id/inbox` returns 201 with pending entry. `GET /api/staff/:id/inbox?state=pending` lists it. `GET ?state=completed` excludes it. `POST /api/staff/:id/inbox/:entryId/complete` (with valid `sessionId.staffId === :id`) transitions state. `…/dismiss` with `outcome="failed"` and `reason` transitions. `DELETE /api/staff/:id/inbox/:entryId` prunes. 403 on `sessionId` whose `staffId` doesn't match. 404 on unknown staff/entry. 409 on non-pending entry transition. |
+| `tests/browser/fixtures/staff-inbox.fixture.spec.ts` | Browser E2E (spawned gateway) | Open app → navigate to a staff session (created via REST in the `beforeAll`) → explicitly open the `inbox` workspace tab → "+ Add to inbox" opens dialog → submit → entry appears in Pending section → reload page → entry still there (content persistence) and the tab/size state matches the server workspace → click Cancel on entry → entry moves to History section (state=cancelled) → click delete in history → entry removed. Close the `inbox` tab, reload, and assert it stays closed until explicitly reopened. Required by AGENTS.md ("every user-facing feature MUST have a browser E2E"). |
+| `tests/unit/core/tool-description-budget.unit.test.ts` | unit (existing — extended) | Add `"inbox"` to `EXTENSION_FILES`. Existing assertions automatically enforce the 150-char / 80-char budgets on the three new tools. |
+| `tests/unit/core/staff-trigger-engine.unit.test.ts` | unit (existing — updated) | Replace `wake()` assertions with `inboxManager.enqueue()` assertions. Confirm the streaming/starting skip is gone (trigger always enqueues regardless of session state). |
 
 Run order:
 1. `npm run check` after wiring the new files.
@@ -855,10 +857,10 @@ Run order:
 | `src/ui/inbox/InboxPanel.ts` | NEW | LitElement `<inbox-panel>`. |
 | `src/ui/inbox/InboxEntry.ts` | NEW | Single-row item component. |
 | `src/ui/inbox/AddToInboxDialog.ts` | NEW | Manual enqueue composer. |
-| `tests/inbox-store.spec.ts` | NEW | Unit. |
-| `tests/inbox-manager.spec.ts` | NEW | Unit. |
-| `tests/inbox-nudger.spec.ts` | NEW | Unit. |
-| `tests/e2e/inbox-api.spec.ts` | NEW | API E2E. |
-| `tests/e2e/ui/staff-inbox.spec.ts` | NEW | Browser E2E. |
-| `tests/tool-description-budget.test.ts` | EDIT | Add `"inbox"` to `EXTENSION_FILES`. |
-| `tests/staff-trigger-engine.test.ts` | EDIT | Re-target from `wake()` to `inboxManager.enqueue()`. |
+| `tests/unit/core/inbox-store.unit.test.ts` | NEW | Unit. |
+| `tests/unit/core/inbox-manager.unit.test.ts` | NEW | Unit. |
+| `tests/unit/core/inbox-nudger.unit.test.ts` | NEW | Unit. |
+| `tests/integration/gateway/inbox-api.gateway.test.ts` | NEW | API E2E. |
+| `tests/browser/fixtures/staff-inbox.fixture.spec.ts` | NEW | Browser E2E. |
+| `tests/unit/core/tool-description-budget.unit.test.ts` | EDIT | Add `"inbox"` to `EXTENSION_FILES`. |
+| `tests/unit/core/staff-trigger-engine.unit.test.ts` | EDIT | Re-target from `wake()` to `inboxManager.enqueue()`. |

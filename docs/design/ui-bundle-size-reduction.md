@@ -1,5 +1,7 @@
 # Reduce UI bundle size — design doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: shipped (HEAD `1741cbf6`)  •  Goal branch: `goal-goal-reduce-ui--0ce41cc6`  •  Author: architect-0938851a
 
 ## Outcome
@@ -13,7 +15,7 @@ What landed:
 - **Task C** — lazy tool-renderer registry: `registerLazyToolRenderer()` in `src/ui/tools/renderer-registry.ts`. Heavy renderers (`gate_inspect`, `verification_result`, `preview_open`, `extract_document`, `javascript_repl`, artifacts) load on first encounter.
 - **Task D** — `pdfjs-dist` and `docx-preview` switched to dynamic `await import()` at call sites in `src/ui/utils/attachment-utils.ts`, `AttachmentOverlay`, `PdfArtifact`, `DocxArtifact`.
 - **Task E** — Vite build flags (`target: "esnext"`, `modulePreload.polyfill: false`, `chunkSizeWarningLimit: 600`) plus a `knip`-driven dead-code sweep across `src/app/` and `src/ui/`.
-- **Task F** — SW route-chunk warming via the `bobbitSwVersion` plugin in `vite.config.ts` (replaces `/*__BOBBIT_PRECACHE_CHUNKS__*/` in `public/sw.js` from `dist/ui/.vite/manifest.json`) and a budget regression guard at `tests/bundle-size.test.ts` (`npm run test:bundle`).
+- **Task F** — SW route-chunk warming via the `bobbitSwVersion` plugin in `vite.config.ts` (replaces `/*__BOBBIT_PRECACHE_CHUNKS__*/` in `public/sw.js` from `dist/ui/.vite/manifest.json`) and a budget regression guard at `tests/unit/core/bundle-size.unit.test.ts` (`npm run test:bundle`).
 
 Follow-on bug fixes during stabilisation:
 
@@ -344,7 +346,7 @@ Six independently-shippable, non-overlapping tasks. Tasks 1, 2a, 4, 5 can run fu
 - **Estimated savings**: -10–35 kB gzipped combined.
 
 ### Task F — SW route-chunk warming + bundle-size assertion test (item 6 + validation)
-- **Files**: `vite.config.ts` (extend `bobbitSwVersion()` plugin, set `build.manifest: true`), `public/sw.js` (line 29), new `tests/bundle-size.spec.ts`.
+- **Files**: `vite.config.ts` (extend `bobbitSwVersion()` plugin, set `build.manifest: true`), `public/sw.js` (line 29), new `tests/unit/core/bundle-size.unit.test.ts`.
 - **Scope**: inject precache chunk list into SW at build time; add a Node-test that runs `npm run build:ui` (or reads `dist/ui` after a previous build) and asserts `index-*.js` gzipped size ≤ 600 kB and that no non-worker chunk exceeds 500 kB except the known PDF worker.
 - **Depends on**: Task A (route chunks must exist before SW can pre-cache them).
 
@@ -364,7 +366,7 @@ npx vite-bundle-visualizer 2>&1 | tail -20                             # treemap
 
 ### Bundle-size assertion (Task F)
 
-`tests/bundle-size.spec.ts`:
+`tests/unit/core/bundle-size.unit.test.ts`:
 
 ```ts
 import { test } from "node:test";

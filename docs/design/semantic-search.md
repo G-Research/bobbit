@@ -1,5 +1,7 @@
 # Semantic Search — Design Document
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > ⚠️ **Historical — superseded.** This document describes the **previous** semantic-search architecture (Nomic embeddings + LanceDB) that was replaced for portability reasons. The current engine is FlexSearch (pure-JS, BM25-style lexical ranking, no native binaries, no model downloads).
 >
 > For the current architecture and ranking reference, see **[docs/internals.md — Semantic search](../internals.md#semantic-search)**. For runtime persistence and recovery, see **[Search worker and persistence](../search-worker-persistence.md)**. [Portable Search](portable-search.md) records the superseded transition design and portability rationale.
@@ -607,15 +609,15 @@ All tests go under `tests/`. Use existing harnesses (`file://` fixtures for unit
 | File | Covers |
 |---|---|
 | `tests/search/embedder.spec.ts` | `Embedder` contract using a **fake deterministic embedder** (hash → 768-dim vector). Parent tests don't download the real model. |
-| `tests/search/content-policy.spec.ts` | Role detection (user/assistant/tool_call/tool_result), `<thinking>` strip, tool-call arg summary, >32KB tool_result skip, 500-char tool_result truncation. Covers the content-policy table row-by-row. |
-| `tests/search/chunker.spec.ts` | Boundary cases: empty, single-token, exactly 2000 tokens, 2001 tokens → 2 chunks, overlap preserved, deterministic chunk ids. |
-| `tests/search/snippet-highlight.spec.ts` | `<b>`-wrap, HTML escape, window centring, edge ellipses, case-insensitive, multi-token. |
-| `tests/search/weight-apply.spec.ts` | Given two rows with equal raw fused score but weights 2.0 vs 1.0, the 2.0 row ranks first. |
-| `tests/search/meta-mismatch.spec.ts` | Write meta with stale `embedder_id` / `dim` / `schema_version` / `content_policy_version`; next `open()` triggers rebuild. |
-| `tests/search/index-source-contract.spec.ts` | Shared contract runner applied to Goal/Session/Message/Staff sources: `iterate()` yields valid `Indexable`s. |
-| `tests/search/files-source-stub.spec.ts` | **V2-readiness test.** Throwaway `FilesIndexSource` iterates a fixture dir, flows end-to-end through `Indexer` → `LanceStore` → `HybridQuery` with **zero changes** to the rest. Asserts no new imports in `indexer.ts`. |
+| `tests/dom/search/content-policy.dom.test.ts` | Role detection (user/assistant/tool_call/tool_result), `<thinking>` strip, tool-call arg summary, >32KB tool_result skip, 500-char tool_result truncation. Covers the content-policy table row-by-row. |
+| `tests/dom/search/chunker.dom.test.ts` | Boundary cases: empty, single-token, exactly 2000 tokens, 2001 tokens → 2 chunks, overlap preserved, deterministic chunk ids. |
+| `tests/dom/search/snippet-highlight.dom.test.ts` | `<b>`-wrap, HTML escape, window centring, edge ellipses, case-insensitive, multi-token. |
+| `tests/dom/search/weight-apply.dom.test.ts` | Given two rows with equal raw fused score but weights 2.0 vs 1.0, the 2.0 row ranks first. |
+| `tests/dom/search/meta-mismatch.dom.test.ts` | Write meta with stale `embedder_id` / `dim` / `schema_version` / `content_policy_version`; next `open()` triggers rebuild. |
+| `tests/dom/search/index-source-contract.dom.test.ts` | Shared contract runner applied to Goal/Session/Message/Staff sources: `iterate()` yields valid `Indexable`s. |
+| `tests/dom/search/files-source-stub.dom.test.ts` | **V2-readiness test.** Throwaway `FilesIndexSource` iterates a fixture dir, flows end-to-end through `Indexer` → `LanceStore` → `HybridQuery` with **zero changes** to the rest. Asserts no new imports in `indexer.ts`. |
 
-### Lexical parity suite (`tests/search/lexical-parity.spec.ts`)
+### Lexical parity suite (`tests/dom/search/lexical-parity.dom.test.ts`)
 
 Guards the FTS5 → Lance+Tantivy switch. Seed a fixed corpus and assert each query returns the same top-1 as the old suite:
 
@@ -643,7 +645,7 @@ Extend existing search tests:
 - Settings → Maintenance "Search Index" panel shows non-zero row counts after seed.
 - Orphan-row scan appears in Maintenance and cleans up on Execute.
 
-### Scale smoke (`tests/search/scale-smoke.spec.ts`, tag `@slow`, not in CI default)
+### Scale smoke (`tests/dom/search/scale-smoke.dom.test.ts`, tag `@slow`, not in CI default)
 
 - Generate 100 000 synthetic `Indexable`s (fake embedder — sub-ms per row).
 - Trigger `createIndexes()`.
@@ -686,7 +688,7 @@ LanceDB supports IVF_PQ and HNSW.
 - Upsert batch: 128 rows.
 
 ### 100K scale smoke
-See `tests/search/scale-smoke.spec.ts` above. Non-blocking for launch but we want a red signal if we regress.
+See `tests/dom/search/scale-smoke.dom.test.ts` above. Non-blocking for launch but we want a red signal if we regress.
 
 ---
 
@@ -721,8 +723,8 @@ Tasks are **file-disjoint** wherever possible so multiple coders can work simult
 |---|---|---|
 | **T1. `embedder.ts` + Nomic impl** | `src/server/search/embedder.ts` | types.ts |
 | **T2. `lance-store.ts`** | `src/server/search/lance-store.ts` | types.ts, meta.ts |
-| **T3. `content-policy.ts` + tests** | `src/server/search/content-policy.ts`, `tests/search/content-policy.spec.ts`, delete `message-extractor.ts` **but** keep a re-export shim until T6 lands | types.ts |
-| **T4. `chunker.ts` + tests** | `src/server/search/chunker.ts`, `tests/search/chunker.spec.ts` | types.ts (embedder injected) |
+| **T3. `content-policy.ts` + tests** | `src/server/search/content-policy.ts`, `tests/dom/search/content-policy.dom.test.ts`, delete `message-extractor.ts` **but** keep a re-export shim until T6 lands | types.ts |
+| **T4. `chunker.ts` + tests** | `src/server/search/chunker.ts`, `tests/dom/search/chunker.dom.test.ts` | types.ts (embedder injected) |
 
 ### Phase 2 — Parallel (3 concurrent coders after T1–T4 merge)
 
@@ -750,7 +752,7 @@ Tasks are **file-disjoint** wherever possible so multiple coders can work simult
 **T13. Parity + integration + E2E tests.** All tests listed in §12.
 **T14. Docker image sanity.** Verify `linux-x64-*` binary loads inside the sandbox image; add apt deps if needed.
 **T15. Docs.** Update `docs/internals.md`, `docs/debugging.md`, recipes in `AGENTS.md`.
-**T16. Smoke / scale.** Run `tests/search/scale-smoke.spec.ts`. Verify macOS Intel behaviour.
+**T16. Smoke / scale.** Run `tests/dom/search/scale-smoke.dom.test.ts`. Verify macOS Intel behaviour.
 
 ### Critical path
 T0 → T1,T2,T3,T4 → T5,T6,T7 → T8 → T9 → T11,T12 → T13 → T16.

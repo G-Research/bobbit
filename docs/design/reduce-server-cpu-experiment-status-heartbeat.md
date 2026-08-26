@@ -115,7 +115,7 @@ Semantics preserved:
 
 ## Tests
 
-Added focused unit coverage in `tests/session-manager-heartbeat.test.ts` for:
+Added focused unit coverage in `tests/unit/core/session-manager-heartbeat.unit.test.ts` for:
 
 - connected-session tracking and unchanged heartbeat `statusVersion`,
 - disconnect removal,
@@ -124,8 +124,8 @@ Added focused unit coverage in `tests/session-manager-heartbeat.test.ts` for:
 
 Verification run:
 
-- `npx tsx --test --test-force-exit tests/session-manager-heartbeat.test.ts tests/session-manager-status.test.ts` — passed.
+- `npx tsx --test --test-force-exit tests/unit/core/session-manager-heartbeat.unit.test.ts tests/unit/core/session-manager-status.unit.test.ts` — passed.
 - `npm run check` — passed.
 - `npm run test:unit` — passed.
-- `npm run build --silent 2>/dev/null && npx playwright test --config playwright-e2e.config.ts tests/e2e/ui/session-status-recovery.spec.ts` — passed.
-- `npm run test:e2e` — attempted; suite had one unrelated remaining failure in `tests/e2e/ui/dynamic-chat-tabs.spec.ts:705` after retries, with status/session-recovery coverage passing separately.
+- `npm run build --silent 2>/dev/null && npx playwright test --config playwright-e2e.config.ts tests/browser/journeys/ui/session-status-recovery.journey.spec.ts` — passed.
+- `npm run test:e2e` — attempted; suite had one unrelated remaining failure in `tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts:705` after retries, with status/session-recovery coverage passing separately.

@@ -161,13 +161,13 @@ Without both, the policy data path is dead — rule 2 stays dormant indefinitely
 
 ## Pinning tests
 
-- `tests/notification-policy.spec.ts` — file:// fixture covering the
+- `tests/dom/notification-policy.dom.test.ts` — file:// fixture covering the
   four-rule matrix including the spawn-handoff debounce case.
-- `tests/workflow-validator.spec.ts` — `human-signoff` requires `prompt` +
+- `tests/unit/core/workflow-validator.unit.test.ts` — `human-signoff` requires `prompt` +
   `label`.
-- `tests/e2e/human-signoff.spec.ts` — full REST flow: signal → poll until
+- `tests/integration/gateway/human-signoff.gateway.test.ts` — full REST flow: signal → poll until
   `awaitingHuman: true` → POST `/signoff` pass and fail paths → idempotent
   409 on repeat.
-- `tests/e2e/ui/goal-status-widget.spec.ts` — pill visibility, popover,
+- `tests/browser/journeys/ui/goal-status-widget.journey.spec.ts` — pill visibility, popover,
   **Start Review** handoff, review-pane Approve / Reject flow, reload persistence,
   and cleanup.

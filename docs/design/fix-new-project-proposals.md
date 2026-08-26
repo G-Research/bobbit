@@ -52,15 +52,15 @@ project, the same bug can silently rename or reconfigure the source project.
 
 The current tests expose the gap:
 
-- `tests2/integration/cross-project-proposals.test.ts` proves that a create draft
+- `tests/integration/gateway/cross-project-proposals.gateway.test.ts` proves that a create draft
   can be seeded, but does not accept it.
-- `tests2/dom/resolve-project-mode.test.ts` currently codifies the wrong absent-id
+- `tests/dom/resolve-project-mode.dom.test.ts` currently codifies the wrong absent-id
   fallback to the source session.
-- `tests2/dom/project-accept-dispatch.test.ts` covers explicit existing targets,
+- `tests/dom/project-accept-dispatch.dom.test.ts` covers explicit existing targets,
   but not absent-id direct creation.
-- `tests2/browser/journeys/cross-project-proposal-banner.journey.spec.ts` checks
+- `tests/browser/journeys/cross-project-proposal-banner.journey.spec.ts` checks
   explicit target mode/banner behavior, not a real absent-id accept.
-- `tests2/browser/journeys/project-proposal-accept.journey.spec.ts` injects slots
+- `tests/browser/journeys/project-proposal-accept.journey.spec.ts` injects slots
   whose source project is also treated as the target; it does not seed and
   accept a new project from a normal or Headquarters session.
 
@@ -349,12 +349,11 @@ false for this bug.
 
 ## Test plan
 
-All new tests belong in `tests2/` and must be registered in
-`tests2/tests-map.json` through the normal inventory workflow.
+All new tests use the canonical `tests/` semantic paths and suffixes so lane discovery is automatic.
 
 ### DOM/unit target and dispatch tests
 
-Update `tests2/dom/resolve-project-mode.test.ts` (or replace it with a focused
+Update `tests/dom/resolve-project-mode.dom.test.ts` (or replace it with a focused
 `project-proposal-target.test.ts`) to pin the full matrix:
 
 - absent id from a registered source resolves create;
@@ -366,7 +365,7 @@ Update `tests2/dom/resolve-project-mode.test.ts` (or replace it with a focused
   registered or provisional source;
 - blank id is treated as absent.
 
-Extend `tests2/dom/project-accept-dispatch.test.ts` to click through the real
+Extend `tests/dom/project-accept-dispatch.dom.test.ts` to click through the real
 `acceptProjectProposalFromPanel()` and assert endpoint chains:
 
 - ordinary registered source + absent id: `POST /api/projects`, then config PUT
@@ -387,10 +386,10 @@ config against the checkpoint id.
 
 ### Real integration/browser acceptance
 
-Extend `tests2/integration/cross-project-proposals.test.ts` for seed contracts,
+Extend `tests/integration/gateway/cross-project-proposals.gateway.test.ts` for seed contracts,
 but do not count seed-only assertions as acceptance coverage. Add or extend a
 browser journey (prefer
-`tests2/browser/journeys/project-proposal-accept.journey.spec.ts`) that uses the
+`tests/browser/journeys/project-proposal-accept.journey.spec.ts`) that uses the
 real seed endpoint, hydrates the real panel, clicks the real primary action, and
 then queries the real API:
 
@@ -420,9 +419,9 @@ server-backed draft and activate the panel before clicking.
 
 Do not weaken:
 
-- `tests2/core/project-proposal-diff.test.ts` (`projectId` is never config);
+- `tests/unit/core/project-proposal-diff.unit.test.ts` (`projectId` is never config);
 - pending/error/draft retention cases in
-  `tests2/browser/journeys/project-proposal-accept.journey.spec.ts`;
+  `tests/browser/journeys/project-proposal-accept.journey.spec.ts`;
 - explicit cross-project banner journey;
 - conditional `root_path` seed validation;
 - provisional API promotion and project-assistant saved-state coverage.
@@ -432,19 +431,16 @@ Do not weaken:
 Run focused suites first, then project gates:
 
 ```bash
-npx vitest run tests2/dom/resolve-project-mode.test.ts tests2/dom/project-accept-dispatch.test.ts
-npx vitest run tests2/integration/cross-project-proposals.test.ts
-npx playwright test tests2/browser/journeys/project-proposal-accept.journey.spec.ts
+npx vitest run tests/dom/resolve-project-mode.dom.test.ts tests/dom/project-accept-dispatch.dom.test.ts
+npx vitest run tests/integration/gateway/cross-project-proposals.gateway.test.ts
+npx playwright test tests/browser/journeys/project-proposal-accept.journey.spec.ts
 npm run check
 npm run test:unit
 npm run test:browser
 npm run build
 ```
 
-If the implementation adds or moves a browser test, use its registered v2 path
-in the focused Playwright command and regenerate/reconcile `tests2/tests-map.json`
-using the repository's testing-v2 inventory tooling rather than editing census
-counts by hand.
+If the implementation adds or moves a browser test, use its canonical semantic path in the focused Playwright command; convention-based discovery requires no registry update.
 
 ## Non-goals
 

@@ -1,5 +1,7 @@
 # PR Walkthrough `hunkSignature` TypeError — Root-Cause Analysis
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > Status: **fixed and merged.** Both defects below were resolved as described in
 > **Proposed fix**; the analysis is retained for context. See **Resolution**
 > immediately below for what landed and the regression tests that pin it.
@@ -28,7 +30,7 @@ Both fixes landed exactly as proposed; `PrWalkthroughHunk.header` stays required
 
 ### Regression tests
 
-- **Server unit** — `tests/pr-walkthrough-bundle-hunk-header.test.ts`: feeds a
+- **Server unit** — `tests/unit/core/pr-walkthrough-bundle-hunk-header.unit.test.ts`: feeds a
   persisted bundle whose hunk omits `header` and asserts every reconstructed
   hunk carries a string `header`; also pins that a present header is preserved
   verbatim. Fails before the producer fix.

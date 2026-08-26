@@ -101,7 +101,7 @@ scheduling change does not remove hydration: side-panel tabs, active tab, size
 mode, proposals, and review documents still restore through their existing
 guarded paths. Workspace revision and conflict rules are unchanged.
 
-`tests2/dom/cold-session-workspace-ordering-repro.test.ts` pins this contract. It
+`tests/dom/cold-session-workspace-ordering-repro.dom.test.ts` pins this contract. It
 holds workspace hydration open while verifying that all 321 transcript rows
 render, `get_messages` precedes relevant REST requests, and only one initial
 workspace GET occurs. It also covers rapid navigation, pre-bind stale responses,
@@ -135,7 +135,7 @@ turnkey repeat commands.
 - Node 24.13.1 / V8 13.6; Vitest 4.1.10 with happy-dom; one worker and
   `retry: 0`.
 - The ignored fixture was derived from
-  `tests2/dom/cold-session-workspace-ordering-repro.test.ts`. It used a
+  `tests/dom/cold-session-workspace-ordering-repro.dom.test.ts`. It used a
   321-record transcript and a real 250 ms `setTimeout` in the workspace endpoint
   for seven sequential cold samples per variant.
 - Controlled WebSocket snapshots were delivered in a microtask. This excludes
@@ -219,10 +219,10 @@ and virtualized rendering for local paint as follow-up work.
 
 ## Tests
 
-- `tests2/dom/cold-session-workspace-ordering-repro.test.ts` — cold transcript
+- `tests/dom/cold-session-workspace-ordering-repro.dom.test.ts` — cold transcript
   ordering, one initial workspace owner, stale navigation, reconnect, and cache
   preservation.
-- `tests2/core/dev-boot-timing.test.ts` — sink append/parse, directory creation,
+- `tests/unit/core/dev-boot-timing.unit.test.ts` — sink append/parse, directory creation,
   limits, malformed entries, and trimming.
-- `tests2/integration/dev-boot-timing-api.test.ts` — endpoint gating, write/read
+- `tests/integration/gateway/dev-boot-timing-api.gateway.test.ts` — endpoint gating, write/read
   under the harness, and invalid-body rejection.

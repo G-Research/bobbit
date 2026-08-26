@@ -1,5 +1,7 @@
 # Design: Test Suite Phase Invariant
 
+> **Historical test-layout note:** This record documents the pre-migration test topology and its original transition rationale. Its non-canonical paths and deleted registry/runner references are historical evidence, not current placement or execution guidance.
+
 ## Problem & big-picture context
 
 Bobbit runs tests through **workflow gates**, not a hand-typed `npm test`. The

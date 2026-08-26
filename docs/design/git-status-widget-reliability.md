@@ -1,5 +1,7 @@
 # Git status widget reliability — design doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Goal spec: the session and goal-dashboard git-status widgets disappear on first-fetch failure, have no safety poll, and the server re-scans the whole working tree on every call with no caching. Make the widget always visible when a repo might exist, resilient to transient failure, and fast on warm cache.
 
 > **Perf revision (2026-04-30).** The server-side worker described in §5 and §7 has been replaced. The host path now lives in `src/server/skills/git-status-native.ts` (`runBatchGitStatusNative`) and fans out direct `git.exe` calls via `child_process.execFile` (argv array, no shell) in two parallel `Promise.all` phases — Phase A resolves branch/primary/porcelain/upstream metadata, Phase B fans out the four ahead/behind counts once Phase A has the primary ref. There is no Git Bash dependency on Windows. The in-server retry loop and the duplicate handler-level retry are both gone — a single `execFile` per git call with a 3s timeout, fast-fail; client-side retry (§2) is the only resilience layer. `GIT_STATUS_TTL_MS` is now `2000` (was `750`) so dashboard fan-out and visibility refreshes coalesce more aggressively. The container path (`containerId` set) preserves the legacy single `docker exec sh -c '<batch>'` round-trip — inside Linux containers `git` is fast and parallel `docker exec` would multiply daemon round-trips. `runBatchGitStatusCount` increments exactly once per `batchGitStatus` call. The numbered constants and code samples below (e.g. `GIT_STATUS_TTL_MS = 750`, `timeout: 15000`, the "Phase A 3s / Phase B 12s" split) reflect the original reliability work and are kept for historical context.
@@ -450,7 +452,7 @@ Add `@property({ type: Boolean }) partial = false;` to `GitStatusWidget` and wir
 
 ## 8. Test plan
 
-### 8.1 Unit — `tests/git-status-widget.spec.ts` (new)
+### 8.1 Unit — `tests/browser/fixtures/git-status-widget.fixture.spec.ts` (new)
 
 Playwright file:// fixture rendering the widget.
 
@@ -533,7 +535,7 @@ All green before signaling `implementation`.
 | `src/ui/components/AgentInterface.ts` | Add `gitRepoKnown` property. Replace render gates. Reset on session change. Pass `.partial` to widget. |
 | `src/ui/components/GitStatusWidget.ts` | Skeleton render state. Refresh-dot overlay. `partial` property. Dropdown-open triggers full refetch. |
 | `src/server/server.ts` | Rename `batchGitStatus` → `runBatchGitStatus`. Add cached `batchGitStatus` wrapper with TTL + single-flight. Add `opts.untracked`. Split into Phase A / B. Return `partial` / `untrackedIncluded`. Invalidate cache on `?fetch=true` and from commit/push/pull endpoints. Bump timeout to 15s. |
-| `tests/git-status-widget.spec.ts` | NEW — render states. |
+| `tests/browser/fixtures/git-status-widget.fixture.spec.ts` | NEW — render states. |
 | `tests/git-status-refresh.spec.ts` | NEW — retry/abort/tri-state. |
 | `tests/git-status-poll.spec.ts` | NEW — poll + coalesce + visibility. |
 | `tests/e2e/ui/git-status-resilience.spec.ts` | NEW — browser E2E. |
@@ -688,11 +690,11 @@ If future render-tree changes reintroduce a wedge, the simpler model (sync close
 
 ### 14.4 Tests
 
-- **`tests/git-status-widget-wedge.spec.ts`** — Playwright file:// regression suite, mounted via the real `git-status-widget-states` bundle so `disconnectedCallback` actually runs. Three scenarios, each open + perturb + click and assert the dropdown reopens:
+- **`tests/dom/git-status-widget-wedge.dom.test.ts`** — Playwright file:// regression suite, mounted via the real `git-status-widget-states` bundle so `disconnectedCallback` actually runs. Three scenarios, each open + perturb + click and assert the dropdown reopens:
   1. *Disconnect mid-close* — start the close animation, `removeChild` + `appendChild` the widget synchronously, then click. Mirrors the production trigger.
   2. *External portal removal* — yank `#git-status-dropdown` out of body while `expanded === true`. Self-heal must reopen.
   3. *`animationcancel` event* — start close, dispatch `animationcancel` synchronously. State must reset and the next click reopens.
-- **`tests/session-manager-git-dropdown-listener.test.ts`** — Node static-source assertion. Reads `src/app/session-manager.ts`, asserts the dropdown-open handler is stored on `__gitStatusDropdownOpenHandler` and that `removeEventListener` precedes `addEventListener` in the wiring block. Fails if anyone reverts to anonymous `addEventListener("git-status-dropdown-open", () => ...)`. Cheaper than a runtime listener-count spy and equally regression-proof for the leak.
+- **`tests/unit/core/session-manager-git-dropdown-listener.unit.test.ts`** — Node static-source assertion. Reads `src/app/session-manager.ts`, asserts the dropdown-open handler is stored on `__gitStatusDropdownOpenHandler` and that `removeEventListener` precedes `addEventListener` in the wiring block. Fails if anyone reverts to anonymous `addEventListener("git-status-dropdown-open", () => ...)`. Cheaper than a runtime listener-count spy and equally regression-proof for the leak.
 - **Skeleton inertness preserved** — the existing `git-status-widget-states` and `git-status-interactions` suites still cover `loading && !branch` non-interactivity, outside-click close, and Escape close. The wedge fix must not regress these.
 
 ### 14.5 Out of scope
@@ -774,8 +776,8 @@ The loading/visibility/persistence rules above are extracted out of `session-man
 
 ### 15.6 Tests
 
-- **`tests2/core/git-empty-widget-cache.test.ts`** — pins the HQ `409 GOAL_GIT_UNAVAILABLE` path: git-status maps to error, retries exhaust with no showable data, the hidden hint is cached, cached-hidden reconnect never writes `gitStatusLoading = true`, exactly one quiet recheck fires, and later showable content reveals the widget/caches `'yes'`.
-- **`tests2/core/git-widget-quiet-refresh.test.ts`** — pins the existing `runWidgetGitRefresh` quiet state machine for cached `'no'`: no skeleton/loading on quiet reconnect, one recheck, cache preservation, and reveal/cache `'yes'` when content appears.
-- **`tests2/core/git-repo-cache.test.ts`** — pins the pure cache module: `computeConnectGitState` mapping (no entry → first-ever skeleton still allowed; cached `'no'`/`'hidden'` → quiet hidden start; cached `'yes'` → normal refresh), the 200-entry cap, prune behaviour, and broken/absent-`localStorage` tolerance.
+- **`tests/unit/core/git-empty-widget-cache.unit.test.ts`** — pins the HQ `409 GOAL_GIT_UNAVAILABLE` path: git-status maps to error, retries exhaust with no showable data, the hidden hint is cached, cached-hidden reconnect never writes `gitStatusLoading = true`, exactly one quiet recheck fires, and later showable content reveals the widget/caches `'yes'`.
+- **`tests/unit/core/git-widget-quiet-refresh.unit.test.ts`** — pins the existing `runWidgetGitRefresh` quiet state machine for cached `'no'`: no skeleton/loading on quiet reconnect, one recheck, cache preservation, and reveal/cache `'yes'` when content appears.
+- **`tests/unit/core/git-repo-cache.unit.test.ts`** — pins the pure cache module: `computeConnectGitState` mapping (no entry → first-ever skeleton still allowed; cached `'no'`/`'hidden'` → quiet hidden start; cached `'yes'` → normal refresh), the 200-entry cap, prune behaviour, and broken/absent-`localStorage` tolerance.
 
-All three land in `tests2/core` and are registered in `tests2/tests-map.json`. The pre-existing tri-state (§1), skeleton (§4.1), poll (§3), and dropdown-lifecycle (§14) suites are unchanged — this fix must not regress them.
+All three land in `tests/unit/core/` with `.unit.test.ts` suffixes and are discovered automatically. The pre-existing tri-state (§1), skeleton (§4.1), poll (§3), and dropdown-lifecycle (§14) suites are unchanged — this fix must not regress them.

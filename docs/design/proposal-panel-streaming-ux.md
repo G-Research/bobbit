@@ -1,5 +1,7 @@
 # Design — Proposal Panel Streaming UX
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Goal: while a `propose_*` tool call is being delta-streamed, every proposal panel must (1) disable its primary submit button, (2) show a clear streaming indicator, (3) preserve the user's scroll position across re-renders, and (4) preserve `<textarea>` scroll/selection across Lit `.value=` rewrites. Apply uniformly to the seven panels: `goal`, `project`, `role`, `tool`, `staff`, `workflow`, `setup`.
 
 This document is implementation-ready. A coder can follow it without further investigation.
@@ -450,7 +452,7 @@ This is intentionally a duplicate of the AgentInterface logic rather than a refa
 
 ## 4. Test plan
 
-### 4.1 Unit — `tests/follow-tail.spec.ts` (NEW)
+### 4.1 Unit — `tests/browser/fixtures/follow-tail.fixture.spec.ts` (NEW)
 
 Playwright `file://` fixture against a synthetic scroll container (a fixed-height `<div>` with overflowing children, or a mocked `HTMLElement` with `scrollTop`/`scrollHeight`/`clientHeight` getters/setters).
 
@@ -468,9 +470,9 @@ Playwright `file://` fixture against a synthetic scroll container (a fixed-heigh
 | Textarea selection preservation | Set `selectionStart=20, selectionEnd=30`, dispatch `keyup`, rewrite `.value`, reconcile | `selectionStart === 20 && selectionEnd === 30` |
 | Selection capture on `select`/`keyup`/`click` | Dispatch each, with cursor at offset 50 | `selectionStart === 50` |
 
-### 4.2 Browser E2E — `tests/e2e/ui/proposal-panel-streaming.spec.ts` (NEW)
+### 4.2 Browser E2E — `tests/browser/fixtures/proposal-panel-streaming.fixture.spec.ts` (NEW)
 
-Patterns: `tests/e2e/ui/settings.spec.ts` for navigation/persistence; `tests/e2e/ui/stories-streaming.spec.ts` for streaming simulation via mock-agent prompts.
+Patterns: `tests/e2e/ui/settings.spec.ts` for navigation/persistence; `tests/browser/journeys/ui/stories-streaming.journey.spec.ts` for streaming simulation via mock-agent prompts.
 
 **Mock-agent extension (in `tests/e2e/mock-agent-core.mjs`).** The existing `respondToPrompt` / `STAY_BUSY:` machinery in `tests/e2e/mock-agent-core.mjs` (around line 281) is extended to recognise a new prompt prefix `STAY_BUSY:propose_<type>:<n>` (e.g. `STAY_BUSY:propose_goal:8`). When matched, the mock emits:
 
@@ -498,8 +500,8 @@ For PPS-01/02 across all 7 types, project's primary button is `Apply Changes / A
 
 ### 4.3 Existing tests preserved
 
-- `tests/agent-interface-scroll.spec.ts` — untouched. We did not modify `AgentInterface`.
-- The `delta === 0 no-op` is the canonical regression for the chat surface; `tests/follow-tail.spec.ts` adds the analogous case for proposal panels.
+- `tests/browser/fixtures/agent-interface-scroll.fixture.spec.ts` — untouched. We did not modify `AgentInterface`.
+- The `delta === 0 no-op` is the canonical regression for the chat surface; `tests/browser/fixtures/follow-tail.fixture.spec.ts` adds the analogous case for proposal panels.
 
 ---
 
@@ -517,8 +519,8 @@ Definitive list. Each entry is **NEW** or **MODIFIED** with no qualifiers.
 | `src/app/render.ts` | **MODIFIED** | (a) Add `streamingBadge()` and `STREAMING_BORDER`. (b) Add `ref/createRef` + `reconcileFollowTail` imports and per-panel module-scoped refs. (c) Extend `GoalFormConfig` with `streaming?: boolean`. (d) In each of the 7 panel functions: read `isProposalStreaming(tag)`, OR-merge `|| streaming` into submit `disabled`, render `streamingBadge()` adjacent to submit, append `STREAMING_BORDER` to scrollable preview/textarea class, emit `queueMicrotask(() => reconcileFollowTail(ref.value))` before return. (e) Add `data-testid="proposal-primary-submit"` to each panel's primary submit button. |
 | `docs/internals.md` | **MODIFIED** | Append a new subsection under the existing **"Chat surface UI invariants"** heading, titled exactly **`### Proposal panel scroll lock invariant`** (anchor: `#proposal-panel-scroll-lock-invariant`). Cross-references `src/app/follow-tail.ts` and notes the same three rules apply. Two-paragraph length. |
 | `docs/debugging.md` | **MODIFIED** | Add one bullet to the keyword index: **"Proposal panel button stuck disabled / streaming badge stuck on"** — verify `agent_end` is firing for the session; the bulk-clear in `RemoteAgent`'s `agent_end` and `reset()` is the safety net. Anchor: `#proposal-panel-button-stuck-disabled--streaming-badge-stuck-on`. |
-| `tests/follow-tail.spec.ts` | **NEW** | Unit tests per §4.1. |
-| `tests/e2e/ui/proposal-panel-streaming.spec.ts` | **NEW** | Browser E2E per §4.2. |
+| `tests/browser/fixtures/follow-tail.fixture.spec.ts` | **NEW** | Unit tests per §4.1. |
+| `tests/browser/fixtures/proposal-panel-streaming.fixture.spec.ts` | **NEW** | Browser E2E per §4.2. |
 | `tests/e2e/mock-agent-core.mjs` | **MODIFIED** | Extend `respondToPrompt` / streaming-driver block (around line 281) to recognise `STAY_BUSY:propose_<type>:<n>`; emit N delta-streamed `message_update` events with a single growing `propose_<type>` `tool_use` block, then `message_end` + `tool_execution_*` + `agent_end`. |
 
 ---
@@ -538,9 +540,9 @@ Definitive list. Each entry is **NEW** or **MODIFIED** with no qualifiers.
 
 Each step is independently mergeable and revertable.
 
-1. **`src/app/follow-tail.ts` + `tests/follow-tail.spec.ts`.** No UI wiring yet. Behaviour is identical for users.
+1. **`src/app/follow-tail.ts` + `tests/browser/fixtures/follow-tail.fixture.spec.ts`.** No UI wiring yet. Behaviour is identical for users.
 2. **State field + RemoteAgent flag plumbing + callback signature changes.** No panel render changes — UI behaviour is identical, but `state.proposalStreamingByTag` now reflects reality.
 3. **Wire `streamingBadge` + `STREAMING_BORDER` + disabled-merge + refs into `renderGoalForm`.** Smoke-test manually with the goal-creation assistant flow.
 4. **Repeat (3) for the six sibling panels** — `role`, `tool`, `staff`, `setup`, `workflow`, `project`.
-5. **Add the mock-agent extension and the E2E spec** — `tests/e2e/mock-agent-core.mjs` then `tests/e2e/ui/proposal-panel-streaming.spec.ts`.
+5. **Add the mock-agent extension and the E2E spec** — `tests/e2e/mock-agent-core.mjs` then `tests/browser/fixtures/proposal-panel-streaming.fixture.spec.ts`.
 6. **Update `docs/internals.md` and `docs/debugging.md`** with the anchors specified in §5.

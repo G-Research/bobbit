@@ -355,11 +355,11 @@ Likewise, keep `src/app/settings-page.ts::renderGeneralTab()` and `togglePlayFin
 
 ## 9. Test recommendations
 
-All new tests must be registered in `tests2/tests-map.json` where applicable.
+All new tests must use canonical semantic paths and suffixes.
 
 ### Resolver, loader, ordering, and persistence helper
 
-Extend `tests2/core/play-finish-sound.test.ts`:
+Extend `tests/unit/core/play-finish-sound.unit.test.ts`:
 
 - await all six table cases for inherit/on/off x global on/off;
 - no-source fallback for global on/off performs no project GET; a known unknown project falls back globally only after a deterministic 404/rejection;
@@ -378,7 +378,7 @@ Extend `tests2/core/play-finish-sound.test.ts`:
 
 ### Foreground/background source and cold-cache regression
 
-Add `tests2/dom/project-audio-notification-paths.test.ts` (or extend the real-path coverage in `tests2/dom/remote-agent-status.test.ts`):
+Add `tests/dom/project-audio-notification-paths.dom.test.ts` (or extend the real-path coverage in `tests/dom/remote-agent-status.dom.test.ts`):
 
 - seed two `GatewaySession` records with different `projectId` values;
 - drive real `RemoteAgent.handleAgentEvent({ type: "agent_end" })` and assert the source is the record matching that agent's `_sessionId`, not the selected/active project's record;
@@ -392,7 +392,7 @@ Add `tests2/dom/project-audio-notification-paths.test.ts` (or extend the real-pa
 
 ### Settings and API
 
-Add `tests2/dom/project-audio-settings.test.ts`:
+Add `tests/dom/project-audio-settings.dom.test.ts`:
 
 - raw config absent renders Inherit;
 - selecting On and Off sends the correct partial PUT and changes the shared resolver immediately;
@@ -402,13 +402,13 @@ Add `tests2/dom/project-audio-settings.test.ts`:
 - a single failed PUT removes only its mutation, reveals the confirmed baseline, and displays failure state;
 - repeat the deterministic Inherit -> On-fail -> Off-fail and explicit Off -> On-fail -> Inherit-fail queues through the Settings-facing setter/render path, proving the displayed state ends at the confirmed server value rather than an earlier optimistic snapshot.
 
-Extend `tests2/integration/project-config-api.test.ts`:
+Extend `tests/integration/gateway/project-config-api.gateway.test.ts`:
 
 - PUT `"true"` and `"false"`, GET raw round-trip;
 - PUT `null`, GET confirms the key is absent;
 - reconstruct `ProjectConfigStore` over the same filesystem to prove On/Off and clearing survive reload.
 
-Extend `tests2/dom/bell-toggle.test.ts`:
+Extend `tests/dom/bell-toggle.dom.test.ts`:
 
 - prime the active project's override to Off while global is on and assert Bell/title remain globally on;
 - prime project On while global is off and assert Bell/title remain globally off;
@@ -416,7 +416,7 @@ Extend `tests2/dom/bell-toggle.test.ts`:
 
 ### Browser journey
 
-Extend `tests2/browser/journeys/project-settings.journey.spec.ts` with a serial scenario:
+Extend `tests/browser/journeys/project-settings.journey.spec.ts` with a serial scenario:
 
 1. register a project and navigate to `#/settings/<projectId>/general`;
 2. verify Inherit, select Off, reload, and verify Off persists;
@@ -456,10 +456,10 @@ The slices below have non-overlapping file ownership. Dependencies flow top-to-b
 | A — resolver/cache | `src/app/play-finish-sound.ts` | Add key/type/source contracts, async effective resolver, confirmed baselines, ordered pending queues, per-request serialized setters, revision-checked raw loads, and loader dedupe while preserving global helpers. |
 | B — notification routing | `src/app/remote-agent.ts`, `src/app/api.ts` | Make only the audio primitive async/deferred, pass foreground/background source sessions, and start opportunistic preloads without awaiting them in polling. |
 | C — Settings UI | `src/app/settings-page.ts` | Capture revision before raw GET and conditionally establish the baseline afterward; render/autosave the three-state control from derived queue/baseline state, hide the raw key from Commands, and render per-request save/error state. |
-| D — unit/DOM tests | `tests2/core/play-finish-sound.test.ts`, `tests2/dom/project-audio-notification-paths.test.ts`, `tests2/dom/project-audio-settings.test.ts`, `tests2/dom/bell-toggle.test.ts` | Matrix, cold-cache opposites, baseline/queue sequences, GET revision races, per-request/transport ordering, non-blocking polling, both source paths, UI states, badge preservation, and Bell-global regression. |
-| E — API/browser tests | `tests2/integration/project-config-api.test.ts`, `tests2/browser/journeys/project-settings.journey.spec.ts`, `tests2/tests-map.json` | Raw key persistence/clear/reload and the end-to-end project mute/Bell journey; this owner alone edits the shared test map. |
+| D — unit/DOM tests | `tests/unit/core/play-finish-sound.unit.test.ts`, `tests/dom/project-audio-notification-paths.dom.test.ts`, `tests/dom/project-audio-settings.dom.test.ts`, `tests/dom/bell-toggle.dom.test.ts` | Matrix, cold-cache opposites, baseline/queue sequences, GET revision races, per-request/transport ordering, non-blocking polling, both source paths, UI states, badge preservation, and Bell-global regression. |
+| E — API/browser tests | `tests/integration/gateway/project-config-api.gateway.test.ts`, `tests/browser/journeys/project-settings.journey.spec.ts` | Raw key persistence/clear/reload and the end-to-end project mute/Bell journey. |
 
-Do not assign `tests2/tests-map.json` to more than one worker. No slice should edit `src/server/server.ts`, `src/server/agent/project-config-store.ts`, `src/app/main.ts`, `src/app/state.ts`, or `src/ui/components/BellToggle.ts`; their current contracts already support the design and leaving them untouched reduces merge risk.
+Historically, one worker owned the now-removed shared test registry to avoid merge conflicts. No slice should edit `src/server/server.ts`, `src/server/agent/project-config-store.ts`, `src/app/main.ts`, `src/app/state.ts`, or `src/ui/components/BellToggle.ts`; their current contracts already support the design and leaving them untouched reduces merge risk.
 
 ## 12. Acceptance trace
 

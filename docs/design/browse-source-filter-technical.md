@@ -8,8 +8,8 @@ This design is based on:
 
 - `src/app/marketplace-page.ts`
 - `src/app/marketplace.css`
-- `tests/e2e/ui/marketplace.spec.ts`
-- `tests/e2e/ui/marketplace-mcp.spec.ts`
+- `tests/browser/journeys/ui/marketplace.journey.spec.ts`
+- `tests/browser/journeys/ui/marketplace-mcp.journey.spec.ts`
 
 ## Current implementation
 
@@ -480,7 +480,7 @@ Keep existing messages for no sources, source load errors, and selected sources 
 
 ## E2E coverage plan
 
-Primary file: `tests/e2e/ui/marketplace.spec.ts`
+Primary file: `tests/browser/journeys/ui/marketplace.journey.spec.ts`
 
 Add a focused Browse source filter test using two local-dir sources:
 
@@ -503,7 +503,7 @@ Add a focused Browse source filter test using two local-dir sources:
 15. Keyboard check: focus trigger, press Enter or Space to open, press Escape in popup to close, assert `aria-expanded="false"`.
 16. Lifecycle check: outside click and Browse tab teardown close the popup; checkbox toggles and bulk actions keep it open.
 
-Update existing `tests/e2e/ui/marketplace-mcp.spec.ts` assertions currently tied to chips:
+Update existing `tests/browser/journeys/ui/marketplace-mcp.journey.spec.ts` assertions currently tied to chips:
 
 Current flow:
 
@@ -540,5 +540,5 @@ Unsupported/error coverage can be unit-light but valuable in E2E if route mockin
 - Do not change `filteredBrowsePacks()` behavior; use its result, or an equivalent helper, for the summary's visible package count so search-active summaries match the rendered package list.
 - The current server endpoint is synchronous, so `src.status === "loading"` is unlikely in normal responses. Still render loading status because the API type includes it.
 - Avoid strict ARIA menu roles unless implementing full menu keyboard behavior. Native checkboxes inside a labelled popup are simpler and more robust.
-- Existing E2E tests using chip test IDs will fail until updated, especially `tests/e2e/ui/marketplace-mcp.spec.ts`.
+- Existing E2E tests using chip test IDs will fail until updated, especially `tests/browser/journeys/ui/marketplace-mcp.journey.spec.ts`.
 - Keep source warnings outside the menu so selected errored sources remain visible even when the menu is closed.

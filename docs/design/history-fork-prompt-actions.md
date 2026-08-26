@@ -1,5 +1,7 @@
 # History Fork Prompt Actions
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Status and decision
 
 This document is the implementation contract for **Fork From History**. It records the selected design and the alternatives considered during implementation.
@@ -500,7 +502,7 @@ If a failed create left a destination persisted-session record, use the establis
 | `src/ui/app.css` | Trigger/bubble reservation and help hit-area styles; canonical variables/classes, same desktop/mobile content |
 | `docs/rest-api.md` | Optional `entryId`, history semantics, errors, worktree defaults |
 | `docs/session-actions.md` | Prompt action surface, help/toggle/copy behavior, canonical popover reuse |
-| `tests2/tests-map.json` | Register every new core/DOM/integration/browser file and journey |
+| `scripts/testing/layout-policy.mjs` | Classify every new core, DOM, integration, and browser test by path and semantic suffix |
 
 No change is needed in `src/app/render.ts` or `src/app/render-helpers.ts`; their existing session/header/sidebar popover mounting remains independent and canonical through the shared component.
 
@@ -529,11 +531,11 @@ The selected design's unavoidable new state is limited to: optional projected cu
 
 ## Focused verification plan
 
-All new tests live in `tests2/` and are registered in `tests2/tests-map.json`.
+All new tests use canonical `tests/` semantic paths and suffixes so lane discovery is automatic.
 
 ### Core
 
-`tests2/core/history-fork-transcript.test.ts`
+`tests/unit/core/history-fork-transcript.unit.test.ts`
 
 - straight active ancestry and exact root cut;
 - selected prompt and every descendant absent;
@@ -546,7 +548,7 @@ All new tests live in `tests2/` and are registered in `tests2/tests-map.json`.
 - safe ignore of only a final unterminated append fragment;
 - input/source string immutability.
 
-`tests2/core/history-fork-sidecars.test.ts`
+`tests/integration/gateway/history-fork-sidecars.gateway.test.ts`
 
 - author bindings filtered by materialized transcript, including duplicate prompts;
 - skill/file entries filtered occurrence-by-occurrence and original typed text retained;
@@ -563,11 +565,11 @@ All new tests live in `tests2/` and are registered in `tests2/tests-map.json`.
 - assistant/tool/update/keyless/optimistic/unsettled rows get none;
 - skill/author visible projection does not change the cursor.
 
-Existing `tests2/core/transcript-sanitizer.test.ts` and orphan-tool-result coverage must remain green to prove the helper extraction did not change sanitizer tree semantics.
+Existing `tests/unit/core/transcript-sanitizer.unit.test.ts` and orphan-tool-result coverage must remain green to prove the helper extraction did not change sanitizer tree semantics.
 
 ### Integration
 
-`tests2/integration/history-fork-api.test.ts`
+`tests/integration/gateway/history-fork-*.gateway.test.ts`
 
 - request schema and stable status/code matrix;
 - exact active cut from real session JSONL and source bytes unchanged before/after;
@@ -580,11 +582,11 @@ Existing `tests2/core/transcript-sanitizer.test.ts` and orphan-tool-result cover
 - sandbox off reuses exact realm/cwd without `sandboxBranch`; sandbox on uses established lifecycle;
 - cross-realm, atomic-write, sidecar, create, switch, and title failure cleanup.
 
-Extend `tests2/integration/sidebar-actions-fork-github-link.test.ts` only where it already pins `launchSidebarSessionFork()` cwd/worktree behavior. Whole-session fork must keep default `newWorktree:true` and existing semantics.
+Extend `tests/integration/gateway/sidebar-actions-fork-github-link.gateway.test.ts` only where it already pins `launchSidebarSessionFork()` cwd/worktree behavior. Whole-session fork must keep default `newWorktree:true` and existing semantics.
 
 ### DOM
 
-`tests2/dom/prompt-history-actions.test.ts`
+`tests/dom/prompt-history-actions.dom.test.ts`
 
 - full eligible/ineligible role/origin/cursor/forkability matrix;
 - absent on assistant, tool, synthetic, optimistic, pending, pre-compaction orphan, archived, child/team/read-only rows; present on the current streaming row once its cursor is proven;
@@ -598,11 +600,11 @@ Extend `tests2/integration/sidebar-actions-fork-github-link.test.ts` only where 
 - `Prompt copied` and `Couldn't copy prompt` feedback;
 - repeated activation while pending sends once and failure remains on source.
 
-Extend `tests2/dom/session-menu.test.ts` to prove help-capable rows do not change existing session Fork toggle/focus behavior.
+Extend `tests/dom/session-menu.dom.test.ts` to prove help-capable rows do not change existing session Fork toggle/focus behavior.
 
 ### Browser journey
 
-Add and register `tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts` covering one real end-to-end lifecycle:
+Add and register `tests/browser/journeys/history-fork-prompt-actions.journey.spec.ts` covering one real end-to-end lifecycle:
 
 1. Create a source, send at least three distinct prompts including multiline `/skill`, `@path`, and attachment text.
 2. Verify desktop overflow is always visible; open it and reach help by hover and keyboard.

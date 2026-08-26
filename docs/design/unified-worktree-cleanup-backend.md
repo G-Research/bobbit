@@ -471,7 +471,7 @@ Implementation boundary:
 
 ### Unit tests
 
-Add tests around pure helpers in `tests/worktree-inventory.test.ts` or equivalent:
+Add tests around pure helpers in `tests/unit/core/worktree-inventory.unit.test.ts` or equivalent:
 
 - Live referenced worktree is `protected-in-use` by exact `worktreePath`.
 - Live referenced worktree is protected when `cwd` is inside the candidate.
@@ -485,11 +485,11 @@ Add tests around pure helpers in `tests/worktree-inventory.test.ts` or equivalen
 - Branch deletion is blocked by another archived record but worktree removal remains allowed.
 - Container-internal paths are never actionable host cleanup targets.
 
-Keep `tests/worktree-sweeper.test.ts` and `tests/worktree-sweeper-multi.test.ts` green by adapting `classifyWorktrees()` to the shared classifier.
+Keep `tests/e2e/node/worktree-sweeper.node-e2e.test.ts` and `tests/unit/core/worktree-sweeper-multi.unit.test.ts` green by adapting `classifyWorktrees()` to the shared classifier.
 
 ### API E2E
 
-Extend `tests/e2e/maintenance-api.spec.ts`:
+Extend `tests/integration/gateway/maintenance-api.gateway.test.ts`:
 
 - `GET /api/maintenance/worktrees` returns summary counts and item provenance.
 - Legacy `GET /api/maintenance/orphaned-worktrees` still returns `{ worktrees }` and is backed by the same fixture classification.

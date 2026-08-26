@@ -1,5 +1,7 @@
 # Windows Unit-Suite Parity Plan
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > [!CAUTION]
 > **Superseded historical plan.** This document is preserved as planning evidence and does not describe the shipped unit gate. The current architecture runs one direct Vitest process with a fixed three-worker cap per suite and no unit ledger, lane orchestration, cost sharding, or gateway-boot lease. See the [unit gate operating model](../testing-v2/unit-gate.md) for the current contract and the [fast-gate progress log](../testing-v2/fast-gate-progress.md) for qualification evidence. All eight-worker, `3/4/1` lane allocation, ledger peak of 24 or lower, weighted scheduler, and acceptance statements below are historical and must not guide new work.
 
@@ -57,7 +59,7 @@ Prioritize measured hotspots:
 5. Move `npm pack` execution to the bundle check; unit tests should validate the package manifest/selection logic without launching `npm.cmd`.
 6. Keep process-per-probe only where Pi-extension security or timeout isolation genuinely requires it.
 
-Every relocation or fake must retain a canonical real-fidelity owner in `tests2/tests-map.json`. No assertion may be weakened merely to improve wall time.
+Every relocation or fake must retain a canonical real-fidelity owner under `tests/e2e/` or `tests/manual/`, as its semantics require. No assertion may be weakened merely to improve wall time.
 
 ## Step 3 — Prebundle the server test graph once
 

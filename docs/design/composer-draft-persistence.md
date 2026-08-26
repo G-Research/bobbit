@@ -149,7 +149,7 @@ The combined design guarantees the following behaviors:
 
 Automated coverage enforces all invariants described in this document.
 
-### Text Draft Unit Tests (`tests/session-store.test.ts`)
+### Text Draft Unit Tests (`tests/unit/core/session-store.unit.test.ts`)
 - `draft gen staleness guard` (text `prompt` draft only):
   - *accepts a strictly increasing gen*: Newer writes overwrite older ones.
   - *silently discards a stale (lower-gen) write*: Stale writes return `true` but do not mutate.
@@ -159,22 +159,22 @@ Automated coverage enforces all invariants described in this document.
 
 > **Attachment drafts are not server-side.** Unlike text, composer attachments are NOT stored in the server `SessionStore` and carry **no persistent gen guard** — they live client-side in IndexedDB (`PromptDraftAttachmentsStore`). The only resurrection guard is the in-flight async-load generation token (`_attachmentDraftGen`) in `AgentInterface`. See the dedicated tests below.
 
-### Attachment Store Unit Tests (`tests/prompt-draft-attachments-store.test.ts`)
+### Attachment Store Unit Tests (`tests/unit/core/prompt-draft-attachments-store.unit.test.ts`)
 - *round-trips and isolates per session*: Attachments persist and stay keyed by session id.
 - *per-session file cap*: Lists are trimmed to `MAX_FILES_PER_SESSION`.
 - *per-session byte cap*: A single session's record can never exceed `MAX_BYTES_PER_SESSION`, keeping the total cap honest even though the active session is never evicted.
 - *LRU + count/byte eviction*: Oldest sessions are evicted past `MAX_SESSIONS` / `MAX_TOTAL_BYTES`, and the just-written session is never self-evicted.
 - *empty list deletes the record*.
 
-### Attachment In-Flight Guard Unit Tests (`tests/agent-interface-attachment-draft-race.test.ts`)
+### Attachment In-Flight Guard Unit Tests (`tests/unit/core/agent-interface-attachment-draft-race.unit.test.ts`)
 - *clear-after-send*: A slow IndexedDB read resolving after send does not resurrect sent attachments.
 - *set-during-load*: A stale load does not clobber freshly user-added attachments.
 - *session-switch-during-load*: A draft loading for session A is never applied to session B.
 
-### Browser E2E Tests (`tests/e2e/ui/stories-drafts.spec.ts`)
+### Browser E2E Tests (`tests/browser/journeys/ui/stories-drafts.journey.spec.ts`)
 - `CT-02-b` (*Pasted image draft survives fast switch and reload*): Asserts attachment survival through fast session transitions and browser reloads.
 - `CT-02-f` (*Pasted image draft survives cache-evicted slow-path switch*): Swings through 11 other sessions to evict the target session from the RAM cache, then asserts attachments are restored on slow-path recreation.
 - `CT-02-h` (*Text survives gen-desync round-trips*): Types text, switches tabs, appends text, switches away immediately in the same tick (testing quick debounces), and asserts both paragraphs are safely stored and restored.
 
-### E2E REST API Tests (`tests/e2e/draft-api.spec.ts`)
+### E2E REST API Tests (`tests/integration/gateway/draft-api.gateway.test.ts`)
 - Validates the REST endpoints (`PUT`, `GET`, `DELETE` on `/api/sessions/:id/draft`) correctly reject lower-gen payloads with status `200` (silently discarded) while accepting equal-or-higher-gen payloads and correctly cleaning drafts.

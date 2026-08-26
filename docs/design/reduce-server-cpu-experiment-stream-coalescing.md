@@ -1,5 +1,7 @@
 # Reduce Server CPU — stream `message_update` coalescing experiment
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Decision
 
 Rejected. Production code was reverted; this branch keeps only this experiment report.

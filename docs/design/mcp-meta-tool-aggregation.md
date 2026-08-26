@@ -1,5 +1,7 @@
 # MCP meta-tool aggregation — design doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: implemented
 Owner: this goal
 Implementation partition: §9
@@ -139,11 +141,11 @@ matches via `mcpPolicyPrefix()`, which still works on every internal
 
 ### 1.7 Tests that lock the contract
 
-- **`tests/grant-policy.test.ts`** — exhaustive `resolveGrantPolicy` cascade
+- **`tests/unit/core/grant-policy.unit.test.ts`** — exhaustive `resolveGrantPolicy` cascade
   cases. Every test is keyed on `mcp__pw__snap`-style names. **Must keep
   passing unmodified.** The internal name shape is unchanged; only the
   *outer* model-facing layer is renamed.
-- **`tests/enforce-headless-qa.test.ts`** — asserts `mcp__playwright: never`
+- **`tests/unit/core/enforce-headless-qa.unit.test.ts`** — asserts `mcp__playwright: never`
   in `defaults/tool-group-policies.yaml` and the qa-tester role's
   toolPolicies. Same prefix form — unchanged.
 - New tests live alongside (§8).
@@ -493,7 +495,7 @@ per-op tools), so `resolveGrantPolicy("mcp_gr-halo", "MCP: gr-halo", role,
    via the prefix branch.
 5. `'allow'` fallback.
 
-The cascade of tests in `tests/grant-policy.test.ts` is unchanged in
+The cascade of tests in `tests/unit/core/grant-policy.unit.test.ts` is unchanged in
 behaviour. New tests in §8 lock the meta-tool branch.
 
 ### 4.3 Tool guard
@@ -786,7 +788,7 @@ All paths are repo-relative.
 
 ### 8.1 New unit tests
 
-- **`tests/mcp-meta-name.test.ts`** (NEW)
+- **`tests/unit/core/mcp-meta-name.unit.test.ts`** (NEW)
   - `makeMetaToolName("gr-halo") === "mcp_gr-halo"`
   - `makeMetaToolName("nano-banana") === "mcp_nano-banana"`
   - `makeMetaToolName("weird/name with spaces") === "mcp_weird_name_with_spaces"`
@@ -794,7 +796,7 @@ All paths are repo-relative.
   - 100-char input → ≤ 64 chars output and remains unique within a
     fixture set of 5 distinct long names (no collisions).
 
-- **`tests/mcp-meta-schema.test.ts`** (NEW)
+- **`tests/unit/core/mcp-meta-schema.unit.test.ts`** (NEW)
   - `buildMetaToolInputSchema([…ops])` produces the right `enum` order
     and shape; idempotent on duplicate op names.
   - `buildMetaToolDescription(server, ops)` truncates to ≤ 400 chars
@@ -803,7 +805,7 @@ All paths are repo-relative.
     missing name, name with spaces, non-object inputSchema, properties
     being an array, required containing non-strings.
 
-- **`tests/mcp-meta-extension.test.ts`** (NEW)
+- **`tests/unit/core/mcp-meta-extension.unit.test.ts`** (NEW)
   - Snapshot/regex-based assertions on `generateMcpMetaExtension(...)`:
     the emitted source contains exactly one `pi.registerTool(`,
     references `gwUrl + "/api/internal/mcp-call"`, includes the literal
@@ -813,7 +815,7 @@ All paths are repo-relative.
     `"mcp_server_unavailable"` literal and an enum of just
     `__unavailable__`.
 
-- **`tests/mcp-failure-isolation.test.ts`** (NEW)
+- **`tests/unit/core/mcp-failure-isolation.unit.test.ts`** (NEW)
   - Construct an `McpManager` with two mock servers; one's `tools/list`
     returns a tool with `inputSchema = "not-an-object"`, the other
     returns valid tools. Assert:
@@ -829,15 +831,15 @@ All paths are repo-relative.
 
 ### 8.2 Updated unit tests (must keep passing **without modification**)
 
-- `tests/grant-policy.test.ts` — every existing test asserts the prefix-
+- `tests/unit/core/grant-policy.unit.test.ts` — every existing test asserts the prefix-
   based cascade on `mcp__<server>__<op>` names. The internal name format
   is unchanged → all 25 cases pass as-is.
-- `tests/enforce-headless-qa.test.ts` — asserts YAML keys
+- `tests/unit/core/enforce-headless-qa.unit.test.ts` — asserts YAML keys
   `mcp__playwright`. YAML untouched → passes as-is.
 
 ### 8.3 New unit tests on the policy cascade
 
-- **`tests/mcp-meta-policy.test.ts`** (NEW)
+- **`tests/unit/core/mcp-meta-policy.unit.test.ts`** (NEW)
   - `mcpPolicyPrefix("mcp_gr-halo") === "mcp__gr-halo"` — proves the
     extended regex maps the new meta-tool name to the legacy YAML key.
   - With `groupPolicyStore = { "mcp__playwright": "never" }`,
@@ -852,7 +854,7 @@ All paths are repo-relative.
 
 ### 8.4 API E2E test
 
-- **`tests/e2e/mcp-meta-call.spec.ts`** (NEW; in-process harness)
+- **`tests/integration/gateway/mcp-meta-call.gateway.test.ts`** (NEW; in-process harness)
   - Boot the gateway with a fake MCP server fixture under
     `tests/fixtures/fake-mcp-server.ts` (a tiny stdio JSON-RPC server
     that responds to `initialize`, `tools/list` with two ops, and
@@ -875,7 +877,7 @@ All paths are repo-relative.
 
 ### 8.5 Browser E2E test
 
-- **`tests/e2e/ui/tool-manager-mcp-section.spec.ts`** (NEW; browser
+- **`tests/browser/fixtures/tool-manager-mcp-section.fixture.spec.ts`** (NEW; browser
   harness). Reuses the fake-MCP fixture above.
   - Navigate to the Tools page.
   - Assert one row labelled `fake` (server name) is rendered under a
@@ -923,13 +925,13 @@ signature.
   Minimal stdio JSON-RPC server with two ops (`echo`, `add`) for E2E
   tests in §8.4 and §8.5.
 
-- **`tests/mcp-meta-name.test.ts`** — §8.1
-- **`tests/mcp-meta-schema.test.ts`** — §8.1
-- **`tests/mcp-meta-extension.test.ts`** — §8.1
-- **`tests/mcp-failure-isolation.test.ts`** — §8.1
-- **`tests/mcp-meta-policy.test.ts`** — §8.3
-- **`tests/e2e/mcp-meta-call.spec.ts`** — §8.4
-- **`tests/e2e/ui/tool-manager-mcp-section.spec.ts`** — §8.5
+- **`tests/unit/core/mcp-meta-name.unit.test.ts`** — §8.1
+- **`tests/unit/core/mcp-meta-schema.unit.test.ts`** — §8.1
+- **`tests/unit/core/mcp-meta-extension.unit.test.ts`** — §8.1
+- **`tests/unit/core/mcp-failure-isolation.unit.test.ts`** — §8.1
+- **`tests/unit/core/mcp-meta-policy.unit.test.ts`** — §8.3
+- **`tests/integration/gateway/mcp-meta-call.gateway.test.ts`** — §8.4
+- **`tests/browser/fixtures/tool-manager-mcp-section.fixture.spec.ts`** — §8.5
 
 ### 9.2 Modified files
 

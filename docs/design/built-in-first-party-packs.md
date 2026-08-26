@@ -1,5 +1,7 @@
 # Built-in first-party packs
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: **IMPLEMENTED (merged on `goal/built-in-first-313bf443`).** This document
 specifies the architecture, file changes, and test plan that shipped a built-in,
 auto-registered source of first-party packs and migrated `pr-walkthrough` into it
@@ -618,7 +620,7 @@ contributions + the durable Host API:
 | Launcher + deep-link | legacy composer/git-widget launch + the `"walkthrough"` RouteView | `entrypoints:` (composer-slash + session-menu launchers, plus `kind:"route"` `routeId:"pr-walkthrough"`) → `#/ext/pr-walkthrough` |
 | Submitted YAML read | bespoke transcript access | `host.session.readToolCall(submit_pr_walkthrough_yaml)` |
 
-**Deletion is gated on the mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`)
+**Deletion is gated on the mandatory E2E (`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`)
 passing while served ENTIRELY by the built-in pack** (no manual install). Do not
 delete until that is green in CI.
 
@@ -714,7 +716,7 @@ the §8.5 carve-out and never read by the panel; see §8.3.)
   returns the deterministic in-worker structural fallback. This is what proves a
   first-party pack owns durable feature state through the Host API.
 - **REAL LLM-card parity — production-schema synthesis migration (the key work; user-chosen: full faithful migration).** The litmus pack reads a SIMPLIFIED `{ cards }` YAML and uses a hard-coded `job-litmus-1`; that is NOT production parity. The unchanged `submit_pr_walkthrough_yaml` tool emits the RICH production schema (`pr` + `walkthrough.{context,merge_assessment,design_decisions,review_chunks,omissions_and_followups,audit,display}` — NO top-level `cards`), which the built-in mapped to `PrWalkthroughCard[]` via `validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` (`src/server/pr-walkthrough/walkthrough-yaml-schema.ts`). The pack must run that SAME synthesis. Plan:
-    1. **Extract the synthesis to a PURE shared module** `src/shared/pr-walkthrough/yaml-to-cards.ts` (move `validatePrWalkthroughYaml`, `mapYamlToWalkthroughPayload`, `DiffReferenceMapper`, `flattenDiffBlocks` + helpers). It already imports ONLY from `src/shared/pr-walkthrough/{ids,nav-label,types}.js` (no `node:`/server deps — verified), so the move is clean. Re-export from `walkthrough-yaml-schema.ts` so the AGENT side (`walkthrough-agent-manager.ts`, `tests/pr-walkthrough-yaml-schema.test.ts`) keeps working with NO behavior change (`WalkthroughStorePayload` stays server-side; the shared fn returns the structural `{ changeset, cards, warnings }`).
+    1. **Extract the synthesis to a PURE shared module** `src/shared/pr-walkthrough/yaml-to-cards.ts` (move `validatePrWalkthroughYaml`, `mapYamlToWalkthroughPayload`, `DiffReferenceMapper`, `flattenDiffBlocks` + helpers). It already imports ONLY from `src/shared/pr-walkthrough/{ids,nav-label,types}.js` (no `node:`/server deps — verified), so the move is clean. Re-export from `walkthrough-yaml-schema.ts` so the AGENT side (`walkthrough-agent-manager.ts`, `tests/unit/core/pr-walkthrough-yaml-schema.unit.test.ts`) keeps working with NO behavior change (`WalkthroughStorePayload` stays server-side; the shared fn returns the structural `{ changeset, cards, warnings }`).
     2. **Bundle the shared synthesis into the pack** via a new `build:packs` entry → `market-packs/pr-walkthrough/lib/yaml-to-cards.mjs` (esbuild, self-contained, committed). NO duplication — one source of truth in `src/shared/`, bundled into the pack served tree.
     3. **Pack `publish` route maps the REAL schema.** The panel passes the RAW submitted YAML text to `host.callRoute("publish", { yaml, jobId })`; the route (confined worker) validates + maps it against the LIVE-computed parsed diff (the same `git` recompute `bundle` does) via the bundled synthesis, and stores `PrWalkthroughCard[]` keyed by the REAL changeset id. `bundle` serves stored cards over the structural fallback (the parity proof).
     4. **Panel derives the REAL job/changeset from the session**, not `job-litmus-1`: read the `submit_pr_walkthrough_yaml` tool call (`host.session.readToolCall`), compute the changeset id from the submitted doc's `pr` (`changesetIdForGithub`), thread it as the jobId; per-changeset store keys (fixes the shared-literal `job/${jobId}` collision).
@@ -750,7 +752,7 @@ the §8.5 carve-out and never read by the panel; see §8.3.)
   do NOT delete or split `walkthrough-store.ts`.
 
 **Gating.** Deleting the client viewer + viewer-feed routes is gated on the
-mandatory E2E (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) being green while the
+mandatory E2E (`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`) being green while the
 feature is served entirely by the pack — including the publish→reload→re-read cards
 path that proves the PACK store is the durable viewer provider. Confirm that E2E
 green **before** removing the viewer-feed routes.
@@ -826,20 +828,20 @@ and implementation are pack-owned.
 
 Findings from `tests/fixtures/market-sources/`:
 
-- Only `retry-demo-src` is used (by `tests/e2e/ui/extension-host.spec.ts` and
+- Only `retry-demo-src` is used (by `tests/browser/journeys/ui/extension-host.journey.spec.ts` and
   `artifacts-pack.spec.ts`).
 - `conflict-dup-route-name-src`, `conflict-dup-panel-id-src`,
   `conflict-dup-entrypoint-id-src`, `conflict-dup-routeid-src`, `no-tools-pack-src`,
   `panel-only-src` are **orphaned** (no test installs them).
 - The within-pack hard conflicts (dup route name / panel id / entrypoint id) are
-  already unit-tested at the loader level in `tests/pack-contributions.test.ts`
+  already unit-tested at the loader level in `tests/unit/core/pack-contributions.unit.test.ts`
   via inline temp dirs.
 - The README references a **nonexistent** dir `tests/fixtures/pack-schema-v1/**`.
 
 **Plan:**
 
 1. **Wire the install-level fixtures into a new E2E**
-   `tests/e2e/ui/marketplace-conflicts.spec.ts` (or an API E2E under
+   `tests/browser/journeys/ui/marketplace-conflicts.journey.spec.ts` (or an API E2E under
    `tests/e2e/`), asserting behaviour the loader-unit tests cannot:
    - `conflict-dup-routeid-src` (two packs claiming the same host-global
      `routeId`) — **install both, register neither** (cross-pack registry
@@ -858,7 +860,7 @@ Findings from `tests/fixtures/market-sources/`:
    drop, since install + registry surfacing is a distinct layer.
 3. **Fix `tests/fixtures/market-sources/README.md`**: correct the broken
    `tests/fixtures/pack-schema-v1/**` reference to the actual location of the
-   loader fixtures (the inline temp dirs in `tests/pack-contributions.test.ts`), or
+   loader fixtures (the inline temp dirs in `tests/unit/core/pack-contributions.unit.test.ts`), or
    drop the stale sentence.
 
 ---
@@ -867,7 +869,7 @@ Findings from `tests/fixtures/market-sources/`:
 
 ### 11.1 Unit (`tests/*.test.ts`, node:test)
 
-- **`tests/builtin-packs.test.ts`** (new):
+- **`tests/unit/core/builtin-packs.unit.test.ts`** (new):
   - `resolveBuiltinPacksDir()` resolves relative to `__dirname` and honours the
     `override` / `BOBBIT_BUILTIN_PACKS_DIR` override.
   - `builtinFirstPartyPackEntries(dir)` returns one entry per shipped pack, with
@@ -883,7 +885,7 @@ Findings from `tests/fixtures/market-sources/`:
   - **Activation filtering**: with `pack_activation.server.<name>.entrypoints`
     listing the four basenames, the resolved/registered entrypoints for that pack
     are empty.
-- **`tests/marketplace-source-builtin.test.ts`** (new):
+- **`tests/unit/core/marketplace-source-builtin.unit.test.ts`** (new):
   - The composed `GET /api/marketplace/sources` shape includes the synthetic
     `{ id: "builtin", builtin: true }` source and `MarketplaceSourceStore` does NOT
     contain it (not persisted to `marketplace-sources.yaml`; idempotent after a
@@ -891,11 +893,11 @@ Findings from `tests/fixtures/market-sources/`:
   - `MarketplaceSourceStore.add({ url: "builtin:" })` / id `"builtin"` is rejected.
   - `parseSource` / a re-instantiated store rejects a disk-authored row with `id: "builtin"` or `url: "builtin:"`.
   - **Disabled-state survives RESTART (DoD: "reload/restart")**: write `pack_activation.server.<name>.entrypoints` via the store, **re-instantiate the server config store from disk** (simulated gateway restart), and assert the disabled refs persist and the contribution registry still filters them — covering the restart half of the DoD that the browser reload E2E does not (the E2E only proves client-reload persistence).
-- **`tests/pr-walkthrough-yaml-schema.test.ts`** (existing, keep green after the extraction): the agent-side `validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` re-exports behave identically post-move to `src/shared/pr-walkthrough/yaml-to-cards.ts` (the extraction is behavior-preserving). Optionally add a focused test that the shared module is import-clean (no `node:`/server deps) so the pack bundle stays loadable.
+- **`tests/unit/core/pr-walkthrough-yaml-schema.unit.test.ts`** (existing, keep green after the extraction): the agent-side `validatePrWalkthroughYaml` + `mapYamlToWalkthroughPayload` re-exports behave identically post-move to `src/shared/pr-walkthrough/yaml-to-cards.ts` (the extraction is behavior-preserving). Optionally add a focused test that the shared module is import-clean (no `node:`/server deps) so the pack bundle stays loadable.
 
 ### 11.2 Browser E2E (`tests/e2e/ui/*.spec.ts`)
 
-- **`tests/e2e/ui/pr-walkthrough-pack.spec.ts`** (the deletion plan's mandated
+- **`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`** (the deletion plan's mandated
   E2E, updated):
   - The walkthrough works **end-to-end served entirely by the first-party pack**,
     with **NO manual install step** (it is resolved by the §5 band): session-menu
@@ -926,13 +928,13 @@ Findings from `tests/fixtures/market-sources/`:
     toggle, while the built-in row is non-uninstallable and its toggle is disabled
     ("shadowed"); after uninstalling the override the built-in pack is the winner
     again and re-owns the toggle.
-- **`tests/e2e/ui/marketplace-conflicts.spec.ts`** (new, item 0): the conflict /
+- **`tests/browser/journeys/ui/marketplace-conflicts.journey.spec.ts`** (new, item 0): the conflict /
   no-tools / panel-only fixture assertions from §10.
 
 ### 11.3 Phase invariant
 
 All new tests land in exactly one of unit / e2e (pinned by
-`tests/test-phase-invariant.test.ts`). The new browser specs go under
+`tests/e2e/node/test-phase-invariant.node-e2e.test.ts`). The new browser specs go under
 `tests/e2e/ui/`.
 
 ---
@@ -970,7 +972,7 @@ independent.
   `pack-list.ts` `BuildPackListOptions` + insertion; `pack-types.ts`/manifest as
   needed): `resolveBuiltinPacksDir`, `builtinFirstPartyPackEntries`,
   `BUILTIN_PACK_SCOPE`, the step-1b insertion, and wiring `builtinPacksDir` at both
-  `buildPackList(...)` call sites. **Unit: `tests/builtin-packs.test.ts`.**
+  `buildPackList(...)` call sites. **Unit: `tests/unit/core/builtin-packs.unit.test.ts`.**
 - **Task B — ship pipeline** (`scripts/copy-builtin-packs.mjs` new;
   `package.json` `build:server`): the allowlist copy step + dist layout. Verify
   `npm run build` produces `dist/server/builtin-packs/market-packs/pr-walkthrough/`.
@@ -979,7 +981,7 @@ independent.
   `server.ts` sources composition, `:id` DELETE/sync/packs special-casing,
   installed-list prepend, install/uninstall rejection; `src/app/api.ts`
   `InstalledPackWire.builtin` + `MarketplaceSource.builtin`). **Unit:
-  `tests/marketplace-source-builtin.test.ts`.**
+  `tests/unit/core/marketplace-source-builtin.unit.test.ts`.**
 - **Task D — Market UI** (`src/app/marketplace-page.ts`): built-in source section
   (no Remove), built-in pack rows (toggle, no Uninstall), reuse #734 activation.
 - **Task E — pr-walkthrough migration** (allowlist add): confirm the band lists it
@@ -993,18 +995,18 @@ independent.
   `mapYamlToWalkthroughPayload` + `DiffReferenceMapper` + `flattenDiffBlocks` +
   helpers from `src/server/pr-walkthrough/walkthrough-yaml-schema.ts` into a PURE
   `src/shared/pr-walkthrough/yaml-to-cards.ts`; re-export so the agent side +
-  `tests/pr-walkthrough-yaml-schema.test.ts` stay green unchanged. (2) New
+  `tests/unit/core/pr-walkthrough-yaml-schema.unit.test.ts` stay green unchanged. (2) New
   `build:packs` entry bundling it → `market-packs/pr-walkthrough/lib/yaml-to-cards.mjs`
   (committed). (3) Pack `lib/routes.mjs` `publish` validates+maps the RAW production
   YAML against the live diff via the bundled synthesis; per-real-changeset store
   keys. (4) `src/panel.js`: pass raw YAML to `publish`, derive the real jobId from
   the submit tool call, add the **"Run PR walkthrough"** `host.session.postMessage`
   action (§8.4 step 5). (5) Drop hard-coded `jobId` from the `entrypoints/*.yaml`.
-  (6) Update `tests/e2e/ui/pr-walkthrough-pack.spec.ts` to the production schema +
+  (6) Update `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` to the production schema +
   synthesized-card assertions. Depends on the pack existing (Task E) and pairs with
   Task F (do together — both touch the pack + the deletion).
 - **Task G — item 0 fixture cleanup** (`tests/fixtures/market-sources/README.md`
-  + `tests/e2e/ui/marketplace-conflicts.spec.ts`): independent of A–F.
+  + `tests/browser/journeys/ui/marketplace-conflicts.journey.spec.ts`): independent of A–F.
 - **Task H — docs**: update `docs/marketplace.md` (built-in source + disabling
   shipped features) and `docs/extension-host-authoring.md` (first-party packs
   dogfood the API); reconcile this doc with

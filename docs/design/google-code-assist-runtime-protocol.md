@@ -12,9 +12,9 @@
 Bobbit's generated Code Assist provider extension. The extension supplies streaming, tool-call and
 tool-result translation, and multi-turn context inside the spawned agent runtime. Current v2
 coverage pins the adapter protocol, generated extension, registry/auth isolation, gateway token
-endpoint, and selectable model UI in `tests2/core/google-code-assist*.test.ts`,
-`tests2/integration/google-code-assist-token-api.test.ts`, and
-`tests2/dom/ui-fixtures/model-selector-fixture.test.ts`.
+endpoint, and selectable model UI in `tests/unit/core/google-code-assist*.unit.test.ts`,
+`tests/integration/gateway/google-code-assist-token-api.gateway.test.ts`, and
+`tests/dom/ui-fixtures/model-selector-fixture.dom.test.ts`.
 
 ## Historical research context
 

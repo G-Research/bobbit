@@ -9,12 +9,12 @@ Source of truth: `docs/design/extension-host-phase2.md` §10 (Slice D1). The
 litmus pack now ships as a first-class installable market pack at the repo-root
 design-specified location `market-packs/artifacts/` (pack.yaml +
 `tools/artifact_demo/...`), NOT as a test fixture. Parity is proven by
-`tests/e2e/ui/artifacts-pack.spec.ts`, which registers `market-packs/` as a
+`tests/browser/journeys/ui/artifacts-pack.journey.spec.ts`, which registers `market-packs/` as a
 local-dir marketplace source and installs the `artifacts` pack.
 
 ## 1. What the litmus already proves (in CI, green)
 
-`tests/e2e/ui/artifacts-pack.spec.ts` drives the artifacts built-in re-expressed
+`tests/browser/journeys/ui/artifacts-pack.journey.spec.ts` drives the artifacts built-in re-expressed
 as an installable market pack using ONLY public Phase-2 contributions + the Host
 API, and asserts behavioral parity for the load-bearing surfaces:
 
@@ -60,8 +60,8 @@ is deleted here.
 
 Full behavioral parity has **shipped**: the pack is no longer a single-text-payload
 litmus. The shipped `market-packs/artifacts/` viewer ports every per-type component
-and the existing tests prove it — see `tests/e2e/ui/artifacts-pack.spec.ts` (per-type
-E2E) and `tests/artifacts-pack-viewer.test.ts` (node).
+and the existing tests prove it — see `tests/browser/journeys/ui/artifacts-pack.journey.spec.ts` (per-type
+E2E) and `tests/unit/core/artifacts-pack-viewer.unit.test.ts` (node).
 
 1. **All artifact types — DONE.** The pack viewer renders HTML (sandboxed
    `allow-scripts` iframe + postMessage console capture), Markdown (rendered HTML,

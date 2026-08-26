@@ -119,13 +119,13 @@ Normalize results by workload duration and connected-client count. The most usef
 
 ## Invariants and tests to preserve
 
-- Status correctness: `session_status` carries monotonic `statusVersion`; heartbeat reuses the same version. Covered by `tests/session-manager-status.test.ts` and `docs/design/unify-session-status.md`.
-- Streaming resume/dedup: `event` frames keep monotonic per-session `seq`; replay never creates holes or goes backward. Covered by `tests/event-buffer.test.ts`, `tests/restart-preserves-streaming-frame.test.ts`, `tests/sandbox-recovery-respawn-helper.test.ts`, and `tests/manual-integration/sandbox-recovery-frame-continuity.spec.ts`.
-- Pending tool permission seq reuse: late joiners must replay the original `seq`/`ts`, not allocate a new frame. Covered by `tests/perm-frame-late-joiner-seq-gap.test.ts` and `tests/remote-agent-sequence-hole.spec.ts`.
-- Abort/queue/status UX: aborting/idle/streaming transitions and queue broadcasts must remain immediate. Covered by `tests/e2e/abort-status-e2e.spec.ts` and `tests/e2e/queue-e2e.spec.ts`.
-- Goal/gate WS behavior: `gate_signal_received`, verification progress, and `gate_status_changed` ordering/fanout must remain intact. Covered by `tests/e2e/gate-status-cache-ws.spec.ts`, `tests/e2e/verification-core.spec.ts`, and `tests/e2e/gate-verification-resume.spec.ts`.
-- Reconnect/model snapshots: archived and reconnect state frames must still include model/status data. Covered by `tests/e2e/archived-footer-model.spec.ts` and `tests/e2e/context-bar-reconnect.spec.ts`.
-- Backpressure behavior: overflow decisions and replay pacing should remain non-flaky. Covered by `tests/ws-overflow-guard.test.ts` and `tests/replay-pacing.test.ts`.
+- Status correctness: `session_status` carries monotonic `statusVersion`; heartbeat reuses the same version. Covered by `tests/unit/core/session-manager-status.unit.test.ts` and `docs/design/unify-session-status.md`.
+- Streaming resume/dedup: `event` frames keep monotonic per-session `seq`; replay never creates holes or goes backward. Covered by `tests/unit/core/event-buffer.unit.test.ts`, `tests/unit/core/restart-preserves-streaming-frame.unit.test.ts`, `tests/unit/core/sandbox-recovery-respawn-helper.unit.test.ts`, and `tests/manual/sandbox-recovery-frame-continuity.manual.spec.ts`.
+- Pending tool permission seq reuse: late joiners must replay the original `seq`/`ts`, not allocate a new frame. Covered by `tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts` and `tests/dom/remote-agent-sequence-hole.dom.test.ts`.
+- Abort/queue/status UX: aborting/idle/streaming transitions and queue broadcasts must remain immediate. Covered by `tests/integration/gateway/abort-status-e2e.gateway.test.ts` and `tests/integration/gateway/queue-e2e.gateway.test.ts`.
+- Goal/gate WS behavior: `gate_signal_received`, verification progress, and `gate_status_changed` ordering/fanout must remain intact. Covered by `tests/integration/gateway/gate-status-cache-ws.gateway.test.ts`, `tests/integration/gateway/verification-core.gateway.test.ts`, and `tests/e2e/api/gate-verification-resume.api-e2e.spec.ts`.
+- Reconnect/model snapshots: archived and reconnect state frames must still include model/status data. Covered by `tests/integration/gateway/archived-footer-model.gateway.test.ts` and `tests/integration/gateway/context-bar-reconnect.gateway.test.ts`.
+- Backpressure behavior: overflow decisions and replay pacing should remain non-flaky. Covered by `tests/unit/core/ws-overflow-guard.unit.test.ts` and `tests/unit/core/replay-pacing.unit.test.ts`.
 
 ## Recommended experiment order
 

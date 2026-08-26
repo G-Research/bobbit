@@ -1,5 +1,7 @@
 # Tail-chat reliability — Issue Analysis & Redesign
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Goal: replace the layered, partially-overlapping scroll-lock defenses in
 `src/ui/components/AgentInterface.ts` with a single coherent model that keeps
 the chat viewport pinned to the bottom across (1) tool-use card insertion,
@@ -101,7 +103,7 @@ Deferred body, in order:
 6. **Negative shrink**: if `_isNearBottom() && !_escapedFromLock`,
    re-engage stick (`_isAtBottom = true`) and apply the post-collapse
    clamp inherited from the previous algorithm
-   (`tests/collapse-scroll-bugs.spec.ts`).
+   (`tests/browser/fixtures/collapse-scroll-bugs.fixture.spec.ts`).
 
 ### `scrollToBottomNow({ animate? })`
 
@@ -460,13 +462,13 @@ the geometry-based intent flip must not run during initial pin at all.
 
 | File | What it asserts | Constraint on rewrite |
 |---|---|---|
-| `tests/agent-interface-scroll.spec.ts` | RO `delta === 0` must NOT clobber user `scrollTop` while `stickToBottom` true (the canonical vibration regression). | **Must still pass.** This is the heart of the no-snap-back invariant. |
-| `tests/agent-interface-scroll-hardening.spec.ts` | Sub-pixel echo (< 1 px), 10-px tail, `wasAtBottom` carry-over, settle window re-anchors across staggered RO ticks, user-wheel cancels settle. | **Some constrain, some are obsolete.** The carry-over and settle-window tests assert internal mechanism details that the rewrite removes. They should be deleted or rewritten as outcome-only tests against the new model. The sub-pixel-echo and 10-px-tail behaviours can be kept as outcome assertions. |
-| `tests/collapse-scroll-bugs.spec.ts` | Phantom padding after collapse; latest message visible after large collapse. | Must still pass. The shrink-clamp logic at line 366 stays. |
-| `tests/scroll-anchor-shrink.spec.ts` | Shrink-while-scrolled-up does not jolt; shrink-while-stuck stays near bottom; grow-while-scrolled-up does not adjust. | Must still pass. |
-| `tests/mobile-scroll-keyboard.spec.ts` | Stick-to-bottom on new content; user scroll-up unsticks; keyboard open behaviour; workflow bar unrelated. | Must still pass. |
+| `tests/browser/fixtures/agent-interface-scroll.fixture.spec.ts` | RO `delta === 0` must NOT clobber user `scrollTop` while `stickToBottom` true (the canonical vibration regression). | **Must still pass.** This is the heart of the no-snap-back invariant. |
+| `tests/browser/fixtures/agent-interface-scroll-hardening.fixture.spec.ts` | Sub-pixel echo (< 1 px), 10-px tail, `wasAtBottom` carry-over, settle window re-anchors across staggered RO ticks, user-wheel cancels settle. | **Some constrain, some are obsolete.** The carry-over and settle-window tests assert internal mechanism details that the rewrite removes. They should be deleted or rewritten as outcome-only tests against the new model. The sub-pixel-echo and 10-px-tail behaviours can be kept as outcome assertions. |
+| `tests/browser/fixtures/collapse-scroll-bugs.fixture.spec.ts` | Phantom padding after collapse; latest message visible after large collapse. | Must still pass. The shrink-clamp logic at line 366 stays. |
+| `tests/browser/fixtures/scroll-anchor-shrink.fixture.spec.ts` | Shrink-while-scrolled-up does not jolt; shrink-while-stuck stays near bottom; grow-while-scrolled-up does not adjust. | Must still pass. |
+| `tests/browser/fixtures/mobile-scroll-keyboard.fixture.spec.ts` | Stick-to-bottom on new content; user scroll-up unsticks; keyboard open behaviour; workflow bar unrelated. | Must still pass. |
 | `tests/e2e/ui/jump-to-bottom.spec.ts` | Button shows on scroll-up, hides at bottom, click jumps + re-sticks; clean unmount. | Must still pass. The 600 ms suppression timer goes away — the test should pass by virtue of correct event sequencing instead. |
-| `tests/follow-tail.spec.ts` | Proposal-panel variant. | Out of scope; do not touch. |
+| `tests/browser/fixtures/follow-tail.fixture.spec.ts` | Proposal-panel variant. | Out of scope; do not touch. |
 
 The rewrite preserves all *behavioural* tests. Tests that assert
 *internal mechanism* (e.g. "settle window re-anchors across staggered
@@ -659,20 +661,20 @@ lands.
 | `tests/e2e/ui/tail-chat-tool-insert.spec.ts` | Open a session, scroll to bottom, then drive a sequence of `message_update` events that insert a new tool_use card with content tall enough to extend below the fold (use a mock or a bg-process echo loop to deterministically grow content). After each insert, await two rAFs. | `scrollTop + clientHeight >= scrollHeight - 4` (sub-pixel tail). |
 | `tests/e2e/ui/tail-chat-tool-expand.spec.ts` | Same scaffold, but emit a tool_use first, then a tool_result that expands the existing card (`tool_execution_update` mid-stream). | Bottom-pinned after settle. |
 | `tests/e2e/ui/tail-chat-rapid-stream.spec.ts` | Drive 10+ `message_update` events back-to-back within a single tick (use the in-process harness to feed the agent a deterministic sequence). | Bottom-pinned throughout — assert at the midpoint AND end. |
-| `tests/e2e/ui/tail-chat-session-navigate.spec.ts` | Pre-create two long sessions (each transcript taller than the viewport, including markdown code blocks and at least one image). Navigate session A → session B → A → B → A. Each navigate must land at the bottom after `updateComplete + 100 ms`. | Five hops, each asserts bottom-pinned. |
+| `tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts` | Pre-create two long sessions (each transcript taller than the viewport, including markdown code blocks and at least one image). Navigate session A → session B → A → B → A. Each navigate must land at the bottom after `updateComplete + 100 ms`. | Five hops, each asserts bottom-pinned. |
 | `tests/e2e/ui/tail-chat-user-scroll-up.spec.ts` | While streaming, dispatch a `wheel` event scrolling up by 200 px. Verify the jump-to-bottom button becomes visible, that subsequent `message_update` events do NOT re-pin (scrollTop preserved), then click the button and verify re-stick + tracking of new content. | All four states correct. |
 
 ### 7.2 Existing tests preserved
 
-`tests/agent-interface-scroll.spec.ts` (vibration), `tests/scroll-anchor-
-shrink.spec.ts` (shrink-clamp), `tests/collapse-scroll-bugs.spec.ts`
-(collapse), `tests/mobile-scroll-keyboard.spec.ts` (mobile keyboard),
+`tests/browser/fixtures/agent-interface-scroll.fixture.spec.ts` (vibration), `tests/scroll-anchor-
+shrink.spec.ts` (shrink-clamp), `tests/browser/fixtures/collapse-scroll-bugs.fixture.spec.ts`
+(collapse), `tests/browser/fixtures/mobile-scroll-keyboard.fixture.spec.ts` (mobile keyboard),
 `tests/e2e/ui/jump-to-bottom.spec.ts` (button visibility). All must pass
 unchanged.
 
 ### 7.3 Existing tests rewritten
 
-`tests/agent-interface-scroll-hardening.spec.ts` currently asserts
+`tests/browser/fixtures/agent-interface-scroll-hardening.fixture.spec.ts` currently asserts
 internal mechanism (settle window re-anchors, carry-over scrolls on
 state_update, etc.). Each test that names a deleted mechanism should
 be **rewritten as an outcome test against the new model** — same
@@ -692,7 +694,7 @@ ticks") should be **deleted**.
   buffer echo latch, (4) user intent is observed.
 - `AGENTS.md` debugging entry "Scroll snaps back / vibration" — point at
   the new model and explicitly note the deleted mechanisms.
-- `tests/agent-interface-scroll-hardening.spec.ts` — rewrite outcome-only.
+- `tests/browser/fixtures/agent-interface-scroll-hardening.fixture.spec.ts` — rewrite outcome-only.
 - New tests under `tests/e2e/ui/tail-chat-*.spec.ts`.
 
 **Do not touch:**

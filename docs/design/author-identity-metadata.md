@@ -106,7 +106,7 @@ Current implementation ownership is:
 - snapshot, transcript, extension, and search projection: the visible-snapshot, transcript-reader, server extension-route, and message-search source modules;
 - label selection/presentation, appearance resolution, and static rendering: the message-author presentation, app appearance, message-list/message, and Bobbit-render modules.
 
-Focused verification is registered in `tests2/tests-map.json`. The core author-surfacing, appearance, dispatch, and sidecar suites pin formatting, write-before-prefix, semantic validation, replay safety, structured content, and failure paths. DOM suites pin exact badge text and the static canonical sprite. Gateway and extension integration suites pin raw Pi versus visible/title/search/extension content. Continue/fork integration pins copied bindings. The browser journey covers conditional labels and responsive appearance; the process E2E covers raw persistence, search rebuild, and gateway restart.
+Focused verification is discovered from canonical paths and semantic suffixes. The core author-surfacing, appearance, dispatch, and sidecar suites pin formatting, write-before-prefix, semantic validation, replay safety, structured content, and failure paths. DOM suites pin exact badge text and the static canonical sprite. Gateway and extension integration suites pin raw Pi versus visible/title/search/extension content. Continue/fork integration pins copied bindings. The browser journey covers conditional labels and responsive appearance; the process E2E covers raw persistence, search rebuild, and gateway restart.
 
 ## Original metadata-only decision record
 

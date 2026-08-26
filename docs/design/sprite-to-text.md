@@ -1,5 +1,7 @@
 # Design: Replace bobbit sprite with text (chat blob)
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Goal
 
 Add a General-settings toggle **"Replace bobbit sprite with text"** (default OFF). When ON,
@@ -148,7 +150,7 @@ Add a `.bobbit-blob-text` block and keyframes. Requirements:
 ## Testing
 
 ### Browser E2E (new) — pattern: `tests/e2e/ui/settings.spec.ts`
-New spec (e.g. `tests/e2e/ui/replace-bobbit-text.spec.ts`) covering:
+New spec (e.g. `tests/browser/journeys/ui/replace-bobbit-text.journey.spec.ts`) covering:
 1. Toggle appears in General settings **immediately below** "Show message timestamps"
    (assert DOM order / position relative to the timestamps row).
 2. Enabling it: the chat blob `<canvas class="bobbit-blob__sprite">` disappears and a
@@ -163,7 +165,7 @@ New spec (e.g. `tests/e2e/ui/replace-bobbit-text.spec.ts`) covering:
 ### Pinning / existing tests
 - Run `npm run check`, `npm run test:unit`, `npm run test:e2e`.
 - Tool-description budget and test-phase-invariant pinning tests must still pass. The new spec
-  must be placed so `tests/test-phase-invariant.test.ts` classifies it correctly (browser E2E →
+  must be placed so `tests/e2e/node/test-phase-invariant.node-e2e.test.ts` classifies it correctly (browser E2E →
   `tests/e2e/ui/*.spec.ts`). Add the missing test rather than weakening any existing one.
 
 ## Files touched
@@ -172,7 +174,7 @@ New spec (e.g. `tests/e2e/ui/replace-bobbit-text.spec.ts`) covering:
 - `src/app/remote-agent.ts` — dataset mirror (preferences_changed handler).
 - `src/ui/components/StreamingMessageContainer.ts` — reactive pref read + render branch + text mapping.
 - `src/ui/app.css` — `.bobbit-blob-text` styles, keyframes, reduced-motion, single sprite-colour var.
-- `tests/e2e/ui/replace-bobbit-text.spec.ts` — new browser E2E.
+- `tests/browser/journeys/ui/replace-bobbit-text.journey.spec.ts` — new browser E2E.
 - Docs: feature documentation (handled by documentation gate).
 
 ## Constraints honoured

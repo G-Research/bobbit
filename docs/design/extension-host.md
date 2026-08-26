@@ -1,5 +1,7 @@
 # Bobbit Extension Host — Durable v1 Contract
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Status:** design (v1, durable) — **Phase 2 IMPLEMENTED**. Phase 1 built the inner slice
 (renderers + actions); Phase 2 made the rest of the reserved shape REAL, **purely
 additively** — no v1 signature changed, `HOST_API_VERSION` is still `1`, and every
@@ -995,7 +997,7 @@ audit are the durable boundary regardless of client realm.
   So whether a stale in-flight load is superseded by an uninstall, a pack `{override}`, OR a
   newer eager registration, the late resolve cannot defeat the reconciliation — the
   invariant lives in exactly one place instead of being re-derived (and forgotten) per
-  writer. A writer-ordering matrix in `tests/lazy-renderer-placeholder.spec.ts` pins each
+  writer. A writer-ordering matrix in `tests/dom/lazy-renderer-placeholder.dom.test.ts` pins each
   ordering and asserts both the winning renderer AND that no resurrecting repaint event
   fired for the superseded resolve.
 
@@ -1420,12 +1422,12 @@ was removed rather than retained "just in case."
 | Renderer/actions loader | `rendererKind` computed `"pack"` only for market `.js`; `GET /renderer` serves bytes as `text/javascript` with bearer-only auth (NO `allowedTools` check); factory missing → loader rejects → load-failure fallback registered. | yes |
 | **Renderer precedence (litmus parity)** | A pack that shadows a built-in interactive tool registers with `{ override: true }` and renders with the **PACK** renderer, not the eager builtin (`getToolRenderer(name)` resolves to the pack loader); a built-in NOT shadowed keeps its eager renderer. | **yes** |
 | Manifest schema | Phase-2 keys (`panels`/`routes`/`stores`/`entrypoints`) accepted + ignored, NOT rejected; malformed block degrades (tool still loads). | yes |
-| **Tool-description budget** | `tests/tool-description-budget.test.ts` still passes after the new tool-metadata wire fields (`rendererKind`/`hasActions`/`actionNames`) + contributions parsing — no tool description exceeds its pinned budget. | yes |
+| **Tool-description budget** | `tests/unit/core/tool-description-budget.unit.test.ts` still passes after the new tool-metadata wire fields (`rendererKind`/`hasActions`/`actionNames`) + contributions parsing — no tool description exceeds its pinned budget. | yes |
 | **`buildPackList` byte-identical** | With zero market packs, resolution is unchanged (renderers/actions add nothing), per the existing `buildPackList` byte-identical invariant test. | yes |
 | **Single-sourced session identity** | `body.sessionId !== x-bobbit-session-id` header → 403 BEFORE allowedTools/toolUseId checks; toolUseId is verified against the header-bound session only (a valid toolUseId from a *different* session → 409). | **yes** |
 | **Action-result contract** | `invokeAction` resolves with the handler's JSON; no transcript/persisted-tool-result mutation occurs (assert the stored session record is byte-identical before/after a successful action). | yes |
 
-### 8.2 Browser E2E (mandatory) — `tests/e2e/ui/extension-host.spec.ts`
+### 8.2 Browser E2E (mandatory) — `tests/browser/journeys/ui/extension-host.journey.spec.ts`
 
 Pattern: `tests/e2e/ui/settings.spec.ts`. With a `file://`/local-dir market source
 fixture shipping the `retry-demo` pack (§2.4):
@@ -1453,7 +1455,7 @@ Run `npm run check`, `npm run test:unit`, `npm run test:e2e` before merge.
 `src/server/extension-host/action-dispatcher.ts`,
 `src/server/extension-host/server-host-api.ts`, `src/app/host-api.ts`,
 `src/app/pack-renderers.ts`, `src/server/agent/tool-contributions.ts`,
-`tests/e2e/ui/extension-host.spec.ts` (+ unit fixtures).
+`tests/browser/journeys/ui/extension-host.journey.spec.ts` (+ unit fixtures).
 
 **Edited:** `src/server/server.ts` (2 routes + `invalidateResolverCaches` + dispatcher
 construction), `src/server/agent/tool-manager.ts` + `builtin-config.ts` (`rendererKind`,

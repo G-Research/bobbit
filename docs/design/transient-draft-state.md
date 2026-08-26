@@ -193,7 +193,7 @@ The following table summarizes the auditing of user-input surfaces across Bobbit
 
 The implementation is protected from regressions by a comprehensive, multi-tiered test suite:
 
-### 6.1 Store Unit Invariants (`tests/transient-draft-store.spec.ts`)
+### 6.1 Store Unit Invariants (`tests/dom/transient-draft-store.dom.test.ts`)
 Pins the low-level behavior of `TransientDraftStore` inside a browser environment (`file://` browser unit test fixture):
 - **Round-Trip and Key Isolation**: Validates that saved objects retrieve identically and that namespaces/scope keys do not collide.
 - **Tombstone Behavior**: Assures `clear()` blocks write operations of equal/lesser generation, while `forget()` deletes the tombstone and lets fresh saves through.
@@ -201,17 +201,17 @@ Pins the low-level behavior of `TransientDraftStore` inside a browser environmen
 - **LRU and Size Protection**: Confirms oldest keys are evicted when limits are reached, and that oversize entries are discarded without throwing exceptions.
 - **Degradation**: Assures that when `Storage` is disabled or throws, store methods safely no-op without surfacing exceptions.
 
-### 6.2 Widget Element Unit Tests (`tests/ask-user-choices-widget.spec.ts`)
+### 6.2 Widget Element Unit Tests (`tests/browser/fixtures/ask-user-choices-widget.fixture.spec.ts`)
 Validates `<ask-user-choices-widget>` lifecycle hooks, Lit rendering outputs, tab selections, and keyboard navigation.
 
-### 6.3 Browser E2E Scenarios (`tests/e2e/ui/ask-user-choices-ui.spec.ts`)
+### 6.3 Browser E2E Scenarios (`tests/browser/journeys/ui/ask-user-choices-ui.journey.spec.ts`)
 Executes browser automation tests on a live server instance:
 - `pre-submit selections survive reload`: Fills out an ask draft, reloads, and verifies radio options and typed "Other" strings are restored.
 - `pre-submit selections survive cache-evicted session switch`: Fills out a draft, switches through 11 different sessions to force the origin session out of the LRU `sessionCache` (destroying the DOM element), switches back, and verifies the selections are successfully restored.
 - `submit clears the draft — no resurrection after reload`: Submits the widget, reloads, and verifies the card remains read-only without resurrecting scratch states.
 - `pre-submit drafts are per-tab isolated`: Opens two separate tabs on the same session, verifies that unsaved draft state does not leak from tab 1 to tab 2, and that once tab 1 submits, tab 2 converges into a read-only state.
 
-### 6.4 Attachment Race Unit Tests (`tests/agent-interface-attachment-draft-race.test.ts`)
+### 6.4 Attachment Race Unit Tests (`tests/unit/core/agent-interface-attachment-draft-race.unit.test.ts`)
 Uses a mock behavioral harness modeled on the `AgentInterface` component to simulate and verify async timing:
 - **Clear-After-Send**: Assures that an async IndexedDB lookup resolving after message clearance is safely ignored and doesn't resurrect files.
 - **Set-During-Load**: Assures that user-added attachments are not overwritten by a slow load resolving afterwards.
@@ -226,7 +226,7 @@ Uses a mock behavioral harness modeled on the `AgentInterface` component to simu
 | `src/ui/storage/transient-draft-store.ts` | The core factory function `createTransientDraftStore` and storage manager. |
 | `src/ui/components/AskUserChoicesWidget.ts` | The widget integrated with `TransientDraftStore` for pre-submit ask persistence. |
 | `src/ui/components/AgentInterface.ts` | The chat interface incorporating the `_attachmentDraftGen` resurrection guard. |
-| `tests/transient-draft-store.spec.ts` | Unit tests for standard `TransientDraftStore` behaviors. |
-| `tests/agent-interface-attachment-draft-race.test.ts` | Unit tests modeling the async resurrection race in `AgentInterface`. |
-| `tests/e2e/ui/ask-user-choices-ui.spec.ts` | End-to-end reload, eviction, and isolation tests for the ask widget. |
+| `tests/dom/transient-draft-store.dom.test.ts` | Unit tests for standard `TransientDraftStore` behaviors. |
+| `tests/unit/core/agent-interface-attachment-draft-race.unit.test.ts` | Unit tests modeling the async resurrection race in `AgentInterface`. |
+| `tests/browser/journeys/ui/ask-user-choices-ui.journey.spec.ts` | End-to-end reload, eviction, and isolation tests for the ask widget. |
 | `docs/design/transient-draft-state.md` | This architectural reference and design guideline. |

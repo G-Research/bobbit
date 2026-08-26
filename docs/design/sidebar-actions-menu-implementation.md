@@ -23,7 +23,7 @@ Implementation should be split by owner so parallel agents do not collide:
 | Session fork endpoint + helper | `src/server/server.ts`, `src/app/session-manager.ts` | Add dedicated `POST /api/sessions/:id/fork` (transcript clone + `newWorktree` body), then export a client helper that calls that endpoint, refreshes session list, and connects. |
 | GitHub link resolver | `src/server/server.ts` and `src/app/api.ts` | `GET /api/goals/:id/github-link` (`execFile`-based, sanitized) still exists but no longer gates the menu item; `Open on GitHub` mirrors the goal-row PR badge. |
 | Modal/open-popover suppression | `src/ui/components/AgentInterface.ts` | Add `sidebar-actions-popover` to the global Escape suppression selector. |
-| Tests | `tests/e2e/ui/sidebar-actions-menu.spec.ts` plus conditional unit test | Browser coverage for menu behavior; unit coverage is required whenever FLIP rect/delta logic is extracted to a helper. |
+| Tests | `tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts` plus conditional unit test | Browser coverage for menu behavior; unit coverage is required whenever FLIP rect/delta logic is extracted to a helper. |
 
 No `src/` or `tests/` changes are made by this research task.
 
@@ -447,7 +447,7 @@ If mobile parity becomes mandatory later, use a bottom sheet instead of an ancho
 
 ## Test plan for later implementation
 
-Add `tests/e2e/ui/sidebar-actions-menu.spec.ts` using the existing gateway harness and patterns from `settings.spec.ts` / `copy-session-link.spec.ts`.
+Add `tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts` using the existing gateway harness and patterns from `settings.spec.ts` / `copy-session-link.spec.ts`.
 
 Required browser E2E cases:
 
@@ -501,7 +501,7 @@ Required browser E2E cases:
 
 Unit/file-fixture test requirement:
 
-- If rect-capture or FLIP delta logic lives in a helper, add `tests/sidebar-actions-flip.test.ts` verifying `computeSidebarActionFlipDeltas` computes `dx`, `dy`, `sx`, `sy`; ignores missing source/target ids; and handles zero-size rects without `Infinity`/`NaN`.
+- If rect-capture or FLIP delta logic lives in a helper, add `tests/unit/core/sidebar-actions-flip.unit.test.ts` verifying `computeSidebarActionFlipDeltas` computes `dx`, `dy`, `sx`, `sy`; ignores missing source/target ids; and handles zero-size rects without `Infinity`/`NaN`.
 
 ## Recommended implementation order
 

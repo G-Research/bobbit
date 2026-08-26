@@ -48,7 +48,7 @@ libuv's real cwd cannot be redirected in a worker.
 2. **The pr-walkthrough pack depends on it.** `market-packs/pr-walkthrough/.../routes.mjs`
    derives the git repo root from `process.cwd()` (its `repoRoot()` helper) and passes it
    as an explicit `cwd` to `execFile("git", …)`. The browser E2E
-   (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) `git init`s the **session worktree** and
+   (`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`) `git init`s the **session worktree** and
    asserts the `bundle` route shells `git diff` against it. If `process.cwd()` returned
    the gateway's cwd, the pack would diff the wrong repo and the E2E would fail
    (acceptance #5). Passing `workingDir` into the handler `ctx` instead is a **Host-API
@@ -271,7 +271,7 @@ many legitimate unrelated `grant`/`permission` hits (tool grant-policy
 `viewerPermission`, storage-permission, `permission_denied` HTTP).
 
 **Explicit EXCLUDE set (never scanned — they describe the removal and would self-match):**
-`tests/extension-host-no-capability-sandbox-residual.test.ts` (the guard itself) and
+`tests/unit/core/extension-host-no-capability-sandbox-residual.unit.test.ts` (the guard itself) and
 `docs/design/extension-host-isolation-simplification.md` (this planning doc). Also skip
 `node_modules/`, `dist/`, `.git/`.
 
@@ -286,8 +286,8 @@ The assertions:
 2. **Extension-host source/test/pack surface — zero `permission` or `grant`** (case-
    insensitive, fragment-assembled needles) in this exact file set: every file under
    `src/server/extension-host/`, `src/server/agent/tool-contributions.ts`,
-   `tests/extension-host-module-isolation.test.ts`,
-   `tests/extension-host-isolation-config-invariant.test.ts`, and every file under
+   `tests/unit/isolated/extension-host-module-isolation.isolated.test.ts`,
+   `tests/unit/isolated/extension-host-isolation-config-invariant.isolated.test.ts`, and every file under
    `market-packs/pr-walkthrough/`. (After the rewrite these legitimately contain neither
    word.)
 3. **`permission-grants.ts` no longer exists** on disk (build the path from fragments too).
@@ -302,7 +302,7 @@ The assertions:
 **Do NOT** add any forbidden-token-named positive test.
 
 ### 6.5 pr-walkthrough E2E
-`tests/e2e/ui/pr-walkthrough-pack.spec.ts` must still pass unchanged behaviorally. Its
+`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` must still pass unchanged behaviorally. Its
 prose mentions `permissions: ["git","fs"]`; update those comments to the ambient model
 (this file is **not** in the guard-test surface set, so comment wording is free, but keep
 it accurate). The test itself drives the same live `git diff` against the session worktree.

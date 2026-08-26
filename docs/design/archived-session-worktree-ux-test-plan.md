@@ -1,5 +1,7 @@
 # Archived Session Worktree UX Test Plan
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Scope
 
 This plan covers the archived-session worktree maintenance reattempt. It is a test strategy only; implementation should update the test files named below after the API/UI contract lands.
@@ -13,7 +15,7 @@ Primary risks to pin:
 
 ## Existing coverage reviewed
 
-- `tests/e2e/maintenance-api.spec.ts`
+- `tests/integration/gateway/maintenance-api.gateway.test.ts`
   - Already seeds archived sessions directly through the isolated gateway project context.
   - Already covers current scan/cleanup shape, selected cleanup, already-cleaned behavior, stale directories, key/session mismatch, sandbox container paths, multi-repo rows, and live-session guard.
   - Needs expansion for the new UX-oriented contract: action categories, machine-readable reason/category fields, grouped summary counts, category cleanup/selection support if added, and guard behavior in `mode: all` or category cleanup.
@@ -34,7 +36,7 @@ Primary risks to pin:
 
 ## Proposed API contract coverage
 
-### File: `tests/e2e/maintenance-api.spec.ts`
+### File: `tests/integration/gateway/maintenance-api.gateway.test.ts`
 
 Extend the existing `archived session worktree maintenance` describe block. Keep using isolated temp git repos and direct session-store seeding.
 
@@ -128,7 +130,7 @@ Keep and strengthen the existing preservation test:
 ### Files
 
 - Add or extend: `tests/ui-fixtures/settings-admin-fixture-entry.ts`
-- Add tests in: `tests/ui-fixtures/settings-admin-fixture.spec.ts`
+- Add tests in: `tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts`
 
 The fixture should expose deterministic controls:
 
@@ -235,7 +237,7 @@ Assert:
 
 ## Proposed spawned-browser E2E coverage
 
-### File: `tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts`
+### File: `tests/browser/journeys/ui/settings-maintenance-archived-worktrees.journey.spec.ts`
 
 Use the real gateway only for one or two full-stack journeys. Avoid duplicating the full fixture matrix.
 
@@ -278,9 +280,9 @@ Run once after implementation on a real development project:
 Focused feedback while developing tests:
 
 ```bash
-npx playwright test --config playwright-e2e.config.ts --project=api tests/e2e/maintenance-api.spec.ts
-npx playwright test --config tests/playwright.config.ts tests/ui-fixtures/settings-admin-fixture.spec.ts
-npx playwright test --config playwright-e2e.config.ts --project=browser tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts
+npx playwright test --config playwright-e2e.config.ts --project=api tests/integration/gateway/maintenance-api.gateway.test.ts
+npx playwright test --config tests/playwright.config.ts tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts
+npx playwright test --config playwright-e2e.config.ts --project=browser tests/browser/journeys/ui/settings-maintenance-archived-worktrees.journey.spec.ts
 ```
 
 Required final verification for the goal branch:

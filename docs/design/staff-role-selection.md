@@ -1,5 +1,7 @@
 # Staff Role Selection — Design
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Goal
 
 Let users optionally choose a **role** when creating/editing a staff member. A selected role:
@@ -172,21 +174,21 @@ Add role-existence validation to the staff routes so unknown roles are rejected:
 
 ## Testing
 
-**Unit** (`tests/role-prompt.spec.ts` or similar, file:// fixtures):
+**Unit** (`tests/unit/core/role-prompt.unit.test.ts` or similar, file:// fixtures):
 - `resolveRolePrompt`: `{{GOAL_BRANCH}}` replaced only when branch present (else left intact); `{{AGENT_ID}}` and `{{AVAILABLE_ROLES}}` substituted; missing/empty template → undefined.
 - `buildStaffSystemPrompt`: role present (prepended, `---` separator); role absent (unchanged); role + memory ordering (`role --- systemPrompt --- Pinned Context`); unknown roleId → graceful fallback (systemPrompt only). 
 - Confirm existing regular-session/role tests still pass after the refactor.
 
 **API E2E** (`tests/e2e/`): `POST` and `PUT /api/staff` with `roleId` (persisted), and unknown-role → 404.
 
-**Browser E2E** (`tests/e2e/ui/staff-role.spec.ts`, pattern: `staff-accessory.spec.ts`): create staff → pick role → accessory pre-fills from role → save → reload → role persists; edit to change role and to clear it ("No role"); verify accessory remains overridable after picking a role.
+**Browser E2E** (`tests/browser/journeys/ui/staff-role.journey.spec.ts`, pattern: `staff-accessory.spec.ts`): create staff → pick role → accessory pre-fills from role → save → reload → role persists; edit to change role and to clear it ("No role"); verify accessory remains overridable after picking a role.
 
 Run: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
 
 ## Work partition (non-overlapping files)
 
 - **Unit A — Server backend**: `role-prompt.ts` (new), `session-manager.ts` (3 sites), `staff-manager.ts` (2 sites + roleManager wiring), `server.ts` (fork-restore site + POST/PUT role 404 validation), unit tests for helpers, API E2E. Owns all `src/server/**` + `tests/*.spec.ts` + `tests/e2e/*.spec.ts`.
-- **Unit B — Frontend**: `src/app/staff-page.ts`, `src/app/api.ts` (roleId in types), browser E2E `tests/e2e/ui/staff-role.spec.ts`. Owns `src/app/staff-page.ts`, `src/app/api.ts`, UI E2E.
+- **Unit B — Frontend**: `src/app/staff-page.ts`, `src/app/api.ts` (roleId in types), browser E2E `tests/browser/journeys/ui/staff-role.journey.spec.ts`. Owns `src/app/staff-page.ts`, `src/app/api.ts`, UI E2E.
 - **Unit C — Proposal/tool** (after B for api.ts roleId): `defaults/tools/proposals/extension.ts`, `propose_staff.yaml`, `src/server/agent/staff-assistant.ts`, `src/app/proposal-panels.ts` (apply path role→roleId).
 
 A and B run in parallel (no file overlap). C runs after B (depends on `api.ts` `roleId`; touches `staff-assistant.ts` which A leaves untouched).

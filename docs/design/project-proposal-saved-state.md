@@ -156,14 +156,14 @@ addressable from E2E tests.
 
 ## Tests
 
-`tests/e2e/ui/project-assistant-saved-state.spec.ts` covers:
+`tests/browser/fixtures/project-assistant-saved-state.fixture.spec.ts` covers:
 
 1. Apply Changes → "Changes Saved" view appears with Terminate button
 2. Reload preserves the saved state (proves draft persistence works)
 3. A new `<project_proposal>` replaces the saved view with the new proposal
 4. Terminate → confirm → session is gone and the user lands on the dashboard
 
-`tests2/browser/journeys/project-proposal-accept.journey.spec.ts` covers the
+`tests/browser/journeys/project-proposal-accept.journey.spec.ts` covers the
 no-op regression directly:
 
 1. Registered Apply Changes shows pending feedback and suppresses duplicate

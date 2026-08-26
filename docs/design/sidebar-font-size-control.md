@@ -80,7 +80,7 @@ At all supported sidebar font sizes:
 
 ## QA and regression coverage
 
-Focused browser E2E coverage lives in `tests/e2e/ui/sidebar-font-scale.spec.ts`. It should cover both the setting and real sidebar affordances:
+Focused browser E2E coverage lives in `tests/e2e/browser/sidebar-font-scale.browser-e2e.spec.ts`. It should cover both the setting and real sidebar affordances:
 
 - The setting persists, clamps to the supported range, and updates `.sidebar-root` font size.
 - Representative top action icons, compound icons, plus overlays, chevrons, and role-picker chevrons grow when the sidebar font size increases.
@@ -95,5 +95,5 @@ Recommended verification for sidebar font-size changes:
 ```bash
 npm run check
 npm run test:unit
-npx playwright test tests/e2e/ui/sidebar-font-scale.spec.ts --reporter=line
+npx playwright test tests/e2e/browser/sidebar-font-scale.browser-e2e.spec.ts --reporter=line
 ```

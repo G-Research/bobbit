@@ -1,5 +1,7 @@
 # Snapshot ↔ Live-Event Race Fix (H3)
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > Historical implementation record. Current prompt/steer snapshot continuity uses `deliveryIntentId` and the authoritative delivery outbox; see [Reliable prompt and steer delivery](../prompt-queue.md).
 
 Status: implemented on `goal/fix-snapsh-af9b8672`, two passes (`c2eeeb73`,
@@ -183,7 +185,7 @@ but each affects different bugs and is queued as its own focused goal:
 
 ## 7. Tests
 
-- **E2E regression**: [`tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts`](../../tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts).
+- **E2E regression**: [`tests/browser/journeys/ui/repro-h3-snapshot-live-interleave.journey.spec.ts`](../../tests/browser/journeys/ui/repro-h3-snapshot-live-interleave.journey.spec.ts).
   Four variations × 5 iterations each. Variations:
   - **A** — mid-stream `requestMessages()` during a single-tab stream burst.
   - **B** — control / no resync (always passed).
@@ -194,9 +196,9 @@ but each affects different bugs and is queued as its own focused goal:
   count cumulative `STREAM_BURST_DONE` markers rather than regex-test (the
   marker text is identical across iterations, so the prior predicate would
   fire instantly on a stale row).
-- **Unit (reducer)**: `tests/message-reducer.test.ts` — H3 `_order`-survivor
+- **Unit (reducer)**: `tests/unit/core/message-reducer.unit.test.ts` — H3 `_order`-survivor
   cases, multiset dedup cases, prior-snapshot-artifact-drop case.
-- **Unit (server splice)**: `tests/session-manager-getmessages-splice.test.ts`
+- **Unit (server splice)**: `tests/unit/core/session-manager-getmessages-splice.unit.test.ts`
   — id-match-replace, append, empty-content no-op.
 
 ## 8. Touched files
@@ -212,9 +214,9 @@ Production:
 
 Tests:
 
-- `tests/message-reducer.test.ts`
-- `tests/session-manager-getmessages-splice.test.ts`
-- `tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts`
+- `tests/unit/core/message-reducer.unit.test.ts`
+- `tests/unit/core/session-manager-getmessages-splice.unit.test.ts`
+- `tests/browser/journeys/ui/repro-h3-snapshot-live-interleave.journey.spec.ts`
 
 ---
 
@@ -326,13 +328,13 @@ not own it.
 
 ### 9.5 Tests
 
-- **Unit (`tests/session-manager-getmessages-splice.test.ts`)** — 8 new
+- **Unit (`tests/unit/core/session-manager-getmessages-splice.unit.test.ts`)** — 8 new
   cases in a `spliceInFlightSteers` describe block: empty/undefined
   ledger no-op; appends synthetic rows with stable position-encoded ids;
   defensive dedup vs already-present user text (array content, string
   content, and `user-with-attachments` role); mixed dedup-and-append
   for partial overlap; non-array messages defensive path.
-- **E2E (`tests/e2e/steer-snapshot-continuity.spec.ts`)** — 3 cases:
+- **E2E (`tests/integration/gateway/steer-snapshot-continuity.gateway.test.ts`)** — 3 cases:
   (1) `steer_queued`: text always visible in queue OR snapshot across
   dispatch→echo, with a sanity counter that the test polls landed in
   the gap so it can't vacuously pass; (2) direct `{type:"steer"}`: at
@@ -359,6 +361,6 @@ Production:
 
 Tests:
 
-- `tests/session-manager-getmessages-splice.test.ts` (+8 cases).
-- `tests/e2e/steer-snapshot-continuity.spec.ts` (new spec, 3 cases).
+- `tests/unit/core/session-manager-getmessages-splice.unit.test.ts` (+8 cases).
+- `tests/integration/gateway/steer-snapshot-continuity.gateway.test.ts` (new spec, 3 cases).
 - `tests/e2e/mock-agent-core.mjs` (instrumentation knob).

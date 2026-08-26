@@ -343,11 +343,11 @@ No UI file is changed.
 
 ## 5. Focused verification plan
 
-All new tests belong in `tests2/` and are registered in `tests2/tests-map.json`.
+All new tests use canonical `tests/` semantic paths and suffixes so lane discovery is automatic.
 
 ### 5.1 RPC framing
 
-`tests2/core/rpc-bridge-line-buffer-correctness.test.ts`:
+`tests/unit/core/rpc-bridge-line-buffer-correctness.unit.test.ts`:
 
 - one/many JSON lines in one chunk;
 - a JSON line split at every representative boundary, including before/after `\r` and multibyte text;
@@ -356,11 +356,11 @@ All new tests belong in `tests2/` and are registered in `tests2/tests-map.json`.
 - response resolution and event listener order unchanged;
 - final chunk ending exactly in newline leaves no phantom fragment.
 
-`tests2/core/rpc-bridge-line-buffer-perf.test.ts` uses a synthetic multi-megabyte JSON line in fixed 64 KiB chunks. Instrument searched bytes or `indexOf` input lengths to assert O(total input) scanning rather than relying only on noisy wall time; retain a practical timing report for 1/4/16 MiB.
+`tests/unit/core/rpc-bridge-line-buffer-complexity.unit.test.ts` uses a synthetic multi-megabyte JSON line in fixed 64 KiB chunks. Instrument searched bytes or `indexOf` input lengths to assert O(total input) scanning rather than relying only on noisy wall time; retain a practical timing report for 1/4/16 MiB.
 
 ### 5.2 Snapshot memo
 
-`tests2/core/session-manager-snapshot-memo.test.ts`:
+`tests/unit/core/session-manager-snapshot-memo.unit.test.ts`:
 
 - same-sequence result is byte-identical and invokes the RPC once;
 - unchanged sequence remains cached across repeated calls;
@@ -374,7 +374,7 @@ All new tests belong in `tests2/` and are registered in `tests2/tests-map.json`.
 
 ### 5.3 Archived BFS
 
-`tests2/core/archived-session-bfs.test.ts` compares indexed output to the retained naive reference for:
+`tests/unit/core/archived-session-bfs.unit.test.ts` compares indexed output to the retained naive reference for:
 
 - every relationship field;
 - multiple seeds and multiple levels;
@@ -388,7 +388,7 @@ A route-level test pins default, archived, project/query filter, offset, and cur
 
 ### 5.4 Persistence
 
-`tests2/core/cost-tracker.test.ts` or a focused companion:
+`tests/unit/core/cost-tracker.unit.test.ts` or a focused companion:
 
 - N `recordUsage` calls in one window cause one write and preserve exact totals;
 - no write before deadline, one at deadline;
@@ -409,9 +409,9 @@ Session-store focused tests:
 
 ### 5.5 Boot scan and restore
 
-`tests2/core/orphan-cleanup-async-walk.test.ts` compares async and sync reference results for tracked/untracked, old/new, nested, missing root, I/O errors, caps, and concurrency 1/wide trees.
+`tests/unit/core/orphan-cleanup-async-walk.unit.test.ts` compares async and sync reference results for tracked/untracked, old/new, nested, missing root, I/O errors, caps, and concurrency 1/wide trees.
 
-`tests2/core/session-manager-boot-restore-lag.test.ts` injects lag samples and a restore spy:
+`tests/unit/core/session-manager-boot-restore-lag.unit.test.ts` injects lag samples and a restore spy:
 
 - low lag uses batches of five;
 - high lag shrinks to one and yields;
@@ -424,7 +424,7 @@ Session-store focused tests:
 
 ### 5.6 Task cache
 
-`tests2/core/session-manager-taskid-cache.test.ts`:
+`tests/unit/core/session-manager-taskid-cache.unit.test.ts`:
 
 - repeated message/reconnect hydration scans once at a stable generation;
 - cached `undefined` invalidates when a task is assigned;

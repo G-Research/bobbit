@@ -1,5 +1,7 @@
 # Pack-Based Marketplace — Design Document
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: **implemented baseline + MCP extension**
 Owner: Pack-Based Marketplace goal (`goal/pack-based-mar-6828576e`) plus Marketplace MCP goal
 Scope: unify installable pack entities into one pack model, add the Market surface, and extend schema-2 packs/Marketplace sources to install MCP server contributions without replacing manual MCP config.
@@ -880,16 +882,16 @@ The design is additive along three axes:
 
 | Test | Pins | Preserved by |
 |---|---|---|
-| `tests/config-cascade.test.ts` | role model/thinkingLevel project>server>builtin; `origin`/`overrides` | §6.1 list = builtin<server<project with zero market packs |
-| `tests/e2e/config-cascade-api.spec.ts` | `/api/roles` `/api/tools` origin/overrides over HTTP | §6.1 + §5.2 badge mapping |
+| `tests/unit/core/config-cascade.unit.test.ts` | role model/thinkingLevel project>server>builtin; `origin`/`overrides` | §6.1 list = builtin<server<project with zero market packs |
+| `tests/integration/gateway/config-cascade-api.gateway.test.ts` | `/api/roles` `/api/tools` origin/overrides over HTTP | §6.1 + §5.2 badge mapping |
 | `tests/e2e/ui/config-scope.spec.ts` | scope rows, customize/revert UX, badges | §5.2 customize/override endpoints unchanged |
-| `tests/config-directories.test.ts` | `parseCustomDirectories`, `getAllConfigDirectories` (13 builtin), `saveCustomDirectories` | legacy helpers retained, only consumed by `buildPackList` |
+| `tests/unit/core/config-directories.unit.test.ts` | `parseCustomDirectories`, `getAllConfigDirectories` (13 builtin), `saveCustomDirectories` | legacy helpers retained, only consumed by `buildPackList` |
 | `tests/e2e/per-project-config-dirs.spec.ts` | per-project config_directories behaviour | §6.5 step 5 (config_directories still read to build list). NB: disablement was inert for resolution (§6.3) — this suite does not pin "disabled dir still resolves", so the new enforcement (unit #6) doesn't conflict with it. |
-| `tests/e2e/tools-cascade.spec.ts` | tool group customize/override cascade | §6.1 tool loader + endpoints |
-| `tests/skill-resolve.test.ts` | byte-equal slash expansion + precedence | §6.2 order identical, adapter reuses parse/sort/cache |
-| `tests/validate-skill-discovery.test.ts` | skill discovery across dirs | §6.2 + §6.4 |
-| `tests/skill-manifest.test.ts` | activation header/manifest | §6.4 (unchanged) |
-| `tests/e2e/slash-skill-e2e.spec.ts` | end-to-end slash skills | §6.2 + §6.4 |
+| `tests/integration/gateway/tools-cascade.gateway.test.ts` | tool group customize/override cascade | §6.1 tool loader + endpoints |
+| `tests/unit/core/skill-resolve.unit.test.ts` | byte-equal slash expansion + precedence | §6.2 order identical, adapter reuses parse/sort/cache |
+| `tests/unit/core/validate-skill-discovery.unit.test.ts` | skill discovery across dirs | §6.2 + §6.4 |
+| `tests/unit/core/skill-manifest.unit.test.ts` | activation header/manifest | §6.4 (unchanged) |
+| `tests/integration/gateway/slash-skill-e2e.gateway.test.ts` | end-to-end slash skills | §6.2 + §6.4 |
 
 > Rule: if any of these fail, fix the mapping, not the test. If a behavior the reframe must preserve isn't currently pinned (e.g. skills disablement via `disabled_config_directories`), **add the test before refactoring**.
 
@@ -908,7 +910,7 @@ Point at fixture pack trees under a tmp dir.
 
 ### 12.3 Browser E2E (mandatory — pattern after `settings.spec.ts` + reuse `config-scope.spec.ts`)
 
-`tests/e2e/ui/marketplace.spec.ts`:
+`tests/browser/journeys/ui/marketplace.journey.spec.ts`:
 1. **Market button** visible and positioned **between Workflows and New Goal**; opens the marketplace surface.
 2. **Register source** (use a local-dir or fixture-repo source) → it appears in the sources list.
 3. **Browse packs** → packs show description + declared entities.
@@ -969,7 +971,7 @@ Concrete ownership boundaries for the high-blast-radius refactor. **New** module
 - `src/app/config-scope.ts` — extend `ConfigOrigin` to include `user` + badge class; render `originPackName` chip/tooltip.
 - Roles/Tools/Skills pages — no structural change beyond the pack chip (badges already generic; §10.3).
 
-**Tests:** new unit specs (§12.2), new `tests/e2e/ui/marketplace.spec.ts` (§12.3); existing regression suite (§12.1) must stay green.
+**Tests:** new unit specs (§12.2), new `tests/browser/journeys/ui/marketplace.journey.spec.ts` (§12.3); existing regression suite (§12.1) must stay green.
 
 ## 13. Implementation order (suggested)
 

@@ -1,5 +1,7 @@
 # Persist Compaction History
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: design (pre-implementation)
 Goal: `goal-persist-co-e3a7640a`
 Related design: [compaction-e2e-rich-summary.md](./compaction-e2e-rich-summary.md)
@@ -21,7 +23,7 @@ in client state.
    and pi-coding-agent never produced one of its own.
    `upgradeServerCompactionMarker` in `src/app/compaction-types.ts:208`
    (and its mirror in `src/app/message-reducer.ts:142`) plus
-   `tests/message-reducer.test.ts` case 12c (line 483) are effectively
+   `tests/unit/core/message-reducer.unit.test.ts` case 12c (line 483) are effectively
    dead code — there is no path that can deliver such a row today.
 
 2. **Pre-compaction history is invisible.** `pi-coding-agent`'s
@@ -323,7 +325,7 @@ Part A renders these structurally impossible:
   `isServerCompactionTextMarker` may stay — they still document the
   legacy shape and are referenced by other tests / fixtures. Leave
   them; don't proliferate the delete radius.
-* `tests/message-reducer.test.ts` case (12c) at line 483 (`snapshot
+* `tests/unit/core/message-reducer.unit.test.ts` case (12c) at line 483 (`snapshot
   with only server text marker is upgraded to a rich synthetic`) —
   **delete**. Replaced by §6 sidecar-snapshot reducer test.
 
@@ -604,7 +606,7 @@ that `hasCompactionToolCall` already recognises.
 
 ### 6.1 Unit (reducer)
 
-Add to `tests/message-reducer.test.ts`, replacing case 12c at line 483:
+Add to `tests/unit/core/message-reducer.unit.test.ts`, replacing case 12c at line 483:
 
 ```ts
 it("(12c-replacement) sidecar synthetic in snapshot is rendered as rich card", () => {
@@ -677,9 +679,9 @@ existing playwright config (no manual integration tier).
 * `src/server/agent/compaction-sidecar.ts` — module mirroring
   `src/server/skills/skill-sidecar.ts`.
 * `src/ui/components/PreCompactionHistory.ts` — Lit component.
-* `tests/e2e/transcript-before-compaction.spec.ts`.
-* `tests/e2e/ui/compaction-persistence.spec.ts`.
-* `tests/e2e/ui/pre-compaction-history.spec.ts`.
+* `tests/integration/gateway/transcript-before-compaction.gateway.test.ts`.
+* `tests/browser/journeys/ui/compaction-persistence.journey.spec.ts`.
+* `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`.
 
 ### Modify
 
@@ -718,7 +720,7 @@ existing playwright config (no manual integration tier).
   unreferenced post-Part-A.
 * `src/app/message-reducer.ts::upgradeServerCompactionMarker` (lines
   137–168).
-* `tests/message-reducer.test.ts` case (12c) (lines 483–512). Replaced
+* `tests/unit/core/message-reducer.unit.test.ts` case (12c) (lines 483–512). Replaced
   by §6.1's sidecar-snapshot test.
 
 ---

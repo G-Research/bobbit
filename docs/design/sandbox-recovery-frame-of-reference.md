@@ -64,10 +64,10 @@ Routing these through the helper would seed off a zero `lastSeq` and add cost wi
 
 ## Test coverage
 
-- `tests/restart-preserves-streaming-frame.test.ts` — pins the original two sites; unchanged.
-- `tests/sandbox-recovery-respawn-helper.test.ts` — drives `_respawnAgentInPlace` against a fake `SessionInfo` + fake client, asserts `_highestSeq` and `_lastStatusVersion` carry-over for the sandbox-recovery shape (no `_overrideAllowedTools`).
-- `tests/sandbox-recovery-preserves-streaming-frame.test.ts` — end-to-end on the `recoverSandboxSessions` path.
-- `tests/manual-integration/sandbox-recovery-frame-continuity.spec.ts` — real Docker: starts a sandboxed session, advances `seq` / `statusVersion`, `docker rm -f`s the project container, drives one more turn, asserts post-recovery events reach the client.
+- `tests/unit/core/restart-preserves-streaming-frame.unit.test.ts` — pins the original two sites; unchanged.
+- `tests/unit/core/sandbox-recovery-respawn-helper.unit.test.ts` — drives `_respawnAgentInPlace` against a fake `SessionInfo` + fake client, asserts `_highestSeq` and `_lastStatusVersion` carry-over for the sandbox-recovery shape (no `_overrideAllowedTools`).
+- `tests/unit/core/sandbox-recovery-preserves-streaming-frame.unit.test.ts` — end-to-end on the `recoverSandboxSessions` path.
+- `tests/manual/sandbox-recovery-frame-continuity.manual.spec.ts` — real Docker: starts a sandboxed session, advances `seq` / `statusVersion`, `docker rm -f`s the project container, drives one more turn, asserts post-recovery events reach the client.
 
 ## When to extend this
 

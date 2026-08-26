@@ -185,6 +185,6 @@ Final prototype decisions:
   - `PLACEHOLDER_DEFAULT_MODEL` in `remote-agent.ts`.
   - type-only `ui/index.ts` re-exports.
   - `manualChunks` in `vite.config.ts`.
-  - tightened `tests/bundle-size.test.ts` budgets.
+  - tightened `tests/unit/core/bundle-size.unit.test.ts` budgets.
   - omission: no user-flow E2E for first lazy-load activation.
   - audit warning examples: `vite.profile.config.ts`, `pill-overflow-promotion.spec.ts` timeout bump.

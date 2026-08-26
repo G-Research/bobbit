@@ -1,5 +1,7 @@
 # Proposal Revision Snapshots
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: implemented. Dynamic Chat Tabs changed historical reopen from mutating restore to read-only tab-local snapshots.
 Owner: single-coder task.
 Related: [docs/design/editable-proposals.md](./editable-proposals.md), [docs/internals.md — Editable proposals](../internals.md#editable-proposals), [docs/design/goal-proposal-panel-fix-analysis.md](./goal-proposal-panel-fix-analysis.md).
@@ -373,7 +375,7 @@ Place adjacent to the existing title heading. No clickable affordance — purely
 - `ProposalRenderer` extracts rev from result content; "Open proposal" dispatches `{ type, rev }` with rev present and `{ type, fields }` without.
 - `EditProposalRenderer` renders truncated old/new text (>120 chars → ellipsis); shows error code on failure; omits button when no rev.
 
-### Browser E2E — `tests/e2e/ui/proposal-revision-snapshots.spec.ts` (new)
+### Browser E2E — `tests/browser/fixtures/proposal-revision-snapshots.fixture.spec.ts` (new)
 
 Four-step pattern:
 

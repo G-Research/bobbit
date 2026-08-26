@@ -1,5 +1,7 @@
 # Multi-repo & Components — Design Doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Goal:** [Multi-repo & components](../../). Generalize Bobbit's project model so a project may hold one or more components (apps, libs, services, docs, infra), each pointing at a repo (or repo subdir). Replace runtime workflow YAMLs with bespoke project-authored workflows inlined into `project.yaml`, resolved structurally against components. Fix the worktree pool so goals use it and sessions get pool warmth without persistent placeholder branches. Add a configurable worktree parent.
 
 **Audience:** implementors. This doc is the build plan; the goal spec is the contract.
@@ -868,7 +870,7 @@ Sections 9.1–9.4 preserve the original feature acceptance plan. The current Te
 | 3 | `repo-scan.spec.ts` — fixture dirs (single repo, multi-repo, monorepo, data-only), assert detected components and detected commands. |
 | 6 | `workflow-validator.spec.ts` — positive cases (all three step shapes); negatives (missing component, wrong command, both `command`+`run`, neither). Asserts error messages include "Did you mean…". |
 | 7 (audit) | One spec per row in §3.5 table — file-fixture workflows, parse + validate + (where applicable) execute under the harness. |
-| 8 | `tests2/integration/goal-candidate-validation.test.ts` — with an empty persisted workflow store, omitted selection selects and freezes the first generated default, while an explicit unknown selection returns the structured workflow error. `tests2/integration/projects-no-default-workflows.test.ts` — generated defaults are not eagerly registered and persist only after successful public goal creation. |
+| 8 | `tests/integration/gateway/goal-candidate-validation.gateway.test.ts` — with an empty persisted workflow store, omitted selection selects and freezes the first generated default, while an explicit unknown selection returns the structured workflow error. `tests/integration/gateway/projects-no-default-workflows.gateway.test.ts` — generated defaults are not eagerly registered and persist only after successful public goal creation. |
 | 17 | `task-handoff-multi-repo.spec.ts` — task store accepts and retrieves `gitHandoff` per repo; legacy flat fields continue to work. |
 | 19 | `worktree-setup-multi.spec.ts` — fake `exec`, three components, declared order asserted; one fails non-fatally; data-only skipped. |
 
@@ -896,14 +898,14 @@ Sections 9.1–9.4 preserve the original feature acceptance plan. The current Te
 
 ### 9.5 Current Git-status regression owners
 
-These tests are registered in `tests2/tests-map.json`:
+These tests are discovered from their canonical paths and semantic suffixes:
 
-- `tests2/integration/team-spawn-multi-repo-real-git.test.ts` creates real component repositories beneath a non-Git root. It pins goal-owned coordinates, live and persisted lead metadata, session restoration, goal/session envelopes with real summed line counts, and archive/purge safety for the borrowed set.
-- `tests2/core/git-status-envelope.test.ts` pins component-authoritative synthesis, all required aggregate fields, root fallback, partial sibling survival, sole-named and sole-root shapes, missing-path classification, and deduplicated target side effects.
-- `tests2/core/git-status-native-classification.test.ts` pins host and container probe classification, including definitive outside-repository diagnostics, spawn/timeout/permission failures, and partial results from optional probe failures.
-- `tests2/integration/git-status-polyrepo-fetch-policy.test.ts` warms separate root and component cache variants, then proves both endpoint families fetch and invalidate every target even when the non-Git root fetch fails.
-- `tests2/core/git-status-local-only-policy.test.ts` and `tests2/integration/git-status-local-only-policy.test.ts` pin the read-only status policy and keep publication behind explicit Git-action routes.
-- `tests2/dom/git-status-widget-multi-repo.test.ts` pins aggregate pill and section behaviour, including a sole named component. `tests2/browser/journeys/polyrepo-git-status.journey.spec.ts` exercises the session and goal-dashboard surfaces, explicit refresh, multiple named components, the sole-named case, and reload.
+- `tests/e2e/vitest/team-spawn-multi-repo-real-git.vitest-e2e.test.ts` creates real component repositories beneath a non-Git root. It pins goal-owned coordinates, live and persisted lead metadata, session restoration, goal/session envelopes with real summed line counts, and archive/purge safety for the borrowed set.
+- `tests/unit/core/git-status-envelope.unit.test.ts` pins component-authoritative synthesis, all required aggregate fields, root fallback, partial sibling survival, sole-named and sole-root shapes, missing-path classification, and deduplicated target side effects.
+- `tests/unit/core/git-status-native-classification.unit.test.ts` pins host and container probe classification, including definitive outside-repository diagnostics, spawn/timeout/permission failures, and partial results from optional probe failures.
+- `tests/integration/gateway/git-status-polyrepo-fetch-policy.gateway.test.ts` warms separate root and component cache variants, then proves both endpoint families fetch and invalidate every target even when the non-Git root fetch fails.
+- `tests/unit/core/git-status-local-only-policy.unit.test.ts` and `tests/integration/gateway/git-status-local-only-policy.gateway.test.ts` pin the read-only status policy and keep publication behind explicit Git-action routes.
+- `tests/dom/git-status-widget-multi-repo.dom.test.ts` pins aggregate pill and section behaviour, including a sole named component. `tests/browser/journeys/polyrepo-git-status.journey.spec.ts` exercises the session and goal-dashboard surfaces, explicit refresh, multiple named components, the sole-named case, and reload.
 
 ---
 

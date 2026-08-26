@@ -330,7 +330,7 @@ The button lives inside the standard card wrapper (isCustom: false). No style cu
 
 ## Test plan
 
-### Unit tests (Playwright `file://` fixtures — `tests/preview-renderer.spec.ts`, new)
+### Unit tests (Playwright `file://` fixtures — `tests/dom/preview-renderer.dom.test.ts`, new)
 
 1. **Renders Open button for completed tool call with inline snapshot** — mount `<tool-message>` with a synthetic `preview_open` toolCall + toolResult containing two text blocks (status + `PREVIEW_SNAPSHOT_MARKER + "<h1>hi</h1>"`). Assert button visible + enabled.
 2. **Renders disabled Open button for historical tool call (no snapshot)** — toolResult has only the status block. Assert button present, `disabled` attribute set, title contains "Snapshot not captured".
@@ -339,23 +339,23 @@ The button lives inside the standard card wrapper (isCustom: false). No style cu
 5. **Streaming (no result yet): button disabled** — `isStreaming: true`, no result. Assert disabled.
 6. **Error result: no Open button** — `result.isError: true`. Assert button not rendered or rendered disabled with error tooltip.
 
-### Truncation unit test (`tests/truncate-large-content.spec.ts`, extend)
+### Truncation unit test (`tests/unit/core/truncate-large-content.unit.test.ts`, extend)
 
 7. `truncateLargeToolContentInMessages` truncates a toolResult text block carrying a >32KB snapshot; leaves short snapshots and non-marker text blocks alone.
 8. `truncateLargeToolContent` on a `message_end` event with a toolResult message + large snapshot returns a shallow-cloned event with truncated block; returns original when no truncation needed (referential equality).
 
-### Extension unit test (`tests/preview-extension.spec.ts`, new — light)
+### Extension unit test (`tests/unit/core/preview-extension.unit.test.ts`, new — light)
 
 9. `execute()` with inline `html` returns a 2-block content array: status + snapshot with marker prefix + original HTML verbatim.
 10. `execute()` with a `file` param reads the file and stores its contents (not the file path) in the snapshot block.
 11. `execute()` error path (unreadable file) returns single-block content with no snapshot.
 
-### API E2E (`tests/e2e/preview-snapshot.spec.ts`, new)
+### API E2E (`tests/integration/gateway/preview-snapshot.gateway.test.ts`, new)
 
 12. Record a synthetic `preview_open` tool call in a session's `.jsonl` with a large snapshot. GET `/api/sessions/:id/tool-content/:mi/:bi` for the snapshot block returns the full untruncated text (verifies handler extension for text-block fallback).
 13. `GET /api/sessions/:id` and history-replay path returns the truncated stub for the same block (verifies `truncateLargeToolContentInMessages` runs).
 
-### Browser E2E (`tests/e2e/ui/preview-reopen.spec.ts`, new)
+### Browser E2E (`tests/dom/ui-fixtures/preview-reopen.dom.test.ts`, new)
 
 14. **Two-preview-swap**: create a session, send two user messages that each trigger a mock `preview_open` with distinct HTML (`<h1>A</h1>` and `<h1>B</h1>`). Assert the preview panel shows B (latest). Click the Open button on the first widget. Assert the panel flips to A. Click Open on the second widget. Assert it flips back to B. Mirror the canonical E2E pattern — navigate, happy path, persistence across reload (reload page, click Open on first widget again, assert panel shows A), cleanup unnecessary here (single-slot).
 15. **Archived session fallback**: load a session fixture whose `.jsonl` contains a pre-feature `preview_open` call with only one content block. Assert the widget renders the Open button in disabled state with the correct tooltip. (Manual sanity is also part of the goal spec; this test automates it.)

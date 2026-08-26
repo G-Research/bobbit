@@ -1,5 +1,7 @@
 # Portable Search — Design Document
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Historical implementation design.** This document records the portability decision and lexical-ranking rationale behind replacing Nomic + LanceDB with FlexSearch. Its proposed persistence layout, lifecycle, API, UI, statistics, performance targets, and test plan are superseded by [Search worker and persistence](../search-worker-persistence.md) and the current [Semantic search](../internals.md#semantic-search) reference. Do not use this document for runtime recovery or operational guidance.
 
 **Status:** Historical design for goal `goal-portable-s-ee9008c4`.
@@ -648,26 +650,26 @@ The **only** change to `types.ts`:
 
 ### 13.2 Modify
 
-- `tests/search/indexer.spec.ts` — drop `embedder: createFakeEmbedder()` from all `new Indexer(...)` calls; wire `lance` param to `new FlexSearchStore(...)` or its test-only factory. Adjust expectations where calls to `embedder.embed(...)` were asserted (remove those assertions).
-- `tests/search/chunker.spec.ts` — drop the `countTokens` argument from all calls (now optional). Keep the chunk-boundary and overlap assertions.
-- `tests/search/content-policy.spec.ts` — unchanged; policy module is orthogonal.
-- `tests/search/meta-mismatch.spec.ts` — update fields tested (`engine` / `schemaVersion` / `contentPolicyVersion`).
-- `tests/search/weight-apply.spec.ts` — rewrite against the new scoring function in §9 (keep the test's *name*, replace the assertions).
-- `tests/search/lexical-parity.spec.ts` — rewrite as a FlexSearch-vs-expected-ranking spec on the same fixtures.
-- `tests/search/snippet-highlight.spec.ts` — unchanged (renderer is unchanged).
-- `tests/search/scale-smoke.spec.ts` — drop Lance-specific timings; confirm FlexSearch scales to 40 K rows with a `< 1 s` open-time assertion.
-- `tests/search/search-service-extras.spec.ts` — delete `BOBBIT_MODEL_CACHE_DIR` / `sharedModelCacheDir` tests. Keep dataset-isolation-per-project test (change `search.lance` → `search.flex`).
-- `tests/search/index-source-contract.spec.ts` — unchanged.
-- `tests/search/files-source-stub.spec.ts` — unchanged.
-- `tests/e2e/search-admin-api.spec.ts` — drop embedderId assertions; add `engine === "flexsearch"`.
+- `tests/dom/search/indexer.dom.test.ts` — drop `embedder: createFakeEmbedder()` from all `new Indexer(...)` calls; wire `lance` param to `new FlexSearchStore(...)` or its test-only factory. Adjust expectations where calls to `embedder.embed(...)` were asserted (remove those assertions).
+- `tests/dom/search/chunker.dom.test.ts` — drop the `countTokens` argument from all calls (now optional). Keep the chunk-boundary and overlap assertions.
+- `tests/dom/search/content-policy.dom.test.ts` — unchanged; policy module is orthogonal.
+- `tests/dom/search/meta-mismatch.dom.test.ts` — update fields tested (`engine` / `schemaVersion` / `contentPolicyVersion`).
+- `tests/dom/search/weight-apply.dom.test.ts` — rewrite against the new scoring function in §9 (keep the test's *name*, replace the assertions).
+- `tests/dom/search/lexical-parity.dom.test.ts` — rewrite as a FlexSearch-vs-expected-ranking spec on the same fixtures.
+- `tests/dom/search/snippet-highlight.dom.test.ts` — unchanged (renderer is unchanged).
+- `tests/dom/search/scale-smoke.dom.test.ts` — drop Lance-specific timings; confirm FlexSearch scales to 40 K rows with a `< 1 s` open-time assertion.
+- `tests/dom/search/search-service-extras.dom.test.ts` — delete `BOBBIT_MODEL_CACHE_DIR` / `sharedModelCacheDir` tests. Keep dataset-isolation-per-project test (change `search.lance` → `search.flex`).
+- `tests/dom/search/index-source-contract.dom.test.ts` — unchanged.
+- `tests/dom/search/files-source-stub.dom.test.ts` — unchanged.
+- `tests/integration/gateway/search-admin-api.gateway.test.ts` — drop embedderId assertions; add `engine === "flexsearch"`.
 - `tests/e2e/ui/search-e2e.spec.ts` — drop the "Compact Dataset" button assertion. Leave the rebuild + stats flow assertions.
-- `tests/e2e/ui/search-index-ui.spec.ts` — remove the "Embedder" label assertion, add an "Engine" label assertion.
-- `tests/search-box.spec.ts`, `tests/search-results.spec.ts`, `tests/search-status-dot.test.ts` — mostly unaffected; confirm status-dot tests still cover the collapsed-state set (`disabled` replaces the two disabled variants).
+- `tests/browser/fixtures/search-index-ui.fixture.spec.ts` — remove the "Embedder" label assertion, add an "Engine" label assertion.
+- `tests/dom/search-box.dom.test.ts`, `tests/dom/search-results.dom.test.ts`, `tests/unit/core/search-status-dot.unit.test.ts` — mostly unaffected; confirm status-dot tests still cover the collapsed-state set (`disabled` replaces the two disabled variants).
 - `tests/e2e/in-process-harness.ts:90` — drop `process.env.BOBBIT_FAKE_EMBEDDER = "1"` (env var is gone).
 
 ### 13.3 Add
 
-- `tests/search/flex-store.spec.ts` — **new**, core coverage:
+- `tests/dom/search/flex-store.dom.test.ts` — **new**, core coverage:
   - `open() → upsert() → search()` round-trip.
   - `close()` + reopen preserves index (persistence).
   - `deleteByIds` removes rows and their chunks.
@@ -767,7 +769,7 @@ Any surviving install scripts must be benign (no network). Current known benign:
 | Add    | `src/server/search/flex-store.ts`                           | `FlexSearchStore` + ranking (replaces lance-store + hybrid-query) |
 | Add    | `src/server/search/render-result.ts` *(optional)*           | Pure `toSearchResult(doc, query, score)` helper, if `flex-store.ts` grows past ~400 LOC |
 | Add    | `docs/design/portable-search.md`                            | This document (committed on this branch) |
-| Add    | `tests/search/flex-store.spec.ts`                           | Core store behaviour |
+| Add    | `tests/dom/search/flex-store.dom.test.ts`                           | Core store behaviour |
 | Add    | `tests/search/flex-persistence.spec.ts`                     | Atomic write, debounce, stale-key cleanup |
 | Add    | `tests/e2e/search-legacy-lance-removal.spec.ts`             | Asserts `search.lance/` is removed on open |
 | Add    | `tests/airgap-install.spec.ts`                              | Offline `npm ci` smoke (opt-in via `RUN_AIRGAP=1`) |
@@ -781,16 +783,16 @@ Any surviving install scripts must be benign (no network). Current known benign:
 | Modify | `src/app/api.ts`                                            | Drop `embedderId`/`embedderDim`; add `engine`/`engineVersion` in `SearchStats` |
 | Modify | `src/app/settings-page.ts`                                  | Replace Embedder row with Engine row; remove Compact Dataset button |
 | Modify | `src/app/components/search-status-dot.ts`                   | No structural change; confirm the single `disabled` kind still renders correctly (no code change expected) |
-| Modify | `tests/search/indexer.spec.ts`                              | Drop `embedder:` args; adapt to `FlexSearchStore` |
-| Modify | `tests/search/chunker.spec.ts`                              | Drop `countTokens` args |
-| Modify | `tests/search/meta-mismatch.spec.ts`                        | New meta fields |
-| Modify | `tests/search/weight-apply.spec.ts`                         | New scoring function |
-| Modify | `tests/search/lexical-parity.spec.ts`                       | FlexSearch ranking fixtures |
-| Modify | `tests/search/scale-smoke.spec.ts`                          | FlexSearch-appropriate perf assertions |
-| Modify | `tests/search/search-service-extras.spec.ts`                | Drop model-cache-dir tests; update paths to `search.flex` |
-| Modify | `tests/e2e/search-admin-api.spec.ts`                        | New stats shape |
+| Modify | `tests/dom/search/indexer.dom.test.ts`                              | Drop `embedder:` args; adapt to `FlexSearchStore` |
+| Modify | `tests/dom/search/chunker.dom.test.ts`                              | Drop `countTokens` args |
+| Modify | `tests/dom/search/meta-mismatch.dom.test.ts`                        | New meta fields |
+| Modify | `tests/dom/search/weight-apply.dom.test.ts`                         | New scoring function |
+| Modify | `tests/dom/search/lexical-parity.dom.test.ts`                       | FlexSearch ranking fixtures |
+| Modify | `tests/dom/search/scale-smoke.dom.test.ts`                          | FlexSearch-appropriate perf assertions |
+| Modify | `tests/dom/search/search-service-extras.dom.test.ts`                | Drop model-cache-dir tests; update paths to `search.flex` |
+| Modify | `tests/integration/gateway/search-admin-api.gateway.test.ts`                        | New stats shape |
 | Modify | `tests/e2e/ui/search-e2e.spec.ts`                           | Drop Compact button; re-baseline stats assertions |
-| Modify | `tests/e2e/ui/search-index-ui.spec.ts`                      | Engine label |
+| Modify | `tests/browser/fixtures/search-index-ui.fixture.spec.ts`                      | Engine label |
 | Modify | `tests/e2e/in-process-harness.ts`                           | Drop `BOBBIT_FAKE_EMBEDDER` env set |
 | Modify | `docs/internals.md` (search section)                        | Point to this doc; note `~/.bobbit/models/` is safe to delete |
 | Modify | `package.json`                                              | Remove 2 deps, add `flexsearch` (§15) |

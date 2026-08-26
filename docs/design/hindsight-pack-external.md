@@ -1,5 +1,7 @@
 # Hindsight pack — external mode (EP G2 / G2.1 + G2.2)
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: design / implementation blueprint. Scope is the **external-URL** Hindsight memory pack:
 a REST client, an in-process stub harness, the lifecycle provider, pack routes + config surface,
 bank/tag derivation, dormancy, and built-in-band registration (dormant). Managed Docker runtime,
@@ -40,10 +42,10 @@ shared extension-platform seams and must be serialized carefully with adjacent E
 | `market-packs/hindsight/pack.yaml` | — (served as-is) | Manifest, `schema: 2`. |
 | `market-packs/hindsight/providers/memory.yaml` | — | Provider contribution + `config` surface. |
 | `tests/e2e/hindsight-stub.mjs` | — | In-process stub Hindsight (reused by later goals). |
-| `tests/hindsight-client.test.ts` | — | Unit: client round-trips, errors, timeouts, auth, paths. |
-| `tests/hindsight-provider.test.ts` | — | Unit: dormancy, tag taxonomy, scope filter, retry queue, block shape. |
-| `tests/e2e/hindsight-external.spec.ts` | — | API E2E against the stub. |
-| `tests/manual-integration/hindsight-external.test.ts` | — | Real local Hindsight round-trip. |
+| `tests/unit/core/hindsight-client.unit.test.ts` | — | Unit: client round-trips, errors, timeouts, auth, paths. |
+| `tests/unit/core/hindsight-provider.unit.test.ts` | — | Unit: dormancy, tag taxonomy, scope filter, retry queue, block shape. |
+| `tests/integration/gateway/hindsight-external.gateway.test.ts` | — | API E2E against the stub. |
+| `tests/manual/hindsight-external.manual.spec.ts` | — | Real local Hindsight round-trip. |
 
 ### 1.2 Build wiring
 
@@ -65,8 +67,8 @@ Append entries, never reorder — file-conflict hotspot, serialize merges in goa
 | `src/server/agent/lifecycle-hub.ts` | Thread provider pack identity/effective config to dispatch; construct a provider-scoped `ServerHostApi` for provider invocations only when needed; pass it to `ModuleHost.invoke`. | Gives provider hooks the same pack-scoped store routes use, without raw transport or cross-pack access. |
 | `src/server/extension-host/module-host-worker.ts` / `module-host-bootstrap.ts` | Serialize provider contexts with proxied `ctx.host.store` and `capabilities.store === true`; keep `callRoute:false`, `session:false`, `agents:false`. Do not clone the live host into worker data. | Durable retry queue/diagnostics require pack store from stateless provider workers; the parent remains the capability authority. |
 | `src/server/extension-host/server-host-api.ts` | If needed, add a constructor option/capability mask so provider host APIs can expose only `store` while route/action hosts keep their existing capabilities. | Security-sensitive least-privilege seam for provider hooks. |
-| `tests/pack-providers-loader.test.ts` / `tests/pack-contributions.test.ts` | Assert flat config defaults, store-over-yaml overrides, and config-gated provider omission when `externalUrl` is absent. | Pins the central dormant/activation invariants before pack code. |
-| `tests/e2e/provider-session-setup.spec.ts` / provider bridge coverage | Assert an unconfigured built-in Hindsight provider does not inject the provider bridge or per-turn hook route, while a configured provider does. | Pins true zero-overhead dormant install. |
+| `tests/unit/core/pack-providers-loader.unit.test.ts` / `tests/unit/core/pack-contributions.unit.test.ts` | Assert flat config defaults, store-over-yaml overrides, and config-gated provider omission when `externalUrl` is absent. | Pins the central dormant/activation invariants before pack code. |
+| `tests/e2e/api/provider-session-setup.api-e2e.spec.ts` / provider bridge coverage | Assert an unconfigured built-in Hindsight provider does not inject the provider bridge or per-turn hook route, while a configured provider does. | Pins true zero-overhead dormant install. |
 
 Pack layout (this goal):
 
@@ -459,7 +461,7 @@ overlay are added **in the loader path, not the provider** (so every provider be
 
 ## 9. Test plan (author FIRST; RED → GREEN)
 
-### 9.1 Unit — `tests/hindsight-client.test.ts` (vs stub)
+### 9.1 Unit — `tests/unit/core/hindsight-client.unit.test.ts` (vs stub)
 - Five ops + `ensureBank` round-trip with correct paths/bodies (assert via stub `calls`).
 - Timeout ⇒ `HindsightError{ kind:"timeout" }` thrown **within budget**.
 - 500 ⇒ `HindsightError{ kind:"http", status:500 }`; connection refused ⇒ `{ kind:"network" }`.
@@ -467,7 +469,7 @@ overlay are added **in the loader path, not the provider** (so every provider be
 - Namespace path-building (default `default`; custom namespace changes the path).
 - `recall` maps `results` → `memories`; `retain` sends item-level tags + `async:!sync`.
 
-### 9.2 Unit — `tests/hindsight-provider.test.ts`
+### 9.2 Unit — `tests/unit/core/hindsight-provider.unit.test.ts`
 - **Dormancy**: no `externalUrl` ⇒ every hook is a no-op / `{ blocks: [] }` and constructs no
   client (assert zero stub calls).
 - **Auto-tag taxonomy** on retain: `project/goal/agent/session/kind` all present and correct.
@@ -480,7 +482,7 @@ overlay are added **in the loader path, not the provider** (so every provider be
 - **Block shape**: `authority:"memory"`, title, reason, content formatting; empty recall ⇒ no
   block.
 
-### 9.3 API E2E — `tests/e2e/hindsight-external.spec.ts`
+### 9.3 API E2E — `tests/integration/gateway/hindsight-external.gateway.test.ts`
 Provider-demo-style: stub loaded via `BOBBIT_BUILTIN_PACKS_DIR`; the `config` route sets
 `externalUrl` to the stub.
 - `sessionSetup` + `beforePrompt` blocks appear (prompt-sections / context-trace).
@@ -490,7 +492,7 @@ Provider-demo-style: stub loaded via `BOBBIT_BUILTIN_PACKS_DIR`; the `config` ro
 - Per-project pack disable (`pack_activation`) ⇒ no injection.
 - Config persists across reload.
 
-### 9.4 Manual integration — `tests/manual-integration/hindsight-external.test.ts`
+### 9.4 Manual integration — `tests/manual/hindsight-external.manual.spec.ts`
 Real local Hindsight. Env `HINDSIGHT_URL` (default `http://localhost:8888`); dedicated bank
 `HINDSIGHT_BANK` (default `bobbit-it`) so it never pollutes the real `bobbit` bank.
 - `ensureBank` → `retain` → poll `recall` until the memory surfaces (bounded ~30 s, tolerating

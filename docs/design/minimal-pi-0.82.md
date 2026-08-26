@@ -70,15 +70,15 @@ Run `npm run check` and the existing Pi compatibility canaries before feature wo
 
 ```bash
 npx vitest run --config vitest.config.ts --project v2-core \
-  tests2/core/pi-ai-browser-boundary.test.ts \
-  tests2/core/oauth-external-callbacks.test.ts \
-  tests2/core/pi-rpc-thinking-levels.test.ts \
-  tests2/core/pi-rpc-agent-end-retry.test.ts \
-  tests2/core/pi-tool-lifecycle-contract.test.ts \
-  tests2/core/compaction-types.test.ts \
-  tests2/core/transcript-sanitizer.test.ts \
-  tests2/core/google-code-assist-provider-extension.test.ts \
-  tests2/core/rpc-bridge-line-buffer-correctness.test.ts
+  tests/unit/core/pi-ai-browser-boundary.unit.test.ts \
+  tests/unit/core/oauth-external-callbacks.unit.test.ts \
+  tests/unit/core/pi-rpc-thinking-levels.unit.test.ts \
+  tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts \
+  tests/unit/core/pi-tool-lifecycle-contract.unit.test.ts \
+  tests/unit/core/compaction-types.unit.test.ts \
+  tests/unit/core/transcript-sanitizer.unit.test.ts \
+  tests/unit/core/google-code-assist-provider-extension.unit.test.ts \
+  tests/unit/core/rpc-bridge-line-buffer-correctness.unit.test.ts
 npm run check
 ```
 
@@ -352,20 +352,20 @@ The implementation/test plan is deliberately non-duplicative.
 
 | ID | Acceptance outcome | Focused owner |
 |---|---|---|
-| **A1** | Every direct/root/nested Pi edge is exactly `0.82.1`; no mixed/stale tree. | Extend `tests/e2e/pi-packed-consumer.spec.ts` and the deterministic shrinkwrap fixture only as version floors require. |
-| **A2** | Direct Anthropic plus all five Bedrock tuples match every published field above. | Extend `tests2/core/models-api.test.ts`; one integration API assertion may prove transport. |
-| **A3** | All seven Opus 5 levels, `xhigh`/`max` clamping, and shared rank order. | Extend `tests2/core/model-utils.test.ts`, `tests2/core/thinking-levels.test.ts`, and one existing model-selector DOM fixture. |
-| **A4** | One combined request reaches the real gateway/in-process mock and returns/persists exact authoritative state. | Extend `tests2/integration/context-bar-reconnect.test.ts` or one equivalently focused existing gateway test. |
-| **A5** | Direct host and remapped sandbox argv preserve separate provider, full model ID, and thinking. | Extend `tests2/core/rpc-bridge-spawn-args.test.ts`; use the existing Docker argument seam, not a real Docker matrix. |
+| **A1** | Every direct/root/nested Pi edge is exactly `0.82.1`; no mixed/stale tree. | Extend `tests/e2e/api/pi-packed-consumer.api-e2e.spec.ts` and the deterministic shrinkwrap fixture only as version floors require. |
+| **A2** | Direct Anthropic plus all five Bedrock tuples match every published field above. | Extend `tests/unit/core/models-api.unit.test.ts`; one integration API assertion may prove transport. |
+| **A3** | All seven Opus 5 levels, `xhigh`/`max` clamping, and shared rank order. | Extend `tests/unit/core/model-utils.unit.test.ts`, `tests/unit/core/thinking-levels.unit.test.ts`, and one existing model-selector DOM fixture. |
+| **A4** | One combined request reaches the real gateway/in-process mock and returns/persists exact authoritative state. | Extend `tests/integration/gateway/context-bar-reconnect.gateway.test.ts` or one equivalently focused existing gateway test. |
+| **A5** | Direct host and remapped sandbox argv preserve separate provider, full model ID, and thinking. | Extend `tests/unit/core/rpc-bridge-spawn-args.unit.test.ts`; use the existing Docker argument seam, not a real Docker matrix. |
 | **A6** | Persistence, reconnect, reload, cold restore, delegate/host-child, and team inheritance retain the triple. | Extend existing `session-manager-restore`, `team-delegate`, `host-agents-sandbox-inheritance`, and `team-manager-decisions` coverage only at their owned boundary. |
 | **A7** | Custom/local and legacy AIGW Kimi-named IDs still work; exact provider `kimi-coding` is absent/rejected from catalog, preferences, roles, runtime, team, and initial spawn. | Catalog test plus one focused runtime-selection test. No provider substring denylist. |
-| **A8** | One registered browser journey performs the complete Opus 5 flow. | Rewrite only the Opus-specific journey in `tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts`; retain unrelated canaries. |
+| **A8** | One registered browser journey performs the complete Opus 5 flow. | Rewrite only the Opus-specific journey in `tests/browser/journeys/pi-runtime-upgrade.journey.spec.ts`; retain unrelated canaries. |
 | **A9** | Existing Pi compatibility canaries remain green, changing only proven version-specific assertions. | Existing browser-import, OAuth, RPC, tool, retry/compaction, transcript, extension, packed-consumer, and binary tests. |
 | **A10** | One failure corrects optimistic model and thinking; one unverifiable partial write enters existing recovery, then fail-closes through existing termination/archive behavior if replacement cannot verify durability. | One focused `RemoteAgent` failure test plus focused runtime-helper partial-write and fail-closed injections; do not add a lifecycle/race matrix. |
 
 ### Required browser journey
 
-Use the registered real gateway plus deterministic mock bridge in `tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts`:
+Use the registered real gateway plus deterministic mock bridge in `tests/browser/journeys/pi-runtime-upgrade.journey.spec.ts`:
 
 1. Create a normal mock-backed session and navigate to it.
 2. Open the existing session model picker and select `anthropic/claude-opus-5`.
@@ -395,14 +395,14 @@ The approved fail-closed reproduction must then make restart/replacement archive
 
 Retain and run at least these current boundaries:
 
-- browser imports: `tests2/core/pi-ai-browser-boundary.test.ts`;
-- OAuth: `tests2/core/oauth-external-callbacks.test.ts`, existing Google OAuth/Code Assist tests;
+- browser imports: `tests/unit/core/pi-ai-browser-boundary.unit.test.ts`;
+- OAuth: `tests/unit/core/oauth-external-callbacks.unit.test.ts`, existing Google OAuth/Code Assist tests;
 - RPC request/response and line correlation: `pi-rpc-thinking-levels`, `rpc-bridge-line-buffer-correctness`, and bridge lifecycle tests;
-- tool lifecycle: `tests2/core/pi-tool-lifecycle-contract.test.ts` and tool-result normalization/extension tests;
+- tool lifecycle: `tests/unit/core/pi-tool-lifecycle-contract.unit.test.ts` and tool-result normalization/extension tests;
 - retry and compaction: `pi-rpc-agent-end-retry`, `compaction-types`, and existing compaction UI journey;
 - transcript: `transcript-sanitizer` and existing transcript reader/restore coverage;
 - extensions: Google Code Assist provider extension plus marketplace/Pi extension canaries;
-- binary resolution and published package graph: `tests/e2e/pi-packed-consumer.spec.ts`.
+- binary resolution and published package graph: `tests/e2e/api/pi-packed-consumer.api-e2e.spec.ts`.
 
 Change only assertions proven version-specific by the Phase 0 delta. New `0.82.1` additive fields/events pass through existing generic handling unless a deterministic canary proves otherwise.
 

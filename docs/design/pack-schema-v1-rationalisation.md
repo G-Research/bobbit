@@ -1,5 +1,7 @@
 # Rationalise Pack Schema V1
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Status:** design locked · **Scope:** pre-release fix to pack schema V1 · **No backwards compatibility.**
 
 This document is the implementation contract for the "Rationalise pack schema V1" goal. It is precise
@@ -1118,7 +1120,7 @@ pack-bound surfaces; its reviewer tools remain normal role/tool-policy-resolved 
 
 | Invariant | Pinned by |
 |---|---|
-| Precedence unchanged | existing `tests/e2e/tools-cascade.spec.ts` + pack-order tests (unchanged) |
+| Precedence unchanged | existing `tests/integration/gateway/tools-cascade.gateway.test.ts` + pack-order tests (unchanged) |
 | Tool guard (allowedTools + toolUseId) | existing action-endpoint guard tests (unchanged) |
 | Pack scope (panel/entrypoint ids pack-local; routeId host-global; route names pack-local + allowlisted) | registry conflict ×4 + parsing tests (§11.1) |
 | Identity server-derived; caller never supplies trusted packId | surface-token pack-bound test (§4) |

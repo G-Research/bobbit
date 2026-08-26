@@ -35,7 +35,7 @@ The selected design adds one persisted boundary array, one coordinated clear tra
 
 ### 3.1 Pi 0.84.1
 
-The packaged contract is pinned by `tests2/core/pi-installed-contract.test.ts`. Pi 0.84.1 source establishes these additional facts, which new contract tests must pin rather than leave as assumptions:
+The packaged contract is pinned by `tests/unit/core/pi-installed-contract.unit.test.ts`. Pi 0.84.1 source establishes these additional facts, which new contract tests must pin rather than leave as assumptions:
 
 1. RPC `new_session` calls `AgentSessionRuntime.newSession()`, returns only `{ cancelled: boolean }`, and rebinds RPC listeners after a successful replacement. It does not return the new path; Bobbit must issue `get_state` afterward.
 2. `AgentSessionRuntime.newSession()` runs cancellable `session_before_switch` first. If accepted, it creates a fresh `SessionManager`, calls `teardownCurrent("new")`, and `teardownCurrent()` awaits `session.abort()` before `session_shutdown`, disposal, and runtime creation. The outgoing active turn is therefore settled and written before success returns.
@@ -48,20 +48,20 @@ The packaged contract is pinned by `tests2/core/pi-installed-contract.test.ts`. 
 
 | Concern | Reused symbols | Existing protecting coverage |
 |---|---|---|
-| Exact command and drafts | `AgentInterface.sendMessage()`, `_clearAttachmentDraft()` in `src/ui/components/AgentInterface.ts` | `tests2/core/agent-interface-attachment-draft-race.test.ts`, `tests2/dom/model-selection-required-ux.test.ts` |
-| Slash discovery | `BUILT_IN_SLASH_COMMANDS`, `mergeBuiltInSlashCommands()`, `_updateSlashAutocomplete()`, `_selectSlashSkill()` in `src/ui/components/MessageEditor.ts` | `tests2/dom/message-editor-slash.test.ts` |
-| Client replacement | `RemoteAgent.send()`, `replaceMessages()`, event dispatch in `src/app/remote-agent.ts`; `replace-messages` in `src/app/message-reducer.ts` | `tests2/core/message-reducer.test.ts`, `tests2/core/message-reducer-dedup.test.ts` |
-| Auth/restricted sessions | `ClientMessage` in `src/server/ws/protocol.ts`; `SESSION_WORK_MESSAGE_TYPES`, `rejectRestrictedSessionWork()`, authenticated connection-bound `sessionId` in `src/server/ws/handler.ts` | `tests2/integration/session-ws-write-policy.test.ts` |
-| Pi RPC | `IRpcBridge`, `RpcBridge.sendCommand()`, `compact()` in `src/server/agent/rpc-bridge.ts` | `tests2/core/pi-installed-contract.test.ts` and RPC bridge tests |
-| Replacement/admission owner | `_coordinateSessionReplacement()`, `_queuePromptBehindReplacement()`, `_promptQueueOwner()`, `_mergeReplacementPromptOwner()`, `drainQueue()` in `src/server/agent/session-manager.ts` | `tests2/core/reliable-compaction-release.test.ts`, `tests2/integration/reliable-intent-recovery.test.ts`, `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts` |
+| Exact command and drafts | `AgentInterface.sendMessage()`, `_clearAttachmentDraft()` in `src/ui/components/AgentInterface.ts` | `tests/unit/core/agent-interface-attachment-draft-race.unit.test.ts`, `tests/dom/model-selection-required-ux.dom.test.ts` |
+| Slash discovery | `BUILT_IN_SLASH_COMMANDS`, `mergeBuiltInSlashCommands()`, `_updateSlashAutocomplete()`, `_selectSlashSkill()` in `src/ui/components/MessageEditor.ts` | `tests/dom/message-editor-slash.dom.test.ts` |
+| Client replacement | `RemoteAgent.send()`, `replaceMessages()`, event dispatch in `src/app/remote-agent.ts`; `replace-messages` in `src/app/message-reducer.ts` | `tests/unit/core/message-reducer.unit.test.ts`, `tests/unit/core/message-reducer-dedup.unit.test.ts` |
+| Auth/restricted sessions | `ClientMessage` in `src/server/ws/protocol.ts`; `SESSION_WORK_MESSAGE_TYPES`, `rejectRestrictedSessionWork()`, authenticated connection-bound `sessionId` in `src/server/ws/handler.ts` | `tests/integration/gateway/session-ws-write-policy.gateway.test.ts` |
+| Pi RPC | `IRpcBridge`, `RpcBridge.sendCommand()`, `compact()` in `src/server/agent/rpc-bridge.ts` | `tests/unit/core/pi-installed-contract.unit.test.ts` and RPC bridge tests |
+| Replacement/admission owner | `_coordinateSessionReplacement()`, `_queuePromptBehindReplacement()`, `_promptQueueOwner()`, `_mergeReplacementPromptOwner()`, `drainQueue()` in `src/server/agent/session-manager.ts` | `tests/unit/core/reliable-compaction-release.unit.test.ts`, `tests/integration/gateway/reliable-intent-recovery.gateway.test.ts`, `tests/browser/journeys/reliable-agent-turns.journey.spec.ts` |
 | Active-turn terminal replay | `_forceAbortOwned()`, `handleAgentLifecycle(..., { replacementOwnedTerminal, deferQueueDrain })`, `_markModernInFlightAttemptsUncertain()`, `_reconcileAfterAbort()` | reliable-turn and Stop coverage above |
-| Atomic metadata | `PersistedSession`, `UpdatableSessionFields`, `RECOVERY_CRITICAL_FIELDS`, `SessionStore.update()`, `flushAsync()` in `src/server/agent/session-store.ts` | `tests2/core/session-store-atomic-write.test.ts`, `tests2/core/session-store.test.ts` |
-| Transcript realms | `sessionFsContextForAgentFile()`, `sessionFileRead()`, `sessionFileExists()`, `sessionFileDelete()`, `canonicalContainerAgentSessionPath()` in `src/server/agent/session-fs.ts`; `switchSessionPathForAgent()`, `trustPersistedAgentSessionFile()`, `resolveSafeSessionsPath()` | `tests2/core/session-fs-sandbox-publication.test.ts`, transcript-sanitizer tests |
+| Atomic metadata | `PersistedSession`, `UpdatableSessionFields`, `RECOVERY_CRITICAL_FIELDS`, `SessionStore.update()`, `flushAsync()` in `src/server/agent/session-store.ts` | `tests/unit/core/session-store-atomic-write.unit.test.ts`, `tests/unit/core/session-store.unit.test.ts` |
+| Transcript realms | `sessionFsContextForAgentFile()`, `sessionFileRead()`, `sessionFileExists()`, `sessionFileDelete()`, `canonicalContainerAgentSessionPath()` in `src/server/agent/session-fs.ts`; `switchSessionPathForAgent()`, `trustPersistedAgentSessionFile()`, `resolveSafeSessionsPath()` | `tests/unit/core/session-fs-sandbox-publication.unit.test.ts`, transcript-sanitizer tests |
 | Transcript branch | `parseTranscript()`, `activeTranscriptBranch()` in `src/server/agent/transcript-tree.ts`; message/author projection in `transcript-reader.ts` | transcript-tree/sanitizer and before-compaction integration tests |
-| Outward-only synthesis | `buildVisibleMessageSnapshot()` / `transformMessages()` in `src/server/agent/visible-message-snapshot.ts` | snapshot purity and `tests2/core/session-manager-snapshot-memo.test.ts` |
+| Outward-only synthesis | `buildVisibleMessageSnapshot()` / `transformMessages()` in `src/server/agent/visible-message-snapshot.ts` | snapshot purity and `tests/unit/core/session-manager-snapshot-memo.unit.test.ts` |
 | Compaction ownership | `readCompactionSidecarEntries()`, `mergeCompactionSidecarIntoMessages()` in `src/server/agent/compaction-sidecar.ts` | compaction sidecar/reducer/history tests |
-| Read-only history UI | `PreCompactionHistory`, `MessageList.getCompactionSidecarId()` and inline mount, `readOrphanedBeforeCompaction()` and its REST route | `tests2/integration/transcript-before-compaction.test.ts`, `tests2/browser/e2e/pre-compaction-history.spec.ts` |
-| Cleanup/recovery | `restoreSessions()` orphan `tracked` set; `purgeOneSession()` | `tests2/core/session-store-orphan-cleanup.test.ts` and sandbox cleanup coverage |
+| Read-only history UI | `PreCompactionHistory`, `MessageList.getCompactionSidecarId()` and inline mount, `readOrphanedBeforeCompaction()` and its REST route | `tests/integration/gateway/transcript-before-compaction.gateway.test.ts`, `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` |
+| Cleanup/recovery | `restoreSessions()` orphan `tracked` set; `purgeOneSession()` | `tests/unit/core/session-store-orphan-cleanup.unit.test.ts` and sandbox cleanup coverage |
 
 ## 4. Durable data model
 
@@ -447,7 +447,7 @@ Production:
 - new `src/ui/tools/renderers/ContextClearedRenderer.ts`
 - `docs/compaction.md` (clear comparison/behavior/history section; implementation documentation gate)
 
-Tests are new/extended only under `tests2/` and registered in `tests2/tests-map.json`.
+New and extended tests use the canonical `tests/` semantic paths and suffixes; discovery is automatic.
 
 ## 11. Test matrix
 
@@ -470,7 +470,7 @@ Tests are new/extended only under `tests2/` and registered in `tests2/tests-map.
 | Core/integration: empty-generation recovery failures | runtime and store faults | fresh bridge start/config/readback/zero-message failure and store update/flush failure for cold, live, and sandbox paths retain the old durable pointer/latest-boundary pair and boundary count, stop/fence the candidate, emit no replacement/boundary, perform no historical switch, and do not drain queued prompt/steer work; retry remains possible |
 | Integration: restart | crash boundaries | restart before rename restores A/no boundary; restart after rename recognizes missing B as intentionally empty and recreates it without old context; active pointer/latest boundary path update atomically; first assistant flush marks materialized; crash after successor prompt admission but before assistant flush preserves exact reliable occurrence recovery; a later missing materialized file fails closed; queue rows release once; repeated empty/non-empty boundaries persist |
 | Integration: history API | pagination/auth/path | active parent-linked branch only; complete user/assistant/tool rows; last-50-first/load older; author projection; invalid id/foreign path unavailable; missing retained file actionable |
-| Browser journey | `tests2/browser/journeys/clear-session-context.journey.spec.ts` | autocomplete/keyboard insertion; seed user+assistant+tool content; mixed-case invocation; composer/attachment clearing; no `/clear` bubble; exact Context Cleared card; expand/collapse dimmed interactive history; fresh follow-up; reload; second clear with disjoint folds; mobile no-overflow/tap; cleanup in `finally` |
+| Browser journey | `tests/browser/journeys/clear-session-context.journey.spec.ts` | autocomplete/keyboard insertion; seed user+assistant+tool content; mixed-case invocation; composer/attachment clearing; no `/clear` bubble; exact Context Cleared card; expand/collapse dimmed interactive history; fresh follow-up; reload; second clear with disjoint folds; mobile no-overflow/tap; cleanup in `finally` |
 
 The browser journey covers navigation, happy path, reload, and cleanup. Gateway-restart and fault injection belong in integration/E2E harness coverage rather than being simulated by browser reload.
 

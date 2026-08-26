@@ -116,21 +116,21 @@ Implementation should not change these semantics.
 
 Relevant tests:
 
-- `tests/git-status-widget-states.spec.ts`
+- `tests/dom/git-status-widget-states.dom.test.ts`
   - commit modal changed-file list;
   - renamed file display;
   - clicking renamed file requests `/api/sessions/:id/git-diff?file=src%2Fnew-name.ts&commit=<sha>`;
   - currently asserts `#git-diff-modal diff-block` exists.
-- `tests/e2e/ui/session-git-status-multi-repo.spec.ts`
+- `tests/browser/journeys/ui/session-git-status-multi-repo.journey.spec.ts`
   - route-mocks session `git-status` and `git-diff`;
   - clicks a file under a repo section;
   - asserts the modal opens and `repo=api` was sent;
   - currently asserts `#git-diff-modal diff-block` is visible.
-- `tests/e2e/commit-file-diffs-api.spec.ts`
+- `tests/integration/gateway/commit-file-diffs-api.gateway.test.ts`
   - API-level commit diff and rename behavior.
-- `tests/e2e/session-git-status-multi-repo.spec.ts`
+- `tests/e2e/api/session-git-status-multi-repo.api-e2e.spec.ts`
   - API-level `?repo=` routing.
-- `tests/pr-walkthrough-panel-parity.spec.ts`
+- `tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts`
   - PR Walkthrough split/inline, file collapse, hunk context, syntax tokens, comments.
   - This should keep passing unchanged; do not couple Git status implementation to it.
 
@@ -639,7 +639,7 @@ Duplication is preferable here because the Git status viewer has no comments, su
 Add a unit regression test such as:
 
 ```text
-tests/pr-walkthrough-pack-boundary.test.ts
+tests/unit/core/pr-walkthrough-pack-boundary.unit.test.ts
 ```
 
 Test intent:
@@ -712,7 +712,7 @@ The existing modal shell uses `var(--card)`, `var(--foreground)`, and `var(--bor
 
 ### 8.1 Parser unit tests
 
-Add `tests/git-diff-unified-parser.test.ts`.
+Add `tests/unit/core/git-diff-unified-parser.unit.test.ts`.
 
 Cover:
 
@@ -755,11 +755,11 @@ Cover:
 
 Update existing tests that assert `<diff-block>`:
 
-- `tests/git-status-widget-states.spec.ts`
+- `tests/dom/git-status-widget-states.dom.test.ts`
   - replace `#git-diff-modal diff-block` assertion with `#git-diff-modal rich-git-diff-viewer` or `[data-testid="rich-git-diff-viewer"]`;
   - keep renamed-file URL assertions unchanged.
   - add an assertion that the modal title still displays `src/new-name.ts` and the viewer renders rename metadata/counts if the mocked diff includes `rename from` / `rename to`.
-- `tests/e2e/ui/session-git-status-multi-repo.spec.ts`
+- `tests/browser/journeys/ui/session-git-status-multi-repo.journey.spec.ts`
   - replace `#git-diff-modal diff-block` with the new viewer selector;
   - keep `mock.diffRepos` assertion unchanged.
 
@@ -774,8 +774,8 @@ Add/extend Git status modal behavior coverage:
 
 Do not rewrite these unless production behavior changes unexpectedly:
 
-- `tests/e2e/commit-file-diffs-api.spec.ts`
-- `tests/e2e/session-git-status-multi-repo.spec.ts`
+- `tests/integration/gateway/commit-file-diffs-api.gateway.test.ts`
+- `tests/e2e/api/session-git-status-multi-repo.api-e2e.spec.ts`
 
 They pin server rename and repo routing semantics that the rich viewer should consume, not alter.
 

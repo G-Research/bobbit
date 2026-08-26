@@ -1,5 +1,7 @@
 # Google account (Code Assist) models as agent session models
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Archived design artifact — implemented and superseded.** This document preserves the
 > pre-implementation proposal for historical rationale only. It is not an authoritative description
 > of current behavior or an active implementation plan. In particular, references below to
@@ -12,9 +14,9 @@
 through Bobbit's generated Code Assist provider extension. Sessions stream responses, call tools,
 receive tool results, and preserve multi-turn context. Current v2 coverage pins the adapter and
 selectability, generated provider runtime, registry isolation, token endpoint, and model-selector UI
-in `tests2/core/google-code-assist*.test.ts`,
-`tests2/integration/google-code-assist-token-api.test.ts`, and
-`tests2/dom/ui-fixtures/model-selector-fixture.test.ts`.
+in `tests/unit/core/google-code-assist*.unit.test.ts`,
+`tests/integration/gateway/google-code-assist-token-api.gateway.test.ts`, and
+`tests/dom/ui-fixtures/model-selector-fixture.dom.test.ts`.
 
 ## Historical proposal (pre-implementation)
 
