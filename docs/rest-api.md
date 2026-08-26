@@ -110,6 +110,20 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 
 A small set of UI probe endpoints accept `optional=1` to represent definitive expected absence without producing browser-console-noisy `404` responses. A missing prompt draft on an existing session returns empty `204`; its bare request retains `404`. PR status returns empty `204` only when the target is ineligible/unresolved or an eligible lookup definitively found no PR. Eligible cold, in-flight, failed, and found PR states remain `200` snapshot envelopes in both modes. Missing sessions or goals remain `404`, and no-worktree Git restrictions remain `409`. Never parse a `204` body. See [Quiet optional probes](quiet-204-probes.md) for the exact state matrix and [Coordinated remote-state status](#coordinated-remote-state-status) for the PR envelope.
 
+### Non-blocking user questions
+
+All three widget endpoints use the normal authenticated API surface:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/internal/user-question/dismissals?sessionId=:id` | Return `{ dismissedToolUseIds: string[] }` from durable session metadata. |
+| `POST` | `/api/internal/user-question/dismiss` | Idempotently dismiss one whole ask card using `{ sessionId, toolUseId }`. The matching `ask_user_choices` call must exist. This does not enqueue a message or wake the agent. A first dismissal emits `{ type: "ask_question_dismissed", sessionId, toolUseId }` over the session WebSocket and invalidates session lists with `sessions_changed`. Returns `409` if an answer already won or is submitting. |
+| `POST` | `/api/internal/user-question/submit` | Validate answers and enqueue the durable response envelope. Returns `409` if dismissal already won or is in progress. |
+
+Submit and dismiss share a `(sessionId, toolUseId)` reservation guard, so the first terminal mutation to reserve wins. Failed enqueue/persistence releases its tentative reservation; durable answer envelopes and dismissal metadata restore terminal classification after restart.
+
+Session list rows expose the durable boolean `hasUnansweredQuestion`. It becomes `true` when a successful posted ask result completes and remains true until every ask is answered, failed, or dismissed. During the first restore of a pre-field session, the server backfills this projection from the restored transcript so existing questions are not missed. State transitions broadcast `sessions_changed` so list clients refresh.
+
 ### Health & Info
 
 | Method | Path | Description |

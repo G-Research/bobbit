@@ -146,6 +146,8 @@ export interface GatewaySession {
 	consecutiveErrorTurns?: number;
 	/** Server-controlled projections of canonical session state. */
 	server_tags?: string[];
+	/** Server-persisted unresolved ask_user_choices state for sidebar attention UI. */
+	hasUnansweredQuestion?: boolean;
 	/** Durable user-owned session metadata. Legacy session payloads may omit it. */
 	user_tags?: string[];
 }

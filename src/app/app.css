@@ -1797,6 +1797,32 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	transform-origin: center;
 }
 
+.unanswered-question-indicator {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: calc(8px * var(--sidebar-font-scale, 1));
+	height: calc(8px * var(--sidebar-font-scale, 1));
+	/* Match the regular dot's total trailing footprint so activity text aligns. */
+	margin-left: calc(2px - (3px * var(--sidebar-font-scale, 1)));
+	color: var(--primary);
+	flex-shrink: 0;
+	vertical-align: middle;
+	position: relative;
+	top: 1px;
+	/* Align the wider question circle's center with the regular 5px unread dot. */
+	left: calc(1.5px * var(--sidebar-font-scale, 1));
+	border-radius: 50%;
+	box-shadow: 0 0 0 0 color-mix(in oklch, var(--primary) 50%, transparent);
+	animation: unseen-dot-pulse 1.8s ease-in-out infinite;
+	transform-origin: center;
+}
+
+.unanswered-question-indicator svg {
+	width: 100%;
+	height: 100%;
+}
+
 @keyframes unseen-dot-pulse {
 	0%, 100% {
 		transform: scale(1);
@@ -1809,7 +1835,8 @@ details.wf-proposal-workflow .wf-proposal-gates {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.unseen-dot { animation: none; }
+	.unseen-dot,
+	.unanswered-question-indicator { animation: none; }
 }
 
 /* Bobbit sprite unread indicator — rhythmic tap.

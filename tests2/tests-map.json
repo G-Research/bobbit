@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/ask-user-choices-dismissal.test.ts",
+      "reason": "Core coverage for answer-vs-dismiss reservation linearization and rollback, durable ask-card ID normalization, transcript call validation, posted-result detection, and multi-ask unresolved-state recomputation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/uploaded-attachment-context.test.ts",
       "reason": "Pure unit coverage for model-facing context generated from uploaded text and arbitrary binary document metadata.",
       "execution": {

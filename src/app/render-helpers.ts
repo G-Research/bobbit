@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, Goal as GoalIcon, LayoutDashboard, Link, Menu, MessagesSquare, Pencil, RotateCcw, Trash2 } from "lucide";
+import { Archive, Bot, CircleHelp, Goal as GoalIcon, LayoutDashboard, Link, Menu, MessagesSquare, Pencil, RotateCcw, Trash2 } from "lucide";
 import { buildNestedGoalForest } from "./sidebar-nesting.js";
 import { selectSpawnedChildren, isAncestorCycle, extendAncestors, computeTitleSuffixes } from "./sidebar-spawned-children.js";
 import type { GoalContext, SessionChildrenContext, SessionContext, SidebarTreeNode, TeamLeadContext } from "./sidebar-tree-builder.js";
@@ -417,11 +417,15 @@ export function renderSessionTime(session: GatewaySession, selected = false) {
 	if (!time) return "";
 	const unseen = hasUnseenActivity(session);
 	return html`<span
-		class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
+		class="shrink-0 inline-flex items-center gap-[3px] tabular-nums ${selected ? (unseen ? "text-foreground font-medium" : "text-foreground/50") : (unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50")}"
 		style="vertical-align:middle;font-size: 0.9167em;"
 		data-testid="sidebar-session-last-activity"
 		title="${formatSessionAge(session.lastActivity)}"
-	>${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
+	>${time}${unseen
+		? session.hasUnansweredQuestion
+			? html`<span class="unanswered-question-indicator" aria-label="Unread question awaiting an answer" title="Question awaiting an answer">${icon(CircleHelp, "xs")}</span>`
+			: html`<span class="unseen-dot" aria-label="unread"></span>`
+		: ""}</span>`;
 }
 
 /**
