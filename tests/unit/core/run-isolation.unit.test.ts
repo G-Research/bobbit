@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, win32 } from "node:path";
+import { dirname, join, resolve, win32 } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   captureMachineLedgerDirectory,
@@ -31,10 +31,12 @@ import {
   createBrowserRunEnvironment,
   createBrowserRunPaths,
 } from "../../../scripts/testing-v2/run-browser-v2.mjs";
+import { classifyTestPath } from "../../../scripts/testing/layout-policy.mjs";
 import {
   composeE2EChildEnvironment,
   createE2EV2CoordinatorEnvironment,
   createNestedE2EEnvironment,
+  createPlaywrightE2EInvocation,
   groupDVitestArgs,
   resolveE2ERetryCount,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
@@ -403,6 +405,48 @@ describe("unit run isolation", () => {
     expect(groupA).not.toMatch(/--retr(?:y|ies)(?:=|\b)/);
   });
 
+  it("keeps discovered Playwright paths shell-free and preserves Group B/C controls", () => {
+    const metacharacterSpec = "tests/e2e/browser/a & spaces & rem tail.browser-e2e.spec.ts";
+    const browser = createPlaywrightE2EInvocation({
+      project: "browser",
+      specs: [metacharacterSpec],
+      workers: 2,
+      retries: 0,
+    });
+    const api = createPlaywrightE2EInvocation({
+      project: "api",
+      specs: ["tests/e2e/api/process & rem tail.api-e2e.spec.ts"],
+      workers: 4,
+      retries: 3,
+    });
+
+    expect(browser).toEqual({
+      command: process.execPath,
+      args: [
+        resolve("scripts/run-playwright-e2e.mjs"),
+        "--project=browser",
+        metacharacterSpec,
+        "--workers=2",
+        "--retries=0",
+      ],
+      shell: false,
+    });
+    expect(browser.args).not.toContain("--project=api");
+    expect(classifyTestPath(metacharacterSpec)).toMatchObject({
+      semantic: "browser-e2e",
+      lane: "e2e",
+      runner: "playwright",
+    });
+    expect(api.args).toEqual([
+      resolve("scripts/run-playwright-e2e.mjs"),
+      "--project=api",
+      "tests/e2e/api/process & rem tail.api-e2e.spec.ts",
+      "--workers=4",
+      "--retries=3",
+    ]);
+    expect(api.shell).toBe(false);
+  });
+
   it("uses the retry-free control for E2E Groups B/C/D and both Playwright configs", () => {
     const runner = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
     const groupB = runner.match(/async function runGroupB[\s\S]*?(?=\nasync function runGroupC)/)?.[0];
@@ -412,9 +456,11 @@ describe("unit run isolation", () => {
     expect(resolveE2ERetryCount({})).toBe(3);
     expect(resolveE2ERetryCount({ BOBBIT_V2_RETRY_FREE: "1" })).toBe(0);
     expect(groupB).toContain("const retries = resolveE2ERetryCount(coordinatorEnv);");
-    expect(groupB).toContain("`--retries=${retries}`");
+    expect(groupB).toContain("createPlaywrightE2EInvocation({ project: \"api\", specs, workers: pwWorkers, retries })");
+    expect(groupB).toContain("shell: invocation.shell");
     expect(groupC).toContain("const retries = resolveE2ERetryCount(coordinatorEnv);");
-    expect(groupC).toContain("`--retries=${retries}`");
+    expect(groupC).toContain("createPlaywrightE2EInvocation({ project: \"browser\", specs, workers: playwrightWorkers, retries })");
+    expect(groupC).toContain("shell: invocation.shell");
     expect(groupDVitestArgs({})).not.toContain("--retry=0");
     expect(groupDVitestArgs({ BOBBIT_V2_RETRY_FREE: "1" })).toContain("--retry=0");
     for (const config of ["playwright-e2e.config.ts", "playwright-v2.config.ts"])
