@@ -820,6 +820,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
 			recordId: skillRecordId,
+			intentId,
 			promptId: intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
@@ -842,6 +843,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(h.persistedRecord.messageQueue, []);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
 			recordId: skillRecordId,
+			intentId,
 			promptId: intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
