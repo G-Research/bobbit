@@ -1,15 +1,18 @@
 import type JSZip from "jszip";
+import {
+	extractPdfTextInIsolate,
+	MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES,
+} from "./uploaded-pdf-extractor-isolate.js";
 
 /**
  * Server-derived document text is only an admission excerpt. Keeping this well
  * above the model context's 2 KiB per-file budget preserves its truncation
  * signal without allowing extracted data to grow the immutable manifest.
  */
-export const MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES = 3 * 1024;
+export { MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES } from "./uploaded-pdf-extractor-isolate.js";
 
 const MAX_SPECIALIZED_INPUT_BYTES = 20 * 1024 * 1024;
-const MAX_PDF_PAGES = 32;
-const MAX_PDF_TEXT_ITEMS_PER_PAGE = 10_000;
+const MAX_PRESENTATION_PAGES = 32;
 const MAX_ZIP_ENTRIES = 512;
 const MAX_SELECTED_ZIP_ENTRIES = 64;
 const MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 1024 * 1024;
@@ -58,47 +61,6 @@ export function boundServerDerivedDocumentText(text: string): string {
 function normalizeExtractedText(text: string): string | undefined {
 	const normalized = text.replace(/[\t ]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 	return normalized || undefined;
-}
-
-async function extractPdf(bytes: Uint8Array): Promise<string | undefined> {
-	const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-	const loadingTask = pdfjs.getDocument({
-		data: new Uint8Array(bytes),
-		disableFontFace: true,
-		isEvalSupported: false,
-		useSystemFonts: false,
-		stopAtErrors: true,
-		verbosity: 0,
-	});
-	let pdf: Awaited<typeof loadingTask.promise> | undefined;
-	try {
-		pdf = await loadingTask.promise;
-		let output = "";
-		const pageCount = Math.min(pdf.numPages, MAX_PDF_PAGES);
-		for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
-			const page = await pdf.getPage(pageNumber);
-			try {
-				const content = await page.getTextContent();
-				const parts: string[] = [];
-				for (const item of content.items.slice(0, MAX_PDF_TEXT_ITEMS_PER_PAGE)) {
-					if (item && typeof item === "object" && "str" in item && typeof item.str === "string" && item.str.trim()) {
-						parts.push(item.str.trim());
-					}
-				}
-				if (parts.length > 0) {
-					const appended = appendBounded(output, `${output ? "\n" : ""}[Page ${pageNumber}]\n${parts.join(" ")}`);
-					output = appended.text;
-					if (appended.full) break;
-				}
-			} finally {
-				page.cleanup();
-			}
-		}
-		return normalizeExtractedText(output);
-	} finally {
-		if (pdf) await pdf.destroy();
-		else await loadingTask.destroy();
-	}
 }
 
 function advertisedUncompressedSize(entry: JSZip.JSZipObject): number | undefined {
@@ -224,9 +186,9 @@ function numericEntrySort(left: string, right: string): number {
 
 async function extractPptx(bytes: Uint8Array): Promise<string | undefined> {
 	const zip = await loadZip(bytes);
-	const slides = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name)).sort(numericEntrySort).slice(0, MAX_PDF_PAGES);
+	const slides = Object.keys(zip.files).filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name)).sort(numericEntrySort).slice(0, MAX_PRESENTATION_PAGES);
 	if (slides.length === 0) return undefined;
-	const notes = Object.keys(zip.files).filter((name) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/i.test(name)).sort(numericEntrySort).slice(0, MAX_PDF_PAGES);
+	const notes = Object.keys(zip.files).filter((name) => /^ppt\/notesSlides\/notesSlide\d+\.xml$/i.test(name)).sort(numericEntrySort).slice(0, MAX_PRESENTATION_PAGES);
 	return extractXmlEntries(zip, [...slides, ...notes], "a:t", (name, index) => {
 		const number = name.match(/(\d+)\.xml$/)?.[1] ?? String(index + 1);
 		return name.includes("notesSlides") ? `[Slide ${number} notes]\n` : `[Slide ${number}]\n`;
@@ -248,7 +210,7 @@ export async function deriveSpecializedDocumentText(input: {
 	if (input.bytes.byteLength > MAX_SPECIALIZED_INPUT_BYTES) return { recognized: true };
 	try {
 		const text = kind === "pdf"
-			? await extractPdf(input.bytes)
+			? await extractPdfTextInIsolate(input.bytes)
 			: kind === "docx"
 				? await extractDocx(input.bytes)
 				: await extractPptx(input.bytes);
