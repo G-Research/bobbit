@@ -225,8 +225,14 @@ test.describe("persistent bash_bg processes — restart re-attach, exit code, di
 		const dropdown = await openPillDropdown(page, bgId);
 		await expect(dropdown).toContainText(/exit\s*0/i, { timeout: 10_000 });
 
+		// Close the portal after collecting the exit-code evidence. Terminal
+		// reconciliation can replace its owner, so dismiss through the stable,
+		// current pill action instead of retaining a button from that portal.
+		await page.keyboard.press("Escape");
+		await expect(page.locator("#bg-process-dropdown")).toBeHidden();
+
 		// ── Dismiss removes the pill AND purges the persisted files. ──
-		await dropdown.getByRole("button", { name: "Remove" }).click();
+		await pillActionButton(page, bgId).click();
 		await expect(pill(page, bgId)).toHaveCount(0, { timeout: 10_000 });
 		await expect
 			.poll(async () => (await listBgProcesses(sessionId))?.some((p) => p.id === bgId) ?? null,
