@@ -323,6 +323,19 @@ describe("uploaded attachment remote-agent tool integration", () => {
 			expect(response).toMatchObject({ operation: "read", encoding: "base64", bytesRead: 3, nextOffset: 4, eof: false });
 			expect(Buffer.from(response.data, "base64")).toEqual(bytes.subarray(1, 4));
 
+			const byteFile = (fs.readdirSync(path.join(temp, "uploaded-attachments"), { recursive: true }) as string[])
+				.map((entry) => path.join(temp, "uploaded-attachments", entry))
+				.find((entry) => entry.endsWith(".bin"));
+			expect(byteFile).toBeTruthy();
+			const tamperedBytes = Buffer.from([0xba, 0xad, 0xf0, 0x0d, 0x00]);
+			fs.writeFileSync(byteFile!, tamperedBytes);
+			const tampered = await registered.execute("tool-call-tampered", { operation: "read", pointer, offset: 1, length: 3 });
+			expect(tampered.isError).toBe(true);
+			expect(tampered.content[0].text).toBe("error: Uploaded attachment is unavailable");
+			expect(tampered.content[0].text).not.toContain(tamperedBytes.toString("base64"));
+			expect(tampered.content[0].text).not.toContain(saved.attachments[0].sha256);
+			expect(tampered.content[0].text).not.toContain(temp);
+
 			process.env.BOBBIT_SESSION_SECRET = "foreign-secret";
 			const rejected = await registered.execute("tool-call-2", { operation: "read", pointer });
 			expect(rejected.isError).toBe(true);

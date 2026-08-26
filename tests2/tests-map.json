@@ -49,7 +49,7 @@
     },
     {
       "path": "tests2/core/uploaded-attachment-store.test.ts",
-      "reason": "Core coverage for immutable exact-byte and durable-preview quota accounting, idempotent occurrence ownership, bounded ranges, authorization, validation, and purge.",
+      "reason": "Core coverage for immutable digest-verified exact bytes, TOCTOU-safe bounded ranges, durable-preview quota accounting, idempotent occurrence ownership, authorization, validation, and purge.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -76,7 +76,7 @@
     },
     {
       "path": "tests2/integration/uploaded-attachment-tool.test.ts",
-      "reason": "Integration coverage for session-scoped attachment list/read routing, exact bounded bytes, foreign-session rejection, restart persistence, and cleanup.",
+      "reason": "Integration coverage for session-scoped attachment list/read routing, exact bounded bytes, fail-closed tamper handling, foreign-session rejection, restart persistence, and cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

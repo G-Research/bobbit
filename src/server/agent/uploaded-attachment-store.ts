@@ -124,6 +124,8 @@ export class UploadedAttachmentStoreError extends Error {
 export interface UploadedAttachmentStoreTestHooks {
 	/** Runs after temporary bytes are written but before the occurrence is committed. */
 	beforeCommit?: (input: { sessionId: string; occurrenceId: string }) => void | Promise<void>;
+	/** Runs after a read snapshot is verified but before its requested range is returned. */
+	afterReadIntegrityVerified?: (input: { sessionId: string; pointer: string }) => void | Promise<void>;
 }
 
 let rootOverride: string | undefined;
@@ -657,11 +659,27 @@ export async function readUploadedAttachmentRange(input: {
 		handle = await fs.promises.open(file, "r");
 		const openedStat = await handle.stat();
 		if (!openedStat.isFile() || openedStat.size !== attachment.size) unavailable();
+
+		// Files are admission-bounded to 20 MiB. Read that bounded immutable view
+		// once, verify the persisted digest, then slice the in-memory snapshot. A
+		// path replacement after open cannot redirect the handle, and a same-inode
+		// mutation during the read either fails the exact-length checks or digest.
+		const snapshot = Buffer.alloc(attachment.size);
+		let snapshotBytesRead = 0;
+		while (snapshotBytesRead < snapshot.length) {
+			const result = await handle.read(snapshot, snapshotBytesRead, snapshot.length - snapshotBytesRead, snapshotBytesRead);
+			if (result.bytesRead === 0) unavailable();
+			snapshotBytesRead += result.bytesRead;
+		}
+		const verifiedStat = await handle.stat();
+		if (!verifiedStat.isFile() || verifiedStat.size !== attachment.size) unavailable();
+		const snapshotSha256 = createHash("sha256").update(snapshot).digest("hex");
+		if (!secureEqualHex(snapshotSha256, attachment.sha256)) unavailable();
+		await testHooks?.afterReadIntegrityVerified?.({ sessionId: input.sessionId, pointer: input.pointer });
+
 		const requested = Math.min(length, attachment.size - offset);
-		const buffer = Buffer.alloc(requested);
-		const { bytesRead } = requested === 0 ? { bytesRead: 0 } : await handle.read(buffer, 0, requested, offset);
-		if (bytesRead !== requested) unavailable();
-		const nextOffset = offset + bytesRead;
+		const range = snapshot.subarray(offset, offset + requested);
+		const nextOffset = offset + range.length;
 		return {
 			pointer: attachment.pointer,
 			fileName: attachment.fileName,
@@ -669,11 +687,11 @@ export async function readUploadedAttachmentRange(input: {
 			size: attachment.size,
 			offset,
 			length,
-			bytesRead,
+			bytesRead: range.length,
 			nextOffset,
 			eof: nextOffset === attachment.size,
 			encoding: "base64",
-			data: buffer.subarray(0, bytesRead).toString("base64"),
+			data: range.toString("base64"),
 		};
 	} catch (error) {
 		if (error instanceof UploadedAttachmentStoreError) throw error;

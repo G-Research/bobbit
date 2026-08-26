@@ -31,6 +31,14 @@ function document(id: string, fileName: string, mimeType: string, bytes: Buffer)
 	};
 }
 
+function findStoredByteFile(root: string): string {
+	const byteFile = (fs.readdirSync(root, { recursive: true }) as string[])
+		.map((entry) => path.join(root, entry))
+		.find((entry) => entry.endsWith(".bin"));
+	if (!byteFile) throw new Error("missing stored attachment bytes");
+	return byteFile;
+}
+
 async function ooxml(entries: Record<string, string>): Promise<Buffer> {
 	const zip = new JSZip();
 	for (const [name, content] of Object.entries(entries)) zip.file(name, content);
@@ -112,6 +120,66 @@ describe("immutable uploaded attachment store", () => {
 		const tail = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer, offset: 4, length: 20 });
 		expect(Buffer.from(tail.data, "base64")).toEqual(bytes.subarray(4));
 		expect(tail).toMatchObject({ bytesRead: 2, nextOffset: 6, eof: true });
+	});
+
+	it("fails closed without returning bytes when a stored blob is changed at the same length", async () => {
+		const original = Buffer.from("ORIGINAL");
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "same-length-tamper", [
+			document("tamper", "tamper.bin", "application/octet-stream", original),
+		]);
+		const byteFile = findStoredByteFile(root);
+		fs.writeFileSync(byteFile, Buffer.from("MODIFIED"));
+
+		await expect(readUploadedAttachmentRange({
+			sessionId: SESSION_A,
+			pointer: saved.attachments[0].pointer,
+			offset: 2,
+			length: 3,
+		})).rejects.toMatchObject({
+			statusCode: 404,
+			code: "UPLOADED_ATTACHMENT_NOT_FOUND",
+			message: "Uploaded attachment is unavailable",
+			retryable: false,
+		});
+	});
+
+	it("returns only the verified snapshot when the backing file changes before range projection", async () => {
+		const original = Buffer.from("immutable");
+		const replacement = Buffer.from("TAMPERED!");
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "verified-read-race", [
+			document("race", "race.bin", "application/octet-stream", original),
+		]);
+		const byteFile = findStoredByteFile(root);
+		setUploadedAttachmentStoreHooksForTesting({
+			afterReadIntegrityVerified: () => fs.writeFileSync(byteFile, replacement),
+		});
+
+		const range = await readUploadedAttachmentRange({
+			sessionId: SESSION_A,
+			pointer: saved.attachments[0].pointer,
+			offset: 1,
+			length: 4,
+		});
+		setUploadedAttachmentStoreHooksForTesting(undefined);
+		expect(Buffer.from(range.data, "base64")).toEqual(original.subarray(1, 5));
+		expect(Buffer.from(range.data, "base64")).not.toEqual(replacement.subarray(1, 5));
+		await expectCode(
+			readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer }),
+			"UPLOADED_ATTACHMENT_NOT_FOUND",
+		);
+	});
+
+	it("rejects a truncated blob without a partial range", async () => {
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "truncated-read", [
+			document("truncated", "truncated.bin", "application/octet-stream", Buffer.from("complete")),
+		]);
+		fs.truncateSync(findStoredByteFile(root), 3);
+		await expectCode(readUploadedAttachmentRange({
+			sessionId: SESSION_A,
+			pointer: saved.attachments[0].pointer,
+			offset: 0,
+			length: 3,
+		}), "UPLOADED_ATTACHMENT_NOT_FOUND");
 	});
 
 	it("derives trusted text from exact bytes and reuses it with the immutable pointer", async () => {
@@ -416,11 +484,8 @@ describe("immutable uploaded attachment store", () => {
 		const afterRestart = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer, offset: 0, length: 64 });
 		expect(Buffer.from(afterRestart.data, "base64").toString()).toBe("durable");
 
-		const byteFile = (fs.readdirSync(root, { recursive: true }) as string[])
-			.map((entry) => path.join(root, entry))
-			.find((entry) => entry.endsWith(".bin"));
-		expect(byteFile).toBeTruthy();
-		fs.unlinkSync(byteFile!);
+		const byteFile = findStoredByteFile(root);
+		fs.unlinkSync(byteFile);
 		await expectCode(listUploadedAttachments(SESSION_A, pointer), "UPLOADED_ATTACHMENT_NOT_FOUND");
 
 		await purgeUploadedAttachments(SESSION_A);
