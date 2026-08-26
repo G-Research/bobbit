@@ -30,7 +30,7 @@ This guide is the practical how-to.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
-**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session access, unified lifecycle hooks, and worker isolation are all **implemented**. `HOST_API_VERSION` remains `1`; `HOST_CONTRACT_VERSION` is `6`. Base capabilities report `true` on a current host; feature-detect optional capabilities through `host.capabilities`. The v6 `host.ui.createBobbitSprite` method is required and has no capability flag. `sessionNotifications` and `projectNotifications` are available on the current host, while `localData` is present only for a winning pack that declares it.
+**Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, project-scoped local data, session and project reads, unified lifecycle hooks, and worker isolation are all **implemented**. `HOST_API_VERSION` remains `1`; `HOST_CONTRACT_VERSION` is `7`. Base capabilities report `true` on a current host; feature-detect optional capabilities through `host.capabilities`. Contract v5 added session/project notifications, v6 added the required `host.ui.createBobbitSprite` method, and v7 added authenticated on-demand project reads. `projectReads` is advertised automatically only for a validated pack-owned browser surface; `localData` remains present only for a winning pack that declares it.
 
 The renderer+action working example lives at `tests/fixtures/market-sources/retry-demo-src/retry-demo/`; the full pack-scoped surface set is exercised by `market-packs/artifacts/` (a tool + panel + deep-link pack), `market-packs/pr-walkthrough/` (a first-party tool + role + panel + route + entrypoint pack), `market-packs/terminal/` (the first-party xterm terminal over `host.channels`), and no-tools fixture packs such as `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/`.
 
@@ -50,9 +50,10 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Lifecycle hooks** *(schema 2)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Gateway worker tier | Explicit `kind: interceptor` participates before authority; `kind: notification` observes canonical committed facts. Kindless legacy declarations remain inert. See [Unified Host hooks](host-hooks.md). |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
-Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
-and the server-side `host.agents.*` (launch + orchestrate child agents), available to surfaces
-that hold a `host`.
+Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events),
+browser `host.project.*` (project notifications and safe on-demand records), and server-side
+`host.agents.*` (launch + orchestrate child agents), available to eligible surfaces that hold a
+`host`.
 
 **Why this layout.** Several of these contributions are already **pack-scoped** at runtime:
 a `panelId` is opened through the Host API by any surface in the pack, channels resolve through
@@ -633,15 +634,16 @@ if (host.capabilities.channels) { /* safe to use host.channels */ }
 ```
 
 A current host reports the base client flags `true` — `{ invokeAction, requestRender, callRoute,
-session, ui, store, channels, sessionNotifications, projectNotifications }`. A declared winning pack
-additionally receives `localData: true`; otherwise that flag and namespace are absent. The
-**server-side** base capabilities are `{ session, store, agents }`, with `localData: true` added only
-for a bound declared directory. `host.version`
+session, ui, store, channels, sessionNotifications, projectNotifications }`. A validated pack-owned
+browser surface additionally receives `projectReads: true`; provider/server-only and unbound Hosts
+do not. A declared winning pack with local data receives `localData: true`; otherwise that flag and
+namespace are absent. The **server-side** base capabilities are `{ session, store, agents }`, with
+`localData: true` added only for a bound declared directory. `host.version`
 (`HOST_API_VERSION`, `1`) and `host.contractVersion`
 (`HOST_CONTRACT_VERSION`) identify the contract revision. Optional capabilities are additive
 (no signature churn), so code written against `capabilities` stays forward/backward-compatible.
-Required methods declared by the active contract are different: for contract v6,
-`host.ui.createBobbitSprite` is always present and must be called without feature detection.
+Required methods declared by the active contract are different: the contract-v6
+`host.ui.createBobbitSprite` remains always present and must be called without feature detection.
 
 ## Step 5 — install, test, iterate
 
@@ -1270,9 +1272,8 @@ it renders the canonical default Bobbit.
 
 Identity lookup is private to the authenticated browser surface's bound session project. An
 out-of-project subject and an unknown subject produce the same canonical fallback, so extensions
-cannot probe whether an ID belongs to another project. Project snapshots do not expose colour,
-accessory, sprite, or rendering fields; pass an identity to this method instead of retaining
-appearance data.
+cannot probe whether an ID belongs to another project. Project summary reads do not expose colour,
+sprite, or rendering fields; pass an identity to this method instead of retaining appearance data.
 
 The result is a plain, non-interactive `HTMLElement` with `role="img"`; its `aria-label` is exactly
 the supplied `label`, and its visual descendants are hidden from assistive technology. The element
@@ -1841,10 +1842,10 @@ providers. Accepted blocks are wrapped in a `<context-block id=… source=… au
 reason=…>` envelope (attribute values are newline-stripped and `"`-escaped). Full algorithm and
 trace details: [docs/lifecycle-hub.md](lifecycle-hub.md).
 
-### `host.session.*` and `host.project.notifications` — reads, posts, and live facts
+### `host.session.*` — own-session reads, posts, and live facts
 
-Reads are **own-session-scoped**; writes require a **genuine user gesture + a server-minted
-permit**.
+Session reads are **own-session-scoped**; writes require a **genuine user gesture + a
+server-minted permit**.
 
 ```js
 // READS (own session, mapped through the internal→contract adapter):
@@ -1860,8 +1861,6 @@ const off = host.session.subscribe("tool_result", ({ record }) => { /* … */ })
 const offStatus = host.session.notifications.subscribe("statusChanged", (event) => {
   console.log(event.payload.status, event.aggregate.revision);
 });
-const offGoal = host.project.notifications.subscribe("goalUpdated", () => refreshGoals());
-const offGap = host.project.notifications.onRefreshRequired(() => refreshGoals());
 
 // WRITE — drives the agent. MUST be called from a real user gesture:
 await host.session.postMessage({ role: "user", text: "re-run the tests", resumeTurn: true });
@@ -1876,13 +1875,360 @@ await host.session.postMessage({ role: "user", text: "re-run the tests", resumeT
   session WebSocket path and carries a one-time, content-bound, server-minted permit —
   captured/replayed/forged/tampered posts are rejected server-side.
 - **Cross-session posting is impossible** — the target is the WS connection's own session.
-- **Canonical notifications are snapshot invalidations, not replay.** Session facts are bound to
-  this session; project facts are bound to its server-resolved project with no client-supplied ID.
-  Mount, a server-observed session project move, reconnect, stream gaps, and pressure call
-  `onRefreshRequired`; re-read the authoritative snapshot instead of reconstructing state from
-  event history. On a move, the server rebinds the live socket and suppresses project deltas until
-  that refresh, so the next read must use the destination project's authoritative state.
-  Subscription cleanup functions are idempotent. See [Unified Host hooks](host-hooks.md#browser-host-api).
+
+### `host.project.*` — on-demand project reads
+
+Contract v7 adds six browser methods for the Bobbit facts a panel commonly needs:
+
+```ts
+host.project.readStaff(selector?);
+host.project.readSessions(selector?);
+host.project.readGoals(selector?);
+host.project.readGoalTasks(goalId, selector?);
+host.project.readGoalGates(goalId, selector?);
+host.project.readGoalPullRequest(goalId);
+```
+
+These methods are automatically available to authenticated pack-owned browser Hosts for tool
+renderers, panels, and entrypoint launchers. Server route handlers do not receive browser project
+reads. Do not add a manifest declaration. Feature-detect before use:
+
+```js
+if (!host.capabilities.has("projectReads")) {
+  renderUnavailable("Project records require Host contract v7.");
+  return;
+}
+```
+
+The host derives the project exclusively from the bound authenticated session and validated
+surface. Extension code never supplies a project, session, pack, tool, token, URL, or transport.
+Stale or inactive surfaces, cross-session use, conflicting session/project authority, and a project
+move during authorization fail closed.
+
+All list methods accept either a bounded page or complete IDs selector:
+
+```ts
+type HostProjectSelector =
+  | { mode?: "page"; cursor?: number; limit?: number }
+  | { mode: "ids"; ids: readonly string[] };
+```
+
+Page mode defaults to cursor `0`, limit `50`; limits are clamped to `1`–`200`. Follow
+`page.nextCursor` while `page.hasMore` is true. IDs mode accepts `1`–`100` valid IDs, preserves
+order and duplicates, and returns one `{ status: "found" | "not-found" | "unauthorized" }`
+outcome per requested ID. It never silently shortens a valid request. Handle every outcome before
+reading `value`.
+
+Tasks and gates authorize `goalId` first and may return `{ goalId, status: "not-found" |
+"unauthorized" }`. PR reads return the ordinary lookup shape; a known goal with no cached PR is
+`{ id: goalId, status: "found", value: null }`.
+
+The returned `HostStaffSummary`, `HostSessionSummary`, `HostGoalSummary`, `HostTaskSummary`,
+`HostGateSummary`, and `HostPullRequestSummary` objects are fresh, stable allowlisted projections.
+They omit paths and worktrees; prompts, specs, transcripts, workflow bodies, signals and verification
+evidence; secrets and provider state; model/sandbox configuration; Git branches and SHAs; arbitrary
+metadata; and administrative flags. See the
+[project-read design](design/extension-host-project-reads.md#stable-summary-boundary) for the exact
+fields and timestamp rules.
+
+#### Panel pattern: load pack data, then related Host records
+
+Load the panel's own domain data through its declared route first. Use the returned IDs to request
+only relevant Host records; do not enumerate unrelated project state.
+
+```js
+// lib/ProjectPanel.js — pre-built browser ESM
+export default function createPanel({ html }) {
+  // A panel module is page-lived and shared across sessions, so key its state.
+  const states = new Map();
+
+  function stateFor(instanceKey) {
+    let state = states.get(instanceKey);
+    if (!state) {
+      state = {
+        started: false,
+        stopped: false,
+        generation: 0,
+        refs: null,
+        records: null,
+        error: null,
+        stops: [],
+        refreshPending: false,
+        refreshRunning: false,
+      };
+      states.set(instanceKey, state);
+    }
+    return state;
+  }
+
+  const emptyLookup = () => ({ mode: "ids", results: [] });
+  const readIds = (ids, read) => ids.length
+    ? read({ mode: "ids", ids })
+    : Promise.resolve(emptyLookup());
+  const indexLookup = (read) => Object.fromEntries(
+    read.results.map((outcome) => [outcome.id, outcome]),
+  );
+  const childOutcomes = (read) => read.mode === "ids" ? indexLookup(read) : read;
+
+  async function readRelated(host, refs) {
+    const goalIds = refs.goals.map((item) => item.goalId);
+    const [staff, sessions, goals, goalChildren, pullRequests, visibleGoalPage] =
+      await Promise.all([
+        readIds(refs.staffIds, (selector) => host.project.readStaff(selector)),
+        readIds(refs.sessionIds, (selector) => host.project.readSessions(selector)),
+        readIds(goalIds, (selector) => host.project.readGoals(selector)),
+        Promise.all(refs.goals.map(async ({ goalId, taskIds, gateIds }) => ({
+          goalId,
+          tasks: await readIds(taskIds, (selector) =>
+            host.project.readGoalTasks(goalId, selector)),
+          gates: await readIds(gateIds, (selector) =>
+            host.project.readGoalGates(goalId, selector)),
+        }))),
+        Promise.all(goalIds.map((goalId) =>
+          host.project.readGoalPullRequest(goalId))),
+        refs.visibleGoalPage
+          ? host.project.readGoals({ mode: "page", ...refs.visibleGoalPage })
+          : Promise.resolve(null),
+      ]);
+    return {
+      staff: indexLookup(staff),
+      sessions: indexLookup(sessions),
+      goals: indexLookup(goals),
+      tasksByGoal: Object.fromEntries(goalChildren.map((item) =>
+        [item.goalId, childOutcomes(item.tasks)])),
+      gatesByGoal: Object.fromEntries(goalChildren.map((item) =>
+        [item.goalId, childOutcomes(item.gates)])),
+      pullRequests: Object.fromEntries(pullRequests.map((outcome) =>
+        [outcome.id, outcome])),
+      visibleGoalPage,
+    };
+  }
+
+  function repaintIfCurrent(state, host, generation) {
+    if (!state.stopped && state.generation === generation) host.requestRender();
+  }
+
+  function targeted(state, host, generation, read, apply) {
+    void read().then((result) => {
+      if (state.stopped || state.generation !== generation) return;
+      state.records = apply(state.records, result);
+      state.error = null;
+      host.requestRender();
+    }).catch((error) => {
+      if (state.stopped || state.generation !== generation) return;
+      state.error = error instanceof Error ? error.message : String(error);
+      host.requestRender();
+    });
+  }
+
+  function subscribe(state, host, generation) {
+    const refs = state.refs;
+    const goalRef = (goalId) => refs.goals.find((item) => item.goalId === goalId);
+    const sub = (name, handler) =>
+      host.project.notifications.subscribe(name, handler);
+
+    const onGoal = (event) => {
+      const id = event.payload.goalId;
+      if (goalRef(id)) targeted(
+        state, host, generation,
+        () => host.project.readGoals({ mode: "ids", ids: [id] }),
+        (records, read) => ({
+          ...records,
+          goals: { ...records.goals, [id]: read.results[0] },
+        }),
+      );
+    };
+    const onTask = (event) => {
+      const ref = goalRef(event.payload.goalId);
+      const id = event.payload.taskId;
+      if (ref?.taskIds.includes(id)) targeted(
+        state, host, generation,
+        () => host.project.readGoalTasks(ref.goalId, { mode: "ids", ids: [id] }),
+        (records, read) => ({
+          ...records,
+          tasksByGoal: {
+            ...records.tasksByGoal,
+            [ref.goalId]: read.mode === "ids"
+              ? { ...records.tasksByGoal[ref.goalId], [id]: read.results[0] }
+              : read,
+          },
+        }),
+      );
+    };
+    const onGate = (event) => {
+      const ref = goalRef(event.payload.goalId);
+      const id = event.payload.gateId;
+      if (ref?.gateIds.includes(id)) targeted(
+        state, host, generation,
+        () => host.project.readGoalGates(ref.goalId, { mode: "ids", ids: [id] }),
+        (records, read) => ({
+          ...records,
+          gatesByGoal: {
+            ...records.gatesByGoal,
+            [ref.goalId]: read.mode === "ids"
+              ? { ...records.gatesByGoal[ref.goalId], [id]: read.results[0] }
+              : read,
+          },
+        }),
+      );
+    };
+    const onPr = (event) => {
+      const id = event.payload.goalId;
+      if (goalRef(id)) targeted(
+        state, host, generation,
+        () => host.project.readGoalPullRequest(id),
+        (records, outcome) => ({
+          ...records,
+          pullRequests: { ...records.pullRequests, [id]: outcome },
+        }),
+      );
+    };
+    const onStaff = (event) => {
+      const id = event.payload.staffId;
+      if (refs.staffIds.includes(id)) targeted(
+        state, host, generation,
+        () => host.project.readStaff({ mode: "ids", ids: [id] }),
+        (records, read) => ({
+          ...records,
+          staff: { ...records.staff, [id]: read.results[0] },
+        }),
+      );
+    };
+    const onSession = (event) => {
+      const id = event.payload.sessionId;
+      if (refs.sessionIds.includes(id)) targeted(
+        state, host, generation,
+        () => host.project.readSessions({ mode: "ids", ids: [id] }),
+        (records, read) => ({
+          ...records,
+          sessions: { ...records.sessions, [id]: read.results[0] },
+        }),
+      );
+    };
+    const rereadGoalPage = () => {
+      if (refs.visibleGoalPage) targeted(
+        state, host, generation,
+        () => host.project.readGoals({ mode: "page", ...refs.visibleGoalPage }),
+        (records, page) => ({ ...records, visibleGoalPage: page }),
+      );
+    };
+
+    const scheduleRefresh = () => {
+      state.refreshPending = true;
+      if (state.refreshRunning) return;
+      queueMicrotask(async () => {
+        if (state.refreshRunning || state.stopped) return;
+        state.refreshRunning = true;
+        try {
+          while (state.refreshPending && !state.stopped &&
+                 state.generation === generation) {
+            state.refreshPending = false;
+            state.records = await readRelated(host, refs);
+          }
+          state.error = null;
+        } catch (error) {
+          if (!state.stopped && state.generation === generation) {
+            state.error = error instanceof Error ? error.message : String(error);
+          }
+        } finally {
+          state.refreshRunning = false;
+          repaintIfCurrent(state, host, generation);
+          if (state.refreshPending) scheduleRefresh();
+        }
+      });
+    };
+
+    state.stops.push(
+      sub("goalCreated", (event) => { onGoal(event); rereadGoalPage(); }),
+      sub("goalUpdated", onGoal),
+      sub("goalCompleted", onGoal),
+      sub("goalArchived", (event) => { onGoal(event); rereadGoalPage(); }),
+      sub("taskCreated", onTask),
+      sub("taskUpdated", onTask),
+      sub("taskStateChanged", onTask),
+      sub("gateStatusChanged", onGate),
+      sub("pullRequestStatusChanged", onPr),
+      sub("staffCreated", onStaff),
+      sub("staffConfigChanged", onStaff),
+      sub("staffRetired", onStaff),
+      sub("staffSessionChanged", onStaff),
+      sub("sessionCreated", onSession),
+      sub("sessionForked", onSession),
+      sub("sessionStatusChanged", onSession),
+      sub("sessionArchived", onSession),
+      host.project.notifications.onRefreshRequired(scheduleRefresh),
+    );
+  }
+
+  async function start(state, host, params) {
+    state.started = true;
+    const generation = ++state.generation;
+    try {
+      // 1. Load the pack's domain data first. It returns only relevant IDs:
+      // { staffIds, sessionIds, goals: [{ goalId, taskIds, gateIds }],
+      //   visibleGoalPage?: { cursor, limit } }
+      const refs = await host.callRoute("panel-data", {
+        query: { viewId: String(params?.viewId ?? "") },
+      });
+      if (state.stopped || state.generation !== generation) return;
+
+      // 2. Feature-detect, then read only the related Host records.
+      if (!host.capabilities.has("projectReads")) {
+        throw new Error("Project records require Host contract v7");
+      }
+      state.refs = refs;
+      state.records = await readRelated(host, refs);
+      if (state.stopped || state.generation !== generation) return;
+      subscribe(state, host, generation);
+      state.error = null;
+    } catch (error) {
+      if (!state.stopped && state.generation === generation) {
+        state.error = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      repaintIfCurrent(state, host, generation);
+    }
+  }
+
+  function stop(instanceKey, state) {
+    state.stopped = true;
+    state.generation += 1; // fence reads already in flight
+    for (const off of state.stops.splice(0)) off();
+    states.delete(instanceKey); // reopening starts from the pack route again
+  }
+
+  return {
+    render(params, host) {
+      const instanceKey = JSON.stringify([
+        String(params?.__sessionId ?? "unbound"),
+        String(params?.viewId ?? ""),
+      ]);
+      const state = stateFor(instanceKey);
+      if (host && !state.started && !state.stopped) void start(state, host, params);
+      return html`
+        ${state.error ? html`<p>${state.error}</p>` : null}
+        <pre>${JSON.stringify(state.records, null, 2)}</pre>
+        <button type="button" @click=${() => {
+          stop(instanceKey, state);
+          host.requestRender();
+        }}>Reload view</button>
+      `;
+    },
+  };
+}
+```
+
+The example uses exact rereads for referenced identities and restarts the visible goal page only
+when membership can change. Apply the same rule to any additional pages the panel deliberately
+shows. `onRefreshRequired` coalesces a complete repeat of this panel's active read set, while the
+stop path unsubscribes and fences promises already in flight. If the panel mounts a component with
+its own lifecycle, call the same `stop` helper from that component's disconnect hook.
+
+Canonical notifications remain invalidation signals. They are ordered only within the live
+connection and are not durable replay. `onRefreshRequired` covers initial subscription, reload,
+reconnect, epoch/sequence gaps, pressure, and project moves; repeat active reads rather than
+reconstruct records from event history. Subscription cleanup functions are idempotent. See
+[Unified Host hooks](host-hooks.md#browser-host-api).
 
 ### `host.agents` — launch and orchestrate child agents
 
@@ -2303,7 +2649,7 @@ sandbox/read-only enforcement. As an author, your obligations are:
 - [ ] **No post / navigate / action / surprising process start on mount** — `host.session.postMessage` requires a real user gesture; actions/navigations/process-like channel opens should be user-driven UX, even though channel authorization is scoped declaration + one-shot permit rather than launcher activation.
 - [ ] **Never supply a pack id, `tool`, token, or transport to a scoped call** — pack identity is server-derived from the surface-binding token held in the Host API closure.
 - [ ] **Choose hook authority correctly** — use an interceptor only to participate before commit; use a notification to observe an immutable committed fact. Never treat a notification return value as an applied mutation.
-- [ ] **Refresh rather than replay notifications** — subscribe to `onRefreshRequired`, read the authoritative snapshot on mount/reconnect/gap, and use idempotent teardown functions.
+- [ ] **Refresh rather than replay notifications** — subscribe to `onRefreshRequired`, repeat only active Host reads on mount/reload/reconnect/gap, and use idempotent teardown functions.
 - [ ] **Declare channels in `contents.channels` + `channels/<name>.yaml`** — `host.channels.open` succeeds only for the calling pack's declared channels; do not use routes as streaming transports.
 - [ ] **Treat `openGrant` as protocol integrity, not user authority** — Bobbit-owned code mints/consumes it from a validated surface token + declared channel; missing/expired/replayed/mismatched permits fail closed.
 - [ ] **Handle channel backpressure and close events** — every `open`/`attach`/`send`/`close` promise can reject, and `onClose` is the lifecycle source of truth.
@@ -2312,7 +2658,7 @@ sandbox/read-only enforcement. As an author, your obligations are:
 - [ ] **Use the bound Pack Local Data directory** — declare the fixed schema-2 `localData` block and call `host.localData.directory()` or select your exact pack id from `BOBBIT_PACK_LOCAL_DATA_JSON`; never reconstruct a project root from `cwd` or accept a caller-supplied directory.
 - [ ] **Server modules are trusted code with full ambient parity** — `child_process`/`fs`/network/`process.env` are available directly (no declaration). The worker is resource/crash isolation only; design handlers to be fast.
 - [ ] **Standalone pi extensions are host/runtime code** — source-level trust is required before executable discovery, and enabled extensions load into matching agent sessions by default via `--extension`.
-- [ ] **Feature-detect optional capabilities via `host.capabilities`**, never member presence; call required contract-v6 `host.ui.createBobbitSprite` directly.
+- [ ] **Feature-detect optional capabilities via `host.capabilities`**, never member presence; check `projectReads` before v7 project methods and call required contract-v6 `host.ui.createBobbitSprite` directly.
 
 The deeper model — the allowlist-bypass fix, `toolUseId` ownership verification, the
 `authorizeScopedRequest` vs `authorizeActionRequest` split, the tool-or-pack surface binding,
@@ -2328,6 +2674,7 @@ the contract adapter, and the worker isolation model — is documented in
 - Litmus packs: `market-packs/artifacts/` (tool + panel + deep-link), `market-packs/pr-walkthrough/` (first-party reviewer tools + panel/routes/entrypoints), `market-packs/terminal/` (first-party xterm terminal over channels), `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/` (no-tools / UI-only)
 - Browser E2Es: `tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, `pr-walkthrough-pack.spec.ts`, `terminal-pack.spec.ts`
 - Frozen Host API types: `src/shared/extension-host/host-api.ts`
+- On-demand project reads: `docs/design/extension-host-project-reads.md`
 - Extension channel substrate: `src/app/channel-bridge.ts`, `src/server/extension-host/channel-registry.ts`, `channel-open-permits.ts`, `channel-module-host.ts`, `channel-pty-helper.ts`
 - Action / route dispatch + handler ctx: `src/server/extension-host/action-dispatcher.ts`, `route-dispatcher.ts`
 - Server-side Host API (`ctx.host`): `src/server/extension-host/server-host-api.ts`

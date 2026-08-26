@@ -114,7 +114,7 @@ Notifications contain identifiers, states, revisions, durations, bounded field-n
 - setting values, secrets, or provider credentials;
 - provider error text, stack traces, or mutable store objects.
 
-Consumers fetch an authoritative transcript, snapshot, tool-call record, or pack route when they need larger data. Diagnostic rows contain bounded attribution codes, never notification payloads or thrown errors.
+Consumers fetch an authoritative transcript, typed project record, tool-call record, or pack route when they need larger data. Diagnostic rows contain bounded attribution codes, never notification payloads or thrown errors.
 
 ## Authoring runtime hook contributions
 
@@ -213,13 +213,36 @@ For exact request/result schemas and deadline caps, use the shared `HOST_INTERCE
 
 ## Browser Host API
 
-Canonical browser notifications are additive Host contract v5 capabilities. Feature-detect `sessionNotifications` and `projectNotifications` rather than checking member presence.
+Canonical browser notifications are additive Host contract v5 capabilities. Contract v7 adds
+on-demand project reads that pair with these notifications. Contract v6 introduced the required
+Bobbit Sprite API between them; `HOST_API_VERSION` remains `1` throughout. Feature-detect
+`sessionNotifications`, `projectNotifications`, and `projectReads` through `host.capabilities`
+rather than member presence.
+
+Notification payloads identify committed changes but do not replace current records. Use an event's
+IDs to reread only the affected Host summary. Use `onRefreshRequired` to repeat the reads currently
+shown after initial binding, reload/reconnect, a stream discontinuity, pressure, or a project move.
 
 ```js
-if (!host.capabilities.projectNotifications) return;
+if (!host.capabilities.projectNotifications ||
+    !host.capabilities.has("projectReads")) return;
 
+let mounted = true;
 let refreshPending = false;
 let refreshRunning = false;
+const visibleGoalIds = new Set([goalId]);
+
+async function readGoal(id) {
+  const result = await host.project.readGoals({ mode: "ids", ids: [id] });
+  if (mounted) applyGoalOutcome(result.results[0]);
+}
+
+async function repeatActiveReads() {
+  const ids = [...visibleGoalIds];
+  if (ids.length === 0) return;
+  const result = await host.project.readGoals({ mode: "ids", ids });
+  if (mounted) applyGoalOutcomes(result.results);
+}
 
 function scheduleRefresh() {
   refreshPending = true;
@@ -228,34 +251,56 @@ function scheduleRefresh() {
     if (refreshRunning) return;
     refreshRunning = true;
     try {
-      // Repeat when another invalidation arrives during the read.
-      while (refreshPending) {
+      // If another invalidation arrives during a read, repeat once more.
+      while (mounted && refreshPending) {
         refreshPending = false;
-        // This is the pack's own declared route, not a built-in Host API route.
-        renderSnapshot(await host.callRoute("your-snapshot-route"));
+        await repeatActiveReads();
       }
     } finally {
       refreshRunning = false;
-      if (refreshPending) scheduleRefresh();
+      if (mounted && refreshPending) scheduleRefresh();
     }
   });
 }
 
-const offGoal = host.project.notifications.subscribe("goalUpdated", scheduleRefresh);
+const offGoal = host.project.notifications.subscribe("goalUpdated", (event) => {
+  if (visibleGoalIds.has(event.payload.goalId)) void readGoal(event.payload.goalId);
+});
 const offRefresh = host.project.notifications.onRefreshRequired(scheduleRefresh);
 
-// On panel teardown; both functions are idempotent.
+// On panel teardown; unsubscribe functions are idempotent.
+mounted = false;
 offGoal();
 offRefresh();
 ```
 
-`host.session.notifications` is bound to the panel's current session. `host.project.notifications` is bound to that session's server-resolved project and accepts no client-supplied project ID. The server routes session facts only to the exact authenticated session socket and project facts only to authenticated app sockets in the same project. Sandbox principals and unbound/viewer sockets do not receive this Host API stream.
+Use the same focused pattern for staff and session IDs, goal-scoped task/gate IDs, and PR goal IDs.
+If a creation/archive event may change page membership, reread the affected visible page from its
+starting cursor. Offset cursors are continuation positions, not durable bookmarks across mutations.
+Handle `found`, `not-found`, and `unauthorized` outcomes explicitly; do not assume a lookup contains
+`value`.
 
-The server revalidates the socket's authentication-time binding against current live and persisted session authority before every delta and refresh. When a session moves projects, the frame that discovers the move is suppressed, the socket is rebound, and old- and new-project deltas remain fenced behind one project `onRefreshRequired` callback. The panel must then read the destination project's authoritative snapshot. Missing or conflicting live/persisted authority unbinds the socket and fails closed rather than selecting a project.
+`host.session.notifications` is bound to the panel's current session. `host.project.notifications`
+and project reads are bound to that session's server-resolved project and accept no client-supplied
+project ID. The server routes session facts only to the exact authenticated session socket and
+project facts only to authenticated app sockets in the same project. Sandbox principals and
+unbound/viewer sockets do not receive this Host API stream, and only validated pack-owned browser
+surfaces advertise project reads.
 
-Delivery is ordered and live per connection, not durable replay. `onRefreshRequired` schedules one initial snapshot read when registered and coalesces project moves, reconnect, epoch change, sequence gap, queue overflow, and burst invalidations. A discontinuous event is not applied as a delta. Always re-read the authoritative snapshot on mount or refresh-required; do not reconstruct state from notification history.
+The server revalidates the socket's authentication-time binding against current live and persisted
+session authority before every delta and refresh. Reads also validate the opaque pack surface
+binding and recheck project ownership immediately before accessing records. Missing, stale,
+inactive, cross-session, cross-project, or conflicting authority fails closed. When a session moves
+projects, the frame that discovers the move is suppressed, the socket is rebound, and old- and
+new-project deltas remain fenced behind one project `onRefreshRequired` callback. The panel then
+repeats its active reads against the destination project.
 
-The legacy `host.session.subscribe("status" | "message" | "tool_result", handler)` remains available and unchanged. It is a separate adapter over rich session events, not a source for canonical notifications.
+Delivery is ordered and live per connection, not durable replay. A discontinuous event is not
+applied as a delta. Coalesce refresh work and do not reconstruct records from notification history.
+The legacy `host.session.subscribe("status" | "message" | "tool_result", handler)` remains
+available and unchanged; it is a separate adapter over rich session events, not a source for
+canonical notifications. See [on-demand project reads](design/extension-host-project-reads.md) for
+selectors, result shapes, redactions, and lifecycle details.
 
 ## Notification-based staff triggers
 
