@@ -16,9 +16,10 @@
  * NEW goal being proposed, not the selected parent — so it cannot fix this.
  * This test asserts the picker itself carries the signal.
  */
+import type { Page, Response } from "@playwright/test";
 import { test, expect } from "../../_helpers/gateway-harness.js";
 import { apiFetch, deleteGoal, defaultProjectId, nonGitCwd } from "../../_helpers/e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
 const PARENT_SPEC =
 	"Parent goal for the parent-picker eligibility repro — padded to satisfy the spec minimum length validator.";
@@ -67,6 +68,43 @@ async function findGoalByTitle(title: string): Promise<any | undefined> {
 	return goals.find((g) => g.title === title);
 }
 
+function goalIdsFromInventory(response: Response): Promise<string[]> {
+	return response.json().then((data: any) => {
+		const goals = Array.isArray(data) ? data : data.goals;
+		return Array.isArray(goals)
+			? goals.map((goal: any) => goal?.id).filter((id: unknown): id is string => typeof id === "string")
+			: [];
+	});
+}
+
+/**
+ * Join the browser's initial authoritative goal-list fetch and its state
+ * reconciliation before opening a proposal. The picker renders from client
+ * state, so merely creating a parent through the test-side API is not a client
+ * hydration boundary.
+ */
+async function openAppWithGoals(page: Page, expectedGoalIds: string[]): Promise<void> {
+	const inventory = page.waitForResponse(async (response) => {
+		const url = new URL(response.url());
+		if (response.request().method() !== "GET" || url.pathname !== "/api/goals" || !response.ok()) return false;
+		const ids = await goalIdsFromInventory(response).catch((): string[] => []);
+		return expectedGoalIds.every((id) => ids.includes(id));
+	});
+
+	const [, response] = await Promise.all([openApp(page), inventory]);
+	const authoritativeIds = await goalIdsFromInventory(response);
+	expect(authoritativeIds, "initial authoritative goal inventory must include every picker parent")
+		.toEqual(expect.arrayContaining(expectedGoalIds));
+
+	await expect.poll(
+		() => page.evaluate((ids) => {
+			const goals = (window as any).bobbitState?.goals ?? (window as any).__bobbitState?.goals ?? [];
+			return ids.every((id) => goals.some((goal: any) => goal.id === id));
+		}, expectedGoalIds),
+		{ message: "authoritative goal inventory must reconcile into picker-owned client state" },
+	).toBe(true);
+}
+
 test.describe("Parent-Goal picker host-eligibility hint", () => {
 	test("an ineligible (sub-goals off) parent is marked before submit; an eligible one is not", async ({ page }) => {
 		await setSubgoalsEnabled(true);
@@ -77,8 +115,8 @@ test.describe("Parent-Goal picker host-eligibility hint", () => {
 		const openId = await createParent(openTitle, true);
 
 		try {
-			await openApp(page);
-			await createSessionViaUI(page);
+			await openAppWithGoals(page, [blockedId, openId]);
+			await createGoalAssistantViaUI(page);
 
 			// Mock agent emits a top-level propose_goal titled "E2E Test Goal".
 			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
@@ -163,8 +201,8 @@ test.describe("Parent-Goal picker host-eligibility hint", () => {
 		const cappedTitle = `picker-capped ${stamp}`;
 		const cappedId = await createParent(cappedTitle, true, 3);
 		try {
-			await openApp(page);
-			await createSessionViaUI(page);
+			await openAppWithGoals(page, [cappedId]);
+			await createGoalAssistantViaUI(page);
 			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
 			const titleInput = page.locator("input[placeholder='Goal title']").first();
@@ -214,8 +252,8 @@ test.describe("Parent-Goal picker host-eligibility hint", () => {
 		const parentId = await createParent(parentTitle, true); // no depth override → effective cap 4
 		let createdId: string | undefined;
 		try {
-			await openApp(page);
-			await createSessionViaUI(page);
+			await openAppWithGoals(page, [parentId]);
+			await createGoalAssistantViaUI(page);
 			await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
 
 			const titleInput = page.locator("input[placeholder='Goal title']").first();
