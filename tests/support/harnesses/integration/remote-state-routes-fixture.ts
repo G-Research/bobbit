@@ -5,12 +5,28 @@ import { PassThrough } from "node:stream";
 import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../../e2e/_helpers/test-utils/cleanup.js";
 import { test, expect } from "../../../integration/gateway/_helpers/e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "../../../integration/gateway/_helpers/e2e/e2e-setup.js";
+import { apiFetch as rawApiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "../../../integration/gateway/_helpers/e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../shared/server-runtime.js";
 import { createCommandSpawnAdapter } from "../../../../src/server/owned-tree-command-spawn.js";
 
 export let serverModule: any;
 let forceRequestedAt = 1_000;
+let forceRequestBurstOpen = false;
+
+function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
+	const url = new URL(path, "http://remote-state.fixture");
+	const intent = url.searchParams.get("intent");
+	const forcedRemoteRead = /\/(?:git|pr)-status$/.test(url.pathname) && (intent === "explicit" || intent === "force");
+	if (forcedRemoteRead && !forceRequestBurstOpen) {
+		// Synchronously-started force requests model one user burst and coalesce.
+		// Closing at the microtask boundary makes an awaited force a new burst,
+		// independent of how quickly the production 250 ms window elapses.
+		forceRequestedAt += 251;
+		forceRequestBurstOpen = true;
+		queueMicrotask(() => { forceRequestBurstOpen = false; });
+	}
+	return rawApiFetch(path, opts);
+}
 type PersistenceMode = "sqlite" | "json" | undefined;
 interface MutableProjectPersistenceOptions {
 	goalPersistence?: PersistenceMode;
@@ -178,7 +194,8 @@ export function installRemoteStateRouteHooks(): void {
 	});
 
 	test.beforeEach(() => {
-		forceRequestedAt = performance.now() + 251;
+		forceRequestBurstOpen = false;
+		forceRequestedAt = Math.max(forceRequestedAt, performance.now()) + 251;
 		serverModule.__setRemoteStateForceNowFake(() => forceRequestedAt);
 		serverModule.__setGitStatusFake(async (_cwd: string, _containerId?: string, opts?: { untracked?: boolean }) => deterministicGitStatus(opts));
 	});
