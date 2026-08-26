@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/uploaded-specialized-document-extractor.test.ts",
+      "reason": "Core coverage for isolated bounded PDF extraction, normal specialized extraction, timeout and capacity fallback, and continued server responsiveness.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/uploaded-attachment-text.test.ts",
       "reason": "Pure regression coverage for rejecting dense valid UTF-8 C1 controls without changing the existing control-density allowance.",
       "execution": {
@@ -81,6 +90,15 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/misc.journey.spec.ts",
+      "reason": "Browser journey covering unrestricted text and arbitrary binary selection, model-only dispatch context, bounded attachment reads, reload presentation, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     },
     {
