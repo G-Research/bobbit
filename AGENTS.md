@@ -7,10 +7,10 @@ npm run build          # Build server + UI
 npm run dev:harness    # Gateway + vite dev
 npm run restart-server # Rebuild & restart after server changes
 npm run check          # Type-check server + web
-npm run test:unit      # Vitest tier-1, fixed 3-worker cap
-npm run test:browser   # Playwright browser-v2
-npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
-npm run test:manual    # Real agents/LLM + Docker (~5 min); ONLY gate-exempt path
+npm run test:unit      # Vitest unit/DOM/gateway, fixed 3-worker cap
+npm run test:browser   # Playwright fixtures + normal app journeys
+npm run test:e2e       # Real Git/worktree/Docker/MCP/restart fidelity
+npm run test:manual    # Real model/agent/external services; gate-exempt
 ```
 
 UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Run `npm run check` first. Sessions survive restarts via `.bobbit/state/sessions.json`.
@@ -21,12 +21,12 @@ Orient here, then `rg` for the symbol.
 
 - **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WS in `src/server/ws/`.
 - **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md) for `bash_bg`.
-- **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Descriptions budget-pinned by `tests2/core/tool-description-budget.test.ts`.
+- **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Descriptions budget-pinned by `tests/unit/core/tool-description-budget.unit.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
-- **Tests (v2)**: `tests2/{core,dom,integration}` (vitest), `tests2/browser` (Playwright), `tests2/tests-map.json`; `tests/e2e/` = `e2e:v2`; `tests/manual-integration/` (real agents).
+- **Tests**: one convention-owned `tests/` root; placement and lane rules live in [docs/testing-strategy.md](docs/testing-strategy.md), with executable policy in `scripts/testing/layout-policy.mjs`.
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
 
 ## Before editing anything non-trivial
@@ -40,13 +40,20 @@ Orient here, then `rg` for the symbol.
 
 Treat every new branch, state owner, transformation, API, or abstraction as defect surface: prefer composing existing well-tested code when its contract, ownership, and lifecycle fit, but do not force reuse or mechanical DRY across unrelated semantics.
 
-## Testing (Test Suite v2)
+## Testing
 
-- **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒Vitest (`core`/`dom`/`integration`, with explicit isolated exceptions); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` → `test:browser` → `test:e2e`; worktree/Docker/MCP/restart coverage belongs to E2E or `test:manual`.
-- **Test isolation** — every automated coordinator owns its run root; qualify retry-free. See [docs/testing-v2/cross-os-test-authoring.md](docs/testing-v2/cross-os-test-authoring.md).
-- Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
-- **Never junction/symlink a worktree's `node_modules` into a shared or primary tree.** See [docs/testing-v2/node-modules-corruption-rca.md](docs/testing-v2/node-modules-corruption-rca.md).
-- Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-v2/](docs/testing-v2/).
+| Semantics | Canonical location | Lane |
+|---|---|---|
+| Pure or singleton-isolated unit | `tests/unit/{core,isolated}/` with `.unit.test.ts` or `.isolated.test.ts` | `test:unit` |
+| DOM or in-process gateway | `tests/dom/**/*.dom.test.ts` or `tests/integration/gateway/**/*.gateway.test.ts` | `test:unit` |
+| Deterministic Chromium fixture or visible journey | `tests/browser/{fixtures,journeys}/` with `.fixture.spec.ts` or `.journey.spec.ts` | `test:browser` |
+| Real Git/worktree/process/API/browser fidelity | `tests/e2e/{node,vitest,api,browser}/` with its matching semantic suffix | `test:e2e` |
+| Real model, agent, or external service | `tests/manual/**/*.manual.spec.ts` | `test:manual` only |
+| Non-runnable shared support | `tests/support/{harnesses,helpers,fixtures,data,templates}/<lane>/` or lane-local `_helpers/` | imported only |
+
+- Create tests with `npm run test:new -- <semantic> <name>`; there is no registry step. `npm run test:layout` rejects wrong directories, suffixes, runners, browser/API boundaries, duplicates, and orphans. See [docs/testing-strategy.md](docs/testing-strategy.md).
+- Gate phases are `test:unit` → `test:browser` → `test:e2e`; qualify with `BOBBIT_V2_RETRY_FREE=1`. Every user-facing feature needs a normal browser journey covering navigation, happy path, durable reload, and cleanup.
+- Every automated coordinator owns its run root. Use harness temp paths, never checkout `.bobbit/`; never background a server from shell—use `bash_bg`; never junction/symlink `node_modules` across worktrees. See [cross-OS authoring](docs/testing-v2/cross-os-test-authoring.md).
 
 ## Git conventions
 

@@ -180,12 +180,139 @@ Measurement used byte length and newline count from the checked-out files; it di
 
 The older snapshot in `docs/testing-v2/suite-speed-analysis.md` recorded 1,038 unit files, a 193.37-second unit run, four run-all rows out of 21, and a 506-file (48.7%) nonzero-bounded average. It is retained as earlier historical evidence only. The present checkout has a 1,177-file inventory and a different recent-commit window, so the two snapshots must not be treated as a controlled performance regression comparison.
 
-## Post-migration evidence to append
+## Post-migration evidence
 
-After the canonical hierarchy and convention-owned runners land, append:
+> **Current-layout evidence.** The measurements in this section describe canonical implementation revision `2a5a268f527a949e83e7e0aca5577e58e2da7fa0`, captured on the same Windows host and toolchain listed above on 2026-08-26. The pre-migration sections remain immutable historical evidence. Counts below are authoritative only for the named revision; use current convention-based discovery rather than copying the numbers into operating guidance.
 
-1. the final revision and exact unit/browser/E2E/manual discovered-file union, including duplicate and orphan count;
-2. like-for-like complete retry-free unit, browser, and E2E timings on available CI hosts;
-3. manual list-only discovery;
-4. final deleted file, line, and byte totals for the map, affected graph/runner, inventories, audits, fixtures, tests, scripts, and stale wiring;
-5. any CI runtime trade-off against this baseline, with retries, skips, Docker availability, and single-run versus repeated statistics labelled explicitly.
+### Canonical inventory and disjointness
+
+Every tracked runnable suffix at the measured revision belonged to exactly one convention. `npm run test:layout` passed with zero diagnostics.
+
+| Semantic cell | Files |
+|---|---:|
+| Core unit | 742 |
+| Isolated unit | 15 |
+| DOM | 184 |
+| Gateway integration | 252 |
+| **Unit lane total** | **1,193** |
+| Normal-browser fixtures | 73 |
+| Normal-browser journeys | 208 |
+| **Browser lane total** | **281** |
+| Node E2E (Group A) | 14 |
+| API/process E2E (Group B) | 45 |
+| Browser-fidelity E2E (Group C) | 24 |
+| Vitest E2E (Group D) | 9 |
+| **E2E lane total** | **92** |
+| Manual | **14** |
+| **Canonical runnable union** | **1,580** |
+
+The repository had **1,580 tracked runnable-suffix files**, all below the single `tests/` root. The canonical union was also 1,580: **zero duplicate owners and zero orphans**. Normal-browser list discovery reported **1,141 tests in 281 files**. Manual list discovery reported **53 tests in 14 files**. E2E list discovery reported the exact 14/45/24/9 file split above.
+
+Compared with the pre-migration revision, identified lane ownership rose from 1,396 of 1,587 runnable files to 1,580 of 1,580. The seven-file reduction in the filesystem total includes obsolete selector/map contract tests; separately, previously unowned product coverage was reconciled into canonical cells. Unit ownership increased by 16 files, normal-browser ownership by 145, E2E ownership by 22, and manual ownership by one.
+
+Reproduction:
+
+```bash
+npm run test:layout
+npm run test:browser -- --list
+node scripts/testing-v2/run-e2e-v2.mjs --list
+npx playwright test --config playwright-manual.config.ts --list
+```
+
+The semantic file counts were produced by filtering `git ls-files -z` with the exact directory/suffix pairs exported by `scripts/testing/layout-policy.mjs`. The sum and pairwise-disjointness check used normalized repository-relative paths.
+
+### Retry-free execution timing
+
+All rows are single local observations with `BOBBIT_V2_RETRY_FREE=1`; no retry occurred. Median and p95 are not reported from a sample of one. The browser and E2E rows are complete-lane attempts, not successful qualification: recording their failures prevents a failed run from being misrepresented as timing evidence for a pass.
+
+| Scope | Result | Runner wall | Outer wall | Notes |
+|---|---|---:|---:|---|
+| Complete unit lane | 1,190 passed + 3 skipped files; 11,418 passed + 19 skipped tests | **355.18 s** | **376.421 s** | Clean pass; fixed three-worker cap |
+| Complete normal-browser lane | 1,130 passed, 8 skipped, 2 failed, 1 did not run; 1,141 tests / 281 files discovered | **1,072.8 s** | **1,078.070 s** | Failed in `bg-process-persistence` and `stories-resilience`; zero retries |
+| Complete E2E Groups A–D | A pass, B pass, C fail, D pass; 92 files discovered | **587.934 s** | not separately captured | A 28.1 s; B 293.3 s; C 203.9 s; D 62.1 s; Groups overlap by design |
+
+The E2E report recorded 23.637 CPU-minutes, a peak of 35 processes, and `dockerCapability: "daemon-unavailable"`. Docker-owned behavior therefore remained explicitly capability-gated on this host. The complete E2E result is a failure because Group C returned code 1; passing groups do not convert it into a partial pass.
+
+Commands:
+
+```bash
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
+BOBBIT_V2_RETRY_FREE=1 npm run test:browser
+BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
+```
+
+These local observations are not cross-platform acceptance. The build/unit workflow owns Linux, Windows, and macOS complete-lane qualification; the browser and E2E failures above require a later passing workflow run before merge. The baseline did not contain complete browser or E2E execution, so there is no honest like-for-like runtime delta for those lanes. The unit lane grew from 1,177 to 1,193 files and this host's single observed retry-free wall changed from 298.13 to 355.18 seconds; different revisions and test inventories make that a capacity observation, not a controlled performance regression.
+
+### Removed maintenance footprint
+
+The final removal manifest is deliberately narrower than every file moved during the migration. It counts only retired ownership/selection machinery and its exclusive tests/fixtures; canonical product tests that were renamed or ported are excluded.
+
+| Removed scope | Files | Lines | Bytes |
+|---|---:|---:|---:|
+| Original bounded registry/affected/inventory core reported above | 20 | 28,019 | 1,081,282 |
+| Additional legacy lane runners, parity/chaos/coverage audits, migration reports/data, and old Playwright config | 11 | 5,121 | 259,314 |
+| Selector/map/audit-only tests and fixtures | 16 | 4,247 | 176,945 |
+| **Total deleted maintenance artifacts** | **47** | **37,387** | **1,517,541** |
+
+The total is this exact baseline-to-measured-HEAD path set; it is not the count of every migration deletion or rename:
+
+<details>
+<summary>Exact 47-path removal manifest</summary>
+
+```text
+scripts/affected/README.md
+scripts/affected/cache.mjs
+scripts/affected/classification.mjs
+scripts/affected/correctness-sample.json
+scripts/affected/correctness-vs-main.mjs
+scripts/affected/graph.mjs
+scripts/affected/impact-rules.mjs
+scripts/affected/proof-vs-main.mjs
+scripts/affected/run.mjs
+scripts/affected/runner.mjs
+scripts/testing-v2/check-inventory.mjs
+scripts/testing-v2/codemod.mjs
+scripts/testing-v2/gen-inventory.mjs
+scripts/testing-v2/lib-census.mjs
+scripts/testing-v2/parity.mjs
+scripts/testing-v2/test-map-execution.mjs
+scripts/testing-v2/unit-declaration-semantic-map.json
+scripts/testing-v2/unit-inventory-audit.mjs
+scripts/testing-v2/unit-inventory-git.mjs
+tests2/tests-map.json
+scripts/lib/unit-heartbeat.mjs
+scripts/run-unit.mjs
+scripts/test-phase-config.mjs
+tests/playwright.config.ts
+scripts/testing-v2/browser-chaos.mjs
+scripts/testing-v2/chaos.mjs
+scripts/testing-v2/coverage-delta.mjs
+scripts/testing-v2/spec-check-helper.ts
+tests2/chaos/browser-mutants.json
+tests2/chaos/mutants.json
+tests2/codemod-report.json
+tests2/core/affected-correctness-harness.test.ts
+tests2/core/affected-doc-classification.test.ts
+tests2/core/affected-reader-inventory.test.ts
+tests2/core/affected-runner-cli.test.ts
+tests2/core/affected-runner-git-cli.test.ts
+tests2/core/affected-runner-no-escape.test.ts
+tests2/core/affected-test-classification.test.ts
+tests2/core/affected-test-runner.test.ts
+tests2/core/test-map-execution.test.ts
+tests2/core/unit-inventory-git.test.ts
+tests2/core/browser-chaos-worktree-safety.test.ts
+tests2/core/chaos-worktree-safety.test.ts
+tests2/core/helpers/affected-graph-fixture.ts
+tests2/core/helpers/affected-runner-fixture.ts
+tests2/integration/_affected-runner-boundary-fixture.ts
+tests2/integration/affected-runner-boundary.test.ts
+```
+
+</details>
+
+Every path existed at baseline `db2d9bb5d7fc249834e16a7a07a04e3e9fd4e1d2`, was absent at measured revision `2a5a268f527a949e83e7e0aca5577e58e2da7fa0`, and appeared as a deletion under `git diff --no-renames --diff-filter=D`. Counts read each baseline blob with `git show <baseline>:<path>`, then summed byte length and logical newline count. This makes the total reproducible without treating canonical test renames as machinery removal.
+
+The manifest includes all of `scripts/affected/`; the old map; inventory, census, parity, codemod, declaration-map, and map-execution scripts; affected correctness/proof/cache/impact code; retired chaos/coverage audit scripts and data; the old split unit/browser runner seams; and tests/fixtures whose only subject was that machinery.
+
+Four package-script entries were also removed: `test:unit:inventory`, `test:affected`, `test:affected:proof`, and `test:affected:correctness`. They are wiring deletions inside a retained file and therefore are not added to the 47-file byte/line total. The replacement is the convention guard plus complete public lanes, not another per-test registry, cache, graph, or generated inventory.

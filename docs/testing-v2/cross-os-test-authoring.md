@@ -4,7 +4,7 @@
 
 Unit, DOM, integration, browser, and E2E tests may run at the same time on one machine and checkout. The test runtime gives each coordinator a canonical run root so one run cannot discover, overwrite, or clean up another run's state. This makes cross-platform failures reproducible instead of dependent on a developer's shell, home directory, or timing.
 
-See the [cross-suite runtime design](../design/isolate-unit-runtime.md) for the runtime wiring and [Unit gate operating model](unit-gate.md) for tier-1 commands.
+See the [testing strategy](../testing-strategy.md) for canonical placement and commands, and the [cross-suite runtime design](../design/isolate-unit-runtime.md) for the runtime wiring.
 
 ## Ownership contract
 
@@ -33,7 +33,7 @@ For DOM tests, the Node 26 happy-dom setup must source storage from happy-dom's 
 
 ## Browser and E2E coordinators
 
-Use the browser and E2E coordinator wrappers rather than invoking Playwright against a shared runtime. Each coordinator allocates its canonical root, compatibility child, Playwright profiles, transform/V8 caches, reports, and output paths. The v2 E2E coordinator gives Groups A, C, and D that root; Group B first clears inherited cache settings and the legacy wrapper allocates a nested root. The nested wrapper may clean only its own root after a successful run; it retains its root on failure, and `BOBBIT_KEEP_PWTEST_CACHE=1` retains its successful legacy-wrapper root for inspection. Browser/E2E consumers use `ensureDistBuild()` so same-worktree readers and builders serialize around a validated, atomically published `dist` manifest.
+Use the browser and E2E coordinator wrappers rather than invoking Playwright against a shared runtime. Each coordinator allocates its canonical root, compatibility child, Playwright profiles, transform/V8 caches, reports, and output paths. The E2E coordinator owns the parent root for Groups A–D; each Playwright invocation allocates a nested owned root after inherited cache settings are cleared. A nested wrapper may clean only its own root after a successful run and retains its root on failure. Browser/E2E consumers use `ensureDistBuild()` so same-worktree readers and builders serialize around a validated, atomically published `dist` manifest.
 
 The harness generates `BOBBIT_E2E_RUN_ID`; callers must not supply it or any run-root, temp-root, report, or cache-root variable. Those values are coordinator outputs, not configuration. Legacy worktree and Docker resources carry the generated ID in their paths, names, and labels. Docker teardown discovers resources by `bobbit-e2e-run=<run-id>` and removes only matching, namespace-validated containers and volumes. Never sweep a temp parent, checkout path, unlabelled resource, or another run's worktree/container/volume.
 
