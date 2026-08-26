@@ -11,7 +11,9 @@ Open **Settings → Models → AI Gateway** and enter an absolute HTTP(S) gatewa
 - **Test** performs discovery without saving or changing active routing.
 - **Enable Gateway** or **Update** discovers models, atomically inserts or refreshes Bobbit's marked `aigw` publication in `models.json`, and saves `aigw.url`.
 - **Refresh Models** repeats the saved configuration flow, including model discovery, default seeding, cache invalidation, and sandbox refresh.
-- **Disconnect** removes only Bobbit's marked publication and clears the saved URL. An unmarked `providers.aigw` block is user-owned and remains unchanged.
+- **Disconnect** removes only Bobbit's marked publication and clears the saved URL. A `providers.aigw` block that Bobbit cannot recognise as one of its own publications is user-owned and remains unchanged.
+
+A block published by Bobbit v0.16.3 or earlier predates the ownership marker and is adopted automatically — see [Adopting a pre-v0.17.0 publication](#adopting-a-pre-v0170-publication).
 
 The equivalent REST endpoints are documented in [REST API](rest-api.md#ai-gateway). Agents with the administrative Bobbit tool can configure or remove the URL through `aigw_configure`.
 
@@ -59,7 +61,7 @@ When discovery throws, `/api/models` retains only exact metadata from the same c
 | Valid marked publication whose normalized `baseUrl` matches the saved `aigw.url` | Pi's exact composition of the published rows | Durable; the matching publication can be composed again after restart |
 | No `providers.aigw` target | The current process's last exact discovery snapshot for the unchanged normalized `aigw.url` | In memory only; unavailable after restart |
 | Marked target that cannot supply rows, such as a URL mismatch or composition failure | The same-process last exact discovery snapshot for the unchanged normalized `aigw.url` | In memory only; unavailable after restart |
-| Valid unmarked target | Pi's exact composition of the user-owned block; discovery and its snapshot are not consulted | Durable as user configuration |
+| Valid unmarked target that is not a recognisable Bobbit publication | Pi's exact composition of the user-owned block; discovery and its snapshot are not consulted | Durable as user configuration |
 | Malformed or ambiguous target | No AIGW rows; fail closed | No fallback |
 
 Both the durable marked publication and the same-process snapshot preserve complete exact rows: provider/model identity, API, endpoint, limits, input modes, thinking map, costs, headers, and compatibility metadata. Neither can authorize a different saved gateway or synthesize missing capability metadata.
@@ -154,15 +156,59 @@ A failed probe is reported for that route and is not retried against another API
 
 ## Publication ownership, caches, and containers
 
-New Bobbit publications carry this forward-only provider marker:
+`models.json` in the active agent directory is shared territory: Bobbit publishes its gateway models there, and the same file may hold providers the user wrote by hand, including ones with real API keys. Ownership is therefore decided per read, from the bytes on disk, and Bobbit only ever writes a block it can prove is its own. New Bobbit publications carry this forward-only provider marker:
 
 ```json
 "x-bobbit-managed": { "kind": "aigw-publication", "version": 1 }
 ```
 
-If `providers.aigw` is absent, configure may insert a marked block. Refresh may update only an unambiguous marked block. An existing unmarked block is user-owned: configure fails with an ownership collision, and Bobbit neither marks nor rewrites it. Disconnect likewise removes only a marked block.
+Every read classifies `providers.aigw` into one ownership realm:
+
+| Realm | What it means | Behaviour |
+|---|---|---|
+| absent | No `providers.aigw` at all | Configure may insert a marked block |
+| managed | The block carries the exact marker | Bobbit's own publication: discovery refreshes it, and its rows keep `upstreamProvider` provenance |
+| unmarked-user | A block with no marker that Bobbit cannot recognise as its own past output | Hand-authored and authoritative. Live discovery is skipped, the block is never rewritten, and configure fails with an ownership collision |
+| invalid | Malformed JSONC, or duplicate `providers` / `providers.aigw` / managed-field paths | Ambiguous, so it fails closed: no AIGW rows, no publication, no gateway-preference commit |
+
+Disconnect removes only a marked block.
 
 Publication uses localized Pi-compatible JSONC edits followed by temp-file-plus-rename replacement. Comments, formatting outside edited values, unknown fields, non-AIGW providers, and user `modelOverrides` remain intact. Malformed JSONC, duplicate `providers`/`providers.aigw` paths, or duplicate managed fields are ambiguous and fail closed without changing any byte or saving the new gateway preference. When AIGW publication is not configured, startup does not normalize `models.json` at all.
+
+Because `models.json` can contain provider credentials, writes never widen its permissions. `rename()` publishes a new inode, so the replacement carries the target file's existing POSIX mode across the swap; a file Bobbit creates itself is owner-only (`0o600`). The staging file receives that mode at creation, before any content is written into it, so it is never readable at a wider mode even transiently.
+
+### Adopting a pre-v0.17.0 publication
+
+The ownership marker was introduced in v0.17.0. Blocks written by v0.16.3 and earlier have none, so on upgrade they used to be classified `unmarked-user` — permanently, and with no way back. For anyone who had only ever let Bobbit manage the file, that protection was destructive rather than safe:
+
+- the model list froze at whatever was published before the upgrade, so models the gateway later added never appeared and removed ones never disappeared;
+- Settings → Default Models and the model picker lost their `[openai]` / `[aws]` provider tags, because `upstreamProvider` provenance is only carried through for a managed publication;
+- republication kept failing closed on the unmarked block, so **Refresh Models** could not repair it either. The only escape was to delete the block by hand.
+
+Bobbit now *adopts* such a block instead. On the first ordinary model read while a gateway is configured — and on any publication attempt, so configure and Refresh Models heal too — an unmarked block that matches an exact signature of Bobbit's own generated output is stamped with the current marker and from then on treated as `managed`. Nothing else in the block is touched: adoption inserts the marker and only the marker, through the same JSONC edit path as every other write, so an upgraded install self-heals with no user action and no reformatting. Persisting the marker is best-effort; a read-only agent directory logs the failure and continues with the managed classification in memory.
+
+Adoption is deliberately conservative, because a wrong adoption means Bobbit taking over and refreshing a file a person wrote. A matching `baseUrl` is not sufficient evidence: pointing at the configured gateway is precisely why someone would hand-author an `aigw` block in the first place. What makes recognition safe instead is that Bobbit's generated provider is fully deterministic, so adoption requires the whole shape to match:
+
+- exactly the generated key set (`baseUrl`, `apiKey`, `api`, `headers`, `models`) and no others;
+- the generated constants `apiKey: "none"` and `api: "openai-completions"`;
+- exactly the two generated provider headers — the `Bobbit/<version>` user agent and the `x-opencode-session` command-form resolver literal;
+- a `models` array whose entries are all plain objects;
+- a `baseUrl` that compares equal to the configured `aigw.url` under the shared URL comparison (trailing slashes and host casing are insignificant; anything unparsable or non-HTTP never matches);
+- no comments and no trailing commas inside the `providers.aigw` value itself. Comments, formatting, and unknown fields anywhere *outside* that byte range — document-level comments, sibling providers, `modelOverrides` — are irrelevant to the decision and are preserved byte-for-byte.
+
+Any single deviation leaves the block `unmarked-user` and byte-identical. Malformed or ambiguous documents still fail closed before adoption is even considered. The predicate lives beside the publication helpers in the AIGW models.json module (`src/server/agent/aigw-models-json.ts`, `adoptLegacyAigwProvider`); see [AI Gateway internals](internals.md#publication-ownership-and-legacy-block-adoption) for the field-level contract and the call sites.
+
+### Living with a user-owned block
+
+A block that stays user-owned is honoured exactly as written, which is the point — but it has consequences that are easy to mistake for bugs:
+
+- **The model list is frozen.** Live discovery is skipped entirely; the catalog is whatever the block declares.
+- **No provider tags.** `upstreamProvider` is a managed-publication field, so Settings → Default Models rows and the model picker show bare model ids with no `[openai]` / `[aws]` badge.
+- **Refresh Models cannot change either.** Publication fails closed on an ownership collision.
+
+Because none of that is visible in the UI, the model registry emits one warning naming the file, the state, and the remedy: remove the `providers.aigw` block (or let Bobbit republish it) to restore managed discovery. It is logged once per classification rather than once per model row, and it never echoes headers, credentials, model definitions, or file contents. See [Debugging — Default Models rows show bare ids](debugging.md#default-models-rows-show-bare-ids-and-new-gateway-models-never-appear).
+
+### Caches and containers
 
 A successful publication invalidates the model registry and session auto-selection caches, then notifies connected clients. Normal reads use short-lived caches; configure, refresh, and disconnect clear them immediately.
 
