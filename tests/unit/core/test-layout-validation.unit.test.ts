@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { TEST_LAYOUT, validateTestPath } from "../../../scripts/testing/layout-policy.mjs";
 
 type Convention = { semantic: string; suffix: string; pattern: string };
-type Diagnostic = { code: string };
+type Diagnostic = { code: string; expectedPattern?: string };
 
 const misplaced = (TEST_LAYOUT as readonly Convention[]).map((entry) => ({
 	semantic: entry.semantic,
@@ -88,14 +88,35 @@ describe("test layout diagnostics", () => {
 		expect(validateTestPath("tests/e2e/api/helper.api-e2e.spec.ts", helperFixture).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
 	});
 
-	it("propagates static Playwright test aliases before inspecting browser fixtures", () => {
+	it("tracks fixture-object access and aliases in API test callbacks", () => {
+		const fixtureObjectCases = [
+			'test("property", async (fixtures) => fixtures.page.goto("/"));',
+			'test("element", async (fixtures) => fixtures["browser"].close());',
+			'test("destructure", async (fixtures) => { const { context: browserContext } = fixtures; await browserContext.close(); });',
+			'test("alias", async (fixtures) => { const first = fixtures; const second = first; await second.page.goto("/"); });',
+			'test("rest", async (fixtures) => { const { request, ...remaining } = fixtures; await remaining.context.close(); });',
+			'test("parameter rest", async ({ request, ...remaining }) => remaining.page.goto("/"));',
+		] as const;
+		for (const callback of fixtureObjectCases) {
+			const source = `import { test } from "@playwright/test";\n${callback}`;
+			expect(validateTestPath("tests/e2e/api/fixture-object.api-e2e.spec.ts", source).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
+		}
+	});
+
+	it("propagates static Playwright test aliases and inspects recognized extend factories", () => {
 		const aliasCases = [
 			'import { test as baseTest } from "@playwright/test";\nconst first = baseTest; const browserJourney = first;\nbrowserJourney("direct", async ({ page }) => page.goto("/"));',
 			'import * as playwright from "@playwright/test";\nconst namespaceAlias = playwright; const { test: browserJourney } = namespaceAlias;\nbrowserJourney("namespace", async ({ browser }) => browser.close());',
 			'import { test as baseTest } from "@playwright/test";\nconst browserJourney = baseTest.extend<{ token: string }>({});\nbrowserJourney("extended", async ({ context }) => context.close());',
+			'import { test as baseTest } from "@playwright/test";\nconst browserJourney = baseTest.extend({ capture: async ({ page }, use) => use(await page.title()) });\nbrowserJourney("extended fixture", async ({ capture }) => capture);',
+			'import { test as baseTest } from "@playwright/test";\nconst capture = async (fixtures, use) => use(fixtures["browser"]);\nconst browserJourney = baseTest["extend"]({ capture: [capture, { auto: true }] });',
 		] as const;
 		for (const source of aliasCases) {
-			expect(validateTestPath("tests/e2e/api/aliased.api-e2e.spec.ts", source).map(({ code }: Diagnostic) => code)).toContain("api-browser-fixture");
+			const diagnostics = validateTestPath("tests/e2e/api/aliased.api-e2e.spec.ts", source) as Diagnostic[];
+			expect(diagnostics.map(({ code }) => code)).toContain("api-browser-fixture");
+			expect(diagnostics.find(({ code }) => code === "api-browser-fixture")).toMatchObject({
+				expectedPattern: "tests/e2e/browser/**/*.browser-e2e.spec.ts",
+			});
 		}
 	});
 
@@ -116,8 +137,9 @@ describe("test layout diagnostics", () => {
 		const source = [
 			'import * as playwright from "@playwright/test";',
 			'const { test: baseTest } = playwright;',
-			'const apiTest = baseTest.extend<{ token: string }>({});',
-			'apiTest("api", async ({ request }) => request.get("/health"));',
+			'const requestFactory = async (fixtures: Fixtures, use: Use) => use(await fixtures.request.get("/setup"));',
+			'const apiTest = baseTest.extend<{ token: string }>({ token: [requestFactory, { auto: true }] });',
+			'apiTest("api", async (fixtures) => fixtures.request.get("/health"));',
 			'// const browserTest = apiTest; browserTest("example", async ({ page }) => page.goto("/"));',
 			'const example = `const browserTest = apiTest; async ({ browser }) => browser.close()`;',
 			'const ordinaryHelper = (name: string, callback: unknown) => ({ name, callback });',
