@@ -1,9 +1,26 @@
-import { applyEdits, findNodeAtLocation, getNodeValue, modify, parse, parseTree, type Node as JsoncNode, type ParseError } from "jsonc-parser";
+import { applyEdits, findNodeAtLocation, getNodeValue, modify, parse, parseTree, visit, type Node as JsoncNode, type ParseError } from "jsonc-parser";
 
 export const AIGW_MANAGED_MARKER = {
 	kind: "aigw-publication",
 	version: 1,
 } as const;
+
+/**
+ * Single URL comparison used everywhere Bobbit decides whether a models.json
+ * AIGW provider still points at the configured gateway. Trailing slashes and
+ * host casing are insignificant; anything unparsable or non-HTTP is
+ * incomparable (`undefined`) and therefore never matches.
+ */
+export function comparableAigwUrl(value: unknown): string | undefined {
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	try {
+		const url = new URL(value.trim());
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		return url.href.replace(/\/+$/, "");
+	} catch {
+		return undefined;
+	}
+}
 
 export class AigwModelsJsonOwnershipError extends Error {
 	constructor(message: string) {
@@ -35,8 +52,8 @@ function objectProperties(node: JsoncNode | undefined, name: string): JsoncNode[
 	);
 }
 
-function propertyValue(property: JsoncNode): JsoncNode | undefined {
-	return property.children?.[1];
+function propertyValue(property: JsoncNode | undefined): JsoncNode | undefined {
+	return property?.children?.[1];
 }
 
 function parseDocument(source: string): JsoncNode {
@@ -131,6 +148,122 @@ export function inspectAigwTargetRealm(source: string | undefined): AigwTargetRe
 			reason: error instanceof Error ? error.message : String(error),
 		};
 	}
+}
+
+// ── Legacy (pre-0.17.0) publication adoption ───────────────────────
+
+/**
+ * Bobbit's generated provider is fully deterministic (see
+ * `writeAigwModelsJson`), which is what makes recognising its own older,
+ * unmarked output safe. These constants describe that exact shape; anything
+ * that deviates is treated as hand-authored and left untouched.
+ */
+const LEGACY_PROVIDER_KEYS = ["baseUrl", "apiKey", "api", "headers", "models"] as const;
+const LEGACY_SESSION_HEADER = `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
+
+/**
+ * Published releases whose unmarked AIGW writer emitted both canonical headers.
+ * The User-Agent first shipped in v0.12.0; v0.17.0 introduced the ownership
+ * marker. An explicit release allowlist prevents current, unreleased, or
+ * hand-authored `Bobbit/*` strings from becoming ownership evidence.
+ */
+const LEGACY_BOBBIT_AIGW_USER_AGENTS = new Set([
+	"Bobbit/0.12.0",
+	"Bobbit/0.13.0",
+	"Bobbit/0.13.1",
+	"Bobbit/0.14.0",
+	"Bobbit/0.14.1",
+	"Bobbit/0.14.2",
+	"Bobbit/0.15.0",
+	"Bobbit/0.15.1",
+	"Bobbit/0.16.1",
+	"Bobbit/0.16.2",
+	"Bobbit/0.16.3",
+]);
+
+/**
+ * True when the exact byte range of the `providers.aigw` value contains no
+ * comment and no trailing comma. Comments, trailing commas, and unknown fields
+ * anywhere *outside* that range (root comments, sibling providers, the comma
+ * delimiting the `aigw` property itself) are irrelevant to ownership.
+ *
+ * jsonc-parser's scanner is used rather than a regex so comment-like text
+ * inside string values cannot be mistaken for a comment.
+ */
+function aigwRangeIsPlainJson(source: string, aigw: JsoncNode): boolean {
+	const start = aigw.offset;
+	const end = aigw.offset + aigw.length;
+	let plain = true;
+	const overlaps = (offset: number, length: number) => offset < end && offset + Math.max(length, 1) > start;
+	visit(source, {
+		onComment: (offset, length) => { if (overlaps(offset, length)) plain = false; },
+		// The document already parsed with `allowTrailingComma`, so any error
+		// reported without it is a trailing comma (reported at the token that
+		// follows it — for a trailing comma inside `aigw` that is its own `}`/`]`).
+		onError: (_code, offset, length) => { if (overlaps(offset, length)) plain = false; },
+	}, { allowTrailingComma: false, disallowComments: false });
+	return plain;
+}
+
+/** All criteria are required; any deviation keeps the block user-owned. */
+function isLegacyBobbitPublication(source: string, aigw: JsoncNode, configuredAigwUrl: string): boolean {
+	const properties = (aigw.children ?? []).filter((property) => property.type === "property");
+	if (properties.length !== LEGACY_PROVIDER_KEYS.length) return false;
+	if (!LEGACY_PROVIDER_KEYS.every((key) => objectProperties(aigw, key).length === 1)) return false;
+
+	const headersNode = propertyValue(objectProperties(aigw, "headers")[0]);
+	if (headersNode?.type !== "object") return false;
+	if ((headersNode.children ?? []).filter((property) => property.type === "property").length !== 2) return false;
+
+	const provider = getNodeValue(aigw) as Record<string, unknown>;
+	if (provider.apiKey !== "none" || provider.api !== "openai-completions") return false;
+
+	const headers = provider.headers as Record<string, unknown>;
+	if (typeof headers["User-Agent"] !== "string" || !LEGACY_BOBBIT_AIGW_USER_AGENTS.has(headers["User-Agent"])) return false;
+	if (headers["x-opencode-session"] !== LEGACY_SESSION_HEADER) return false;
+
+	if (!Array.isArray(provider.models)) return false;
+	if (!provider.models.every((model) => !!model && typeof model === "object" && !Array.isArray(model))) return false;
+
+	const configured = comparableAigwUrl(configuredAigwUrl);
+	if (!configured || comparableAigwUrl(provider.baseUrl) !== configured) return false;
+
+	return aigwRangeIsPlainJson(source, aigw);
+}
+
+export type AigwAdoptionResult =
+	| { adopted: true; text: string; realm: Extract<AigwTargetRealm, { kind: "managed" }> }
+	| { adopted: false; text: string | undefined; realm: AigwTargetRealm };
+
+/**
+ * Adopt a `providers.aigw` block that Bobbit itself published before the
+ * `x-bobbit-managed` marker existed (v0.16.3 and earlier), so upgraded installs
+ * resume managed discovery and upstream-provider provenance instead of being
+ * frozen forever as "user-owned".
+ *
+ * Adoption inserts *only* the marker, through the same jsonc edit path as every
+ * other write here; the enclosing document is never reformatted. Absent,
+ * already-marked, invalid, and unrecognised blocks are returned unchanged.
+ * Ambiguous/malformed documents still fail closed by throwing before any
+ * mutation is considered.
+ */
+export function adoptLegacyAigwProvider(source: string | undefined, configuredAigwUrl: string): AigwAdoptionResult {
+	if (source === undefined) return { adopted: false, text: source, realm: { kind: "absent" } };
+	const state = inspectAigwPath(source);
+	if (!state.aigw) return { adopted: false, text: source, realm: { kind: "absent" } };
+	if (state.aigw.type !== "object") {
+		return { adopted: false, text: source, realm: { kind: "invalid", reason: "models.json providers.aigw is not an object" } };
+	}
+	assertAigwFieldsUnambiguous(state.aigw);
+	if (isManagedAigw(state.aigw) || !isLegacyBobbitPublication(source, state.aigw, configuredAigwUrl)) {
+		return { adopted: false, text: source, realm: inspectAigwTargetRealm(source) };
+	}
+	const text = setValue(source, ["providers", "aigw", "x-bobbit-managed"], AIGW_MANAGED_MARKER, formattingFor(source));
+	const realm = inspectAigwTargetRealm(text);
+	// Defensive: never report adoption unless the resulting bytes really classify
+	// as managed, so a failed edit can't silently claim ownership.
+	if (realm.kind !== "managed") return { adopted: false, text: source, realm: inspectAigwTargetRealm(source) };
+	return { adopted: true, text, realm };
 }
 
 /**
