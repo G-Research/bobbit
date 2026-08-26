@@ -144,6 +144,21 @@ async function createRemoteStateSession(gateway: any, cwd: string, requestedProj
 		status: "idle",
 	});
 	expect(gateway.sessionManager.getSession(sessionId)?.worktreePath).toBeUndefined();
+
+	// The fork-scoped coordinator can still own work admitted by an earlier
+	// automatic read for this repository. An explicit route read is its public,
+	// blocking join boundary: it waits for an existing refresh (or its own) before
+	// replying. Complete both resource lifecycles before callers replace the
+	// shared command runner, so their first explicit read cannot join work that
+	// captured the predecessor runner. `optional=1` keeps a definitive missing PR
+	// successful; failed optional probes remain observable 200 snapshots.
+	const [gitHandoff, prHandoff] = await Promise.all([
+		apiFetch(`/api/sessions/${sessionId}/git-status?intent=explicit`),
+		apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`),
+	]);
+	expect(gitHandoff.status, "remote-state fixture Git lifecycle handoff failed").toBe(200);
+	expect([200, 204], "remote-state fixture PR lifecycle handoff failed").toContain(prHandoff.status);
+	await Promise.all([gitHandoff.arrayBuffer(), prHandoff.arrayBuffer()]);
 	return sessionId;
 }
 
