@@ -31,13 +31,14 @@ test.describe("Instant loader on session create", () => {
 
 		// Headquarters is the built-in first-run workspace, so the splash CTA is Quick Session.
 		const splashLabel = page.locator('[data-testid="splash-new-session-label"]').first();
-		await expect(splashLabel).toBeVisible({ timeout: 20_000 });
+		await expect(splashLabel).toBeVisible();
 		await expect(splashLabel).toContainText("Quick Session");
 
-		// Hold the create-session POST open until after the loader assertion. This
-		// avoids brittle wall-clock timing while still proving the loader is visible
-		// before the response can complete. A regression that waits for POST to
-		// return before showing the loader will time out below.
+		// Hold the create-session POST open until after the loader assertion. The
+		// route itself is the authoritative observation point: resolving a separate
+		// waitForRequest beside an intercept can miss the event under a busy browser.
+		let observePost!: () => void;
+		const postObserved = new Promise<void>((resolve) => { observePost = resolve; });
 		let releasePost!: () => void;
 		let postReleased = false;
 		const releasePostPromise = new Promise<void>((resolve) => {
@@ -47,39 +48,35 @@ test.describe("Instant loader on session create", () => {
 			};
 		});
 		await page.route("**/api/sessions", async (route) => {
-			if (route.request().method() !== "POST") {
-				return route.fallback();
-			}
+			if (route.request().method() !== "POST") return route.fallback();
+			observePost();
 			await releasePostPromise;
 			return route.fallback();
 		});
 
-		const postStarted = page.waitForRequest(
-			(request) => request.url().includes("/api/sessions") && request.method() === "POST",
-			{ timeout: 10_000 },
-		);
+		// openApp's end-of-boot marker makes this hydrated project count the same
+		// authority used by _onSplashSessionClick: one project posts directly,
+		// while multiple projects render the splash-specific picker.
+		const projectCount = await page.evaluate(() => (window as any).__bobbitState.projects.length as number);
+		expect(projectCount, "Quick Session requires at least one hydrated visible project").toBeGreaterThan(0);
 		await splashLabel.click();
-		// With Headquarters plus the harness default project visible, the splash
-		// Quick Session CTA opens the same project picker as other session entry
-		// points. Pick Headquarters to exercise the built-in first-run workspace;
-		// single-visible-project states still POST immediately.
-		const picker = page.locator("project-picker-popover").first();
-		if (await picker.isVisible({ timeout: 1_000 }).catch(() => false)) {
-			await picker.locator('button[data-project-id="headquarters"]').click();
-		} else {
-			const inlineHeadquartersOption = page.getByRole("button", { name: /Headquarters\s+Server workspace/i }).first();
-			if (await inlineHeadquartersOption.isVisible({ timeout: 1_000 }).catch(() => false)) {
-				await inlineHeadquartersOption.click();
-			}
+		if (projectCount > 1) {
+			const picker = page.locator('[data-testid="splash-project-picker"]');
+			await expect(picker).toBeVisible();
+			await picker
+				.locator('[data-testid="splash-project-picker-item"]')
+				.filter({ hasText: "Headquarters" })
+				.first()
+				.click();
 		}
-		await postStarted;
+		await postObserved;
 
 		const loader = page.locator('[data-testid="bobbit-loader"]').first();
 		try {
 			await expect(
 				loader,
 				"bobbit-loader should be visible before POST /api/sessions is allowed to complete",
-			).toBeVisible({ timeout: 1_000 });
+			).toBeVisible();
 			expect(postReleased).toBe(false);
 		} finally {
 			releasePost();
