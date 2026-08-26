@@ -50,7 +50,6 @@ binaries/binaries-*/bin/rg.exe
 
 .e2e-ui-pi
 .e2e-ui-bobbit
-tests/code-review-results.json
 coverage/
 .profiles/
 .poc-scratch/

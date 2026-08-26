@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
 	TEST_LAYOUT,
 	classifyTestPath,
+	isDirectTestsRootExecutablePath,
 	isRunnableTestPath,
 	patternsFor,
 	validateTestInventory,
@@ -70,10 +71,11 @@ function assertPairwiseDisjoint(namedSets: Readonly<Record<string, readonly stri
 	assert.deepEqual(overlaps, [], `Lane discovery must be pairwise disjoint:\n${overlaps.join("\n")}`);
 }
 
-const runnableFiles = collectFiles(TESTS_ROOT).filter(isRunnableTestPath).sort();
+const testTreeFiles = collectFiles(TESTS_ROOT).sort();
+const runnableFiles = testTreeFiles.filter(isRunnableTestPath);
 const conventions = TEST_LAYOUT as readonly Convention[];
 
-test("the canonical policy is the only owner of every runnable test", () => {
+test("the canonical policy owns every test and rejects direct-root executable escape hatches", () => {
 	assert.ok(Object.isFrozen(TEST_LAYOUT), "the convention table must be immutable");
 	for (const convention of conventions) {
 		assert.ok(Object.isFrozen(convention), `${convention.semantic} convention must be immutable`);
@@ -84,12 +86,15 @@ test("the canonical policy is the only owner of every runnable test", () => {
 		);
 	}
 
-	const diagnostics = validateTestInventory(runnableFiles, (path: string) => readRepoFile(path));
+	const diagnostics = validateTestInventory(testTreeFiles, (path: string) => readRepoFile(path));
 	assert.deepEqual(
 		diagnostics,
 		[],
 		`Canonical test ownership violations:\n${diagnostics.map(({ path, message }: { path: string; message: string }) => `${path}: ${message}`).join("\n")}`,
 	);
+
+	const directRootExecutables = testTreeFiles.filter(isDirectTestsRootExecutablePath);
+	assert.deepEqual(directRootExecutables, [], `Executable sources cannot live directly under tests/:\n${directRootExecutables.join("\n")}`);
 
 	const unowned = runnableFiles.filter((path) => classifyTestPath(path) === null);
 	assert.deepEqual(unowned, [], `Every runnable test must have exactly one semantic owner:\n${unowned.join("\n")}`);
@@ -133,7 +138,12 @@ test("runner discovery keeps browser, API E2E, browser-fidelity E2E, and manual 
 	for (const path of normalBrowser) assert.equal(classifyTestPath(path)?.lane, "browser");
 	for (const path of e2eGroups.B) assert.equal(classifyTestPath(path)?.semantic, "api-e2e");
 	for (const path of e2eGroups.C) assert.equal(classifyTestPath(path)?.semantic, "browser-e2e");
-	for (const path of ownedPaths(runnableFiles, "manual")) assert.equal(classifyTestPath(path)?.lane, "manual");
+	const manualPaths = ownedPaths(runnableFiles, "manual");
+	for (const path of manualPaths) assert.equal(classifyTestPath(path)?.lane, "manual");
+	assert.ok(
+		manualPaths.includes("tests/manual/code-review-workflow.manual.spec.ts"),
+		"the real-model code-review workflow must be discovered exactly once by the manual lane",
+	);
 
 	const vitestConfig = readRepoFile("vitest.config.ts");
 	for (const pattern of [...patternsFor("unit"), ...patternsFor("vitest-e2e")]) {

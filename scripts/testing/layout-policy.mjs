@@ -96,6 +96,8 @@ export const TEST_LAYOUT = Object.freeze(RAW_CONVENTIONS.map((entry) => Object.f
 export const TEST_SEMANTICS = Object.freeze(TEST_LAYOUT.map(({ semantic }) => semantic));
 
 const RUNNABLE_SUFFIX_RE = /\.(?:test|spec)\.(?:[cm]?[jt]sx?)$/i;
+const DIRECT_TEST_ROOT_EXECUTABLE_RE = /^tests\/[^/]+\.(?:[cm]?[jt]s|[jt]sx)$/i;
+const DECLARATION_SOURCE_RE = /\.d\.(?:[cm]?ts|tsx)$/i;
 const ABSOLUTE_PATH_RE = /^(?:[A-Za-z]:\/|\/\/|\/)/;
 const RUNNER_MODULES = Object.freeze({
 	vitest: "vitest",
@@ -110,6 +112,12 @@ export function normalizeTestPath(filePath) {
 
 export function isRunnableTestPath(filePath) {
 	return typeof filePath === "string" && RUNNABLE_SUFFIX_RE.test(normalizeTestPath(filePath));
+}
+
+export function isDirectTestsRootExecutablePath(filePath) {
+	if (typeof filePath !== "string") return false;
+	const normalized = normalizeTestPath(filePath);
+	return DIRECT_TEST_ROOT_EXECUTABLE_RE.test(normalized) && !DECLARATION_SOURCE_RE.test(normalized);
 }
 
 function hasUnsafeShape(filePath) {
@@ -438,6 +446,13 @@ export function validateTestPath(filePath, source) {
 	}
 	if (normalized.split("/").some((part) => part === ".." || part === ".")) {
 		return [diagnostic("path-traversal", normalized, "Test paths cannot contain '.' or '..' traversal segments.")];
+	}
+	if (isDirectTestsRootExecutablePath(normalized)) {
+		return [diagnostic(
+			"direct-tests-root-executable",
+			normalized,
+			`Executable JavaScript and TypeScript cannot live directly under tests/. Real-model workflows belong at tests/manual/**/*.manual.spec.ts; real Git/worktree/process scripts belong at tests/e2e/node/**/*.node-e2e.test.ts; non-runnable shared code belongs under tests/support/{harnesses,helpers,fixtures,data,templates}/<lane>/.`,
+		)];
 	}
 	if (!isRunnableTestPath(normalized)) return [];
 

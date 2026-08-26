@@ -1,33 +1,42 @@
 /**
- * E2E test for the code review workflow.
- * 
- * Usage: npx tsx tests/code-review-e2e.ts [--runs N] [--verbose]
+ * Manual real-model coverage for the code review workflow.
+ *
+ * This test connects to an already-running Bobbit gateway, starts a real agent,
+ * asks it to run the code-review workflow, records phase timings, and emits JSON
+ * and HTML reports as Playwright artifacts. It is manual-only and must never be
+ * included in an automated lane.
+ *
+ * Environment:
+ *   GATEWAY_HOST / GATEWAY_PORT       gateway address (localhost:3001 by default)
+ *   GATEWAY_AUTH_TOKEN                optional token override
+ *   CODE_REVIEW_RUNS                  repetitions (default 1)
+ *   CODE_REVIEW_VERBOSE               set to 1 for tool progress
+ *   CODE_REVIEW_BRANCH / _BASE        compared branches
+ *   CODE_REVIEW_REPORT_DIR            optional persistent report directory
+ *   CODE_REVIEW_WORKFLOW_STATE_DIR    optional workflow-state directory
+ *
+ * Run without invoking other real-model tests:
+ *   npm run test:manual -- tests/manual/code-review-workflow.manual.spec.ts
  */
-
-import https from "node:https";
-import { WebSocket } from "ws";
 import fs from "node:fs";
-import path from "node:path";
+import https from "node:https";
 import os from "node:os";
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+import { WebSocket } from "ws";
 
 const GATEWAY_HOST = process.env.GATEWAY_HOST || "localhost";
-const GATEWAY_PORT = 3001;
-const AUTH_TOKEN = fs.readFileSync(path.join(process.cwd(), ".bobbit", "state", "token"), "utf-8").trim();
+const GATEWAY_PORT = Number.parseInt(process.env.GATEWAY_PORT || "3001", 10);
 const BASE_URL = `https://${GATEWAY_HOST}:${GATEWAY_PORT}`;
 const WS_BASE = `wss://${GATEWAY_HOST}:${GATEWAY_PORT}`;
 const REPO_PATH = process.cwd();
-const STATE_DIR = path.join(os.homedir(), ".pi", "workflow-state");
-
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-
-const args = process.argv.slice(2);
-const VERBOSE = args.includes("--verbose") || args.includes("-v");
-const runsIdx = args.indexOf("--runs");
-const NUM_RUNS = runsIdx >= 0 ? parseInt(args[runsIdx + 1], 10) : 1;
-const branchIdx = args.indexOf("--branch");
-const FEATURE_BRANCH = branchIdx >= 0 ? args[branchIdx + 1] : "test/realistic-change";
-const baseIdx = args.indexOf("--base");
-const BASE_BRANCH = baseIdx >= 0 ? args[baseIdx + 1] : "master";
+const STATE_DIR = process.env.CODE_REVIEW_WORKFLOW_STATE_DIR
+	? path.resolve(process.env.CODE_REVIEW_WORKFLOW_STATE_DIR)
+	: path.join(os.homedir(), ".pi", "workflow-state");
+const VERBOSE = process.env.CODE_REVIEW_VERBOSE === "1";
+const NUM_RUNS = Number.parseInt(process.env.CODE_REVIEW_RUNS || "1", 10);
+const FEATURE_BRANCH = process.env.CODE_REVIEW_BRANCH || "test/realistic-change";
+const BASE_BRANCH = process.env.CODE_REVIEW_BASE || "master";
 
 interface PhaseInfo { name: string; durationMs: number }
 interface RunResult {
@@ -45,12 +54,18 @@ function log(...a: any[]) {
 }
 function vlog(...a: any[]) { if (VERBOSE) log(...a); }
 
-async function apiRequest(method: string, urlPath: string, body?: any): Promise<any> {
+function readAuthToken(): string {
+	const token = process.env.GATEWAY_AUTH_TOKEN
+		?? fs.readFileSync(path.join(REPO_PATH, ".bobbit", "state", "token"), "utf-8");
+	return token.trim();
+}
+
+async function apiRequest(authToken: string, method: string, urlPath: string, body?: any): Promise<any> {
 	return new Promise((resolve, reject) => {
 		const url = new URL(urlPath, BASE_URL);
 		const req = https.request({
 			method, hostname: url.hostname, port: url.port, path: url.pathname,
-			headers: { "Authorization": `Bearer ${AUTH_TOKEN}`, "Content-Type": "application/json" },
+			headers: { "Authorization": `Bearer ${authToken}`, "Content-Type": "application/json" },
 			rejectUnauthorized: false,
 		}, (res) => {
 			let data = "";
@@ -63,10 +78,10 @@ async function apiRequest(method: string, urlPath: string, body?: any): Promise<
 	});
 }
 
-function connectWS(sessionId: string): Promise<WebSocket> {
+function connectWS(authToken: string, sessionId: string): Promise<WebSocket> {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(`${WS_BASE}/ws/${sessionId}`, { rejectUnauthorized: false });
-		ws.on("open", () => { ws.send(JSON.stringify({ type: "auth", token: AUTH_TOKEN })); });
+		ws.on("open", () => { ws.send(JSON.stringify({ type: "auth", token: authToken })); });
 		const h = (data: Buffer) => {
 			const msg = JSON.parse(data.toString());
 			if (msg.type === "auth_ok") { ws.removeListener("message", h); resolve(ws); }
@@ -111,7 +126,7 @@ function getPhaseTimings(state: any): PhaseInfo[] {
 	return timings;
 }
 
-async function runCodeReview(runNumber: number): Promise<RunResult> {
+async function runCodeReview(authToken: string, runNumber: number): Promise<RunResult> {
 	const startTime = Date.now();
 
 	log(`\n========== Run ${runNumber} ==========`);
@@ -130,11 +145,11 @@ async function runCodeReview(runNumber: number): Promise<RunResult> {
 		}
 	} catch { /* no state dir */ }
 
-	const session = await apiRequest("POST", "/api/sessions", { cwd: REPO_PATH });
+	const session = await apiRequest(authToken, "POST", "/api/sessions", { cwd: REPO_PATH });
 	const sessionId = session.id;
 	log(`Session: ${sessionId}`);
 
-	const ws = await connectWS(sessionId);
+	const ws = await connectWS(authToken, sessionId);
 	log("Connected");
 
 	return new Promise<RunResult>((resolve) => {
@@ -224,49 +239,24 @@ async function runCodeReview(runNumber: number): Promise<RunResult> {
 	});
 }
 
-async function main() {
-	log(`Code Review E2E — ${NUM_RUNS} run(s), branch=${FEATURE_BRANCH} vs ${BASE_BRANCH}`);
-
-	const results: RunResult[] = [];
-	for (let i = 1; i <= NUM_RUNS; i++) {
-		try {
-			results.push(await runCodeReview(i));
-		} catch (err: any) {
-			log(`Run ${i} error: ${err.message}`);
-			results.push({ runNumber: i, totalMs: 0, phases: [], status: "failed", error: err.message });
-		}
+function positiveRunCount(): number {
+	if (!Number.isSafeInteger(NUM_RUNS) || NUM_RUNS < 1) {
+		throw new Error(`CODE_REVIEW_RUNS must be a positive integer; received ${process.env.CODE_REVIEW_RUNS ?? ""}.`);
 	}
-
-	// Summary
-	log("\n========== SUMMARY ==========");
-	const completed = results.filter(r => r.status === "completed");
-	for (const r of results) {
-		const icon = r.status === "completed" ? "OK" : "FAIL";
-		log(`  [${icon}] Run ${r.runNumber}: ${(r.totalMs / 1000).toFixed(1)}s`);
-		for (const p of r.phases) log(`       ${p.name}: ${(p.durationMs / 1000).toFixed(1)}s`);
-	}
-	if (completed.length > 0) {
-		const avg = completed.reduce((s, r) => s + r.totalMs, 0) / completed.length;
-		log(`\n  Average: ${(avg / 1000).toFixed(1)}s (target: 120s)`);
-		log(`  ${avg <= 120000 ? "TARGET MET" : `${((avg - 120000) / 1000).toFixed(1)}s over target`}`);
-	}
-
-	// Save results
-	const outputPath = path.resolve("tests", "code-review-results.json");
-	let existing: any;
-	try { existing = JSON.parse(fs.readFileSync(outputPath, "utf-8")); } catch { existing = { iterations: [] }; }
-	existing.iterations.push({
-		timestamp: new Date().toISOString(),
-		runs: results,
-		averageMs: completed.length > 0 ? completed.reduce((s, r) => s + r.totalMs, 0) / completed.length : null,
-	});
-	fs.writeFileSync(outputPath, JSON.stringify(existing, null, 2));
-
-	// Generate progress report
-	generateReport(existing);
+	return NUM_RUNS;
 }
 
-function generateReport(data: any) {
+function reportDirectory(playwrightOutputDirectory: string): string {
+	return process.env.CODE_REVIEW_REPORT_DIR
+		? path.resolve(process.env.CODE_REVIEW_REPORT_DIR)
+		: playwrightOutputDirectory;
+}
+
+function readReportHistory(outputPath: string): any {
+	try { return JSON.parse(fs.readFileSync(outputPath, "utf-8")); } catch { return { iterations: [] }; }
+}
+
+function generateReport(data: any): string {
 	const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Code Review Workflow — Performance Report</title>
 <style>
@@ -369,9 +359,56 @@ ${data.iterations.map((it: any, idx: number) =>
 </div>
 </body></html>`;
 
-	const reportPath = path.resolve("tests", "code-review-progress.html");
-	fs.writeFileSync(reportPath, html);
-	log(`Report: ${reportPath}`);
+	return html;
 }
 
-main().catch(console.error);
+test("real agent completes the code-review workflow and emits timing reports", async ({}, testInfo) => {
+	const runCount = positiveRunCount();
+	test.setTimeout(runCount * 10 * 60 * 1_000 + 30_000);
+	log(`Code Review manual — ${runCount} run(s), branch=${FEATURE_BRANCH} vs ${BASE_BRANCH}`);
+
+	const authToken = readAuthToken();
+	const results: RunResult[] = [];
+	for (let runNumber = 1; runNumber <= runCount; runNumber++) {
+		try {
+			results.push(await runCodeReview(authToken, runNumber));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			log(`Run ${runNumber} error: ${message}`);
+			results.push({ runNumber, totalMs: 0, phases: [], status: "failed", error: message });
+		}
+	}
+
+	log("\n========== SUMMARY ==========");
+	const completed = results.filter(result => result.status === "completed");
+	for (const result of results) {
+		const icon = result.status === "completed" ? "OK" : "FAIL";
+		log(`  [${icon}] Run ${result.runNumber}: ${(result.totalMs / 1000).toFixed(1)}s`);
+		for (const phase of result.phases) log(`       ${phase.name}: ${(phase.durationMs / 1000).toFixed(1)}s`);
+	}
+	if (completed.length > 0) {
+		const averageMs = completed.reduce((sum, result) => sum + result.totalMs, 0) / completed.length;
+		log(`\n  Average: ${(averageMs / 1000).toFixed(1)}s (target: 120s)`);
+		log(`  ${averageMs <= 120_000 ? "TARGET MET" : `${((averageMs - 120_000) / 1000).toFixed(1)}s over target`}`);
+	}
+
+	const outputDirectory = reportDirectory(testInfo.outputDir);
+	fs.mkdirSync(outputDirectory, { recursive: true });
+	const resultsPath = path.join(outputDirectory, "code-review-results.json");
+	const reportPath = path.join(outputDirectory, "code-review-progress.html");
+	const history = readReportHistory(resultsPath);
+	history.iterations.push({
+		timestamp: new Date().toISOString(),
+		runs: results,
+		averageMs: completed.length > 0
+			? completed.reduce((sum, result) => sum + result.totalMs, 0) / completed.length
+			: null,
+	});
+	fs.writeFileSync(resultsPath, JSON.stringify(history, null, 2));
+	fs.writeFileSync(reportPath, generateReport(history));
+	await testInfo.attach("code-review-results", { path: resultsPath, contentType: "application/json" });
+	await testInfo.attach("code-review-progress", { path: reportPath, contentType: "text/html" });
+	log(`Reports: ${resultsPath}, ${reportPath}`);
+
+	expect(results.filter(result => result.status !== "completed"), "every requested real workflow run must complete").toEqual([]);
+});
