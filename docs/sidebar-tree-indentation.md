@@ -127,18 +127,18 @@ Renderer guidance:
 
 Unit coverage:
 
-- `tests/sidebar-tree-layout.test.ts` verifies clamping, rounding, corrupt and throwing storage, save/reset behavior, CSS variable application, and collapsed-indent derivation.
-- `tests/sidebar-tree-builder.test.ts` verifies resolved layout defaults, edge clamping, custom base/nested indent metadata, and custom nested-goal indentation.
+- `tests/unit/core/sidebar-tree-layout.unit.test.ts` verifies clamping, rounding, corrupt and throwing storage, save/reset behavior, CSS variable application, and collapsed-indent derivation.
+- `tests/unit/core/sidebar-tree-builder.unit.test.ts` verifies resolved layout defaults, edge clamping, custom base/nested indent metadata, and custom nested-goal indentation.
 
 Browser coverage:
 
-- `tests/e2e/ui/sidebar-indent.spec.ts` covers the Settings control, persistence across reload, reset behavior, seeded out-of-range storage clamping, visible nested-goal offset changes, and no horizontal overflow at max indentation in expanded desktop, collapsed desktop, and mobile sidebars.
-- `tests/e2e/ui/sidebar-tree-restart.spec.ts` covers restart durability for the stored indentation value and runtime CSS variable application after gateway restart plus reload.
+- `tests/browser/fixtures/sidebar-indent.fixture.spec.ts` covers the Settings control, persistence across reload, reset behavior, seeded out-of-range storage clamping, visible nested-goal offset changes, and no horizontal overflow at max indentation in expanded desktop, collapsed desktop, and mobile sidebars.
+- `tests/browser/journeys/ui/sidebar-tree-restart.journey.spec.ts` covers restart durability for the stored indentation value and runtime CSS variable application after gateway restart plus reload.
 
 Recommended verification when changing this feature:
 
 ```bash
 npm run check
 npm run test:unit
-npx playwright test tests/e2e/ui/sidebar-indent.spec.ts tests/e2e/ui/sidebar-tree-restart.spec.ts --reporter=line
+npx playwright test tests/browser/fixtures/sidebar-indent.fixture.spec.ts tests/browser/journeys/ui/sidebar-tree-restart.journey.spec.ts --reporter=line
 ```

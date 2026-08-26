@@ -151,7 +151,7 @@ the REST handler, so the fast path is always the reuse branch.
 
 Clients depend on `gate_signal_received` arriving **before**
 `gate_verification_started` on the wire. The verification-core E2E suite
-pins this ordering (`tests/e2e/verification-core.spec.ts`, "WS events have
+pins this ordering (`tests/integration/gateway/verification-core.gateway.test.ts`, "WS events have
 correct shape, timestamps, and ordering").
 
 An earlier iteration of `beginVerification` broadcast
@@ -235,10 +235,10 @@ Any future call site that signals a gate must follow the same pattern: initiate 
 | `src/app/goal-dashboard.ts` | Signal-entry renderer | Consults `step.status` first for in-flight signals so seeded `running`/`waiting` rows don't render as failed. |
 | `src/ui/tools/renderers/GateToolRenderers.ts` | `gate_signal` renderer | Passes `initialSteps` to `<gate-verification-live>` for both running and completed cards. |
 | `src/app/api.ts` | `GateSignalStep` client shape | Mirrors the server `status`/`phase`/`skipped` additions. |
-| `tests/gate-signal-step-enumeration.test.ts` | Unit | Asserts the gate-store signal and `activeVerifications` agree on `steps[]` immediately after `recordSignal`. |
-| `tests/e2e/gate-signal-progress.spec.ts` | API E2E | Pins fresh `POST` and cached responses, persisted terminal skipped steps, and phase/status preservation across summary / inspect / active endpoints. |
-| `tests/gate-signal-renderer.spec.ts` | Browser fixture | Asserts completed `gate_signal` cards pass terminal `verification.steps` as `initialSteps` alongside `finalStatus`. |
-| `tests/e2e/ui/verification-progress-indicator.spec.ts` | Browser E2E | Asserts the dashboard renders named verify-card chips immediately after signal (no empty "Verification in progress…" placeholder) and that the chips survive a page reload (rendered from persisted gate-store state alone). |
+| `tests/unit/core/gate-signal-step-enumeration.unit.test.ts` | Unit | Asserts the gate-store signal and `activeVerifications` agree on `steps[]` immediately after `recordSignal`. |
+| `tests/integration/gateway/gate-signal-progress.gateway.test.ts` | Gateway integration | Pins fresh `POST` and cached responses, persisted terminal skipped steps, and phase/status preservation across summary / inspect / active endpoints. |
+| `tests/dom/gate-signal-renderer.dom.test.ts` | Browser fixture | Asserts completed `gate_signal` cards pass terminal `verification.steps` as `initialSteps` alongside `finalStatus`. |
+| `tests/browser/journeys/ui/verification-progress-indicator.journey.spec.ts` | Browser journey | Asserts the dashboard renders named verify-card chips immediately after signal (no empty "Verification in progress…" placeholder) and that the chips survive a page reload (rendered from persisted gate-store state alone). |
 
 ## Origin
 

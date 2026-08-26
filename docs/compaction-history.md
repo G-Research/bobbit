@@ -352,8 +352,8 @@ Test hooks (used by the browser E2Es):
 | Pre-compaction history component + count-probe retry | `src/ui/components/PreCompactionHistory.ts` |
 | Renderer integration (mounts the child when `compactionId` is set) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
 | Payload type (adds `compactionId?: string`) | `src/app/compaction-types.ts` |
-| API integration (endpoint contract) | `tests2/integration/transcript-before-compaction.test.ts` |
-| Browser E2E (persistence + expand + `@live-compaction-affordance` live-session affordance + count-probe transient-404 retry) | `tests2/browser/e2e/pre-compaction-history.spec.ts` |
+| API integration (endpoint contract) | `tests/integration/gateway/transcript-before-compaction.gateway.test.ts` |
+| Browser E2E (persistence + expand + `@live-compaction-affordance` live-session affordance + count-probe transient-404 retry) | `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` |
 | Full design rationale | [docs/design/persist-compaction-history.md](design/persist-compaction-history.md) |
 
 ## See also

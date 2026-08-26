@@ -84,7 +84,7 @@ attach the override is set but the hash has not yet committed. The earlier
 "only trust if hash matches" guard caused `getActiveNavId()` to fall back
 to the cold start during attach, which made `openForNavItem` re-fire with
 the same id and silently dropped 3–4 of every 6 rapid Ctrl+↓ keystrokes.
-Pinned by `tests/rapid-keystroke-nav.spec.ts`.
+Pinned by `tests/dom/rapid-keystroke-nav.dom.test.ts`.
 
 ## DOM-driven order — single source of truth
 
@@ -137,8 +137,8 @@ Emission sites:
   child/delegate groups, archived rows, and top-level session rows.
 
 Tests (and any future tooling) can rely on this contract: see
-[`tests/e2e/ui/sidebar-keyboard-nav.spec.ts`](../tests/e2e/ui/sidebar-keyboard-nav.spec.ts)
-and [`tests/e2e/ui/sidebar-unified-tree.spec.ts`](../tests/e2e/ui/sidebar-unified-tree.spec.ts)
+[`tests/browser/journeys/ui/sidebar-keyboard-nav.journey.spec.ts`](../tests/browser/journeys/ui/sidebar-keyboard-nav.journey.spec.ts)
+and [`tests/browser/journeys/ui/sidebar-unified-tree.journey.spec.ts`](../tests/browser/journeys/ui/sidebar-unified-tree.journey.spec.ts)
 for coverage.
 
 ## Edge cases
@@ -195,5 +195,5 @@ the row into view. See [Sidebar reveal on nav](sidebar-reveal-on-nav.md).
   extension.
 - [`src/app/state.ts`](../src/app/state.ts) — `keyboardNavActiveId`
   override field.
-- [`tests/e2e/ui/sidebar-keyboard-nav.spec.ts`](../tests/e2e/ui/sidebar-keyboard-nav.spec.ts)
+- [`tests/browser/journeys/ui/sidebar-keyboard-nav.journey.spec.ts`](../tests/browser/journeys/ui/sidebar-keyboard-nav.journey.spec.ts)
   — full contract coverage.

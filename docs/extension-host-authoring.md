@@ -1191,17 +1191,17 @@ The built-in xterm panel behavior:
   status.
 - Styling and accessibility layer Bobbit theme tokens and panel controls on top of xterm's
   required layout/hiding CSS. See [terminal panel xterm layout](terminal-panel.md).
-- Regression coverage: `tests2/core/extension-host-terminal.test.ts` pins bounded replay, replay
+- Regression coverage: `tests/unit/core/extension-host-terminal.unit.test.ts` pins bounded replay, replay
   boundary sanitization, PTY policy, and exit-before-final-data delivery; the worker/proxy seam and
-  acknowledged outbound ordering are in `tests2/core/extension-host-channel-registry.test.ts`.
-  `tests2/browser/e2e/terminal-pack.spec.ts` exercises the source and packaged terminal runtimes,
+  acknowledged outbound ordering are in `tests/unit/isolated/extension-host-channel-registry.isolated.test.ts`.
+  `tests/e2e/browser/terminal-pack.browser-e2e.spec.ts` exercises the source and packaged terminal runtimes,
   including final output before exactly one exit frame.
 
 Run focused retry-free coverage after changing terminal lifecycle or worker channel delivery:
 
 ```bash
-npx vitest run tests2/core/extension-host-terminal.test.ts tests2/core/extension-host-channel-registry.test.ts --config vitest.config.ts --retry=0
-BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- tests2/browser/e2e/terminal-pack.spec.ts --retries=0
+npx vitest run tests/unit/core/extension-host-terminal.unit.test.ts tests/unit/isolated/extension-host-channel-registry.isolated.test.ts --config vitest.config.ts --retry=0
+BOBBIT_V2_RETRY_FREE=1 npx playwright test --config playwright-e2e.config.ts --project=browser tests/e2e/browser/terminal-pack.browser-e2e.spec.ts --retries=0
 ```
 
 ### Canonical Bobbit avatars (`host.ui.createBobbitSprite`)
@@ -2105,7 +2105,7 @@ The canonical chain: `renderer` persists to the implicit `store` → `openPanel`
 panel rehydrated from `store.get`. Real parity needs real libraries, so `highlight.js`,
 `pdfjs-dist`, and `docx-preview` are **vendored** (see *Bundling* above), and HTML artifacts
 render inside a `sandbox="allow-scripts"` iframe. Tests:
-`tests/artifacts-pack-viewer.test.ts` (node) + `tests/e2e/ui/artifacts-pack.spec.ts` (browser).
+`tests/unit/core/artifacts-pack-viewer.unit.test.ts` (node) + `tests/browser/journeys/ui/artifacts-pack.journey.spec.ts` (browser).
 
 ## Worked example: the file explorer first-party pack
 
@@ -2215,7 +2215,7 @@ Two boundaries are worth copying:
    "pr-reviewer" })` grants the child the **role's** resolved PR Walkthrough tools — never the
    owner session's broader toolset.
 
-Tests: `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (no install — resolved by the built-in band →
+Tests: `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` (no install — resolved by the built-in band →
 launcher click spawns the reviewer child → the bound child pane auto-renders from `callRoute` +
 store via child-self `status`/`recover` → deep-link → concrete tool toggles and entrypoint toggles),
 plus the durable route/provider/store tests listed in
@@ -2326,7 +2326,7 @@ the contract adapter, and the worker isolation model — is documented in
 - **Authoritative V1 schema:** `docs/design/pack-schema-v1-rationalisation.md`
 - Renderer+action example pack: `tests/fixtures/market-sources/retry-demo-src/retry-demo/`
 - Litmus packs: `market-packs/artifacts/` (tool + panel + deep-link), `market-packs/pr-walkthrough/` (first-party reviewer tools + panel/routes/entrypoints), `market-packs/terminal/` (first-party xterm terminal over channels), `tests/fixtures/market-sources/no-tools-pack-src/no-tools-pack/` (no-tools / UI-only)
-- Browser E2Es: `tests/e2e/ui/extension-host.spec.ts`, `artifacts-pack.spec.ts`, `pr-walkthrough-pack.spec.ts`, `terminal-pack.spec.ts`
+- Browser journey coverage: `tests/browser/journeys/ui/extension-host.journey.spec.ts` and `tests/browser/journeys/ui/artifacts-pack.journey.spec.ts`; real-fidelity E2E coverage: `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` and `tests/e2e/browser/terminal-pack.browser-e2e.spec.ts`
 - Frozen Host API types: `src/shared/extension-host/host-api.ts`
 - Extension channel substrate: `src/app/channel-bridge.ts`, `src/server/extension-host/channel-registry.ts`, `channel-open-permits.ts`, `channel-module-host.ts`, `channel-pty-helper.ts`
 - Action / route dispatch + handler ctx: `src/server/extension-host/action-dispatcher.ts`, `route-dispatcher.ts`

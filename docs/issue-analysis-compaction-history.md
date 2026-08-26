@@ -206,11 +206,10 @@ session this guard is **not** triggered (total=462).
 
 ### T1 (primary, reproduces gap 1) — browser E2E, live compaction, no reload
 
-Extend `tests/e2e/ui/pre-compaction-history.spec.ts` (or a new
-`live-compaction-affordance.spec.ts`) to drive a **mock-agent compaction in a
+Extend `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` to drive a **mock-agent compaction in a
 live session** and assert the affordance appears **before any reload**:
 
-- Requires extending `tests/e2e/mock-agent-core.mjs`: the `compact` RPC (and
+- Requires extending `tests/e2e/_helpers/mock-agent-core.mjs`: the `compact` RPC (and
   an auto/overflow trigger) must `emit` `compaction_start` then
   `compaction_end`/`auto_compaction_end` with a
   `result: { tokensBefore, firstKeptEntryId }`, and `get_state` must write a
@@ -227,7 +226,7 @@ live session** and assert the affordance appears **before any reload**:
 
 ### T2 (pins gap-2 fallback) — API E2E
 
-In `tests/e2e/transcript-before-compaction.spec.ts`, add a case: a sidecar
+In `tests/integration/gateway/transcript-before-compaction.gateway.test.ts`, add a case: a sidecar
 entry with `firstKeptEntryId: null` whose `.jsonl` carries a real
 `type:"compaction"` boundary with orphans before it → assert `total > 0` and
 the orphan contents. Add a companion case with `firstKeptEntryId` set to a

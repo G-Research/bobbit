@@ -235,7 +235,7 @@ open the same URL the iframe is showing. Refresh remains a local cache-buster: i
 bumps the preview mtime used in the iframe URL, but it does not create a tab or
 revive one the user closed.
 
-Pinned by `tests/e2e/ui/preview-durable-restart.spec.ts`, including the
+Pinned by `tests/browser/fixtures/preview-durable-restart.fixture.spec.ts`, including the
 regression that the refresh button is visible immediately after restoring an
 active preview tab.
 

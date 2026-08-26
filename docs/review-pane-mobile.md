@@ -101,5 +101,5 @@ Mobile annotations use the **same format** as desktop annotations — the `Annot
 
 ## Testing
 
-- **Unit tests**: `tests/mobile-review-annotation.spec.ts` — 13 tests using a Playwright `file://` fixture (`tests/mobile-review-annotation.html`). Covers floating button visibility, bottom sheet open/close, comment submission, toast on lost selection, CSS touch targets.
-- **E2E tests**: `tests/e2e/ui/mobile-review-commenting.spec.ts` — 7 tests covering full user journeys: mobile creation flow, desktop unaffected, submit review on mobile, persistence after reload, edit existing comment, cancel removes uncommitted highlight, toast on lost selection.
+- **Browser fixture tests**: `tests/browser/fixtures/mobile-review-annotation.fixture.spec.ts` — 13 tests using a Playwright `file://` fixture (`tests/support/fixtures/browser/pages/mobile-review-annotation.html`). Covers floating button visibility, bottom sheet open/close, comment submission, toast on lost selection, CSS touch targets.
+- **Browser fixture tests**: `tests/browser/fixtures/mobile-review-commenting.fixture.spec.ts` — 7 tests covering full user journeys: mobile creation flow, desktop unaffected, submit review on mobile, persistence after reload, edit existing comment, cancel removes uncommitted highlight, toast on lost selection.

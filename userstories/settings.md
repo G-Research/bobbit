@@ -19,7 +19,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 3. Click the Settings button in the sidebar (with `title='Settings (Ctrl+,)'`).
    - Same result as step 1 — settings opens at `#/settings/system/shortcuts`.
 
-**Coverage:** covered (settings.spec.ts — open settings and switch tabs)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — open settings and switch tabs)
 
 ---
 
@@ -52,7 +52,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 8. Navigate to `#/settings/system/nonexistent` (invalid tab ID).
    - Falls back to the first tab for the scope (Shortcuts for system scope).
 
-**Coverage:** covered (settings.spec.ts — open settings and switch tabs)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — open settings and switch tabs)
 
 ---
 
@@ -74,7 +74,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 4. Toggle the checkbox back to its original state.
    - Another `PUT /api/preferences` fires. Preference is restored.
 
-**Coverage:** covered (settings.spec.ts — setting persists after reload)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — setting persists after reload)
 
 ---
 
@@ -102,7 +102,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
    - Settings open with the correct project scope and Appearance tab active.
    - The project button in the scope row has active styling.
 
-**Coverage:** covered (settings.spec.ts — per-project settings scope switching)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — per-project settings scope switching)
 
 ---
 
@@ -126,7 +126,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
    - The field reverts to the system-inherited value.
    - Source badge changes back to "system".
 
-**Coverage:** partial (settings.spec.ts covers scope switching; API integration via project config REST endpoints)
+**Coverage:** partial (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts covers scope switching; API integration via project config REST endpoints)
 
 ---
 
@@ -164,7 +164,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
     - All shortcuts revert to factory defaults.
 11. A tip box on the right reads: "When running Bobbit as a browser tab, some shortcut combinations are intercepted by the browser. Install Bobbit as a PWA app to regain complete control."
 
-**Coverage:** covered (shortcuts are tested via the shortcut-registry; UI interaction via settings.spec.ts tab switching)
+**Coverage:** covered (shortcuts are tested via the shortcut-registry; UI interaction via tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts tab switching)
 
 ---
 
@@ -188,7 +188,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 4. Select "Forest" (the default palette).
    - Theme reverts. `dataset.palette` is removed. `localStorage` item is removed.
 
-**Coverage:** covered (settings.spec.ts — tab switching to palette; visual verification manual)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — tab switching to palette; visual verification manual)
 
 ---
 
@@ -217,7 +217,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 7. Reload the page. Navigate back to `#/settings/system/models`.
    - All model and thinking selections persist as set.
 
-**Coverage:** covered (model persistence tested in prompt-stats-e2e.spec.ts; models tab rendering in settings.spec.ts)
+**Coverage:** covered (model persistence tested in tests/browser/journeys/ui/prompt-stats-e2e.journey.spec.ts; models tab rendering in tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts)
 
 ---
 
@@ -243,7 +243,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
    - After cleanup, an automatic re-scan fires (`GET /api/maintenance/orphaned-worktrees`).
    - The list updates — either empty ("No orphaned worktrees found") or shows remaining items.
 
-**Coverage:** covered (maintenance.spec.ts — scan buttons call API, action button state, cleanup POST)
+**Coverage:** covered (tests/browser/fixtures/search-preview-maintenance.fixture.spec.ts — scan buttons call API, action button state, cleanup POST)
 
 ---
 
@@ -265,7 +265,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 5. Click "Terminate (N)".
    - Orphaned sessions are removed. Re-scan fires automatically.
 
-**Coverage:** covered (maintenance.spec.ts — scan buttons call API, action button state)
+**Coverage:** covered (tests/browser/fixtures/search-preview-maintenance.fixture.spec.ts — scan buttons call API, action button state)
 
 ---
 
@@ -287,7 +287,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
 5. Click "Purge (N)".
    - Expired archives are deleted. Re-scan fires automatically.
 
-**Coverage:** covered (maintenance.spec.ts — scan buttons call API, action button state)
+**Coverage:** covered (tests/browser/fixtures/search-preview-maintenance.fixture.spec.ts — scan buttons call API, action button state)
 
 ---
 
@@ -307,7 +307,7 @@ The Settings page is the primary configuration surface for system-wide and per-p
    - Scan results are gone (module-level state is cleared on reload).
    - Action buttons are disabled again. User must re-scan.
 
-**Coverage:** covered (maintenance.spec.ts — scan state persists when switching tabs and back)
+**Coverage:** covered (tests/browser/fixtures/search-preview-maintenance.fixture.spec.ts — scan state persists when switching tabs and back)
 
 ---
 
@@ -354,4 +354,4 @@ The Settings page is the primary configuration surface for system-wide and per-p
 6. Bookmark a settings URL (e.g. `#/settings/system/maintenance`) and open it later.
    - Settings open directly at that tab — deep links are stable.
 
-**Coverage:** covered (settings.spec.ts — URL verification on tab switch; routing.ts handles `#/settings/<scope>/<tab>`)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — URL verification on tab switch; routing.ts handles `#/settings/<scope>/<tab>`)

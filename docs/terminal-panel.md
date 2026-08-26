@@ -27,7 +27,7 @@ This preserves xterm layout, selection, keyboard input, resize/fit, and reload/r
 
 ## Touch-scroll E2E invariant
 
-`tests/e2e/ui/terminal-pack.spec.ts` contains the touch-scroll regression test:
+`tests/e2e/browser/terminal-pack.browser-e2e.spec.ts` contains the touch-scroll regression test:
 
 `touch pan over xterm-screen scrolls the xterm viewport; reproduces ambiguous marker assertion before touch pan hides the terminal tail @terminal-repro`
 
@@ -70,7 +70,7 @@ If the test flakes only in the full suite, preserve these outcome predicates ins
 
 ## Windows ConPTY reproducer
 
-`tests/e2e/ui/terminal-pack.spec.ts` includes a targeted browser E2E test tagged `@terminal-repro` for the Windows `cmd.exe`/ConPTY startup artifact. It injects a deterministic synthetic startup stream shaped like the observed Windows PTY output:
+`tests/e2e/browser/terminal-pack.browser-e2e.spec.ts` includes a targeted browser E2E test tagged `@terminal-repro` for the Windows `cmd.exe`/ConPTY startup artifact. It injects a deterministic synthetic startup stream shaped like the observed Windows PTY output:
 
 - private-mode enables such as `ESC[?9001h` and `ESC[?1004h`;
 - cursor hide/show;
@@ -97,19 +97,19 @@ Assertions check both CSS/layout invariants and visible behavior: no repeated to
 Use the focused touch regression when changing terminal scrollback or follow-output behavior:
 
 ```bash
-npx playwright test tests/e2e/ui/terminal-pack.spec.ts -g "touch pan over xterm-screen scrolls the xterm viewport" --reporter=line
+npx playwright test tests/e2e/browser/terminal-pack.browser-e2e.spec.ts -g "touch pan over xterm-screen scrolls the xterm viewport" --reporter=line
 ```
 
 Run the full terminal-pack browser E2E file before handing off terminal panel changes:
 
 ```bash
-npx playwright test tests/e2e/ui/terminal-pack.spec.ts --reporter=line
+npx playwright test tests/e2e/browser/terminal-pack.browser-e2e.spec.ts --reporter=line
 ```
 
 Use the broader targeted reproducer when changing terminal rendering:
 
 ```bash
-npm run test:e2e -- tests/e2e/ui/terminal-pack.spec.ts --grep @terminal-repro
+npm run test:e2e -- tests/e2e/browser/terminal-pack.browser-e2e.spec.ts --grep @terminal-repro
 ```
 
 Then run the usual project checks for the touched area:
@@ -121,5 +121,5 @@ npm run test:unit
 
 Relevant context:
 
-- `tests/e2e/ui/terminal-pack.spec.ts` covers the browser panel, xterm layout, prompt visibility, resize, reattach, lifecycle, and screenshot/debug artifacts.
-- `tests/extension-host-terminal.test.ts` covers channel replay behavior, bounded replay, ANSI/OSC boundary trimming, frame bridging, and PTY policy.
+- `tests/e2e/browser/terminal-pack.browser-e2e.spec.ts` covers the browser panel, xterm layout, prompt visibility, resize, reattach, lifecycle, and screenshot/debug artifacts.
+- `tests/unit/core/extension-host-terminal.unit.test.ts` covers channel replay behavior, bounded replay, ANSI/OSC boundary trimming, frame bridging, and PTY policy.

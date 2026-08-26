@@ -138,7 +138,7 @@ Current contract:
   review controls cramped.
 
 The regression coverage lives in
-`tests/e2e/ui/pr-walkthrough-pack.spec.ts` (`T-5`). It seeds a ready walkthrough,
+`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` (`T-5`). It seeds a ready walkthrough,
 asserts orientation de-duplication in labelled and collapsed rails, checks the
 `(done/total)` counter format/style, and verifies row geometry at default and
 constrained rail widths.
@@ -445,7 +445,7 @@ schema. Resolving cascade-first in both paths (and threading the pack role's
 `promptTemplate` into the child's system prompt via `resolveRolePromptTemplate` +
 `createSession`'s `rolePrompt`) is what lets the reviewer actually **call** its
 tools and know the chunk/finalization schema. This is pinned by role/tool-policy
-unit tests plus `tests/e2e/pr-walkthrough-host-agents.spec.ts`. See
+unit tests plus `tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts`. See
 [docs/design/pr-walkthrough-restore-ux.md](design/pr-walkthrough-restore-ux.md) § A.
 
 The role `allow`s the `PR Walkthrough` tool group and **denies every other fixed
@@ -551,7 +551,7 @@ narrow side panel collapses even when the browser viewport is wide.
 ### Pinning tests
 
 The pack-served viewer is covered end-to-end by
-`tests/e2e/ui/pr-walkthrough-pack.spec.ts` (install-free built-in-band resolution
+`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` (install-free built-in-band resolution
 → launcher → live `bundle` recompute → render → `publish` → reload persistence →
 entrypoint and concrete-tool activation toggles). The launch-UX correction is pinned in the same spec: clicking the
 session-menu launcher on a branch with no PR shows visible launcher feedback
@@ -568,11 +568,11 @@ owner-session mount). The reviewer **spawn**, the **`magnifier` accessory** and
 child-side `status`/`recover` routing, the always-fresh (two clicks → two distinct
 reviewers) behaviour, the **no-dismiss-on-finalize** + restart-survival lifecycle,
 and the user-terminate control are pinned in the API spec
-`tests/e2e/pr-walkthrough-host-agents.spec.ts` (whose mock agent cannot resolve a
+`tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts` (whose mock agent cannot resolve a
 real PR through a click, so the spawn/lifecycle assertions live there, not in the
 browser spec).
 Preview panel sizing through the shared side-panel controls is independently pinned by
-`tests/ui-fixtures/preview-panel.spec.ts` (preview is one workspace panel kind
+`tests/browser/fixtures/preview-panel.fixture.spec.ts` (preview is one workspace panel kind
 using the same sizing logic as pack, proposal, review, and inbox panels). See
 [design/walkthrough-panel-resize-fix.md](design/walkthrough-panel-resize-fix.md)
 for the root-cause analysis and the corrected design.
@@ -1124,16 +1124,16 @@ Coverage is split across unit, API E2E, and browser E2E tests:
 
 - YAML schema validation and YAML-to-card mapping (`src/shared/pr-walkthrough/yaml-to-cards.ts`);
 - read-only command policy and durable walkthrough tool metadata;
-- pack-store delete/deletePrefix, scoped review quotas, emergency quota ceiling, and structured Host API errors (`tests/extension-host-pack-store.test.ts`, `tests/extension-host-server-host-api.test.ts`, `tests/client-host-api.spec.ts`);
-- durable route behavior: review-scoped run writes, chunk idempotency, finalization, compatibility conflicts, final-payload authorization, and trusted metadata overlay (`tests/pr-walkthrough-durable-routes.test.ts`);
-- lifecycle provider behavior: durable progress prompt block, bounded compaction checkpoint, and shutdown cleanup of review-scoped plus tied legacy keys (`tests/pr-walkthrough-lifecycle-provider.test.ts`);
-- session-list synchronization: visible session creation emits `session_created` or `sessions_changed` before the polling fallback (`tests/e2e/session-created-sync.spec.ts`), and the mobile landing page keeps an authenticated `/ws/viewer` listener that refreshes the session list without creating a `RemoteAgent` (`tests/e2e/ui/session-created-push-sync.spec.ts`);
-- the isolated reviewer child: `run` mints a `host-agents` / `pr-reviewer` read-only child with the `magnifier` accessory and the `PR Walkthrough` session title and the owner's agent is never prompted, the reviewer receives the durable PR Walkthrough toolset, always-fresh launch (two `run` calls for the same PR → two distinct reviewers), and owner-gone cascade cleanup (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
+- pack-store delete/deletePrefix, scoped review quotas, emergency quota ceiling, and structured Host API errors (`tests/unit/core/extension-host-pack-store.unit.test.ts`, `tests/unit/core/extension-host-server-host-api.unit.test.ts`, `tests/dom/client-host-api.dom.test.ts`);
+- durable route behavior: review-scoped run writes, chunk idempotency, finalization, compatibility conflicts, final-payload authorization, and trusted metadata overlay (`tests/unit/core/pr-walkthrough-durable-routes.unit.test.ts`);
+- lifecycle provider behavior: durable progress prompt block, bounded compaction checkpoint, and shutdown cleanup of review-scoped plus tied legacy keys (`tests/unit/core/pr-walkthrough-lifecycle-provider.unit.test.ts`);
+- session-list synchronization: visible session creation emits `session_created` or `sessions_changed` before the polling fallback (`tests/integration/gateway/session-created-sync.gateway.test.ts`), and the mobile landing page keeps an authenticated `/ws/viewer` listener that refreshes the session list without creating a `RemoteAgent` (`tests/browser/journeys/ui/session-created-push-sync.journey.spec.ts`);
+- the isolated reviewer child: `run` mints a `host-agents` / `pr-reviewer` read-only child with the `magnifier` accessory and the `PR Walkthrough` session title and the owner's agent is never prompted, the reviewer receives the durable PR Walkthrough toolset, always-fresh launch (two `run` calls for the same PR → two distinct reviewers), and owner-gone cascade cleanup (`tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts`);
 - binding-routed chunk/finalize/bundle authorization by `X-Bobbit-Session-Secret` (no submit proof anywhere in the tree), and submission/validation behavior;
 - the agent-side resolve/export routes;
-- the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the PR Walkthrough tools and its system prompt carries the chunk/finalization guidance, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + prompt across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after finalization the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/pr-walkthrough-host-agents.spec.ts`);
-- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR launcher feedback from the session menu (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards after finalization, surviving reload via the child-self `recover`, and showing bounded draft/missing/quota/schema states; plus explicit export confirmation (`tests/e2e/ui/pr-walkthrough-pack.spec.ts`, `tests/pr-walkthrough-panel-parity.spec.ts`);
-- pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, split/inline diff rendering including meaningful-only `.diff-word` intraline highlights, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/pr-walkthrough-panel-parity.spec.ts`);
+- the isolated reviewer child at the API level: the spawned reviewer's tool **guard** blocks none of the PR Walkthrough tools and its system prompt carries the chunk/finalization guidance, a restored reviewer re-resolves the pack role cascade-first (keeping its tools + prompt across a gateway restart), `status`/`recover` authorize from the **child side** (`isChild`) with right-job routing preserved (a foreign session is rejected), and after finalization the reviewer is **not** dismissed — it stays a live, selectable session that survives a simulated gateway restart (no `childTerminal` marker) until the user-facing terminate control archives it (`tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts`);
+- browser behavior for the pack-served viewer at `#/ext/pr-walkthrough` — the built-in-band pack resolution, spawn-on-click launchers, concrete tool/entrypoint activation toggles, no-PR launcher feedback from the session menu (no session, no view switch), the **child-session pane** auto-opening in the pending `PR Walkthrough: In Progress` + spinner state with **no** Run/Load buttons, rendering ready cards after finalization, surviving reload via the child-self `recover`, and showing bounded draft/missing/quota/schema states; plus explicit export confirmation (`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`, `tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts`);
+- pack-panel shell parity with the prototype/reference UX: pending state, compact 58px-class header/stats/link/progress, single labelled/collapsed/resizable rail, container-based narrow collapse, guided orientation rail/card flow, compact cards, split/inline diff rendering including meaningful-only `.diff-word` intraline highlights, line/card comment workflows, `Prev` / `Like` / `Dislike` auto-advance, persisted reviewer state, audit draft, and export-preview unavailable/copy semantics (`tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts`);
 - panel sizing: user-initiated fullscreen/collapse via the shared preview-panel toolbar and shortcuts, no auto-fullscreen on ready, persistence across reload, while keeping its internal rail toggle (see [Panel sizing](#panel-sizing-fullscreen-collapse-and-shortcuts));
 - compatibility resolver coverage for local SHA resolution, stored payload reload, large diff warnings, empty diffs, GitHub errors, and export mapping.
 
@@ -1146,7 +1146,7 @@ shared host behavior changed:
 
 ```bash
 npm run build:packs
-npx playwright test --config tests/playwright.config.ts tests/pr-walkthrough-panel-parity.spec.ts
+npx playwright test --config playwright-e2e.config.ts --project=browser tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts
 npm run test:unit
 npm run test:e2e
 ```

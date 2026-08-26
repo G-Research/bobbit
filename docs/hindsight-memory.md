@@ -202,7 +202,7 @@ list) rather than erroring.
 `market-packs/hindsight/src/hindsight-client.ts` is a thin, faithful mapping over the Hindsight
 HTTP API (`/v1/{namespace}/banks/{bank}/…`). Body shapes are mapped per the upstream `openapi.json`
 (Hindsight 0.8.x); see [the design doc §3](design/hindsight-pack-external.md) for the exact request
-and response mapping. Behaviour pinned by `tests/hindsight-client.test.ts`:
+and response mapping. Behaviour pinned by `tests/unit/core/hindsight-client.unit.test.ts`:
 
 - Every method arms an `AbortController` with `timeoutMs` (default 1500); an abort surfaces as
   `HindsightError{ kind: "timeout" }` thrown **within budget**.
@@ -217,19 +217,19 @@ and response mapping. Behaviour pinned by `tests/hindsight-client.test.ts`:
 
 | Test | Phase | What it pins |
 |---|---|---|
-| `tests/hindsight-client.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, namespace path-building (vs the in-process stub). |
-| `tests/hindsight-provider.test.ts` | unit | Dormancy (no URL ⇒ no client constructed), auto-tag taxonomy, `recallScope` filter, retry-queue retry + cap, block shape. |
-| `tests/e2e/hindsight-external.spec.ts` | E2E | sessionSetup + beforePrompt blocks appear; a turn retains on the stub with bank `bobbit` + correct tags; unhealthy ⇒ session unaffected + diagnostic + `status` unhealthy; recovery flushes the queue; per-project disable ⇒ no injection; persists across reload. |
-| `tests/manual-integration/hindsight-external.test.ts` | manual | Real local Hindsight round-trip. |
+| `tests/unit/core/hindsight-client.unit.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, namespace path-building (vs the in-process stub). |
+| `tests/unit/core/hindsight-provider.unit.test.ts` | unit | Dormancy (no URL ⇒ no client constructed), auto-tag taxonomy, `recallScope` filter, retry-queue retry + cap, block shape. |
+| `tests/integration/gateway/hindsight-external.gateway.test.ts` | E2E | sessionSetup + beforePrompt blocks appear; a turn retains on the stub with bank `bobbit` + correct tags; unhealthy ⇒ session unaffected + diagnostic + `status` unhealthy; recovery flushes the queue; per-project disable ⇒ no injection; persists across reload. |
+| `tests/manual/hindsight-external.manual.spec.ts` | manual | Real local Hindsight round-trip. |
 
-The shared in-process stub `tests/e2e/hindsight-stub.mjs` (`startHindsightStub`) backs the
+The shared in-process stub `tests/e2e/_helpers/hindsight-stub.mjs` (`startHindsightStub`) backs the
 automated tests deterministically — no network. It records every call, serves seeded memories
 filtered by request tags, records retained items, and `setHealthy(false)` flips `/health` to 503 so
 the provider's skip/queue paths are exercised.
 
 ### Manual integration against a real Hindsight
 
-`tests/manual-integration/hindsight-external.test.ts` talks directly to a running Hindsight over
+`tests/manual/hindsight-external.manual.spec.ts` talks directly to a running Hindsight over
 HTTP (no Bobbit gateway) and exercises `ensureBank → retain → recall`, polling up to ~30 s to
 tolerate Hindsight's asynchronous fact-extraction pipeline. It **skips cleanly** (never fails) when
 the health probe shows Hindsight is unreachable, so the manual suite stays green on machines
@@ -245,7 +245,7 @@ Environment:
 | `HINDSIGHT_API_KEY` | — | Optional bearer token; sent only when set. |
 
 ```bash
-npm run build && node --import tsx --test tests/manual-integration/hindsight-external.test.ts
+npm run test:manual -- tests/manual/hindsight-external.manual.spec.ts
 ```
 
 ## Build & packaging

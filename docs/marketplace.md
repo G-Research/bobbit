@@ -653,7 +653,7 @@ Built-in packs appear in the **Installed** tab in their own *Built-in (shipped)*
 
 Disabled pack tools can still appear in persisted role/session allowlists, especially after a shipped pack moves from enabled to `defaultDisabled: true` or an admin disables a pack/entity in Market. During session activation, Bobbit classifies these as **known inactive pack contributions** when the tool name still exists in an inactive marketplace or built-in pack root. They are skipped quietly: no warn-level `has no provider` block is emitted, and the optional diagnostic is a deduped `console.debug` with the tool name, reason, scope, and source/root path.
 
-Genuine unknown YAML tool names are different. If no active provider exists and the name is not known from an inactive pack contribution, Bobbit still warns once per process and scope with `reason=unknown-yaml-tool`; this keeps typos in role/session allowlists visible without repeating on every spawn. `tests2/core/tool-activation-mcp-warn.test.ts` pins both sides: inactive PR Walkthrough tools stay quiet, while an unknown YAML typo warns exactly once.
+Genuine unknown YAML tool names are different. If no active provider exists and the name is not known from an inactive pack contribution, Bobbit still warns once per process and scope with `reason=unknown-yaml-tool`; this keeps typos in role/session allowlists visible without repeating on every spawn. `tests/unit/core/tool-activation-mcp-warn.unit.test.ts` pins both sides: inactive PR Walkthrough tools stay quiet, while an unknown YAML typo warns exactly once.
 
 ### Same-name user override (shadowing)
 

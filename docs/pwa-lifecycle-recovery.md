@@ -192,7 +192,7 @@ Automated tests use the real lifecycle module with injected clocks and browser
 signals. They assert decisions and callback counts; they do not use battery
 runtime or cross-machine timing thresholds.
 
-- **DOM lifecycle coverage** — `tests2/dom/pwa-lifecycle.test.ts` imports the
+- **DOM lifecycle coverage** — `tests/dom/pwa-lifecycle.dom.test.ts` imports the
   real `shouldReloadOnResume()` and pins cooldown precedence and boundaries,
   dead bootstrap, healthy and stalled long resumes, quick suspend, and missing
   hidden timestamp. Its fake rAF/timer harness also pins zero work on visible
@@ -200,7 +200,7 @@ runtime or cross-machine timing thresholds.
   generation isolation under force-delivered stale callbacks; one guarded
   reload; and no later work after the module reload guard trips.
 - **Browser lifecycle coverage** —
-  `tests2/browser/fixtures/pwa-lifecycle.spec.ts` injects standalone mode before
+  `tests/browser/fixtures/pwa-lifecycle.fixture.spec.ts` injects standalone mode before
   app scripts run and observes reload requests through
   `window.__bobbitReloadHook`. It covers persisted `pageshow`, same-instance and
   real-reload cooldown, non-standalone gating, quick visibility recovery,

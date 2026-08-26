@@ -53,7 +53,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Textarea wraps the text and grows vertically to fit (CSS `field-sizing: content`).
    - No horizontal scrollbar appears.
 
-**Coverage:** covered (message-editor-send.spec.ts, message-editor-arrows.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/message-editor-send.fixture.spec.ts, tests/dom/message-editor-arrows.dom.test.ts)
 
 ---
 
@@ -86,7 +86,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 11. ArrowUp only activates when the cursor is on the top visual row of the textarea. If the textarea has multiple lines and the cursor is on line 2, ArrowUp moves the cursor up normally (default textarea behavior).
 12. ArrowDown only activates when the cursor is on the bottom visual row of the textarea. Same principle as above.
 
-**Coverage:** covered (command-history.spec.ts, message-editor-arrows.spec.ts)
+**Coverage:** covered (tests/dom/command-history.dom.test.ts, tests/dom/message-editor-arrows.dom.test.ts)
 
 ---
 
@@ -115,7 +115,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Session B's draft includes both "draft B" text and the attachment tile.
    - Attachments are part of the draft and are preserved.
 
-**Coverage:** covered (message-editor-queue.spec.ts, draft-api.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts, tests/integration/gateway/draft-api.gateway.test.ts)
 
 ---
 
@@ -148,7 +148,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Menu does NOT appear. Only "/" preceded by whitespace or at position 0 triggers autocomplete.
 9. Menu has a max height (~192px) and scrolls if many skills are available.
 
-**Coverage:** covered (message-editor-slash.spec.ts, slash-skill-e2e.spec.ts)
+**Coverage:** covered (tests/dom/message-editor-slash.dom.test.ts, tests/integration/gateway/slash-skill-e2e.gateway.test.ts)
 
 ---
 
@@ -185,7 +185,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - The paperclip button is replaced by a spinning loader icon.
    - Send button is disabled until processing completes.
 
-**Coverage:** covered (message-editor-attach.spec.ts — button flow, limits, tiles)
+**Coverage:** covered (tests/browser/fixtures/message-editor-attach.fixture.spec.ts — button flow, limits, tiles)
 
 ---
 
@@ -208,7 +208,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 6. Drag a queued message pill (see PI-12) — the "Drop files here" overlay does NOT appear.
    - File drop overlay only triggers for external file drags, not internal pill reordering.
 
-**Coverage:** covered (message-editor-attach.spec.ts — drag-drop, overlay, limits)
+**Coverage:** covered (tests/browser/fixtures/message-editor-attach.fixture.spec.ts — drag-drop, overlay, limits)
 
 ---
 
@@ -231,7 +231,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 6. Paste multiple images (if clipboard supports it).
    - Each image becomes a separate attachment tile.
 
-**Coverage:** covered (message-editor-attach.spec.ts — paste, edge cases, limits)
+**Coverage:** covered (tests/browser/fixtures/message-editor-attach.fixture.spec.ts — paste, edge cases, limits)
 
 ---
 
@@ -263,7 +263,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Other errors stop recognition and reset the button state.
 7. Hardware Copilot key support: pressing F13 (remapped via PowerToys from Win+Shift+F23) starts recognition; releasing F13 stops it (push-to-talk mode).
 
-**Coverage:** covered (voice-input.spec.ts — mocked SpeechRecognition, F13, errors, restart)
+**Coverage:** covered (tests/dom/voice-input.dom.test.ts — mocked SpeechRecognition, F13, errors, restart)
 
 ---
 
@@ -288,7 +288,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - The agent continues incorporating the steer content.
 4. Both the partial response, the steer, and the new response are visible in chat in chronological order.
 
-**Coverage:** covered (steer-midturn.spec.ts API — steer_queued mid-turn delivery, queue-ui.spec.ts E2E, message-editor-queue.spec.ts unit)
+**Coverage:** covered (tests/integration/gateway/steer-midturn.gateway.test.ts API — steer_queued mid-turn delivery, tests/browser/journeys/ui/queue-ui.journey.spec.ts E2E, tests/browser/fixtures/message-editor-queue.fixture.spec.ts unit)
 
 ---
 
@@ -313,7 +313,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - No steers are dropped or lost.
 6. Chat shows the correct chronological order: partial agent response, steer 1, steer 2, then the agent's new response.
 
-**Coverage:** covered (steer-midturn.spec.ts API, queue-ui.spec.ts E2E, queue-dispatch.spec.ts unit — batch steer delivery)
+**Coverage:** covered (tests/integration/gateway/steer-midturn.gateway.test.ts API, tests/browser/journeys/ui/queue-ui.journey.spec.ts E2E, tests/dom/queue-dispatch.dom.test.ts unit — batch steer delivery)
 
 ---
 
@@ -335,7 +335,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Second queued message is dispatched next. Messages execute in order.
 5. Queue count is reflected in the pill list (visual count of remaining pills).
 
-**Coverage:** covered (queue-ui.spec.ts E2E, queue-dispatch.spec.ts unit, message-editor-queue.spec.ts)
+**Coverage:** covered (tests/browser/journeys/ui/queue-ui.journey.spec.ts E2E, tests/dom/queue-dispatch.dom.test.ts unit, tests/browser/fixtures/message-editor-queue.fixture.spec.ts)
 
 ---
 
@@ -358,7 +358,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 5. Drag a pill and drop it on itself (no-op).
    - Nothing changes. No reorder event fires.
 
-**Coverage:** covered (message-editor-queue.spec.ts — drag reorder with pill DnD)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts — drag reorder with pill DnD)
 
 ---
 
@@ -378,7 +378,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - No orphaned message — the user chose to discard it.
 4. Steer pills that have been dispatched (showing "Sent") do not have an Edit button.
 
-**Coverage:** covered (message-editor-queue.spec.ts, queue-ui.spec.ts E2E — edit pill flow)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts, tests/browser/journeys/ui/queue-ui.journey.spec.ts E2E — edit pill flow)
 
 ---
 
@@ -395,7 +395,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Queue area collapses (no empty container visible).
 3. Dispatched steer pills (showing "Sent") do not have a Remove button.
 
-**Coverage:** covered (message-editor-queue.spec.ts — remove button fires callback)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts — remove button fires callback)
 
 ---
 
@@ -418,7 +418,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - The selected model persists (stored server-side on the session).
 5. If many models are available, a search/filter input is present in the dropdown.
 
-**Coverage:** covered (model-thinking-selectors.spec.ts — button display, click, visibility toggle)
+**Coverage:** covered (tests/dom/model-thinking-selectors.dom.test.ts — button display, click, visibility toggle)
 
 ---
 
@@ -440,7 +440,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 5. Setting persists for the session (survives page reload).
 6. If the model does not support thinking, the thinking control is hidden or disabled.
 
-**Coverage:** covered (model-thinking-selectors.spec.ts — levels, onChange, visibility, reasoning gate)
+**Coverage:** covered (tests/dom/model-thinking-selectors.dom.test.ts — levels, onChange, visibility, reasoning gate)
 
 ---
 
@@ -460,7 +460,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 5. When context is near-full (e.g. >90%), a visible warning is displayed.
 6. Context percentage is session-specific — switching sessions shows the other session's usage.
 
-**Coverage:** covered (context-cost-stats.spec.ts — bar fill, thresholds, tooltip, stale state)
+**Coverage:** covered (tests/dom/context-cost-stats.dom.test.ts — bar fill, thresholds, tooltip, stale state)
 
 ---
 
@@ -480,7 +480,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 5. Cost is session-specific — switching sessions shows the other session's cost.
 6. Cost persists across page reload (server-side value).
 
-**Coverage:** covered (context-cost-stats.spec.ts — dollar formatting, popover toggle, breakdown)
+**Coverage:** covered (tests/dom/context-cost-stats.dom.test.ts — dollar formatting, popover toggle, breakdown)
 
 ---
 
@@ -501,7 +501,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 5. When a branch has been merged into the primary branch, a "merged" indicator is visible.
 6. Git status is session-specific (each session may have its own worktree/branch).
 
-**Coverage:** covered (git-status-interactions.spec.ts — expand/collapse, files, PR, events, badges)
+**Coverage:** covered (tests/dom/git-status-interactions.dom.test.ts — expand/collapse, files, PR, events, badges)
 
 ---
 
@@ -523,7 +523,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 6. Kill action is available directly from the pill (click to expand, then kill).
 7. Process pills are session-specific — switching sessions shows only that session's processes.
 
-**Coverage:** covered (bg-process-states.spec.ts — running/exited, logs, kill, dismiss, close)
+**Coverage:** covered (tests/dom/bg-process-states.dom.test.ts — running/exited, logs, kill, dismiss, close)
 
 ---
 
@@ -547,7 +547,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Agent turn is aborted. An empty or minimal partial response may appear.
    - Textarea re-enables. Can send again.
 
-**Coverage:** covered (abort-and-focus.spec.ts — stop button, Escape, onAbort callback)
+**Coverage:** covered (tests/dom/abort-and-focus.dom.test.ts — stop button, Escape, onAbort callback)
 
 ---
 
@@ -569,7 +569,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Stats bar adapts — less critical items may hide or move to overflow.
    - Core items (model, cost) remain visible.
 
-**Coverage:** covered (context-cost-stats.spec.ts — composite stats bar, reactive updates)
+**Coverage:** covered (tests/dom/context-cost-stats.dom.test.ts — composite stats bar, reactive updates)
 
 ---
 
@@ -593,7 +593,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Textarea focus is not stolen. User can still type in the textarea.
    - Clicking in the review document moves focus to the document. Clicking back in the textarea restores focus there.
 
-**Coverage:** covered (abort-and-focus.spec.ts — auto-focus, focus after send, persistence)
+**Coverage:** covered (tests/dom/abort-and-focus.dom.test.ts — auto-focus, focus after send, persistence)
 
 ---
 
@@ -634,7 +634,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
     - Agent processes Q2 and responds.
 12. All queue pills are now consumed. Textarea is ready for new input.
 
-**Coverage:** tests/queue-dispatch.spec.ts
+**Coverage:** tests/dom/queue-dispatch.dom.test.ts
 
 > **Implementation note:** There are two distinct steer paths, and PI-25 covers only the first:
 >
@@ -663,7 +663,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - `drainQueue()` picks it up and delivers it as a fresh user turn.
    - A user `message_end` with text "S_DIRECT" is emitted **after** the abort's `agent_end`, and the agent begins a new turn responding to it — without the user having to resend.
 
-**Coverage:** `tests/e2e/abort-status-e2e.spec.ts` — "PI-25b: live-steer (direct) survives abort and is delivered as next user turn".
+**Coverage:** `tests/integration/gateway/abort-status-e2e.gateway.test.ts` — "PI-25b: live-steer (direct) survives abort and is delivered as next user turn".
 
 > **Contrast with PI-25:** PI-25 covers the `steer_queued` promotion path, where the message was already in `promptQueue` before the user asked to steer it. PI-25b covers the direct `{type:"steer", text}` WS path where the server must itself insert the row into `promptQueue` (inside `deliverLiveSteer`) for abort-resilience.
 
@@ -684,7 +684,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Observed order in the transcript: user `message_end` "S_DIRECT" → agent turn → user `message_end` "FOLLOWUP" → agent turn.
 6. All pills are consumed. Textarea is ready for new input.
 
-**Coverage:** `tests/e2e/abort-status-e2e.spec.ts` — "PI-25c: live-steer + followup during aborting window preserves order".
+**Coverage:** `tests/integration/gateway/abort-status-e2e.gateway.test.ts` — "PI-25c: live-steer + followup during aborting window preserves order".
 
 ---
 
@@ -704,7 +704,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Draft should still be present.
    - **Suspected:** draft is missing because the race condition persisted the empty state.
 
-**Coverage:** tests/draft-persistence.spec.ts
+**Coverage:** tests/browser/journeys/ui/stories-drafts.journey.spec.ts
 
 ---
 
@@ -723,7 +723,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Wait 2 seconds. Check textarea.
    - Draft should still be there.
 
-**Coverage:** tests/draft-persistence.spec.ts
+**Coverage:** tests/browser/journeys/ui/stories-drafts.journey.spec.ts
 
 ---
 
@@ -758,7 +758,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
    - Queue should be re-broadcast on WS reconnection (check if `queue_update` is sent in the `connect` handler).
 4. Agent finishes. Queued messages drain in order.
 
-**Coverage:** verified not-a-bug — queue_update sent on WS reconnect (handler.ts:195), existing E2E in tests/e2e/queue-e2e.spec.ts
+**Coverage:** verified not-a-bug — queue_update sent on WS reconnect (handler.ts:195), existing E2E in tests/integration/gateway/queue-e2e.gateway.test.ts
 
 ---
 
@@ -796,7 +796,7 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Send a new message.
    - Agent responds normally (process was restarted).
 
-**Coverage:** tests/queue-dispatch.spec.ts
+**Coverage:** tests/dom/queue-dispatch.dom.test.ts
 
 ---
 
@@ -853,4 +853,4 @@ The prompt area and context bar are the most-used parts of the UI. These stories
 3. Without clicking anything, start typing.
    - Characters should appear in the message editor textarea.
 
-**Coverage:** tests/review-annotation-focus.spec.ts
+**Coverage:** no direct canonical regression test currently covers Escape-to-composer focus restoration. The annotation popover itself is exercised by `tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts`.

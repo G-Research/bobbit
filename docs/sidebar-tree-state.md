@@ -156,17 +156,17 @@ Focused checks for tree-state work:
 ```bash
 npm run check
 npm run test:unit
-npx playwright test tests/e2e/ui/sidebar-unified-tree.spec.ts tests/e2e/ui/sidebar-tree-restart.spec.ts --reporter=line
-npx playwright test tests/e2e/ui/sidebar-indent.spec.ts tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts --reporter=line
+npm run test:browser -- tests/browser/journeys/ui/sidebar-unified-tree.journey.spec.ts tests/browser/journeys/ui/sidebar-tree-restart.journey.spec.ts tests/browser/fixtures/sidebar-indent.fixture.spec.ts
+npm run test:unit -- tests/dom/sidebar-archived-delegates.dom.test.ts
 ```
 
 Relevant coverage:
 
-- `tests/sidebar-tree-state.test.ts` — defaults, explicit preference precedence, legacy migration, corrupted storage, automatic expansion safeguards, and archived reset behavior.
-- `tests/sidebar-tree-builder.test.ts` — stable keys, hierarchy, session-child classes, duplicate spawned-child prevention, and layout metadata.
-- `tests/sidebar-tree-layout.test.ts` — indentation clamping, save/reset, throwing storage, CSS variable application, and collapsed-indent derivation.
-- `tests/api-sidebar-expansion-regression.test.ts` — refresh/create auto-expansion and collapsed parent/sub-goal regressions.
-- `tests/e2e/ui/sidebar-unified-tree.spec.ts` — representative desktop tree behavior, canonical key attributes, and keyboard expansion.
-- `tests/e2e/ui/sidebar-tree-restart.spec.ts` — persistence across gateway restart and reload.
-- `tests/e2e/ui/sidebar-indent.spec.ts` — settings UI, persistence, reset, clamping, and overflow checks.
-- `tests/ui-fixtures/sidebar-filter-search-fixture.spec.ts` — search retention and ephemeral expansion behavior.
+- `tests/unit/core/sidebar-tree-state.unit.test.ts` — defaults, explicit preference precedence, legacy migration, corrupted storage, automatic expansion safeguards, and archived reset behavior.
+- `tests/unit/core/sidebar-tree-builder.unit.test.ts` — stable keys, hierarchy, session-child classes, duplicate spawned-child prevention, and layout metadata.
+- `tests/unit/core/sidebar-tree-layout.unit.test.ts` — indentation clamping, save/reset, throwing storage, CSS variable application, and collapsed-indent derivation.
+- `tests/unit/core/api-sidebar-expansion-regression.unit.test.ts` — refresh/create auto-expansion and collapsed parent/sub-goal regressions.
+- `tests/browser/journeys/ui/sidebar-unified-tree.journey.spec.ts` — representative desktop tree behavior, canonical key attributes, and keyboard expansion.
+- `tests/browser/journeys/ui/sidebar-tree-restart.journey.spec.ts` — persistence across gateway restart and reload.
+- `tests/browser/fixtures/sidebar-indent.fixture.spec.ts` — settings UI, persistence, reset, clamping, and overflow checks.
+- `tests/browser/fixtures/sidebar-filter-search-fixture.fixture.spec.ts` — search retention and ephemeral expansion behavior.

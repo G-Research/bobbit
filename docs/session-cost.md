@@ -71,10 +71,10 @@ The first frame primes `RemoteAgent.state.serverCost` before the reduced transcr
 
 Relevant tests pin the behavior:
 
-- `tests/context-cost-stats.spec.ts` — fixture-level UI coverage that visible-message cost alone is hidden, and `serverCost` wins in the footer and session stats popover.
-- `tests/e2e/compact-cost-ws.spec.ts` — WebSocket/API coverage for active attach, `get_state`, resume fallback, archived attach/state, no-cost sessions, and `refreshAfterCompaction()` cost-before-messages ordering.
-- `tests/e2e/ui/compact-cost.spec.ts` — browser regression that seeds persisted cumulative cost, shrinks the visible transcript with a compaction-like refresh, and verifies the footer, context popover, and session cost API agree.
-- `tests/cost-tracker.test.ts` — persistence and accumulation coverage for `CostTracker` itself.
+- `tests/dom/context-cost-stats.dom.test.ts` — fixture-level UI coverage that visible-message cost alone is hidden, and `serverCost` wins in the footer and session stats popover.
+- `tests/integration/gateway/compact-cost-ws.gateway.test.ts` — WebSocket/API coverage for active attach, `get_state`, resume fallback, archived attach/state, no-cost sessions, and `refreshAfterCompaction()` cost-before-messages ordering.
+- `tests/browser/journeys/ui/compact-cost.journey.spec.ts` — browser regression that seeds persisted cumulative cost, shrinks the visible transcript with a compaction-like refresh, and verifies the footer, context popover, and session cost API agree.
+- `tests/unit/core/cost-tracker.unit.test.ts` — persistence and accumulation coverage for `CostTracker` itself.
 
 ## Implementation map
 

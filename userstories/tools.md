@@ -28,7 +28,7 @@ The tools page lets users browse, configure, and control every capability availa
    - Switching scope reloads the tool list for that context. All groups re-collapse on scope change.
 7. With only one project registered, no scope selector appears.
 
-**Coverage:** partial — tools list renders in E2E (`tools-e2e.spec.ts`) but grouping, badges, collapse state, and multi-project scope are not validated
+**Coverage:** partial — tools list renders in E2E (`tests/integration/gateway/tools-e2e.gateway.test.ts`) but grouping, badges, collapse state, and multi-project scope are not validated
 
 ---
 
@@ -56,7 +56,7 @@ The tools page lets users browse, configure, and control every capability availa
 8. Click the back arrow from the edit view.
    - Returns to the tool list. Group collapse state is preserved.
 
-**Coverage:** API only — `tool-policy.spec.ts` and `tools-cascade.spec.ts` test policy resolution; no browser E2E for the edit page
+**Coverage:** API only — `tests/integration/gateway/tool-policy.gateway.test.ts` and `tests/integration/gateway/tools-cascade.gateway.test.ts` test policy resolution; no browser E2E for the edit page
 
 ---
 
@@ -82,7 +82,7 @@ The tools page lets users browse, configure, and control every capability availa
 8. Change the group policy back to "Allow (default)".
    - Tools resolve to allow again for new sessions.
 
-**Coverage:** API only — `tool-policy.spec.ts` covers resolution logic; `tools-cascade.spec.ts` covers cascade; no browser E2E for group policy dropdown
+**Coverage:** API only — `tests/integration/gateway/tool-policy.gateway.test.ts` covers resolution logic; `tests/integration/gateway/tools-cascade.gateway.test.ts` covers cascade; no browser E2E for group policy dropdown
 
 ---
 
@@ -110,7 +110,7 @@ The tools page lets users browse, configure, and control every capability availa
 7. Dismiss the dialog by clicking outside it or pressing Escape.
    - The dialog closes. The tool invocation is denied (same as clicking "Deny").
 
-**Coverage:** covered — `tool-ask-policy.spec.ts` (UI dialog flow), `tool-guard-ask-policy.spec.ts` (API permission flow with guard files)
+**Coverage:** covered — `tests/browser/journeys/ui/tool-ask-policy.journey.spec.ts` (UI dialog flow), `tests/integration/gateway/tool-guard-ask-policy.gateway.test.ts` (API permission flow with guard files)
 
 ---
 
@@ -137,7 +137,7 @@ The tools page lets users browse, configure, and control every capability availa
 7. Remove the MCP server configuration and reload the Tools page.
    - The MCP group disappears. Tools from that server are no longer available.
 
-**Coverage:** partial — `mcp-integration.spec.ts` tests MCP server connection; `mcp-unit.spec.ts` tests schema conversion; multi-project MCP scope not covered
+**Coverage:** partial — `tests/e2e/api/mcp-integration.api-e2e.spec.ts` tests MCP server connection; `tests/dom/mcp-unit.dom.test.ts` tests schema conversion; multi-project MCP scope not covered
 
 ---
 
@@ -191,4 +191,4 @@ The tools page lets users browse, configure, and control every capability availa
 7. During tool execution, the tool card shows a loading/in-progress indicator.
    - Once the tool completes, the indicator is replaced by the result.
 
-**Coverage:** API-level — tool execution events tested via API (`tools-e2e.spec.ts`); `tool-docs-prompt.test.ts` tests tool docs generation; no browser E2E for visual tool card rendering
+**Coverage:** API-level — tool execution events tested via API (`tests/integration/gateway/tools-e2e.gateway.test.ts`); `tests/unit/core/tool-docs-prompt.unit.test.ts` tests tool docs generation; no browser E2E for visual tool card rendering

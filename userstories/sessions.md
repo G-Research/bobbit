@@ -30,7 +30,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - The setup command runs automatically in the new worktree.
    - Session becomes usable after setup completes (no premature prompt delivery).
 
-**Coverage:** covered (session-interactions.spec.ts — create+send+response; session-worktree.spec.ts — worktree creation)
+**Coverage:** covered (tests/browser/journeys/session-interactions.journey.spec.ts — create+send+response; tests/unit/core/session-worktree.unit.test.ts — worktree creation)
 
 ---
 
@@ -58,7 +58,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
 6. Press Enter with only whitespace.
    - Nothing happens. Whitespace-only messages are not sent.
 
-**Coverage:** covered (session-interactions.spec.ts — create+send+response)
+**Coverage:** covered (tests/browser/journeys/session-interactions.journey.spec.ts — create+send+response)
 
 ---
 
@@ -85,7 +85,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
 8. Switch away and back to session A.
    - Textarea is empty — sent message does not reappear as a draft.
 
-**Coverage:** covered (message-editor-queue.spec.ts, draft-api.spec.ts — draft save/load/clear, per-session isolation)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts, tests/integration/gateway/draft-api.gateway.test.ts — draft save/load/clear, per-session isolation)
 
 ---
 
@@ -112,7 +112,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - View switches to the landing/dashboard.
    - The "+" button is still available to create a new session.
 
-**Coverage:** covered (session-interactions.spec.ts — terminate+cleanup)
+**Coverage:** covered (tests/browser/journeys/session-interactions.journey.spec.ts — terminate+cleanup)
 
 ---
 
@@ -141,7 +141,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - If session A had a draft, it reappears. If not, textarea is empty.
    - Textarea is focused and ready for input.
 
-**Coverage:** covered (session-interactions.spec.ts — switch via sidebar)
+**Coverage:** covered (tests/browser/journeys/session-interactions.journey.spec.ts — switch via sidebar)
 
 ---
 
@@ -166,7 +166,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - Session C loads correctly with its own messages.
    - No flicker of session D's content.
 
-**Coverage:** covered (session-interactions.spec.ts — switch via sidebar; rapid switching is an edge case of the same flow)
+**Coverage:** covered (tests/browser/journeys/session-interactions.journey.spec.ts — switch via sidebar; rapid switching is an edge case of the same flow)
 
 ---
 
@@ -193,7 +193,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - Model name matches the pre-reload selection.
    - Cost reflects the cumulative session cost (not reset to $0.00).
 
-**Coverage:** covered (session-interactions.spec.ts — session survives reload)
+**Coverage:** covered (tests/browser/journeys/session-interactions.journey.spec.ts — session survives reload)
 
 ---
 
@@ -221,7 +221,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - The file is created inside the worktree, not in the primary project directory.
    - Git status widget updates to show the new untracked file.
 
-**Coverage:** covered (session-worktree.spec.ts — worktree creation)
+**Coverage:** covered (tests/unit/core/session-worktree.unit.test.ts — worktree creation)
 
 ---
 
@@ -273,7 +273,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
 6. Send another message after reload.
    - Agent continues to use "Claude Opus 4".
 
-**Coverage:** covered (prompt-stats-e2e.spec.ts — model persistence across reconnect)
+**Coverage:** covered (tests/browser/journeys/ui/prompt-stats-e2e.journey.spec.ts — model persistence across reconnect)
 
 ---
 
@@ -302,7 +302,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - UI transitions through an "aborting" state, then settles to idle.
    - No ghost "streaming" indicator persists after the abort completes.
 
-**Coverage:** covered (abort-and-focus.spec.ts — stop button, Escape, onAbort callback)
+**Coverage:** covered (tests/dom/abort-and-focus.dom.test.ts — stop button, Escape, onAbort callback)
 
 ---
 
@@ -337,7 +337,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - After the agent responds, the next queued message auto-dispatches.
    - Queue drains in order until empty.
 
-**Coverage:** covered (message-editor-queue.spec.ts — pills, reorder, remove, edit; queue-ui.spec.ts E2E — steer, drain)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts — pills, reorder, remove, edit; tests/browser/journeys/ui/queue-ui.journey.spec.ts E2E — steer, drain)
 
 ---
 
@@ -367,7 +367,7 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - Dialog closes. Tool executes.
    - The tool's policy is permanently changed to `allow` — no future prompts in any session.
 
-**Coverage:** covered (tool-ask-policy.spec.ts, tool-guard-ask-policy.spec.ts — permission dialog, allow/deny flows)
+**Coverage:** covered (tests/browser/journeys/ui/tool-ask-policy.journey.spec.ts, tests/integration/gateway/tool-guard-ask-policy.gateway.test.ts — permission dialog, allow/deny flows)
 
 ---
 
@@ -398,4 +398,4 @@ Session lifecycle covers creation, switching, persistence, worktrees, terminatio
    - Git status widget shows the correct branch.
    - Files created before the crash are still present in the worktree.
 
-**Coverage:** covered (manual-integration/session-resilience.spec.ts — crash/restart recovery)
+**Coverage:** covered (manual-integration/tests/manual/session-resilience.manual.spec.ts — crash/restart recovery)

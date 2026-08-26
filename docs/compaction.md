@@ -185,7 +185,7 @@ uses a fixed id, `COMPACTION_ACTIVE_ID = "compact_active"` (exported from
 `compaction-result` cases both filter out any prior row with that id
 before appending. Lit then diffs to the same DOM node, repainting only
 the card body — there is never a plaintext `"Compacting context…"` row
-in the transcript. Pinned by `tests2/core/message-reducer.test.ts` and `tests2/dom/ui-fixtures/compaction-widget.test.ts`.
+in the transcript. Pinned by `tests/unit/core/message-reducer.unit.test.ts` and `tests/dom/ui-fixtures/compaction-widget.dom.test.ts`.
 
 ### Overflow `tokensBefore` resolution
 
@@ -199,7 +199,7 @@ priority order — first non-null wins:
 4. `this._lastKnownContextTokens` — last-seen live count, kept current
    as the in-progress payload is built.
 
-This means `reductionPct` resolves for overflow as well. Pinned by `tests2/core/compaction-types.test.ts` and the reducer coverage.
+This means `reductionPct` resolves for overflow as well. Pinned by `tests/unit/core/compaction-types.unit.test.ts` and the reducer coverage.
 
 `schemaVersion: 1` is reserved for forward compatibility — bump it if a
 future renderer adds fields that older snapshots cannot supply.
@@ -275,20 +275,20 @@ position. The richer in-place upgrade helpers
 removed when the sidecar landed; the sidecar splice supplies a real
 structured row instead of trying to reconstruct one from text.
 
-Reducer invariants are pinned in `tests2/core/message-reducer.test.ts` and `message-reducer-dedup.test.ts`, including in-place lifecycle transition, overflow payload propagation, and live-versus-sidecar deduplication.
+Reducer invariants are pinned in `tests/unit/core/message-reducer.unit.test.ts` and `tests/unit/core/message-reducer-dedup.unit.test.ts`, including in-place lifecycle transition, overflow payload propagation, and live-versus-sidecar deduplication.
 
 ## Tests
 
 Deterministic CI coverage uses named runtime barriers rather than timing sleeps:
 
-- `tests2/core/reliable-compaction-release.test.ts` pins admission fencing, deferred error-recovery payload identity, guarded rejection rollback, and the single release owner across manual, threshold, overflow, failure, and Stop outcomes.
-- `tests2/core/session-manager-force-abort-grace.test.ts` pins graceful settlement replay plus hard-Stop settlement synthesis and interrupted-compaction finalization.
-- `tests2/core/pi-installed-contract.test.ts` pins Pi event order, `willRetry`, direct-prompt rejection during compaction, recoverable-length tail removal, and the one-retry cap.
-- `tests2/core/assistant-stream-session-broadcast.test.ts` pins invalidation-before-release ordering and one invalidation for the first recoverable tail.
-- `tests2/integration/reliable-intent-recovery.test.ts` exercises held compaction boundaries and visible outbox continuity through failure and recovery.
-- `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts` drives manual, threshold, overflow, Stop, reload, reconnect, and second-tab stories through the visible composer.
-- `tests2/dom/ui-fixtures/compaction-widget.test.ts`, `tests2/core/compaction-types.test.ts`, and `tests2/browser/e2e/pre-compaction-history.spec.ts` retain summary-card, payload, sidecar, affordance, and reload coverage.
-- `tests/manual-integration/reliable-agent-context-pressure.spec.ts` is the opt-in real Pi/real-model pressure smoke documented in [Pi runtime compatibility](pi-runtime-compatibility.md#real-model-context-pressure-smoke).
+- `tests/unit/core/reliable-compaction-release.unit.test.ts` pins admission fencing, deferred error-recovery payload identity, guarded rejection rollback, and the single release owner across manual, threshold, overflow, failure, and Stop outcomes.
+- `tests/unit/core/session-manager-force-abort-grace.unit.test.ts` pins graceful settlement replay plus hard-Stop settlement synthesis and interrupted-compaction finalization.
+- `tests/unit/core/pi-installed-contract.unit.test.ts` pins Pi event order, `willRetry`, direct-prompt rejection during compaction, recoverable-length tail removal, and the one-retry cap.
+- `tests/unit/core/assistant-stream-session-broadcast.unit.test.ts` pins invalidation-before-release ordering and one invalidation for the first recoverable tail.
+- `tests/integration/gateway/reliable-intent-recovery.gateway.test.ts` exercises held compaction boundaries and visible outbox continuity through failure and recovery.
+- `tests/browser/journeys/reliable-agent-turns.journey.spec.ts` drives manual, threshold, overflow, Stop, reload, reconnect, and second-tab stories through the visible composer.
+- `tests/dom/ui-fixtures/compaction-widget.dom.test.ts`, `tests/unit/core/compaction-types.unit.test.ts`, and `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` retain summary-card, payload, sidecar, affordance, and reload coverage.
+- `tests/manual/reliable-agent-context-pressure.manual.spec.ts` is the opt-in real Pi/real-model pressure smoke documented in [Pi runtime compatibility](pi-runtime-compatibility.md#real-model-context-pressure-smoke).
 
 ## Files
 
@@ -302,11 +302,11 @@ Deterministic CI coverage uses named runtime barriers rather than timing sleeps:
 | Live card carries server `compactionId`; pre-compaction affordance + count-probe retry | `src/app/remote-agent.ts`, `src/ui/components/PreCompactionHistory.ts` |
 | Renderer (three states + adjacent layout + overflow pill) | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` |
 | Renderer registration | `src/ui/tools/index.ts` — `__compaction_summary` |
-| Helper unit tests | `tests2/core/compaction-types.test.ts` |
-| Reducer unit tests | `tests2/core/message-reducer.test.ts`, `message-reducer-dedup.test.ts` |
-| Renderer lifecycle | `tests2/dom/ui-fixtures/compaction-widget.test.ts` |
-| Live sidecar/affordance browser E2E | `tests2/browser/e2e/pre-compaction-history.spec.ts` |
-| Compact-cost regressions | `tests2/integration/compact-cost-ws.test.ts`, `tests2/dom/context-cost-stats.test.ts` |
-| Reliable-turn compaction lifecycle | `tests2/core/reliable-compaction-release.test.ts`, `tests2/integration/reliable-intent-recovery.test.ts`, `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts` |
-| Mock agent compaction event emission | `tests/e2e/mock-agent-core.mjs` |
+| Helper unit tests | `tests/unit/core/compaction-types.unit.test.ts` |
+| Reducer unit tests | `tests/unit/core/message-reducer.unit.test.ts`, `tests/unit/core/message-reducer-dedup.unit.test.ts` |
+| Renderer lifecycle | `tests/dom/ui-fixtures/compaction-widget.dom.test.ts` |
+| Live sidecar/affordance browser E2E | `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` |
+| Compact-cost regressions | `tests/integration/gateway/compact-cost-ws.gateway.test.ts`, `tests/dom/context-cost-stats.dom.test.ts` |
+| Reliable-turn compaction lifecycle | `tests/unit/core/reliable-compaction-release.unit.test.ts`, `tests/integration/gateway/reliable-intent-recovery.gateway.test.ts`, `tests/browser/journeys/reliable-agent-turns.journey.spec.ts` |
+| Mock agent compaction event emission | `tests/e2e/_helpers/mock-agent-core.mjs` |
 | Full design rationale | `docs/design/compaction-e2e-rich-summary.md` |

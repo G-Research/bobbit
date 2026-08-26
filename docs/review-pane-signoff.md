@@ -268,16 +268,16 @@ Review-source browser payloads are normalized before opening, and only supported
 
 | Concern | Primary implementation | Focused coverage |
 |---|---|---|
-| Tool schema, validation, file loading, and canonical payload | `defaults/tools/review/extension.ts` and the review tool definition under `defaults/tools/review/` | `tests2/core/review-extension.test.ts` |
-| Group persistence, exact-key lifecycle ordering, decision coalescing, tombstones, and cleanup | `src/app/review-sources.ts` | `tests2/dom/review-group-model.test.ts` |
-| Live control provenance and owner-session isolation | `src/app/remote-agent.ts` | `tests2/dom/review-tool-active-guard.test.ts` |
-| Primary workspace authority, background focus guards, and review/file selection | side-panel workspace and app render modules under `src/app/` | `tests2/dom/side-panel-workspace-review-normalize.test.ts` and grouped review DOM/browser coverage |
-| Secondary tabs, shared draft ownership, measured overflow, accessibility, and decision UI | review components and styles under `src/ui/components/review/` | `tests2/dom/review-pane-groups.test.ts` and the grouped review browser fixture |
+| Tool schema, validation, file loading, and canonical payload | `defaults/tools/review/extension.ts` and the review tool definition under `defaults/tools/review/` | `tests/unit/core/review-extension.unit.test.ts` |
+| Group persistence, exact-key lifecycle ordering, decision coalescing, tombstones, and cleanup | `src/app/review-sources.ts` | `tests/dom/review-group-model.dom.test.ts` |
+| Live control provenance and owner-session isolation | `src/app/remote-agent.ts` | `tests/dom/review-tool-active-guard.dom.test.ts` |
+| Primary workspace authority, background focus guards, and review/file selection | side-panel workspace and app render modules under `src/app/` | `tests/dom/side-panel-workspace-review-normalize.dom.test.ts` and grouped review DOM/browser coverage |
+| Secondary tabs, shared draft ownership, measured overflow, accessibility, and decision UI | review components and styles under `src/ui/components/review/` | `tests/dom/review-pane-groups.dom.test.ts` and the grouped review browser fixture |
 | Annotation migration, persistence, and exact tombstones | client and server review annotation stores | grouped review lifecycle tests and review annotation API integration tests |
-| Token-aware HTML handling and sanitizer policy | `src/ui/components/review/ReviewDocument.ts` | `tests2/dom/review-document-sanitize.test.ts` |
-| End-to-end multi-review and background-session lifecycle | shared review surface plus gateway/session workspace paths | `tests2/browser/journeys/review-groups.journey.spec.ts` |
+| Token-aware HTML handling and sanitizer policy | `src/ui/components/review/ReviewDocument.ts` | `tests/dom/review-document-sanitize.dom.test.ts` |
+| End-to-end multi-review and background-session lifecycle | shared review surface plus gateway/session workspace paths | `tests/browser/journeys/review-groups.journey.spec.ts` |
 
-For a review change, run `npm run check` and `npm run test:unit`, then the targeted grouped-review browser fixture and journey through the normal `npm run test:browser` workflow. Also rerun the existing mobile commenting, human-signoff, and side-panel workspace journeys when touching their shared routing or chrome. The suite entries and ownership reasons are registered in `tests2/tests-map.json`; use those entries rather than introducing an unregistered ad hoc test path.
+For a review change, run `npm run check` and `npm run test:unit`, then the targeted grouped-review browser fixture and journey through the normal `npm run test:browser` workflow. Also rerun the existing mobile commenting, human-signoff, and side-panel workspace journeys when touching their shared routing or chrome. New coverage must use the canonical semantic path and suffix; `npm run test:layout` rejects ad hoc test locations.
 
 Manual browser verification should cover multiple same-session reviews, duplicate titles, one-file row suppression, enough files to overflow at both desktop and narrow widths, keyboard dismissal/focus, close-target geometry, sibling survival after close/decision, reload hydration, and a live background owner open/close while another session remains selected.
 

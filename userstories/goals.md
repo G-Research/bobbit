@@ -27,7 +27,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 6. Open the goal dashboard and verify the spec.
    - Title reads "Dark Mode v2". Spec matches the edited markdown. Workflow matches the selection.
 
-**Coverage:** goal-creation.spec.ts (assistant flow, optional step toggles), goal-creation-flow.spec.ts (navigation to dashboard)
+**Coverage:** tests/browser/journeys/ui/goal-creation.journey.spec.ts (assistant flow, optional step toggles), tests/integration/gateway/goal-creation-flow.gateway.test.ts (navigation to dashboard)
 
 ---
 
@@ -48,7 +48,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 4. Create a second goal with the same title.
    - Both goals exist independently with distinct IDs. Duplicate titles are allowed.
 
-**Coverage:** goal-creation.spec.ts (API creation), goal-creation-flow.spec.ts (API goal creation, navigation)
+**Coverage:** tests/browser/journeys/ui/goal-creation.journey.spec.ts (API creation), tests/integration/gateway/goal-creation-flow.gateway.test.ts (API goal creation, navigation)
 
 ---
 
@@ -97,7 +97,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 4. Click "Start Team" on the no-auto-start goal.
    - Team lead is created. Same result as step 1–2.
 
-**Coverage:** auto-start-team.spec.ts (auto-start API)
+**Coverage:** tests/integration/gateway/auto-start-team.gateway.test.ts (auto-start API)
 
 ---
 
@@ -120,7 +120,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 5. Navigate away and back to the dashboard.
    - State is preserved — no flash of empty content. Data is fetched fresh on each visit.
 
-**Coverage:** goal-creation-flow.spec.ts (navigation to dashboard). Partial coverage — full dashboard rendering not yet E2E tested.
+**Coverage:** tests/integration/gateway/goal-creation-flow.gateway.test.ts (navigation to dashboard). Partial coverage — full dashboard rendering not yet E2E tested.
 
 ---
 
@@ -148,7 +148,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 6. Attempt to signal the second gate via API while the first is still pending.
    - Server responds `409 Conflict`. Gate status does not change.
 
-**Coverage:** gates-api.spec.ts (gate CRUD, signal, dependency enforcement)
+**Coverage:** tests/integration/gateway/gates-api.gateway.test.ts (gate CRUD, signal, dependency enforcement)
 
 ---
 
@@ -177,7 +177,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 7. Signal a gate with empty content (no text).
    - Signal is accepted (content is optional). Metadata-only signals are valid.
 
-**Coverage:** gates-api.spec.ts (signal, verification pass/fail)
+**Coverage:** tests/integration/gateway/gates-api.gateway.test.ts (signal, verification pass/fail)
 
 ---
 
@@ -201,7 +201,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 5. Cancel via API: `POST /api/goals/:id/gates/:gateId/cancel-verification`.
    - Same behavior as UI cancel — verification stops, status reverts.
 
-**Coverage:** cancel-verification.spec.ts (cancel flow), cancel-verification UI tests
+**Coverage:** tests/integration/gateway/cancel-verification.gateway.test.ts (cancel flow), cancel-verification UI tests
 
 ---
 
@@ -271,7 +271,7 @@ The goal system orchestrates multi-agent work: creation via assistant or API, wo
 5. Click "Create Goal" on the second proposal.
    - Goal is created successfully. Only the second proposal becomes a goal.
 
-**Coverage:** goal-proposal-dismiss.spec.ts (dismiss flow), goal-creation.spec.ts (dismiss button)
+**Coverage:** tests/dom/goal-proposal-dismiss.dom.test.ts (dismiss flow), tests/browser/journeys/ui/goal-creation.journey.spec.ts (dismiss button)
 
 ---
 

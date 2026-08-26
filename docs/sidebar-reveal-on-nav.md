@@ -209,7 +209,7 @@ scroll would produce visible thrash.
 - [`src/app/sidebar-tree-state.ts`](../src/app/sidebar-tree-state.ts) —
   `expandSidebarTreeNode(key, { explicit: true })`, the persistent force-expand
   operation applied to resolved route ancestors.
-- [`tests2/browser/fixtures/sidebar-reveal.spec.ts`](../tests2/browser/fixtures/sidebar-reveal.spec.ts)
+- [`tests/browser/fixtures/sidebar-reveal.fixture.spec.ts`](../tests/browser/fixtures/sidebar-reveal.fixture.spec.ts)
   — deep-link session and sub-goal reveal, in-app off-screen scroll vs
   no-jump-when-visible, path-scoped persistence, and the team-lead + staff
   regression tests for the ordered-resolver fix.

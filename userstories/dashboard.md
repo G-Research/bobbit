@@ -32,7 +32,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
 7. Navigate to the dashboard via deep link (direct URL with goal ID).
    - Dashboard loads identically to sidebar click — title visible, sections populated.
 
-**Coverage:** navigation.spec.ts (goal title visible via deep link), goal-dashboard-setup-poll.spec.ts (setup polling unit test)
+**Coverage:** tests/browser/journeys/app-smoke.journey.spec.ts (goal title visible via deep link), tests/dom/goal-dashboard-setup-poll.dom.test.ts (setup polling unit test)
 
 ---
 
@@ -93,7 +93,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
    - Signal is sent. Gate transitions to "verifying" state with a spinner.
    - No page reload required — the UI updates in place.
 
-**Coverage:** gates-api.spec.ts (gate CRUD and signal API), gate-store-logic.test.ts (dependency ordering)
+**Coverage:** tests/integration/gateway/gates-api.gateway.test.ts (gate CRUD and signal API), tests/unit/core/gate-store-logic.unit.test.ts (dependency ordering)
 
 ---
 
@@ -122,7 +122,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
 6. Click "View Output" on a gate that has never been signalled.
    - Modal either does not open or shows an empty state ("No verification output").
 
-**Coverage:** gate-verification-ux.spec.ts (verification viewer WS, session link navigation), cancel-verification.spec.ts (cancel flow API)
+**Coverage:** tests/unit/core/gate-verification-ux.unit.test.ts (verification viewer WS, session link navigation), tests/integration/gateway/cancel-verification.gateway.test.ts (cancel flow API)
 
 ---
 
@@ -150,7 +150,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
 7. Navigate away from the dashboard and back.
    - PR status is fresh (re-fetched, not showing stale cached data).
 
-**Coverage:** pr-cache.spec.ts (PR cache API, cache-bust endpoint)
+**Coverage:** tests/integration/gateway/pr-cache.gateway.test.ts (PR cache API, cache-bust endpoint)
 
 ---
 
@@ -201,7 +201,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
    - Session loads in read-only or archived mode — past messages are visible.
    - No error or blank screen.
 
-**Coverage:** team-lifecycle-ui.spec.ts (start team, navigate to member, teardown), navigation.spec.ts (goal deep link), back-button-goal.spec.ts (back navigation)
+**Coverage:** tests/browser/journeys/team-operations.journey.spec.ts (start team, navigate to member, teardown), tests/browser/journeys/app-smoke.journey.spec.ts (goal deep link), tests/dom/back-button-goal.dom.test.ts (back navigation)
 
 ---
 
@@ -229,7 +229,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
    - The retry handles partial state gracefully — no duplicate gates, no orphaned resources.
    - The result is identical to a fresh setup.
 
-**Coverage:** goal-dashboard-setup-poll.spec.ts (setup polling transitions), goal-dashboard-setup-poll-repro.spec.ts (pre-fix behavior)
+**Coverage:** tests/dom/goal-dashboard-setup-poll.dom.test.ts (setup polling transitions), tests/dom/goal-dashboard-setup-poll-repro.dom.test.ts (pre-fix behavior)
 
 ---
 
@@ -260,7 +260,7 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
 7. Tasks update in real time as agents complete work.
    - Status transitions (in-progress → complete) appear without page refresh.
 
-**Coverage:** gates-api.spec.ts (task CRUD via API), team-manager.test.ts (task assignment logic)
+**Coverage:** tests/integration/gateway/gates-api.gateway.test.ts (task CRUD via API), tests/e2e/vitest/team-manager.vitest-e2e.test.ts (task assignment logic)
 
 ---
 
@@ -289,4 +289,4 @@ The goal dashboard is the command centre for a running goal. It shows setup stat
    - Only the last-clicked goal's dashboard loads (no race condition showing the wrong goal).
    - No interleaved data from both goals.
 
-**Coverage:** goal-dashboard-setup-poll.spec.ts (setup polling unit test), navigation.spec.ts (deep link loading)
+**Coverage:** tests/dom/goal-dashboard-setup-poll.dom.test.ts (setup polling unit test), tests/browser/journeys/app-smoke.journey.spec.ts (deep link loading)

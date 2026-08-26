@@ -131,6 +131,6 @@ Image generation uses the session image-model selector and `default.imageModel`.
 - Exact live picker binding, bridge-identity fencing, rollback, restart handoff, and fail-closed quarantine: `src/server/ws/runtime-model-selection.ts` and the model-selection branches in `src/server/ws/handler.ts`.
 - Client optimistic-state correction: `src/app/remote-agent.ts` and `src/app/session-manager.ts`.
 - Settings UI: `src/app/settings-page.ts`.
-- Regression coverage: controlled fallback and redaction tests in `tests2/core/`, the focused runtime-zombie recovery and replacement-race cases there, the combined-selection DOM test, and the settings fallback E2E journey.
+- Regression coverage: `tests/unit/core/controlled-model-fallback.unit.test.ts` and the focused runtime-zombie recovery and replacement-race unit cases, the combined-selection DOM test, and `tests/browser/journeys/ui/settings-model-fallback.journey.spec.ts`.
 
 See also [Per-role model & thinking-level overrides](internals.md#per-role-model--thinking-level-overrides), [Spawn-time model pinning](internals.md#spawn-time-model-pinning), and [Image generation routing](internals.md#image-generation-routing).

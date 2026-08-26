@@ -428,7 +428,7 @@ provider, but it is **dormant until a Hindsight URL is configured** — so a fre
 no Dynamic Context until you opt in. The wiring itself is also exercised by a
 deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
 `DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
-E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
+E2E test (`tests/e2e/api/provider-session-setup.api-e2e.spec.ts`) **copies that fixture into the per-gateway
 server-scope market-packs dir** (`.bobbit/config/market-packs/provider-demo/`) and toggles it via
 pack activation (`PUT /api/marketplace/pack-activation`), which invalidates the resolver caches.
 This layers the fixture *on top of* the real built-in band rather than replacing it — the earlier

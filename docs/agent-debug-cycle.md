@@ -104,7 +104,7 @@ The permission card bug had two components:
 
 2. **No persistence for new clients**: `tool_permission_needed` was only broadcast at the moment the guard blocked. Reconnecting clients never saw it.
 
-The existing E2E test (`tool-ask-policy.spec.ts`) uses the mock agent and calls the `tool-grant-request` REST endpoint directly — this bypasses the guard extension entirely and happened to work because of timing. The real flow (agent → guard → gateway → WS broadcast → UI render) was never tested.
+The existing E2E test (`tests/browser/journeys/ui/tool-ask-policy.journey.spec.ts`) uses the mock agent and calls the `tool-grant-request` REST endpoint directly — this bypasses the guard extension entirely and happened to work because of timing. The real flow (agent → guard → gateway → WS broadcast → UI render) was never tested.
 
 ## Toward a QA Agent Role
 

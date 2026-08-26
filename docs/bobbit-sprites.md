@@ -272,7 +272,7 @@ shimmer, accessories, and entry/exit transitions remain CSS-driven and smooth;
 archived/static Bobbits bypass the scheduler entirely.
 
 **Verification:**
-`tests2/browser/fixtures/canvas-eye-getanimations.spec.ts` uses fake time and
+`tests/browser/fixtures/canvas-eye-getanimations.fixture.spec.ts` uses fake time and
 controlled `Animation.currentTime` to pin every busy/idle boundary, negative
 delay, wrap, late wake, callback budget, single-frame sleep, visibility resync,
 Animation replacement, stale callback, cleanup, and archived zero-work behavior.

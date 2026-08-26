@@ -159,7 +159,7 @@ content. Use the manifest to clean up manually.
 
 ### Pinning test: the allowlist cannot drift
 
-`tests/bobbit-archive-allowlist.test.ts` walks every `.ts` file under
+`tests/unit/core/bobbit-archive-allowlist.unit.test.ts` walks every `.ts` file under
 `src/server/`, finds every literal child segment joined onto
 `bobbitStateDir(...)`, and asserts each distinct segment is either covered by
 `GATEWAY_OWNED_FILES` or annotated with `// archive-safe` at the write site.
@@ -192,10 +192,10 @@ not add `config/...` entries to the allowlist.
 4. If the check carries a UI affordance, add a `remediation` of one of the
    known kinds (`archive-bobbit`, `use-canonical`, `shorter-path`,
    `free-space`, `external`) and handle it in `renderPreflightPanel()`.
-5. Add a unit test in `tests/project-preflight.test.ts` covering both the
+5. Add a unit test in `tests/unit/core/project-preflight.unit.test.ts` covering both the
    pass and bad paths with a `file://` fixture.
 6. If it changes the Submit gating, extend the browser E2E in
-   `tests/e2e/ui/add-project-preflight.spec.ts`.
+   `tests/browser/journeys/ui/add-project-preflight.journey.spec.ts`.
 
 The full check spec including detection logic for each id lives in
 [design/robust-add-project.md](design/robust-add-project.md) and is the

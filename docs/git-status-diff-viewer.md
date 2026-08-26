@@ -190,19 +190,19 @@ Not allowed:
 
 This boundary matters because PR Walkthrough is a built-in first-party Extension Host pack. It must remain portable and Host-API based, while Git status is core app UI with a different data source and no review workflow.
 
-`tests/pr-walkthrough-pack-boundary.test.ts` pins the rule by scanning PR Walkthrough pack imports. It allows package imports, pack-local imports, and relative imports resolving into `src/shared/**`; it fails imports that resolve into core UI/app/server internals or other non-shared repo code.
+`tests/unit/core/pr-walkthrough-pack-boundary.unit.test.ts` pins the rule by scanning PR Walkthrough pack imports. It allows package imports, pack-local imports, and relative imports resolving into `src/shared/**`; it fails imports that resolve into core UI/app/server internals or other non-shared repo code.
 
 ## Test coverage
 
 Coverage for this area is split by responsibility:
 
-- `tests/git-diff-unified-parser.test.ts` covers multi-file parsing, renames, added/deleted files, binary diffs, no-newline markers, truncation, synthetic hunk-only files, and split pairing.
-- `tests/rich-git-diff-viewer.spec.ts` covers collapsible file sections/counts/rename paths, file toggle `aria-expanded`, split/inline `aria-checked`, context expansion, responsive auto mode and explicit override, raw fallback, and truncation warning.
-- `tests/git-status-widget-states.spec.ts` covers the widget modal integration, commit-file rename URL shape, modal ARIA, preserved modal behavior, and bypass-merge button visibility/event details.
-- `tests/pr-status-lookup.test.ts` covers PR status lookup argv construction, GraphQL bypass capability, ruleset-backed bypass capability, best-effort ruleset failures, and malicious branch text staying in one argv argument.
-- `tests/e2e/ui/session-git-status-multi-repo.spec.ts` covers the browser path for multi-repo `repo=` routing and new viewer rendering.
-- `tests/e2e/commit-file-diffs-api.spec.ts` and `tests/e2e/session-git-status-multi-repo.spec.ts` keep server rename and repo routing semantics pinned.
-- `tests/pr-walkthrough-pack-boundary.test.ts` keeps the pack/core boundary explicit.
+- `tests/unit/core/git-diff-unified-parser.unit.test.ts` covers multi-file parsing, renames, added/deleted files, binary diffs, no-newline markers, truncation, synthetic hunk-only files, and split pairing.
+- `tests/dom/rich-git-diff-viewer.dom.test.ts` covers collapsible file sections/counts/rename paths, file toggle `aria-expanded`, split/inline `aria-checked`, context expansion, responsive auto mode and explicit override, raw fallback, and truncation warning.
+- `tests/dom/git-status-widget-states.dom.test.ts` covers the widget modal integration, commit-file rename URL shape, modal ARIA, preserved modal behavior, and bypass-merge button visibility/event details.
+- `tests/unit/core/pr-status-lookup.unit.test.ts` covers PR status lookup argv construction, GraphQL bypass capability, ruleset-backed bypass capability, best-effort ruleset failures, and malicious branch text staying in one argv argument.
+- `tests/browser/journeys/ui/session-git-status-multi-repo.journey.spec.ts` covers the browser path for multi-repo `repo=` routing and new viewer rendering.
+- `tests/integration/gateway/commit-file-diffs-api.gateway.test.ts` and `tests/e2e/api/session-git-status-multi-repo.api-e2e.spec.ts` keep server rename and repo routing semantics pinned.
+- `tests/unit/core/pr-walkthrough-pack-boundary.unit.test.ts` keeps the pack/core boundary explicit.
 - Existing PR Walkthrough parity tests should keep passing because the pack viewer is not reused by Git status.
 
 For UI/parser changes in this area, run:
