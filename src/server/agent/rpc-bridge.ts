@@ -8,7 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
 import { caCertPath } from "../auth/tls.js";
-import { activeAgentSessionsDir } from "./agent-session-path.js";
+import { activeAgentSessionsDir, sessionStateSessionsRoot, sessionTranscriptRoot } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { PiAssistantStreamNormalizer } from "../../shared/assistant-stream-delta.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-levels.js";
@@ -107,6 +107,10 @@ export interface RpcBridgeOptions {
 	systemPromptPath?: string;
 	/** Extra environment variables */
 	env?: Record<string, string>;
+	/** Trusted Bobbit owner identity for session-scoped sandbox mounts. */
+	sessionId?: string;
+	/** Host project state root used for the private `/bobbit-state/sessions` bind. */
+	sessionStateDir?: string;
 	/** Whether this session runs in a Docker sandbox (affects timeouts). */
 	sandboxed?: boolean;
 	/** Env vars to inject into the container (API keys, etc.) */
@@ -1004,6 +1008,9 @@ export class RpcBridge {
 	 * The container already has all bind mounts and env vars configured.
 	 */
 	private spawnDockerExec(containerId: string, _cliPath: string, agentArgs: string[]): ChildProcess {
+		if (!this.options.sessionId || this.options.env?.BOBBIT_SESSION_ID !== this.options.sessionId) {
+			throw new Error("Sandbox runtime is missing its trusted session owner");
+		}
 		const execArgs: string[] = ["exec", "-i"];
 
 		// Pass session-specific env vars via docker exec -e (overrides container env)
@@ -1068,7 +1075,13 @@ export class RpcBridge {
 	private remapArgsForContainer(agentArgs: string[]): string[] {
 		// Also handle builtin tools dir (dist/server/defaults/tools/) for cascade-resolved paths.
 		const builtinToolsDir = this.options.toolManager?.getBuiltinToolsDir();
-		const remapOpts = { builtinToolsDir, projectBase: this.options.cwd, projectMarketPacksRoot: this.options.projectMarketPacksRoot };
+		const remapOpts = {
+			builtinToolsDir,
+			projectBase: this.options.cwd,
+			projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+			sessionId: this.options.sessionId,
+			sessionStateDir: this.options.sessionStateDir,
+		};
 		const remappedArgs: string[] = [];
 
 		for (let i = 0; i < agentArgs.length; i++) {
@@ -1270,6 +1283,8 @@ export interface HostPathToContainerOptions {
 	builtinToolsDir?: string;
 	projectBase?: string;
 	projectMarketPacksRoot?: string;
+	sessionId?: string;
+	sessionStateDir?: string;
 }
 
 type MountTableOptions = HostPathToContainerOptions;
@@ -1329,7 +1344,7 @@ function remapUnknownProjectMarketPackPath(hostPath: string): string | null {
  */
 function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 	const stateDir = bobbitStateDir();
-	const agentSessionsDir = activeAgentSessionsDir();
+	const agentSessionsDir = opts.sessionId ? sessionTranscriptRoot(opts.sessionId) : activeAgentSessionsDir();
 	const sessionPromptsDir = path.join(stateDir, "session-prompts");
 	const mcpExtDir = path.join(stateDir, "mcp-extensions");
 	const builtinPacksDir = resolveBuiltinPacksDir();
@@ -1344,7 +1359,9 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		...marketPackMountMappings(opts.projectBase, opts.projectMarketPacksRoot),
 		// Mount only specific state subdirectories — never the full state dir
 		// (which contains the host gateway token, TLS keys, etc.)
-		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
+		...(opts.sessionId
+			? (opts.sessionStateDir ? [{ containerPrefix: "/bobbit-state/sessions", hostPath: sessionStateSessionsRoot(opts.sessionStateDir, opts.sessionId) }] : [])
+			: [{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") }]),
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so

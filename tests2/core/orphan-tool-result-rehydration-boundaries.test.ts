@@ -16,7 +16,11 @@ process.env.BOBBIT_DIR = tmpRoot;
 process.env.BOBBIT_AGENT_DIR = path.join(tmpRoot, "agent");
 fs.mkdirSync(stateDir, { recursive: true });
 
-const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const {
+	activeAgentSessionsDir,
+	sessionTranscriptHostPath,
+	sessionTranscriptRoot,
+} = await import("../../src/server/agent/agent-session-path.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 const {
@@ -27,8 +31,8 @@ const {
 } = await import("../../src/server/agent/author-sidecar.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { containerPathToHost, registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
+const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
+const { sessionFileCopy, sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
 const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { executePlan } = await import("../../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
@@ -76,6 +80,7 @@ loadOrCreateToken();
 
 const managers: any[] = [];
 const createdFiles: string[] = [];
+const exactSandboxFixtures: ExactSandboxFixture[] = [];
 const ORPHAN_ERROR =
 	"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.88.content.0: unexpected tool_use_id found in tool_result blocks: toolu_fixture. Each tool_result block must have a corresponding tool_use block in the previous message.\"}}";
 
@@ -89,6 +94,7 @@ afterEach(() => {
 		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
 		manager.sessions?.clear?.();
 	}
+	while (exactSandboxFixtures.length > 0) exactSandboxFixtures.pop()!.cleanup();
 	while (createdFiles.length > 0) fs.rmSync(createdFiles.pop()!, { force: true });
 });
 
@@ -135,8 +141,9 @@ function assertOrphanRewritten(content: string): void {
 	expect(content).not.toContain("toolu_missing_from_assistant");
 }
 
-function hostTranscript(name: string): string {
-	const dir = path.join(activeAgentSessionsDir(), "--orphan-boundaries--");
+function hostTranscript(name: string, ownerSessionId?: string): string {
+	const sessionsRoot = ownerSessionId ? sessionTranscriptRoot(ownerSessionId) : activeAgentSessionsDir();
+	const dir = path.join(sessionsRoot, "--orphan-boundaries--");
 	fs.mkdirSync(dir, { recursive: true });
 	const file = path.join(dir, `${name}.jsonl`);
 	fs.writeFileSync(file, orphanTranscript(), "utf8");
@@ -144,46 +151,140 @@ function hostTranscript(name: string): string {
 	return file;
 }
 
-function containerTranscript(name: string): { containerFile: string; hostFile: string } {
-	const containerFile = `/home/node/.bobbit/agent/sessions/--orphan-boundaries--/${name}.jsonl`;
-	const hostFile = containerPathToHost(containerFile);
+function containerTranscript(sessionId: string): { containerFile: string; hostFile: string } {
+	const containerFile = `/home/node/.bobbit/agent/sessions/--orphan-boundaries--/${sessionId}.jsonl`;
+	const hostFile = sessionTranscriptHostPath(sessionId, containerFile);
+	if (!hostFile) throw new Error("fixture container transcript path must be canonical");
 	fs.mkdirSync(path.dirname(hostFile), { recursive: true });
 	fs.writeFileSync(hostFile, orphanTranscript(), "utf8");
 	createdFiles.push(hostFile);
 	return { containerFile, hostFile };
 }
 
-function realSandboxFixture(containerFile: string, containerId = "container-boundary"): {
+interface ExactSandboxFixture {
 	projectConfigStore: any;
 	sandboxManager: any;
-	sandbox: any;
-} {
-	const sandbox = {
-		getContainerId: vi.fn(async () => containerId),
-		exec: vi.fn(async (args: string[]) => {
-			if (args[0] === "test" && args[1] === "-f" && args[2] === containerFile) return "";
-			if (args[0] === "cat" && args[1] === containerFile) {
-				return fs.readFileSync(containerPathToHost(containerFile), "utf8");
-			}
-			if (args[0] === "echo") return "ok";
-			throw new Error(`unexpected sandbox exec: ${args.join(" ")}`);
-		}),
+	sandbox: SandboxSessionFilesystem;
+	runtimeId: (sessionId: string) => string;
+	register: (sessionId: string) => Promise<string>;
+	write: (sessionId: string, containerFile: string, content: string) => Promise<void>;
+	read: (sessionId: string, containerFile: string) => Promise<string>;
+	cleanup: () => void;
+}
+
+/**
+ * Model the production SandboxManager boundary rather than granting transcript
+ * access through a project control container or a host mirror. Every operation
+ * first proves the exact project/session/runtime registration, then delegates to
+ * the canonical deterministic session-filesystem harness.
+ */
+function realSandboxFixture(label: string): ExactSandboxFixture {
+	const projectId = "project-boundary";
+	const owners = new Set<string>();
+	const runtimes = new Map<string, { projectId: string; containerId: string }>();
+	const sandbox = new SandboxSessionFilesystem({
+		root: path.join(tmpRoot, `sandbox-session-fs-${label}`),
+		hostAgentSessionsDir: activeAgentSessionsDir(),
+	});
+	const ensureForProject = vi.fn(async (candidateProjectId: string) => {
+		if (candidateProjectId !== projectId) throw new Error("fixture sandbox project mismatch");
+	});
+	const get = vi.fn((candidateProjectId: string) => candidateProjectId === projectId ? sandbox : undefined);
+	const ensureSessionRuntime = vi.fn(async (
+		candidateProjectId: string,
+		sessionId: string,
+		expectedId?: string,
+	) => {
+		await ensureForProject(candidateProjectId);
+		const existing = runtimes.get(sessionId);
+		if (existing && existing.projectId !== candidateProjectId) {
+			throw new Error("fixture session runtime project mismatch");
+		}
+		const containerId = await sandbox.ensureSessionRuntime(
+			sessionId,
+			expectedId ?? existing?.containerId,
+		);
+		runtimes.set(sessionId, { projectId: candidateProjectId, containerId });
+		owners.add(sessionId);
+		return containerId;
+	});
+	const isSessionRuntimeIsolated = vi.fn(async (
+		candidateProjectId: string,
+		sessionId: string,
+		containerId: string,
+	) => {
+		const registered = runtimes.get(sessionId);
+		return registered?.projectId === candidateProjectId
+			&& registered.containerId === containerId
+			&& await sandbox.isSessionRuntimeIsolated(sessionId, containerId);
+	});
+	const releaseSessionRuntime = vi.fn(async (candidateProjectId: string, sessionId: string) => {
+		const registered = runtimes.get(sessionId);
+		if (registered && registered.projectId !== candidateProjectId) {
+			throw new Error("fixture cannot release a foreign session runtime");
+		}
+		runtimes.delete(sessionId);
+		await sandbox.removeSessionRuntime(sessionId);
+	});
+	const runSessionTranscriptOperation = vi.fn(async (
+		candidateProjectId: string,
+		sessionId: string,
+		operation: any,
+	) => {
+		const registered = runtimes.get(sessionId);
+		if (!registered || registered.projectId !== candidateProjectId) {
+			throw new Error("fixture transcript runtime is not registered");
+		}
+		if (!await sandbox.isSessionRuntimeIsolated(sessionId, registered.containerId)) {
+			throw new Error("fixture transcript runtime failed exact isolation attestation");
+		}
+		return sandbox.runSessionTranscriptOperation(sessionId, registered.containerId, operation);
+	});
+	const sandboxManager = {
+		ensureForProject,
+		get,
+		ensureSessionRuntime,
+		isSessionRuntimeIsolated,
+		releaseSessionRuntime,
+		runSessionTranscriptOperation,
 	};
-	return {
+	const fixture: ExactSandboxFixture = {
 		projectConfigStore: {
 			get: vi.fn((key: string) => key === "sandbox" ? "docker" : undefined),
 			getSandboxTokens: vi.fn(() => []),
 		},
-		sandboxManager: {
-			ensureForProject: vi.fn(async () => sandbox),
-			get: vi.fn(() => sandbox),
-		},
+		sandboxManager,
 		sandbox,
+		runtimeId: sessionId => `fixture-runtime:${sessionId}`,
+		register: sessionId => ensureSessionRuntime(projectId, sessionId),
+		async write(sessionId, containerFile, content) {
+			await runSessionTranscriptOperation(projectId, sessionId, {
+				kind: "writeAtomic",
+				path: containerFile,
+				content,
+			});
+		},
+		async read(sessionId, containerFile) {
+			const content = await runSessionTranscriptOperation(projectId, sessionId, {
+				kind: "read",
+				path: containerFile,
+			});
+			if (typeof content !== "string") throw new Error("fixture transcript read returned no content");
+			return content;
+		},
+		cleanup() {
+			fs.rmSync(sandbox.root, { recursive: true, force: true });
+			for (const sessionId of owners) {
+				fs.rmSync(sessionTranscriptRoot(sessionId), { recursive: true, force: true });
+			}
+		},
 	};
+	exactSandboxFixtures.push(fixture);
+	return fixture;
 }
 
 function recordingBridge(
-	onSwitch: (sessionPath: string) => void,
+	onSwitch: (sessionPath: string) => unknown | Promise<unknown>,
 	initial?: { modelProvider: string; modelId: string; thinkingLevel: string },
 ): any {
 	let modelProvider = initial?.modelProvider ?? FIXTURE_MODEL_PROVIDER;
@@ -216,7 +317,7 @@ function recordingBridge(
 		},
 		async compact() { return { success: true }; },
 		async sendCommand(command: any) {
-			if (command?.type === "switch_session") onSwitch(command.sessionPath);
+			if (command?.type === "switch_session") await onSwitch(command.sessionPath);
 			return { success: true };
 		},
 		onEvent() { return () => {}; },
@@ -281,6 +382,7 @@ function mutableStore(record: Record<string, any>): any {
 		}),
 		put: vi.fn(() => {}),
 		archive: vi.fn(() => {}),
+		flushAsync: vi.fn(async () => {}),
 	};
 }
 
@@ -317,6 +419,7 @@ function makeManager(ps: any, bridge: any): any {
 		put: vi.fn(() => {}),
 		archive: vi.fn(() => {}),
 		archiveAsync: vi.fn(async (id: string) => { manager._testStore.archive(id); }),
+		flushAsync: vi.fn(async () => {}),
 	};
 	managers.push(manager);
 	return manager;
@@ -878,6 +981,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -953,6 +1057,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2190,6 +2295,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn(() => {}),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -2265,6 +2371,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -2326,6 +2433,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -2386,6 +2494,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => {});
@@ -2431,6 +2540,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => {});
@@ -2486,6 +2596,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => {});
@@ -2532,6 +2643,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => {});
@@ -2637,6 +2749,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, patch: Record<string, unknown>) => Object.assign(ps, patch)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => {});
@@ -2793,6 +2906,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -2822,13 +2936,14 @@ describe("executable SessionManager rehydration boundaries", () => {
 		{ realm: "host", sandboxed: false },
 		{ realm: "sandbox", sandboxed: true },
 	])("serializes Stop through the $realm respawn map gap and cancels install", async ({ realm, sandboxed }) => {
-		const file = hostTranscript(`respawn-map-gap-stop-${realm}`);
+		const sessionId = `respawn-map-gap-stop-${realm}`;
+		const file = hostTranscript(sessionId, sandboxed ? sessionId : undefined);
 		const startGate = deferred<void>();
 		const replacement = recordingBridge(() => {});
 		replacement.start = vi.fn(() => startGate.promise);
 		replacement.stop = vi.fn(async () => {});
 		replacement.prompt = vi.fn(async () => ({ success: true }));
-		const ps = persisted(`respawn-map-gap-stop-${realm}`, file, { sandboxed });
+		const ps = persisted(sessionId, file, { sandboxed });
 		const manager = makeManager(ps, replacement);
 		manager.applySandboxWiring = vi.fn(async () => true);
 		const oldBridge = recordingBridge(() => {});
@@ -2856,13 +2971,16 @@ describe("executable SessionManager rehydration boundaries", () => {
 	});
 
 	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {
-		const { containerFile, hostFile } = containerTranscript("assign-role-real-sandbox");
-		const sandboxFx = realSandboxFixture(containerFile, "container-role-boundary");
+		const sessionId = "assign-role-real-sandbox";
+		const containerFile = `/home/node/.bobbit/agent/sessions/--orphan-boundaries--/${sessionId}.jsonl`;
+		const sandboxFx = realSandboxFixture(sessionId);
+		await sandboxFx.register(sessionId);
+		await sandboxFx.write(sessionId, containerFile, orphanTranscript());
 		fs.writeFileSync(path.join(stateDir, "gateway-url"), "http://127.0.0.1:7890\n", "utf8");
 		const switches: string[] = [];
-		const replacement = recordingBridge((sessionPath) => {
+		const replacement = recordingBridge(async (sessionPath) => {
 			switches.push(sessionPath);
-			assertOrphanRewritten(fs.readFileSync(hostFile, "utf8"));
+			assertOrphanRewritten(await sandboxFx.read(sessionId, sessionPath));
 		});
 		const sendCommand = vi.spyOn(replacement, "sendCommand");
 		let replacementOptions: any;
@@ -2872,7 +2990,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		const manager: any = new SessionManager({ projectConfigStore: sandboxFx.projectConfigStore });
 		manager.sandboxManager = sandboxFx.sandboxManager;
-		const ps = persisted("assign-role-real-sandbox", containerFile, {
+		const ps = persisted(sessionId, containerFile, {
 			sandboxed: true,
 			cwd: "/workspace",
 		});
@@ -2881,6 +2999,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn(() => {}),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		managers.push(manager);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -2897,9 +3016,18 @@ describe("executable SessionManager rehydration boundaries", () => {
 		})).resolves.toBe(true);
 
 		expect(sandboxFx.sandboxManager.ensureForProject).toHaveBeenCalledWith("project-boundary");
-		expect(sandboxFx.sandbox.getContainerId).toHaveBeenCalledTimes(1);
+		expect(sandboxFx.sandboxManager.ensureSessionRuntime).toHaveBeenCalledWith(
+			"project-boundary",
+			ps.id,
+			undefined,
+		);
+		expect(sandboxFx.sandboxManager.isSessionRuntimeIsolated).toHaveBeenCalledWith(
+			"project-boundary",
+			ps.id,
+			sandboxFx.runtimeId(ps.id),
+		);
 		expect(replacementOptions).toMatchObject({
-			containerId: "container-role-boundary",
+			containerId: sandboxFx.runtimeId(ps.id),
 			sandboxed: true,
 			cwd: "/workspace",
 			gatewayUrl: "http://127.0.0.1:7890",
@@ -3135,7 +3263,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 		{ realm: "host", sandboxed: false, timeout: undefined, failureBoundary: "start" as const, switchFailure: "response" as const, firstAction: "retry" as const, laterAction: "retry" as const },
 		{ realm: "sandbox", sandboxed: true, timeout: 60_000, failureBoundary: "switch" as const, switchFailure: "exception" as const, firstAction: "follow-up" as const, laterAction: "follow-up" as const },
 	])("rolls back a failed $realm poison respawn at $failureBoundary and later recovers by $laterAction with the same session", async ({ realm, sandboxed, timeout, failureBoundary, switchFailure, firstAction, laterAction }) => {
-		const file = hostTranscript(`poison-rollback-${realm}`);
+		const sessionId = `poison-rollback-${realm}`;
+		const file = hostTranscript(sessionId, sandboxed ? sessionId : undefined);
 		const switchTimeouts: number[] = [];
 		const failedSwitch = failingSwitchBridge(switchFailure, switchTimeouts);
 		const failedReplacement = failedSwitch.bridge;
@@ -3164,7 +3293,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			return replacementIndex++ === 0 ? failedReplacement : successfulReplacement;
 		});
 
-		const ps = persisted(`poison-rollback-${realm}`, file, {
+		const ps = persisted(sessionId, file, {
 			title: `Visible ${realm} history`,
 			sandboxed,
 			cwd: sandboxed ? "/workspace" : tmpRoot,
@@ -3179,6 +3308,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
 		if (sandboxed) {
@@ -3316,7 +3446,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 	});
 
 	it("keeps a failed sandbox poison rollback intact across addClient reconnect until one later Retry", async () => {
-		const file = hostTranscript("poison-rollback-sandbox-reconnect");
+		const sessionId = "poison-rollback-sandbox-reconnect";
+		const file = hostTranscript(sessionId, sessionId);
 		const successfulPrompts: string[] = [];
 		const replacement = recordingBridge(() => {});
 		replacement.getState = vi.fn(async () => ({
@@ -3333,7 +3464,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const factory = vi.fn(() => replacement);
 		registerRpcBridgeFactory(factory);
 
-		const ps = persisted("poison-rollback-sandbox-reconnect", file, {
+		const ps = persisted(sessionId, file, {
 			title: "Visible sandbox reconnect history",
 			sandboxed: true,
 			cwd: "/workspace",
@@ -3348,6 +3479,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
+			flushAsync: vi.fn(async () => {}),
 		};
 		let sandboxAvailable = false;
 		manager.applySandboxWiring = vi.fn(async (options: any) => {
@@ -3468,10 +3600,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 		{ realm: "host", sandboxed: false, failure: "response" as const, timeout: 15_000 },
 		{ realm: "sandbox", sandboxed: true, failure: "exception" as const, timeout: 60_000 },
 	])("does not install an assignRole replacement when the $realm history switch fails", async ({ realm, sandboxed, failure, timeout }) => {
-		const file = hostTranscript(`assign-role-${realm}-failure`);
+		const sessionId = `assign-role-${realm}-failure`;
+		const file = hostTranscript(sessionId, sandboxed ? sessionId : undefined);
 		const timeouts: number[] = [];
 		const { bridge: replacement, stop } = failingSwitchBridge(failure, timeouts);
-		const ps = persisted(`assign-role-${realm}-failure`, file, { sandboxed });
+		const ps = persisted(sessionId, file, { sandboxed });
 		const manager = makeManager(ps, replacement);
 		if (sandboxed) {
 			manager.applySandboxWiring = vi.fn(async (options: any) => {
@@ -3515,6 +3648,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(original.spawnPinnedModel).toBe("fixture/previous-model");
 		expect(original.spawnPinnedThinkingLevel).toBe("high");
 		expect(original.status).toBe("idle");
+		if (sandboxed) expect(manager._testStore.flushAsync).toHaveBeenCalledTimes(1);
+		else expect(manager._testStore.flushAsync).not.toHaveBeenCalled();
 		assertOrphanRewritten(fs.readFileSync(file, "utf8"));
 	});
 
@@ -3644,10 +3779,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 		{ realm: "host", sandboxed: false, failure: "response" as const, timeout: 15_000 },
 		{ realm: "sandbox", sandboxed: true, failure: "exception" as const, timeout: 60_000 },
 	])("does not install or drain a force-abort replacement when the $realm history switch fails", async ({ realm, sandboxed, failure, timeout }) => {
-		const file = hostTranscript(`force-abort-${realm}-failure`);
+		const sessionId = `force-abort-${realm}-failure`;
+		const file = hostTranscript(sessionId, sandboxed ? sessionId : undefined);
 		const timeouts: number[] = [];
 		const { bridge: replacement, stop } = failingSwitchBridge(failure, timeouts);
-		const ps = persisted(`force-abort-${realm}-failure`, file, { sandboxed });
+		const ps = persisted(sessionId, file, { sandboxed });
 		const manager = makeManager(ps, replacement);
 		manager.applySandboxWiring = vi.fn(async () => sandboxed);
 		manager.drainQueue = vi.fn();
@@ -3695,12 +3831,14 @@ function pipelineContext(sandboxManager: any = null): any {
 		groupPolicyStore: null,
 		configCascade: null,
 		costTracker: {},
-		store: { put: vi.fn(), update: vi.fn() },
+		store: { put: vi.fn(), update: vi.fn(), flushAsync: vi.fn(async () => {}) },
 		searchIndex: {},
 		sessions: new Map(),
 		assemblePrompt: () => undefined,
-		applySandboxWiring: async (options: any) => {
-			options.containerId = "container-boundary";
+		applySandboxWiring: async (options: any, sessionId: string) => {
+			options.containerId = sandboxManager
+				? await sandboxManager.ensureSessionRuntime("project-boundary", sessionId)
+				: "container-boundary";
 			return true;
 		},
 		handleAgentLifecycle() {},
@@ -3745,31 +3883,41 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 	});
 
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {
+		const sourceSessionId = "continue-sandbox-source";
+		const destinationSessionId = "continue-sandbox";
 		const containerFile = "/home/node/.bobbit/agent/sessions/--orphan-boundaries--/continue-sandbox.jsonl";
-		const sandbox = new SandboxSessionFilesystem({
-			root: path.join(tmpRoot, "continue-sandbox-container"),
-			hostAgentSessionsDir: activeAgentSessionsDir(),
-		});
-		vi.spyOn(sandbox, "exec");
-		const hostFile = sandbox.hostPath(containerFile);
-		fs.mkdirSync(path.dirname(hostFile), { recursive: true });
-		fs.writeFileSync(hostFile, orphanTranscript(), "utf8");
-		createdFiles.push(hostFile);
-		const sandboxManager = {
-			ensureForProject: vi.fn(async () => sandbox),
-			get: vi.fn(() => sandbox),
-		};
+		const sandboxFx = realSandboxFixture(destinationSessionId);
+		await sandboxFx.register(sourceSessionId);
+		await sandboxFx.register(destinationSessionId);
+		await sandboxFx.write(sourceSessionId, containerFile, orphanTranscript());
+		await sessionFileCopy(
+			{ sandboxed: true, projectId: "project-boundary", sessionId: sourceSessionId },
+			containerFile,
+			{ sandboxed: true, projectId: "project-boundary", sessionId: destinationSessionId },
+			containerFile,
+			sandboxFx.sandboxManager,
+		);
 		const switches: string[] = [];
-		registerRpcBridgeFactory(() => recordingBridge((sessionPath) => {
+		registerRpcBridgeFactory(() => recordingBridge(async (sessionPath) => {
 			switches.push(sessionPath);
 			expect(sessionPath).toBe(containerFile);
-			assertOrphanRewritten(fs.readFileSync(hostFile, "utf8"));
+			assertOrphanRewritten(await sandboxFx.read(destinationSessionId, sessionPath));
+			expect(await sandboxFx.read(sourceSessionId, containerFile)).toBe(orphanTranscript());
 		}));
 
-		await executePlan(setupPlan("continue-sandbox", containerFile, true), pipelineContext(sandboxManager));
+		await executePlan(
+			setupPlan(destinationSessionId, containerFile, true),
+			pipelineContext(sandboxFx.sandboxManager),
+		);
 
 		expect(switches).toEqual([containerFile]);
-		expect(sandbox.exec).toHaveBeenCalledWith(["cat", containerFile]);
+		expect(sandboxFx.sandboxManager.runSessionTranscriptOperation).toHaveBeenCalledWith(
+			"project-boundary",
+			destinationSessionId,
+			expect.objectContaining({ kind: "writeAtomic", path: containerFile }),
+		);
+		expect(sandboxFx.sandbox.calls.some((call) => call.args[0] === "runtime")).toBe(true);
+		expect(sandboxFx.sandbox.calls.some((call) => call.args[0] !== "runtime")).toBe(false);
 	});
 });
 
@@ -3799,15 +3947,17 @@ describe("worktree continue/fork shared boundary", () => {
 
 describe("transcript realm resolution retained at every shared boundary", () => {
 	it("keeps host and sandbox path translation deterministic", () => {
-		const hostFile = hostTranscript("realm-host");
-		const containerFile = switchSessionPathForAgent({ sandboxed: true, agentSessionFile: hostFile } as any);
+		const sessionId = "realm-host";
+		const hostFile = hostTranscript(sessionId, sessionId);
+		const owner = { id: sessionId, projectId: "project-boundary" };
+		const containerFile = switchSessionPathForAgent({ ...owner, sandboxed: true, agentSessionFile: hostFile } as any);
 
-		expect(sessionFsContextForAgentFile({ sandboxed: false, projectId: "p" }, hostFile))
-			.toEqual({ sandboxed: false, projectId: "p" });
-		expect(sessionFsContextForAgentFile({ sandboxed: true, projectId: "p" }, hostFile))
-			.toEqual({ sandboxed: false, projectId: "p" });
+		expect(sessionFsContextForAgentFile({ ...owner, sandboxed: false }, hostFile))
+			.toEqual({ sandboxed: false, projectId: "project-boundary", sessionId });
+		expect(sessionFsContextForAgentFile({ ...owner, sandboxed: true }, hostFile))
+			.toEqual({ sandboxed: false, projectId: "project-boundary", sessionId });
 		expect(containerFile).toBe("/home/node/.bobbit/agent/sessions/--orphan-boundaries--/realm-host.jsonl");
-		expect(sessionFsContextForAgentFile({ sandboxed: true, projectId: "p" }, containerFile))
-			.toEqual({ sandboxed: true, projectId: "p" });
+		expect(sessionFsContextForAgentFile({ ...owner, sandboxed: true }, containerFile))
+			.toEqual({ sandboxed: true, projectId: "project-boundary", sessionId });
 	});
 });

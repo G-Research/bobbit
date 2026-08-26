@@ -5,9 +5,9 @@
  * session is sandboxed (Docker) or local. Paths are always in the agent's
  * coordinate system — container paths for sandbox, host paths for non-sandbox.
  *
- * For sandboxed sessions, operations go through `docker exec` when the
- * container is available, with a bind-mount fallback for archived sessions
- * whose containers may be stopped.
+ * Sandboxed operations run only through the exact server-attested session
+ * runtime. Archived/store-only sessions use a short-lived isolated runtime;
+ * there is no host-path or project-control-container fallback.
  */
 
 import fs from "node:fs";
@@ -15,20 +15,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
 import type { SandboxManager } from "./sandbox-manager.js";
-import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { sidecarPathFor } from "./session-sidecar.js";
 
 type SessionDeleteFs = Pick<typeof fs.promises, "unlink">;
-
-async function containerPathToHostLazy(filePath: string): Promise<string> {
-	const { containerPathToHost } = await import("./rpc-bridge.js");
-	return containerPathToHost(filePath);
-}
-
-async function hostPathToContainerLazy(filePath: string): Promise<string | null> {
-	const { tryHostPathToContainer } = await import("./rpc-bridge.js");
-	return tryHostPathToContainer(filePath);
-}
 
 /**
  * Thrown by `sessionFileCopy` when the (src, dst) sandbox/project realms
@@ -48,6 +37,8 @@ export class CrossRealmCopyError extends Error {
 export interface SessionFsContext {
 	sandboxed?: boolean;
 	projectId?: string;
+	/** Trusted Bobbit owner identity; mandatory for sandbox transcript paths. */
+	sessionId?: string;
 }
 
 function isWindowsAbsolutePath(filePath: string): boolean {
@@ -57,65 +48,49 @@ function isWindowsAbsolutePath(filePath: string): boolean {
 function isContainerAgentSessionPath(filePath: string): boolean {
 	const normalized = filePath.replace(/\\/g, "/");
 	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/");
 }
 
 export function canonicalContainerAgentSessionPath(filePath: string): string | null {
-	if (!filePath || filePath.includes("\0") || filePath.includes("\\")) return null;
+	if (!filePath || /[\u0000-\u001f\u007f]/.test(filePath) || filePath.includes("\\")) return null;
 	const normalized = path.posix.normalize(filePath);
 	if (normalized !== filePath || !isContainerAgentSessionPath(normalized)) return null;
 	return normalized;
 }
-
-const SANDBOX_PUBLISH_SCRIPT = [
-	'const fs=require("node:fs"),path=require("node:path");',
-	'const [stage,temp,target]=process.argv.slice(1);',
-	'let fd;',
-	'try {',
-	'  fs.mkdirSync(path.dirname(target),{recursive:true});',
-	'  fs.copyFileSync(stage,temp,fs.constants.COPYFILE_EXCL);',
-	'  fs.chmodSync(temp,0o600);',
-	'  fd=fs.openSync(temp,"r+"); fs.fsyncSync(fd); fs.closeSync(fd); fd=undefined;',
-	'  fs.renameSync(temp,target);',
-	'} finally {',
-	'  if (fd!==undefined) { try { fs.closeSync(fd); } catch {} }',
-	'  try { fs.unlinkSync(temp); } catch {}',
-	'}',
-].join("\n");
-
-const SANDBOX_RENAME_SCRIPT = [
-	'const fs=require("node:fs"),path=require("node:path");',
-	'const [source,target]=process.argv.slice(1);',
-	'fs.mkdirSync(path.dirname(target),{recursive:true});',
-	'fs.renameSync(source,target);',
-].join("\n");
-
-const SANDBOX_DELETE_SCRIPT = [
-	'const fs=require("node:fs");',
-	'const target=process.argv[1];',
-	'try { fs.unlinkSync(target); } catch (error) { if (error?.code!=="ENOENT") throw error; }',
-].join("\n");
 
 function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
 	if (!filePath || isContainerAgentSessionPath(filePath)) return false;
 	return path.isAbsolute(filePath) || isWindowsAbsolutePath(filePath);
 }
 
-export function sessionFsContextForAgentFile(ps: Pick<SessionFsContext, "sandboxed" | "projectId">, filePath: string | undefined): SessionFsContext {
+export function sessionFsContextForAgentFile(
+	ps: Pick<SessionFsContext, "sandboxed" | "projectId" | "sessionId"> & { id?: string },
+	filePath: string | undefined,
+): SessionFsContext {
 	return {
 		sandboxed: !!ps.sandboxed && !isHostAbsoluteAgentSessionPath(filePath),
 		projectId: ps.projectId,
+		sessionId: ps.sessionId ?? ps.id,
 	};
+}
+
+function sandboxTranscriptAuthority(
+	ctx: SessionFsContext,
+	filePath: string,
+	sandboxManager: SandboxManager | null,
+): { projectId: string; sessionId: string; path: string; sandboxManager: SandboxManager } {
+	const canonical = canonicalContainerAgentSessionPath(filePath);
+	if (!ctx.projectId || !ctx.sessionId || !canonical || !sandboxManager) {
+		throw new CrossRealmCopyError("sandbox transcript runtime authority is unavailable");
+	}
+	return { projectId: ctx.projectId, sessionId: ctx.sessionId, path: canonical, sandboxManager };
 }
 
 /**
  * Check whether a file exists at the given path.
  *
- * For sandboxed sessions, tries `docker exec test -f` first. If the container
- * is unavailable (stopped/archived), falls back to translating the container
- * path to a host path via the known bind-mount table.
+ * Sandboxed sessions use the exact attested session runtime and fail closed if
+ * no isolated runtime can be established.
  *
  * For non-sandboxed sessions, checks the host filesystem directly.
  *
@@ -130,44 +105,24 @@ export async function sessionFileExists(
 	sandboxManager: SandboxManager | null,
 ): Promise<boolean> {
 	if (!ctx.sandboxed) {
-		return fs.existsSync(filePath);
+		try { return (await fs.promises.lstat(filePath)).isFile(); }
+		catch { return false; }
 	}
-
-	// Sandboxed: try docker exec first
-	const sandbox = ctx.projectId ? sandboxManager?.get(ctx.projectId) : undefined;
-	if (sandbox) {
-		try {
-			await sandbox.exec(["test", "-f", filePath]);
-			return true;
-		} catch {
-			// test -f returns non-zero if file doesn't exist OR container is gone.
-			// Try to distinguish: attempt a simple echo to check container health.
-			try {
-				await sandbox.exec(["echo", "ok"]);
-				// Container is healthy — file genuinely doesn't exist
-				return false;
-			} catch {
-				// Container unreachable — fall through to host fallback
-			}
-		}
-	}
-
-	// Fallback: translate container path → host path
-	const hostPath = await containerPathToHostLazy(filePath);
-	if (hostPath === filePath) {
-		// No mount mapping found — can't translate, give up
-		return false;
-	}
-	console.warn(`[session-fs] Container unavailable for exists check, falling back to host path: ${hostPath}`);
-	return fs.existsSync(hostPath);
+	try {
+		const authority = sandboxTranscriptAuthority(ctx, filePath, sandboxManager);
+		return await authority.sandboxManager.runSessionTranscriptOperation(
+			authority.projectId,
+			authority.sessionId,
+			{ kind: "exists", path: authority.path },
+		) === true;
+	} catch { return false; }
 }
 
 /**
  * Read a file's contents as a UTF-8 string.
  *
- * For sandboxed sessions, tries `docker exec cat` first. If the container
- * is unavailable, falls back to reading from the host via bind-mount
- * path translation.
+ * Sandboxed sessions use a bounded read inside the exact attested session
+ * runtime; the gateway never resolves the sandbox-owned entry as a host path.
  *
  * For non-sandboxed sessions, reads from the host filesystem directly.
  *
@@ -182,101 +137,39 @@ export async function sessionFileRead(
 	sandboxManager: SandboxManager | null,
 ): Promise<string | null> {
 	if (!ctx.sandboxed) {
-		try {
-			return fs.readFileSync(filePath, "utf-8");
-		} catch {
-			return null;
-		}
+		try { return await fs.promises.readFile(filePath, "utf-8"); }
+		catch { return null; }
 	}
-
-	// Sandboxed: try docker exec cat
-	const sandbox = ctx.projectId ? sandboxManager?.get(ctx.projectId) : undefined;
-	if (sandbox) {
-		try {
-			return await sandbox.exec(["cat", filePath]);
-		} catch {
-			// cat failed — could be missing file or dead container.
-			// Check container health before falling back.
-			try {
-				await sandbox.exec(["echo", "ok"]);
-				// Container healthy — file doesn't exist
-				return null;
-			} catch {
-				// Container unreachable — fall through to host fallback
-			}
-		}
-	}
-
-	// Fallback: translate container path → host path
-	const hostPath = await containerPathToHostLazy(filePath);
-	if (hostPath === filePath) {
-		// No mount mapping found — can't translate
-		return null;
-	}
-	console.warn(`[session-fs] Container unavailable for read, falling back to host path: ${hostPath}`);
 	try {
-		return fs.readFileSync(hostPath, "utf-8");
-	} catch {
-		return null;
-	}
+		const authority = sandboxTranscriptAuthority(ctx, filePath, sandboxManager);
+		const result = await authority.sandboxManager.runSessionTranscriptOperation(
+			authority.projectId,
+			authority.sessionId,
+			{ kind: "read", path: authority.path },
+		);
+		return typeof result === "string" ? result : null;
+	} catch { return null; }
 }
 
 /**
  * Atomically publish generated session-file content in the destination's own
- * filesystem realm. Sandbox targets are published entirely inside the live
- * container: the host owns only an exclusive flat staging file under the
- * trusted sessions root, while fixed Node code copies and renames in-container.
+ * filesystem realm. Sandbox targets are streamed to fixed, bounded code in the
+ * exact attested runtime, which creates and atomically renames its own staging
+ * entry without putting transcript content or host paths in argv.
  */
 export async function sessionFileWriteAtomic(
 	ctx: SessionFsContext,
 	filePath: string,
-	content: string,
+	content: string | Buffer,
 	sandboxManager: SandboxManager | null,
 ): Promise<void> {
 	if (ctx.sandboxed) {
-		const targetPath = canonicalContainerAgentSessionPath(filePath);
-		if (!ctx.projectId || !targetPath) {
-			throw new CrossRealmCopyError("cross-realm session write not supported");
-		}
-		const sandbox = sandboxManager?.get(ctx.projectId);
-		if (!sandbox) throw new Error(`sandbox unavailable for project ${ctx.projectId}`);
-
-		const stagePath = path.join(
-			activeAgentSessionsDir(),
-			`.bobbit-stage-${process.pid}-${randomUUID()}.tmp`,
+		const authority = sandboxTranscriptAuthority(ctx, filePath, sandboxManager);
+		await authority.sandboxManager.runSessionTranscriptOperation(
+			authority.projectId,
+			authority.sessionId,
+			{ kind: "writeAtomic", path: authority.path, content },
 		);
-		const siblingTemp = path.posix.join(
-			path.posix.dirname(targetPath),
-			`.${path.posix.basename(targetPath)}.bobbit-stage-${randomUUID()}.tmp`,
-		);
-		let handle: FileHandle | undefined;
-		let stageCreated = false;
-		try {
-			await fs.promises.mkdir(activeAgentSessionsDir(), { recursive: true });
-			handle = await fs.promises.open(stagePath, "wx", 0o600);
-			stageCreated = true;
-			const stat = await handle.stat();
-			if (!stat.isFile()) throw new Error("Session transcript staging entry is not a regular file");
-			await handle.writeFile(content, { encoding: "utf-8" });
-			await handle.sync();
-			await handle.close();
-			handle = undefined;
-			const containerStage = await hostPathToContainerLazy(stagePath);
-			if (!containerStage || !canonicalContainerAgentSessionPath(containerStage)) {
-				throw new CrossRealmCopyError("sandbox session stage is not in the sessions bind mount");
-			}
-			await sandbox.exec([
-				"node", "-e", SANDBOX_PUBLISH_SCRIPT, "--",
-				containerStage, siblingTemp, targetPath,
-			]);
-		} finally {
-			if (handle) {
-				try { await handle.close(); } catch { /* retain the primary staging failure */ }
-			}
-			if (stageCreated) {
-				try { await fs.promises.unlink(stagePath); } catch { /* remove only this invocation's flat stage */ }
-			}
-		}
 		return;
 	}
 
@@ -293,7 +186,8 @@ export async function sessionFileWriteAtomic(
 		temporaryCreated = true;
 		const stat = await handle.stat();
 		if (!stat.isFile()) throw new Error("Session transcript staging entry is not a regular file");
-		await handle.writeFile(content, { encoding: "utf-8" });
+		if (typeof content === "string") await handle.writeFile(content, { encoding: "utf-8" });
+		else await handle.writeFile(content);
 		await handle.sync();
 		await handle.close();
 		handle = undefined;
@@ -309,39 +203,40 @@ export async function sessionFileWriteAtomic(
 	}
 }
 
-/** Atomically move a transcript between two paths in one live sandbox realm. */
+/** Atomically move a transcript within one owner root. */
 export async function sessionFileRenameAtomic(
 	ctx: SessionFsContext,
 	sourcePath: string,
 	targetPath: string,
 	sandboxManager: SandboxManager | null,
 ): Promise<void> {
-	const source = canonicalContainerAgentSessionPath(sourcePath);
-	const target = canonicalContainerAgentSessionPath(targetPath);
-	if (!ctx.sandboxed || !ctx.projectId || !source || !target) {
-		throw new CrossRealmCopyError("cross-realm session rename not supported");
-	}
-	const sandbox = sandboxManager?.get(ctx.projectId);
-	if (!sandbox) throw new Error(`sandbox unavailable for project ${ctx.projectId}`);
-	await sandbox.exec(["node", "-e", SANDBOX_RENAME_SCRIPT, "--", source, target]);
+	if (!ctx.sandboxed) throw new CrossRealmCopyError("cross-realm session rename not supported");
+	const source = sandboxTranscriptAuthority(ctx, sourcePath, sandboxManager);
+	const target = sandboxTranscriptAuthority(ctx, targetPath, sandboxManager);
+	await source.sandboxManager.runSessionTranscriptOperation(
+		source.projectId,
+		source.sessionId,
+		{ kind: "renameAtomic", sourcePath: source.path, targetPath: target.path },
+	);
 }
 
 /**
- * Delete only through a live container. This intentionally has no host-path
- * translation fallback: an unavailable sandbox leaves an orphan for trusted
- * maintenance rather than turning an attacker-influenced path into host I/O.
+ * Delete only through an exact attested session runtime. This intentionally
+ * has no host-path or shared-control-container fallback.
  */
 export async function sessionFileDeleteContainerOnly(
 	ctx: SessionFsContext,
 	filePath: string,
 	sandboxManager: SandboxManager | null,
 ): Promise<boolean> {
-	const target = canonicalContainerAgentSessionPath(filePath);
-	if (!ctx.sandboxed || !ctx.projectId || !target) return false;
-	const sandbox = sandboxManager?.get(ctx.projectId);
-	if (!sandbox) return false;
+	if (!ctx.sandboxed) return false;
 	try {
-		await sandbox.exec(["node", "-e", SANDBOX_DELETE_SCRIPT, "--", target]);
+		const authority = sandboxTranscriptAuthority(ctx, filePath, sandboxManager);
+		await authority.sandboxManager.runSessionTranscriptOperation(
+			authority.projectId,
+			authority.sessionId,
+			{ kind: "delete", path: authority.path },
+		);
 		return true;
 	} catch {
 		return false;
@@ -355,11 +250,10 @@ export async function sessionFileDeleteContainerOnly(
  *   src \ dst | non-sandboxed                 | sandboxed (same project)
  *   ──────────┼───────────────────────────────┼──────────────────────────
  *   non-sb    | host fs.copyFileSync          | CrossRealmCopyError
- *   sandboxed | CrossRealmCopyError           | docker exec cp
+ *   sandboxed | CrossRealmCopyError           | bounded runtime read + atomic write
  *
- * Cross-realm and cross-project copies throw `CrossRealmCopyError`. Same-
- * realm copies create the destination directory (host-side or via
- * `docker exec mkdir -p`) before copying.
+ * Cross-realm and cross-project copies throw `CrossRealmCopyError`. Each
+ * sandbox side is independently bound to its exact owner runtime.
  */
 export async function sessionFileCopy(
 	srcCtx: SessionFsContext,
@@ -384,13 +278,19 @@ export async function sessionFileCopy(
 		if (!srcCtx.projectId || !dstCtx.projectId || srcCtx.projectId !== dstCtx.projectId) {
 			throw new CrossRealmCopyError("cross-realm continue not supported");
 		}
-		const sandbox = sandboxManager?.get(srcCtx.projectId);
-		if (!sandbox) {
-			throw new Error(`sandbox unavailable for project ${srcCtx.projectId}`);
-		}
-		const dir = path.posix.dirname(dstPath.replace(/\\/g, "/"));
-		await sandbox.exec(["mkdir", "-p", dir]);
-		await sandbox.exec(["cp", srcPath, dstPath]);
+		const source = sandboxTranscriptAuthority(srcCtx, srcPath, sandboxManager);
+		const destination = sandboxTranscriptAuthority(dstCtx, dstPath, sandboxManager);
+		const content = await source.sandboxManager.runSessionTranscriptOperation(
+			source.projectId,
+			source.sessionId,
+			{ kind: "read", path: source.path },
+		);
+		if (typeof content !== "string") throw new Error("Session transcript source is unavailable");
+		await destination.sandboxManager.runSessionTranscriptOperation(
+			destination.projectId,
+			destination.sessionId,
+			{ kind: "writeAtomic", path: destination.path, content },
+		);
 		return;
 	}
 
@@ -401,9 +301,7 @@ export async function sessionFileCopy(
 /**
  * Delete a file at the given path.
  *
- * For sandboxed sessions, tries `docker exec rm` first. If the container
- * is unavailable, falls back to deleting from the host via bind-mount
- * path translation.
+ * Sandboxed sessions delete only inside the exact attested session runtime.
  *
  * For non-sandboxed sessions, deletes from the host filesystem directly.
  *
@@ -423,41 +321,19 @@ export async function sessionFileDelete(
 			await fsImpl.unlink(filePath);
 			return true;
 		} catch (err: any) {
-			// ENOENT is fine — file already gone
 			return err?.code === "ENOENT";
 		}
 	}
-
-	// Sandboxed: try docker exec rm
-	const sandbox = ctx.projectId ? sandboxManager?.get(ctx.projectId) : undefined;
-	if (sandbox) {
-		try {
-			await sandbox.exec(["rm", "-f", filePath]);
-			return true;
-		} catch {
-			// rm failed — check if container is alive
-			try {
-				await sandbox.exec(["echo", "ok"]);
-				// Container healthy — rm genuinely failed
-				return false;
-			} catch {
-				// Container unreachable — fall through to host fallback
-			}
-		}
-	}
-
-	// Fallback: translate container path → host path
-	const hostPath = await containerPathToHostLazy(filePath);
-	if (hostPath === filePath) {
-		// No mount mapping found — can't translate
-		return false;
-	}
-	console.warn(`[session-fs] Container unavailable for delete, falling back to host path: ${hostPath}`);
 	try {
-		await fsImpl.unlink(hostPath);
+		const authority = sandboxTranscriptAuthority(ctx, filePath, sandboxManager);
+		await authority.sandboxManager.runSessionTranscriptOperation(
+			authority.projectId,
+			authority.sessionId,
+			{ kind: "delete", path: authority.path },
+		);
 		return true;
-	} catch (err: any) {
-		return err?.code === "ENOENT";
+	} catch {
+		return false;
 	}
 }
 

@@ -32,6 +32,7 @@ toolPolicies:
   "Agent": never
   read_session: never
   "Ask": never
+  "Attachments": never
   "Bobbit": never
   "Browser": never
   "Children": never

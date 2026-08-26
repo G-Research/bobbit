@@ -147,13 +147,18 @@ it safely.
 |---|---|---|---|
 | `text` | readable content recognized as UTF-8 text | snapshotted content in a `<file-reference>` block | `@path` is replaced by the block |
 | `image` | supported image extension (`.png`, `.jpg`, `.gif`, `.webp`, `.svg`, and others) | snapshotted base64 bytes through `images[]` | literal `@path` remains |
-| `binary` | readable non-image content not recognized as text | snapshotted base64 document attachment | literal `@path` remains |
+| `binary` | readable non-image content not recognized as text | workspace bytes are snapshotted, then admitted through the same immutable document path as a browser upload | literal `@path` remains; safe metadata and an opaque pointer are appended, never binary base64 |
 | `unresolved` | existing or otherwise non-missing target fails a later delivery check | no content or bytes delivered | literal `@path` remains |
 
-Binary document attachments preserve the UI chip and send-time snapshot in the
-same shape as uploaded documents. The current agent prompt RPC forwards text and
-images, not document bytes; model-side binary delivery remains an attachment
-pipeline concern outside this feature.
+A binary `@` reference gets its bytes from the workspace resolver, whereas a
+browser upload gets them from the browser. After that source-specific capture,
+both use the same authoritative document admission: the UI keeps the literal
+`@path` and chip, model-only context gets escaped metadata and an opaque pointer,
+and exact bytes are available only when policy enables bounded
+`session_attachment` reads. The pointer resolves the immutable send-time
+snapshot, never a mutable workspace or host path. The `@` admission and delivery
+limits below remain separate from the browser-upload count, per-file, serialized
+send, and session-quota limits.
 
 A text block names and delimits the snapshot:
 
@@ -300,6 +305,7 @@ sidecar degrades to the original plain text for backward compatibility.
 
 ## Related
 
+- [Browser-uploaded attachments](uploaded-attachments.md) — the distinct browser byte source and shared immutable document delivery path.
 - [Skills (slash commands)](features.md#skills) — the sibling `/` feature.
 - [Skill chip rendering and sidecar persistence](internals.md#skill-chip-rendering--autonomous-activation)
   — the shared chip and replay machinery.

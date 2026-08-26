@@ -724,9 +724,12 @@ describe("SessionManager poisoned-history recovery", () => {
 		vi.spyOn(console, "info").mockImplementation(() => {});
 		let rejectReplacement!: (error: Error) => void;
 		const replacement = new Promise<void>((_resolve, reject) => { rejectReplacement = reject; });
+		let replacementEnteredResolve!: () => void;
+		const replacementEntered = new Promise<void>((resolve) => { replacementEnteredResolve = resolve; });
 		let respawns = 0;
 		h.manager._respawnAgentInPlaceOwned = async () => {
 			respawns++;
+			replacementEnteredResolve();
 			await replacement;
 		};
 
@@ -735,6 +738,7 @@ describe("SessionManager poisoned-history recovery", () => {
 			modelText: "expanded second follow-up",
 			source: "agent",
 		});
+		await replacementEntered;
 		rejectReplacement(new Error("fixture shared replacement failed"));
 
 		const results = await Promise.allSettled([first, second]);
@@ -796,6 +800,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(queued[0], {
 			id: intentId,
 			text: "expanded mockup instructions\n\nhero",
+			displayText: "/mockup hero",
 			isSteered: true,
 			createdAt: queued[0].createdAt,
 			kind: "steer",
@@ -819,11 +824,13 @@ describe("SessionManager poisoned-history recovery", () => {
 		);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
 			recordId: skillRecordId,
+			intentId,
+			promptId: intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
 			skillExpansions,
 			fileMentions,
-		}]);
+		}], "stable admission binds the display envelope before recovery so an equal-text occurrence cannot claim it");
 		assert.equal(rollback.lastPromptSource, "agent");
 
 		// Once recovery gating clears, repeated drains still hand this occurrence to
@@ -840,6 +847,7 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.deepEqual(h.persistedRecord.messageQueue, []);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
 			recordId: skillRecordId,
+			intentId,
 			promptId: intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",

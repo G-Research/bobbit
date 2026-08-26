@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import * as BobbitDir from "../bobbit-dir.js";
 
 /** Slugify a cwd for use as the agent CLI sessions-dir component. */
@@ -60,6 +61,110 @@ function configuredAgentDirHistory(): string[] {
 /** Active startup-resolved host sessions directory for new agent session files. */
 export function activeAgentSessionsDir(): string {
 	return path.join(BobbitDir.globalAgentDir(), "sessions");
+}
+
+const SESSION_ROOT_NAMESPACE = ".bobbit-session-roots-v1";
+const SESSION_ROOT_DOMAIN = "bobbit-session-transcript-root-v1\0";
+
+function trustedSessionId(sessionId: string): string {
+	if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > 256 || sessionId.includes("\0")) {
+		throw new Error("Invalid server session identity");
+	}
+	return sessionId;
+}
+
+/** Filename-inert, domain-separated storage identity for one Bobbit session. */
+export function sessionTranscriptStorageKey(sessionId: string): string {
+	return createHash("sha256").update(SESSION_ROOT_DOMAIN).update(trustedSessionId(sessionId)).digest("hex");
+}
+
+/** Durable host transcript root visible only to one session execution runtime. */
+export function sessionTranscriptRoot(sessionId: string, sessionsRoot = activeAgentSessionsDir()): string {
+	return path.join(sessionsRoot, SESSION_ROOT_NAMESPACE, sessionTranscriptStorageKey(sessionId));
+}
+
+/** Private analogue of the legacy shared `/bobbit-state/sessions` bind. */
+export function sessionStateSessionsRoot(stateDir: string, sessionId: string): string {
+	if (!path.isAbsolute(stateDir) || stateDir.includes("\0")) throw new Error("Invalid state directory");
+	return path.join(stateDir, "sessions", SESSION_ROOT_NAMESPACE, sessionTranscriptStorageKey(sessionId));
+}
+
+/** Create a private root without following a pre-existing namespace/root link. */
+export function ensurePrivateSessionRoot(root: string, trustedParent: string): string {
+	const parent = path.resolve(trustedParent);
+	const target = path.resolve(root);
+	const relative = path.relative(parent, target);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Private session root escapes its trusted parent");
+	fs.mkdirSync(parent, { recursive: true });
+	let cursor = parent;
+	for (const component of relative.split(path.sep)) {
+		cursor = path.join(cursor, component);
+		try {
+			const stat = fs.lstatSync(cursor);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Private session root contains an unsafe filesystem entry");
+		} catch (error: any) {
+			if (error?.code !== "ENOENT") throw error;
+			fs.mkdirSync(cursor, { mode: 0o700 });
+			const created = fs.lstatSync(cursor);
+			if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("Private session root creation was replaced");
+		}
+	}
+	return target;
+}
+
+/** Async variant for request, recovery, and cleanup paths. */
+export async function ensurePrivateSessionRootAsync(root: string, trustedParent: string): Promise<string> {
+	const parent = path.resolve(trustedParent);
+	const target = path.resolve(root);
+	const relative = path.relative(parent, target);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Private session root escapes its trusted parent");
+	await fs.promises.mkdir(parent, { recursive: true });
+	let cursor = parent;
+	for (const component of relative.split(path.sep)) {
+		cursor = path.join(cursor, component);
+		try {
+			const stat = await fs.promises.lstat(cursor);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Private session root contains an unsafe filesystem entry");
+		} catch (error: any) {
+			if (error?.code !== "ENOENT") throw error;
+			try { await fs.promises.mkdir(cursor, { mode: 0o700 }); }
+			catch (mkdirError: any) { if (mkdirError?.code !== "EEXIST") throw mkdirError; }
+			const created = await fs.promises.lstat(cursor);
+			if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("Private session root creation was replaced");
+		}
+	}
+	return target;
+}
+
+const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
+
+/** Canonical path relative to Pi's primary sessions coordinate. */
+export function containerTranscriptRelativePath(filePath: string): string | null {
+	if (!filePath || filePath.includes("\0") || filePath.includes("\\")) return null;
+	const normalized = path.posix.normalize(filePath);
+	if (normalized !== filePath || normalized === CONTAINER_AGENT_SESSIONS_DIR) return null;
+	if (!normalized.startsWith(`${CONTAINER_AGENT_SESSIONS_DIR}/`)) return null;
+	const relative = normalized.slice(CONTAINER_AGENT_SESSIONS_DIR.length + 1);
+	return relative && !relative.startsWith("../") ? relative : null;
+}
+
+/** Translate one canonical Pi coordinate using its trusted Bobbit owner. */
+export function sessionTranscriptHostPath(sessionId: string, filePath: string, sessionsRoot = activeAgentSessionsDir()): string | null {
+	const relative = containerTranscriptRelativePath(filePath);
+	if (!relative) return null;
+	return path.join(sessionTranscriptRoot(sessionId, sessionsRoot), ...relative.split("/"));
+}
+
+export function sessionTranscriptContainerPath(relativePath: string): string | null {
+	if (!relativePath || relativePath.includes("\0") || relativePath.includes("\\") || path.posix.isAbsolute(relativePath)) return null;
+	const normalized = path.posix.normalize(relativePath);
+	if (normalized !== relativePath || normalized.startsWith("../")) return null;
+	return `${CONTAINER_AGENT_SESSIONS_DIR}/${normalized}`;
+}
+
+/** Owner roots corresponding to every trusted active/historical sessions root. */
+export function trustedSessionTranscriptRoots(sessionId: string): string[] {
+	return trustedAgentSessionsRoots().map(root => sessionTranscriptRoot(sessionId, root));
 }
 
 function currentHomeDir(): string {
@@ -129,4 +234,12 @@ export function formatAgentSessionFilePath(
 	const cwdDir = path.join(activeAgentSessionsDir(), `--${slugifyCwd(cwd)}--`);
 	const ts = formatAgentTimestamp(createdAtMs);
 	return path.join(cwdDir, `${ts}_${sessionId}.jsonl`).replace(/\\/g, "/");
+}
+
+/** Canonical Pi coordinate for a generation owned by one sandbox session. */
+export function formatOwnedAgentSessionFilePath(cwd: string, createdAtMs: number, transcriptId: string): string {
+	const relative = `--${slugifyCwd(cwd)}--/${formatAgentTimestamp(createdAtMs)}_${transcriptId}.jsonl`;
+	const result = sessionTranscriptContainerPath(relative);
+	if (!result) throw new Error("Could not format owner-scoped agent session path");
+	return result;
 }

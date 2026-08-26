@@ -11,7 +11,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-goal-promotion-runti
 process.env.BOBBIT_DIR = root;
 process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
 
-const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { activeAgentSessionsDir, sessionTranscriptRoot } = await import("../../src/server/agent/agent-session-path.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
@@ -79,18 +79,23 @@ afterEach(() => {
 
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
-function transcript(name: string): string {
-	const dir = path.join(activeAgentSessionsDir(), "--promotion-runtime--");
+function transcript(name: string, sandboxed: boolean): string {
+	const relative = path.join("--promotion-runtime--", `${name}.jsonl`);
+	const dir = sandboxed
+		? path.join(sessionTranscriptRoot(name), "--promotion-runtime--")
+		: path.join(activeAgentSessionsDir(), "--promotion-runtime--");
 	fs.mkdirSync(dir, { recursive: true });
-	const file = path.join(dir, `${name}.jsonl`);
-	fs.writeFileSync(file, `${JSON.stringify({
+	const hostFile = path.join(dir, `${name}.jsonl`);
+	fs.writeFileSync(hostFile, `${JSON.stringify({
 		type: "message",
 		id: "existing-user-message",
 		parentId: null,
 		message: { role: "user", content: [{ type: "text", text: "work already in progress" }] },
 	})}\n`, "utf8");
-	files.push(file);
-	return file;
+	files.push(hostFile);
+	return sandboxed
+		? `/home/node/.bobbit/agent/sessions/${relative.replace(/\\/g, "/")}`
+		: hostFile;
 }
 
 function bridge(initial: { provider?: string; modelId?: string; thinkingLevel?: string } = {}): any {
@@ -140,7 +145,7 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 	oldBridge: any;
 	store: any;
 } {
-	const file = transcript(name);
+	const file = transcript(name, overrides.sandboxed === true);
 	const persisted: any = {
 		id: name,
 		title: "Existing regular session",
@@ -505,6 +510,14 @@ describe("SessionManager current-session runtime promotion", () => {
 		fx.live.cwd = fx.persisted.cwd;
 		fx.live.worktreePath = fx.persisted.worktreePath;
 		fx.live.sandboxed = true;
+		// Exact-runtime transcript fixture: role staging probes the canonical
+		// conversation path after the replacement bridge starts.
+		fx.manager.sandboxManager = {
+			runSessionTranscriptOperation: vi.fn(async (_projectId: string, sessionId: string, operation: { kind: string }) => {
+				expect(sessionId).toBe(fx.live.id);
+				return operation.kind === "exists" ? true : undefined;
+			}),
+		};
 		const replacement = bridge();
 		let options: any;
 		registerRpcBridgeFactory((nextOptions: any) => {
@@ -517,6 +530,8 @@ describe("SessionManager current-session runtime promotion", () => {
 				projectId: fx.live.projectId,
 				goalId: "goal-sandbox",
 				expectedExistingContainerId: "existing-container",
+				allowLegacyControlMigration: true,
+				persistRuntimeIdentity: false,
 			});
 			bridgeOptions.sandboxed = true;
 			bridgeOptions.containerId = "existing-container";
@@ -548,13 +563,13 @@ describe("SessionManager current-session runtime promotion", () => {
 	});
 
 	it.each([
-		["non-ready", { status: "starting", containerId: "existing-container" }],
-		["replacement", { status: "ready", containerId: "replacement-container" }],
-	])("fails closed on a %s sandbox without bootstrap or candidate start", async (_case, status) => {
+		["missing", "Expected session runtime was not found"],
+		["mismatched", "Unexpected session runtime identity"],
+	])("fails closed on a %s promoted execution runtime without candidate start", async (_case, runtimeError) => {
 		const fx = fixture(`promotion-sandbox-${_case}`, {
 			agentSessionFile: "",
 			sandboxed: true,
-			containerId: "existing-container",
+			containerId: "runtime-exact",
 			cwd: `/workspace-wt/session/promotion-sandbox-${_case}`,
 			worktreePath: `/workspace-wt/session/promotion-sandbox-${_case}`,
 		});
@@ -564,23 +579,30 @@ describe("SessionManager current-session runtime promotion", () => {
 		const replacement = bridge();
 		const factory = vi.fn(() => replacement);
 		registerRpcBridgeFactory(factory);
-		const ensureForProject = vi.fn(async () => { throw new Error("strict promotion must not bootstrap"); });
-		const getContainerId = vi.fn(async () => status.containerId);
+		const ensureForProject = vi.fn(async () => {});
 		fx.manager.projectConfigStore = {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => [],
 		};
+		fx.manager.readGatewayUrlForAgent = () => "https://gateway.test";
+		fx.manager.mintScopedGatewayToken = () => "scoped-token";
 		fx.manager.sandboxManager = {
 			ensureForProject,
-			get: vi.fn(() => ({ getStatus: () => status, getContainerId })),
+			get: vi.fn(() => ({
+				getStatus: () => ({ status: "ready", containerId: "control-container" }),
+				getContainerId: async () => "control-container",
+			})),
+			ensureSessionRuntime: vi.fn(async () => { throw new Error(runtimeError); }),
+			isSessionRuntimeIsolated: vi.fn(async () => false),
+			releaseSessionRuntime: vi.fn(async () => {}),
 		};
 		const before = structuredClone(fx.persisted);
 
 		const reservation = reservePromotion(fx, "goal-sandbox-race");
 		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox-race", reservation))
-			.rejects.toThrow(/expected ready container|container identity changed/);
+			.rejects.toThrow(runtimeError);
 
-		expect(ensureForProject).not.toHaveBeenCalled();
+		expect(ensureForProject).toHaveBeenCalledTimes(1);
 		expect(factory).not.toHaveBeenCalled();
 		expect(replacement.start).not.toHaveBeenCalled();
 		expect(fx.oldBridge.stop).not.toHaveBeenCalled();
@@ -683,7 +705,7 @@ describe("SessionManager current-session runtime promotion", () => {
 
 		await fx.manager.restoreOneSession(fx.persisted);
 
-		expect(sandboxExec).toHaveBeenCalledTimes(2);
+		expect(sandboxExec).not.toHaveBeenCalled();
 		expect(fx.store.archive).not.toHaveBeenCalled();
 		expect(fx.persisted).toEqual(before);
 		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({
@@ -721,7 +743,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		});
 		fx.manager.commandRunner = { execFile };
 		const createWorktree = vi.fn(async () => { throw new Error("recreation must not run"); });
-		fx.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree })) };
+		fx.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree, getContainerId: async () => "control-container" })) };
 		const before = structuredClone(fx.persisted);
 
 		await expect(fx.manager.restoreSession(fx.persisted)).rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
@@ -735,7 +757,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(fx.persisted).toEqual(before);
 	});
 
-	it("quarantines a promoted source when restart sees a replacement container without bootstrapping", async () => {
+	it("quarantines a promoted source when its exact runtime is missing after control recovery", async () => {
 		const fx = fixture("promotion-sandbox-replaced-on-restart", {
 			goalId: "goal-promoted",
 			teamGoalId: "goal-promoted",
@@ -748,7 +770,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		fx.manager.sessions.clear();
 		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
 			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
-		const ensureForProject = vi.fn(async () => { throw new Error("must not bootstrap"); });
+		const ensureForProject = vi.fn(async () => {});
 		fx.manager.projectConfigStore = {
 			get: (key: string) => key === "sandbox" ? "docker" : undefined,
 			getSandboxTokens: () => [],
@@ -756,15 +778,18 @@ describe("SessionManager current-session runtime promotion", () => {
 		fx.manager.sandboxManager = {
 			ensureForProject,
 			get: vi.fn(() => ({
-				getStatus: () => ({ status: "ready", containerId: "replacement-container" }),
-				getContainerId: vi.fn(async () => "replacement-container"),
+				getStatus: () => ({ status: "ready", containerId: "replacement-control" }),
+				getContainerId: vi.fn(async () => "replacement-control"),
 			})),
+			ensureSessionRuntime: vi.fn(async () => { throw new Error("Expected session runtime was not found"); }),
+			isSessionRuntimeIsolated: vi.fn(async () => false),
+			releaseSessionRuntime: vi.fn(async () => {}),
 		};
 		const before = structuredClone(fx.persisted);
 
 		await fx.manager.restoreOneSession(fx.persisted);
 
-		expect(ensureForProject).not.toHaveBeenCalled();
+		expect(ensureForProject).toHaveBeenCalledTimes(1);
 		expect(fx.persisted).toEqual(before);
 		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({
 			dormant: true,
@@ -804,12 +829,13 @@ describe("SessionManager current-session runtime promotion", () => {
 		});
 	});
 
-	it("does not repair, recreate, archive, or terminate a live promoted source during container recovery", async () => {
+	it("keeps a promoted runtime live when only the project control container recovers", async () => {
 		const fx = fixture("promotion-live-container-recovery", {
 			goalId: "goal-promoted",
 			teamGoalId: "goal-promoted",
 			role: "team-lead",
 			sandboxed: true,
+			containerId: "runtime-promoted-exact",
 			cwd: "/workspace-wt/session/promotion-live-container-recovery",
 			worktreePath: "/workspace-wt/session/promotion-live-container-recovery",
 		});
@@ -818,15 +844,21 @@ describe("SessionManager current-session runtime promotion", () => {
 		fx.live.sandboxed = true;
 		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
 			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
-		const execFile = vi.fn(async (..._args: any[]) => { throw new Error("worktree missing"); });
+		const execFile = vi.fn(async (..._args: any[]) => ({ stdout: "", stderr: "" }));
 		fx.manager.commandRunner = { execFile };
 		const createWorktree = vi.fn();
-		fx.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree })) };
+		fx.manager.sandboxManager = {
+			get: vi.fn(() => ({ createWorktree })),
+			isSessionRuntimeIsolated: vi.fn(async (_projectId: string, sessionId: string, id: string) =>
+				sessionId === fx.persisted.id && id === "runtime-promoted-exact"),
+		};
 
-		await fx.manager.recoverSandboxSessions(fx.persisted.projectId, "replacement-container-id");
+		await fx.manager.recoverSandboxSessions(fx.persisted.projectId, "replacement-control-id");
 
-		expect(execFile).not.toHaveBeenCalled();
+		expect(execFile).toHaveBeenCalledTimes(1);
+		expect(execFile.mock.calls[0][1]).toContain("replacement-control-id");
 		expect(createWorktree).not.toHaveBeenCalled();
+		expect(fx.oldBridge.stop).not.toHaveBeenCalled();
 		expect(fx.store.archive).not.toHaveBeenCalled();
 		expect(fx.store.archiveAsync).not.toHaveBeenCalled();
 		expect(fx.manager.getSession(fx.persisted.id)).toBe(fx.live);
@@ -972,7 +1004,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		const execFile = vi.fn(async () => { throw new Error("missing or unrepaired"); });
 		sandbox.manager.commandRunner = { execFile };
 		const createWorktree = vi.fn(async () => { throw new Error("recreation failed"); });
-		sandbox.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree })) };
+		sandbox.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree, getContainerId: async () => "control-container" })) };
 
 		await sandbox.manager.restoreSession(sandbox.persisted);
 

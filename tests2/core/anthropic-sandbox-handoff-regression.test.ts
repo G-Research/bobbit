@@ -33,6 +33,19 @@ function completePiOAuthCredential(access: string, expires: number): { type: "oa
 	return { type: "oauth", access, refresh: SYNTHETIC_PI_REFRESH, expires };
 }
 
+function isolatedSandboxManager(): any {
+	return {
+		ensureForProject: async () => {},
+		get: () => ({
+			getContainerId: async () => "container-test",
+			getStatus: () => ({ status: "ready", containerId: "container-test" }),
+		}),
+		ensureSessionRuntime: async (_projectId: string, sessionId: string) => `runtime-${sessionId}`,
+		isSessionRuntimeIsolated: async (_projectId: string, sessionId: string, id: string) => id === `runtime-${sessionId}`,
+		releaseSessionRuntime: async () => {},
+	};
+}
+
 function useHostAuth(auth: unknown): void {
 	root = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-sandbox-"));
 	agentDir = path.join(root, "agent");
@@ -151,10 +164,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
 		};
 		manager.sandboxTokenStore = null;
-		manager.sandboxManager = {
-			ensureForProject: async () => {},
-			get: () => ({ getContainerId: async () => "container-test" }),
-		};
+		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
@@ -175,10 +185,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			getSandboxTokens: () => [{ key: "ANTHROPIC_API_KEY", enabled: true, value: "project-provided-key" }],
 		};
 		manager.sandboxTokenStore = null;
-		manager.sandboxManager = {
-			ensureForProject: async () => {},
-			get: () => ({ getContainerId: async () => "container-test" }),
-		};
+		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
@@ -208,10 +215,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			getSandboxTokens: () => entries,
 		};
 		manager.sandboxTokenStore = null;
-		manager.sandboxManager = {
-			ensureForProject: async () => {},
-			get: () => ({ getContainerId: async () => "container-test" }),
-		};
+		manager.sandboxManager = isolatedSandboxManager();
 		const firstOptions: any = { cwd: "/workspace", env: {} };
 		const secondOptions: any = { cwd: "/workspace", env: {} };
 
@@ -263,10 +267,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			getSandboxTokens: () => [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
 		};
 		manager.sandboxTokenStore = null;
-		manager.sandboxManager = {
-			ensureForProject: async () => {},
-			get: () => ({ getContainerId: async () => "container-test" }),
-		};
+		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);
@@ -285,10 +286,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			getSandboxTokens: () => [],
 		};
 		manager.sandboxTokenStore = null;
-		manager.sandboxManager = {
-			ensureForProject: async () => {},
-			get: () => ({ getContainerId: async () => "container-test" }),
-		};
+		manager.sandboxManager = isolatedSandboxManager();
 		const bridgeOptions: any = { cwd: "/workspace", env: {} };
 
 		assert.equal(await manager.applySandboxWiring(bridgeOptions, "session-test", { projectId: "project-test" }), true);

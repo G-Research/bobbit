@@ -21,12 +21,102 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-transcript-roots.test.ts",
+      "reason": "Focused security coverage for deterministic owner roots, exact session/control mounts, mount attestation, and owner-aware transcript publication and translation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/ask-user-choices-dismissal.test.ts",
       "reason": "Core coverage for answer-vs-dismiss reservation linearization and rollback, durable ask-card ID normalization, transcript call validation, posted-result detection, and multi-ask unresolved-state recomputation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/uploaded-attachment-context.test.ts",
+      "reason": "Pure unit coverage for model-facing context generated from uploaded text and arbitrary binary document metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/uploaded-specialized-document-extractor.test.ts",
+      "reason": "Core coverage for isolated bounded PDF extraction, bounded linear OOXML scanning and malformed fallback, normal specialized extraction, timeout and capacity fallback, and continued server responsiveness.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/uploaded-attachment-text.test.ts",
+      "reason": "Pure regression coverage for rejecting dense valid UTF-8 C1 controls without changing the existing control-density allowance.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/uploaded-attachment-admission-repro.test.ts",
+      "reason": "Focused admission lifecycle coverage proving immutable pointers and bounded excerpts reach model dispatch while visible, title, queue, binary, equal-text occurrence, and preview-quota rejection projections remain isolated.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/uploaded-attachment-store.test.ts",
+      "reason": "Core coverage for immutable digest-verified exact bytes, TOCTOU-safe bounded ranges, adversarial OOXML pointer-only admission, durable-preview quota accounting, idempotent occurrence ownership, authorization, validation, and purge.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/attachment-upload.test.ts",
+      "reason": "Real composer and browser File coverage for unrestricted file selection, unknown-extension UTF-8 extraction, and arbitrary binary attachment retention.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/uploaded-attachment-binary-text-repro.test.ts",
+      "reason": "DOM regression coverage proving binary-looking bytes are never trusted as text solely from their filename or claimed MIME type.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/uploaded-attachment-tool.test.ts",
+      "reason": "Integration coverage for session-scoped attachment list/read routing, exact bounded bytes, fail-closed tamper handling, foreign-session rejection, restart persistence, and cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/misc.journey.spec.ts",
+      "reason": "Browser journey covering unrestricted text and arbitrary binary selection, model-only dispatch context, bounded attachment reads, reload presentation, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
       }
     },
     {
