@@ -146,8 +146,23 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 /** Specs whose Docker-backed cases require the local sandbox image. */
 const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 
-function npmCmd() {
-	return process.platform === "win32" ? "npm.cmd" : "npm";
+/**
+ * Build a shell-free invocation of the isolated Playwright E2E wrapper.
+ * Discovered spec paths stay as individual argv elements even when their names
+ * contain characters interpreted by cmd.exe or another shell.
+ */
+export function createPlaywrightE2EInvocation({ project, specs, workers, retries }) {
+	return {
+		command: process.execPath,
+		args: [
+			join(REPO_ROOT, "scripts", "run-playwright-e2e.mjs"),
+			`--project=${project}`,
+			...specs,
+			`--workers=${workers}`,
+			`--retries=${retries}`,
+		],
+		shell: false,
+	};
 }
 
 // The E2E runner intentionally defaults Groups B/C to two workers. It is a
@@ -248,9 +263,11 @@ async function runGroupB(specs, coordinatorEnv) {
 	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
 	// explicitly passes 0 so no first-attempt failure can be hidden.
 	const pwWorkers = resolveE2ePlaywrightWorkers();
-	return run(npmCmd(), ["run", "test:e2e:run", "--", "--project=api", ...specs, `--workers=${pwWorkers}`, `--retries=${retries}`], {
+	const invocation = createPlaywrightE2EInvocation({ project: "api", specs, workers: pwWorkers, retries });
+	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 		label: "B/api-process",
+		shell: invocation.shell,
 	});
 }
 
@@ -259,9 +276,11 @@ async function runGroupC(specs, coordinatorEnv) {
 	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
 	const retries = resolveE2ERetryCount(coordinatorEnv);
 	const playwrightWorkers = resolveE2ePlaywrightWorkers();
-	return run(npmCmd(), ["run", "test:e2e:run", "--", "--project=browser", ...specs, `--workers=${playwrightWorkers}`, `--retries=${retries}`], {
+	const invocation = createPlaywrightE2EInvocation({ project: "browser", specs, workers: playwrightWorkers, retries });
+	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 		label: "C/browser-fidelity",
+		shell: invocation.shell,
 	});
 }
 
