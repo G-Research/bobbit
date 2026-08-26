@@ -276,6 +276,13 @@ export function installRemoteStateRouteHooks(): void {
 	});
 
 	test.afterAll(() => {
+		// These server-module fakes are process-global, so the suite—not an
+		// individual spec body—owns their lifetime. The compatibility harness runs
+		// its entity sweep after spec afterEach hooks; clearing here keeps cleanup in
+		// the same synthetic force-clock domain and releases both seams before the
+		// harness's final leak assertion or a later suite can observe them.
+		serverModule?.__clearGitStatusFake();
+		serverModule?.__clearRemoteStateForceNowFake();
 		if (!projectPersistenceOptions || !previousPersistence) return;
 		projectPersistenceOptions.goalPersistence = previousPersistence.goalPersistence;
 		projectPersistenceOptions.taskPersistence = previousPersistence.taskPersistence;
@@ -287,11 +294,6 @@ export function installRemoteStateRouteHooks(): void {
 		forceRequestedAt = Math.max(forceRequestedAt, performance.now()) + 251;
 		serverModule.__setRemoteStateForceNowFake(() => forceRequestedAt);
 		serverModule.__setGitStatusFake(async (_cwd: string, _containerId?: string, opts?: { untracked?: boolean }) => deterministicGitStatus(opts));
-	});
-
-	test.afterEach(() => {
-		serverModule.__clearGitStatusFake();
-		serverModule.__clearRemoteStateForceNowFake();
 	});
 }
 
