@@ -10820,11 +10820,17 @@ async function handleApiRoute(
 			return;
 		}
 		const projectToolManager = resolveActionToolManager(toolManager, projectContext.toolManager);
-		const resolveSession = (id: string): ActionGuardSession | undefined => {
-			const live = sessionManager.getSession(id);
-			if (live) return { allowedTools: live.allowedTools };
-			const persisted = sessionManager.getPersistedSession(id);
-			return persisted ? { allowedTools: persisted.allowedTools } : undefined;
+		// Configured tool names cannot contain NUL, so this sentinel can never grant a real tool.
+		const PACK_BOUND_PROJECT_READ_TOOL = "\0bobbit:pack-bound-project-read";
+		const resolveProjectReadSession = (id: string): ActionGuardSession | undefined => {
+			const session = sessionManager.getSession(id) ?? sessionManager.getPersistedSession(id);
+			if (!session) return undefined;
+			const allowedTools = session.allowedTools;
+			return {
+				allowedTools: allowedTools && allowedTools.length > 0
+					? [...allowedTools, PACK_BOUND_PROJECT_READ_TOOL]
+					: allowedTools,
+			};
 		};
 		const surface = resolveSurfaceIdentity({
 			token: request.surfaceToken,
@@ -10837,28 +10843,20 @@ async function handleApiRoute(
 			json({ error: surface.error }, surface.status);
 			return;
 		}
-		// Every surface passes the common session guard. Tool surfaces then layer the
-		// canonical allowedTools check onto that mandatory authorization contract.
-		const commonGuard = packBoundScopedGuard(headerSessionId, request.sessionId, resolveSession);
-		if (!commonGuard.ok) {
-			json({ error: commonGuard.error }, commonGuard.status);
+		const { tool = PACK_BOUND_PROJECT_READ_TOOL } = surface;
+		const guard = authorizeScopedRequest({
+			tool,
+			headerSessionId: rawHeaderSessionId,
+			bodySessionId: request.sessionId,
+			resolveSession: resolveProjectReadSession,
+		});
+		if (!guard.ok) {
+			json({ error: guard.error }, guard.status);
 			return;
-		}
-		if (surface.tool !== undefined) {
-			const toolGuard = authorizeScopedRequest({
-				tool: surface.tool,
-				headerSessionId: rawHeaderSessionId,
-				bodySessionId: request.sessionId,
-				resolveSession,
-			});
-			if (!toolGuard.ok) {
-				json({ error: toolGuard.error }, toolGuard.status);
-				return;
-			}
 		}
 		// Project-move fence: token validation and scoped authorization may consult
 		// stores. Re-resolve immediately before touching any project record.
-		if (resolveHostNotificationSessionProject(sessionManager, commonGuard.sessionId) !== projectId) {
+		if (resolveHostNotificationSessionProject(sessionManager, guard.sessionId) !== projectId) {
 			json({ error: "session project authority changed" }, 403);
 			return;
 		}
