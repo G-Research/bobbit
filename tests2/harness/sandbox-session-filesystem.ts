@@ -71,8 +71,18 @@ export class SandboxSessionFilesystem {
 		return { projectId: "fixture", status: "ready", containerId: "fixture-control" };
 	}
 
-	async ensureSessionRuntime(sessionId: string): Promise<string> {
-		return `fixture-runtime:${sessionId}`;
+	async getContainerId(): Promise<string> {
+		return "fixture-control";
+	}
+
+	async ensureSessionRuntime(sessionId: string, expectedId?: string): Promise<string> {
+		const runtimeId = `fixture-runtime:${sessionId}`;
+		if (expectedId && expectedId !== runtimeId) throw new Error("fixture session runtime identity mismatch");
+		return runtimeId;
+	}
+
+	async isSessionRuntimeIsolated(sessionId: string, containerId: string): Promise<boolean> {
+		return containerId === `fixture-runtime:${sessionId}`;
 	}
 
 	async removeSessionRuntime(_sessionId: string): Promise<void> {}

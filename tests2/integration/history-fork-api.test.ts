@@ -40,6 +40,7 @@ let serverModule: any;
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 const fixtureRoots: string[] = [];
+const sandboxFixtureFinalizers: Array<() => Promise<void>> = [];
 
 const SYSTEM_AUTHOR = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
 const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
@@ -313,6 +314,7 @@ function installSandboxSessionFilesystem(
 		throw new Error("history fork fixture requires the production SandboxManager");
 	}
 	const originalGet = sandboxManager.get;
+	const originalEnsureForProject = sandboxManager.ensureForProject;
 	const containerRoot = path.join(gateway.bobbitDir, `sandbox-session-fs-${label}-${randomUUID()}`);
 	fixtureRoots.push(containerRoot);
 	const filesystem = new SandboxSessionFilesystem({
@@ -320,10 +322,28 @@ function installSandboxSessionFilesystem(
 		hostAgentSessionsDir: agentSessionsDir,
 		removeWorktree: name => { removed.push(name); },
 	});
+	// Keep the production SandboxManager registry and lifecycle serialization in
+	// the test path. Only replace its Docker project boundary with the exact fake
+	// runtime; this avoids both shared-control-container access and real Docker.
+	sandboxManager.ensureForProject = async () => {};
 	sandboxManager.get = () => filesystem;
+	let finalized = false;
+	sandboxFixtureFinalizers.push(async () => {
+		if (finalized) return;
+		finalized = true;
+		const runtimes = sandboxManager._sessionRuntimes as Map<string, { projectId: string; containerId: string }>;
+		for (const [sessionId, runtime] of [...runtimes]) {
+			if (runtime.containerId !== `fixture-runtime:${sessionId}`) continue;
+			await sandboxManager.releaseSessionRuntime(runtime.projectId, sessionId);
+		}
+		sandboxManager.get = originalGet;
+		sandboxManager.ensureForProject = originalEnsureForProject;
+	});
 	return {
 		filesystem,
-		restore: () => { sandboxManager.get = originalGet; },
+		// Session cleanup still needs the registered fake runtimes. The afterEach
+		// finalizer restores the production boundary after those sessions terminate.
+		restore: () => {},
 	};
 }
 
@@ -384,11 +404,17 @@ test.describe("history fork API", () => {
 
 	test.afterEach(async ({ gateway }) => {
 		serverModule?.__clearHistoryForkSidecarCopyFake();
-		await sessions.cleanup(gateway);
-		for (const root of fixtureRoots.splice(0)) {
-			try {
-				fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
-			} catch { /* the isolated run-root owner performs the final safety sweep */ }
+		try {
+			await sessions.cleanup(gateway);
+		} finally {
+			for (const finalize of sandboxFixtureFinalizers.splice(0).reverse()) {
+				await finalize();
+			}
+			for (const root of fixtureRoots.splice(0)) {
+				try {
+					fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
+				} catch { /* the isolated run-root owner performs the final safety sweep */ }
+			}
 		}
 	});
 
@@ -903,6 +929,7 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "flatten-borrower");
 		let capturedOptions: any;
 		manager.createSession = async (...args: any[]) => {
 			capturedOptions = args[4];
@@ -918,6 +945,7 @@ test.describe("history fork API", () => {
 			response = await historyFork(gateway, borrowerId, "selected-user", false);
 		} finally {
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
@@ -949,6 +977,7 @@ test.describe("history fork API", () => {
 		const originalSendCommand = rpcBridgeModule.RpcBridge.prototype.sendCommand;
 		manager.applySandboxWiring = async (options: any) => {
 			options.cwd = nonGitCwd();
+			options.sandboxed = true;
 			delete options.containerId;
 			return true;
 		};
@@ -1437,6 +1466,7 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "failed-deduplication");
 		let capturedDestinationId = "";
 		let capturedDestinationFile = "";
 		let capturedOptions: any;
@@ -1488,6 +1518,7 @@ test.describe("history fork API", () => {
 				rejectLaunch(new Error("fixture released blocked launch during assertion cleanup"));
 			}
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(capturedDestinationId).toBeTruthy();
