@@ -36,6 +36,7 @@ import {
   composeE2EChildEnvironment,
   createE2EV2CoordinatorEnvironment,
   createNestedE2EEnvironment,
+  createNodeE2EInvocation,
   createPlaywrightE2EInvocation,
   groupDVitestArgs,
   resolveE2ERetryCount,
@@ -401,11 +402,23 @@ describe("unit run isolation", () => {
     )?.[0];
     expect(groupA).toBeDefined();
     expect(groupA).not.toContain("--test-force-exit");
-    expect(groupA).toContain('const args = ["--test", `--test-concurrency=${nodeConc}`, ...specs];');
+    expect(groupA).toContain("createNodeE2EInvocation({ specs, concurrency: nodeConc })");
+    expect(groupA).toContain("E2E_V2_NODE_CONCURRENCY");
+    expect(groupA).toContain("composeE2EChildEnvironment(coordinatorEnv");
+    expect(groupA).toContain("...EXTERNAL_FREE_ENV, NODE_ENV: \"test\"");
+    expect(groupA).toContain('label: "A/node-relocate"');
+    expect(groupA).toContain("shell: invocation.shell");
+    expect(groupA).not.toMatch(/\bnpx(?:\.cmd)?\b/i);
     expect(groupA).not.toMatch(/--retr(?:y|ies)(?:=|\b)/);
   });
 
-  it("keeps discovered Playwright paths shell-free and preserves Group B/C controls", () => {
+  it("keeps discovered E2E paths shell-free and preserves group controls", () => {
+    const nodeSpecs = [
+      "tests/e2e/node/space name.node-e2e.test.ts",
+      "tests/e2e/node/ampersand & name.node-e2e.test.ts",
+      "tests/e2e/node/rem payload.node-e2e.test.ts",
+    ];
+    const node = createNodeE2EInvocation({ specs: nodeSpecs, concurrency: "2" });
     const metacharacterSpec = "tests/e2e/browser/a & spaces & rem tail.browser-e2e.spec.ts";
     const browser = createPlaywrightE2EInvocation({
       project: "browser",
@@ -420,6 +433,23 @@ describe("unit run isolation", () => {
       retries: 3,
     });
 
+    expect(node).toEqual({
+      command: process.execPath,
+      args: [
+        resolve("node_modules/tsx/dist/cli.mjs"),
+        "--test",
+        "--test-concurrency=2",
+        ...nodeSpecs,
+      ],
+      shell: false,
+    });
+    for (const spec of nodeSpecs) {
+      expect(classifyTestPath(spec), spec).toMatchObject({
+        semantic: "node-e2e",
+        lane: "e2e",
+        runner: "node",
+      });
+    }
     expect(browser).toEqual({
       command: process.execPath,
       args: [
@@ -445,6 +475,10 @@ describe("unit run isolation", () => {
       "--retries=3",
     ]);
     expect(api.shell).toBe(false);
+
+    const runner = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
+    expect(runner).toContain("function run(command, args, { env = {}, label, shell = false } = {})");
+    expect(runner).not.toContain("shell ??");
   });
 
   it("uses the retry-free control for E2E Groups B/C/D and both Playwright configs", () => {

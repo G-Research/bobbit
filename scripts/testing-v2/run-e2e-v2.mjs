@@ -147,6 +147,23 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 
 /**
+ * Build a shell-free invocation of the project-installed tsx CLI. Discovered
+ * specs stay as distinct argv elements rather than becoming shell input.
+ */
+export function createNodeE2EInvocation({ specs, concurrency }) {
+	return {
+		command: process.execPath,
+		args: [
+			join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"),
+			"--test",
+			`--test-concurrency=${concurrency}`,
+			...specs,
+		],
+		shell: false,
+	};
+}
+
+/**
  * Build a shell-free invocation of the isolated Playwright E2E wrapper.
  * Discovered spec paths stay as individual argv elements even when their names
  * contain characters interpreted by cmd.exe or another shell.
@@ -175,7 +192,7 @@ export function resolveE2ePlaywrightWorkers(env = process.env) {
 	return Math.min(4, requested);
 }
 
-function run(command, args, { env = {}, label, shell } = {}) {
+function run(command, args, { env = {}, label, shell = false } = {}) {
 	const startWall = performance.now();
 	return new Promise((resolveRun) => {
 		const child = spawn(command, args, {
@@ -184,10 +201,9 @@ function run(command, args, { env = {}, label, shell } = {}) {
 			// Re-merging process.env here would restore deleted credentials/cache roots.
 			env: composeE2EChildEnvironment(env),
 			stdio: "inherit",
-			// Default: shell on Windows (needed for npm.cmd/npx.cmd). Callers that
-			// spawn an absolute exe with spaces (e.g. process.execPath under
-			// "C:\Program Files\…") pass shell:false so the path isn't word-split.
-			shell: shell ?? (process.platform === "win32"),
+			// Every coordinator-owned child uses an executable plus an argv array.
+			// Keep this fail-closed even when a new group omits an explicit setting.
+			shell,
 		});
 
 		let settled = false;
@@ -238,10 +254,11 @@ async function runGroupA(specs, coordinatorEnv) {
 	// files to cut wall time while keeping gateway-boot load modest (override with
 	// E2E_V2_NODE_CONCURRENCY).
 	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "2";
-	const args = ["--test", `--test-concurrency=${nodeConc}`, ...specs];
-	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
+	const invocation = createNodeE2EInvocation({ specs, concurrency: nodeConc });
+	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(coordinatorEnv, { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" }),
 		label: "A/node-relocate",
+		shell: invocation.shell,
 	});
 }
 
