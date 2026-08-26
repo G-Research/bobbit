@@ -24,7 +24,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { bobbitDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
-import { activeAgentSessionsDir } from "./agent-session-path.js";
+import {
+	activeAgentSessionsDir,
+	ensurePrivateSessionRoot,
+	sessionStateSessionsRoot,
+	sessionTranscriptRoot,
+} from "./agent-session-path.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
 import { BUILTIN_PACKS_CONTAINER_DIR, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR, PROJECT_MARKET_PACKS_CONTAINER_DIR, SERVER_MARKET_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
@@ -167,13 +172,13 @@ export interface DockerRunConfig {
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
-	 * - Per-session containers (sessionId set, projectId unset): the host
-	 *   directory `<stateDir>/preview/<sessionId>` is bind-mounted at
-	 *   `/bobbit/preview` so the agent can read back its own preview tree.
-	 * - Per-project containers (projectId set): `<stateDir>/preview/` is
-	 *   bind-mounted at `/bobbit/preview-root` so every session sharing the
-	 *   long-lived container can resolve its own subtree by
-	 *   `BOBBIT_SESSION_ID`.
+	 * - Per-session containers (sessionId set, including project-backed session
+	 *   runtimes): the host directory `<stateDir>/preview/<sessionId>` is
+	 *   bind-mounted at `/bobbit/preview` so the agent can read back only its own
+	 *   preview tree.
+	 * - Per-project control containers (projectId set and sessionId absent):
+	 *   `<stateDir>/preview/` is bind-mounted at `/bobbit/preview-root` so the
+	 *   long-lived control container retains its shared preview behavior.
 	 *
 	 * Note: the gateway runs the actual writes (via `mount.writeInline` /
 	 * `mount.mountFile`) — the bind-mount mainly exists for symmetry, so
@@ -190,6 +195,8 @@ export interface DockerRunConfig {
 	cpuLimit?: string;
 	/** Container PID limit (default: "512"). */
 	pidsLimit?: string;
+	/** Docker restart policy (default: the long-lived project-container policy). */
+	restartPolicy?: "unless-stopped" | "no";
 
 	// ── Sandbox config ───────────────────────────────────────────────────
 	sandboxMounts?: string[];
@@ -253,7 +260,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		baseHostArgs.push("--add-host=169.254.169.254:0.0.0.0");
 	}
 
-	const args: string[] = ["run", "-d", "--restart=unless-stopped", ...baseHostArgs];
+	const args: string[] = ["run", "-d", `--restart=${config.restartPolicy ?? "unless-stopped"}`, ...baseHostArgs];
 
 	// ── Labels ─────────────────────────────────────────────────────────
 	if (label && labelPrefix) {
@@ -332,17 +339,17 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// mount.mountFile. Bind it into the container so the agent (and any
 	// in-container tooling) can read back the same bytes. Replaces the
 	// old BOBBIT_HOST_CWD path-translation dance.
-	if (stateDir && projectId) {
-		// Per-project (long-lived) container: bind the parent so every
-		// session sharing the container resolves its own subtree.
-		const previewRoot = path.join(stateDir, "preview");
-		fs.mkdirSync(previewRoot, { recursive: true });
-		args.push("-v", `${toDockerPath(previewRoot)}:/bobbit/preview-root`);
-	} else if (stateDir && sessionId) {
-		// Per-session container: bind only this session's mount.
+	if (stateDir && sessionId) {
+		// A session identity always narrows the bind, including runtimes which
+		// also share the project's named workspace volumes.
 		const previewMount = path.join(stateDir, "preview", sessionId);
 		fs.mkdirSync(previewMount, { recursive: true });
 		args.push("-v", `${toDockerPath(previewMount)}:/bobbit/preview`);
+	} else if (stateDir && projectId) {
+		// Only the long-lived project control container may bind the shared root.
+		const previewRoot = path.join(stateDir, "preview");
+		fs.mkdirSync(previewRoot, { recursive: true });
+		args.push("-v", `${toDockerPath(previewRoot)}:/bobbit/preview-root`);
 	}
 
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
@@ -364,18 +371,24 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
 	if (stateDir) {
 		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
-			const hostPath = path.join(stateDir, sub);
-			fs.mkdirSync(hostPath, { recursive: true });
+			const sharedHostPath = path.join(stateDir, sub);
+			const hostPath = sub === "sessions" && sessionId
+				? ensurePrivateSessionRoot(sessionStateSessionsRoot(stateDir, sessionId), sharedHostPath)
+				: sharedHostPath;
+			if (!(sub === "sessions" && sessionId)) fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
 			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
 		}
 	}
 
-	// Host agent sessions dir — mount ONLY sessions, not the full agent dir, to
-	// prevent sandboxed agents from accessing host auth.json credentials.
+	// A session execution runtime receives only its deterministic owner root.
+	// The trusted project control container intentionally retains the broad root.
 	const hostAgentDir = globalAgentDir();
-	const hostSessionsDir = activeAgentSessionsDir();
-	fs.mkdirSync(hostSessionsDir, { recursive: true });
+	const sharedSessionsDir = activeAgentSessionsDir();
+	const hostSessionsDir = sessionId
+		? ensurePrivateSessionRoot(sessionTranscriptRoot(sessionId), sharedSessionsDir)
+		: sharedSessionsDir;
+	if (!sessionId) fs.mkdirSync(hostSessionsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
 
 	// Mount models.json (read-only) so the agent can discover available models.

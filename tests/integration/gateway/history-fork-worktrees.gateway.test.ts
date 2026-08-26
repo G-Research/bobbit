@@ -6,6 +6,8 @@ import {
 	expect,
 	nonGitCwd,
 	registerProject,
+	registerUntrackedFixtureProject,
+	sessionTranscriptHostPath,
 	copyGitTemplate,
 	sessions,
 	rpcBridgeModule,
@@ -99,6 +101,7 @@ test.describe("history fork API: worktree ownership and setup", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "flatten-borrower");
 		let capturedOptions: any;
 		manager.createSession = async (...args: any[]) => {
 			capturedOptions = args[4];
@@ -114,6 +117,7 @@ test.describe("history fork API: worktree ownership and setup", () => {
 			response = await historyFork(gateway, borrowerId, "selected-user", false);
 		} finally {
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
@@ -128,13 +132,14 @@ test.describe("history fork API: worktree ownership and setup", () => {
 		});
 	});
 	test("publishes, rebases, and rehydrates a sandbox history transcript using canonical container coordinates", async ({ gateway }) => {
-		const sourceId = await createTrackedSession();
+		const project = await registerUntrackedFixtureProject(gateway, "container-coordinate-project");
+		const sourceId = await createTrackedSession(project.rootPath, project.id);
 		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `container-coordinate-${randomUUID()}`);
 		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
 		const manager = gateway.sessionManager;
 		const sandboxFixture = installSandboxSessionFilesystem(gateway, "container-coordinate");
 		const sourceContainerPath = `/home/node/.bobbit/agent/sessions/--canonical-source--/${sourceId}.jsonl`;
-		const sourceHostPath = sandboxFixture.filesystem.hostPath(sourceContainerPath);
+		const sourceHostPath = sessionTranscriptHostPath(sourceId, sourceContainerPath)!;
 		fs.mkdirSync(path.dirname(sourceHostPath), { recursive: true });
 		fs.writeFileSync(sourceHostPath, seeded.content, "utf8");
 		setPersistedTranscriptPath(gateway, sourceId, sourceContainerPath);
@@ -143,15 +148,14 @@ test.describe("history fork API: worktree ownership and setup", () => {
 		const originalSendCommand = rpcBridgeModule.RpcBridge.prototype.sendCommand;
 		manager.applySandboxWiring = async (options: any) => {
 			options.cwd = nonGitCwd();
+			options.sandboxed = true;
 			delete options.containerId;
 			return true;
 		};
 		rpcBridgeModule.RpcBridge.prototype.sendCommand = function(command: any, ...rest: any[]) {
 			if (command?.type === "switch_session" && typeof command.sessionPath === "string") {
-				command = {
-					...command,
-					sessionPath: sandboxFixture.filesystem.hostPath(command.sessionPath),
-				};
+				const owner = path.basename(command.sessionPath, ".jsonl").split("_").at(-1)!;
+				command = { ...command, sessionPath: sessionTranscriptHostPath(owner, command.sessionPath) };
 			}
 			return originalSendCommand.call(this, command, ...rest);
 		};
@@ -176,7 +180,7 @@ test.describe("history fork API: worktree ownership and setup", () => {
 		});
 		expect(persisted.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
 		const destinationBytes = fs.readFileSync(
-			sandboxFixture.filesystem.hostPath(persisted.agentSessionFile),
+			sessionTranscriptHostPath(fork.id, persisted.agentSessionFile)!,
 			"utf8",
 		);
 		expect(destinationBytes).toContain("retained prompt");

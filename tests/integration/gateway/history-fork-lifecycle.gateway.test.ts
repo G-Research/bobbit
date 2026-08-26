@@ -5,6 +5,7 @@ import {
 	expect,
 	nonGitCwd,
 	localApiFetch,
+	sessionTranscriptHostPath,
 	sessions,
 	serverModule,
 	agentSessionsDir,
@@ -97,7 +98,10 @@ test.describe("history fork API: owner and project lifecycle serialization", () 
 		expect(removed).toEqual([]);
 		expect(manager.getSession(sourceId)).toBe(source);
 		const preservedSource = manager.getPersistedSession(sourceId);
-		expect(preservedSource?.agentSessionFile).toBe(seeded.file);
+		expect(preservedSource?.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const preservedSourceHost = sessionTranscriptHostPath(sourceId, preservedSource!.agentSessionFile);
+		expect(preservedSourceHost).toBeTruthy();
+		expect(fs.readFileSync(preservedSourceHost!, "utf8")).toBe(seeded.content);
 		expect(preservedSource?.archived).not.toBe(true);
 		expect(manager.getSession(forkId)).toBeTruthy();
 		expect(manager.getPersistedSession(forkId)).toMatchObject({
@@ -317,8 +321,12 @@ test.describe("history fork API: owner and project lifecycle serialization", () 
 		expect(sourceStopCalls).toBe(0);
 		expect(removed).toEqual([]);
 		expect(manager.getSession(sourceId)).toBe(source);
-		expect(manager.getPersistedSession(sourceId)).toMatchObject({ agentSessionFile: seeded.file });
-		expect(manager.getPersistedSession(sourceId)?.archived).not.toBe(true);
+		const preservedSource = manager.getPersistedSession(sourceId);
+		expect(preservedSource?.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const preservedSourceHost = sessionTranscriptHostPath(sourceId, preservedSource!.agentSessionFile);
+		expect(preservedSourceHost).toBeTruthy();
+		expect(fs.readFileSync(preservedSourceHost!, "utf8")).toBe(seeded.content);
+		expect(preservedSource?.archived).not.toBe(true);
 		expect(manager.getSession(forkId)).toBeTruthy();
 		expect(manager.getPersistedSession(forkId)).toMatchObject({
 			projectId: project.id,

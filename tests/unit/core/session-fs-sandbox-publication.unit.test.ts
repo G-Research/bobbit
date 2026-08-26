@@ -2,201 +2,203 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
-import { activeAgentSessionsDir } from "../../../src/server/agent/agent-session-path.ts";
+import type { SandboxManager } from "../../../src/server/agent/sandbox-manager.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
+import type { SessionTranscriptRuntimeOperation } from "../../../src/server/agent/project-sandbox.ts";
 import {
 	canonicalContainerAgentSessionPath,
 	CrossRealmCopyError,
+	sessionFileCopy,
+	sessionFileDelete,
 	sessionFileDeleteContainerOnly,
+	sessionFileExists,
+	sessionFileRead,
 	sessionFileRenameAtomic,
 	sessionFileWriteAtomic,
 } from "../../../src/server/agent/session-fs.ts";
-import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.ts";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sandbox-session-publish-"));
-const hostSessions = activeAgentSessionsDir();
+const owners = [`publication-a-${randomUUID()}`, `publication-b-${randomUUID()}`];
 const projectId = `sandbox-publication-${randomUUID()}`;
+const canonical = "/home/node/.bobbit/agent/sessions/--workspace--/turn.jsonl";
+const renamed = "/home/node/.bobbit/agent/sessions/--workspace--/renamed.jsonl";
+const ctx = (sessionId: string) => ({ sandboxed: true, projectId, sessionId });
+const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-session-fs-adversary-"));
 
-function target(label: string): string {
-	return `/home/node/.bobbit/agent/sessions/${label}-${randomUUID()}/fork.jsonl`;
-}
+type OperationCall = {
+	projectId: string;
+	sessionId: string;
+	operation: SessionTranscriptRuntimeOperation;
+};
 
-function createFilesystem(label: string): SandboxSessionFilesystem {
-	return new SandboxSessionFilesystem({
-		root: path.join(root, `${label}-${randomUUID()}`),
-		hostAgentSessionsDir: hostSessions,
-	});
-}
-
-function stagePaths(filesystem: SandboxSessionFilesystem): string[] {
-	return filesystem.calls
-		.flatMap(call => call.mappedArgs)
-		.filter(value => path.dirname(value) === hostSessions && path.basename(value).startsWith(".bobbit-stage-"));
-}
-
-function siblingTemps(directory: string): string[] {
-	if (!fs.existsSync(directory)) return [];
-	return fs.readdirSync(directory).filter(name => name.includes(".bobbit-stage-") && name.endsWith(".tmp"));
-}
-
-afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
-
-describe("sandbox session transcript publication", () => {
-	it("accepts only canonical paths under the supported container session roots", () => {
-		for (const supported of [
-			"/home/node/.bobbit/agent/sessions",
-			"/home/node/.bobbit/agent/sessions/--workspace--/turn.jsonl",
-			"/bobbit-state/sessions",
-			"/bobbit-state/sessions/--workspace--/turn.jsonl",
-		]) {
-			expect(canonicalContainerAgentSessionPath(supported)).toBe(supported);
+function fakeAttestedRuntime(beforeOperation?: (call: OperationCall) => void) {
+	const files = new Map<string, string>();
+	const calls: OperationCall[] = [];
+	const key = (sessionId: string, filePath: string) => `${sessionId}\0${filePath}`;
+	const runSessionTranscriptOperation = vi.fn(async (
+		actualProjectId: string,
+		sessionId: string,
+		operation: SessionTranscriptRuntimeOperation,
+	): Promise<string | boolean | void> => {
+		const call = { projectId: actualProjectId, sessionId, operation };
+		calls.push(call);
+		beforeOperation?.(call);
+		if (actualProjectId !== projectId || !owners.includes(sessionId)) {
+			throw new Error("runtime attestation rejected");
 		}
+		switch (operation.kind) {
+			case "exists": return files.has(key(sessionId, operation.path));
+			case "read": {
+				const content = files.get(key(sessionId, operation.path));
+				if (content === undefined) throw new Error("missing transcript");
+				return content;
+			}
+			case "writeAtomic":
+				files.set(key(sessionId, operation.path), Buffer.isBuffer(operation.content)
+					? operation.content.toString("utf8")
+					: operation.content);
+				return;
+			case "renameAtomic": {
+				const source = key(sessionId, operation.sourcePath);
+				const content = files.get(source);
+				if (content === undefined) throw new Error("missing transcript");
+				files.delete(source);
+				files.set(key(sessionId, operation.targetPath), content);
+				return;
+			}
+			case "delete":
+				files.delete(key(sessionId, operation.path));
+				return;
+		}
+	});
+	return {
+		manager: { runSessionTranscriptOperation } as unknown as SandboxManager,
+		files,
+		calls,
+		key,
+		runSessionTranscriptOperation,
+	};
+}
 
+afterAll(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
+
+describe("owner-scoped sandbox transcript publication", () => {
+	it("accepts only canonical paths under Pi's primary session root", () => {
+		expect(canonicalContainerAgentSessionPath(canonical)).toBe(canonical);
 		for (const rejected of [
-			"",
-			"\0/home/node/.bobbit/agent/sessions/turn.jsonl",
-			"/home/node/.bobbit/agent/sessions\\turn.jsonl",
+			"", "/bobbit-state/sessions/turn.jsonl",
 			"/home/node/.bobbit/agent/sessions/../turn.jsonl",
-			"/home/node/.bobbit/agent/sessions/./turn.jsonl",
-			"/home/node/.bobbit/agent/sessions//turn.jsonl",
-			"home/node/.bobbit/agent/sessions/turn.jsonl",
-			"./home/node/.bobbit/agent/sessions/turn.jsonl",
-			"/home/node/.bobbit/agent/session/turn.jsonl",
+			"/home/node/.bobbit/agent/sessions\\turn.jsonl",
+			"/home/node/.bobbit/agent/sessions/turn\n.jsonl",
 			"/home/node/.bobbit/agent/sessions-lookalike/turn.jsonl",
-			"/bobbit-state/session/turn.jsonl",
-			"/bobbit-state/sessions-lookalike/turn.jsonl",
-		]) {
-			expect(canonicalContainerAgentSessionPath(rejected), rejected).toBeNull();
-		}
+		]) expect(canonicalContainerAgentSessionPath(rejected), rejected).toBeNull();
 	});
 
-	it("publishes complete bytes through fixed container code without putting content in argv", async () => {
-		const filesystem = createFilesystem("atomic");
-		const destination = target("atomic");
-		const content = `{"secret":"argv-canary-${randomUUID()}"}\nsecond line\n`;
-		const hostDestination = filesystem.hostPath(destination);
-		fs.mkdirSync(path.dirname(hostDestination), { recursive: true });
-		fs.writeFileSync(hostDestination, "old-complete-content", "utf8");
+	it("fails closed without exact project, owner, runtime, or canonical path authority", async () => {
+		await expect(sessionFileWriteAtomic({ sandboxed: true, projectId }, canonical, "no owner", null)).rejects.toBeInstanceOf(CrossRealmCopyError);
+		await expect(sessionFileWriteAtomic(ctx(owners[0]), canonical, "no runtime", null)).rejects.toBeInstanceOf(CrossRealmCopyError);
+		await expect(sessionFileWriteAtomic(ctx(owners[0]), "/home/node/.bobbit/agent/sessions/../escape", "escape", fakeAttestedRuntime().manager)).rejects.toBeInstanceOf(CrossRealmCopyError);
+		expect(await sessionFileRead(ctx(owners[0]), canonical, null)).toBeNull();
+		expect(await sessionFileExists(ctx(owners[0]), canonical, null)).toBe(false);
+		expect(await sessionFileDelete(ctx(owners[0]), canonical, null)).toBe(false);
+	});
 
-		await sessionFileWriteAtomic(
-			{ sandboxed: true, projectId },
-			destination,
-			content,
-			filesystem.manager(projectId) as any,
+	it("routes write/read/exists/copy/rename/delete through exact owner runtimes", async () => {
+		const runtime = fakeAttestedRuntime();
+		await sessionFileWriteAtomic(ctx(owners[0]), canonical, "complete owner bytes", runtime.manager);
+		expect(await sessionFileExists(ctx(owners[0]), canonical, runtime.manager)).toBe(true);
+		expect(await sessionFileRead(ctx(owners[0]), canonical, runtime.manager)).toBe("complete owner bytes");
+		expect(await sessionFileRead(ctx(owners[1]), canonical, runtime.manager)).toBeNull();
+
+		await sessionFileCopy(ctx(owners[0]), canonical, ctx(owners[1]), canonical, runtime.manager, {
+			mkdirSync: vi.fn(() => { throw new Error("host mkdir forbidden"); }),
+			copyFileSync: vi.fn(() => { throw new Error("host copy forbidden"); }),
+		});
+		await sessionFileRenameAtomic(ctx(owners[1]), canonical, renamed, runtime.manager);
+		expect(await sessionFileRead(ctx(owners[1]), renamed, runtime.manager)).toBe("complete owner bytes");
+		expect(await sessionFileDeleteContainerOnly(ctx(owners[1]), renamed, runtime.manager)).toBe(true);
+		expect(await sessionFileDelete(ctx(owners[0]), canonical, runtime.manager, {
+			unlink: vi.fn(async () => { throw new Error("host unlink forbidden"); }),
+		})).toBe(true);
+
+		expect(runtime.calls.map(call => [call.projectId, call.sessionId, call.operation.kind])).toEqual([
+			[projectId, owners[0], "writeAtomic"],
+			[projectId, owners[0], "exists"],
+			[projectId, owners[0], "read"],
+			[projectId, owners[1], "read"],
+			[projectId, owners[0], "read"],
+			[projectId, owners[1], "writeAtomic"],
+			[projectId, owners[1], "renameAtomic"],
+			[projectId, owners[1], "read"],
+			[projectId, owners[1], "delete"],
+			[projectId, owners[0], "delete"],
+		]);
+	});
+
+	it("never follows host symlink swaps for any sandbox transcript operation", async () => {
+		const sentinelDirectory = path.join(outsideRoot, `sentinel-dir-${randomUUID()}`);
+		const hostileParent = path.join(outsideRoot, `sandbox-parent-${randomUUID()}`);
+		const sentinel = path.join(sentinelDirectory, "turn.jsonl");
+		const hostileEntry = path.join(hostileParent, "turn.jsonl");
+		const sentinelBytes = "OUTSIDE_HOST_SENTINEL";
+		fs.mkdirSync(sentinelDirectory);
+		fs.writeFileSync(sentinel, sentinelBytes);
+
+		const runtime = fakeAttestedRuntime(() => {
+			// Deterministic adversarial seam: swap the checked parent to a host
+			// symlink/junction immediately before every runtime operation.
+			try { fs.unlinkSync(hostileParent); } catch (error: any) { if (error?.code !== "ENOENT") throw error; }
+			fs.symlinkSync(sentinelDirectory, hostileParent, process.platform === "win32" ? "junction" : "dir");
+			expect(fs.lstatSync(hostileParent).isSymbolicLink()).toBe(true);
+		});
+		runtime.files.set(runtime.key(owners[0], canonical), "INSIDE_RUNTIME_TRANSCRIPT");
+
+		expect(await sessionFileRead(ctx(owners[0]), canonical, runtime.manager)).toBe("INSIDE_RUNTIME_TRANSCRIPT");
+		await sessionFileWriteAtomic(ctx(owners[0]), canonical, "UPDATED_INSIDE", runtime.manager);
+		await sessionFileRenameAtomic(ctx(owners[0]), canonical, renamed, runtime.manager);
+		await sessionFileCopy(ctx(owners[0]), renamed, ctx(owners[1]), canonical, runtime.manager);
+		expect(await sessionFileDelete(ctx(owners[0]), renamed, runtime.manager)).toBe(true);
+
+		expect(fs.readFileSync(sentinel, "utf8")).toBe(sentinelBytes);
+		expect(fs.lstatSync(hostileParent).isSymbolicLink()).toBe(true);
+		expect(fs.readFileSync(hostileEntry, "utf8")).toBe(sentinelBytes);
+		expect(runtime.calls.every(call => call.projectId === projectId && owners.includes(call.sessionId))).toBe(true);
+		expect(JSON.stringify(runtime.calls)).not.toContain(sentinel);
+		expect(JSON.stringify(runtime.calls)).not.toContain(hostileEntry);
+	});
+
+	it("reads a quiescent legacy source by bound handle but publishes only through the owner runtime", async () => {
+		const legacySource = path.join(outsideRoot, `legacy-${randomUUID()}.jsonl`);
+		const legacyBytes = Buffer.from('{"type":"message","text":"legacy"}\n', "utf8");
+		fs.writeFileSync(legacySource, legacyBytes);
+		const sentinel = path.join(outsideRoot, `legacy-destination-sentinel-${randomUUID()}`);
+		fs.writeFileSync(sentinel, "DESTINATION_SENTINEL");
+		const runtime = fakeAttestedRuntime();
+		const ps = { id: owners[0], sandboxed: true, projectId };
+
+		await (SessionManager.prototype as any)._publishLegacySandboxFile.call(
+			{ sandboxManager: runtime.manager },
+			ps,
+			legacySource,
+			canonical,
 		);
 
-		expect(fs.readFileSync(hostDestination, "utf8")).toBe(content);
-		expect(filesystem.calls).toHaveLength(1);
-		expect(filesystem.calls[0].args.slice(0, 4)).toEqual(["node", "-e", expect.any(String), "--"]);
-		expect(filesystem.calls[0].args.join("\n")).not.toContain(content.trim());
-		expect(filesystem.calls[0].args[2]).toContain("COPYFILE_EXCL");
-		expect(filesystem.calls[0].args[2]).toContain("renameSync");
-		expect(stagePaths(filesystem).every(stage => !fs.existsSync(stage))).toBe(true);
-		expect(siblingTemps(path.dirname(hostDestination))).toEqual([]);
-		if (process.platform !== "win32") expect(fs.statSync(hostDestination).mode & 0o777).toBe(0o600);
+		expect(runtime.files.get(runtime.key(owners[0], canonical))).toBe(legacyBytes.toString("utf8"));
+		expect(runtime.calls.map(call => call.operation.kind)).toEqual(["read", "writeAtomic"]);
+		expect(runtime.calls.every(call => call.projectId === projectId && call.sessionId === owners[0])).toBe(true);
+		expect(JSON.stringify(runtime.calls)).not.toContain(legacySource);
+		expect(JSON.stringify(runtime.calls)).not.toContain(sentinel);
+		expect(fs.readFileSync(sentinel, "utf8")).toBe("DESTINATION_SENTINEL");
 	});
 
-	it("keeps host symlink canaries untouched when an attacker swaps the predictable parent before publication", async (context) => {
-		const filesystem = createFilesystem("symlink-race");
-		const relativeParent = `hostile-parent-${randomUUID()}`;
-		const destination = `/home/node/.bobbit/agent/sessions/${relativeParent}/fork.jsonl`;
-		const sentinel = path.join(root, `host-sentinel-${randomUUID()}`);
-		const hostParent = path.join(hostSessions, relativeParent);
-		fs.mkdirSync(sentinel, { recursive: true });
-		fs.writeFileSync(path.join(sentinel, "sentinel.txt"), "unchanged", "utf8");
-
-		filesystem.beforeExec = async () => {
-			try {
-				fs.symlinkSync(sentinel, hostParent, process.platform === "win32" ? "junction" : "dir");
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				if (["EPERM", "EACCES", "ENOTSUP"].includes(code ?? "")) context.skip();
-				throw error;
-			}
-		};
-		try {
-			await sessionFileWriteAtomic(
-				{ sandboxed: true, projectId },
-				destination,
-				"container-scoped transcript\n",
-				filesystem.manager(projectId) as any,
-			);
-			expect(fs.readFileSync(path.join(sentinel, "sentinel.txt"), "utf8")).toBe("unchanged");
-			expect(fs.existsSync(path.join(sentinel, "fork.jsonl"))).toBe(false);
-			expect(fs.readFileSync(filesystem.hostPath(destination), "utf8")).toBe("container-scoped transcript\n");
-		} finally {
-			fs.rmSync(hostParent, { recursive: true, force: true });
-		}
-	});
-
-	it("uses unique stages and publishes one complete winner under concurrent writes", async () => {
-		const filesystem = createFilesystem("concurrent");
-		const destination = target("concurrent");
-		const first = `first-${"a".repeat(32_000)}\n`;
-		const second = `second-${"b".repeat(32_000)}\n`;
-		let entered = 0;
-		let release!: () => void;
-		const bothEntered = new Promise<void>(resolve => { release = resolve; });
-		filesystem.beforeExec = async () => {
-			entered++;
-			if (entered === 2) release();
-			await bothEntered;
-		};
-
-		await Promise.all([
-			sessionFileWriteAtomic({ sandboxed: true, projectId }, destination, first, filesystem.manager(projectId) as any),
-			sessionFileWriteAtomic({ sandboxed: true, projectId }, destination, second, filesystem.manager(projectId) as any),
-		]);
-
-		expect([first, second]).toContain(fs.readFileSync(filesystem.hostPath(destination), "utf8"));
-		const stages = stagePaths(filesystem);
-		expect(new Set(stages).size).toBe(2);
-		expect(stages.every(stage => !fs.existsSync(stage))).toBe(true);
-		expect(siblingTemps(path.dirname(filesystem.hostPath(destination)))).toEqual([]);
-	});
-
-	it("fails closed and cleans caller-owned stages and sibling temps without host fallback", async () => {
-		const filesystem = createFilesystem("failure");
-		const destination = target("failure");
-		const hostDestination = filesystem.hostPath(destination);
-		fs.mkdirSync(hostDestination, { recursive: true });
-
-		await expect(sessionFileWriteAtomic(
-			{ sandboxed: true, projectId },
-			destination,
-			"must-not-publish",
-			filesystem.manager(projectId) as any,
-		)).rejects.toThrow();
-		expect(stagePaths(filesystem).every(stage => !fs.existsSync(stage))).toBe(true);
-		expect(siblingTemps(path.dirname(hostDestination))).toEqual([]);
-		expect(fs.statSync(hostDestination).isDirectory()).toBe(true);
-
-		await expect(sessionFileWriteAtomic(
-			{ sandboxed: true, projectId },
-			destination,
-			"unavailable",
-			null,
-		)).rejects.toThrow(`sandbox unavailable for project ${projectId}`);
-
-		const hostCanary = path.join(hostSessions, `delete-canary-${randomUUID()}.jsonl`);
-		fs.mkdirSync(path.dirname(hostCanary), { recursive: true });
-		fs.writeFileSync(hostCanary, "preserve", "utf8");
-		const containerCanary = `/home/node/.bobbit/agent/sessions/${path.basename(hostCanary)}`;
-		try {
-			expect(await sessionFileDeleteContainerOnly(
-				{ sandboxed: true, projectId }, containerCanary, null,
-			)).toBe(false);
-			expect(fs.readFileSync(hostCanary, "utf8")).toBe("preserve");
-		} finally {
-			fs.rmSync(hostCanary, { force: true });
-		}
-
-		await expect(sessionFileRenameAtomic(
-			{ sandboxed: true, projectId },
-			"/home/node/.bobbit/agent/sessions/../escape.jsonl",
-			"/home/node/.bobbit/agent/sessions/safe.jsonl",
-			filesystem.manager(projectId) as any,
+	it("rejects cross-project owner copies before invoking a runtime", async () => {
+		const runtime = fakeAttestedRuntime();
+		await expect(sessionFileCopy(
+			ctx(owners[0]), canonical,
+			{ ...ctx(owners[1]), projectId: "other" }, canonical,
+			runtime.manager,
 		)).rejects.toBeInstanceOf(CrossRealmCopyError);
+		expect(runtime.runSessionTranscriptOperation).not.toHaveBeenCalled();
 	});
 });

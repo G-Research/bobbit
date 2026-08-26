@@ -205,6 +205,38 @@ test.describe("WebSocket frame size routing", () => {
 		});
 	}
 
+	for (const malformed of [
+		{ label: "images", field: "images", value: { type: "image" } },
+		{ label: "attachments", field: "attachments", value: "not-an-array" },
+	] as const) {
+		test(`rejects a non-array prompt ${malformed.label} field without closing the socket`, async () => {
+			const sessionId = await createSession();
+			try {
+				const conn = await connectWs(sessionId);
+				try {
+					const intentId = `malformed-${malformed.label}`;
+					const cursor = conn.messageCount();
+					conn.send({ type: "prompt", intentId, text: "must reject", [malformed.field]: malformed.value });
+					const outcome = await conn.waitForFrom(cursor, (m) => m.type === "error", 1_000);
+					expect(outcome).toMatchObject({
+						type: "error",
+						code: "UPLOADED_ATTACHMENT_INVALID",
+						intentId,
+						retryable: false,
+					});
+
+					const pingCursor = conn.messageCount();
+					conn.send({ type: "ping" });
+					await conn.waitForFrom(pingCursor, (m) => m.type === "pong", 5_000);
+				} finally {
+					conn.close();
+				}
+			} finally {
+				await deleteSession(sessionId);
+			}
+		});
+	}
+
 	test("accepts lowercase and uppercase 64-hex extension write hashes as the same content binding", async () => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);

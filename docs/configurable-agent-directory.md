@@ -107,7 +107,7 @@ Compatibility rules:
 - Transcript guards accept paths inside trusted active, historical, or legacy `sessions/` roots.
 - Exact persisted outside-root transcript paths are read-compatible only after they are registered from a persisted session and verified as regular, non-symlink `.jsonl` transcript files. They are not sanitizer write targets and are not deleted by purge.
 
-For sandboxed sessions, the agent can see only the active mounted sessions root. If a persisted historical host transcript has been copied to the active root, Bobbit remaps `switch_session` to the active mounted copy while preserving the historical absolute path for host reads. If no active copy exists, the historical path remains unchanged and may not be visible inside the sandbox.
+For sandboxed sessions, each session runtime sees only its deterministic owner transcript root, mounted at Pi's standard sessions path; shared, sibling, and historical transcript roots are not mounted. During restore, Bobbit may copy a trusted persisted active, historical, or legacy transcript into that owner root and persist its container-coordinate path. The legacy source is read through one identity-checked file handle before the destination is published inside the exact freshly attested runtime. Runtime transcript access never falls back to the shared project container or translates the container path into host I/O.
 
 Legacy transcript roots, including `~/.pi/agent/sessions`, are read compatibility fallbacks only. Startup does not rename, move, copy from, or write marker directories into `~/.pi/agent`.
 
@@ -117,7 +117,7 @@ Configuring the agent directory must not widen sandbox access.
 
 Sandbox containers receive:
 
-- the active `<agentDir>/sessions/` mounted at `/home/node/.bobbit/agent/sessions`;
+- the active `<agentDir>/sessions/` root at `/home/node/.bobbit/agent/sessions` only in trusted project-control infrastructure; each agent session runtime receives only its private owner subtree at that same container path;
 - active `<agentDir>/models.json` mounted read-only when it exists;
 - a generated scoped auth file from `.bobbit/state/sandbox-agent-auth/<scope>.auth.json` mounted read-only as `/home/node/.bobbit/agent/auth.json`;
 - only the generated-extension state subdirectories needed for remapped `--extension` paths, including `.bobbit/state/google-code-assist/` and `.bobbit/state/tool-result-error-bridge/`, mounted read-only at `/bobbit-state/<subdir>`.

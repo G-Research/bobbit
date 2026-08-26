@@ -23,10 +23,13 @@ process.env.BOBBIT_DIR = tmpRoot;
 const {
 	initSkillSidecarDir,
 	appendSkillSidecarEntry,
+	appendIdentifiedSkillSidecarEntry,
 	readSkillSidecarEntries,
 	findSkillSidecarEntry,
 	purgeSkillSidecar,
 	mergeSidecarEntriesIntoMessages,
+	projectPromptDisplayMessage,
+	projectPromptDisplayMessagesForSession,
 } = await import("../../../src/server/skills/skill-sidecar.ts");
 
 initSkillSidecarDir(stateDir);
@@ -75,6 +78,32 @@ describe("skill-sidecar", () => {
 		const entries = readSkillSidecarEntries(sid);
 		assert.equal(entries.length, 1);
 		assert.deepEqual(entries[0], sample);
+	});
+
+	it("persists only validated accepted occurrence identity on modern records", () => {
+		const sid = "session-occurrence-roundtrip";
+		const recordId = appendIdentifiedSkillSidecarEntry(sid, {
+			...sample,
+			intentId: "accepted-occurrence",
+		});
+		assert.ok(recordId);
+		const [persisted] = readSkillSidecarEntries(sid);
+		assert.equal(persisted.recordId, recordId);
+		assert.equal(persisted.intentId, "accepted-occurrence");
+		assert.equal(persisted.schemaVersion, 1);
+		assert.equal(appendSkillSidecarEntry(sid, {
+			...sample,
+			intentId: " ",
+		}), false);
+
+		const file = path.join(stateDir, "skill-sidecar", `${sid}.jsonl`);
+		fs.appendFileSync(file, `${JSON.stringify({
+			...sample,
+			schemaVersion: 1,
+			recordId: "skill:v1:malformed-occurrence",
+			intentId: "x".repeat(257),
+		})}\n`, "utf8");
+		assert.equal(readSkillSidecarEntries(sid).length, 1, "invalid modern identity must fail closed, not downgrade to legacy FIFO");
 	});
 
 	it("findSkillSidecarEntry matches by modelText + ts within tolerance", () => {
@@ -159,6 +188,49 @@ describe("skill-sidecar", () => {
 		assert.equal(entries[0].fileMentions, undefined);
 		assert.equal(entries[0].skillExpansions.length, 1);
 	});
+
+	it("persists repeated large images as metadata only while retaining document previews", () => {
+		const sid = "session-metadata-only-images";
+		const imageBytes = Buffer.alloc(1024 * 1024, 0x5a);
+		const imagePreview = imageBytes.toString("base64");
+		const documentPreview = Buffer.from("document preview").toString("base64");
+		assert.equal(appendSkillSidecarEntry(sid, {
+			ts: 1,
+			modelText: "model",
+			originalText: "typed",
+			skillExpansions: [],
+			attachments: [
+				{ id: "image", type: "image", fileName: "photo.png", mimeType: "image/png", size: imageBytes.length, preview: imagePreview },
+				{ id: "document", type: "document", fileName: "page.pdf", mimeType: "application/pdf", size: 16, preview: documentPreview },
+			],
+		}), true);
+		for (let index = 0; index < 2; index++) {
+			assert.equal(appendSkillSidecarEntry(sid, {
+				ts: index + 2,
+				modelText: `model-${index}`,
+				originalText: `typed-${index}`,
+				skillExpansions: [],
+				attachments: [{
+					id: `image-${index}`,
+					type: "image",
+					fileName: `photo-${index}.png`,
+					mimeType: "image/png",
+					size: imageBytes.length,
+					preview: imagePreview,
+				}],
+			}), true);
+		}
+
+		const [entry] = readSkillSidecarEntries(sid);
+		assert.deepEqual(entry.attachments, [
+			{ id: "image", type: "image", fileName: "photo.png", mimeType: "image/png", size: imageBytes.length },
+			{ id: "document", type: "document", fileName: "page.pdf", mimeType: "application/pdf", size: 16, preview: documentPreview },
+		]);
+		const raw = fs.readFileSync(path.join(stateDir, "skill-sidecar", `${sid}.jsonl`), "utf8");
+		assert.equal(raw.includes(imagePreview), false);
+		assert.equal(raw.includes(documentPreview), true);
+		assert.ok(Buffer.byteLength(raw, "utf8") < 2_000, "large image bytes must not accumulate in the sidecar");
+	});
 });
 
 describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
@@ -214,5 +286,201 @@ describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
 		const messages = [{ role: "user", content: "no match here" }];
 		const out = mergeSidecarEntriesIntoMessages([fileMentionSample], messages);
 		assert.equal(out, messages); // same reference — unchanged
+	});
+
+	it("restores safe attachment tiles without bytes and preserves image blocks and author", () => {
+		const image = { type: "image", data: "image-bytes", mimeType: "image/png" };
+		const author = { kind: "user", id: "user:local", label: "User" };
+		const envelope = {
+			ts: 1,
+			modelText: "typed\n\n<attachment-context>secret excerpt</attachment-context>",
+			originalText: "typed",
+			skillExpansions: [],
+			attachments: [{
+				id: "attachment:v1:one",
+				type: "document" as const,
+				fileName: "notes.unknown",
+				mimeType: "application/octet-stream",
+				size: 12,
+				preview: "aGk=",
+			}],
+		};
+		const input = {
+			role: "user",
+			content: [{ type: "text", text: envelope.modelText }, image],
+			author,
+		};
+		const out = projectPromptDisplayMessage(input, envelope);
+		assert.equal(out.role, "user-with-attachments");
+		assert.equal(out.content[0].text, "typed");
+		assert.equal(out.content[1], image);
+		assert.equal(out.author, author);
+		assert.deepEqual(out.attachments, envelope.attachments);
+		assert.ok(!("content" in out.attachments[0]));
+		assert.ok(!("extractedText" in out.attachments[0]));
+	});
+
+	it("hydrates metadata-only image tiles from Pi blocks while preserving mixed attachment order", () => {
+		const first = Buffer.from("first image").toString("base64");
+		const second = Buffer.from("second image").toString("base64");
+		const attachments = [
+			{ id: "doc-a", type: "document" as const, fileName: "a.bin", mimeType: "application/octet-stream", size: 1 },
+			{ id: "image-a", type: "image" as const, fileName: "original-a.png", mimeType: "image/png", size: 11 },
+			{ id: "doc-b", type: "document" as const, fileName: "b.bin", mimeType: "application/octet-stream", size: 1 },
+			{ id: "image-b", type: "image" as const, fileName: "original-b.webp", mimeType: "image/webp", size: 12 },
+		];
+		const out = projectPromptDisplayMessage({
+			role: "user",
+			content: [
+				{ type: "text", text: "model" },
+				{ type: "image", data: first, mimeType: "image/png" },
+				{ type: "image", data: second, mimeType: "image/webp" },
+			],
+		}, {
+			ts: 1, modelText: "model", originalText: "typed", skillExpansions: [], attachments,
+		});
+
+		assert.equal(out.role, "user-with-attachments");
+		assert.deepEqual(out.attachments, [
+			attachments[0],
+			{ ...attachments[1], preview: first },
+			attachments[2],
+			{ ...attachments[3], preview: second },
+		]);
+		assert.deepEqual(out.attachments.map((attachment: any) => attachment.fileName), [
+			"a.bin", "original-a.png", "b.bin", "original-b.webp",
+		]);
+	});
+
+	it("uses proven occurrence identity instead of equal-text FIFO", () => {
+		const entries = [
+			{ ts: 2, modelText: "same", originalText: "second", skillExpansions: [], transcriptEntryId: "entry-2" },
+			{ ts: 1, modelText: "same", originalText: "first", skillExpansions: [], transcriptEntryId: "entry-1" },
+		];
+		const out = mergeSidecarEntriesIntoMessages(entries, [
+			{ role: "user", entryId: "entry-1", content: "same" },
+			{ role: "user", entryId: "entry-2", content: "same" },
+			{ role: "user", content: "same" },
+		]);
+		assert.equal(out[0].content, "first");
+		assert.equal(out[1].content, "second");
+		assert.equal(out[2].content, "same", "ambiguous bound envelopes must not fall back to text association");
+	});
+
+	it("matches modern same-text records only by proven delivery occurrence", () => {
+		const entries = [
+			{ ts: 2, modelText: "Attachments:", originalText: "second", skillExpansions: [], intentId: "occurrence-b" },
+			{ ts: 1, modelText: "Attachments:", originalText: "first", skillExpansions: [], intentId: "occurrence-a" },
+		];
+		const out = mergeSidecarEntriesIntoMessages(entries, [
+			{ role: "user", deliveryIntentId: "occurrence-a", content: "Attachments:" },
+			{ role: "user", deliveryIntentId: "occurrence-b", content: "Attachments:" },
+			{ role: "user", content: "Attachments:" },
+		]);
+		assert.deepEqual(out.map((message: any) => message.content), [
+			"first",
+			"second",
+			"Attachments:",
+		]);
+	});
+
+	it("never lets duplicate or unproven modern records enter legacy FIFO", () => {
+		const modern = {
+			ts: 1,
+			modelText: "same pointer text",
+			originalText: "must stay private",
+			skillExpansions: [],
+			intentId: "modern-occurrence",
+		};
+		const input = [
+			{ role: "user", deliveryIntentId: "modern-occurrence", content: modern.modelText },
+			{ role: "user", content: modern.modelText },
+		];
+		const ambiguous = mergeSidecarEntriesIntoMessages([
+			modern,
+			{ ...modern, originalText: "conflict" },
+		], input);
+		assert.deepEqual(ambiguous.map((message: any) => message.content), [modern.modelText, modern.modelText]);
+
+		const unproven = mergeSidecarEntriesIntoMessages([modern], [{ role: "user", content: modern.modelText }]);
+		assert.equal(unproven[0].content, modern.modelText);
+		const legacy = mergeSidecarEntriesIntoMessages([
+			{ ...modern, intentId: undefined, originalText: "legacy display" },
+		], [{ role: "user", content: modern.modelText }]);
+		assert.equal(legacy[0].content, "legacy display", "truly legacy records retain FIFO compatibility");
+	});
+
+	it("projects one authoritative bound envelope when the outward source omits entry identity", () => {
+		const entry = {
+			ts: 1,
+			modelText: "retained model text",
+			originalText: "retained visible text",
+			skillExpansions: [],
+			transcriptEntryId: "retained-entry",
+		};
+		const out = mergeSidecarEntriesIntoMessages([entry], [
+			{ role: "user", content: "retained model text" },
+		]);
+		assert.equal(out[0].content, "retained visible text");
+	});
+
+	it("fails closed when identity-free messages could claim the same bound envelope", () => {
+		const entry = {
+			ts: 1,
+			modelText: "duplicate model text",
+			originalText: "must not project",
+			skillExpansions: [],
+			transcriptEntryId: "one-bound-entry",
+		};
+		const out = mergeSidecarEntriesIntoMessages([entry], [
+			{ role: "user", content: "duplicate model text" },
+			{ role: "user", content: "duplicate model text" },
+		]);
+		assert.deepEqual(out.map((message: any) => message.content), [
+			"duplicate model text",
+			"duplicate model text",
+		]);
+	});
+
+	it("provides a reusable session projection for title and copy sources", () => {
+		const sid = "session-outward-helper";
+		appendSkillSidecarEntry(sid, {
+			ts: 1,
+			modelText: "typed\n\nprivate model context",
+			originalText: "typed",
+			skillExpansions: [],
+			attachments: [{
+				id: "attachment:v1:title",
+				type: "document",
+				fileName: "title.bin",
+				mimeType: "application/octet-stream",
+				size: 3,
+				content: "cmF3LWJ5dGVz",
+				extractedText: "model-only text",
+			} as any],
+		});
+		const projected: any[] = projectPromptDisplayMessagesForSession(sid, [
+			{ role: "user", content: "typed\n\nprivate model context" },
+		]);
+		assert.equal(projected[0].content, "typed");
+		assert.equal(projected[0].attachments[0].fileName, "title.bin");
+		assert.ok(!("content" in projected[0].attachments[0]));
+		assert.ok(!("extractedText" in projected[0].attachments[0]));
+	});
+
+	it("drops unsafe presentation metadata instead of exposing paths or bytes", () => {
+		const out = projectPromptDisplayMessage(
+			{ role: "user", content: "model" },
+			{
+				ts: 1, modelText: "model", originalText: "typed", skillExpansions: [],
+				attachments: [{
+					id: "ok", type: "document", fileName: "C:\\secret.txt",
+					mimeType: "text/plain", size: 1,
+					content: "c2VjcmV0", extractedText: "secret",
+				} as any],
+			},
+		);
+		assert.equal(out.content, "typed");
+		assert.ok(!("attachments" in out));
 	});
 });

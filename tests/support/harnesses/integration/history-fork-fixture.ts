@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "../../../integration/gateway/_helpers/e2e/in-process-harness.js";
+import { sessionTranscriptHostPath } from "../../../../src/server/agent/agent-session-path.js";
 import {
 	apiFetch,
 	createSession as createSessionFromHarness,
@@ -39,6 +40,7 @@ let serverModule: any;
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 const fixtureRoots: string[] = [];
+const sandboxFixtureFinalizers: Array<() => Promise<void>> = [];
 
 const SYSTEM_AUTHOR = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
 const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
@@ -312,6 +314,7 @@ function installSandboxSessionFilesystem(
 		throw new Error("history fork fixture requires the production SandboxManager");
 	}
 	const originalGet = sandboxManager.get;
+	const originalEnsureForProject = sandboxManager.ensureForProject;
 	const containerRoot = path.join(gateway.bobbitDir, `sandbox-session-fs-${label}-${randomUUID()}`);
 	fixtureRoots.push(containerRoot);
 	const filesystem = new SandboxSessionFilesystem({
@@ -319,10 +322,28 @@ function installSandboxSessionFilesystem(
 		hostAgentSessionsDir: agentSessionsDir,
 		removeWorktree: name => { removed.push(name); },
 	});
+	// Keep the production SandboxManager registry and lifecycle serialization in
+	// the test path. Only replace its Docker project boundary with the exact fake
+	// runtime; this avoids both shared-control-container access and real Docker.
+	sandboxManager.ensureForProject = async () => {};
 	sandboxManager.get = () => filesystem;
+	let finalized = false;
+	sandboxFixtureFinalizers.push(async () => {
+		if (finalized) return;
+		finalized = true;
+		const runtimes = sandboxManager._sessionRuntimes as Map<string, { projectId: string; containerId: string }>;
+		for (const [sessionId, runtime] of [...runtimes]) {
+			if (runtime.containerId !== `fixture-runtime:${sessionId}`) continue;
+			await sandboxManager.releaseSessionRuntime(runtime.projectId, sessionId);
+		}
+		sandboxManager.get = originalGet;
+		sandboxManager.ensureForProject = originalEnsureForProject;
+	});
 	return {
 		filesystem,
-		restore: () => { sandboxManager.get = originalGet; },
+		// Session cleanup still needs the registered fake runtimes. The afterEach
+		// finalizer restores the production boundary after those sessions terminate.
+		restore: () => {},
 	};
 }
 
@@ -383,11 +404,17 @@ export function installHistoryForkHooks(): void {
 
 	test.afterEach(async ({ gateway }) => {
 		serverModule?.__clearHistoryForkSidecarCopyFake();
-		await sessions.cleanup(gateway);
-		for (const root of fixtureRoots.splice(0)) {
-			try {
-				fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
-			} catch { /* the isolated run-root owner performs the final safety sweep */ }
+		try {
+			await sessions.cleanup(gateway);
+		} finally {
+			for (const finalize of sandboxFixtureFinalizers.splice(0).reverse()) {
+				await finalize();
+			}
+			for (const root of fixtureRoots.splice(0)) {
+				try {
+					fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
+				} catch { /* the isolated run-root owner performs the final safety sweep */ }
+			}
 		}
 	});
 }
@@ -400,6 +427,7 @@ export {
 	expect,
 	apiFetch,
 	nonGitCwd,
+	sessionTranscriptHostPath,
 	registerProject,
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,

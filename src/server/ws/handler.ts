@@ -881,11 +881,19 @@ export function handleWebSocketConnection(
 	};
 
 	const sendCommandFailure = (err: unknown, msg?: ReliableIntentClientMessage): void => {
+		const failure = err as { code?: unknown; message?: unknown; retryable?: unknown } | null;
+		const code = typeof failure?.code === "string" && failure.code.length > 0
+			? failure.code
+			: "COMMAND_ERROR";
+		const message = typeof failure?.message === "string" && failure.message.length > 0
+			? failure.message
+			: String(err);
+		const retryable = typeof failure?.retryable === "boolean" ? failure.retryable : true;
 		if (msg) {
-			sendIntentRejection(msg, String(err), "COMMAND_ERROR");
+			sendIntentRejection(msg, message, code, retryable);
 			return;
 		}
-		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
+		send(ws, { type: "error", message, code });
 	};
 
 	const sendIntentUpdate = (
@@ -903,6 +911,7 @@ export function handleWebSocketConnection(
 	const launchAcceptedDelivery = (
 		intentId: string,
 		delivery: Promise<unknown> | unknown,
+		msg?: ReliableIntentClientMessage,
 	): void => {
 		// SessionManager admission is synchronous up to its first await: by this
 		// point the exact occurrence is persisted and projected, while Pi delivery
@@ -936,8 +945,8 @@ export function handleWebSocketConnection(
 		}, (error) => {
 			const failed = intentProjection(sessionManager, sessionId, intentId);
 			if (failed) sendIntentUpdate(failed, failed.deliveryState === "failed" ? "failed" : undefined);
-			console.warn(`[ws-handler] intent delivery did not settle session=${sessionId} intent=${intentId} outcome=${failed?.deliveryState ?? "retained"}`);
-			void error;
+			else sendCommandFailure(error, msg);
+			console.warn(`[ws-handler] intent delivery did not settle session=${sessionId} intent=${intentId} outcome=${failed?.deliveryState ?? "rejected"}`);
 		});
 	};
 
@@ -969,6 +978,20 @@ export function handleWebSocketConnection(
 		} else {
 			sendIntentRejection(msg, message, code);
 		}
+		return true;
+	};
+
+	const rejectInvalidPromptAttachmentFields = (msg: ReliableIntentClientMessage): boolean => {
+		if (msg.type !== "prompt") return false;
+		const candidate = msg as { images?: unknown; attachments?: unknown };
+		if ((candidate.images === undefined || Array.isArray(candidate.images))
+			&& (candidate.attachments === undefined || Array.isArray(candidate.attachments))) return false;
+		sendIntentRejection(
+			msg,
+			"Prompt images and attachments must be arrays",
+			"UPLOADED_ATTACHMENT_INVALID",
+			false,
+		);
 		return true;
 	};
 
@@ -1569,7 +1592,7 @@ export function handleWebSocketConnection(
 						suppressTitleGen: msg.suppressTitleGen === true,
 						intentId,
 					});
-					launchAcceptedDelivery(intentId, delivery);
+					launchAcceptedDelivery(intentId, delivery, msg);
 					break;
 				}
 				case "steer": {
@@ -2562,7 +2585,11 @@ export function handleWebSocketConnection(
 
 		// Validate occurrence identity and text-bearing commands before they enter
 		// Markdown parsing, a session queue, or the extension-post permit flow.
-		if (authenticated && (rejectInvalidIntentId(msg) || rejectInvalidPromptText(msg))) return;
+		if (authenticated && (
+			rejectInvalidIntentId(msg)
+			|| rejectInvalidPromptText(msg)
+			|| rejectInvalidPromptAttachmentFields(msg)
+		)) return;
 
 		const dispatch = (signal?: AbortSignal) => handleMessage(msg, frameBytes, signal);
 		const liveSession = authenticated && sessionId !== "__viewer__"

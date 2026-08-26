@@ -7,6 +7,7 @@ import {
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../../src/server/agent/author-sidecar.js";
+import { setUploadedAttachmentRootForTesting } from "../../../src/server/agent/uploaded-attachment-store.js";
 import {
 	barrier,
 	flushMicrotasks,
@@ -28,10 +29,12 @@ beforeEach(() => {
 		secretsDir: path.join(authorStateDir, "private-secrets"),
 		hmacKey: Buffer.alloc(32, 0x52),
 	});
+	setUploadedAttachmentRootForTesting(path.join(authorStateDir, "uploaded-attachments"));
 });
 
 afterEach(() => {
 	while (harnesses.length > 0) harnesses.pop()!.cleanup();
+	setUploadedAttachmentRootForTesting(undefined);
 	fs.rmSync(authorStateDir, { recursive: true, force: true });
 	vi.restoreAllMocks();
 });
@@ -223,8 +226,8 @@ describe("post-terminal reliable drain settlement", () => {
 	});
 
 	it.each([
-		{ label: "stable occurrence", intentId: "post-error-follow-up" },
-		{ label: "legacy occurrence", intentId: undefined },
+		{ label: "caller-identified occurrence", intentId: "post-error-follow-up" },
+		{ label: "server-identified occurrence", intentId: undefined },
 	])("fences a $label accepted after error agent_end until agent_settled", async ({ intentId }) => {
 		const prompt = vi.fn(async (
 			_text: string,
@@ -233,7 +236,9 @@ describe("post-terminal reliable drain settlement", () => {
 			_streamingBehavior?: unknown,
 		) => ({ success: true }));
 		const { manager, session, storeUpdates } = useHarness({
-			id: `post-error-settlement-${intentId ?? "legacy"}`,
+			id: intentId
+				? "83749600-0000-4000-8000-000000000101"
+				: "83749600-0000-4000-8000-000000000102",
 			status: "streaming",
 			prompt,
 		});
@@ -246,7 +251,23 @@ describe("post-terminal reliable drain settlement", () => {
 
 		const modelText = "expanded recovery payload";
 		const images = [{ type: "image", data: "cGl4ZWw=", mimeType: "image/png" }];
-		const attachments = [{ name: "recovery.txt", mimeType: "text/plain", size: 8 }];
+		const attachmentBytes = Buffer.from("recovery", "utf8");
+		const attachments = [{
+			id: "post-error-recovery-file",
+			type: "document" as const,
+			fileName: "recovery.txt",
+			mimeType: "text/plain",
+			size: attachmentBytes.byteLength,
+			content: attachmentBytes.toString("base64"),
+			extractedText: attachmentBytes.toString("utf8"),
+		}];
+		const displayAttachments = [{
+			id: attachments[0].id,
+			type: attachments[0].type,
+			fileName: attachments[0].fileName,
+			mimeType: attachments[0].mimeType,
+			size: attachments[0].size,
+		}];
 		const admission = await manager.enqueuePrompt(session.id, "recover after error", {
 			...(intentId ? { intentId } : {}),
 			modelText,
@@ -262,25 +283,28 @@ describe("post-terminal reliable drain settlement", () => {
 		const deferred = session.promptQueue.peek()!;
 		expect(deferred.text).toContain("terminal model failure");
 		expect(deferred.text).toContain(modelText);
+		expect(deferred.text).toContain("bobbit-attachment:v1:");
+		expect(deferred.text).not.toContain(attachments[0].content);
 		expect(deferred.text).not.toBe(modelText);
 		expect(deferred).toMatchObject({
 			images,
-			attachments,
+			attachments: displayAttachments,
 			streamingBehavior: "followUp",
 			suppressTitleGen: true,
 		});
 		expect(session.lastTurnErrored).toBe(false);
 
-		if (intentId) {
-			const persistedRows = storeUpdates
-				.map((update: any) => update.messageQueue?.find((row: any) => row.id === intentId))
-				.filter(Boolean);
-			expect(persistedRows[0]?.text).toBe(modelText);
-			expect(persistedRows.at(-1)?.text).toBe(deferred.text);
-			for (const field of ["id", "kind", "targetTurn", "sequence", "createdAt", "deliveryState"] as const) {
-				expect(persistedRows.at(-1)?.[field], `${field} changed while preserving the deferred payload`)
-					.toEqual(persistedRows[0]?.[field]);
-			}
+		const acceptedOccurrenceId = deferred.id;
+		const persistedRows = storeUpdates
+			.map((update: any) => update.messageQueue?.find((row: any) => row.id === acceptedOccurrenceId))
+			.filter(Boolean);
+		expect(persistedRows[0]?.text).toContain(modelText);
+		expect(persistedRows[0]?.text).toContain("bobbit-attachment:v1:");
+		expect(persistedRows[0]?.attachments).toEqual(displayAttachments);
+		expect(persistedRows.at(-1)?.text).toBe(deferred.text);
+		for (const field of ["id", "kind", "targetTurn", "sequence", "createdAt", "deliveryState"] as const) {
+			expect(persistedRows.at(-1)?.[field], `${field} changed while preserving the deferred payload`)
+				.toEqual(persistedRows[0]?.[field]);
 		}
 
 		const later = session.promptQueue.enqueue("later FIFO occurrence");

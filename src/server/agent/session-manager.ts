@@ -34,17 +34,18 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, containerPathToHost, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, containerPathToHost, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import {
 	canonicalContainerAgentSessionPath,
 	sessionFileDelete,
 	sessionFileExists,
 	sessionFileRead,
+	sessionFileWriteAtomic,
 	sessionFsContextForAgentFile,
 	sessionSidecarDelete,
 } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
-import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
+import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import {
 	appendPromptAuthorDismissalTombstone,
 	appendPromptAuthorDispatch,
@@ -80,7 +81,23 @@ import type { FileMention } from "../skills/resolve-file-mentions.js";
 import {
 	appendIdentifiedSkillSidecarEntry,
 	appendSkillSidecarTranscriptBinding,
+	projectPromptDisplayMessage,
+	projectPromptDisplayMessagesForSession,
+	readSkillSidecarEntries,
+	type SkillSidecarEntry,
 } from "../skills/skill-sidecar.js";
+import {
+	sanitizeAttachmentDisplayMetadata,
+	validateUploadedPromptAttachments,
+	type AttachmentDisplayMetadata,
+} from "./attachment-display.js";
+import { appendUploadedAttachmentContext } from "../../shared/uploaded-attachment-context.js";
+import {
+	assertUploadedAttachmentSerializedSendWithinLimit,
+	MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES,
+	persistUploadedAttachmentOccurrence,
+	UploadedAttachmentStoreError,
+} from "./uploaded-attachment-store.js";
 import {
 	appendCompactionSidecarEntry,
 	makeCompactionId,
@@ -180,7 +197,16 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
-import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
+import {
+	activeAgentSessionsDir,
+	containerTranscriptRelativePath,
+	ensurePrivateSessionRoot,
+	sessionStateSessionsRoot,
+	sessionTranscriptContainerPath,
+	sessionTranscriptHostPath,
+	sessionTranscriptRoot,
+	trustedAgentSessionsRoots,
+} from "./agent-session-path.js";
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
@@ -238,9 +264,7 @@ function isWindowsAbsolutePath(filePath: string): boolean {
 function isContainerAgentSessionPath(filePath: string): boolean {
 	const normalized = filePath.replace(/\\/g, "/");
 	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/");
 }
 
 function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
@@ -256,9 +280,16 @@ function safePersistedHostAgentSessionFile(filePath: string | undefined): string
 }
 
 export function switchSessionPathForAgent(ps: PersistedSession): string {
-	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
-	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
-	return hostPathToContainer(mountedHostPath);
+	if (!ps.sandboxed) return ps.agentSessionFile;
+	const canonical = canonicalContainerAgentSessionPath(ps.agentSessionFile);
+	if (canonical) return canonical;
+	if (!isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) throw new Error("Sandbox transcript path is invalid");
+	const root = path.resolve(sessionTranscriptRoot(ps.id));
+	const candidate = path.resolve(ps.agentSessionFile);
+	const relative = path.relative(root, candidate).replace(/\\/g, "/");
+	const containerPath = sessionTranscriptContainerPath(relative);
+	if (!containerPath || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error("Sandbox transcript is outside its owner root");
+	return containerPath;
 }
 
 export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
@@ -518,7 +549,16 @@ export function collectTeamOwnedSessionClosure(
 	return selected;
 }
 
-type StrictSandboxWiringOptions = SandboxWiringOptions & { expectedExistingContainerId?: string };
+type StrictSandboxWiringOptions = SandboxWiringOptions & {
+	/** Exact persisted execution-container identity. Never a client-supplied hint. */
+	expectedExistingContainerId?: string;
+	/** Ordinary legacy rows may migrate only when their ID is the exact live control container. */
+	allowLegacyControlMigration?: boolean;
+	/** Ordinary recovery may replace only an expected runtime proven absent/dead by SandboxManager. */
+	allowMissingRuntimeReplacement?: boolean;
+	/** Staged bridge swaps defer durable identity publication until commit. */
+	persistRuntimeIdentity?: boolean;
+};
 
 interface ArchivedWorktreeScanContext {
 	candidateContexts: ProjectContext[];
@@ -570,6 +610,8 @@ export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedr
  */
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS = 3;
+/** Process-local proof that recursive admission is reusing an already validated snapshot. */
+const UPLOADED_ATTACHMENTS_ADMITTED = Symbol("uploaded-attachments-admitted");
 
 /** Pi/runtime cancellation has a small, stable terminal vocabulary. Keep this
  * whole-message matcher separate from provider retry classification: a provider
@@ -1175,6 +1217,8 @@ export interface SessionInfo {
 	lastPromptText?: string;
 	/** Last user prompt images, for retry on fresh-response errors */
 	lastPromptImages?: Array<{ type: "image"; data: string; mimeType: string }>;
+	/** Occurrence-owned outward projection retained for a fresh-response retry. */
+	lastPromptDisplay?: PromptDisplayRetryCarrier;
 	/** Provenance of the last prompt enqueued to this session. Set by
 	 *  enqueuePrompt / deliverLiveSteer. Defaults to "user" when callers
 	 *  don't supply a source. Read by TeamManager.subscribeTeamLeadEvents. */
@@ -1328,7 +1372,11 @@ interface PendingSkillSidecarEnvelope {
 	originalText: string;
 	skillExpansions: SkillExpansion[];
 	fileMentions?: FileMention[];
+	attachments?: AttachmentDisplayMetadata[];
 	recordId?: string;
+	/** Durable accepted occurrence identity persisted with modern envelopes. */
+	intentId?: string;
+	/** Current author-sidecar dispatch key; legacy attempts may be rebound. */
 	promptId?: string;
 }
 
@@ -1337,6 +1385,14 @@ interface PendingSkillTranscriptBinding {
 	promptId: string;
 	modelText: string;
 	messageIdentity: { id: string } | { timestamp: number };
+}
+
+interface PromptDisplayRetryCarrier {
+	modelText: string;
+	originalText: string;
+	skillExpansions: SkillExpansion[];
+	fileMentions?: FileMention[];
+	attachments?: AttachmentDisplayMetadata[];
 }
 
 /** Exact canonical bridge identity required by ownership-sensitive respawns. */
@@ -1588,7 +1644,9 @@ function cancelPromptAuthorBinding(
 		}
 	}
 	for (const envelope of session.pendingSkillExpansions ?? []) {
-		if (envelope.promptId === pending.promptId) envelope.promptId = undefined;
+		if (envelope.promptId === pending.promptId && envelope.intentId === undefined) {
+			envelope.promptId = undefined;
+		}
 	}
 	retainPromptAuthorAmbiguityFence(session, pending);
 	cancelSessionPromptActivity(
@@ -1700,10 +1758,11 @@ export function projectPromptAuthorMessagesForTitle<T extends object>(
 	identity: AgentSessionIdentity = { id: sessionId },
 	agentDeps: AgentAuthorDependencies = {},
 ): T[] {
-	return mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
+	const withAuthors = mergeAuthorSidecarIntoMessages(readAuthorSidecar(sessionId), messages, {
 		session: identity,
 		agentDeps,
 	}) as T[];
+	return projectPromptDisplayMessagesForSession(sessionId, withAuthors);
 }
 
 /**
@@ -1917,6 +1976,7 @@ export function reconcilePersistedIntentRestore(
 			const recovered = row as ReliableQueuedMessage;
 			normalizedLedger.push({
 				text: row.text,
+				displayText: recovered.displayText,
 				promptId: latest.promptId,
 				intentId: latest.intentId,
 				attemptId: latest.attemptId,
@@ -1985,16 +2045,28 @@ export function reconcilePersistedIntentRestore(
  * explicit queue reorder and in-flight dispatch order must survive projection.
  * Accepted time is used only to merge the two already-ordered streams.
  */
+function displayTextForDelivery(row: Pick<QueuedMessage, "text" | "displayText">): string {
+	return row.displayText ?? row.text;
+}
+
+function outwardQueuedMessage(row: ReliableQueuedMessage): ReliableQueuedMessage {
+	const outward = { ...row };
+	delete outward.displayText;
+	outward.text = displayTextForDelivery(row);
+	return outward;
+}
+
 function projectReliableDeliveryOutbox(
 	queued: ReliableQueuedMessage[],
 	ledger: ReliableInFlightRecord[],
 ): ReliableQueuedMessage[] {
-	const ids = new Set(queued.map((row) => row.id));
+	const outwardQueued = queued.map(outwardQueuedMessage);
+	const ids = new Set(outwardQueued.map((row) => row.id));
 	const inFlight = ledger
 		.filter((record) => record.intentId && !ids.has(record.intentId))
 		.map((record): ReliableQueuedMessage => ({
 			id: record.intentId!,
-			text: record.text,
+			text: displayTextForDelivery(record),
 			isSteered: (record.kind ?? "steer") === "steer",
 			createdAt: record.createdAt ?? record.dispatchEpoch ?? 0,
 			kind: record.kind ?? "steer",
@@ -2020,8 +2092,8 @@ function projectReliableDeliveryOutbox(
 	const projection: ReliableQueuedMessage[] = [];
 	let queuedIndex = 0;
 	let inFlightIndex = 0;
-	while (queuedIndex < queued.length && inFlightIndex < inFlight.length) {
-		const queuedRow = queued[queuedIndex];
+	while (queuedIndex < outwardQueued.length && inFlightIndex < inFlight.length) {
+		const queuedRow = outwardQueued[queuedIndex];
 		const inFlightRow = inFlight[inFlightIndex];
 		if ((queuedRow.createdAt ?? 0) <= (inFlightRow.createdAt ?? 0)) {
 			projection.push(queuedRow);
@@ -2031,7 +2103,7 @@ function projectReliableDeliveryOutbox(
 			inFlightIndex += 1;
 		}
 	}
-	projection.push(...queued.slice(queuedIndex), ...inFlight.slice(inFlightIndex));
+	projection.push(...outwardQueued.slice(queuedIndex), ...inFlight.slice(inFlightIndex));
 	return projection;
 }
 
@@ -2186,8 +2258,67 @@ function commitCorrelatedPromptActivity(
 	);
 }
 
+/**
+ * Rebuild modern display envelopes from their accepted occurrence identity.
+ * Cancelled terminal occurrences are excluded unless the durable queue/ledger
+ * proves that the same accepted occurrence still owns a retry. Duplicate
+ * display rows fail closed rather than falling back to body text.
+ */
+export function restorePromptDisplayEnvelopes(
+	session: SessionInfo,
+	authorEntries: PromptAuthorBinding[],
+	displayEntries: SkillSidecarEntry[] = readSkillSidecarEntries(session.id),
+): number {
+	const groups = new Map<string, SkillSidecarEntry[]>();
+	for (const entry of displayEntries) {
+		if (entry.schemaVersion !== 1 || !entry.recordId || !entry.intentId) continue;
+		const group = groups.get(entry.intentId) ?? [];
+		group.push(entry);
+		groups.set(entry.intentId, group);
+	}
+	const durableIntentIds = new Set<string>();
+	for (const row of session.promptQueue?.toArray?.() ?? []) durableIntentIds.add(row.id);
+	for (const row of session.inFlightSteerTexts ?? []) {
+		if (row.intentId) durableIntentIds.add(row.intentId);
+	}
+	const restored: PendingSkillSidecarEnvelope[] = [];
+	for (const [intentId, group] of groups) {
+		if (group.length !== 1) continue;
+		const author = selectLatestPromptAuthorBinding(
+			authorEntries,
+			(candidate) => candidate.intentId === intentId,
+		);
+		if (!author) continue;
+		if (author.settlement?.outcome === "cancelled" && !durableIntentIds.has(intentId)) continue;
+		const entry = group[0];
+		if (typeof author.modelText === "string") {
+			const baseModelText = author.modelPrefix && author.modelText.startsWith(author.modelPrefix)
+				? author.modelText.slice(author.modelPrefix.length)
+				: author.modelText;
+			if (baseModelText !== entry.modelText) continue;
+		}
+		const existing = session.pendingSkillExpansions?.find((candidate) =>
+			candidate.recordId === entry.recordId && candidate.intentId === intentId);
+		restored.push(existing ?? {
+			modelText: entry.modelText,
+			originalText: entry.originalText,
+			skillExpansions: entry.skillExpansions ?? [],
+			...(entry.fileMentions?.length ? { fileMentions: entry.fileMentions } : {}),
+			...(entry.attachments?.length ? { attachments: entry.attachments } : {}),
+			recordId: entry.recordId,
+			intentId,
+			promptId: author.promptId,
+		});
+	}
+	const unpersisted = (session.pendingSkillExpansions ?? []).filter((entry) =>
+		entry.intentId === undefined || entry.recordId === undefined);
+	session.pendingSkillExpansions = [...unpersisted, ...restored];
+	return restored.length;
+}
+
 /** Rebuild live correlation state before switch_session replays transcript events. */
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
+	restorePromptDisplayEnvelopes(session, entries);
 	session.pendingPromptAuthors = entries
 		.filter((entry) => entry.settlement === undefined)
 		.map(({ promptId, intentId, attemptId, dispatchEpoch, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
@@ -2215,8 +2346,11 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		const text = entry.modelPrefix && entry.modelText.startsWith(entry.modelPrefix)
 			? entry.modelText.slice(entry.modelPrefix.length)
 			: entry.modelText;
+		const displayText = session.pendingSkillExpansions?.find((envelope) =>
+			envelope.promptId === entry.intentId)?.originalText;
 		(session.inFlightSteerTexts ??= []).push({
 			text,
+			...(displayText === undefined ? {} : { displayText }),
 			promptId: entry.promptId,
 			intentId: entry.intentId,
 			attemptId: entry.attemptId,
@@ -2333,23 +2467,6 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		});
 	}
 	return before - (session.inFlightSteerTexts?.length ?? 0) + restoredDirectAttempts;
-}
-
-/** Helper: rewrite the text body of a user message in place (returns a new object). */
-function rewriteUserMessageText(message: any, newText: string): any {
-	if (!message) return message;
-	if (typeof message.content === "string") return { ...message, content: newText };
-	if (Array.isArray(message.content)) {
-		const content = message.content.map((c: any) =>
-			c?.type === "text" ? { ...c, text: newText } : c,
-		);
-		// If no text block was present, prepend one.
-		if (!content.some((c: any) => c?.type === "text")) {
-			content.unshift({ type: "text", text: newText });
-		}
-		return { ...message, content };
-	}
-	return { ...message, content: newText };
 }
 
 /**
@@ -2473,7 +2590,12 @@ export function prepareVisibleAgentEvent(
 			&& !promptAuthorBindingMatchesText(liveKeylessTerminalGuard, modelText)))) {
 		session.lastKeylessPromptAuthorEnd = undefined;
 	}
-	let stableBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
+	// A user update is occurrence-proven only when its key was already bound by
+	// the preceding start. Keep this distinct from a binding inferred while
+	// processing the update itself so provisional raw-text matching cannot gain
+	// outward display authority.
+	const precedingMessageBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
+	let stableBinding = precedingMessageBinding;
 	if (!stableBinding && userRole && !messageKey && raw.type === "message_end") {
 		stableBinding = session.lastKeylessPromptAuthorEnd;
 	}
@@ -2611,6 +2733,13 @@ export function prepareVisibleAgentEvent(
 		promptAuthor: author,
 	});
 	const prepared = stripVisiblePromptEntryIdProvenance(normalized);
+	if (raw.type === "message_update" && userRole && precedingMessageBinding) {
+		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
+			promptId: precedingMessageBinding.promptId,
+			attemptId: precedingMessageBinding.attemptId,
+			alreadySettled: precedingMessageBinding.settled,
+		} satisfies PromptAuthorEventBinding;
+	}
 	if (bufferedPending) {
 		const messageId = promptAuthorMessageId(message, raw);
 		bufferedPending[PROMPT_AMBIGUOUS_ECHO] = {
@@ -2698,10 +2827,11 @@ export function prepareVisibleAgentEvent(
 	}
 	const eventBinding = (prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
 	if (raw.type === "message_end" && eventBinding && !eventBinding.alreadySettled) {
+		const displayModelText = extractUserMessageText((prepared as any).message);
 		const envelope = session.pendingSkillExpansions?.find((entry) =>
 			entry.promptId === eventBinding.promptId
 			&& entry.recordId !== undefined
-			&& entry.modelText === modelText,
+			&& entry.modelText === displayModelText,
 		);
 		const rawMessageId = typeof message.id === "string" && message.id.length > 0
 			? message.id
@@ -2717,7 +2847,7 @@ export function prepareVisibleAgentEvent(
 				session.pendingSkillTranscriptBindings.push({
 					recordId: envelope.recordId,
 					promptId: eventBinding.promptId,
-					modelText,
+					modelText: displayModelText,
 					messageIdentity,
 				});
 			}
@@ -3112,35 +3242,67 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 }
 
 /**
- * If `event` is a `message_end` for a user role and the session has a
- * pending skill-expansion envelope whose `modelText` matches the message
- * body, return a cloned event with:
- *   - the user message body rewritten to `originalText`
- *   - `skillExpansions` attached as a top-level field on the message
- * The pending envelope is consumed (FIFO). The original event object is
- * never mutated; the agent's internal transcript continues to reference
- * the un-spliced (modelText) message — that is what the model has seen.
+ * Project a proven user prompt occurrence into its outward-only display form.
+ * A correlated `message_start` is rendered immediately by clients, so it must
+ * receive the same projection as the terminal event without consuming the
+ * envelope needed by that later terminal. Pi emits user starts and ends (not
+ * user updates); any future update fails closed unless it carries the same
+ * trusted occurrence binding.
+ *
+ * Only `message_end` retains the legacy unbound compatibility lookup and
+ * consumes the matching envelope. The original event and Pi transcript remain
+ * model-facing and unmodified.
  */
 function spliceSkillExpansionsIntoEvent(
-	session: { pendingSkillExpansions?: PendingSkillSidecarEnvelope[] },
+	session: {
+		pendingSkillExpansions?: PendingSkillSidecarEnvelope[];
+		pendingPromptAuthors?: PendingPromptAuthorRecord[];
+	},
 	event: unknown,
 ): unknown {
 	const ev = event as any;
 	if (!ev || typeof ev !== "object") return event;
-	if (ev.type !== "message_end") return event;
+	const terminal = ev.type === "message_end";
+	if (!terminal && ev.type !== "message_start" && ev.type !== "message_update") return event;
 	const msg = ev.message;
 	if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return event;
 	const pending = session.pendingSkillExpansions;
 	if (!pending || pending.length === 0) return event;
 	const body = extractUserMessageText(msg);
-	const idx = pending.findIndex((p) => p.modelText === body);
-	if (idx === -1) return event;
-	const envelope = pending.splice(idx, 1)[0];
-	const rewrittenMsg = rewriteUserMessageText(msg, envelope.originalText);
-	rewrittenMsg.skillExpansions = envelope.skillExpansions;
-	if (envelope.fileMentions && envelope.fileMentions.length > 0) {
-		rewrittenMsg.fileMentions = envelope.fileMentions;
+	const binding = ev[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+	// Starts/updates are provisional outward projections. They may only use the
+	// occurrence binding established at the author-admission boundary; raw text is
+	// never sufficient because equal model text can belong to separate prompts.
+	if (!terminal && !binding) return event;
+	let idx = binding
+		? pending.findIndex((candidate) => candidate.promptId === binding.promptId && candidate.modelText === body)
+		: pending.findIndex((candidate) => candidate.promptId === undefined && candidate.modelText === body);
+	if (terminal && idx === -1 && !binding) {
+		// Legacy/raw emitters do not carry the author binding that normally proves
+		// occurrence identity. A poison-history respawn can nevertheless have bound
+		// its restored display envelope before that raw echo reaches this boundary.
+		// Recover it only when one active author occurrence proves an unambiguous
+		// prompt ID; equal-text or replay ambiguity deliberately fails closed.
+		const matchingAuthors = session.pendingPromptAuthors?.filter((candidate) =>
+			promptAuthorBindingMatchesText(candidate, body),
+		) ?? [];
+		if (matchingAuthors.length === 1) {
+			idx = pending.findIndex((candidate) =>
+				candidate.promptId === matchingAuthors[0].promptId
+				&& candidate.modelText === body,
+			);
+		}
 	}
+	if (idx === -1) return event;
+	const envelope = terminal ? pending.splice(idx, 1)[0] : pending[idx];
+	const rewrittenMsg = projectPromptDisplayMessage(msg, {
+		ts: 0,
+		modelText: envelope.modelText,
+		originalText: envelope.originalText,
+		skillExpansions: envelope.skillExpansions,
+		...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
+		...(envelope.attachments?.length ? { attachments: envelope.attachments } : {}),
+	});
 	return { ...ev, message: rewrittenMsg };
 }
 
@@ -3281,6 +3443,8 @@ export interface SessionManagerOptions {
 	promotedSessionLifecycleGuard?: PromotedSessionLifecycleGuard;
 	/** Narrow canonical notification publication seam. */
 	hostNotificationPublisher?: HostSessionNotificationPublisher;
+	/** Test-only override for the browser-compatible serialized attachment guard. */
+	uploadedAttachmentSerializedSendLimitBytes?: number;
 }
 
 type SessionReplacementToken = {
@@ -3399,6 +3563,7 @@ export class SessionManager {
 	private readonly clock: Clock;
 	private readonly commandRunner: CommandRunner;
 	private readonly skipTitleGeneration: boolean;
+	private readonly uploadedAttachmentSerializedSendLimitBytes: number;
 	private readonly remoteGitPolicy: RemoteGitPolicy;
 	private readonly testPreparingDelayMs?: string;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -4152,12 +4317,147 @@ export class SessionManager {
 		}
 	}
 
-	private _hostTrackedTranscriptPath(_ps: PersistedSession, filePath: string): string | undefined {
+	private _legacySandboxTranscriptMapping(ps: PersistedSession, filePath: string): { source: string; container: string } {
+		let relative = containerTranscriptRelativePath(filePath);
+		let source: string | undefined;
+		const ownerRoot = path.resolve(sessionTranscriptRoot(ps.id));
+		if (relative) {
+			if (relative.startsWith(".bobbit-session-roots-v1/")) throw new Error("Sandbox transcript path enters the reserved owner namespace");
+			source = path.join(activeAgentSessionsDir(), ...relative.split("/"));
+		} else if (isHostAbsoluteAgentSessionPath(filePath)) {
+			const candidate = path.resolve(filePath);
+			const ownerRelative = path.relative(ownerRoot, candidate);
+			if (ownerRelative && !ownerRelative.startsWith("..") && !path.isAbsolute(ownerRelative)) {
+				relative = ownerRelative.replace(/\\/g, "/");
+				source = candidate;
+			} else {
+				for (const root of trustedAgentSessionsRoots()) {
+					const candidateRelative = path.relative(path.resolve(root), candidate);
+					if (!candidateRelative || candidateRelative.startsWith("..") || path.isAbsolute(candidateRelative)) continue;
+					const normalized = candidateRelative.replace(/\\/g, "/");
+					if (normalized.startsWith(".bobbit-session-roots-v1/")) throw new Error("Sandbox transcript belongs to another owner");
+					relative = normalized;
+					source = candidate;
+					break;
+				}
+			}
+			if (!source) {
+				const exactLegacyPaths = new Set<string>([ps.agentSessionFile]);
+				for (const boundary of normalizeContextClearBoundaries(ps.contextClearBoundaries)) {
+					exactLegacyPaths.add(boundary.previousAgentSessionFile);
+					exactLegacyPaths.add(boundary.activatedAgentSessionFile);
+				}
+				if (exactLegacyPaths.has(filePath)) {
+					trustPersistedAgentSessionFile(filePath);
+					const readable = resolveReadablePersistedAgentSessionFile(filePath);
+					if (readable) {
+						source = readable;
+						const sourceKey = createHash("sha256").update(path.resolve(readable)).digest("hex");
+						relative = `--bobbit-legacy--/${sourceKey}-${path.basename(readable)}`;
+					}
+				}
+			}
+		}
+		const container = relative ? sessionTranscriptContainerPath(relative) : null;
+		if (!container || !source) throw new Error("Sandbox transcript migration source is invalid");
+		return { source, container };
+	}
+
+	private async _publishLegacySandboxFile(
+		ps: PersistedSession,
+		source: string,
+		destinationContainerPath: string,
+	): Promise<void> {
+		const MAX_LEGACY_MIGRATION_BYTES = 256 * 1024 * 1024;
+		let sourceStat: fs.Stats;
+		try { sourceStat = await fsp.lstat(source); }
+		catch (error: any) { if (error?.code === "ENOENT") return; throw error; }
+		if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error("Legacy sandbox transcript source is unsafe");
+		if (sourceStat.size > MAX_LEGACY_MIGRATION_BYTES) throw new Error("Legacy sandbox transcript exceeds the migration limit");
+
+		// Legacy sources are read only during restore, before an agent process is
+		// started for this session. Bind the allowed source leaf to one handle and
+		// verify its identity; the destination owner root may have been writable in
+		// an earlier runtime, so destination I/O always uses an exact session runtime.
+		const sourceHandle = await fsp.open(source, "r");
+		let content: Buffer;
+		try {
+			const openedStat = await sourceHandle.stat();
+			if (!openedStat.isFile()
+				|| openedStat.dev !== sourceStat.dev
+				|| openedStat.ino !== sourceStat.ino
+				|| openedStat.size !== sourceStat.size) {
+				throw new Error("Legacy sandbox transcript changed during migration");
+			}
+			content = await sourceHandle.readFile();
+		} finally {
+			await sourceHandle.close();
+		}
+		if (content.length !== sourceStat.size) throw new Error("Legacy sandbox transcript changed during migration");
+		const fsContext = sessionFsContextForAgentFile(ps, destinationContainerPath);
+		const existing = await sessionFileRead(fsContext, destinationContainerPath, this.sandboxManager);
+		if (existing !== null) {
+			if (!Buffer.from(existing, "utf8").equals(content)) {
+				throw new Error("Sandbox transcript migration destination conflicts with legacy bytes");
+			}
+			return;
+		}
+		await sessionFileWriteAtomic(fsContext, destinationContainerPath, content, this.sandboxManager);
+	}
+
+	private async _prepareSandboxTranscriptPersistence(ps: PersistedSession, store: SessionStore): Promise<PersistedSession> {
+		if (!ps.sandboxed || !ps.agentSessionFile) return ps;
+		ensurePrivateSessionRoot(sessionTranscriptRoot(ps.id), activeAgentSessionsDir());
+		const migrate = async (filePath: string): Promise<string> => {
+			const mapping = this._legacySandboxTranscriptMapping(ps, filePath);
+			await this._publishLegacySandboxFile(ps, mapping.source, mapping.container);
+			const sidecarContainer = mapping.container.endsWith(".jsonl")
+				? `${mapping.container.slice(0, -".jsonl".length)}.bobbit.json`
+				: `${mapping.container}.bobbit.json`;
+			await this._publishLegacySandboxFile(ps, sidecarPathFor(mapping.source), sidecarContainer);
+			return mapping.container;
+		};
+		const agentSessionFile = await migrate(ps.agentSessionFile);
+		const boundaries = normalizeContextClearBoundaries(ps.contextClearBoundaries);
+		const migratedBoundaries: ContextClearBoundary[] = [];
+		for (const boundary of boundaries) {
+			migratedBoundaries.push({
+				...boundary,
+				previousAgentSessionFile: await migrate(boundary.previousAgentSessionFile),
+				activatedAgentSessionFile: await migrate(boundary.activatedAgentSessionFile),
+			});
+		}
+		if (agentSessionFile === ps.agentSessionFile
+			&& JSON.stringify(migratedBoundaries) === JSON.stringify(boundaries)) return ps;
+		const previousFile = ps.agentSessionFile;
+		const previousBoundaries = ps.contextClearBoundaries;
+		try {
+			store.update(ps.id, { agentSessionFile, contextClearBoundaries: migratedBoundaries });
+			await store.flushAsync();
+		} catch (error) {
+			store.update(ps.id, { agentSessionFile: previousFile, contextClearBoundaries: previousBoundaries });
+			await store.flushAsync().catch(() => {});
+			throw error;
+		}
+		return { ...ps, agentSessionFile, contextClearBoundaries: migratedBoundaries };
+	}
+
+	/** Materialize legacy sandbox bytes into the owner root before fork/continue reads. */
+	async prepareSandboxTranscriptPersistence(sessionId: string): Promise<PersistedSession | undefined> {
+		const store = this.resolveStoreForId(sessionId);
+		const ps = store?.get(sessionId);
+		if (!store || !ps) return undefined;
+		return this._prepareSandboxTranscriptPersistence(ps, store);
+	}
+
+	private _hostTrackedTranscriptPath(ps: PersistedSession, filePath: string): string | undefined {
 		try {
 			const container = canonicalContainerAgentSessionPath(filePath);
 			if (container) {
-				const host = containerPathToHost(container);
-				return host === container ? undefined : path.normalize(host);
+				const host = ps.sandboxed
+					? sessionTranscriptHostPath(ps.id, container)
+					: containerPathToHost(container);
+				return !host || host === container ? undefined : path.normalize(host);
 			}
 			trustPersistedAgentSessionFile(filePath);
 			const readable = resolveReadablePersistedAgentSessionFile(filePath);
@@ -4461,6 +4761,7 @@ export class SessionManager {
 			session.latestTurnAssistantText = undefined;
 			session.lastPromptText = undefined;
 			session.lastPromptImages = undefined;
+			session.lastPromptDisplay = undefined;
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.manualRetryRequired = false;
@@ -5187,9 +5488,9 @@ export class SessionManager {
 				const persisted = this.getSessionStore(session.projectId).get(session.id);
 				if (persisted && this.isCanonicalAdoptedWorkspaceOwner(persisted)) {
 					const expected = persisted.containerId?.trim();
-					if (!expected || session.containerId !== expected || newContainerId !== expected) {
-						this.assertPromotedSessionRecoveryAllowed(session.id, "transfer to a recovered sandbox container");
-						throw new Error(`Cannot recover promoted session ${session.id}: sandbox container identity changed`);
+					if (!expected || session.containerId !== expected) {
+						this.assertPromotedSessionRecoveryAllowed(session.id, "transfer to a replacement execution runtime");
+						throw new Error(`Cannot recover promoted session ${session.id}: execution runtime identity changed`);
 					}
 				}
 				// Verify/repair/recreate worktree if needed. Headquarters never owns
@@ -5245,8 +5546,7 @@ export class SessionManager {
 							console.warn(`[orphan-cleanup] WARN: would-archive ${session.id} but worktree+recent-transcript present — leaving live`);
 						} else {
 							console.warn(`[session-manager] Archiving session ${session.id} — worktree unrecoverable after container recreation`);
-							try { await this.archiveWithCascade(session.id, this.getSessionStore(session.projectId)); } catch { /* best-effort */ }
-							broadcastStatus(session, "terminated");
+							try { await this.terminateSession(session.id); } catch { /* best-effort */ }
 						}
 						continue;
 					}
@@ -5260,8 +5560,27 @@ export class SessionManager {
 					continue;
 				}
 
+				const expectedRuntimeId = ps.containerId?.trim();
+				const runtimeStillLive = !!(
+					expectedRuntimeId
+					&& session.containerId === expectedRuntimeId
+					&& this.sandboxManager
+					&& await this.sandboxManager.isSessionRuntimeIsolated(projectId, session.id, expectedRuntimeId)
+				);
+				if (runtimeStillLive) {
+					// Project control recovery does not disturb Pi, RpcBridge, queued
+					// prompts, or bg processes running in the isolated session container.
+					console.log(`[session-manager] Session ${session.id} runtime remained live during project control recovery`);
+					continue;
+				}
+				if (this.isCanonicalAdoptedWorkspaceOwner(ps)) {
+					this.assertPromotedSessionRecoveryAllowed(session.id, "replace its unavailable execution runtime");
+					throw new Error(`Cannot recover promoted session ${session.id}: exact execution runtime is unavailable`);
+				}
+
 				// Save connected WebSocket clients in case respawn fails and we need
-				// to re-attach them to the original (now terminated) session.
+				// to re-attach them to the original (now terminated) session. Ordinary
+				// restore may allocate a replacement only after exact absence/death proof.
 				const savedClients = new Set(session.clients);
 				try {
 					await this._respawnAgentInPlace(session, ps);
@@ -5342,6 +5661,8 @@ export class SessionManager {
 		this.clock = options?.clock ?? realClock;
 		this.commandRunner = options?.commandRunner ?? realCommandRunner;
 		this.skipTitleGeneration = options?.skipTitleGeneration ?? false;
+		this.uploadedAttachmentSerializedSendLimitBytes = options?.uploadedAttachmentSerializedSendLimitBytes
+			?? MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES;
 		this.remoteGitPolicy = options?.remoteGitPolicy ?? {};
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
@@ -6130,12 +6451,10 @@ export class SessionManager {
 	 * Shared by createSession(), restoreSession(), and createDelegateSession().
 	 * Returns true if sandbox was applied, false if sandbox is not configured.
 	 *
-	 * With the new per-project sandbox architecture, this:
-	 * - Gets the ProjectSandbox for the project
-	 * - Gets the container ID
-	 * - Sets up credentials and token (one per project, not per session)
-	 * - Sets bridgeOptions.containerId
-	 * - The CWD is the container-internal worktree path (set by caller or /workspace)
+	 * The ProjectSandbox control container owns clone/worktree mutation only.
+	 * Pi, RpcBridge, and background commands execute in a distinct container owned
+	 * by the exact project/session pair; bridgeOptions.containerId always projects
+	 * that execution identity.
 	 */
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
@@ -6169,27 +6488,22 @@ export class SessionManager {
 		if (opts?.expectedExistingContainerId !== undefined && !expectedExistingContainerId) {
 			throw new Error(`Cannot reuse sandbox for session ${sessionId}: expected container identity is missing`);
 		}
-		// Ordinary creation/restore lazily initializes as before. Promotion and
-		// promoted-source restore pass an exact identity and must only inspect the
-		// already-ready sandbox: never bootstrap, transfer, or repair its realm.
-		if (!expectedExistingContainerId) await this.sandboxManager.ensureForProject(projectId);
+		// The control container is recoverable project infrastructure, not session
+		// execution identity. Always establish it before worktree mutation, including
+		// when an exact session runtime is being reused.
+		await this.sandboxManager.ensureForProject(projectId);
 		const sandbox = this.sandboxManager.get(projectId);
 		if (!sandbox) {
 			throw new Error(`No sandbox initialized for project ${projectId}`);
 		}
-		const assertExpectedContainer = () => {
-			if (!expectedExistingContainerId) return;
+		const controlContainerId = await sandbox.getContainerId();
+		const assertControlContainer = () => {
 			const status = sandbox.getStatus();
-			if (status.status !== "ready" || status.containerId !== expectedExistingContainerId) {
-				throw new Error(`Cannot reuse sandbox for session ${sessionId}: expected ready container ${expectedExistingContainerId}`);
+			if (status.status !== "ready" || status.containerId !== controlContainerId) {
+				throw new Error(`Cannot wire sandbox for session ${sessionId}: project control container changed`);
 			}
 		};
-		assertExpectedContainer();
-		const containerId = await sandbox.getContainerId();
-		if (expectedExistingContainerId && containerId !== expectedExistingContainerId) {
-			throw new Error(`Cannot reuse sandbox for session ${sessionId}: container identity changed`);
-		}
-		assertExpectedContainer();
+		assertControlContainer();
 
 		// Read gateway URL and generate scoped token for the container.
 		const gwUrl = this.readGatewayUrlForAgent();
@@ -6210,9 +6524,8 @@ export class SessionManager {
 
 		// Re-check after credential wiring as well: a health transition during an
 		// await must reject before a candidate bridge can start.
-		assertExpectedContainer();
+		assertControlContainer();
 		bridgeOptions.sandboxed = true;
-		bridgeOptions.containerId = containerId;
 		const projectRootPath = projectContext?.project.rootPath;
 		if (projectRootPath) {
 			bridgeOptions.projectMarketPacksRoot = path.join(projectRootPath, ".bobbit", "config", "market-packs");
@@ -6320,8 +6633,76 @@ export class SessionManager {
 				scope: projectId,
 			});
 		});
-		assertExpectedContainer();
+		assertControlContainer();
 
+		// A pre-isolation ordinary row may contain the exact current control ID.
+		// That single legacy shape is migrated by creating/adopting the labelled
+		// session runtime. Any other expected identity remains exact and fail-closed.
+		let expectedRuntimeId = expectedExistingContainerId;
+		if (expectedRuntimeId === controlContainerId) {
+			if (!opts?.allowLegacyControlMigration) {
+				throw new Error(`Cannot reuse sandbox for session ${sessionId}: persisted identity is the project control container`);
+			}
+			expectedRuntimeId = undefined;
+		}
+
+		let runtimeContainerId: string;
+		try {
+			runtimeContainerId = await this.sandboxManager.ensureSessionRuntime(projectId, sessionId, expectedRuntimeId);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const provenMissingOrDead = message.includes("Expected session runtime was not found")
+				|| message.includes("Expected session runtime is not live and isolated");
+			if (!opts?.allowMissingRuntimeReplacement || !expectedRuntimeId || !provenMissingOrDead) throw error;
+			// ensureSessionRuntime has already proved the expected labelled runtime
+			// absent/dead (and removed an owned stale container). Clear only this exact
+			// project/session registry before allocating its replacement.
+			await this.sandboxManager.releaseSessionRuntime(projectId, sessionId);
+			runtimeContainerId = await this.sandboxManager.ensureSessionRuntime(projectId, sessionId);
+		}
+		assertControlContainer();
+		if (runtimeContainerId === controlContainerId
+			|| !await this.sandboxManager.isSessionRuntimeIsolated(projectId, sessionId, runtimeContainerId)) {
+			await this.sandboxManager.releaseSessionRuntime(projectId, sessionId).catch(() => {});
+			throw new Error(`Cannot wire sandbox for session ${sessionId}: execution runtime failed exact isolation attestation`);
+		}
+		bridgeOptions.containerId = runtimeContainerId;
+
+		// Creation may not have published its placeholder row yet. Restore,
+		// migration, and replacement do: durably project the execution identity
+		// before the bridge can start.
+		if (opts?.persistRuntimeIdentity !== false) {
+			try {
+				const store = this.resolveStoreForId(sessionId);
+				if (store?.get(sessionId)?.containerId !== runtimeContainerId) {
+					store?.update(sessionId, { containerId: runtimeContainerId });
+				}
+			} catch { /* initial creation persists immediately after wiring */ }
+		}
+
+		return true;
+	}
+
+	/**
+	 * Release a session runtime only while the caller's exact execution identity is
+	 * still authoritative. This prevents delayed rollback/teardown from deleting a
+	 * newer replacement allocated for the same durable session ID.
+	 */
+	private async releaseSessionExecutionRuntime(
+		projectId: string | undefined,
+		sessionId: string,
+		expectedRuntimeId: string | undefined,
+		unpublishedPredecessorId?: string,
+	): Promise<boolean> {
+		if (!projectId || !expectedRuntimeId || !this.sandboxManager || isSandboxExemptProject(projectId)) return false;
+		const liveIdentity = this.sessions.get(sessionId)?.containerId?.trim();
+		const persistedIdentity = this.resolveStoreForId(sessionId)?.get(sessionId)?.containerId?.trim();
+		const currentIdentity = liveIdentity || persistedIdentity;
+		if (currentIdentity && currentIdentity !== expectedRuntimeId && currentIdentity !== unpublishedPredecessorId) {
+			console.warn(`[session-manager] Skipping stale runtime release for ${sessionId}: execution identity advanced`);
+			return false;
+		}
+		await this.sandboxManager.releaseSessionRuntime(projectId, sessionId);
 		return true;
 	}
 
@@ -7595,6 +7976,7 @@ export class SessionManager {
 		kind: "prompt" | "steer",
 		targetTurn: DeliveryTargetTurn,
 		opts: {
+			displayText?: string;
 			images?: Array<{ type: "image"; data: string; mimeType: string }>;
 			attachments?: unknown[];
 			suppressTitleGen?: boolean;
@@ -7608,6 +7990,7 @@ export class SessionManager {
 		return {
 			id: intentId,
 			text,
+			...(typeof opts.displayText === "string" ? { displayText: opts.displayText } : {}),
 			isSteered: kind === "steer",
 			createdAt: this.nextIntentAcceptedAt(session),
 			kind,
@@ -7644,6 +8027,174 @@ export class SessionManager {
 		this.resolveStoreForSession(session.id).update(session.id, {
 			inFlightSteerTexts: this.persistedInFlightSteerTexts(session),
 		});
+	}
+
+	/**
+	 * Validate and snapshot browser-supplied attachments before any reliable row,
+	 * display envelope, or Pi dispatch is admitted. The returned attachments are
+	 * presentation-only metadata; exact document bytes live exclusively in the
+	 * immutable occurrence store and model text carries only bounded context.
+	 */
+	private async admitUploadedAttachments<T extends {
+		images?: Array<{ type: "image"; data: string; mimeType: string }>;
+		attachments?: unknown[];
+		modelText?: string;
+		intentId?: string;
+	}>(sessionId: string, text: string, opts: T | undefined): Promise<T | undefined> {
+		if (!opts) return opts;
+		const validated = validateUploadedPromptAttachments(opts.images, opts.attachments);
+		if (!validated) {
+			throw new UploadedAttachmentStoreError(
+				400,
+				"UPLOADED_ATTACHMENT_INVALID",
+				"Uploaded attachment data is invalid",
+			);
+		}
+
+		let displayAttachments = validated.attachments;
+		const occurrenceId = opts.intentId ?? randomUUID();
+		let contextAttachments: unknown[] = [];
+		if (validated.documents.length > 0) {
+			const stored = await persistUploadedAttachmentOccurrence(sessionId, occurrenceId, validated.documents);
+			contextAttachments = stored.attachments.map(({ trustedExtractedText, ...attachment }) => ({
+				type: "document",
+				...attachment,
+				...(trustedExtractedText === undefined ? {} : { extractedText: trustedExtractedText }),
+			}));
+			// Only store-admitted document previews may cross the later durable
+			// display-envelope boundary. Pi transcript image blocks own image bytes.
+			let documentIndex = 0;
+			displayAttachments = displayAttachments?.map((attachment) => attachment.type === "document"
+				? stored.displayAttachments[documentIndex++]!
+				: attachment);
+		}
+
+		const baseModelText = synthesizeAttachmentText(
+			opts.modelText ?? text,
+			validated.images,
+			displayAttachments,
+		);
+		let attachmentModelText = appendUploadedAttachmentContext(baseModelText, contextAttachments);
+		if (contextAttachments.length > 0 && attachmentModelText === baseModelText) {
+			// The context helper's public pointer grammar predates the immutable
+			// store's namespaced `bobbit-attachment:v1:` pointers. Adapt only the
+			// already store-validated opaque values, then restore the exact resolvable
+			// pointer after bounded/escaped context construction. The longer alias
+			// keeps budget accounting conservative.
+			const aliases = contextAttachments.map((candidate) => {
+				const attachment = candidate as { pointer: string };
+				return { ...attachment, pointer: `attachment:${attachment.pointer}` };
+			});
+			attachmentModelText = appendUploadedAttachmentContext(baseModelText, aliases);
+			for (let index = 0; index < aliases.length; index++) {
+				const alias = (aliases[index] as { pointer: string }).pointer;
+				const pointer = (contextAttachments[index] as { pointer: string }).pointer;
+				attachmentModelText = attachmentModelText.replaceAll(alias, pointer);
+			}
+		}
+		const admitted = {
+			...opts,
+			intentId: occurrenceId,
+			images: validated.images,
+			attachments: displayAttachments,
+			modelText: attachmentModelText,
+		} as T;
+		Object.defineProperty(admitted, UPLOADED_ATTACHMENTS_ADMITTED, { value: true });
+		return admitted;
+	}
+
+	private appendPromptDisplayEnvelope(
+		session: SessionInfo,
+		text: string,
+		dispatchText: string,
+		opts: {
+			modelText?: string;
+			skillExpansions?: SkillExpansion[];
+			fileMentions?: FileMention[];
+			attachments?: unknown[];
+			intentId?: string;
+		} | undefined,
+		acceptedIntentId: string | undefined = opts?.intentId,
+	): PendingSkillSidecarEnvelope | undefined {
+		const attachments = sanitizeAttachmentDisplayMetadata(opts?.attachments);
+		const hasSkillExpansions = !!opts?.skillExpansions?.length;
+		const hasFileMentions = !!opts?.fileMentions?.length;
+		const hasModelTextOverride = opts?.modelText !== undefined && dispatchText !== text;
+		if (!hasSkillExpansions && !hasFileMentions && !hasModelTextOverride && !attachments?.length) return undefined;
+
+		const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
+			ts: this.clock.now(),
+			modelText: dispatchText,
+			originalText: text,
+			...(acceptedIntentId ? { intentId: acceptedIntentId } : {}),
+			skillExpansions: opts?.skillExpansions ?? [],
+			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			...(attachments?.length ? { attachments } : {}),
+		});
+		const envelope: PendingSkillSidecarEnvelope = {
+			modelText: dispatchText,
+			originalText: text,
+			skillExpansions: opts?.skillExpansions ?? [],
+			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
+			...(attachments?.length ? { attachments } : {}),
+			...(recordId ? { recordId } : {}),
+			...(acceptedIntentId ? { intentId: acceptedIntentId, promptId: acceptedIntentId } : {}),
+		};
+		if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
+		session.pendingSkillExpansions.push(envelope);
+		return envelope;
+	}
+
+	/** Predict the exact pre-author Pi body for immediate error recovery. */
+	private promptDisplayModelTextAtAdmission(session: SessionInfo, dispatchText: string): string {
+		if (session.status !== "idle" || !session.lastTurnErrored
+			|| (session.consecutiveErrorTurns ?? 0) >= MAX_CONSECUTIVE_ERROR_TURNS
+			|| isOrphanToolResultOrderingError(session.lastTurnErrorMessage)) return dispatchText;
+		if (isBlankContentBlockError(session.lastTurnErrorMessage)) {
+			try {
+				if (this.resolveStoreForSession(session.id).get(session.id)?.agentSessionFile) return dispatchText;
+			} catch { /* no restorable transcript: the normal prefixed path is authoritative */ }
+		}
+		return buildErrorRecoveryPrefix((session.lastTurnErrorMessage || "").slice(0, 200), dispatchText);
+	}
+
+	private rememberLastPromptDisplay(
+		session: SessionInfo,
+		modelText: string,
+		promptId?: string,
+	): void {
+		const envelope = session.pendingSkillExpansions?.find((entry) =>
+			(promptId !== undefined && entry.promptId === promptId && entry.modelText === modelText)
+			|| (entry.promptId === undefined && entry.modelText === modelText));
+		session.lastPromptDisplay = envelope
+			? {
+				modelText,
+				originalText: envelope.originalText,
+				skillExpansions: envelope.skillExpansions,
+				...(envelope.fileMentions?.length ? { fileMentions: envelope.fileMentions } : {}),
+				...(envelope.attachments?.length ? { attachments: envelope.attachments.map((attachment) => ({ ...attachment })) } : {}),
+			}
+			: undefined;
+	}
+
+	private appendRetryPromptDisplayEnvelope(
+		session: SessionInfo,
+		carrier: PromptDisplayRetryCarrier | undefined,
+		modelText: string,
+		promptId: string,
+	): AttachmentDisplayMetadata[] | undefined {
+		if (!carrier) return undefined;
+		if (session.pendingSkillExpansions?.some((entry) => entry.promptId === promptId)) {
+			return carrier.attachments?.map((attachment) => ({ ...attachment }));
+		}
+		this.appendPromptDisplayEnvelope(session, carrier.originalText, modelText, {
+			modelText,
+			skillExpansions: carrier.skillExpansions,
+			fileMentions: carrier.fileMentions,
+			attachments: carrier.attachments,
+			intentId: promptId,
+		});
+		return carrier.attachments?.map((attachment) => ({ ...attachment }));
 	}
 
 	/** Apply a synchronously persisted exact echo/cancellation that preceded RPC acknowledgement. */
@@ -7722,25 +8273,7 @@ export class SessionManager {
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-		const hasSkillExpansions = !!opts?.skillExpansions?.length;
-		const hasFileMentions = !!opts?.fileMentions?.length;
-		if (hasSkillExpansions || hasFileMentions) {
-			const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
-				ts: this.clock.now(),
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-			});
-			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
-			session.pendingSkillExpansions.push({
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-				...(recordId ? { recordId } : {}),
-			});
-		}
+		this.appendPromptDisplayEnvelope(session, text, dispatchText, opts, reliableIntentId);
 		// Server-generated work entered the occurrence lifecycle before any sidecar
 		// persistence above; now persist the delivery carrier itself.
 		if (reliableIntentId) {
@@ -7751,6 +8284,7 @@ export class SessionManager {
 				opts?.isSteered ? "steer" : "prompt",
 				"next-turn",
 				{
+					displayText: dispatchText === text ? undefined : text,
 					images: opts?.images,
 					attachments: opts?.attachments,
 					suppressTitleGen: opts?.suppressTitleGen,
@@ -7763,6 +8297,7 @@ export class SessionManager {
 			));
 		} else {
 			session.promptQueue.enqueue(dispatchText, {
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				isSteered: opts?.isSteered,
@@ -7909,6 +8444,24 @@ export class SessionManager {
 		// recovery the coordinator's promptOwner remains the conditioned capsule until
 		// the verified replacement commits and ownership is released.
 		this._assertModelSelectionReady(sessionId);
+		// Attachment admission is authoritative here, before replacement/queue/RPC
+		// ownership can mutate. It also mints the accepted occurrence used by the
+		// immutable pointer when a legacy caller did not supply one. Trusted internal
+		// producers retain their established metadata-only attachment contract.
+		if ((opts?.attachments !== undefined || opts?.images !== undefined)
+			&& (opts.source ?? "user") === "user"
+			&& !(opts as Record<PropertyKey, unknown>)[UPLOADED_ATTACHMENTS_ADMITTED]) {
+			// Measure the original browser frame before replacing it with safe display
+			// metadata, then validate every byte-bearing input before any admission state.
+			assertUploadedAttachmentSerializedSendWithinLimit({
+				text,
+				intentId: opts.intentId,
+				images: Array.isArray(opts.images) ? opts.images : undefined,
+				attachments: Array.isArray(opts.attachments) ? opts.attachments : [],
+				suppressTitleGen: opts.suppressTitleGen,
+			}, this.uploadedAttachmentSerializedSendLimitBytes);
+			opts = await this.admitUploadedAttachments(sessionId, text, opts);
+		}
 
 		// Replacement ownership is the first ordinary dispatch fence — before
 		// poison/error classification, revive logic, or any RPC. Every prompt accepted
@@ -7943,25 +8496,7 @@ export class SessionManager {
 				const author = resolveAcceptedPromptAuthor(source, opts?.author);
 				rollback.lastPromptSource = source;
 				const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-				const hasSkillExpansions = !!opts?.skillExpansions?.length;
-				const hasFileMentions = !!opts?.fileMentions?.length;
-				if (hasSkillExpansions || hasFileMentions) {
-					const recordId = appendIdentifiedSkillSidecarEntry(sessionId, {
-						ts: this.clock.now(),
-						modelText: dispatchText,
-						originalText: text,
-						skillExpansions: opts?.skillExpansions ?? [],
-						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-					});
-					if (!rollback.pendingSkillExpansions) rollback.pendingSkillExpansions = [];
-					rollback.pendingSkillExpansions.push({
-						modelText: dispatchText,
-						originalText: text,
-						skillExpansions: opts?.skillExpansions ?? [],
-						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-						...(recordId ? { recordId } : {}),
-					});
-				}
+				this.appendPromptDisplayEnvelope(rollback, text, dispatchText, opts);
 				if (opts?.intentId) {
 					this.enqueueReliableIntent(rollback, this.makeReliableIntentRow(
 						rollback,
@@ -7970,6 +8505,7 @@ export class SessionManager {
 						opts.isSteered ? "steer" : "prompt",
 						"next-turn",
 						{
+							displayText: dispatchText === text ? undefined : text,
 							images: opts.images,
 							attachments: opts.attachments,
 							suppressTitleGen: opts.suppressTitleGen,
@@ -7982,6 +8518,7 @@ export class SessionManager {
 					));
 				} else {
 					rollback.promptQueue.enqueue(dispatchText, {
+						displayText: dispatchText === text ? undefined : text,
 						images: opts?.images,
 						attachments: opts?.attachments,
 						isSteered: opts?.isSteered,
@@ -8104,28 +8641,13 @@ export class SessionManager {
 				return { status: duplicate && (duplicate as ReliableQueuedMessage).deliveryState === "queued" ? "queued" : "dispatched" };
 			}
 		}
-		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
-		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
-		if (hasSkillExpansions || hasFileMentions) {
-			const recordId = appendIdentifiedSkillSidecarEntry(session.id, {
-				ts: this.clock.now(),
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-			});
-			// Stash the envelope so when the agent echoes the user message
-			// back via `message_end`, we can splice the original text +
-			// chip metadata onto the broadcast event before clients see it.
-			if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
-			session.pendingSkillExpansions.push({
-				modelText: dispatchText,
-				originalText: text,
-				skillExpansions: opts?.skillExpansions ?? [],
-				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
-				...(recordId ? { recordId } : {}),
-			});
-		}
+		this.appendPromptDisplayEnvelope(
+			session,
+			text,
+			this.promptDisplayModelTextAtAdmission(session, dispatchText),
+			opts,
+			reliableIntentId,
+		);
 
 		// Stable-ID admission has one durable boundary: persist the exact occurrence
 		// before any Pi RPC, even when the session currently appears idle.
@@ -8150,6 +8672,7 @@ export class SessionManager {
 				? "continuation"
 				: "next-turn";
 			const accepted = this.makeReliableIntentRow(session, reliableIntentId, dispatchText, kind, targetTurn, {
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				suppressTitleGen: opts?.suppressTitleGen,
@@ -8296,6 +8819,7 @@ export class SessionManager {
 				this.consumeRecoveredPromptDispatchRows(session);
 			}
 			const accepted = session.promptQueue.enqueue(dispatchText, {
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				isSteered: opts?.isSteered,
@@ -8359,6 +8883,7 @@ export class SessionManager {
 				// order even if startup fails. On success only this exact row is removed and
 				// dispatched ahead of older parked work.
 				const accepted = session.promptQueue.enqueue(dispatchText, {
+					displayText: dispatchText === text ? undefined : text,
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -8409,6 +8934,7 @@ export class SessionManager {
 					`[session-manager] Session ${session.id} has ${consec} consecutive errored turns; parking incoming prompt. Human action required (click Retry or fix upstream issue).`
 				);
 				session.promptQueue.enqueue(dispatchText, {
+					displayText: dispatchText === text ? undefined : text,
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -8495,6 +9021,7 @@ export class SessionManager {
 		// expanded text to the agent later. The chip metadata is already
 		// in the sidecar/broadcast; the queued row is purely for delivery.
 		session.promptQueue.enqueue(dispatchText, {
+			displayText: dispatchText === text ? undefined : text,
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
@@ -8785,6 +9312,7 @@ export class SessionManager {
 				const prepared = this.preparePromptAuthorDispatch(session, row.id, row.text, source, author, row.id);
 				const ledgerRecord: ReliableInFlightRecord = {
 					text: row.text,
+					displayText: row.displayText,
 					promptId: row.id,
 					intentId: row.id,
 					attemptId: prepared.attemptId,
@@ -8971,7 +9499,7 @@ export class SessionManager {
 			if (legacy.length > 0) {
 				for (const record of [...legacy].reverse()) {
 					this.cancelRestoredPromptAuthorDispatch(session, record.promptId);
-					session.promptQueue.enqueueAtFront(record.text, { isSteered: true, source: record.source, author: record.author });
+					session.promptQueue.enqueueAtFront(record.text, { displayText: record.displayText, isSteered: true, source: record.source, author: record.author });
 				}
 				session.inFlightSteerTexts = ledger.filter((record) => !!record.intentId);
 				changed = true;
@@ -8997,6 +9525,7 @@ export class SessionManager {
 			return {
 				id: intentId,
 				text: record.text,
+				displayText: record.displayText,
 				isSteered: kind === "steer",
 				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
 				kind,
@@ -9057,6 +9586,7 @@ export class SessionManager {
 			const row: ReliableQueuedMessage = {
 				id: record.intentId,
 				text: record.text,
+				displayText: record.displayText,
 				isSteered: (record.kind ?? "steer") === "steer",
 				createdAt: record.createdAt ?? record.dispatchEpoch ?? this.clock.now(),
 				kind: record.kind ?? "steer",
@@ -9293,6 +9823,7 @@ export class SessionManager {
 	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		id?: string;
 		text: string;
+		displayText?: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
@@ -9339,6 +9870,7 @@ export class SessionManager {
 				? session.promptQueue.restoreAtFront({
 					id: r.id,
 					text: r.text,
+					displayText: r.displayText,
 					images: r.images,
 					attachments: r.attachments,
 					isSteered: r.isSteered ?? false,
@@ -9352,6 +9884,7 @@ export class SessionManager {
 					goalDispatchGuardId: r.goalDispatchGuardId,
 				})
 				: session.promptQueue.enqueueAtFront(r.text, {
+					displayText: r.displayText,
 					images: r.images,
 					attachments: r.attachments,
 					isSteered: r.isSteered,
@@ -9492,6 +10025,7 @@ export class SessionManager {
 				// model-facing payload and dispatch metadata that settlement must replay.
 				Object.assign(existing, {
 					text,
+					displayText: reliableRow?.displayText,
 					images,
 					attachments,
 					isSteered: isSteered ?? false,
@@ -9507,6 +10041,7 @@ export class SessionManager {
 				const deferred = {
 					id: durableQueueRowId ?? randomUUID(),
 					text,
+					displayText: reliableRow?.displayText,
 					images,
 					attachments,
 					isSteered: isSteered ?? false,
@@ -9531,6 +10066,7 @@ export class SessionManager {
 			// Re-resolve canonical goal lifecycle at the last synchronous boundary
 			// before status, author-sidecar, queue ownership, or Pi can change.
 			if (!this.goalDispatchGuardAllows(session, reliableRow)) return;
+			this.rememberLastPromptDisplay(session, text, reliableRow.id);
 			session.lastPromptText = text;
 			session.lastPromptImages = images;
 			session.lastPromptSource = source;
@@ -9546,6 +10082,7 @@ export class SessionManager {
 			);
 			const attempt: ReliableInFlightRecord = {
 				text,
+				displayText: reliableRow.displayText,
 				promptId: reliableRow.id,
 				intentId: reliableRow.id,
 				attemptId: prepared.attemptId,
@@ -9648,6 +10185,7 @@ export class SessionManager {
 							[{
 								id: reliableRow.id,
 								text: reliableRow.text,
+								displayText: reliableRow.displayText,
 								images: reliableRow.images,
 								attachments: reliableRow.attachments,
 								isSteered: reliableRow.isSteered,
@@ -9701,12 +10239,25 @@ export class SessionManager {
 			}
 		}
 
+		this.rememberLastPromptDisplay(session, text, promptId);
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 
-		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, verifierOwned, author, streamingBehavior, coldStart, suppressTitleGen }];
+		const dispatchedRowsForRecovery = [{
+			text,
+			displayText: session.lastPromptDisplay?.originalText,
+			images,
+			attachments,
+			isSteered,
+			source,
+			verifierOwned,
+			author,
+			streamingBehavior,
+			coldStart,
+			suppressTitleGen,
+		}];
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		const activityBoundary = beginPreparedPromptActivity(session, prepared);
 		const consumeDurableAcceptanceRow = () => {
@@ -9797,7 +10348,7 @@ export class SessionManager {
 			}, undefined);
 		if (reliableNext) {
 			if (!this.goalDispatchGuardAllows(session, reliableNext)) return;
-			if (!reliableNext.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, reliableNext.text);
+			if (!reliableNext.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, displayTextForDelivery(reliableNext));
 			const promptSource = reliableNext.source ?? "user";
 			const promptAuthor = resolveAcceptedPromptAuthor(promptSource, reliableNext.author);
 			if (session.poisonRecoveryPromptDispatchQueueIds?.includes(reliableNext.id)) {
@@ -9847,13 +10398,20 @@ export class SessionManager {
 
 		if (steered.length > 0) {
 			const batchText = steered.map(m => m.text).join('\n');
+			const batchDisplayText = steered.map(displayTextForDelivery).join('\n');
 			const batchAuthor = authorForSteerRows(steered);
 			const batchSource: PromptSource = batchAuthor === BATCH_SYSTEM_AUTHOR
 				? "system"
 				: steered.every((row) => (row.source ?? "user") === (steered[0].source ?? "user"))
 					? (steered[0].source ?? "user")
 					: "system";
-			next = { ...steered[0], text: batchText, source: batchSource, author: batchAuthor };
+			next = {
+				...steered[0],
+				text: batchText,
+				...(batchDisplayText === batchText ? { displayText: undefined } : { displayText: batchDisplayText }),
+				source: batchSource,
+				author: batchAuthor,
+			};
 		} else {
 			// Skip already-dispatched messages (steered mid-turn), then pop the next
 			next = session.promptQueue.dequeue();
@@ -9865,12 +10423,13 @@ export class SessionManager {
 		// Title generation for the first real prompt. Suppressed kickoff prompts
 		// (assistant auto-kickoff) never seed the title — naming fires on the
 		// first genuine user message.
-		if (!next.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, next.text);
+		if (!next.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, displayTextForDelivery(next));
 
 		// Track for retry and nudge provenance from the row being dispatched.
 		const promptSource = next.source ?? "user";
 		const promptAuthor = resolveAcceptedPromptAuthor(promptSource, next.author);
 		const promptId = steered.length > 0 ? batchPromptId("queue-batch", steered) : next.id;
+		this.rememberLastPromptDisplay(session, next.text, promptId);
 		session.lastPromptText = next.text;
 		session.lastPromptImages = next.images;
 		session.lastPromptSource = promptSource;
@@ -9882,8 +10441,8 @@ export class SessionManager {
 		// if the agent rejects the prompt (e.g. "Agent is already processing."
 		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
-			? steered.map(r => ({ id: r.id, text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart, suppressTitleGen: r.suppressTitleGen }))
-			: [{ id: next.id, text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart, suppressTitleGen: next.suppressTitleGen }];
+			? steered.map(r => ({ id: r.id, text: r.text, displayText: r.displayText, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, verifierOwned: r.verifierOwned, author: r.author, streamingBehavior: r.streamingBehavior, coldStart: r.coldStart, suppressTitleGen: r.suppressTitleGen }))
+			: [{ id: next.id, text: next.text, displayText: next.displayText, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, verifierOwned: next.verifierOwned, author: promptAuthor, streamingBehavior: next.streamingBehavior, coldStart: next.coldStart, suppressTitleGen: next.suppressTitleGen }];
 		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
@@ -10778,8 +11337,11 @@ export class SessionManager {
 		try { ps = this.resolveStoreForSession(session.id).get(session.id); }
 		catch { ps = undefined; }
 		if (!ps?.agentSessionFile) return undefined;
+		const lastPromptDisplay = session.lastPromptDisplay;
 		const restored = await this._respawnAgentInPlace(session, ps, { deferQueueDrain: true });
-		return restored ?? this.sessions.get(session.id);
+		const target = restored ?? this.sessions.get(session.id);
+		if (target && lastPromptDisplay) target.lastPromptDisplay = lastPromptDisplay;
+		return target;
 	}
 
 	/**
@@ -10802,6 +11364,7 @@ export class SessionManager {
 			if (!ps?.agentSessionFile) return undefined;
 
 			const pendingPromptEnvelopes = current.pendingSkillExpansions?.slice();
+			const lastPromptDisplay = current.lastPromptDisplay;
 			const recoveredPromptDispatchQueueIds = current.recoveredPromptDispatchQueueIds?.slice();
 			const poisonRecoveryPromptDispatchQueueIds = current.poisonRecoveryPromptDispatchQueueIds?.slice();
 			const savedSessionOnlyGrantedTools = current.sessionOnlyGrantedTools?.slice();
@@ -10824,6 +11387,7 @@ export class SessionManager {
 			if (target && target !== current) {
 				if (savedSessionOnlyGrantedTools) target.sessionOnlyGrantedTools = savedSessionOnlyGrantedTools;
 				if (savedOneTimeGrantedTools) target.oneTimeGrantedTools = savedOneTimeGrantedTools;
+				if (lastPromptDisplay) target.lastPromptDisplay = lastPromptDisplay;
 				if (pendingPromptEnvelopes?.length) {
 					target.pendingSkillExpansions = [
 						...pendingPromptEnvelopes,
@@ -10935,6 +11499,7 @@ export class SessionManager {
 		session: SessionInfo,
 		text: string,
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		attachments?: AttachmentDisplayMetadata[],
 	): QueuedMessage {
 		const existing = session.explicitRetryQueueRowId
 			? session.promptQueue.toArray().find(row => row.id === session.explicitRetryQueueRowId)
@@ -10951,6 +11516,7 @@ export class SessionManager {
 		}
 		const row = session.promptQueue.enqueueAtFront(text, {
 			images,
+			attachments,
 			source: "system",
 			author: BOBBIT_SYSTEM_AUTHOR,
 		});
@@ -11010,6 +11576,7 @@ export class SessionManager {
 			opts?.isSteered ? "steer" : "prompt",
 			"next-turn",
 			{
+				displayText: dispatchText === text ? undefined : text,
 				images: opts?.images,
 				attachments: opts?.attachments,
 				suppressTitleGen: opts?.suppressTitleGen,
@@ -11051,6 +11618,7 @@ export class SessionManager {
 		const poisonedByOrphanResult = isOrphanToolResultOrderingError(session.lastTurnErrorMessage);
 		const savedPromptText = session.lastPromptText;
 		const savedPromptImages = session.lastPromptImages;
+		const savedPromptDisplay = session.lastPromptDisplay;
 		const savedPromptSource = session.lastPromptSource;
 
 		if (poisonedByOrphanResult) {
@@ -11067,9 +11635,11 @@ export class SessionManager {
 					: "[SYSTEM: The model API returned an error on your last response. " +
 						"Please review your conversation history and retry what you were doing.]";
 			const retryImages = hadToolCalls ? undefined : savedPromptImages;
+			const retryDisplay = hadToolCalls ? undefined : savedPromptDisplay;
 			// Explicit Retry owns a newly allocated durable row. Equal text/images in
 			// the existing queue are independent accepted intent and must survive.
-			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages);
+			const acceptedRetry = this.enqueueDurableRetryRow(session, retryText, retryImages, retryDisplay?.attachments);
+			const retryAttachments = this.appendRetryPromptDisplayEnvelope(session, retryDisplay, retryText, acceptedRetry.id);
 			this.markPoisonRecoveryPromptDispatchRow(session, acceptedRetry.id);
 			const recovery = (async () => {
 				const target = await this._recoverPoisonedHistory(session, "retry", async (canonical) => {
@@ -11081,7 +11651,18 @@ export class SessionManager {
 					canonical.lastPromptSource = savedPromptSource;
 					const durableId = this.ensureDurableRetryRow(canonical, acceptedRetry);
 					try {
-						await this.dispatchDirectPrompt(canonical, retryText, retryImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+						await this.dispatchDirectPrompt(
+							canonical,
+							retryText,
+							retryImages,
+							retryAttachments,
+							false,
+							false,
+							"system",
+							BOBBIT_SYSTEM_AUTHOR,
+							durableId,
+							acceptedRetry.id,
+						);
 					} catch (err) {
 						canonical.lastTurnErrored = true;
 						canonical.lastTurnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -11132,13 +11713,28 @@ export class SessionManager {
 			// synthesizeAttachmentText can still return blank; never resend it.
 			let retryText = synthesizeAttachmentText(savedPromptText ?? "", savedPromptImages);
 			if (retryText.trim() === "") retryText = ATTACHMENT_ONLY_TEXT;
-			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, savedPromptImages) : undefined;
+			const acceptedRetry = !isAuto
+				? this.enqueueDurableRetryRow(session, retryText, savedPromptImages, savedPromptDisplay?.attachments)
+				: undefined;
+			const retryPromptId = acceptedRetry?.id ?? promptAttemptId("auto-retry");
+			const retryAttachments = this.appendRetryPromptDisplayEnvelope(session, savedPromptDisplay, retryText, retryPromptId);
 			const target = await this._recoverBlankTextPoison(session);
 			const dispatchTarget = target ?? session;
 			dispatchTarget.lastPromptText = retryText;
 			dispatchTarget.lastPromptImages = savedPromptImages;
 			const durableId = acceptedRetry ? this.ensureDurableRetryRow(dispatchTarget, acceptedRetry) : undefined;
-			await this.dispatchDirectPrompt(dispatchTarget, retryText, savedPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableId);
+			await this.dispatchDirectPrompt(
+				dispatchTarget,
+				retryText,
+				savedPromptImages,
+				retryAttachments,
+				false,
+				false,
+				"system",
+				BOBBIT_SYSTEM_AUTHOR,
+				durableId,
+				retryPromptId,
+			);
 			return;
 		}
 
@@ -11176,7 +11772,12 @@ export class SessionManager {
 			if (!recoveredVerifierRow && !consumedRecovered && isAuto) {
 				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
 			}
-			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
+			const retryDisplay = recoveredVerifierRow ? undefined : savedPromptDisplay;
+			const acceptedRetry = !isAuto
+				? this.enqueueDurableRetryRow(session, retryText, savedPromptImages, retryDisplay?.attachments)
+				: undefined;
+			const retryPromptId = acceptedRetry?.id ?? recoveredVerifierRow?.id ?? promptAttemptId("auto-retry");
+			const retryAttachments = this.appendRetryPromptDisplayEnvelope(session, retryDisplay, retryText, retryPromptId);
 			// Manual recovery belongs only to an explicit Retry's newly accepted
 			// durable row. Automatic retries keep their bounded budget, whether
 			// they consume ordinary recovered work or redrive a verifier's same row.
@@ -11184,14 +11785,14 @@ export class SessionManager {
 			await this.dispatchDirectPrompt(
 				session,
 				retryText,
-				session.lastPromptImages,
-				undefined,
+				savedPromptImages,
+				retryAttachments,
 				false,
 				false,
 				recoveredVerifierRow?.source ?? "system",
 				recoveredVerifierRow?.author ?? BOBBIT_SYSTEM_AUTHOR,
 				acceptedRetry?.id ?? recoveredVerifierRow?.id,
-				undefined,
+				retryPromptId,
 				recoveredVerifierRow?.streamingBehavior,
 				manualRecoveryRequired,
 				recoveredVerifierRow?.verifierOwned === true,
@@ -12365,6 +12966,7 @@ export class SessionManager {
 				return;
 			}
 		}
+		ps = await this._prepareSandboxTranscriptPersistence(ps, sessionStore);
 		if (!ps.agentSessionFile) {
 			// No session file path — persistSessionMetadata never completed.
 			// Try to recover by scanning the sessions dir for a matching .jsonl.
@@ -12428,19 +13030,8 @@ export class SessionManager {
 			// If the worktree/cwd is actually gone, restoreSession() throws below and we
 			// fall back to a dormant (never archived) session. Pinned by
 			// tests/unit/core/session-manager-no-precreate.unit.test.ts.
-			if (!ps.sandboxed) {
-				console.log(`[session-manager] Session ${ps.id} recorded ${ps.agentSessionFile} but has no transcript yet (pre-flush restart) — restoring live; agent will create the file on first write`);
-				// fall through to restoreSession()
-			} else if (await shouldKeepDespiteOrphan(ps)) {
-				console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
-				this.addDormantSession(ps);
-				return;
-			} else {
-				console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
-				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its missing-transcript record")) return;
-				sessionStore.archive(ps.id);
-				return;
-			}
+			console.log(`[session-manager] Session ${ps.id} recorded an owner-scoped transcript that is not materialized yet — restoring live; agent will create the file on first write`);
+			// Both direct and sandbox sessions preserve Pi's exclusive lazy creation.
 			}
 		}
 		// A completed catalog is authoritative. Discovery failures deliberately fall
@@ -12779,7 +13370,7 @@ export class SessionManager {
 		const restoredAuthorBindings = preparedRestore.bindings;
 		const restoredQueue = ps.messageQueue ?? [];
 		if (preparedRestore.changed) await restoreStore.flushAsync();
-		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd, sessionId: ps.id };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 
 		// Restore env vars needed by extensions. The per-session capability
@@ -12807,9 +13398,7 @@ export class SessionManager {
 				bridgeOptions.cwd = ps.cwd;
 			}
 			const adoptedSource = this.isCanonicalAdoptedWorkspaceOwner(ps);
-			const expectedExistingContainerId = adoptedSource
-				? ps.containerId?.trim()
-				: undefined;
+			const expectedExistingContainerId = ps.containerId?.trim();
 			if (adoptedSource && !expectedExistingContainerId) {
 				this.assertPromotedSessionRecoveryAllowed(ps.id, "restore without its durable sandbox container identity");
 				throw new Error(`Cannot restore promoted session ${ps.id}: durable sandbox container identity is missing`);
@@ -12819,7 +13408,13 @@ export class SessionManager {
 					projectId: ps.projectId,
 					goalId: ps.goalId ?? ps.teamGoalId,
 					expectedExistingContainerId,
+					allowLegacyControlMigration: !adoptedSource,
+					allowMissingRuntimeReplacement: !adoptedSource,
 				});
+				if (bridgeOptions.containerId && bridgeOptions.containerId !== ps.containerId) {
+					ps.containerId = bridgeOptions.containerId;
+					this.resolveStoreForSession(ps.id).update(ps.id, { containerId: bridgeOptions.containerId });
+				}
 			} catch (error) {
 				if (adoptedSource) {
 					this.assertPromotedSessionRecoveryAllowed(ps.id, "transfer to a replacement sandbox container");
@@ -12845,12 +13440,17 @@ export class SessionManager {
 			this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
 		}
 		if (restoredSandboxed) {
-			// Verify the sandbox worktree still exists inside the container. Headquarters
-			// sessions are no-worktree, so never repair/recreate /workspace-wt paths.
-			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && !ps.borrowsWorktree && ps.cwd?.startsWith("/workspace-wt/") && bridgeOptions.containerId) {
+			// Headquarters sessions are no-worktree, so never repair/recreate /workspace-wt paths.
+			if (ps.projectId !== HEADQUARTERS_PROJECT_ID && !ps.borrowsWorktree && ps.cwd?.startsWith("/workspace-wt/")) {
+				// Worktree inspection and mutation remain owned by the project control
+				// container; the execution runtime only consumes the shared volumes.
+				const controlContainerId = ps.projectId && this.sandboxManager
+					? await this.sandboxManager.get(ps.projectId)?.getContainerId()
+					: undefined;
+				if (!controlContainerId) throw new Error(`Cannot restore sandbox worktree for ${ps.id}: project control container is unavailable`);
 				try {
 					await this.commandRunner.execFile("docker", [
-						"exec", bridgeOptions.containerId, "test", "-d", ps.cwd,
+						"exec", controlContainerId, "test", "-d", ps.cwd,
 					], { timeout: 5_000 });
 					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
 				} catch {
@@ -12861,12 +13461,12 @@ export class SessionManager {
 					// Try git worktree repair first — handles broken .git link files after hard container kill
 					try {
 						await this.commandRunner.execFile("docker", [
-							"exec", "-w", "/workspace", bridgeOptions.containerId!,
+							"exec", "-w", "/workspace", controlContainerId,
 							"git", "worktree", "repair",
 						], { timeout: 10_000 });
 						// Re-check if worktree now exists after repair
 						await this.commandRunner.execFile("docker", [
-							"exec", bridgeOptions.containerId!, "test", "-d", ps.cwd!,
+							"exec", controlContainerId, "test", "-d", ps.cwd!,
 						], { timeout: 5_000 });
 						console.log(`[session-manager] Sandbox worktree repaired for ${ps.id}: ${ps.cwd}`);
 						recovered = true;
@@ -13575,10 +14175,12 @@ export class SessionManager {
 				let transcriptRollbackVerified = !candidateRestoreStarted;
 				if (candidateRestoreStarted) {
 					try {
-						transcriptRollbackVerified = restoreAgentTranscriptSnapshot(
+						transcriptRollbackVerified = await restoreAgentTranscriptSnapshot(
 							transcriptFileCtx,
 							persisted.agentSessionFile,
 							transcriptSnapshot,
+							undefined,
+							this.sandboxManager,
 						) === true;
 					} catch (rollbackError) {
 						transcriptRollbackVerified = false;
@@ -13909,6 +14511,9 @@ export class SessionManager {
 				opts?.initialThinkingLevel,
 			);
 			const setupPromise = executeWorktreeAsync(plan, session, ctx, claimed?.worktreePath).then(() => {
+				if (session.sandboxed && session.containerId) {
+					ctx.store.update(session.id, { containerId: session.containerId });
+				}
 				// agentSessionFile is now persisted synchronously by spawnAgent before
 				// status flips to idle (see session-setup.ts). The post-resolve persist
 				// here is redundant but kept as a safety net for re-attempts where the
@@ -13919,6 +14524,12 @@ export class SessionManager {
 				this.trackSessionMetadataWork(session, () => this.persistSessionMetadata(session).catch((err) => {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}));
+			}).catch(async (error) => {
+				try { session.unsubscribe?.(); } catch { /* best-effort */ }
+				await session.rpcClient?.stop?.().catch(() => {});
+				try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
+				await this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId).catch(() => {});
+				throw error;
 			}).finally(releaseSetupThinkingAuthority);
 
 			if (opts?.awaitWorktreeSetup) {
@@ -13999,6 +14610,9 @@ export class SessionManager {
 		try {
 			const session = await executePlan(plan, ctx);
 			if (projectId) session.projectId = projectId;
+			if (session.sandboxed && session.containerId) {
+				ctx.store.update(session.id, { containerId: session.containerId });
+			}
 			// Verification/reviewer sessions deliberately skip the ordinary post-spawn
 			// selectors because their tuple was pinned in argv. They still need the same
 			// exact read-back and one atomic durable tuple commit before create returns.
@@ -14023,6 +14637,13 @@ export class SessionManager {
 			}
 
 			return session;
+		} catch (error) {
+			const failedSession = this.sessions.get(id);
+			try { failedSession?.unsubscribe?.(); } catch { /* best-effort */ }
+			await failedSession?.rpcClient?.stop?.().catch(() => {});
+			try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
+			await this.releaseSessionExecutionRuntime(projectId, id, plan.bridgeOptions.containerId).catch(() => {});
+			throw error;
 		} finally {
 			releaseSetupThinkingAuthority();
 		}
@@ -14247,6 +14868,16 @@ export class SessionManager {
 				throw new Error("Cannot create a delegate for an archived team goal");
 			}
 			session = await executePlan(plan, ctx);
+			if (session.sandboxed && session.containerId) {
+				ctx.store.update(session.id, { containerId: session.containerId });
+			}
+		} catch (error) {
+			const failedSession = this.sessions.get(id);
+			try { failedSession?.unsubscribe?.(); } catch { /* best-effort */ }
+			await failedSession?.rpcClient?.stop?.().catch(() => {});
+			try { (this as any).bgProcessManager?.cleanup?.(id); } catch { /* best-effort */ }
+			await this.releaseSessionExecutionRuntime(parentProjectId, id, plan.bridgeOptions.containerId).catch(() => {});
+			throw error;
 		} finally {
 			releaseSetupThinkingAuthority();
 		}
@@ -16523,7 +17154,7 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd, sessionId: id };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (replacementToolRuntime.toolManager) bridgeOptions.toolManager = replacementToolRuntime.toolManager;
@@ -16616,24 +17247,37 @@ export class SessionManager {
 		// longer be wired; silently launching Pi on the host would strand the
 		// container transcript and make an apparently successful role change lose
 		// model-visible history.
+		let stagedExpectedRuntimeId: string | undefined;
 		if (replacementSession.sandboxed) {
-			const adoptedExpectedContainerId = this.isCanonicalAdoptedWorkspaceOwner(respawnPersisted ?? persistedBeforeRole!)
-				? respawnPersisted?.containerId?.trim()
-				: undefined;
-			const strictExpectedContainerId = projection?.expectedSandboxContainerId ?? adoptedExpectedContainerId;
-			if (!projection && this.isCanonicalAdoptedWorkspaceOwner(respawnPersisted ?? persistedBeforeRole!) && !strictExpectedContainerId) {
+			const persistedRuntimeOwner = respawnPersisted ?? persistedBeforeRole!;
+			const alreadyCanonical = this.isCanonicalAdoptedWorkspaceOwner(persistedRuntimeOwner);
+			const strictExpectedContainerId = projection?.expectedSandboxContainerId
+				?? persistedRuntimeOwner.containerId?.trim()
+				?? replacementSession.containerId?.trim();
+			stagedExpectedRuntimeId = strictExpectedContainerId;
+			if (!projection && alreadyCanonical && !strictExpectedContainerId) {
 				throw new Error(`Cannot replace promoted session ${id}: durable sandbox container identity is missing`);
 			}
 			const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 				projectId: replacementSession.projectId,
 				goalId: replacementSession.goalId ?? replacementSession.teamGoalId,
 				expectedExistingContainerId: strictExpectedContainerId,
+				allowLegacyControlMigration: !alreadyCanonical,
+				persistRuntimeIdentity: false,
 			});
 			if (!sandboxApplied) {
 				throw new Error(`Cannot assign role for sandboxed session ${id}: sandbox realm is unavailable`);
 			}
 			if (strictExpectedContainerId && bridgeOptions.containerId !== strictExpectedContainerId) {
-				throw new Error(`Cannot replace sandboxed session ${id}: container identity changed during staging`);
+				const controlId = this.sandboxManager && replacementSession.projectId
+					? await this.sandboxManager.get(replacementSession.projectId)?.getContainerId()
+					: undefined;
+				if (alreadyCanonical || strictExpectedContainerId !== controlId) {
+					throw new Error(`Cannot replace sandboxed session ${id}: execution runtime identity changed during staging`);
+				}
+				// The only permitted identity change here is the ordinary row's exact
+				// legacy-control migration. Promotion then makes the new runtime canonical.
+				if (projection) projection.expectedSandboxContainerId = bridgeOptions.containerId;
 			}
 		} else {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, replacementSession.projectId, replacementSession.goalId ?? replacementSession.teamGoalId);
@@ -16740,7 +17384,11 @@ export class SessionManager {
 							? { containerId: projection.expectedSandboxContainerId }
 							: {}),
 					} as Parameters<SessionStore["update"]>[1]
-					: { role: role.name, accessory: role.accessory });
+					: {
+						role: role.name,
+						accessory: role.accessory,
+						...(bridgeOptions.containerId ? { containerId: bridgeOptions.containerId } : {}),
+					});
 			} catch (err) {
 				if (promotionAttachmentBefore) {
 					await this.restorePromotionAttachment(roleStore, id, promotionAttachmentBefore);
@@ -16776,6 +17424,26 @@ export class SessionManager {
 		} catch (err) {
 			unsub();
 			await rpcClient.stop().catch(() => {});
+			if (bridgeOptions.containerId && bridgeOptions.containerId !== stagedExpectedRuntimeId) {
+				await this.releaseSessionExecutionRuntime(
+					replacementSession.projectId,
+					id,
+					bridgeOptions.containerId,
+					stagedExpectedRuntimeId,
+				).catch(() => {});
+				// A failed staged legacy migration must put the durable identity back
+				// on the still-canonical old bridge (including exact optional absence).
+				if (persistedBeforeRole) {
+					const hadContainerId = Object.prototype.hasOwnProperty.call(persistedBeforeRole, "containerId");
+					roleStore.update(id, { containerId: persistedBeforeRole.containerId });
+					const restored = roleStore.get(id) as Record<string, unknown> | undefined;
+					if (restored && !hadContainerId) {
+						delete restored.containerId;
+						roleStore.update(id, { lastActivity: restored.lastActivity as number });
+					}
+					await roleStore.flushAsync().catch(() => {});
+				}
+			}
 			// If terminal cancellation landed during the irreversible old stop, both
 			// bridges are now gone. Surface that canonical capsule as terminated;
 			// never leave a dead old bridge looking idle after the staged one is disposed.
@@ -16796,7 +17464,7 @@ export class SessionManager {
 		session.messagesSnapshotCursorProjection = undefined;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
-		if (projection?.expectedSandboxContainerId) session.containerId = projection.expectedSandboxContainerId;
+		if (bridgeOptions.containerId) session.containerId = bridgeOptions.containerId;
 		if (verifiedReplacementTuple) {
 			session.spawnPinnedModel = `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`;
 			session.spawnPinnedThinkingLevel = verifiedReplacementTuple.thinkingLevel;
@@ -17325,6 +17993,11 @@ export class SessionManager {
 			try { (this as any).bgProcessManager.cleanup(id); } catch { /* best-effort */ }
 		}
 		try {
+			await this.releaseSessionExecutionRuntime(session.projectId, id, session.containerId);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to release quiesced execution runtime for ${id}:`, err);
+		}
+		try {
 			if (this.sandboxTokenStore && session.projectId) this.sandboxTokenStore.removeSession(session.projectId, id);
 		} catch { /* process is already stopped */ }
 		try { this.sessionSecretStore.remove(id); } catch { /* process is already stopped */ }
@@ -17458,6 +18131,11 @@ export class SessionManager {
 		if ((this as any).bgProcessManager) {
 			(this as any).bgProcessManager.abortAllWaits(id);
 			(this as any).bgProcessManager.cleanup(id);
+		}
+		try {
+			await this.releaseSessionExecutionRuntime(session.projectId, id, session.containerId);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to release terminated execution runtime for ${id}:`, err);
 		}
 
 		// Clean up sandbox token — remove session from project scope (not the whole project token)
@@ -18601,6 +19279,14 @@ export class SessionManager {
 		// the purge of its parent.
 		try { await this.cascadeReapOwner(ps.id); } catch { /* best-effort */ }
 
+		// A crash may leave an archived/store-only runtime behind. Runtime removal is
+		// idempotent and precedes transcript/worktree data destruction.
+		try {
+			await this.releaseSessionExecutionRuntime(ps.projectId, ps.id, ps.containerId);
+		} catch (err) {
+			console.warn(`[session-manager] Failed to release purged execution runtime for ${ps.id}:`, err);
+		}
+
 		// Remove from search index
 		this.cleanupSearchForSession(ps.id, ps.projectId);
 
@@ -18635,6 +19321,22 @@ export class SessionManager {
 			if (!canonicalContainerAgentSessionPath(safeFile)) {
 				try { await sessionSidecarDelete(safeFile); }
 				catch (err) { console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err); }
+			}
+		}
+		if (ps.sandboxed) {
+			const privateRoots = [sessionTranscriptRoot(ps.id)];
+			try {
+				const projectContext = ps.projectId ? this.projectContextManager?.getOrCreate(ps.projectId) : undefined;
+				if (projectContext?.stateDir) privateRoots.push(sessionStateSessionsRoot(projectContext.stateDir, ps.id));
+			} catch { /* project already removed: transcript root is still independently owned */ }
+			for (const privateRoot of privateRoots) {
+				try {
+					const stat = await fsp.lstat(privateRoot);
+					if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("private session root is unsafe");
+					await fsp.rm(privateRoot, { recursive: true, force: true });
+				} catch (error: any) {
+					if (error?.code !== "ENOENT") console.warn(`[session-manager] Failed to purge a private session root for ${ps.id}`);
+				}
 			}
 		}
 
@@ -18805,7 +19507,7 @@ export class SessionManager {
 			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
 			const TOLERANCE_MS = 60_000;
 
-			const sessionRoots = trustedAgentSessionsRoots();
+			const sessionRoots = ps.sandboxed ? [sessionTranscriptRoot(ps.id)] : trustedAgentSessionsRoots();
 
 			// Prefer an exact filename/session-id match across all known roots before
 			// falling back to timestamp proximity. This preserves historical-root
@@ -18817,6 +19519,10 @@ export class SessionManager {
 				if (exactFile) {
 					const recovered = path.join(cwdDir, exactFile).replace(/\\/g, "/");
 					trustPersistedAgentSessionFile(recovered);
+					if (ps.sandboxed) {
+						const relative = path.relative(sessionTranscriptRoot(ps.id), recovered).replace(/\\/g, "/");
+						return sessionTranscriptContainerPath(relative);
+					}
 					return recovered;
 				}
 			}
@@ -18852,6 +19558,10 @@ export class SessionManager {
 				if (bestFile) {
 					const recovered = path.join(cwdDir, bestFile).replace(/\\/g, "/");
 					trustPersistedAgentSessionFile(recovered);
+					if (ps.sandboxed) {
+						const relative = path.relative(sessionTranscriptRoot(ps.id), recovered).replace(/\\/g, "/");
+						return sessionTranscriptContainerPath(relative);
+					}
 					return recovered;
 				}
 			}
@@ -19315,10 +20025,9 @@ export class SessionManager {
 		// kill immediately; recovery must never wait on the bridge being replaced.
 		// Paths remain in the agent's coordinate system — no translation needed.
 		const persistedBeforeAbort = this.resolveStoreForSession(id).get(id);
-		const adoptedExpectedContainerId = persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort)
-			? persistedBeforeAbort.containerId?.trim()
-			: undefined;
-		if (persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort) && !adoptedExpectedContainerId) {
+		const abortingCanonicalSource = !!persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort);
+		const adoptedExpectedContainerId = persistedBeforeAbort?.containerId?.trim() ?? session.containerId?.trim();
+		if (abortingCanonicalSource && !adoptedExpectedContainerId) {
 			throw new Error(`Cannot force-abort promoted session ${id}: durable sandbox container identity is missing`);
 		}
 		let agentSessionFile = persistedBeforeAbort?.agentSessionFile;
@@ -19376,11 +20085,11 @@ export class SessionManager {
 		emitSessionEvent(session, { type: "agent_end", messages: [] });
 
 		// Restart the agent process
+		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd, sessionId: id };
 		try {
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
 			}
-			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			// Prepare the cold replacement's scoped catalogue before any later
@@ -19402,6 +20111,8 @@ export class SessionManager {
 					projectId: session.projectId,
 					goalId: session.goalId ?? session.teamGoalId,
 					expectedExistingContainerId: adoptedExpectedContainerId,
+					allowLegacyControlMigration: !abortingCanonicalSource,
+					allowMissingRuntimeReplacement: !abortingCanonicalSource,
 				});
 				if (!sandboxApplied) {
 					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);
@@ -19626,6 +20337,7 @@ export class SessionManager {
 				: bridgeOptions.initialModel;
 			session.spawnPinnedThinkingLevel = verifiedReplacementTuple?.thinkingLevel
 				?? bridgeOptions.initialThinkingLevel;
+			if (bridgeOptions.containerId) session.containerId = bridgeOptions.containerId;
 			if (verifiedReplacementTuple) {
 				this.persistSessionModel(
 					id,
@@ -19645,6 +20357,17 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
+			if (bridgeOptions.containerId && bridgeOptions.containerId !== adoptedExpectedContainerId) {
+				await this.releaseSessionExecutionRuntime(
+					session.projectId,
+					id,
+					bridgeOptions.containerId,
+					adoptedExpectedContainerId,
+				).catch(() => {});
+				if (persistedBeforeAbort && adoptedExpectedContainerId) {
+					this.resolveStoreForSession(id).update(id, { containerId: adoptedExpectedContainerId });
+				}
+			}
 			// Recovery failure makes the stopped old process permanently terminal. Close
 			// metadata admission and cancel any retry delay that process exit already
 			// made futile; later DELETE still joins the real admitted lane and store flush.

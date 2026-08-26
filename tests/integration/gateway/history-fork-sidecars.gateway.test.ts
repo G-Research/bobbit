@@ -13,6 +13,7 @@ import {
 	sessions,
 	serverModule,
 	agentSessionsDir,
+	sessionTranscriptHostPath,
 	SYSTEM_AUTHOR,
 	FIXTURE_TIME,
 	messageEntry,
@@ -27,6 +28,7 @@ import {
 	seedForgedInlineSkillIdentity,
 	seedCompactionBinding,
 	createTrackedSession,
+	installSandboxSessionFilesystem,
 	installHistoryForkHooks,
 } from "../../support/harnesses/integration/history-fork-fixture.js";
 import type { TranscriptEntry } from "../../support/harnesses/integration/history-fork-fixture.js";
@@ -314,6 +316,7 @@ test.describe("history fork API: sidecar filtering and destination cleanup", () 
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "failed-deduplication");
 		let capturedDestinationId = "";
 		let capturedDestinationFile = "";
 		let capturedOptions: any;
@@ -365,22 +368,31 @@ test.describe("history fork API: sidecar filtering and destination cleanup", () 
 				rejectLaunch(new Error("fixture released blocked launch during assertion cleanup"));
 			}
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(capturedDestinationId).toBeTruthy();
-		expect(path.isAbsolute(capturedDestinationFile)).toBe(true);
-		expect(capturedDestinationFile.replace(/\\/g, "/")).not.toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-		const destinationRelative = path.relative(agentSessionsDir, capturedDestinationFile);
-		expect(path.isAbsolute(destinationRelative)).toBe(false);
-		expect(destinationRelative).not.toMatch(/^\.\.(?:[\\/]|$)/);
-		expect(fs.existsSync(capturedDestinationFile)).toBe(false);
+		expect(capturedDestinationFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const capturedDestinationHost = sessionTranscriptHostPath(capturedDestinationId, capturedDestinationFile);
+		expect(capturedDestinationHost).toBeTruthy();
+		expect(fs.existsSync(capturedDestinationHost!)).toBe(false);
 		expect(fs.existsSync(authorPath(gateway, capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "skill-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "proposal-drafts", capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "tool-content", capturedDestinationId))).toBe(false);
 
-		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, { sandboxed: false });
+		const migratedSource = gateway.sessionManager.getPersistedSession(sourceId);
+		const migratedSourceHost = sessionTranscriptHostPath(sourceId, migratedSource.agentSessionFile);
+		expect(migratedSourceHost).toBeTruthy();
+		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, {
+			sandboxed: false,
+			agentSessionFile: migratedSourceHost!,
+		});
+		Object.assign(gateway.sessionManager.getSession(sourceId), {
+			sandboxed: false,
+			agentSessionFile: migratedSourceHost!,
+		});
 		const retry = await historyFork(gateway, sourceId, "selected-user", false);
 		expect(retry.status, JSON.stringify(await responseJson(retry))).toBe(201);
 		const retried = await retry.json();

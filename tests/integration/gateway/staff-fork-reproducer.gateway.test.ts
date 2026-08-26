@@ -9,6 +9,7 @@ import { loadServerTestRuntime } from "../../support/harnesses/shared/server-run
 import { SandboxSessionFilesystem } from "../../support/harnesses/shared/sandbox-session-filesystem.js";
 import { SessionStore } from "../../../src/server/agent/session-store.js";
 import { seedSessionTranscript } from "./_helpers/session-fixtures.js";
+import { sessionTranscriptHostPath } from "../../../src/server/agent/agent-session-path.js";
 
 const FAILURE_MARKER = "STAFF_FORK_IDENTITY_ISOLATION";
 const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
@@ -233,6 +234,7 @@ async function assertSandboxWholeStaffFork(
 	const originalCreateSession = manager.createSession;
 	const originalSendCommand = rpcBridgeModule.RpcBridge.prototype.sendCommand;
 	let destination: any;
+	let destinationSessionId: string | undefined;
 	let capturedOptions: any;
 	try {
 		configureSandboxStaffOwner(gateway, source, realm);
@@ -245,14 +247,16 @@ async function assertSandboxWholeStaffFork(
 			? `/home/node/.bobbit/agent/sessions/--staff-fork-${realm}--/${source.currentSessionId}.jsonl`
 			: seededHostPath;
 		if (realm === "canonical-container") {
-			const containerHostPath = sandboxFixture.filesystem.hostPath(sourcePath);
+			const containerHostPath = sessionTranscriptHostPath(source.currentSessionId, sourcePath);
+			if (!containerHostPath) throw new Error("canonical source transcript did not resolve to its owner root");
 			fs.mkdirSync(path.dirname(containerHostPath), { recursive: true });
 			fs.writeFileSync(containerHostPath, seededContent, "utf8");
 			setPersistedTranscriptPath(gateway, source.currentSessionId, sourcePath);
 		}
-		const sourceBytes = realm === "canonical-container"
-			? fs.readFileSync(sandboxFixture.filesystem.hostPath(sourcePath))
-			: fs.readFileSync(sourcePath);
+		const canonicalSourceHostPath = realm === "canonical-container"
+			? sessionTranscriptHostPath(source.currentSessionId, sourcePath)
+			: undefined;
+		const sourceBytes = fs.readFileSync(canonicalSourceHostPath ?? sourcePath);
 		const sourceBefore = structuredClone(await gateway.apiJson(`/api/staff/${source.id}`));
 
 		manager.applySandboxWiring = async (options: any) => {
@@ -262,14 +266,14 @@ async function assertSandboxWholeStaffFork(
 		};
 		manager.createSession = async (...args: any[]) => {
 			capturedOptions = structuredClone(args[4]);
+			destinationSessionId = args[4]?.sessionId;
 			return originalCreateSession.apply(manager, args);
 		};
 		rpcBridgeModule.RpcBridge.prototype.sendCommand = function(command: any, ...rest: any[]) {
-			if (command?.type === "switch_session" && typeof command.sessionPath === "string") {
-				command = {
-					...command,
-					sessionPath: sandboxFixture.filesystem.hostPath(command.sessionPath),
-				};
+			if (command?.type === "switch_session" && typeof command.sessionPath === "string" && destinationSessionId) {
+				const hostPath = sessionTranscriptHostPath(destinationSessionId, command.sessionPath);
+				if (!hostPath) throw new Error("destination transcript did not resolve to its owner root");
+				command = { ...command, sessionPath: hostPath };
 			}
 			return originalSendCommand.call(this, command, ...rest);
 		};
@@ -294,22 +298,15 @@ async function assertSandboxWholeStaffFork(
 		});
 		expect(manager.getSession(fork.value.id)?.staffId).toBe(destination.id);
 		expect(destination.sandboxed).toBe(true);
-		if (realm === "canonical-container") {
-			expect(capturedOptions.preExistingAgentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-			expect(persisted.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-		} else {
-			expect(path.isAbsolute(capturedOptions.preExistingAgentSessionFile)).toBe(true);
-			expect(capturedOptions.preExistingAgentSessionFile).not.toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-		}
-		const destinationTranscript = persisted.agentSessionFile.startsWith("/home/node/.bobbit/agent/sessions/")
-			? fs.readFileSync(sandboxFixture.filesystem.hostPath(persisted.agentSessionFile), "utf8")
-			: fs.readFileSync(persisted.agentSessionFile, "utf8");
+		expect(capturedOptions.preExistingAgentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		expect(persisted.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const destinationHostPath = sessionTranscriptHostPath(fork.value.id, persisted.agentSessionFile);
+		expect(destinationHostPath).toBeTruthy();
+		const destinationTranscript = fs.readFileSync(destinationHostPath!, "utf8");
 		expect(destinationTranscript).toContain(`SANDBOX_WHOLE_${realm}_USER`);
 		expect(destinationTranscript).toContain(`SANDBOX_WHOLE_${realm}_ASSISTANT`);
 		expect(await gateway.apiJson(`/api/staff/${source.id}`)).toEqual(sourceBefore);
-		const sourceAfter = realm === "canonical-container"
-			? fs.readFileSync(sandboxFixture.filesystem.hostPath(sourcePath))
-			: fs.readFileSync(sourcePath);
+		const sourceAfter = fs.readFileSync(canonicalSourceHostPath ?? sourcePath);
 		expect(sourceAfter.equals(sourceBytes)).toBe(true);
 	} finally {
 		manager.applySandboxWiring = originalApplySandboxWiring;

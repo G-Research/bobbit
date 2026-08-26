@@ -362,8 +362,12 @@ describe("LifecycleHub", () => {
 				ensureForProject: async () => {},
 				get: () => ({
 					getContainerId: async () => "container-xyz",
+					getStatus: () => ({ status: "ready", containerId: "container-xyz" }),
 					createWorktree: async () => CONTAINER_WORKTREE,
 				}),
+				ensureSessionRuntime: async (_projectId: string, sessionId: string) => `runtime-${sessionId}`,
+				isSessionRuntimeIsolated: async (_projectId: string, sessionId: string, id: string) => id === `runtime-${sessionId}`,
+				releaseSessionRuntime: async () => {},
 			};
 
 			const provider = fixtureProvider(

@@ -202,7 +202,7 @@ describe("recoverSessionFile with configurable agent directories", () => {
 		assert.deepEqual(messages[0], { role: "user", content: "read me from the historical persisted absolute path" });
 	});
 
-	it("remaps sandbox switch_session paths from historical host transcripts to migrated active mounted transcripts", () => {
+	it("refuses to project historical sandbox host paths before owner-root migration", () => {
 		const ps = makePersistedSession({
 			id: "sandbox-migrated-transcript-session",
 			cwd: "/workspace",
@@ -210,18 +210,11 @@ describe("recoverSessionFile with configurable agent directories", () => {
 			projectId: "project-1",
 			createdAt: Date.parse("2026-04-03T18:00:00.000Z"),
 		});
-		const oldPersistedPath = writeRecoverableTranscript(historicalAgentDir, { ...ps, text: "old copy remains authoritative for Bobbit reads" });
-		const activeMigratedPath = writeRecoverableTranscript(activeAgentDir, { ...ps, text: "active mounted copy is visible to sandbox" });
-		ps.agentSessionFile = oldPersistedPath;
-
-		assert.equal(
-			switchSessionPathForAgent(ps),
-			"/home/node/.bobbit/agent/sessions/" + path.relative(sessionsRoot(activeAgentDir), activeMigratedPath).replace(/\\/g, "/"),
-		);
-		samePath(ps.agentSessionFile, oldPersistedPath);
+		ps.agentSessionFile = writeRecoverableTranscript(historicalAgentDir, ps);
+		assert.throws(() => switchSessionPathForAgent(ps), /outside its owner root/);
 	});
 
-	it("leaves sandbox historical host transcripts unchanged when no active migrated copy exists", () => {
+	it("never falls back to an unmounted historical host path for sandbox switch_session", () => {
 		const ps = makePersistedSession({
 			id: "sandbox-not-migrated-transcript-session",
 			cwd: "/workspace",
@@ -229,10 +222,8 @@ describe("recoverSessionFile with configurable agent directories", () => {
 			projectId: "project-1",
 			createdAt: Date.parse("2026-04-03T19:00:00.000Z"),
 		});
-		const oldPersistedPath = writeRecoverableTranscript(historicalAgentDir, ps);
-		ps.agentSessionFile = oldPersistedPath;
-
-		samePath(switchSessionPathForAgent(ps), oldPersistedPath);
+		ps.agentSessionFile = writeRecoverableTranscript(historicalAgentDir, ps);
+		assert.throws(() => switchSessionPathForAgent(ps), /outside its owner root/);
 	});
 
 	it("keeps an exact persisted absolute agentSessionFile readable outside known sessions roots", async () => {
