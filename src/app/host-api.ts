@@ -26,6 +26,16 @@ import {
 	type PostMessageInput,
 	type HostSessionEventName,
 	type HostSessionEventMap,
+	type HostProjectSelector,
+	type HostProjectRead,
+	type HostLookupResult,
+	type HostGoalReadError,
+	type HostStaffSummary,
+	type HostSessionSummary,
+	type HostGoalSummary,
+	type HostTaskSummary,
+	type HostGateSummary,
+	type HostPullRequestSummary,
 	type StorePutOptions,
 	type StoreReadResult,
 	type StoreStats,
@@ -225,6 +235,26 @@ export function getHostApi(
 		}
 		return resp;
 	};
+	// Project reads are available only when the trusted loader binds this Host to a
+	// pack-owned surface. Built-in/unbound hosts keep the namespace for contract
+	// stability but do not advertise the capability.
+	const projectReadsAvailable = typeof surface?.packId === "string" && surface.packId.length > 0;
+	type ProjectReadOperation = "staff" | "sessions" | "goals" | "goal-tasks" | "goal-gates" | "goal-pull-request";
+	const projectRead = async <T>(
+		operation: ProjectReadOperation,
+		payload: { goalId?: string; selector?: unknown } = {},
+	): Promise<T> => {
+		if (!projectReadsAvailable) throw new Error("host.project reads require a pack-served context");
+		const resp = await scopedFetch((token) => ({
+			path: "/api/ext/project/read",
+			init: {
+				method: "POST",
+				body: JSON.stringify({ operation, surfaceToken: token, ...payload }),
+			},
+		}));
+		if (!resp.ok) throw new Error(`project.${operation} HTTP ${resp.status}`);
+		return resp.json() as Promise<T>;
+	};
 	// POST a store op to /api/ext/store/:op carrying the SERVER-MINTED surface
 	// token (NOT a raw `tool`) so the server derives the trusted packId.
 	const storeOp = async (op: "get" | "read" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
@@ -253,6 +283,7 @@ export function getHostApi(
 		channels: true,
 		sessionNotifications: true,
 		projectNotifications: true,
+		...(projectReadsAvailable ? { projectReads: true } : {}),
 	};
 	const api = {
 		version: HOST_API_VERSION,
@@ -395,8 +426,29 @@ export function getHostApi(
 			},
 		} as HostApi["session"],
 		project: {
-			// Project authority is the project already bound to this session's socket.
-			// There is intentionally no projectId parameter or client-side selector.
+			// Project authority is derived from the header-bound session and the opaque
+			// surface token. These fixed wrappers accept only record selectors; pack code
+			// cannot supply a project/session/token/URL identity.
+			readStaff: (selector?: HostProjectSelector): Promise<HostProjectRead<HostStaffSummary>> =>
+				projectRead("staff", { selector }),
+			readSessions: (selector?: HostProjectSelector): Promise<HostProjectRead<HostSessionSummary>> =>
+				projectRead("sessions", { selector }),
+			readGoals: (selector?: HostProjectSelector): Promise<HostProjectRead<HostGoalSummary>> =>
+				projectRead("goals", { selector }),
+			readGoalTasks: (
+				goalId: string,
+				selector?: HostProjectSelector,
+			): Promise<HostProjectRead<HostTaskSummary> | HostGoalReadError> =>
+				projectRead("goal-tasks", { goalId, selector }),
+			readGoalGates: (
+				goalId: string,
+				selector?: HostProjectSelector,
+			): Promise<HostProjectRead<HostGateSummary> | HostGoalReadError> =>
+				projectRead("goal-gates", { goalId, selector }),
+			readGoalPullRequest: (
+				goalId: string,
+			): Promise<HostLookupResult<HostPullRequestSummary | null>> =>
+				projectRead("goal-pull-request", { goalId }),
 			notifications: {
 				subscribe: (name, handler) => subscribeHostNotification(sessionId, "project", name, handler),
 				onRefreshRequired: (handler) => subscribeHostNotificationRefresh(sessionId, "project", handler),
