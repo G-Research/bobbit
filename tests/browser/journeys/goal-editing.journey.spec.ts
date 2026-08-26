@@ -7,6 +7,62 @@ import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, apiFetch
 import { nonGitCwd } from "../../e2e/_helpers/e2e-setup.js";
 import { createGoalAssistantViaUI } from "../../support/harnesses/browser/legacy-ui/ui-helpers.js";
 
+async function sendGoalProposalAndJoinLifecycle(
+	page: import("@playwright/test").Page,
+	gateway: any,
+	sessionId: string,
+	trigger: string,
+	title: string,
+): Promise<void> {
+	const core = gateway.sessionManager?.getSession(sessionId)?.rpcClient?._agent;
+	if (!core || typeof core.armBarrier !== "function" || typeof core.waitForBarrier !== "function") {
+		throw new Error("goal editing journey requires the in-process mock agent lifecycle seam");
+	}
+
+	const previousPrompts = Array.isArray(core.commandJournal)
+		? core.commandJournal.filter((entry: any) => entry?.kind === "prompt")
+		: [];
+	const occurrence = (previousPrompts.at(-1)?.occurrence ?? 0) + 1;
+	const receiptBoundary = `prompt:${occurrence}:received`;
+	const completionBoundary = "turn:before-agent-end";
+	core.releaseBarrier(completionBoundary);
+	core.armBarrier(receiptBoundary);
+	core.armBarrier(completionBoundary);
+	const receipt = Promise.resolve(core.waitForBarrier(receiptBoundary));
+	const completed = Promise.resolve(core.waitForBarrier(completionBoundary));
+
+	try {
+		await sendMessage(page, trigger);
+		const details: any = await receipt;
+		if (details?.kind !== "prompt" || details?.occurrence !== occurrence || details?.text !== trigger) {
+			throw new Error(`goal editing journey received an uncorrelated prompt: ${JSON.stringify(details)}`);
+		}
+		core.releaseBarrier(receiptBoundary);
+		await completed;
+	} finally {
+		core.releaseBarrier(receiptBoundary);
+		core.releaseBarrier(completionBoundary);
+	}
+
+	await page.waitForFunction(
+		({ sid, expectedTitle }) => {
+			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
+			const routeSessionId = window.location.hash.match(/^#\/session\/([\w-]+)/)?.[1];
+			const proposal = state?.activeProposals?.goal;
+			const remoteAgent = state?.remoteAgent;
+			return routeSessionId === sid
+				&& state?.selectedSessionId === sid
+				&& remoteAgent?._sessionId === sid
+				&& remoteAgent?.state?.status === "idle"
+				&& proposal?.sessionId === sid
+				&& proposal?.streaming === false
+				&& proposal?.fields?.title === expectedTitle;
+		},
+		{ sid: sessionId, expectedTitle: title },
+		{ timeout: 20_000 },
+	);
+}
+
 test.describe("Journey: Goal Editing", () => {
 	test("goal dashboard renders goal title", async ({ page }) => {
 		const title = "v2-goal-editing-smoke";
@@ -151,7 +207,7 @@ test.describe("Journey: Goal Creation — behavioral assertions", () => {
 	// Ported from goal-creation.spec.ts (audit: goal-editing GAP, mutant BR68):
 	// toggling an optional step in the assistant proposal and creating the goal
 	// must round-trip the enabled step into the created goal's enabledOptionalSteps.
-	test("assistant optional-steps toggle round-trips into the created goal", async ({ page }) => {
+	test("assistant optional-steps toggle round-trips into the created goal", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		// Configure qa_start_command so the feature workflow's QA step toggle enables.
 		const projectId = await defaultProjectId();
@@ -168,10 +224,16 @@ test.describe("Journey: Goal Creation — behavioral assertions", () => {
 		}
 
 		await openApp(page);
-		await createGoalAssistantViaUI(page, { timeout: 60_000 });
+		const assistantSessionId = await createGoalAssistantViaUI(page, { timeout: 60_000 });
 		const textarea = page.locator("textarea").first();
 		await expect(textarea).toBeVisible({ timeout: 30_000 });
-		await sendMessage(page, "Please create a GOAL_PROPOSAL for testing");
+		await sendGoalProposalAndJoinLifecycle(
+			page,
+			gateway,
+			assistantSessionId,
+			"Please create a GOAL_PROPOSAL for testing",
+			"E2E Test Goal",
+		);
 
 		const titleInput = page.locator("input[placeholder='Goal title']").first();
 		await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 20_000 });
