@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { initialState, reduce } from "../../src/app/message-reducer.ts";
 import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
 import {
 	MAX_PROMPT_ATTACHMENT_BYTES,
@@ -21,6 +22,7 @@ import {
 	setUploadedAttachmentSessionQuotaForTesting,
 } from "../../src/server/agent/uploaded-attachment-store.ts";
 import { initSkillSidecarDir, readSkillSidecarEntries } from "../../src/server/skills/skill-sidecar.ts";
+import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.ts";
 
 const SESSION_ID = "83749600-0000-4000-8000-000000000001";
 const TYPED_TEXT = "Summarize the uploaded notes.";
@@ -185,7 +187,67 @@ describe("uploaded attachment prompt admission", () => {
 		expect(pointer, "ATTACHMENT_STABLE_POINTER_MISSING").toBeTruthy();
 		expect(modelText).not.toContain(ATTACHMENT.content);
 
-		const raw = [{ role: "user", content: [{ type: "text", text: modelText }] }];
+		const pendingEnvelopeCount = session.pendingSkillExpansions.length;
+		const rawStart = {
+			type: "message_start",
+			message: { id: "pi-live-text-occurrence", role: "user", content: [{ type: "text", text: modelText }] },
+		};
+		const preparedStart = prepareVisibleAgentEvent(session, rawStart);
+		const startEntry = emitSessionEvent(session, preparedStart);
+		const visibleStart = startEntry.event as any;
+		expect(visibleText(visibleStart.message), "ATTACHMENT_LIVE_START_TEXT_LEAK").toBe(TYPED_TEXT);
+		expect(visibleStart.message).toMatchObject({
+			role: "user-with-attachments",
+			deliveryIntentId: "text-occurrence",
+			attachments: [{ id: ATTACHMENT.id, fileName: ATTACHMENT.fileName }],
+		});
+		expect(JSON.stringify(visibleStart)).not.toContain(pointer);
+		expect(JSON.stringify(visibleStart)).not.toContain(EXTRACTED_MARKER);
+		expect(session.pendingSkillExpansions).toHaveLength(pendingEnvelopeCount);
+		expect(rawStart.message.content[0].text, "outward projection must not mutate Pi's event").toBe(modelText);
+
+		let clientState = reduce(initialState(), {
+			type: "live-event",
+			frame: visibleStart,
+			seq: startEntry.seq,
+		});
+		expect(clientState.messages).toHaveLength(1);
+		expect(visibleText(clientState.messages[0]), "ATTACHMENT_CLIENT_START_TEXT_LEAK").toBe(TYPED_TEXT);
+		expect((clientState.messages[0] as any).attachments?.[0]?.fileName).toBe(ATTACHMENT.fileName);
+
+		// Pi currently emits user starts/ends, but keep a keyed cumulative update
+		// safe if a future adapter adds one after the occurrence-bound start.
+		const preparedUpdate = prepareVisibleAgentEvent(session, {
+			type: "message_update",
+			message: { id: "pi-live-text-occurrence", role: "user", content: [{ type: "text", text: modelText }] },
+		});
+		const visibleUpdate = emitSessionEvent(session, preparedUpdate).event as any;
+		expect(visibleText(visibleUpdate.message), "ATTACHMENT_LIVE_UPDATE_TEXT_LEAK").toBe(TYPED_TEXT);
+		expect(visibleUpdate.message.attachments?.[0]?.fileName).toBe(ATTACHMENT.fileName);
+		expect(session.pendingSkillExpansions).toHaveLength(pendingEnvelopeCount);
+
+		const rawEnd = {
+			type: "message_end",
+			message: { id: "pi-live-text-occurrence", role: "user", content: [{ type: "text", text: modelText }] },
+		};
+		const preparedEnd = prepareVisibleAgentEvent(session, rawEnd);
+		const endEntry = emitSessionEvent(session, preparedEnd);
+		const visibleEnd = endEntry.event as any;
+		expect(visibleText(visibleEnd.message)).toBe(TYPED_TEXT);
+		expect(visibleEnd.message.attachments?.[0]?.fileName).toBe(ATTACHMENT.fileName);
+		expect(session.pendingSkillExpansions).toHaveLength(pendingEnvelopeCount - 1);
+		expect(rawEnd.message.content[0].text, "terminal projection must not mutate Pi's event").toBe(modelText);
+
+		clientState = reduce(clientState, {
+			type: "live-event",
+			frame: visibleEnd,
+			seq: endEntry.seq,
+		});
+		expect(clientState.messages).toHaveLength(1);
+		expect(visibleText(clientState.messages[0])).toBe(TYPED_TEXT);
+		expect((clientState.messages[0] as any).attachments?.[0]?.fileName).toBe(ATTACHMENT.fileName);
+
+		const raw = [{ id: "pi-live-text-occurrence", role: "user", content: [{ type: "text", text: modelText }] }];
 		const projected = manager.buildVisibleMessageSnapshot(session.id, raw) as any[];
 		expect(visibleText(projected[0]), "ATTACHMENT_VISIBLE_TEXT_LEAK").toBe(TYPED_TEXT);
 		expect(projected[0]).toMatchObject({
@@ -195,6 +257,97 @@ describe("uploaded attachment prompt admission", () => {
 
 		const titleProjection = projectPromptAuthorMessagesForTitle(session.id, raw) as any[];
 		expect(visibleText(titleProjection[0]), "ATTACHMENT_TITLE_TEXT_LEAK").toBe(TYPED_TEXT);
+	});
+
+	it("projects identical model text by occurrence without consuming starts", () => {
+		const modelText = `${TYPED_TEXT}\n\n[Uploaded attachment]\nPointer: bobbit-attachment:v1:same:model`;
+		const metadata = (id: string, fileName: string) => ({
+			id,
+			type: "document" as const,
+			fileName,
+			mimeType: "application/octet-stream",
+			size: 4,
+		});
+		const occurrence = (id: string, epoch: number) => ({
+			promptId: id,
+			intentId: id,
+			attemptId: `attempt:${id}`,
+			dispatchEpoch: epoch,
+			dispatchedAt: epoch,
+			modelText,
+			source: "user" as const,
+			author: LOCAL_USER_AUTHOR,
+		});
+		const sameTextSession: any = {
+			...session,
+			id: "83749600-0000-4000-8000-000000000008",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			pendingSkillTranscriptBindings: undefined,
+			promptAuthorMessageBindings: undefined,
+			promptAuthorReplayBindings: undefined,
+			promptAuthorAmbiguityFences: undefined,
+			lastKeylessPromptAuthorEnd: undefined,
+			pendingPromptAuthors: [occurrence("same-a", 1), occurrence("same-b", 2)],
+			inFlightSteerTexts: [
+				{ ...occurrence("same-a", 1), text: modelText, state: "dispatching" },
+				{ ...occurrence("same-b", 2), text: modelText, state: "dispatching" },
+			],
+			// Deliberately reverse the envelopes: text FIFO would give occurrence A
+			// the wrong attachment, while the trusted author binding selects by ID.
+			pendingSkillExpansions: [
+				{
+					recordId: "display-same-b",
+					promptId: "same-b",
+					modelText,
+					originalText: TYPED_TEXT,
+					skillExpansions: [],
+					attachments: [metadata("attachment-b", "second.bin")],
+				},
+				{
+					recordId: "display-same-a",
+					promptId: "same-a",
+					modelText,
+					originalText: TYPED_TEXT,
+					skillExpansions: [],
+					attachments: [metadata("attachment-a", "first.bin")],
+				},
+			],
+		};
+
+		const project = (type: "message_start" | "message_end", id: string) => {
+			const prepared = prepareVisibleAgentEvent(sameTextSession, {
+				type,
+				message: { id: `pi-${id}`, role: "user", content: [{ type: "text", text: modelText }] },
+			});
+			return emitSessionEvent(sameTextSession, prepared);
+		};
+
+		const startA = project("message_start", "same-a");
+		expect((startA.event as any).message.attachments[0].fileName).toBe("first.bin");
+		expect(sameTextSession.pendingSkillExpansions).toHaveLength(2);
+		sameTextSession.inFlightSteerTexts[0].state = "received";
+		const startB = project("message_start", "same-b");
+		expect((startB.event as any).message.attachments[0].fileName).toBe("second.bin");
+		expect(sameTextSession.pendingSkillExpansions).toHaveLength(2);
+
+		let clientState = initialState();
+		for (const entry of [startA, startB]) {
+			clientState = reduce(clientState, { type: "live-event", frame: entry.event, seq: entry.seq });
+		}
+		expect(clientState.messages.map((message: any) => message.deliveryIntentId)).toEqual(["same-a", "same-b"]);
+		expect(clientState.messages.map((message: any) => message.attachments[0].fileName)).toEqual(["first.bin", "second.bin"]);
+		expect(clientState.messages.map(visibleText)).toEqual([TYPED_TEXT, TYPED_TEXT]);
+
+		const endA = project("message_end", "same-a");
+		expect(sameTextSession.pendingSkillExpansions.map((entry: any) => entry.promptId)).toEqual(["same-b"]);
+		const endB = project("message_end", "same-b");
+		expect(sameTextSession.pendingSkillExpansions).toEqual([]);
+		for (const entry of [endA, endB]) {
+			clientState = reduce(clientState, { type: "live-event", frame: entry.event, seq: entry.seq });
+		}
+		expect(clientState.messages.map((message: any) => message.deliveryIntentId)).toEqual(["same-a", "same-b"]);
+		expect(clientState.messages.map((message: any) => message.attachments[0].fileName)).toEqual(["first.bin", "second.bin"]);
 	});
 
 	it("keeps binary content pointer-only and isolates equal typed occurrences through queue projection", async () => {
