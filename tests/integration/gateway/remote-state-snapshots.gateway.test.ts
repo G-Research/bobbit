@@ -20,6 +20,62 @@ import {
 test.describe("remote-state coordinator routes", () => {
 	installRemoteStateRouteHooks();
 
+	test("waits for pre-override remote work before returning a fixture session", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const firstSessionId = await createRemoteStateSession(gateway, gitCwd());
+		const branch = `fixture/bootstrap-drain-${Date.now()}`;
+		gateway.sessionManager.updateSessionMeta(firstSessionId, { branch });
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const fixtureRemote = `https://github.com/acme/bootstrap-drain-${Date.now()}.git`;
+		let oldRefreshActive = false;
+		let oldRefreshStartedResolve!: () => void;
+		const oldRefreshStarted = new Promise<void>(resolve => { oldRefreshStartedResolve = resolve; });
+		let releaseOldRefresh!: () => void;
+		const oldRefreshGate = new Promise<void>(resolve => { releaseOldRefresh = resolve; });
+		let releaseIssued = false;
+		let secondSessionId: string | undefined;
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const releaseDuringSuccessorDrain = () => {
+				if (!oldRefreshActive || releaseIssued) return;
+				releaseIssued = true;
+				releaseOldRefresh();
+			};
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				releaseDuringSuccessorDrain();
+				return { stdout: `${fixtureRemote}\n`, stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
+				oldRefreshActive = true;
+				oldRefreshStartedResolve();
+				await oldRefreshGate;
+				oldRefreshActive = false;
+				return { stdout: "[]", stderr: "" };
+			}
+			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+			if (probe) {
+				releaseDuringSuccessorDrain();
+				return probe;
+			}
+			return unexpectedRunnerCommand(file, args, options);
+		};
+
+		const oldRefresh = apiFetch(`/api/sessions/${firstSessionId}/pr-status?intent=explicit&optional=1`);
+		try {
+			await oldRefreshStarted;
+			secondSessionId = await createRemoteStateSession(gateway, gitCwd());
+			expect(oldRefreshActive, "fixture session creation must hand off only after joined predecessor work settles").toBe(false);
+			expect((await oldRefresh).status).toBe(204);
+		} finally {
+			releaseOldRefresh();
+			await oldRefresh.catch(() => undefined);
+			runner.execFile = originalExecFile;
+			if (secondSessionId) await deleteSession(secondSessionId);
+			await deleteSession(firstSessionId);
+		}
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());
