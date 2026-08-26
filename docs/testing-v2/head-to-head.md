@@ -1,10 +1,17 @@
 # Head-to-head: legacy vs v2 — measured wall + CPU cost (task 190c7af5)
 
-> ## ⏩ UPDATE (task 7862db76, test-engineer-6d58, 2026-07-08) — e2e:v2 is now GREEN + proven external-free
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
+> ## Snapshot update (task 7862db76, test-engineer-6d58, 2026-07-08) — e2e:v2 was green and external-free
 >
-> The §4 caveats ("e2e:v2 under-measured, not yet green, no runner") are RESOLVED.
+> The §4 caveats ("e2e:v2 under-measured, not yet green, no runner") were resolved at this snapshot.
 > A reusable runner (`scripts/testing-v2/run-e2e-v2.mjs`, `npm run test:e2e:v2`)
-> now drives the whole real-fidelity tier from `tests2/tests-map.json`. Read the
+> then drove the whole real-fidelity tier from `tests2/tests-map.json`. Read the
 > new **§8 (green e2e:v2)**, **§9 (external-service-free proof)**, and **§10 (the
 > corrected honest TOTAL)** below.
 >
@@ -222,7 +229,7 @@ sampler on a churny suite should be treated as inflated.**
 npm run test:unit                                   # legacy unit
 BOBBIT_E2E_SKIP_GUARDS=1 npm run test:e2e           # legacy e2e (bypass sleep lint)
 npm run test:v2                                     # v2 unit (tier-1 + tier-2)
-# e2e:v2 — now a single reusable runner (tracks tests-map.json, not a frozen list):
+# Historical e2e:v2 runner (then tracked tests-map.json rather than a frozen list):
 npm run test:e2e:v2                    # build + A(node) → B(e2e) → C(browser), retries:0
 node scripts/testing-v2/run-e2e-v2.mjs --group A|B|C   # one group at a time
 node scripts/testing-v2/run-e2e-v2.mjs --list          # show classification + exclusions

@@ -1,5 +1,12 @@
 # RCA: primary `node_modules` half-wipe (general / dev-time)
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 > **Scope.** This doc has **two** parts:
 > 1. **The general / dev-time half-wipe** (§1–§12) — the primary checkout's
 >    `node_modules` intermittently gets half-wiped while the dev stack is live, bricking
@@ -356,16 +363,14 @@ Bobbit, its harness/watchdog, and the development stack are fully stopped.
 Docker sandbox behavior is unchanged: its Pi runtime remains baked into the image. Support
 Assistant offline grounding is also independent of the retired runtime tree: the `package.json`
 `files` allowlist, `src/server/agent/bundled-paths.ts`, prompt path substitution, and
-`tests2/core/support-packaging.test.ts` remain unchanged. The chaos junction-safety
-implementation and `tests2/core/chaos-worktree-safety.test.ts` address the separate mechanism
-preserved in §13 and must not be weakened.
+`tests/unit/core/support-packaging.unit.test.ts` remain unchanged. The chaos junction-safety
+implementation described in §13 addresses a separate historical mechanism and must not be weakened.
 
 ---
 
 ## 12. Focused regression coverage
 
-`tests2/core/node-modules-ring-fence.test.ts` retains its historical filename but now pins the
-NFS-safe startup policy with temporary fixtures and injected seams. It does not simulate NFS,
+`tests/unit/core/node-modules-ring-fence.unit.test.ts` pins the NFS-safe startup policy with temporary fixtures and injected seams. It does not simulate NFS,
 run real npm, access the network, or mutate the repository's installed dependencies.
 
 Coverage verifies:
@@ -486,8 +491,7 @@ delete when a junction target resolves inside the removal path.
 
 #### Regression test
 
-`tests2/core/chaos-worktree-safety.test.ts` (temp-FS only, no git/network — stays in the
-external-free core tier) pins the invariant: `unlinkReparsePoint` / `cleanupChaosRoot` remove a
+The regression test present at that revision (temp-FS only, with no Git or network) pinned the invariant: `unlinkReparsePoint` / `cleanupChaosRoot` remove a
 `node_modules` junction pointing at an external sentinel dir while the sentinel and its marker
 file **survive**, and asserts `ensureNodeModulesJunction` is no longer defined (so the
 in-worktree junction can never be reintroduced). It fails against the pre-fix HEAD and passes

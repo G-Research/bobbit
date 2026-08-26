@@ -1,5 +1,12 @@
 # Consolidation Assertion-Parity Audit — 151 `legacy-pending` browser specs
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 **Task:** 92adf324 · **Scope:** every `tests2/tests-map.json` entry with `method: "legacy-pending"`
 (151 legacy browser E2E specs consolidated into smoke journeys). For each legacy spec this audit
 compares its meaningful assertions against the assertions actually present in its replacement

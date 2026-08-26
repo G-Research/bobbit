@@ -1,5 +1,12 @@
 # Restored integration topology and contention evidence
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 > **Historical evidence.** This document preserves an intermediate lane/shard experiment. Its temporary Pi-discovery relocation was later reverted; the shipped Vitest E2E set now contains `team-manager.test.ts`, `marketplace-install.test.ts`, and the native real-filesystem `orphan-tool-result-rehydration-boundaries.test.ts`. See [`../unit-gate.md`](../unit-gate.md).
 
 **Date:** 2026-07-15

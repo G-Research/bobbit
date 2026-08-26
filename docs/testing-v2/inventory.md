@@ -1,20 +1,15 @@
 # Test Suite v2 — Legacy Inventory (Gate 1)
 
-Machine-generated classification of every legacy test file into the v2 tier
-buckets, plus the smoke-journey catalogue that consolidates the retired
-browser-E2E specs. This document is the human-readable companion to
-[`tests2/tests-map.json`](../../tests2/tests-map.json).
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
 
-- **Generator:** `scripts/testing-v2/gen-inventory.mjs` (deterministic — re-run after any test add/remove/rename).
-- **Validator (the gate):** `scripts/testing-v2/check-inventory.mjs` — exits non-zero on any orphan, phantom, duplicate, invalid bucket/method, or retired-without-replacement entry.
-- **Shared census:** `scripts/testing-v2/lib-census.mjs` — enumerates `tests/**/*.{test,spec}.ts` exactly like the phase-invariant guard (`tests/test-phase-invariant.test.ts`): a recursive walk skipping `node_modules`.
+This frozen inventory classified every legacy test file into the proposed v2 tier buckets and catalogued the smoke journeys that would consolidate browser E2E specs. It accompanied the former `tests2/tests-map.json` registry and its generator, validator, and census scripts. Those files were migration machinery and have been deleted.
 
-Regenerate + validate:
-
-```bash
-node scripts/testing-v2/gen-inventory.mjs
-node scripts/testing-v2/check-inventory.mjs   # must exit 0
-```
+The counts, rules, and commands below are retained to audit the migration snapshot. Do not regenerate this document or register tests from it; current ownership is derived directly from canonical path and suffix conventions.
 
 ## Census total: 1105 files
 

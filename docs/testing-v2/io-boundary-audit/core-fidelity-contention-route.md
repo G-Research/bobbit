@@ -1,5 +1,12 @@
 # Core-fidelity route below 300 seconds
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 > **Historical profiling route.** The named lane and worker topology were retired by the direct three-worker unit gate. Current commands and projects are documented in [`../unit-gate.md`](../unit-gate.md).
 
 **Profiling reference only:** completed six-job run at **679.2s**, 7,575 passed / 1 failed. It excluded twelve formerly unit-owned integration files and is therefore not acceptance evidence.

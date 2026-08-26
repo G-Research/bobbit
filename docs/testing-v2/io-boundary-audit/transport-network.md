@@ -1,5 +1,12 @@
 # Transport and network I/O boundary audit
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 **Audit date:** 2026-07-15
 **Frozen evidence snapshot:** `4df9a35e2bd1ac5b662382189e12973fc4e1c4c2` (`MB`)
 **Policy:** no substantive coverage migration landed after `MB` may justify mocking a unit-owned I/O boundary.

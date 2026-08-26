@@ -1,5 +1,12 @@
 # Windows unit profile — 2026-07-14
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 ## Historical configuration
 
 - Windows x64, Node 24.13.1, Vitest 4.1.10.
@@ -16,7 +23,7 @@ The profiler now invokes `node_modules/vitest/vitest.mjs` directly and writes ea
 npm run test:v2:profile-windows
 
 # Profile a narrow core file. --workers may only lower the cap.
-npm run test:v2:profile-windows -- --project v2-core --workers 1 tests2/core/windows-process-profile.test.ts
+npm run test:v2:profile-windows -- --project v2-core --workers 1 tests/unit/core/windows-process-profile.unit.test.ts
 
 # Rebuild reports from an existing profile without rerunning Vitest.
 npm run test:v2:profile-windows -- --from-dir .profiles/testing-v2/windows-process-profile/<timestamp>
@@ -24,9 +31,9 @@ npm run test:v2:profile-windows -- --from-dir .profiles/testing-v2/windows-proce
 
 Projects are `v2-core`, `v2-integration`, `v2-dom`, and `v2-isolated`. The repeatable `--lane` option remains only as a backward-compatible alias for `--project`; old short values such as `core` are accepted.
 
-## August 2026 Windows unit I/O reduction
+## Historical August 2026 Windows unit I/O reduction
 
-The August work removes process boundaries where the behavior under test is policy rather than process isolation. Affected-runner policy now calls an in-process planner and executor, Hindsight policy calls the provider directly, incidental API fixtures use existing identity seams, and the Vitest coordinator creates the shared Git template once before workers adopt it. Real CLI, Git, worker, network, crash, timeout, and worktree behavior remains at explicit boundary owners.
+The August work removed process boundaries where the behavior under test was policy rather than process isolation. Affected-runner policy called an in-process planner and executor, Hindsight policy called the provider directly, incidental API fixtures used existing identity seams, and the Vitest coordinator created the shared Git template once before workers adopted it. The affected-runner portions are retained only as measurements because that runner has since been deleted.
 
 ### Revisions and method
 
@@ -51,7 +58,7 @@ The affected after rounds launched **0 Node + 10 Git** processes. All ten Git la
 
 The Hindsight provider's 20 direct cases completed in 24, 25, and 22 ms. The retained installed-provider worker smoke averaged about 1.445 s of semantic test time. The combined slice therefore retains its genuine `ModuleHost` and host-store proxy proof without paying worker startup for provider policy, payload, configuration, queue, and diagnostic cases. No `worker_threads` launch count is claimed because the profiler does not collect it.
 
-The incidental slice occupied three forks in every round and launched no fixture Git beyond the ten coordinator-bootstrap commands. Its four fixtures therefore no longer amplify repository creation. At `8cc7b01b`, the focused one-init probe additionally pinned one shared path and digest, distinct worker identities, private writable copies, an immutable shared source, unchanged ten-command audit before and after adoption, and no worker cleanup authority. In the current scheduler-independent design, that certification runs at coordinator shutdown only after the complete canonical Tier-1 inventory has executed; focused subsets intentionally do not certify incomplete evidence.
+The incidental slice occupied three forks in every round and launched no fixture Git beyond the ten coordinator-bootstrap commands. Its four fixtures therefore no longer amplify repository creation. At `8cc7b01b`, the focused one-init probe additionally pinned one shared path and digest, distinct worker identities, private writable copies, an immutable shared source, unchanged ten-command audit before and after adoption, and no worker cleanup authority. In the scheduler-independent design at that revision, certification ran at coordinator shutdown only after the complete Tier-1 inventory had executed; focused subsets intentionally did not certify incomplete evidence.
 
 The affected E2E boundary passed 2/2 tests with `retry=0` in all three rounds. External walls were 2.671, 2.607, and 2.624 s (mean 2.634 s). This small serial owner preserves CLI argv/JSON/exit behavior and real-Git committed, staged, unstaged, untracked, rename, delete, and invalid-base behavior outside Tier 1.
 

@@ -1,5 +1,12 @@
 # Cross-suite test runtime design
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 ## Why this exists
 
 The unit-runtime extraction is the reliability foundation for all automated workflow gates, not an isolated Vitest optimization. Unit, DOM, integration, browser, and legacy E2E coordinators can overlap in one checkout or on one machine. Their default user/config/cache locations otherwise collide, and timing fixes only hide that ownership bug.

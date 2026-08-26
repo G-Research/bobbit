@@ -1,10 +1,17 @@
 # Fast 3-Worker Unit Gate Design
 
-## Status and decision
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
 
-**Implemented.** This is the frozen implementation design; use [`unit-gate.md`](unit-gate.md) for the current operating model and [`fast-gate-progress.md`](fast-gate-progress.md) for qualification evidence.
+## Historical status and decision
 
-This design replaced the unit-stage lane runner with one ordinary Vitest invocation. The unit stage has one coordinator, at most three Vitest workers across all projects, no test ledger reservation, no gateway-boot lease, no lane logs, and no cost-based sharding.
+This frozen design records how the direct three-worker unit gate replaced the earlier lane runner. Its map-based ownership, affected/changed flow, old paths, retry policy, and qualification commands were later superseded by convention-based complete lanes. Use the current authorities linked above rather than implementing from this record.
+
+At the recorded revision, this design replaced the unit-stage lane runner with one ordinary Vitest invocation. The unit stage has one coordinator, at most three Vitest workers across all projects, no test ledger reservation, no gateway-boot lease, no lane logs, and no cost-based sharding.
 
 The required command is:
 
@@ -26,9 +33,9 @@ The expensive server graph had a useful foundation at that baseline:
 - `tests2/harness/server-runtime.ts::{loadServerTestRuntime, serverRuntimeMode}` selected the bundle via `BOBBIT_V2_SERVER_PREBUNDLE`.
 - `tests2/harness/gateway.ts::boot` created one gateway per worker, but then obtained `acquireGatewayBootLease()` and only integration workers received the prepared bundle.
 
-The pre-existing map-driven E2E path was reusable. `scripts/testing-v2/run-e2e-v2.mjs::classifyDaily` places legacy entries with `bucket: "daily"` and `method: "vitest-e2e"`, plus explicitly E2E-owned native tests, in Group D; `runGroupD` selects the conditional `v2-e2e-vitest` project. The current project has three approved owners.
+The pre-existing map-driven E2E path was reusable at the time. `scripts/testing-v2/run-e2e-v2.mjs::classifyDaily` placed legacy entries with `bucket: "daily"` and `method: "vitest-e2e"`, plus explicitly E2E-owned native tests, in Group D; `runGroupD` selected the conditional `v2-e2e-vitest` project. That snapshot had three approved owners.
 
-## Target architecture
+## Historical target architecture
 
 ### One process and fixed worker resolution
 
@@ -72,9 +79,9 @@ There are no heavy, source, fidelity, command, fake-command, or sharded unit pro
 
 The current 15-entry `singleForkFiles` list is not carried forward. After `withEnv`, singleton reset hooks, and worker-resolver cleanup, only demonstrated bleeders may be tagged `v2-isolated`, with a hard map audit enforcing `<= 10`. Initial candidates are the extension-host worker/module-global cases plus the `BOBBIT_DIR`/`BOBBIT_AGENT_DIR` module-top cases. Every isolated tag requires a non-empty reason; removing the underlying bleed requires moving the tag back to core.
 
-### Tests-map is the source of truth
+### Former tests-map ownership
 
-`tests2/tests-map.json` becomes authoritative for execution membership; `vitest.config.ts` must not read test source to infer fidelity. `scripts/testing-v2/gen-inventory.mjs` emits an explicit execution object for every materialized `v2Path` and every `v2Native` record:
+The design made `tests2/tests-map.json` authoritative for execution membership; that registry and its loader were later deleted. The snapshot required `vitest.config.ts` not to read test source to infer fidelity. `scripts/testing-v2/gen-inventory.mjs` emits an explicit execution object for every materialized `v2Path` and every `v2Native` record:
 
 ```json
 "execution": {
@@ -102,7 +109,7 @@ The original files retain only their real filesystem/process fidelity assertions
 
 Moved declaration names are recorded in `scripts/testing-v2/unit-declaration-semantic-map.json`. This preserves decision coverage in tier 1 while Group D retains the real-fidelity owners at the two mandated paths.
 
-## Workstreams and ownership boundaries
+## Historical workstreams and ownership boundaries
 
 ### WS1 — runner, projects, and inventory
 
@@ -127,7 +134,7 @@ Owns maintenance fixture sharing/splitting, manual-clock conversion of slow inte
 
 WS1 and WS2 can merge independently. WS3 publishes the template/guard API before WS4 migrates maintenance. The only intentional cross-workstream touch points are the one WS2 config hook, two WS3 map requests, and the WS4 reporter registration.
 
-## Data flows
+## Historical design data flows
 
 ### Content-addressed server prebundle
 
@@ -178,7 +185,7 @@ The two validation-rejection cases in `tests2/integration/maintenance-api.test.t
 
 If the combined file cannot meet 15 seconds, split by endpoint domain (for example `maintenance-api-validation.test.ts`, scan, cleanup, and session groups) while keeping every split unit-tagged. Shared helpers are non-test modules under `tests2/integration/helpers/`. The maintenance cluster target is at most 60 seconds total, and every physical test file must independently meet the 15-second budget.
 
-## Inventory and performance enforcement
+## Historical inventory and performance enforcement
 
 `scripts/testing-v2/unit-inventory-audit.mjs` is extended to enforce all of these in one report:
 
@@ -194,7 +201,7 @@ Add `tests2/harness/unit-file-budget-reporter.ts`. It records `performance.now()
 
 The standard reporter remains enabled. A retry that makes a file exceed budget still fails the budget, exposing rather than hiding a flake.
 
-## Compatibility constraints
+## Compatibility constraints at the snapshot
 
 - `npm run test:v2:changed` remains a direct `vitest --config vitest.config.ts --changed`; map-built includes must still intersect correctly with Vitest's changed-file selection. No wrapper or ledger is introduced.
 - `scripts/testing-v2/parity.mjs` continues to run all unit projects with V8 coverage. Prebundle source maps must preserve `src/server` paths and coverage totals.
@@ -217,9 +224,9 @@ Windows is the reference implementation:
 - Cleanup uses `rmSync` retries for transient sharing violations. Command retries are bounded and include captured stderr; hook failures are not expected to be rescued by Vitest retry.
 - Atomic cache publication uses same-volume rename. A losing concurrent builder validates the winner before discarding its own temporary directory.
 
-## Verification and iteration plan
+## Historical verification and iteration plan
 
-Implementation proceeds in short measured steps. After every significant merged change, run `npm run test:unit` twice and append, without rewriting history, to `docs/testing-v2/fast-gate-progress.md`:
+The implementation used the following measured procedure. It is retained to explain the qualification evidence, not as a current checklist. After every significant merged change, the team ran `npm run test:unit` twice and appended results to `docs/testing-v2/fast-gate-progress.md`:
 
 - commit SHA and Windows machine/core count;
 - cold/warm cache state;
@@ -228,7 +235,7 @@ Implementation proceeds in short measured steps. After every significant merged 
 - Vitest transform/import/test phase totals and transform+import percentage;
 - spawn-guard count (must be zero).
 
-Before signaling the unit-stage target, run in this order:
+The historical unit-stage target used this order:
 
 ```text
 npm run check
@@ -244,7 +251,7 @@ The two solo unit runs must be consecutive, green, and each at or below 300 seco
 
 Then start three independent `npm run test:unit` processes simultaneously from PowerShell using `Start-Process npm.cmd -ArgumentList 'run','test:unit' -PassThru`, with distinct redirected stdout/stderr files under `.profiles/testing-v2/fast-gate-concurrency/<timestamp>/`. Wait for all three and record each PID, exit code, Vitest duration, file count, test count, failed-suite count, failed-test count, and retry count. Acceptance is three exit codes of zero and zero failed suites/tests. Record the command, log paths, start/end timestamps, and summarized evidence in the progress document.
 
-Finally verify `node scripts/testing-v2/run-e2e-v2.mjs --list` reports the exact approved Group D owners and the inventory report shows no unapproved E2E exclusion. The team lead signals `unit-stage-target` only after the two solo and one 3x-concurrent evidence blocks are committed.
+Finally, the historical procedure verified that `node scripts/testing-v2/run-e2e-v2.mjs --list` reported the exact approved Group D owners and that the inventory report showed no unapproved E2E exclusion. This map-based verification no longer exists.
 
 ## Completion criteria
 

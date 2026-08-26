@@ -1,8 +1,13 @@
 # Test suite speed and affected selectivity
 
-Bobbit's full unit, browser, and E2E gates remain deliberately high-fidelity and multi-minute. The affected-test runner improves the developer feedback loop by executing only a conservative unit closure and reusing stable local PASS results. It does not make selective evidence authoritative and does not change the full merge gates.
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
 
-Detailed selector behavior lives in [`scripts/affected/README.md`](../../scripts/affected/README.md). This page records the current performance evidence and the remaining architectural floor.
+This page records the measured cost and selectivity of the former affected-test runner. That runner, its dependency graph, execution map, correctness harness, and local PASS cache have been removed; Bobbit now runs deterministic complete lanes. The measurements remain useful evidence for why maintaining selective execution was not worth its complexity, but they do not describe an available workflow.
 
 ## Measured full-gate baseline
 
@@ -12,7 +17,7 @@ Measurement snapshot: goal revision `e0391f090` on a Windows host, 2026-08-04. C
 |---|---:|---:|
 | `npm run test:unit` | 1,035 passed files + 3 skipped = **1,038**; 9,557 passed tests + 20 skipped = **9,577** | **193.37 s** |
 
-Browser and E2E were not remeasured for this unit-selector snapshot; their authoritative commands and CI gates are unchanged. The unit suite uses one Vitest coordinator and a fixed three-worker cap. Increasing local concurrency is not the affected runner's safety mechanism: selection reduces the set, while the complete gate remains the backstop.
+Browser and E2E were not remeasured for this unit-selector snapshot. At that revision, the unit suite used one Vitest coordinator and a fixed three-worker cap. Increasing local concurrency was not the affected runner's safety mechanism: selection reduced the set, while the complete gate remained the backstop.
 
 ## Measured selection proof
 
@@ -41,7 +46,7 @@ These rows replay historical change records through the graph and inventory at `
 
 “Plan time” above is the proof row's classification timer. It excludes graph construction, Git history reads, cache work, and Vitest execution. Within this current-checkout replay, `RUN-ALL` rows report the complete 1,038-file executable plan; the proof never substitutes a smaller graph-only diagnostic for execution.
 
-The historical proof is not a correctness run. It demonstrates current-rule classification and catches blind zeroes, but only the [correctness qualification](../../scripts/affected/README.md#proof-and-correctness-qualification) builds each plan from exact revision files and compares it with independent Vitest and full-run evidence.
+The historical proof is not a correctness run. It demonstrated the selector rules then in effect and caught blind zeroes; the now-removed correctness qualification built each plan from exact revision files and compared it with independent Vitest and full-run evidence.
 
 ### Exact-revision plan measurements
 
@@ -100,9 +105,9 @@ npm run test:affected -- --changed tests2/core/affected-doc-classification.test.
 
 The warm run still pays graph and fingerprint cost. This single small case is about **3.5×** faster by runner wall time; it is not evidence of a general 10× improvement. Test-file cost varies widely, and the historical bounded average still selects 506 of 1,038 files. Claims about end-to-end speed must include Vitest execution on the actual change set rather than extrapolate from selected counts.
 
-## Windows affected-runner execution overhead
+## Historical Windows affected-runner execution overhead
 
-Selector breadth and runner overhead are separate costs. The measurements above describe how many tests a change selects; the August 2026 I/O work reduces the cost of deciding, executing, and certifying that plan by moving policy matrices behind an in-process planner/executor seam. One E2E owner retains the CLI and real-Git boundary, so the faster unit matrix does not weaken change-collection evidence.
+Selector breadth and runner overhead were separate costs. The measurements above describe how many tests a change selected; the August 2026 I/O work reduced the cost of deciding, executing, and certifying that plan by moving policy matrices behind an in-process planner/executor seam. One E2E owner retained the CLI and real-Git boundary, so the faster unit matrix did not weaken change-collection evidence.
 
 At exact stacked baseline `626f3cf1`, the two affected-runner files took 12.9 s of profiler wall, 9.56 s of Vitest duration, and 17.04 s of cumulative file time. The historical split at `094d14ae` remains the audited 29.5 s comparison point. Three clean retry-free Windows rounds after `8cc7b01b` measured:
 
@@ -117,32 +122,32 @@ The after rounds launched no Node process and only the shared coordinator's ten 
 
 See [the Windows unit profile](windows-unit-profile-2026-07-14.md#august-2026-windows-unit-io-reduction) for commands, raw evidence paths, Hindsight and incidental-Git results, one-init proof, caveats, and the exact retained-boundary table.
 
-## Why bounded sets remain large
+## Why bounded sets remained large
 
-The selector has removed the previous blind spots without pretending that Bobbit has fine-grained domain boundaries:
+The selector removed the previous blind spots without pretending that Bobbit had fine-grained domain boundaries:
 
 - Gateway tests depend on the transitive server runtime entry, including imported shared modules. This is sounder and narrower than treating all `src/server/**` as equivalent, but a widely imported runtime file still reaches many boot tests.
 - Happy-DOM tests depend on the UI entry boundary. The app shell and global state keep many UI files connected.
 - Shipped role/tool/skill/pack/workflow/config inputs are intentionally connected to production loaders and direct policy, prompt, and budget canaries.
 - Vitest configuration, lockfiles, TypeScript configuration, dependency topology, selector/runtime code, unknown infrastructure, and unresolved executable old edges deliberately invalidate the entire unit suite. Git records are collected before graph construction, so tombstones retain declared non-code ownership for deletes and rename old sides; they do not claim to reconstruct a deleted source file's former static imports.
 
-Over-selection costs time; under-selection creates false confidence. The current gate chooses the former whenever it lacks a maintainable proof.
+Over-selection cost time; under-selection created false confidence. The former gate chose the former whenever it lacked a maintainable proof.
 
-## Correctness and authority
+## Historical correctness model
 
-The affected runner is the default local and PR feedback path. The full unit suite remains authoritative on pull requests and pushes to the primary branch, and browser/E2E workflow gates are unchanged. A periodic or nightly qualification must run the complete gates; `.profiles/test-cache/` is never portable evidence and is not shared through CI.
+At this snapshot, the affected runner was the default local feedback path while the complete unit suite remained authoritative. Its checkout-local `.profiles/test-cache/` state was never portable evidence or shared through CI. Both the selective runner and this cache contract have since been removed.
 
-The expensive correctness harness materializes each fixed historical sample in an invocation-owned worktree and builds its plan from the exact revision files, revision-local execution-map loader, and historical inventory. It audits current selector declarations against that tree: absent future declarations are ignored, live unresolved/dynamic unit consumers are conservatively quarantined into non-doc bounded plans, and other live graph or ownership incompatibility escalates to `RUN-ALL`. Only revision loader or graph construction incompatibility may become a deliberate fallback; classification, compatibility, and selector exceptions fail the qualification once graph construction succeeds.
+The expensive correctness harness materialized each fixed historical sample in an invocation-owned worktree and built its plan from exact revision files, a revision-local execution-map loader, and the historical inventory. It audited selector declarations against that tree: absent future declarations were ignored, live unresolved or dynamic unit consumers were quarantined into non-documentation bounded plans, and other graph or ownership incompatibility escalated to `RUN-ALL`. These details explain the measured maintenance cost; they are not current runner behavior.
 
-The harness runs Vitest's independent `--changed` mode and a full retry-free unit suite, attributes changed-run failures against a clean baseline when needed, and fails on any required file absent from the affected plan. Changed and baseline full JSON reports must each exactly cover their own revision's authoritative unit inventory. Native reports may cover a subset but cannot name out-of-inventory files, and all reports must agree with process exit status. Missing, partial, crashed, or contradictory evidence fails before comparison. Its evidence validation, exact-revision provenance, isolation, comparison, and owned cleanup are pinned in the fast unit suite; the multi-install/full-run sample belongs in manual or periodic qualification.
+The harness ran Vitest's independent `--changed` mode and a full retry-free unit suite, attributed changed-run failures against a clean baseline when needed, and failed on any required file absent from the affected plan. Missing, partial, crashed, or contradictory evidence failed before comparison. This machinery was deleted when convention-based complete lanes replaced affected selection.
 
-## Remaining improvement path
+## Improvement path considered at the snapshot
 
-Phase 2 production-domain extraction remains separate work. Smaller reliable selections require fewer tests to boot the whole gateway or import the whole UI:
+Phase 2 production-domain extraction was proposed as separate work. Smaller reliable selections would have required fewer tests to boot the whole gateway or import the whole UI:
 
 1. Extract pure workflow, gate, config-cascade, proposal, scheduling, session, and reducer decisions behind explicit module boundaries.
 2. Move decision coverage to fast direct tests while retaining a small set of gateway/UI wiring contracts.
 3. Split broad runtime boundaries only when a new dependency contract and regression evidence make that narrower attribution sound.
 4. Re-measure selected counts and actual wall time after each extraction; do not weaken the fail-closed rules to manufacture a faster headline.
 
-The current result is trustworthy selective feedback, not a claim that the coupled suite has become a true test pyramid.
+The recorded result was trustworthy selective feedback, not a claim that the coupled suite had become a true test pyramid.

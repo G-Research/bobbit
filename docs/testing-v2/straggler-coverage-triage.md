@@ -1,5 +1,12 @@
 # Straggler coverage triage — the 51 no-`v2Path` specs (switchover gate)
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 **Purpose.** Definitive port-vs-accept ledger for every legacy test file classified
 migrate-intended (`adapter`/`codemod`/`rewrite`) that reached switchover **without a
 `v2Path`** — i.e. deleted from `tests/**` but with no recorded tests2 replacement.

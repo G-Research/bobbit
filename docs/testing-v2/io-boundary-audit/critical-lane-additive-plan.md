@@ -1,5 +1,12 @@
 # Critical-lane decomposition and additive feasibility
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../../scripts/testing/layout-policy.mjs).
+
 **Decision date:** 2026-07-15
 **Profiling reference only:** the **685.8s** run had three failures and excluded twelve formerly unit-owned integration files; it is not acceptance evidence.
 **Constraint:** frozen scheduling/config/timeouts/retries/test tiers and merge-base boundary ownership.

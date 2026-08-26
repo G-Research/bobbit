@@ -1,5 +1,12 @@
 # Memfs unit store migration report
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 ## Summary
 
 The memfs migration reduces real filesystem IO in the `tests2/core` unit lane by moving fs-only store and persistence tests from temp directories to the existing `FsLike` seam. Unit tests should exercise store logic against `tests2/harness/mem-fs.ts::createMemFs()`; real-disk behavior stays covered by small integration proofs.
@@ -147,17 +154,17 @@ Focused native tests remain in `tests2/core/goal-store-sqlite.test.ts`, `task-st
 
 Packed-consumer native binding load and write/read/close belong to bundle qualification, not the ordinary unit critical path. See [Goal and task store SQLite persistence](../design/goal-task-store-sqlite-persistence.md#test-ownership).
 
-### Session store real filesystem — `tests2/integration/session-store-real-fs.test.ts`
+### Historical session-store real-filesystem owner
 
-New file (registered in `tests2/tests-map.json`) with three canonical real-fs cases against the default `realFs`:
+At this snapshot, `tests2/integration/session-store-real-fs.test.ts` was registered in the former test map with three real-filesystem cases against the default `realFs`:
 
 - `saveNow` persists `sessions.json` through real fs and leaves no `.tmp` after the atomic rename.
 - Real `.bak.N` backup rotation, and restore from `.bak.1` after a corrupt primary.
 - Real nested transcript directory traversal (orphan-cleanup walk), ignoring tracked/old `.jsonl` files by real `mtime`.
 
-### CostTracker real filesystem — `tests2/integration/cost-tracker-real-fs.test.ts`
+### Historical CostTracker real-filesystem owner
 
-`CostTracker`'s default `realFs` persistence now has a dedicated canonical integration test (registered in `tests2/tests-map.json`): it constructs a `CostTracker` against a real temp dir with the default (uninjected) fs and asserts `session-costs.json` is persisted and reloaded through `realFs`. This is the fidelity proof the design plan called for after `cost-tracker.test.ts` moved to memfs.
+At this snapshot, `CostTracker`'s default `realFs` persistence had a dedicated integration test at `tests2/integration/cost-tracker-real-fs.test.ts`, recorded by the former test map. It constructed a `CostTracker` against a real temporary directory with the default uninjected filesystem and asserted that `session-costs.json` persisted and reloaded through `realFs`. This is the fidelity proof the design plan called for after `cost-tracker.test.ts` moved to memfs.
 
 The gateway-backed integration tests `tests2/integration/compact-cost-ws.test.ts` and `tests2/integration/cost-update-cache-hit.test.ts` additionally exercise the default filesystem path end to end via a real gateway. The memfs unit tests in `cost-tracker.test.ts` therefore cover the store logic without duplicating disk fidelity.
 

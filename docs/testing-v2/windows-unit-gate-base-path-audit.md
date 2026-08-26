@@ -1,5 +1,12 @@
 # Windows unit-gate base-path audit
 
+> **Historical layout notice.** This document preserves migration, incident, or measurement
+> evidence from before Bobbit adopted the canonical `tests/` hierarchy. Old `tests2/`
+> and non-semantic test paths, map/affected-selector references, commands, counts, and
+> lane names below describe the recorded revision; they are not current instructions.
+> Keep measured citations unchanged. For current placement and discovery, use [Testing
+> Strategy](../testing-strategy.md) and [`scripts/testing/layout-policy.mjs`](../../scripts/testing/layout-policy.mjs).
+
 ## Context
 
 This audit records the Windows diagnosis and qualification for the base-path gateway integration coverage. The governing constraints remain the [unit-gate operating model](unit-gate.md), including its 25-second per-file wall budget, and the fixture ownership rules in [Cross-OS test authoring](cross-os-test-authoring.md).
