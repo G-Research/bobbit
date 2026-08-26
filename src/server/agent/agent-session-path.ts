@@ -112,6 +112,30 @@ export function ensurePrivateSessionRoot(root: string, trustedParent: string): s
 	return target;
 }
 
+/** Async variant for request, recovery, and cleanup paths. */
+export async function ensurePrivateSessionRootAsync(root: string, trustedParent: string): Promise<string> {
+	const parent = path.resolve(trustedParent);
+	const target = path.resolve(root);
+	const relative = path.relative(parent, target);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Private session root escapes its trusted parent");
+	await fs.promises.mkdir(parent, { recursive: true });
+	let cursor = parent;
+	for (const component of relative.split(path.sep)) {
+		cursor = path.join(cursor, component);
+		try {
+			const stat = await fs.promises.lstat(cursor);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Private session root contains an unsafe filesystem entry");
+		} catch (error: any) {
+			if (error?.code !== "ENOENT") throw error;
+			try { await fs.promises.mkdir(cursor, { mode: 0o700 }); }
+			catch (mkdirError: any) { if (mkdirError?.code !== "EEXIST") throw mkdirError; }
+			const created = await fs.promises.lstat(cursor);
+			if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("Private session root creation was replaced");
+		}
+	}
+	return target;
+}
+
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 
 /** Canonical path relative to Pi's primary sessions coordinate. */

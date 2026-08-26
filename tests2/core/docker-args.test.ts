@@ -24,6 +24,11 @@ import {
 	_resetDockerLimitsCache,
 } from "../../src/server/agent/project-sandbox.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
+import {
+	activeAgentSessionsDir,
+	sessionStateSessionsRoot,
+	sessionTranscriptRoot,
+} from "../../src/server/agent/agent-session-path.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 import {
 	initializeAgentDirState,
@@ -38,7 +43,7 @@ let restoreFs: () => void;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"chmodSync", "existsSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
+		"chmodSync", "existsSync", "lstatSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
 		"statSync", "symlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
@@ -126,7 +131,11 @@ describe("buildDockerRunArgs", () => {
 		}, NOOP_COMMAND_RUNNER);
 
 		assert.ok(args.includes(`${toDockerPath(path.join(stateDir, "preview", "runtime-session"))}:/bobbit/preview`));
+		assert.ok(args.includes(`${toDockerPath(sessionStateSessionsRoot(stateDir, "runtime-session"))}:/bobbit-state/sessions`));
+		assert.ok(args.includes(`${toDockerPath(sessionTranscriptRoot("runtime-session", activeAgentSessionsDir()))}:/home/node/.bobbit/agent/sessions`));
 		assert.ok(!args.some((arg) => arg.endsWith(":/bobbit/preview-root")));
+		assert.ok(!args.includes(`${toDockerPath(path.join(stateDir, "sessions"))}:/bobbit-state/sessions`));
+		assert.ok(!args.includes(`${toDockerPath(activeAgentSessionsDir())}:/home/node/.bobbit/agent/sessions`));
 	});
 
 	it("retains the shared preview root for a project control container without a session identity", () => {
@@ -180,8 +189,13 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_ROLE_LABEL}=${SESSION_RUNTIME_ROLE_VERSION}`));
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_PROJECT_LABEL}=${projectId}`));
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_SESSION_LABEL}=${sessionId}`));
-		assert.ok(runArgs.includes(`${toDockerPath(path.join(projectDir, ".bobbit", "state", "preview", sessionId))}:/bobbit/preview`));
+		const runtimeStateDir = path.join(projectDir, ".bobbit", "state");
+		assert.ok(runArgs.includes(`${toDockerPath(path.join(runtimeStateDir, "preview", sessionId))}:/bobbit/preview`));
+		assert.ok(runArgs.includes(`${toDockerPath(sessionStateSessionsRoot(runtimeStateDir, sessionId))}:/bobbit-state/sessions`));
+		assert.ok(runArgs.includes(`${toDockerPath(sessionTranscriptRoot(sessionId, activeAgentSessionsDir()))}:/home/node/.bobbit/agent/sessions`));
 		assert.ok(!runArgs.some((arg) => arg.endsWith(":/bobbit/preview-root")));
+		assert.ok(!runArgs.includes(`${toDockerPath(path.join(runtimeStateDir, "sessions"))}:/bobbit-state/sessions`));
+		assert.ok(!runArgs.includes(`${toDockerPath(activeAgentSessionsDir())}:/home/node/.bobbit/agent/sessions`));
 		assert.ok(!runArgs.some((arg) => arg.startsWith("bobbit-project=")), "runtime must not be discoverable as the project control container");
 		assert.ok(!runArgs.includes("OPENAI_API_KEY"));
 		assert.ok(!runArgs.some((arg) => arg.includes("pid1-secret")));
