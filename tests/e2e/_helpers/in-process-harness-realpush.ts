@@ -41,7 +41,6 @@ installRunIsolation();
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
 // Keep runtime imports pointed at the built server while deriving their types

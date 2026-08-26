@@ -74,7 +74,8 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 			for (let i = 0; i < 300 && pool.size === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
-			assert.equal(pool.size, 1, "pool should have one multi-repo entry after fill");
+			const filledSize = pool.size;
+			assert.equal(filledSize, 1, "pool should have one multi-repo entry after fill");
 
 			const claim = await pool.claim("session/abcd1234");
 			assert.ok(claim, "claim should succeed");

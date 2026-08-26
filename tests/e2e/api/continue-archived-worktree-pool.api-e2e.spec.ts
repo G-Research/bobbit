@@ -19,6 +19,13 @@ test.use({ enableWorktreePool: true });
 type PoolEntrySnapshot = { branchName: string; worktreePath: string };
 type RuntimeCwdRecord = { type: "system" | "session"; cwd: string };
 
+function requireSessionId(value: unknown, context: string): string {
+	if (typeof value !== "object" || value === null || !("id" in value) || typeof value.id !== "string" || value.id.length === 0) {
+		throw new Error(`${context} response must contain a non-empty string session id`);
+	}
+	return value.id;
+}
+
 async function sendPromptAndWait(id: string, text: string): Promise<void> {
 	const ws = await connectWs(id);
 	try {
@@ -101,13 +108,15 @@ function ensureRuntimeCwdMetadata(jsonlPath: string, cwd: string, sessionId: str
 async function readyPoolEntry(gateway: any, projectId: string): Promise<PoolEntrySnapshot> {
 	const ready = await waitForPool(projectId, 1, 45_000);
 	expect(ready, "project worktree pool should expose a ready entry before continue").toBeGreaterThan(0);
-	return pollUntil(() => {
-		const pool = gateway.sessionManager.getWorktreePool(projectId) as any;
+	const snapshot = await pollUntil(() => {
+		const pool = gateway.sessionManager.getWorktreePool(projectId);
 		const entry = pool?.pool?.[0];
 		return typeof entry?.branchName === "string" && typeof entry?.worktreePath === "string"
 			? { branchName: entry.branchName, worktreePath: entry.worktreePath }
 			: null;
 	}, { timeoutMs: 10_000, intervalMs: 100, label: "ready pool entry is observable" });
+	if (snapshot === null) throw new Error("ready pool entry poll returned without an observable entry");
+	return snapshot;
 }
 
 test.describe("Continue-Archived worktree pool", () => {
@@ -132,7 +141,7 @@ test.describe("Continue-Archived worktree pool", () => {
 			});
 			const sourceBody = await sourceResp.text();
 			expect(sourceResp.status, sourceBody).toBe(201);
-			srcId = JSON.parse(sourceBody).id;
+			srcId = requireSessionId(JSON.parse(sourceBody), "source session creation");
 
 			const srcRec = await pollUntil(async () => {
 				const recResp = await apiFetch(`/api/sessions/${srcId}`);
@@ -176,7 +185,7 @@ test.describe("Continue-Archived worktree pool", () => {
 			});
 			const continueBody = await continueResp.text();
 			expect(continueResp.status, continueBody).toBe(201);
-			newId = JSON.parse(continueBody).id;
+			newId = requireSessionId(JSON.parse(continueBody), "continue archived");
 			expect(newId).toBeTruthy();
 			expect(newId).not.toBe(srcId);
 

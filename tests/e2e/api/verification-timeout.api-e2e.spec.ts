@@ -88,6 +88,7 @@ async function createWorkflow(id: string, timeout: number): Promise<void> {
 
 async function deleteWorkflowSafe(id: string): Promise<void> {
 	const projectId = await defaultProjectId();
+	if (!projectId) throw new Error(`cannot delete workflow ${id}: default project id is unavailable`);
 	await apiFetch(`/api/workflows/${id}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 }
 

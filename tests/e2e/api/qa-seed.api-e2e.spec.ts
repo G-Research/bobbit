@@ -12,6 +12,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { importBuiltServerModule } from "../_helpers/import-built-server-module.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
@@ -64,10 +65,10 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 
-		const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
-		const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
-		const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
-		const { createGateway } = await import("../../../dist/server/server.js");
+		const { setProjectRoot } = await importBuiltServerModule<typeof import("../../../src/server/bobbit-dir.js")>("../../../dist/server/bobbit-dir.js");
+		const { scaffoldBobbitDir } = await importBuiltServerModule<typeof import("../../../src/server/scaffold.js")>("../../../dist/server/scaffold.js");
+		const { loadOrCreateToken } = await importBuiltServerModule<typeof import("../../../src/server/auth/token.js")>("../../../dist/server/auth/token.js");
+		const { createGateway } = await importBuiltServerModule<typeof import("../../../src/server/server.js")>("../../../dist/server/server.js");
 
 		setProjectRoot(workDir);
 		scaffoldBobbitDir(workDir);

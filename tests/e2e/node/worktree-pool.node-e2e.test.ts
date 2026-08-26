@@ -372,7 +372,7 @@ describe.skip("WorktreePool — retired orphan reclaim", () => {
 				await inspectionGate.promise;
 				activeInspections--;
 			},
-			opendir: async (dirPath) => {
+			opendir: async (dirPath: string) => {
 				assert.equal(dirPath, configuredRoot);
 				return {
 					read: async () => entries[readCalls++] ?? null,
@@ -885,12 +885,12 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		const initializing = pool.initialize();
 		assert.equal(resolutionAttempts, 1);
 		assert.equal(await pool.claim("session/during-init"), null, "claim must use the cold fallback while initialization is pending");
-		assert.deepEqual(mutationCommands, [], "a fenced claim must not rename a branch or move a worktree");
+		assert.equal(mutationCommands.length, 0, "a fenced claim must not rename a branch or move a worktree");
 
 		firstResolution.reject(new Error("first path resolution failed"));
 		await assert.rejects(initializing, /first path resolution failed/);
 		assert.equal(await pool.claim("session/after-failure"), null, "claim must remain fenced after the failed attempt settles");
-		assert.deepEqual(mutationCommands, [], "the failed-attempt gap must execute no claim mutations");
+		assert.equal(mutationCommands.length, 0, "the failed-attempt gap must execute no claim mutations");
 
 		await pool.initialize();
 		assert.equal(resolutionAttempts, 2, "explicit initialize must retry a rejected path resolution");

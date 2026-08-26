@@ -15,6 +15,7 @@ import {
 	waitForSessionStatus,
 } from "../_helpers/e2e-setup.js";
 import { pollUntil } from "../_helpers/test-utils/cleanup.js";
+import { importBuiltServerModule } from "../_helpers/import-built-server-module.js";
 
 function messageText(message: any): string {
 	if (typeof message?.content === "string") return message.content;
@@ -397,7 +398,7 @@ test.describe.serial("message author prefix restart projection", () => {
 			expect(messageText(resumed.data.message)).toBe(systemBaseText);
 			expect(countOccurrences(messageText(resumed.data.message), systemPrefix)).toBe(1);
 
-			const { prepareVisibleAgentEvent } = await import("../../../dist/server/agent/session-manager.js");
+			const { prepareVisibleAgentEvent } = await importBuiltServerModule<typeof import("../../../src/server/agent/session-manager.js")>("../../../dist/server/agent/session-manager.js");
 			const clonedProjectedEvent = JSON.parse(JSON.stringify(systemEntry.event));
 			const projectedAgain = prepareVisibleAgentEvent(targetSession, clonedProjectedEvent) as any;
 			expect(projectedAgain.message.author).toEqual({ kind: "system", id: "system:bobbit", label: "Bobbit" });

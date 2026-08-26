@@ -175,6 +175,7 @@ async function waitForGateway(
 		return { kind: "ready" };
 	}, { timeoutMs, intervalMs: 100, label: `gateway healthy on :${port}` });
 
+	if (result === null) throw new Error(`gateway readiness poll on :${port} completed without a result`);
 	if (result.kind === "failed") throw new Error(result.message);
 }
 
