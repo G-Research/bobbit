@@ -24,7 +24,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { bobbitDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
-import { activeAgentSessionsDir } from "./agent-session-path.js";
+import {
+	activeAgentSessionsDir,
+	ensurePrivateSessionRoot,
+	sessionStateSessionsRoot,
+	sessionTranscriptRoot,
+} from "./agent-session-path.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { ensureSandboxAgentAuthFile } from "./host-tokens.js";
 import { BUILTIN_PACKS_CONTAINER_DIR, GLOBAL_USER_MARKET_PACKS_CONTAINER_DIR, PROJECT_MARKET_PACKS_CONTAINER_DIR, SERVER_MARKET_PACKS_CONTAINER_DIR, toDockerPath } from "./rpc-bridge.js";
@@ -366,18 +371,24 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
 	if (stateDir) {
 		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
-			const hostPath = path.join(stateDir, sub);
-			fs.mkdirSync(hostPath, { recursive: true });
+			const sharedHostPath = path.join(stateDir, sub);
+			const hostPath = sub === "sessions" && sessionId
+				? ensurePrivateSessionRoot(sessionStateSessionsRoot(stateDir, sessionId), sharedHostPath)
+				: sharedHostPath;
+			if (!(sub === "sessions" && sessionId)) fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
 			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
 		}
 	}
 
-	// Host agent sessions dir — mount ONLY sessions, not the full agent dir, to
-	// prevent sandboxed agents from accessing host auth.json credentials.
+	// A session execution runtime receives only its deterministic owner root.
+	// The trusted project control container intentionally retains the broad root.
 	const hostAgentDir = globalAgentDir();
-	const hostSessionsDir = activeAgentSessionsDir();
-	fs.mkdirSync(hostSessionsDir, { recursive: true });
+	const sharedSessionsDir = activeAgentSessionsDir();
+	const hostSessionsDir = sessionId
+		? ensurePrivateSessionRoot(sessionTranscriptRoot(sessionId), sharedSessionsDir)
+		: sharedSessionsDir;
+	if (!sessionId) fs.mkdirSync(hostSessionsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(hostSessionsDir)}:/home/node/.bobbit/agent/sessions`);
 
 	// Mount models.json (read-only) so the agent can discover available models.

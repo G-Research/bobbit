@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-transcript-roots.test.ts",
+      "reason": "Focused security coverage for deterministic owner roots, exact session/control mounts, mount attestation, and owner-aware transcript publication and translation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/uploaded-attachment-context.test.ts",
       "reason": "Pure unit coverage for model-facing context generated from uploaded text and arbitrary binary document metadata.",
       "execution": {

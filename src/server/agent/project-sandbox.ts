@@ -29,7 +29,12 @@ import {
 	validatedE2ERunId,
 	type PackLocalDataMountPlan,
 } from "./docker-args.js";
-import { activeAgentSessionsDir } from "./agent-session-path.js";
+import {
+	activeAgentSessionsDir,
+	sessionStateSessionsRoot,
+	sessionTranscriptRoot,
+	trustedAgentSessionsRoots,
+} from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
@@ -49,7 +54,8 @@ const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
 
 export const SESSION_RUNTIME_ROLE_LABEL = "bobbit-session-runtime";
-export const SESSION_RUNTIME_ROLE_VERSION = "1";
+export const SESSION_RUNTIME_ROLE_VERSION = "2";
+const LEGACY_SESSION_RUNTIME_ROLE_VERSIONS = new Set(["1"]);
 export const SESSION_RUNTIME_PROJECT_LABEL = "bobbit-runtime-project";
 export const SESSION_RUNTIME_SESSION_LABEL = "bobbit-runtime-session";
 export const SESSION_RUNTIME_MEMORY_LIMIT = "4g";
@@ -114,6 +120,10 @@ export interface StateDirMountExpectation {
 
 export interface SessionPreviewMountExpectation extends StateDirMountExpectation {
 	sessionId: string;
+}
+
+export interface SessionTranscriptMountExpectation extends SessionPreviewMountExpectation {
+	agentSessionsRoot?: string;
 }
 
 /** Live project-aware resolver; callers must not snapshot winning pack mounts. */
@@ -226,12 +236,14 @@ export function getAgentDirMountStaleness(
 
 export function getStateDirMountStaleness(
 	mounts: DockerMountInfo[] | unknown,
-	expected: StateDirMountExpectation,
+	expected: StateDirMountExpectation & { sessionId?: string },
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
 	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 		const destination = `/bobbit-state/${sub}`;
-		const hostPath = path.join(expected.stateDir, sub);
+		const hostPath = sub === "sessions" && expected.sessionId
+			? sessionStateSessionsRoot(expected.stateDir, expected.sessionId)
+			: path.join(expected.stateDir, sub);
 		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
 		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
 		const compatible = stateMounts.some((mount) => {
@@ -241,6 +253,49 @@ export function getStateDirMountStaleness(
 		if (!compatible) {
 			const mode = readOnly ? "read-only" : "writable";
 			return { stale: true, reason: `state mount ${destination} does not match the active ${mode} state directory` };
+		}
+	}
+	return { stale: false };
+}
+
+/** Require exact writable owner transcript/state binds and no shared or sibling exposure. */
+export function getSessionTranscriptMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: SessionTranscriptMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	const broadAgentRoots = [expected.agentSessionsRoot ?? activeAgentSessionsDir(), ...trustedAgentSessionsRoots()];
+	const agentRoot = sessionTranscriptRoot(expected.sessionId, expected.agentSessionsRoot ?? activeAgentSessionsDir());
+	const broadStateRoot = path.join(expected.stateDir, "sessions");
+	const stateRoot = sessionStateSessionsRoot(expected.stateDir, expected.sessionId);
+	const contracts = [
+		{ destination: CONTAINER_AGENT_SESSIONS_DIR, source: agentRoot, label: "agent transcript" },
+		{ destination: "/bobbit-state/sessions", source: stateRoot, label: "state sessions" },
+	] as const;
+	const accepted = new Set<DockerMountInfo>();
+	for (const contract of contracts) {
+		const matching = mounts.filter(mount => normalizeContainerMountDestination(mount?.Destination) === contract.destination);
+		if (matching.length !== 1) return { stale: true, reason: `${matching.length ? "duplicate" : "missing"} ${contract.label} mount` };
+		const mount = matching[0];
+		if (mount.Type !== "bind" || !mountSourceMatches(mount.Source, contract.source)) {
+			return { stale: true, reason: `${contract.label} mount source does not match this session` };
+		}
+		if (mount.RW !== true || isMountReadOnly(mount)) return { stale: true, reason: `${contract.label} mount is not writable` };
+		accepted.add(mount);
+		try {
+			const stat = fs.lstatSync(contract.source);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) return { stale: true, reason: `${contract.label} source is unsafe` };
+		} catch {
+			return { stale: true, reason: `${contract.label} source is unavailable` };
+		}
+	}
+	for (const mount of mounts) {
+		if (accepted.has(mount)) continue;
+		if (broadAgentRoots.some(root => mountSourceIsWithin(mount.Source, root))) {
+			return { stale: true, reason: "session runtime exposes a shared, sibling, or historical agent transcript root" };
+		}
+		if (mountSourceIsWithin(mount.Source, broadStateRoot)) {
+			return { stale: true, reason: "session runtime exposes a shared or sibling state sessions root" };
 		}
 	}
 	return { stale: false };
@@ -585,6 +640,7 @@ export class ProjectSandbox {
 
 		try {
 			await this._initContainer();
+			await this._removeLegacySessionRuntimes();
 			this._status = "ready";
 			this._readyResolve!();
 		} catch (err: any) {
@@ -1959,7 +2015,8 @@ export class ProjectSandbox {
 		if (!inspection || inspection.Id !== containerId) return null;
 		const labels = inspection.Config?.Labels;
 		if (!labels || labels["bobbit-project"] !== undefined) return null;
-		if (labels[SESSION_RUNTIME_ROLE_LABEL] !== SESSION_RUNTIME_ROLE_VERSION) return null;
+		const version = labels[SESSION_RUNTIME_ROLE_LABEL];
+		if (version !== SESSION_RUNTIME_ROLE_VERSION && !LEGACY_SESSION_RUNTIME_ROLE_VERSIONS.has(version ?? "")) return null;
 		if (labels[SESSION_RUNTIME_PROJECT_LABEL] !== this.options.projectId) return null;
 		if (this.e2eRunId && labels["bobbit-e2e-run"] !== this.e2eRunId) return null;
 		const sessionId = labels[SESSION_RUNTIME_SESSION_LABEL];
@@ -1995,16 +2052,17 @@ export class ProjectSandbox {
 		// Check the isolation-critical preview bind before optional content reads.
 		// Old/shared runtimes must fail closed even if another mount is stale too.
 		if (getSessionPreviewMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
+		if (getSessionTranscriptMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
 		const activeAgentDir = globalAgentDir();
 		const modelsJson = path.join(activeAgentDir, "models.json");
 		let modelsJsonExists = false;
 		try { modelsJsonExists = fs.statSync(modelsJson).isFile(); } catch { /* absent is valid */ }
 		if (getAgentDirMountStaleness(inspection.Mounts, {
-			sessionsDir: activeAgentSessionsDir(),
+			sessionsDir: sessionTranscriptRoot(sessionId),
 			modelsJson,
 			modelsJsonExists,
 		}).stale) return false;
-		if (getStateDirMountStaleness(inspection.Mounts, { stateDir }).stale) return false;
+		if (getStateDirMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
 		if (this.options.resolvePackLocalDataMounts) {
 			const expected = await this._resolvePackLocalDataMounts();
 			if (getPackLocalDataMountStaleness(inspection.Mounts, expected).stale) return false;
@@ -2068,7 +2126,7 @@ export class ProjectSandbox {
 	private async _findProjectSessionRuntimeContainerIds(): Promise<string[]> {
 		const args = [
 			"ps", "-a", "--no-trunc",
-			"--filter", `label=${SESSION_RUNTIME_ROLE_LABEL}=${SESSION_RUNTIME_ROLE_VERSION}`,
+			"--filter", `label=${SESSION_RUNTIME_ROLE_LABEL}`,
 			"--filter", `label=${SESSION_RUNTIME_PROJECT_LABEL}=${validatedSessionRuntimeLabel("project", this.options.projectId)}`,
 		];
 		if (this.e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${this.e2eRunId}`);
@@ -2078,6 +2136,19 @@ export class ProjectSandbox {
 			return stdout.trim().split("\n").filter(Boolean);
 		} catch {
 			return [];
+		}
+	}
+
+	private async _removeLegacySessionRuntimes(): Promise<void> {
+		for (const containerId of await this._findProjectSessionRuntimeContainerIds()) {
+			const inspection = await this._inspectContainer(containerId);
+			const labels = inspection?.Config?.Labels;
+			if (inspection?.Id === containerId
+				&& labels
+				&& LEGACY_SESSION_RUNTIME_ROLE_VERSIONS.has(labels[SESSION_RUNTIME_ROLE_LABEL] ?? "")
+				&& await this._sessionRuntimeOwner(containerId)) {
+				await this._removeContainer(containerId);
+			}
 		}
 	}
 

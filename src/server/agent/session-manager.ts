@@ -33,7 +33,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, containerPathToHost, hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, containerPathToHost, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type PromptStreamingBehavior, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import {
 	canonicalContainerAgentSessionPath,
 	sessionFileDelete,
@@ -43,7 +43,7 @@ import {
 	sessionSidecarDelete,
 } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
-import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
+import { writeSessionSidecar, buildSessionSidecar, sidecarPathFor } from "./session-sidecar.js";
 import {
 	appendPromptAuthorDismissalTombstone,
 	appendPromptAuthorDispatch,
@@ -190,7 +190,16 @@ import { PrStatusStore } from "./pr-status-store.js";
 import { TaskStore } from "./task-store.js";
 import type { GateStore } from "./gate-store.js";
 import { bobbitStateDir, bobbitConfigDir, globalAuthPath } from "../bobbit-dir.js";
-import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trustedAgentSessionsRoots } from "./agent-session-path.js";
+import {
+	activeAgentSessionsDir,
+	containerTranscriptRelativePath,
+	ensurePrivateSessionRoot,
+	sessionStateSessionsRoot,
+	sessionTranscriptContainerPath,
+	sessionTranscriptHostPath,
+	sessionTranscriptRoot,
+	trustedAgentSessionsRoots,
+} from "./agent-session-path.js";
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
@@ -248,9 +257,7 @@ function isWindowsAbsolutePath(filePath: string): boolean {
 function isContainerAgentSessionPath(filePath: string): boolean {
 	const normalized = filePath.replace(/\\/g, "/");
 	return normalized === "/home/node/.bobbit/agent/sessions"
-		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/")
-		|| normalized === "/bobbit-state/sessions"
-		|| normalized.startsWith("/bobbit-state/sessions/");
+		|| normalized.startsWith("/home/node/.bobbit/agent/sessions/");
 }
 
 function isHostAbsoluteAgentSessionPath(filePath: string | undefined): boolean {
@@ -266,9 +273,16 @@ function safePersistedHostAgentSessionFile(filePath: string | undefined): string
 }
 
 export function switchSessionPathForAgent(ps: PersistedSession): string {
-	if (!ps.sandboxed || !isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) return ps.agentSessionFile;
-	const mountedHostPath = migratedActiveAgentSessionFileForHostPath(ps.agentSessionFile) ?? ps.agentSessionFile;
-	return hostPathToContainer(mountedHostPath);
+	if (!ps.sandboxed) return ps.agentSessionFile;
+	const canonical = canonicalContainerAgentSessionPath(ps.agentSessionFile);
+	if (canonical) return canonical;
+	if (!isHostAbsoluteAgentSessionPath(ps.agentSessionFile)) throw new Error("Sandbox transcript path is invalid");
+	const root = path.resolve(sessionTranscriptRoot(ps.id));
+	const candidate = path.resolve(ps.agentSessionFile);
+	const relative = path.relative(root, candidate).replace(/\\/g, "/");
+	const containerPath = sessionTranscriptContainerPath(relative);
+	if (!containerPath || relative.startsWith("../") || path.isAbsolute(relative)) throw new Error("Sandbox transcript is outside its owner root");
+	return containerPath;
 }
 
 export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
@@ -4293,12 +4307,136 @@ export class SessionManager {
 		}
 	}
 
-	private _hostTrackedTranscriptPath(_ps: PersistedSession, filePath: string): string | undefined {
+	private _legacySandboxTranscriptMapping(ps: PersistedSession, filePath: string): { source: string; container: string; destination: string } {
+		let relative = containerTranscriptRelativePath(filePath);
+		let source: string | undefined;
+		const ownerRoot = path.resolve(sessionTranscriptRoot(ps.id));
+		if (relative) {
+			if (relative.startsWith(".bobbit-session-roots-v1/")) throw new Error("Sandbox transcript path enters the reserved owner namespace");
+			source = path.join(activeAgentSessionsDir(), ...relative.split("/"));
+		} else if (isHostAbsoluteAgentSessionPath(filePath)) {
+			const candidate = path.resolve(filePath);
+			const ownerRelative = path.relative(ownerRoot, candidate);
+			if (ownerRelative && !ownerRelative.startsWith("..") && !path.isAbsolute(ownerRelative)) {
+				relative = ownerRelative.replace(/\\/g, "/");
+				source = candidate;
+			} else {
+				for (const root of trustedAgentSessionsRoots()) {
+					const candidateRelative = path.relative(path.resolve(root), candidate);
+					if (!candidateRelative || candidateRelative.startsWith("..") || path.isAbsolute(candidateRelative)) continue;
+					const normalized = candidateRelative.replace(/\\/g, "/");
+					if (normalized.startsWith(".bobbit-session-roots-v1/")) throw new Error("Sandbox transcript belongs to another owner");
+					relative = normalized;
+					source = candidate;
+					break;
+				}
+			}
+		}
+		const container = relative ? sessionTranscriptContainerPath(relative) : null;
+		if (!container || !source) throw new Error("Sandbox transcript migration source is invalid");
+		const destination = sessionTranscriptHostPath(ps.id, container);
+		if (!destination) throw new Error("Sandbox transcript migration destination is invalid");
+		return { source, container, destination };
+	}
+
+	private async _publishLegacySandboxFile(source: string, destination: string, ownerRoot: string): Promise<void> {
+		let sourceStat: fs.Stats;
+		try { sourceStat = await fsp.lstat(source); }
+		catch (error: any) { if (error?.code === "ENOENT") return; throw error; }
+		if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error("Legacy sandbox transcript source is unsafe");
+		const relative = path.relative(path.resolve(ownerRoot), path.resolve(destination));
+		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Sandbox transcript migration destination escapes its owner root");
+		let cursor = path.resolve(ownerRoot);
+		for (const component of relative.split(path.sep).slice(0, -1)) {
+			cursor = path.join(cursor, component);
+			try {
+				const stat = await fsp.lstat(cursor);
+				if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Sandbox transcript migration parent is unsafe");
+			} catch (error: any) {
+				if (error?.code !== "ENOENT") throw error;
+				await fsp.mkdir(cursor, { mode: 0o700 });
+				const created = await fsp.lstat(cursor);
+				if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("Sandbox transcript migration parent creation was replaced");
+			}
+		}
+		const content = await fsp.readFile(source);
+		try {
+			const existing = await fsp.readFile(destination);
+			if (!existing.equals(content)) throw new Error("Sandbox transcript migration destination conflicts with legacy bytes");
+			return;
+		} catch (error: any) {
+			if (error?.code !== "ENOENT") throw error;
+		}
+		const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.bobbit-migrate-${randomUUID()}.tmp`);
+		let handle: fs.promises.FileHandle | undefined;
+		try {
+			handle = await fsp.open(temporary, "wx", 0o600);
+			await handle.writeFile(content);
+			await handle.sync();
+			await handle.close();
+			handle = undefined;
+			try { await fsp.link(temporary, destination); }
+			catch (error: any) {
+				if (error?.code !== "EEXIST") throw error;
+				const winner = await fsp.readFile(destination);
+				if (!winner.equals(content)) throw new Error("Sandbox transcript migration raced with conflicting bytes");
+			}
+		} finally {
+			if (handle) await handle.close().catch(() => {});
+			await fsp.unlink(temporary).catch(() => {});
+		}
+	}
+
+	private async _prepareSandboxTranscriptPersistence(ps: PersistedSession, store: SessionStore): Promise<PersistedSession> {
+		if (!ps.sandboxed || !ps.agentSessionFile) return ps;
+		const ownerRoot = ensurePrivateSessionRoot(sessionTranscriptRoot(ps.id), activeAgentSessionsDir());
+		const migrate = async (filePath: string): Promise<string> => {
+			const mapping = this._legacySandboxTranscriptMapping(ps, filePath);
+			await this._publishLegacySandboxFile(mapping.source, mapping.destination, ownerRoot);
+			await this._publishLegacySandboxFile(sidecarPathFor(mapping.source), sidecarPathFor(mapping.destination), ownerRoot);
+			return mapping.container;
+		};
+		const agentSessionFile = await migrate(ps.agentSessionFile);
+		const boundaries = normalizeContextClearBoundaries(ps.contextClearBoundaries);
+		const migratedBoundaries: ContextClearBoundary[] = [];
+		for (const boundary of boundaries) {
+			migratedBoundaries.push({
+				...boundary,
+				previousAgentSessionFile: await migrate(boundary.previousAgentSessionFile),
+				activatedAgentSessionFile: await migrate(boundary.activatedAgentSessionFile),
+			});
+		}
+		if (agentSessionFile === ps.agentSessionFile
+			&& JSON.stringify(migratedBoundaries) === JSON.stringify(boundaries)) return ps;
+		const previousFile = ps.agentSessionFile;
+		const previousBoundaries = ps.contextClearBoundaries;
+		try {
+			store.update(ps.id, { agentSessionFile, contextClearBoundaries: migratedBoundaries });
+			await store.flushAsync();
+		} catch (error) {
+			store.update(ps.id, { agentSessionFile: previousFile, contextClearBoundaries: previousBoundaries });
+			await store.flushAsync().catch(() => {});
+			throw error;
+		}
+		return { ...ps, agentSessionFile, contextClearBoundaries: migratedBoundaries };
+	}
+
+	/** Materialize legacy sandbox bytes into the owner root before fork/continue reads. */
+	async prepareSandboxTranscriptPersistence(sessionId: string): Promise<PersistedSession | undefined> {
+		const store = this.resolveStoreForId(sessionId);
+		const ps = store?.get(sessionId);
+		if (!store || !ps) return undefined;
+		return this._prepareSandboxTranscriptPersistence(ps, store);
+	}
+
+	private _hostTrackedTranscriptPath(ps: PersistedSession, filePath: string): string | undefined {
 		try {
 			const container = canonicalContainerAgentSessionPath(filePath);
 			if (container) {
-				const host = containerPathToHost(container);
-				return host === container ? undefined : path.normalize(host);
+				const host = ps.sandboxed
+					? sessionTranscriptHostPath(ps.id, container)
+					: containerPathToHost(container);
+				return !host || host === container ? undefined : path.normalize(host);
 			}
 			trustPersistedAgentSessionFile(filePath);
 			const readable = resolveReadablePersistedAgentSessionFile(filePath);
@@ -12795,6 +12933,7 @@ export class SessionManager {
 				return;
 			}
 		}
+		ps = await this._prepareSandboxTranscriptPersistence(ps, sessionStore);
 		if (!ps.agentSessionFile) {
 			// No session file path — persistSessionMetadata never completed.
 			// Try to recover by scanning the sessions dir for a matching .jsonl.
@@ -12858,19 +12997,8 @@ export class SessionManager {
 			// If the worktree/cwd is actually gone, restoreSession() throws below and we
 			// fall back to a dormant (never archived) session. Pinned by
 			// tests/session-manager-no-precreate.test.ts.
-			if (!ps.sandboxed) {
-				console.log(`[session-manager] Session ${ps.id} recorded ${ps.agentSessionFile} but has no transcript yet (pre-flush restart) — restoring live; agent will create the file on first write`);
-				// fall through to restoreSession()
-			} else if (await shouldKeepDespiteOrphan(ps)) {
-				console.warn(`[orphan-cleanup] WARN: would-archive ${ps.id} but worktree+recent-transcript present — leaving live`);
-				this.addDormantSession(ps);
-				return;
-			} else {
-				console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
-				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its missing-transcript record")) return;
-				sessionStore.archive(ps.id);
-				return;
-			}
+			console.log(`[session-manager] Session ${ps.id} recorded an owner-scoped transcript that is not materialized yet — restoring live; agent will create the file on first write`);
+			// Both direct and v2 sandbox sessions preserve Pi's exclusive lazy creation.
 			}
 		}
 		// A completed catalog is authoritative. Discovery failures deliberately fall
@@ -13209,7 +13337,7 @@ export class SessionManager {
 		const restoredAuthorBindings = preparedRestore.bindings;
 		const restoredQueue = ps.messageQueue ?? [];
 		if (preparedRestore.changed) await restoreStore.flushAsync();
-		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd, sessionId: ps.id };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 
 		// Restore env vars needed by extensions. The per-session capability
@@ -16841,7 +16969,7 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd, sessionId: id };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (replacementToolRuntime.toolManager) bridgeOptions.toolManager = replacementToolRuntime.toolManager;
@@ -19008,6 +19136,22 @@ export class SessionManager {
 				catch (err) { console.warn(`[session-manager] Failed to delete sidecar for ${ps.id}:`, err); }
 			}
 		}
+		if (ps.sandboxed) {
+			const privateRoots = [sessionTranscriptRoot(ps.id)];
+			try {
+				const projectContext = ps.projectId ? this.projectContextManager?.getOrCreate(ps.projectId) : undefined;
+				if (projectContext?.stateDir) privateRoots.push(sessionStateSessionsRoot(projectContext.stateDir, ps.id));
+			} catch { /* project already removed: transcript root is still independently owned */ }
+			for (const privateRoot of privateRoots) {
+				try {
+					const stat = await fsp.lstat(privateRoot);
+					if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("private session root is unsafe");
+					await fsp.rm(privateRoot, { recursive: true, force: true });
+				} catch (error: any) {
+					if (error?.code !== "ENOENT") console.warn(`[session-manager] Failed to purge a private session root for ${ps.id}`);
+				}
+			}
+		}
 
 		// Delete per-session proposal-drafts directory. Deferred from archive
 		// (terminateSession) so that archived sessions retain their drafts long
@@ -19176,7 +19320,7 @@ export class SessionManager {
 			const cwdSlug = "--" + ps.cwd.replace(/[^a-zA-Z0-9]/g, "-") + "--";
 			const TOLERANCE_MS = 60_000;
 
-			const sessionRoots = trustedAgentSessionsRoots();
+			const sessionRoots = ps.sandboxed ? [sessionTranscriptRoot(ps.id)] : trustedAgentSessionsRoots();
 
 			// Prefer an exact filename/session-id match across all known roots before
 			// falling back to timestamp proximity. This preserves historical-root
@@ -19188,6 +19332,10 @@ export class SessionManager {
 				if (exactFile) {
 					const recovered = path.join(cwdDir, exactFile).replace(/\\/g, "/");
 					trustPersistedAgentSessionFile(recovered);
+					if (ps.sandboxed) {
+						const relative = path.relative(sessionTranscriptRoot(ps.id), recovered).replace(/\\/g, "/");
+						return sessionTranscriptContainerPath(relative);
+					}
 					return recovered;
 				}
 			}
@@ -19223,6 +19371,10 @@ export class SessionManager {
 				if (bestFile) {
 					const recovered = path.join(cwdDir, bestFile).replace(/\\/g, "/");
 					trustPersistedAgentSessionFile(recovered);
+					if (ps.sandboxed) {
+						const relative = path.relative(sessionTranscriptRoot(ps.id), recovered).replace(/\\/g, "/");
+						return sessionTranscriptContainerPath(relative);
+					}
 					return recovered;
 				}
 			}
@@ -19746,7 +19898,7 @@ export class SessionManager {
 		emitSessionEvent(session, { type: "agent_end", messages: [] });
 
 		// Restart the agent process
-		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd, sessionId: id };
 		try {
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);

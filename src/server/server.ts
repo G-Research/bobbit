@@ -1,6 +1,6 @@
 import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
+import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, parseUntrustedGithubRemoteCandidate, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { GithubTrustedHostResolver } from "./github-trusted-hosts.js";
@@ -15458,11 +15458,13 @@ async function handleApiRoute(
 			if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
 
 			const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
-			const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+			const { formatAgentSessionFilePath, formatOwnedAgentSessionFilePath } = await import("./agent/agent-session-path.js");
 			const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 
-			// Resolve or recover the source `.jsonl` authoritatively. Never let a raw
-			// persisted path bypass host/container transcript-path validation.
+			// Resolve or recover the source `.jsonl` authoritatively. Migrate legacy
+			// shared sandbox bytes before any owner-scoped read.
+			const preparedSource = await sessionManager.prepareSandboxTranscriptPersistence(ps.id);
+			if (preparedSource) Object.assign(ps, preparedSource);
 			const sourceJsonl = sessionManager.recoverSessionFile(ps);
 			if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
 
@@ -15539,14 +15541,14 @@ async function handleApiRoute(
 			// forks; legacy host-absolute sandbox transcripts remain host-to-host.
 			const sandboxTranscriptDestination = srcCtx.sandboxed === true;
 			const sandboxDestJsonl = sandboxTranscriptDestination
-				? tryHostPathToContainer(formattedDestJsonl)
+				? formatOwnedAgentSessionFilePath(projCwd, Date.now(), forkId)
 				: null;
 			if (sandboxTranscriptDestination && !sandboxDestJsonl) {
 				json({ error: "failed to resolve sandbox transcript destination" }, 500);
 				return;
 			}
 			const destJsonl = sandboxDestJsonl ?? formattedDestJsonl;
-			const dstCtx = sessionFsContextForAgentFile({ sandboxed: sandboxTranscriptDestination, projectId }, destJsonl);
+			const dstCtx = sessionFsContextForAgentFile({ id: forkId, sandboxed: sandboxTranscriptDestination, projectId }, destJsonl);
 			const cleanupFailedFork = async (): Promise<void> => {
 				let failedRecord = sessionManager.getPersistedSession(forkId);
 				const failedTranscripts = new Set<string>([destJsonl]);
@@ -16303,11 +16305,13 @@ async function handleApiRoute(
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
 		// sessions whose persisted `agentSessionFile` was never populated.
 		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
-		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+		const { formatAgentSessionFilePath, formatOwnedAgentSessionFilePath } = await import("./agent/agent-session-path.js");
 		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 		const nodeFs = await import("node:fs");
 		const { randomUUID } = await import("node:crypto");
 
+		const preparedSource = await sessionManager.prepareSandboxTranscriptPersistence(ps.id);
+		if (preparedSource) Object.assign(ps, preparedSource);
 		let sourceJsonl = ps.agentSessionFile;
 		if (!sourceJsonl) {
 			const recovered = sessionManager.recoverSessionFile(ps);
@@ -16357,11 +16361,13 @@ async function handleApiRoute(
 		// once the worktree cwd is final, but the cloned file we hand it via
 		// `switch_session` is what gets adopted.
 		const newSessionId = randomUUID();
-		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
+		const destJsonl = ps.sandboxed
+			? formatOwnedAgentSessionFilePath(projCwd, Date.now(), newSessionId)
+			: formatAgentSessionFilePath(projCwd, Date.now(), newSessionId);
 
 		// Copy the source `.jsonl`. Cross-realm → 422; any other failure → 500.
 		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
-		const dstCtx = sessionFsContextForAgentFile(ps, destJsonl);
+		const dstCtx = sessionFsContextForAgentFile({ ...ps, id: newSessionId, sessionId: newSessionId }, destJsonl);
 		let clonedTranscript: string | null = null;
 		try {
 			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);

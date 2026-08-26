@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { sessionTranscriptHostPath } from "../../src/server/agent/agent-session-path.js";
 import {
 	apiFetch,
 	createSession as createSessionFromHarness,
@@ -938,7 +939,7 @@ test.describe("history fork API", () => {
 		const manager = gateway.sessionManager;
 		const sandboxFixture = installSandboxSessionFilesystem(gateway, "container-coordinate");
 		const sourceContainerPath = `/home/node/.bobbit/agent/sessions/--canonical-source--/${sourceId}.jsonl`;
-		const sourceHostPath = sandboxFixture.filesystem.hostPath(sourceContainerPath);
+		const sourceHostPath = sessionTranscriptHostPath(sourceId, sourceContainerPath)!;
 		fs.mkdirSync(path.dirname(sourceHostPath), { recursive: true });
 		fs.writeFileSync(sourceHostPath, seeded.content, "utf8");
 		setPersistedTranscriptPath(gateway, sourceId, sourceContainerPath);
@@ -952,10 +953,8 @@ test.describe("history fork API", () => {
 		};
 		rpcBridgeModule.RpcBridge.prototype.sendCommand = function(command: any, ...rest: any[]) {
 			if (command?.type === "switch_session" && typeof command.sessionPath === "string") {
-				command = {
-					...command,
-					sessionPath: sandboxFixture.filesystem.hostPath(command.sessionPath),
-				};
+				const owner = path.basename(command.sessionPath, ".jsonl").split("_").at(-1)!;
+				command = { ...command, sessionPath: sessionTranscriptHostPath(owner, command.sessionPath) };
 			}
 			return originalSendCommand.call(this, command, ...rest);
 		};
@@ -980,7 +979,7 @@ test.describe("history fork API", () => {
 		});
 		expect(persisted.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
 		const destinationBytes = fs.readFileSync(
-			sandboxFixture.filesystem.hostPath(persisted.agentSessionFile),
+			sessionTranscriptHostPath(fork.id, persisted.agentSessionFile)!,
 			"utf8",
 		);
 		expect(destinationBytes).toContain("retained prompt");

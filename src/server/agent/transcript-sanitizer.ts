@@ -36,8 +36,7 @@
 
 import { ATTACHMENT_ONLY_TEXT } from "./rpc-bridge.js";
 import { sessionFileRead, type SessionFsContext } from "./session-fs.js";
-import { containerPathToHost } from "./rpc-bridge.js";
-import { trustedAgentSessionsRoots } from "./agent-session-path.js";
+import { sessionTranscriptHostPath, sessionTranscriptRoot, trustedAgentSessionsRoots } from "./agent-session-path.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -784,8 +783,12 @@ export function restoreAgentTranscriptSnapshot(
 	rootPolicy: TranscriptRootPolicy = defaultTranscriptRootPolicy,
 ): boolean {
 	try {
-		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
-		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
+		const hostPath = ctx.sandboxed && ctx.sessionId ? sessionTranscriptHostPath(ctx.sessionId, filePath) : filePath;
+		if (!hostPath) return false;
+		const effectivePolicy = ctx.sandboxed && ctx.sessionId
+			? createTranscriptRootPolicy([sessionTranscriptRoot(ctx.sessionId)])
+			: rootPolicy;
+		const realPath = resolveSafeSessionsPath(hostPath, effectivePolicy);
 		if (realPath === null) return false;
 		replaceTranscriptSnapshotAtomic(realPath, content);
 		return true;
@@ -834,7 +837,11 @@ async function transformAgentTranscriptFile(
 		// path and is what the read+write both touch. Sandboxed: the read runs
 		// in-container (docker exec); only the write is host-side, via the
 		// bind-mounted sessions dir (container path → host path).
-		const hostPath = ctx.sandboxed ? containerPathToHost(filePath) : filePath;
+		const hostPath = ctx.sandboxed && ctx.sessionId ? sessionTranscriptHostPath(ctx.sessionId, filePath) : filePath;
+		if (!hostPath) return 0;
+		const effectivePolicy = ctx.sandboxed && ctx.sessionId
+			? createTranscriptRootPolicy([sessionTranscriptRoot(ctx.sessionId)])
+			: rootPolicy;
 
 		// For non-sandboxed sessions, validate the real host path BEFORE reading.
 		// Exact persisted paths outside trusted roots are read-compatible only; they
@@ -842,8 +849,8 @@ async function transformAgentTranscriptFile(
 		let writableRealPath: string | null = null;
 		let readAllowed = true;
 		if (!ctx.sandboxed) {
-			writableRealPath = resolveSafeSessionsPath(hostPath, rootPolicy);
-			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath, rootPolicy) !== null;
+			writableRealPath = resolveSafeSessionsPath(hostPath, effectivePolicy);
+			readAllowed = writableRealPath !== null || resolveReadablePersistedAgentSessionFile(hostPath, effectivePolicy) !== null;
 			if (!readAllowed) {
 				console.warn(`[transcript-sanitizer] Refusing to access path outside agent sessions dir: ${hostPath} (from ${filePath})`);
 				return 0;
@@ -860,7 +867,7 @@ async function transformAgentTranscriptFile(
 		// (TOCTOU) and write with O_NOFOLLOW so a symlink swapped in after the
 		// check is not followed. A malformed/hostile agentSessionFile must never
 		// let us clobber an arbitrary file.
-		const realPath = resolveSafeSessionsPath(hostPath, rootPolicy);
+		const realPath = resolveSafeSessionsPath(hostPath, effectivePolicy);
 		if (realPath === null) {
 			console.warn(`[transcript-sanitizer] Refusing to write outside agent sessions dir: ${hostPath} (from ${filePath})`);
 			return 0;
