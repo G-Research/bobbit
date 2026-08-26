@@ -12,7 +12,8 @@
  *   except the last, where it reads **Submit** (existing behaviour).
  * - Submit is disabled until every question has a valid selection (respecting
  *   min/max for multi-select).
- * - Once submitted (or `answers` prop is populated), the widget is read-only.
+ * - **Dismiss All** durably dismisses the entire card without waking the agent.
+ * - Once submitted, dismissed, or replayed from final state, the widget is read-only.
  *
  * ## Keyboard navigation
  *
@@ -35,6 +36,7 @@
 import { LitElement, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
+import { dismissAskQuestion } from "../../app/ask-dismissals.js";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
 import { createTransientDraftStore } from "../storage/transient-draft-store.js";
@@ -95,6 +97,7 @@ export class AskUserChoicesWidget extends LitElement {
 	@property({ attribute: false }) questions: AskQuestion[] = [];
 	/** When non-null, widget is read-only (final answers). */
 	@property({ attribute: false }) answers: AskAnswer[] | null = null;
+	@property({ type: Boolean }) dismissed = false;
 	@property({ type: String }) sessionId = "";
 	@property({ type: String }) toolUseId = "";
 	/** Explicit retained-history mode for unanswered questions. */
@@ -107,6 +110,8 @@ export class AskUserChoicesWidget extends LitElement {
 	@state() private _draft: DraftEntry[] = [];
 	@state() private _submitting = false;
 	@state() private _submitError = "";
+	@state() private _dismissing = false;
+	@state() private _dismissError = "";
 
 	// Use light DOM for CSS consistency with tool-card styling.
 	protected override createRenderRoot(): HTMLElement | DocumentFragment {
@@ -121,7 +126,7 @@ export class AskUserChoicesWidget extends LitElement {
 		this._ensureDraft();
 		// If we mount already read-only (transcript-backed answers replayed on
 		// reload), the pending draft is moot — clear it so it can't resurrect.
-		if (Array.isArray(this.answers)) this._clearDraftStore();
+		if (Array.isArray(this.answers) || this.dismissed) this._clearDraftStore();
 	}
 
 	override willUpdate(changed: Map<string, unknown>): void {
@@ -134,7 +139,8 @@ export class AskUserChoicesWidget extends LitElement {
 		}
 		// Becoming read-only because a final answer arrived means the draft is
 		// done — clear it (tombstoned) so a late save can't bring it back.
-		if (changed.has("answers") && Array.isArray(this.answers)) {
+		if ((changed.has("answers") && Array.isArray(this.answers))
+			|| (changed.has("dismissed") && this.dismissed)) {
 			this._clearDraftStore();
 		}
 	}
@@ -372,7 +378,7 @@ export class AskUserChoicesWidget extends LitElement {
 	}
 
 	private _isReadOnly(): boolean {
-		return this.readOnly || Array.isArray(this.answers) || this.errored;
+		return this.readOnly || Array.isArray(this.answers) || this.dismissed || this.errored;
 	}
 
 	private _isLastTab(): boolean {
@@ -409,6 +415,21 @@ export class AskUserChoicesWidget extends LitElement {
 		);
 		this._submitError = "";
 		this._persistDraft();
+	}
+
+	private async _dismissAll(): Promise<void> {
+		if (this._isReadOnly() || this._submitting || this._dismissing) return;
+		this._dismissing = true;
+		this._dismissError = "";
+		try {
+			await dismissAskQuestion(this.sessionId, this.toolUseId);
+			this.dismissed = true;
+			this._clearDraftStore();
+		} catch (error: any) {
+			this._dismissError = error?.message || String(error);
+		} finally {
+			this._dismissing = false;
+		}
 	}
 
 	private async _submit(): Promise<void> {
@@ -537,9 +558,9 @@ export class AskUserChoicesWidget extends LitElement {
 		}
 
 		if (key === "Enter") {
-			// If focus is on the primary (Next/Submit) button, let the native
-			// click handler do the work — don't preventDefault or double-fire.
-			if (target?.closest?.(".ask-submit")) return;
+			// If focus is on an action button, let its native click handler do the
+			// work — do not also run the widget's primary keyboard shortcut.
+			if (target?.closest?.(".ask-submit, .ask-dismiss-all")) return;
 
 			// Single-question single-select: Enter picks the focused option and
 			// auto-submits (the option pick schedules the submit).
@@ -620,24 +641,37 @@ export class AskUserChoicesWidget extends LitElement {
 			? "Submitting…"
 			: showNext ? "Next" : "Submit";
 		return html`
-			<div class="ask-widget ${readOnly ? "ask-answered" : ""} border border-border rounded p-3 bg-card" @keydown=${this._onKeydown}>
+			<div class="ask-widget ${Array.isArray(this.answers) ? "ask-answered" : ""} ${this.dismissed ? "ask-dismissed" : ""} border border-border rounded p-3 bg-card" @keydown=${this._onKeydown}>
 				${showTabs ? html`
 				<div role="tablist" class="flex flex-wrap gap-1 border-b border-border mb-3">
 					${this.questions.map((_, i) => this._renderTab(i))}
 				</div>` : nothing}
 				${this._renderActivePanel(readOnly)}
-				${!readOnly && !hideSubmit ? html`
-					<div class="mt-3 flex items-center gap-2 justify-end">
-						${this._submitError
-							? html`<span class="ask-submit-error text-xs text-destructive">${this._submitError}</span>`
-							: nothing}
+				${!readOnly ? html`
+					<div class="mt-3 flex items-center gap-2 justify-between">
 						<button
 							type="button"
-							class="ask-submit px-3 py-1 text-xs font-medium rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer transition-opacity"
-							?disabled=${primaryDisabled}
-							@click=${this._clickPrimary}>
-							${primaryLabel}
+							class="ask-dismiss-all px-3 py-1 text-xs font-medium rounded border border-border bg-transparent text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer transition-colors"
+							?disabled=${this._submitting || this._dismissing}
+							@click=${this._dismissAll}>
+							${this._dismissing ? "Dismissing…" : "Dismiss All"}
 						</button>
+						<span class="flex min-w-0 items-center gap-2 justify-end">
+							${this._dismissError
+								? html`<span class="ask-dismiss-error text-xs text-destructive">${this._dismissError}</span>`
+								: this._submitError
+									? html`<span class="ask-submit-error text-xs text-destructive">${this._submitError}</span>`
+									: nothing}
+							${!hideSubmit ? html`
+								<button
+									type="button"
+									class="ask-submit px-3 py-1 text-xs font-medium rounded bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer transition-opacity"
+									?disabled=${primaryDisabled || this._dismissing}
+									@click=${this._clickPrimary}>
+									${primaryLabel}
+								</button>
+							` : nothing}
+						</span>
 					</div>` : nothing}
 			</div>`;
 	}

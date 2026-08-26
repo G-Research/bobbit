@@ -10,12 +10,56 @@ guardProcessEnv();
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-setup-event-fence-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { subscribeToEvents } = await import("../../src/server/agent/session-setup.ts");
+const { persistOnce, subscribeToEvents } = await import("../../src/server/agent/session-setup.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 
 afterAll(() => {
 	fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+describe("session setup initial unanswered-question state", () => {
+	const session = (id: string) => ({
+		id,
+		title: `Session ${id}`,
+		cwd: tmpRoot,
+		createdAt: 100,
+		lastActivity: 200,
+	}) as any;
+	const plan = (id: string, preExistingAgentSessionFile?: string) => ({
+		id,
+		mode: "normal",
+		title: `Session ${id}`,
+		cwd: tmpRoot,
+		bridgeOptions: {},
+		preExistingAgentSessionFile,
+	}) as any;
+
+	it("persists false for a fresh transcript", () => {
+		const put = vi.fn();
+		persistOnce(session("fresh-session-id"), plan("fresh-session-id"), { put } as any);
+
+		expect(put).toHaveBeenCalledOnce();
+		expect(put.mock.calls[0]![0]).toMatchObject({
+			id: "fresh-session-id",
+			agentSessionFile: "",
+			hasUnansweredQuestion: false,
+		});
+	});
+
+	it("leaves imported transcript state unset so restore performs legacy backfill", () => {
+		const put = vi.fn();
+		const importedTranscript = path.join(tmpRoot, "imported-session-id.jsonl");
+		persistOnce(
+			session("imported-session-id"),
+			plan("imported-session-id", importedTranscript),
+			{ put } as any,
+		);
+
+		const persisted = put.mock.calls[0]![0];
+		expect(persisted.agentSessionFile).toBe(importedTranscript);
+		expect(Object.prototype.hasOwnProperty.call(persisted, "hasUnansweredQuestion")).toBe(false);
+	});
 });
 
 describe("session setup event lifecycle fence", () => {

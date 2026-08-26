@@ -9,8 +9,10 @@ __syncBeforeAll(() => __syncCE());
 // exported src counterpart — the logic lives inline at the sidebar render sites —
 // so they are kept as byte-identical replicas of the legacy fixture, preserving
 // every assertion (SB-05..08, SB-15, SB-34, SB-36).
+import { render } from "lit";
 import { describe, expect, it } from "vitest";
-import { terseRelativeTime, formatSessionAge } from "../../src/app/render-helpers.js";
+import { terseRelativeTime, formatSessionAge, renderSessionTime } from "../../src/app/render-helpers.js";
+import { state, type GatewaySession } from "../../src/app/state.js";
 
 function hasUnseenActivity(session: any, activeId: string, goals: any[], visitedMap: Record<string, number>): boolean {
 	if (session.status === "streaming" || session.status === "busy") return false;
@@ -101,6 +103,35 @@ describe("SB-07: hasUnseenActivity", () => {
 		const now = Date.now();
 		const s = { id: "s1", status: "idle", lastActivity: now, role: "team-lead", goalId: "g1" };
 		expect(hasUnseenActivity(s, "other", [], { s1: now - 10000 })).toBe(false);
+	});
+});
+
+describe("SB-06: unread question indicator", () => {
+	it("replaces the unread dot with a question-circle for unanswered asks", () => {
+		const now = Date.now();
+		const session: GatewaySession = {
+			id: "question-session",
+			title: "Question",
+			cwd: ".",
+			status: "idle",
+			createdAt: now - 1000,
+			lastActivity: now,
+			lastReadAt: now - 100,
+			clientCount: 0,
+			hasUnansweredQuestion: true,
+		};
+		state.remoteAgent = null;
+		state.gatewaySessions = [session];
+		state.goals = [];
+		const host = document.createElement("div");
+		render(renderSessionTime(session), host);
+		expect(host.querySelector(".unanswered-question-indicator svg")).not.toBeNull();
+		expect(host.querySelector(".unseen-dot")).toBeNull();
+
+		session.hasUnansweredQuestion = false;
+		render(renderSessionTime(session), host);
+		expect(host.querySelector(".unanswered-question-indicator")).toBeNull();
+		expect(host.querySelector(".unseen-dot")).not.toBeNull();
 	});
 });
 

@@ -28,7 +28,8 @@
   .ask-other-input[data-disabled="true"][data-checked="true"] { opacity: 0.7; }
   .ask-submit { padding: 6px 12px; font-size: 12px; font-weight: 500; border-radius: 4px; background: #3b82f6; color: white; border: 0; cursor: pointer; }
   .ask-submit:disabled { opacity: 0.5; cursor: not-allowed; }
-  .ask-submit-row { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .ask-dismiss-all { padding: 5px 11px; font-size: 12px; font-weight: 500; border-radius: 4px; background: transparent; color: #aaa; border: 1px solid #444; cursor: pointer; }
+  .ask-submit-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-top: 12px; }
   .ask-submit-error { color: #f87171; font-size: 12px; }
   /* Tailwind-compatible sr-only (visually hidden but focusable/a11y). */
   .sr-only {
@@ -70,12 +71,14 @@ class AskWidget {
     mount.addEventListener("keydown", (e) => this.onKeydown(e));
     this.questions = opts.questions;
     this.answers = opts.answers || null;
+    this.dismissed = !!opts.dismissed;
     this.sessionId = opts.sessionId || "";
     this.toolUseId = opts.toolUseId || "t1";
     this.errored = !!opts.errored;
     this.errorText = opts.errorText || "";
     this.submitUrl = opts.submitUrl || "/api/internal/user-question/submit";
     this.submitFetch = opts.submitFetch || window.fetch.bind(window);
+    this.dismissFetch = opts.dismissFetch || window.fetch.bind(window);
     this.activeTab = 0;
     this.focusedOption = 0;
     this.draft = this.questions.map(q => ({
@@ -83,11 +86,13 @@ class AskWidget {
       other_text: "",
     }));
     this.submitting = false;
+    this.dismissing = false;
     this.submitError = "";
+    this.dismissError = "";
     this.render();
   }
 
-  isReadOnly() { return Array.isArray(this.answers) || this.errored; }
+  isReadOnly() { return Array.isArray(this.answers) || this.dismissed || this.errored; }
 
   optionCount(qIdx) {
     const q = this.questions[qIdx];
@@ -216,8 +221,29 @@ class AskWidget {
     if (!alreadySelected) this.selectOption(qIdx, OTHER_SENTINEL);
   }
 
+  async dismissAll() {
+    if (this.isReadOnly() || this.submitting || this.dismissing) return;
+    this.dismissing = true;
+    this.dismissError = "";
+    this.render();
+    try {
+      const resp = await this.dismissFetch("/api/internal/user-question/dismiss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: this.sessionId, toolUseId: this.toolUseId }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      this.dismissed = true;
+    } catch (e) {
+      this.dismissError = e && e.message ? e.message : String(e);
+    } finally {
+      this.dismissing = false;
+      this.render();
+    }
+  }
+
   async submit() {
-    if (!this.canSubmit() || this.submitting) return;
+    if (this.isReadOnly() || !this.canSubmit() || this.submitting) return;
     this.submitting = true;
     this.submitError = "";
     this.render();
@@ -332,7 +358,7 @@ class AskWidget {
     if (key === "Escape") { e.preventDefault(); this.clearActive(); return; }
 
     if (key === "Enter") {
-      if (target && target.closest && target.closest(".ask-submit")) return;
+      if (target && target.closest && target.closest(".ask-submit, .ask-dismiss-all")) return;
       const q = this.questions[this.activeTab];
       if (q && !q.multi && this.questions.length === 1) {
         const value = this.optionValueAt(this.activeTab, this.focusedOption);
@@ -389,7 +415,8 @@ class AskWidget {
     }
 
     const readOnly = this.isReadOnly();
-    if (readOnly) root.classList.add("ask-answered");
+    if (Array.isArray(this.answers)) root.classList.add("ask-answered");
+    if (this.dismissed) root.classList.add("ask-dismissed");
 
     // Tabs — omitted entirely for single-question asks.
     const tablist = document.createElement("div");
@@ -492,27 +519,39 @@ class AskWidget {
     panel.appendChild(optsDiv);
     root.appendChild(panel);
 
-    // Submit row
-    if (!readOnly && !this.shouldHideSubmit()) {
+    // Action row
+    if (!readOnly) {
       const row = document.createElement("div");
       row.className = "ask-submit-row";
-      if (this.submitError) {
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "ask-dismiss-all";
+      dismiss.textContent = this.dismissing ? "Dismissing…" : "Dismiss All";
+      dismiss.disabled = this.submitting || this.dismissing;
+      dismiss.addEventListener("click", () => this.dismissAll());
+      row.appendChild(dismiss);
+
+      const trailing = document.createElement("span");
+      if (this.dismissError || this.submitError) {
         const err = document.createElement("span");
         err.className = "ask-submit-error";
-        err.textContent = this.submitError;
-        row.appendChild(err);
+        err.textContent = this.dismissError || this.submitError;
+        trailing.appendChild(err);
       }
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "ask-submit";
-      const showNext = this.showNext();
-      const primaryDisabled = showNext
-        ? !this.isQuestionValid(this.activeTab)
-        : (!this.canSubmit() || this.submitting);
-      btn.textContent = this.submitting ? "Submitting…" : (showNext ? "Next" : "Submit");
-      btn.disabled = primaryDisabled;
-      btn.addEventListener("click", () => this.clickPrimary());
-      row.appendChild(btn);
+      if (!this.shouldHideSubmit()) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ask-submit";
+        const showNext = this.showNext();
+        const primaryDisabled = showNext
+          ? !this.isQuestionValid(this.activeTab)
+          : (!this.canSubmit() || this.submitting);
+        btn.textContent = this.submitting ? "Submitting…" : (showNext ? "Next" : "Submit");
+        btn.disabled = primaryDisabled || this.dismissing;
+        btn.addEventListener("click", () => this.clickPrimary());
+        trailing.appendChild(btn);
+      }
+      row.appendChild(trailing);
       root.appendChild(row);
     }
 

@@ -2,7 +2,7 @@
 
 `ask_user_choices` posts 1–5 multiple-choice questions to the user as an inline chat widget. Unlike `verification_result`, it does **not** block the agent's turn. The tool returns a synchronous stub, the turn ends, and the user's answers arrive later as a tagged user message.
 
-This page documents why the tool is non-blocking, the wire format of that tagged message, and how the UI and agent converge across restarts and multiple tabs.
+This page documents why the tool is non-blocking, the wire format of that tagged message, and how answer and dismissal state converge across restarts and multiple tabs.
 
 ## Why non-blocking
 
@@ -44,7 +44,11 @@ The fix is to use the chat transcript itself as the communication medium. The us
     │  sees envelope, parses answers, continues    │                               │
 ```
 
-Key property: the session is **idle** during the wait. Every UI sees it as idle. No special "pending widget" state exists server-side.
+Key property: the session is **idle** during the wait. Every UI sees it as idle. The server retains only durable presentation metadata: dismissed tool-use IDs and the derived `hasUnansweredQuestion` session-list boolean. Neither parks a Promise, enqueues a prompt, or wakes the agent.
+
+A user may instead dismiss the entire card with `POST /api/internal/user-question/dismiss`. The server validates that the matching ask call exists, persists its exact tool-use ID, emits `ask_question_dismissed` to session clients, and broadcasts `sessions_changed` for sidebar refresh. `GET /api/internal/user-question/dismissals?sessionId=...` rehydrates the dismissed IDs. Repeated completed dismissals are idempotent, and `/submit` returns `409` after dismissal.
+
+Answer and dismissal share one process-local reservation guard. The first mutation to reserve `(sessionId, toolUseId)` wins: dismiss rejects answered/submitting asks, while submit rejects dismissing/dismissed asks. Failed dismissal persistence and failed answer enqueue release their tentative reservation so a retry can proceed. Completed outcomes are rehydrated from the transcript or session metadata after restart.
 
 ## Envelope format
 
@@ -95,22 +99,24 @@ The tool documentation (`defaults/tools/ask/ask_user_choices.yaml`) also instruc
 
 ## Multi-tab behavior
 
-Both tabs render the same transcript. The `ask_user_choices` renderer picks its mode from `ctx.getAskResponseAnswers(toolUseId)`:
+Both tabs render the same transcript and durable dismissal list. The `ask_user_choices` renderer picks its mode from the matching answer envelope unless the tool-use ID is dismissed:
 
-- **Interactive** when no matching envelope is present later in the transcript.
-- **Answered (read-only)** when one is. Selections come straight from the parsed envelope.
+- **Interactive** when no matching envelope or dismissal exists.
+- **Answered (read-only)** when an envelope exists. Selections come straight from the parsed envelope.
+- **Dismissed (read-only)** when the exact tool-use ID is in the dismissal list. The card remains visible with subdued choices and a **Dismissed** badge.
 
-When one tab submits, the server broadcasts the new user message. The other tab receives it, dispatches a `bobbit-transcript-message` DOM event, and the tool card re-renders in answered mode. No custom WS event types are needed — the normal message broadcast is enough.
+When one tab submits, the server broadcasts the new user message; the normal transcript event converges answered state. When one tab dismisses, the typed `ask_question_dismissed` event converges the read-only dismissed state without creating a transcript message. Both pending and resolved transitions also emit `sessions_changed`, prompting session-list clients to refresh `hasUnansweredQuestion`.
 
 ## Server restart behavior
 
 The envelope is a regular user message persisted to the session `.jsonl`. Everything survives a restart:
 
-- **Pending widget before restart.** The assistant's tool_use is in the transcript; on reload the UI renders it as interactive (because no envelope follows it). The user can still submit.
+- **Pending widget before restart.** The assistant's tool_use is in the transcript; on reload the UI renders it as interactive (because no envelope or dismissal follows it). The user can still submit.
 - **Submit after restart.** The REST call appends a user message through `sessionManager.enqueuePrompt`, which also wakes the agent. Works exactly the same as a cold submit.
 - **Already-answered widget.** The envelope is in the transcript; all tabs render it as answered on first paint.
+- **Dismissed widget.** Its tool-use ID and the recomputed `hasUnansweredQuestion` boolean live in session metadata, so the card stays read-only with its **Dismissed** badge and sidebar attention stays correct.
 
-No `/pending` endpoint, no in-memory map, no rejection listener. The transcript is the state.
+There is no blocking `/pending` endpoint, in-memory Promise, or rejection listener. Answers use the transcript; dismissals use durable session metadata.
 
 ## Widget UX
 
@@ -121,7 +127,10 @@ The interactive widget is a Lit component (`<ask-user-choices-widget>`) rendered
 - **Tabs** (multi-question asks only): `A. <tab_label>`, `B. <tab_label>`, … The letter prefix doubles as the tab-jump shortcut (see below); `tab_label` is required on every question when `questions.length > 1` and must be 2–4 words, ≤24 chars. The server rejects the call with a clear error if any question is missing it. Single-question asks hide the tab strip and ignore `tab_label`.
 - **Options**: every option is prefixed with a numeric badge (`1.`, `2.`, …) matching the number-key shortcut. An "Other" free-text choice is always rendered automatically and takes the next number in sequence; agents cannot opt out. The free-text input is **always visible inline** beside the Other row — the user can start typing immediately without first selecting Other. Submission is gated on Other-with-empty-text: if the user picks Other (or includes it in a multi-select) the text field must be non-empty.
 - **Primary button**: on a multi-question ask, every tab except the last shows **Next** (advances to the next tab, disabled until the current question has a valid selection). The last tab shows **Submit**. Single-question asks keep the existing behaviour — single-select auto-submits on pick, multi-select / Other shows **Submit**.
+- **Dismiss action**: every interactive card includes **Dismiss All**, which dismisses the entire one-to-five-question card. Dismissal is durable and read-only, but does not enqueue a prompt, wake the agent, or add a model-facing message.
 - **Answered state**: completed cards add a compact **Answered** badge in the tool header. The read-only question and unselected responses are visibly subdued; the selected response remains clearer so the saved choice is still immediately scannable.
+- **Dismissed state**: dismissed cards add a compact **Dismissed** badge. Questions and choices remain visible but subdued, with no selected response or submit path.
+- **Sidebar attention**: when an unread session has at least one unanswered ask, its generic unread dot becomes a question-mark-in-circle. Answering or dismissing the final pending ask restores ordinary unread treatment.
 
 ### Keyboard map
 
@@ -171,9 +180,11 @@ Envelope user messages are internal transcript control messages hidden from the 
 | `src/shared/ask-envelope.ts` | Envelope format: regex, build, parse, find, predicate. |
 | `defaults/tools/ask/extension.ts` | Tool extension. Returns `{status:"posted", tool_use_id}` synchronously. |
 | `defaults/tools/ask/ask_user_choices.yaml` | Tool manifest + detail_docs describing the non-blocking contract. |
-| `src/server/server.ts` — `POST /api/internal/user-question/submit` | Validate, cross-check against transcript, idempotency check, enqueue envelope via `sessionManager.enqueuePrompt`. |
+| `src/server/server.ts` — `/api/internal/user-question/*` | Submit answers, list dismissals, and idempotently dismiss validated ask calls. |
 | `src/server/agent/ask-user-choices-validation.ts` | Input validators (`validateQuestions`, `validateAnswers`, `crossValidate`) shared by the submit handler. |
-| `src/ui/tools/renderers/AskUserChoicesRenderer.ts` | Two-mode rendering (interactive vs answered) via `ctx.getAskResponseAnswers(toolUseId)`. |
+| `src/server/agent/ask-user-choices-dismissal.ts` | Exact-ID normalization, ask lookup, successful-post detection, and multi-ask unresolved-state recomputation. |
+| `src/server/agent/session-store.ts` | Durable dismissed IDs and `hasUnansweredQuestion` session metadata. |
+| `src/ui/tools/renderers/AskUserChoicesRenderer.ts` | Interactive, answered, and dismissed header/widget modes from transcript answers plus durable dismissal state. |
 | `src/ui/components/AskUserChoicesWidget.ts` | Interactive Lit widget: tabs, numbered option badges, keyboard navigation, ARIA radiogroup/tablist. |
 | `src/ui/components/AgentInterface.ts` | Filters envelope user messages out of the rendered transcript. |
 | `src/app/remote-agent.ts` | Exposes `findAskResponseAnswers` to renderers; dispatches `bobbit-transcript-message` on new user messages so tool cards re-render. |
@@ -191,8 +202,8 @@ Removed in the non-blocking redesign (mentioned here so searches don't mislead):
 | Who produces the result | A human clicking a widget | A reviewer/QA agent doing work |
 | Agent turn while waiting | Ends; session idle | Stays open; session "thinking" |
 | Server-side wait state | None (transcript is state) | In-memory Promise + persisted active-verification |
-| Multi-tab convergence | Transcript broadcast | Custom WS events |
-| Restart semantics | Works unchanged (transcript persists) | Persistence layer resumes in-flight verifications |
+| Multi-tab convergence | Transcript broadcast for answers; typed dismissal event for read-only dismissed cards | Custom WS events |
+| Restart semantics | Transcript + session metadata persist | Persistence layer resumes in-flight verifications |
 
 Both are legitimate patterns. Pick based on whether the counterparty is actively computing or just a human we're waiting on.
 

@@ -86,13 +86,25 @@ describe("transcript history projection", () => {
 			["user", "Prompt", "Human prompt"],
 			["agent", "Response", "Primary response"],
 			["agent", "Agent prompt", "Agent handoff"],
-			["system", "System prompt", "System instruction"],
+			["system", "System Message", "System instruction"],
 			["system", "System event", "Session restarted"],
 			["system", "System event", "Approve a fix-up"],
 			["system", "Error", "Provider failed"],
 			["question", "Multiple-choice question", "Choose a release channel"],
 		]);
 		expect(projected.entries.map((entry) => entry.ordinal)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+		expect(projected.entries.filter((entry) => entry.kind === "system")
+			.map((entry) => entry.authorLabel)).toEqual(["System", "System", "System", "System"]);
+		expect(projected.entries.map((entry) => entry.author?.id)).toEqual([
+			USER.id,
+			AGENT.id,
+			AGENT.id,
+			SYSTEM.id,
+			SYSTEM.id,
+			SYSTEM.id,
+			SYSTEM.id,
+			undefined,
+		]);
 		expect(projected.unresolvedQuestions).toHaveLength(1);
 	});
 
@@ -167,17 +179,29 @@ describe("transcript history projection", () => {
 		const projected = deriveTranscriptNavigation(messages as any);
 		const questions = projected.entries.filter((entry) => entry.kind === "question");
 
-		expect(questions.map((entry) => [entry.excerpt, entry.unresolved])).toEqual([
-			["Preceding envelope", true],
-			["Answered later", false],
-			["Failed call", false],
-			["Legacy call", false],
-			["Composite call", true],
+		expect(questions.map((entry) => [entry.excerpt, entry.unresolved, entry.questionStatus])).toEqual([
+			["Preceding envelope", true, "unanswered"],
+			["Answered later", false, "answered"],
+			["Failed call", false, "failed"],
+			["Legacy call", false, "answered"],
+			["Composite call", true, "unanswered"],
+		]);
+		expect(questions.map((entry) => entry.toolUseId)).toEqual([
+			"before", "answered", "failed", "legacy", "team|composite-1",
 		]);
 		expect(projected.unresolvedQuestions.map((entry) => entry.excerpt)).toEqual([
 			"Preceding envelope", "Composite call",
 		]);
 		expect(projected.entries.some((entry) => entry.excerpt.includes("ask_user_choices_response"))).toBe(false);
+
+		const withDismissals = deriveTranscriptNavigation(messages as any, {
+			dismissedToolUseIds: new Set(["before", "answered", "team|composite-1"]),
+		});
+		expect(withDismissals.entries.filter((entry) => entry.kind === "question")
+			.map((entry) => entry.questionStatus)).toEqual([
+			"dismissed", "answered", "failed", "answered", "dismissed",
+		]);
+		expect(withDismissals.unresolvedQuestions).toEqual([]);
 	});
 
 	it("accepts current arguments and legacy input calls but rejects malformed calls and ids", () => {
