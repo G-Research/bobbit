@@ -380,6 +380,9 @@ test.describe("Journey: Reliable Agent Turns", () => {
 				await abort.received;
 				await abort.beforeAgentEnd.entered;
 			});
+			// Capture every terminal authority while the held steer still owns its
+			// active-turn tail; later transcript rendering may let that turn settle.
+			const terminalProjection = scenario.runtime.joinAbortTerminalProjection(abort);
 			await expectOneCarrier(page, id, "outbox");
 			await expectIntentState(page, id, "uncertain", /Awaiting delivery confirmation/);
 			expect(scenario.runtime.barrierJournal.map((entry) => entry.name)).toEqual(expect.arrayContaining([
@@ -397,9 +400,6 @@ test.describe("Journey: Reliable Agent Turns", () => {
 			await expectOneCarrier(page, id, "transcript");
 
 			await test.step("Stop terminal lifecycle and replacement coordinator settle", async () => {
-				// Capture before releasing the held abort so a fast hosted runner cannot
-				// remove the already-installed coordinator before the fixture owns its tail.
-				const terminalProjection = scenario.runtime.joinAbortTerminalProjection(abort);
 				abort.beforeAgentEnd.release();
 				await abort.afterTerminalIdle.entered;
 				abort.afterTerminalIdle.release();

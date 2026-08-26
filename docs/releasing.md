@@ -25,18 +25,19 @@ For a release commit, `verify` then enforces the whole contract, in [`scripts/re
 
 Only then does the run build and type-check the commit, and pack the resulting files into an immutable workflow artifact. The serialized publishing job publishes that exact tarball with provenance, the tag job then creates `v<version>`, and the GitHub release follows. Pre-release versions (`0.16.0-rc.1`) go to the `next` dist-tag and are marked as prereleases; stable versions go to `latest`.
 
-The post-merge build is deliberate because it produces the exact tarball that ships. The unit suite is not repeated after publication approval: the release PR's required unit matrix already tested the mergeable tree, and the release preflight ran the full unit, browser, and E2E suites before the PR opened.
+The post-merge build is deliberate because it produces the exact tarball that ships. The test suites are not repeated after publication approval: the release PR's required GitHub checks already ran the full unit, browser, and E2E matrices against the mergeable tree. The local release pre-flight installs dependencies, builds, and type-checks so basic failures are caught before the PR opens without duplicating the hosted suites.
 
 **The same contract also runs before the merge.** `build-unit-gate.yml` runs `validate-release-commit.mjs --mode pre-merge` on every pull request. It decides whether a PR is a release the same way `detect` does — by comparing `package.json` against the base — and exits immediately when the version is unchanged. Every content rule then runs against that base, including the append-only changelog check and the version-increase check, so a wrong branch name, title, lockfile, changelog entry, backwards version or unpublished binary pin fails while it still costs one push — rather than after the merge, when the version is on `main` and the number is spent. The post-merge run is the authority; the pre-merge run is there so the authority rarely has to say no.
 
-### Why browser and e2e tests are not in the release gate
+### Release test ownership
 
-`npm run test:browser` and `npm run test:e2e` are **not** part of this workflow, or of any workflow. They are not runner-shaped yet:
+The release PR's required [`build-unit-gate.yml`](../.github/workflows/build-unit-gate.yml) checks own the full test qualification:
 
-- **browser** — carries a 3600 s wall budget, and `playwright-v2.config.ts` reserves workers from `scripts/testing-v2/ledger.mjs`. That ledger exists to share one 24-core development machine between concurrent agent sessions; on a single-tenant runner it reserves against contention that does not exist, so the numbers it produces are meaningless there.
-- **e2e** — needs a Docker daemon and real git worktrees.
+- **unit** runs with the build and type-check matrix on Linux, Windows, and macOS, including the supported Node floor and the forward Node lane
+- **browser** runs the Playwright browser suite on Linux, Windows, and macOS with runner-specific worker limits
+- **E2E** runs on Linux, Windows, and macOS; Linux also builds the version-matched Docker sandbox image
 
-Adding them to a workflow today would not gate anything; it would fail or mislead. Making them runner-shaped is separate work. Run the full suite locally before opening the release PR — the skill's pre-flight does exactly that — and let the PR's required unit matrix provide the hosted unit gate. The post-merge release workflow rebuilds and type-checks the package without repeating that unit matrix.
+The release skill therefore does not repeat those suites locally. Its pre-flight is limited to `npm ci`, `npm run build`, and `npm run check`, then it waits for every required GitHub check on the release PR. The same read-only matrices can be run through the no-input `workflow_dispatch` trigger for exact-head qualification when GitHub does not attach a PR-event run; ordinary pushes still avoid duplicating Browser and E2E. This test workflow has no publish or repository-write authority. The post-merge release workflow validates the release contract and rebuilds and type-checks the exact package tarball without duplicating the PR test matrices.
 
 Publish, tag and release are separate jobs so each holds only the permissions it needs: `id-token: write` to publish, `contents: write` to tag, `contents: write` to create the release. None checks out the repository, installs dependencies, or runs package lifecycle scripts. Before the publishable artifact enters the OIDC-enabled job, that job uses a small inline registry check to confirm the dist-tag still has the value recorded by verification. It then downloads and publishes the verified tarball with `--ignore-scripts`; the release job downloads the reviewed notes from the same immutable artifact. Dependency lifecycle code therefore never receives publish or repository-write authority, and the tarball produced after all gates is the tarball sent to npm.
 

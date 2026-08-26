@@ -19,8 +19,14 @@ import { ensureDistBuild } from "./ensure-dist.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const PACK_TIMEOUT_MS = 3 * 60_000;
-const INSTALL_TIMEOUT_MS = 10 * 60_000;
-export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 10_000;
+// A measured hosted-Windows prewarm can exceed nine minutes while resolving a
+// fresh lock-free consumer. Keep other runners tight and give only Windows the
+// demonstrated network/install headroom.
+const INSTALL_TIMEOUT_MS = process.platform === "win32" ? 15 * 60_000 : 10 * 60_000;
+// Hosted Windows may spend more than 10 seconds establishing the Job-backed
+// ownership handshake under concurrent runner load. This deadline covers only
+// process-tree ownership setup; command execution retains its separate budget.
+export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;
 const TREE_EXIT_TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_BYTES = 20 * 1024 * 1024;
 

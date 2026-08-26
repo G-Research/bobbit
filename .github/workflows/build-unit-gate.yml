@@ -60,7 +60,7 @@ jobs:
 
   browser:
     name: Browser (${{ matrix.os }}, Node 22.19.0)
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -106,9 +106,11 @@ jobs:
 
   e2e:
     name: E2E (${{ matrix.os }}, Node 22.19.0)
-    if: github.event_name == 'pull_request'
+    if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # Hosted Windows can spend over nine minutes preparing the lock-free packed
+    # consumer before the authoritative suite begins.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:

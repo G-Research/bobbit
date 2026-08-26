@@ -37,9 +37,16 @@ import { assertDistTagAdvances } from "../../scripts/release/dist-tag-guard.mjs"
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
 const releaseDocs = readFileSync(resolve(process.cwd(), "docs/releasing.md"), "utf8");
 
-type WorkflowStep = { name?: string; uses?: string; with?: Record<string, unknown>; run?: string };
+type WorkflowStep = {
+	name?: string;
+	uses?: string;
+	with?: Record<string, unknown>;
+	run?: string;
+	"continue-on-error"?: boolean;
+};
 type WorkflowJob = {
 	if?: string;
+	"continue-on-error"?: boolean;
 	needs?: string | string[];
 	outputs?: Record<string, string>;
 	permissions?: Record<string, string>;
@@ -63,7 +70,10 @@ const releaseWorkflow = parseYaml(
 
 const prGateWorkflow = parseYaml(
 	readFileSync(resolve(process.cwd(), ".github/workflows/build-unit-gate.yml"), "utf8"),
-) as { jobs?: Record<string, WorkflowJob> };
+) as {
+	on?: { pull_request?: { branches?: string[] } };
+	jobs?: Record<string, WorkflowJob>;
+};
 
 function toolchainOf(job: WorkflowJob | undefined): { node?: unknown; cache?: unknown; runs: string[] } {
 	const steps = job?.steps ?? [];
@@ -751,7 +761,7 @@ describe("release contract rules", () => {
 });
 
 describe("release skill pre-flight order", () => {
-	it("runs deterministic quality gates without runtime registry audits", () => {
+	it("runs local install, build, and type-check while GitHub owns the test suites", () => {
 		assert.equal(
 			packageJson.scripts?.["audit:packed-consumer"],
 			"node scripts/release-packed-consumer-audit.mjs",
@@ -759,9 +769,24 @@ describe("release skill pre-flight order", () => {
 		assert.doesNotMatch(skill, /^npm audit|^npm run audit:packed-consumer/gm);
 		assert.ok(position("npm ci") < position("npm run build"));
 		assert.ok(position("npm run build") < position("npm run check"));
-		assert.ok(position("npm run check") < position("npm run test:unit"));
-		assert.ok(position("npm run test:unit") < position("npm run test:browser"));
-		assert.ok(position("npm run test:browser") < position("npm run test:e2e"));
+		assert.doesNotMatch(preflight ?? "", /npm run test:(?:unit|browser|e2e)/);
+
+		assert.deepEqual(prGateWorkflow.on?.pull_request, { branches: ["main"] });
+		const requiredSuites = [
+			["verify", "npm run test:unit", undefined],
+			["browser", "npm run test:browser", "github.event_name != 'push'"],
+			["e2e", "npm run test:e2e", "github.event_name != 'push'"],
+		] as const;
+		for (const [jobName, command, condition] of requiredSuites) {
+			const job = prGateWorkflow.jobs?.[jobName];
+			assert.ok(job, `required GitHub job ${jobName} must exist`);
+			assert.equal(job.if, condition, `required GitHub job ${jobName} must keep its PR gate condition`);
+			assert.notEqual(job["continue-on-error"], true, `required GitHub job ${jobName} must block on failure`);
+			const step = (job.steps ?? []).find(candidate => candidate.run === command);
+			assert.ok(step, `required GitHub job ${jobName} must run ${command}`);
+			assert.notEqual(step["continue-on-error"], true, `${command} must block on failure`);
+		}
+		assert.match(releaseDocs, /release PR's required GitHub checks already ran the full unit, browser, and E2E matrices/);
 	});
 
 	it("documents runtime registry audits as optional diagnostics only", () => {

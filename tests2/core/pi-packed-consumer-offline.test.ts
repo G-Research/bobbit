@@ -126,8 +126,8 @@ describe("packed-consumer offline install contract", () => {
 		assert.doesNotMatch(source, /copyFile|symlink|npm-shrinkwrap\.json|bundleDependencies/,
 			"prewarm must not seed or copy an installed dependency graph");
 		assert.match(source, /const PACK_TIMEOUT_MS = 3 \* 60_000;/);
-		assert.match(source, /const INSTALL_TIMEOUT_MS = 10 \* 60_000;/);
-		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 10_000;/);
+		assert.match(source, /const INSTALL_TIMEOUT_MS = process\.platform === "win32" \? 15 \* 60_000 : 10 \* 60_000;/);
+		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
 		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
 			"spawn-time ownership must have a separate setup deadline before execution timing");
 		assert.match(source, /tracked\.killTree\("SIGKILL"\);/);
@@ -189,7 +189,7 @@ describe("packed-consumer offline install contract", () => {
 			]);
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
-			assert.equal(calls[1]?.timeoutMs, 10 * 60_000);
+			assert.equal(calls[1]?.timeoutMs, process.platform === "win32" ? 15 * 60_000 : 10 * 60_000);
 			const inherited: Record<string, string> = {
 				npm_config_cache: "inherited-cache",
 				npm_config_registry: "https://registry.example.test/",
