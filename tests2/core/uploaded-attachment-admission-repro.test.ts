@@ -15,13 +15,19 @@ import {
 	emitSessionEvent,
 	prepareVisibleAgentEvent,
 	projectPromptAuthorMessagesForTitle,
+	restorePromptAuthorBindings,
 	SessionManager,
 } from "../../src/server/agent/session-manager.ts";
 import {
 	setUploadedAttachmentRootForTesting,
 	setUploadedAttachmentSessionQuotaForTesting,
 } from "../../src/server/agent/uploaded-attachment-store.ts";
-import { initSkillSidecarDir, readSkillSidecarEntries } from "../../src/server/skills/skill-sidecar.ts";
+import {
+	appendSkillSidecarEntry,
+	appendSkillSidecarTranscriptBinding,
+	initSkillSidecarDir,
+	readSkillSidecarEntries,
+} from "../../src/server/skills/skill-sidecar.ts";
 import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.ts";
 
 const SESSION_ID = "83749600-0000-4000-8000-000000000001";
@@ -186,6 +192,8 @@ describe("uploaded attachment prompt admission", () => {
 		const pointer = modelText.match(STABLE_POINTER)?.[0];
 		expect(pointer, "ATTACHMENT_STABLE_POINTER_MISSING").toBeTruthy();
 		expect(modelText).not.toContain(ATTACHMENT.content);
+		expect(readSkillSidecarEntries(session.id).find((entry) => entry.intentId === "text-occurrence"))
+			.toMatchObject({ originalText: TYPED_TEXT, modelText });
 
 		const pendingEnvelopeCount = session.pendingSkillExpansions.length;
 		const rawStart = {
@@ -350,6 +358,100 @@ describe("uploaded attachment prompt admission", () => {
 		expect(clientState.messages.map((message: any) => message.attachments[0].fileName)).toEqual(["first.bin", "second.bin"]);
 	});
 
+	it.each([
+		{
+			kind: "image",
+			modelText: "Attachments:",
+			attachmentA: { id: "rejected-image", type: "image" as const, fileName: "rejected.png", mimeType: "image/png", size: 14 },
+			attachmentB: { id: "accepted-image", type: "image" as const, fileName: "accepted.png", mimeType: "image/png", size: 14 },
+			content: (modelText: string) => [
+				{ type: "text", text: modelText },
+				{ type: "image", data: Buffer.from("accepted-image").toString("base64"), mimeType: "image/png" },
+			],
+		},
+		{
+			kind: "document",
+			modelText: `${TYPED_TEXT}\n\n[Uploaded attachment]\nPointer: bobbit-attachment:v1:recovery:same`,
+			attachmentA: { id: "rejected-document", type: "document" as const, fileName: "rejected.bin", mimeType: "application/octet-stream", size: 4 },
+			attachmentB: { id: "accepted-document", type: "document" as const, fileName: "accepted.bin", mimeType: "application/octet-stream", size: 4 },
+			content: (modelText: string) => [{ type: "text", text: modelText }],
+		},
+	])("restores only the non-cancelled same-text $kind occurrence before replay", ({ kind, modelText, attachmentA, attachmentB, content }) => {
+		const recoveredId = `83749600-0000-4000-8000-recovery-${kind}`;
+		const rejectedId = `recovery-${kind}-rejected`;
+		const acceptedId = `recovery-${kind}-accepted`;
+		for (const entry of [
+			{
+				schemaVersion: 1 as const,
+				recordId: `skill:v1:${rejectedId}`,
+				intentId: rejectedId,
+				ts: 1,
+				modelText,
+				originalText: TYPED_TEXT,
+				skillExpansions: [],
+				attachments: [attachmentA],
+			},
+			{
+				schemaVersion: 1 as const,
+				recordId: `skill:v1:${acceptedId}`,
+				intentId: acceptedId,
+				ts: 2,
+				modelText,
+				originalText: TYPED_TEXT,
+				skillExpansions: [],
+				attachments: [attachmentB],
+			},
+		]) expect(appendSkillSidecarEntry(recoveredId, entry)).toBe(true);
+		const authorEntries: any[] = [
+			{
+				schemaVersion: 1, type: "prompt-author", promptId: rejectedId, intentId: rejectedId,
+				attemptId: `attempt:${rejectedId}`, dispatchEpoch: 1, dispatchedAt: 1,
+				modelText, source: "user", author: LOCAL_USER_AUTHOR,
+				settlement: {
+					schemaVersion: 1, type: "prompt-author-settlement", promptId: rejectedId,
+					intentId: rejectedId, attemptId: `attempt:${rejectedId}`, settledAt: 2, outcome: "cancelled",
+				},
+			},
+			{
+				schemaVersion: 1, type: "prompt-author", promptId: acceptedId, intentId: acceptedId,
+				attemptId: `attempt:${acceptedId}`, dispatchEpoch: 3, dispatchedAt: 3,
+				modelText, source: "user", author: LOCAL_USER_AUTHOR,
+			},
+		];
+		const recovered: any = {
+			id: recoveredId,
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: new PromptQueue(),
+		};
+
+		restorePromptAuthorBindings(recovered, authorEntries);
+		expect(recovered.pendingSkillExpansions).toEqual([
+			expect.objectContaining({ intentId: acceptedId, promptId: acceptedId }),
+		]);
+		expect(JSON.stringify(recovered.pendingSkillExpansions)).not.toContain(attachmentA.fileName);
+
+		const rawMessage = { id: `pi-${kind}-accepted`, role: "user", content: content(modelText) };
+		const project = (type: "message_start" | "message_update" | "message_end") => {
+			const prepared = prepareVisibleAgentEvent(recovered, { type, message: rawMessage });
+			return emitSessionEvent(recovered, prepared).event as any;
+		};
+		for (const type of ["message_start", "message_update"] as const) {
+			const visible = project(type);
+			expect(visibleText(visible.message)).toBe(TYPED_TEXT);
+			expect(visible.message.deliveryIntentId).toBe(acceptedId);
+			expect(visible.message.attachments).toEqual([
+				expect.objectContaining({ id: attachmentB.id, fileName: attachmentB.fileName }),
+			]);
+			expect(JSON.stringify(visible)).not.toContain(attachmentA.fileName);
+			if (kind === "document") expect(JSON.stringify(visible)).not.toContain("bobbit-attachment:v1:recovery:same");
+		}
+		const terminal = project("message_end");
+		expect(visibleText(terminal.message)).toBe(TYPED_TEXT);
+		expect(terminal.message.attachments[0].fileName).toBe(attachmentB.fileName);
+		expect(recovered.pendingSkillExpansions).toEqual([]);
+	});
+
 	it("keeps binary content pointer-only and isolates equal typed occurrences through queue projection", async () => {
 		const delivery = await manager.enqueuePrompt(session.id, TYPED_TEXT, {
 			attachments: [BINARY_ATTACHMENT],
@@ -385,12 +487,12 @@ describe("uploaded attachment prompt admission", () => {
 		// prompt, so clear the fixture's unacknowledged direct-dispatch recovery row.
 		session.inFlightSteerTexts = [];
 		const visible = manager.buildVisibleMessageSnapshot(session.id, [
-			{ role: "user", content: firstModelText },
+			{ role: "user", deliveryIntentId: "text-occurrence", content: firstModelText },
 			{ role: "user", content: internal.text },
 		]) as any[];
-		expect(visible.map(visibleText)).toEqual([TYPED_TEXT, TYPED_TEXT]);
+		expect(visible.map(visibleText)).toEqual([TYPED_TEXT, internal.text]);
 		expect(visible[0].attachments[0].fileName).toBe(ATTACHMENT.fileName);
-		expect(visible[1].attachments[0].fileName).toBe(BINARY_ATTACHMENT.fileName);
+		expect(visible[1].attachments).toBeUndefined();
 		expect(firstModelText.match(STABLE_POINTER)?.[0]).not.toBe(internal.text.match(STABLE_POINTER)?.[0]);
 	});
 
@@ -705,6 +807,9 @@ describe("uploaded attachment prompt admission", () => {
 			expect(recoveryModelText).toContain(EXTRACTED_MARKER);
 			expect(pointer).toBeTruthy();
 
+			const firstEnvelope = recoverySession.pendingSkillExpansions.find((entry: any) =>
+				entry.intentId === "recovery-attachment-occurrence");
+			expect(firstEnvelope?.recordId).toBeTruthy();
 			const firstPrepared = prepareVisibleAgentEvent(recoverySession, {
 				type: "message_end",
 				message: { id: "pi-recovery-occurrence", role: "user", content: recoveryModelText },
@@ -712,6 +817,9 @@ describe("uploaded attachment prompt admission", () => {
 			const firstLive = emitSessionEvent(recoverySession, firstPrepared).event as any;
 			expect(visibleText(firstLive.message)).toBe(TYPED_TEXT);
 			expect(firstLive.message.attachments?.[0].fileName).toBe(ATTACHMENT.fileName);
+			expect(appendSkillSidecarTranscriptBinding(
+				recoverySession.id, firstEnvelope.recordId, "pi-recovery-occurrence",
+			)).toBe(true);
 
 			recoverySession.status = "idle";
 			recoverySession.lastTurnErrored = true;
@@ -723,6 +831,8 @@ describe("uploaded attachment prompt admission", () => {
 			const retryPiText = recoveryPrompt.mock.calls[1][0] as string;
 			expect(retryPiText).toContain(pointer);
 			expect(retryPiText).toContain(EXTRACTED_MARKER);
+			const retryEnvelope = recoverySession.pendingSkillExpansions.at(-1);
+			expect(retryEnvelope?.recordId).toBeTruthy();
 			const retryPrepared = prepareVisibleAgentEvent(recoverySession, {
 				type: "message_end",
 				message: { id: "pi-explicit-retry-occurrence", role: "user", content: retryPiText },
@@ -730,6 +840,9 @@ describe("uploaded attachment prompt admission", () => {
 			const retryLive = emitSessionEvent(recoverySession, retryPrepared).event as any;
 			expect(visibleText(retryLive.message)).toBe(TYPED_TEXT);
 			expect(retryLive.message.attachments?.[0].fileName).toBe(ATTACHMENT.fileName);
+			expect(appendSkillSidecarTranscriptBinding(
+				recoverySession.id, retryEnvelope.recordId, "pi-explicit-retry-occurrence",
+			)).toBe(true);
 
 			recoverySession.status = "idle";
 			recoverySession.lastTurnErrored = true;
@@ -738,6 +851,8 @@ describe("uploaded attachment prompt admission", () => {
 			await recoveryManager.retryLastPrompt(recoverySession.id, { auto: true });
 			const autoRetryPiText = recoveryPrompt.mock.calls[2][0] as string;
 			expect(autoRetryPiText).toContain(pointer);
+			const autoEnvelope = recoverySession.pendingSkillExpansions.at(-1);
+			expect(autoEnvelope?.recordId).toBeTruthy();
 			const autoPrepared = prepareVisibleAgentEvent(recoverySession, {
 				type: "message_end",
 				message: { id: "pi-auto-retry-occurrence", role: "user", content: autoRetryPiText },
@@ -745,11 +860,16 @@ describe("uploaded attachment prompt admission", () => {
 			const autoLive = emitSessionEvent(recoverySession, autoPrepared).event as any;
 			expect(visibleText(autoLive.message)).toBe(TYPED_TEXT);
 			expect(autoLive.message.attachments?.[0].fileName).toBe(ATTACHMENT.fileName);
+			expect(appendSkillSidecarTranscriptBinding(
+				recoverySession.id,
+				autoEnvelope.recordId,
+				"pi-auto-retry-occurrence",
+			)).toBe(true);
 
 			const raw = [
-				{ id: "pi-recovery-occurrence", role: "user", content: recoveryModelText },
-				{ id: "pi-explicit-retry-occurrence", role: "user", content: retryPiText },
-				{ id: "pi-auto-retry-occurrence", role: "user", content: autoRetryPiText },
+				{ id: "pi-recovery-occurrence", entryId: "pi-recovery-occurrence", role: "user", content: recoveryModelText },
+				{ id: "pi-explicit-retry-occurrence", entryId: "pi-explicit-retry-occurrence", role: "user", content: retryPiText },
+				{ id: "pi-auto-retry-occurrence", entryId: "pi-auto-retry-occurrence", role: "user", content: autoRetryPiText },
 			];
 			const restored = recoveryManager.buildVisibleMessageSnapshot(recoverySession.id, raw) as any[];
 			expect(restored.map(visibleText)).toEqual([TYPED_TEXT, TYPED_TEXT, TYPED_TEXT]);

@@ -23,6 +23,7 @@ process.env.BOBBIT_DIR = tmpRoot;
 const {
 	initSkillSidecarDir,
 	appendSkillSidecarEntry,
+	appendIdentifiedSkillSidecarEntry,
 	readSkillSidecarEntries,
 	findSkillSidecarEntry,
 	purgeSkillSidecar,
@@ -77,6 +78,32 @@ describe("skill-sidecar", () => {
 		const entries = readSkillSidecarEntries(sid);
 		assert.equal(entries.length, 1);
 		assert.deepEqual(entries[0], sample);
+	});
+
+	it("persists only validated accepted occurrence identity on modern records", () => {
+		const sid = "session-occurrence-roundtrip";
+		const recordId = appendIdentifiedSkillSidecarEntry(sid, {
+			...sample,
+			intentId: "accepted-occurrence",
+		});
+		assert.ok(recordId);
+		const [persisted] = readSkillSidecarEntries(sid);
+		assert.equal(persisted.recordId, recordId);
+		assert.equal(persisted.intentId, "accepted-occurrence");
+		assert.equal(persisted.schemaVersion, 1);
+		assert.equal(appendSkillSidecarEntry(sid, {
+			...sample,
+			intentId: " ",
+		}), false);
+
+		const file = path.join(stateDir, "skill-sidecar", `${sid}.jsonl`);
+		fs.appendFileSync(file, `${JSON.stringify({
+			...sample,
+			schemaVersion: 1,
+			recordId: "skill:v1:malformed-occurrence",
+			intentId: "x".repeat(257),
+		})}\n`, "utf8");
+		assert.equal(readSkillSidecarEntries(sid).length, 1, "invalid modern identity must fail closed, not downgrade to legacy FIFO");
 	});
 
 	it("findSkillSidecarEntry matches by modelText + ts within tolerance", () => {
@@ -338,6 +365,49 @@ describe("mergeSidecarEntriesIntoMessages (restore / snapshot path)", () => {
 		assert.equal(out[0].content, "first");
 		assert.equal(out[1].content, "second");
 		assert.equal(out[2].content, "same", "ambiguous bound envelopes must not fall back to text association");
+	});
+
+	it("matches modern same-text records only by proven delivery occurrence", () => {
+		const entries = [
+			{ ts: 2, modelText: "Attachments:", originalText: "second", skillExpansions: [], intentId: "occurrence-b" },
+			{ ts: 1, modelText: "Attachments:", originalText: "first", skillExpansions: [], intentId: "occurrence-a" },
+		];
+		const out = mergeSidecarEntriesIntoMessages(entries, [
+			{ role: "user", deliveryIntentId: "occurrence-a", content: "Attachments:" },
+			{ role: "user", deliveryIntentId: "occurrence-b", content: "Attachments:" },
+			{ role: "user", content: "Attachments:" },
+		]);
+		assert.deepEqual(out.map((message: any) => message.content), [
+			"first",
+			"second",
+			"Attachments:",
+		]);
+	});
+
+	it("never lets duplicate or unproven modern records enter legacy FIFO", () => {
+		const modern = {
+			ts: 1,
+			modelText: "same pointer text",
+			originalText: "must stay private",
+			skillExpansions: [],
+			intentId: "modern-occurrence",
+		};
+		const input = [
+			{ role: "user", deliveryIntentId: "modern-occurrence", content: modern.modelText },
+			{ role: "user", content: modern.modelText },
+		];
+		const ambiguous = mergeSidecarEntriesIntoMessages([
+			modern,
+			{ ...modern, originalText: "conflict" },
+		], input);
+		assert.deepEqual(ambiguous.map((message: any) => message.content), [modern.modelText, modern.modelText]);
+
+		const unproven = mergeSidecarEntriesIntoMessages([modern], [{ role: "user", content: modern.modelText }]);
+		assert.equal(unproven[0].content, modern.modelText);
+		const legacy = mergeSidecarEntriesIntoMessages([
+			{ ...modern, intentId: undefined, originalText: "legacy display" },
+		], [{ role: "user", content: modern.modelText }]);
+		assert.equal(legacy[0].content, "legacy display", "truly legacy records retain FIFO compatibility");
 	});
 
 	it("projects one authoritative bound envelope when the outward source omits entry identity", () => {
