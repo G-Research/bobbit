@@ -249,7 +249,7 @@ export function getHostApi(
 			path: "/api/ext/project/read",
 			init: {
 				method: "POST",
-				body: JSON.stringify({ operation, surfaceToken: token, ...payload }),
+				body: JSON.stringify({ sessionId, operation, surfaceToken: token, ...payload }),
 			},
 		}));
 		if (!resp.ok) throw new Error(`project.${operation} HTTP ${resp.status}`);

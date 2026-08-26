@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
 import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.js";
@@ -24,7 +26,7 @@ function projectRead(
 	});
 }
 
-function seedBoundSession(gateway: any): { id: string; store: any } {
+function seedBoundSession(gateway: any, allowedTools?: string[]): { id: string; store: any } {
 	const id = `project-read-session-${randomUUID()}`;
 	const store = gateway.sessionManager.getSessionStore(gateway.defaultProjectId);
 	store.put({
@@ -34,8 +36,52 @@ function seedBoundSession(gateway: any): { id: string; store: any } {
 		createdAt: 1_000,
 		lastActivity: 2_000,
 		projectId: gateway.defaultProjectId,
+		...(allowedTools ? { allowedTools } : {}),
 	});
 	return { id, store };
+}
+
+async function refreshServerPackIndex(gateway: any): Promise<void> {
+	const current = await gateway.apiJson("/api/marketplace/pack-order?scope=server");
+	const response = await gateway.api("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order: current.order }),
+	});
+	expect(response.status, await response.clone().text()).toBe(200);
+}
+
+function writeToolPack(gateway: any, packName: string, toolName: string): string {
+	const packDir = join(gateway.bobbitDir, "config", "market-packs", packName);
+	const toolDir = join(packDir, "tools", toolName);
+	mkdirSync(toolDir, { recursive: true });
+	writeFileSync(join(packDir, "pack.yaml"), [
+		"schema: 2",
+		`name: ${packName}`,
+		"description: Project read tool authorization fixture",
+		"version: 1.0.0",
+		"contents:",
+		"  roles: []",
+		`  tools: [${toolName}]`,
+		"  skills: []",
+		"  entrypoints: []",
+	].join("\n") + "\n");
+	writeFileSync(join(packDir, ".pack-meta.yaml"), [
+		"sourceUrl: integration",
+		"sourceRef: local",
+		"commit: test",
+		`packName: ${packName}`,
+		"version: 1.0.0",
+		"installedAt: '2026-01-01T00:00:00.000Z'",
+		"updatedAt: '2026-01-01T00:00:00.000Z'",
+		"scope: server",
+	].join("\n") + "\n");
+	writeFileSync(join(toolDir, `${toolName}.yaml`), [
+		`name: ${toolName}`,
+		"description: Project read tool authorization fixture",
+		"group: Integration Fixture",
+		"summary: Project read tool authorization fixture",
+	].join("\n") + "\n");
+	return packDir;
 }
 
 function goalRecord(id: string, projectId: string, title: string) {
@@ -179,9 +225,17 @@ test("project child reads authorize the parent first and reread current canonica
 		const foreignParent = await projectRead(bound.id, "goal-tasks", { goalId: foreignGoalId });
 		expect(foreignParent.status).toBe(200);
 		expect(await foreignParent.json()).toEqual({ goalId: foreignGoalId, status: "unauthorized" });
-		const missingParent = await projectRead(bound.id, "goal-gates", { goalId: `missing-${randomUUID()}` });
+		const missingGoalId = `missing-${randomUUID()}`;
+		const missingParent = await projectRead(bound.id, "goal-gates", { goalId: missingGoalId });
 		expect(missingParent.status).toBe(200);
-		expect(await missingParent.json()).toMatchObject({ status: "not-found" });
+		expect(await missingParent.json()).toEqual({ goalId: missingGoalId, status: "not-found" });
+
+		const foreignPullRequest = await projectRead(bound.id, "goal-pull-request", { goalId: foreignGoalId });
+		expect(foreignPullRequest.status).toBe(200);
+		expect(await foreignPullRequest.json()).toEqual({ id: foreignGoalId, status: "unauthorized" });
+		const missingPullRequest = await projectRead(bound.id, "goal-pull-request", { goalId: missingGoalId });
+		expect(missingPullRequest.status).toBe(200);
+		expect(await missingPullRequest.json()).toEqual({ id: missingGoalId, status: "not-found" });
 
 		context.goalStore.put({ ...context.goalStore.get(goalId), title: "After reread", updatedAt: 30 });
 		const reread = await projectRead(bound.id, "goals", { selector: { mode: "ids", ids: [goalId] } });
@@ -191,6 +245,39 @@ test("project child reads authorize the parent first and reread current canonica
 		context.goalStore.remove(goalId);
 		foreignContext.goalStore.remove(foreignGoalId);
 		bound.store.remove(bound.id);
+	}
+});
+
+test("tool-bound project reads require the closure-bound session echo and an allowed active pack tool", async ({ gateway }) => {
+	const suffix = randomUUID().replaceAll("-", "");
+	const packName = `project-read-tool-${suffix}`;
+	const toolName = `project_read_tool_${suffix}`;
+	const packDir = writeToolPack(gateway, packName, toolName);
+	const bound = seedBoundSession(gateway, [toolName]);
+	try {
+		await refreshServerPackIndex(gateway);
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
+		const location = context.toolManager.resolveToolLocation(toolName);
+		expect(location?.baseDir).toContain(packName);
+		const surfaceToken = mintSurfaceToken({
+			sessionId: bound.id,
+			packId: packName,
+			contributionId: `${location?.groupDir}/${toolName}`,
+			tool: toolName,
+		});
+
+		const matching = await projectRead(bound.id, "goals", { sessionId: bound.id }, surfaceToken);
+		expect(matching.status, await matching.clone().text()).toBe(200);
+		expect(await matching.json()).toMatchObject({ mode: "page" });
+
+		const omitted = await projectRead(bound.id, "goals", {}, surfaceToken);
+		expect(omitted.status).toBe(403);
+		const mismatched = await projectRead(bound.id, "goals", { sessionId: `${bound.id}-other` }, surfaceToken);
+		expect(mismatched.status).toBe(403);
+	} finally {
+		bound.store.remove(bound.id);
+		rmSync(packDir, { recursive: true, force: true });
+		await refreshServerPackIndex(gateway);
 	}
 });
 

@@ -10914,7 +10914,12 @@ async function handleApiRoute(
 			parseHostProjectSelector({ mode: "ids", ids: [goalId] });
 			const goal = projectContext.goalStore.get(goalId);
 			if (!goal) {
-				json({ goalId, status: foreignGoal(goalId) });
+				const status = foreignGoal(goalId);
+				if (operation === "goal-pull-request") {
+					json({ id: goalId, status });
+					return;
+				}
+				json({ goalId, status });
 				return;
 			}
 			if (operation === "goal-tasks") {

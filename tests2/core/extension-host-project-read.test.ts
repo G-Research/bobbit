@@ -52,6 +52,16 @@ describe("Extension Host project read v7 contract", () => {
 			goalId: string;
 			status: "not-found" | "unauthorized";
 		}>();
+		expectTypeOf<Awaited<ReturnType<HostProjectApi["readGoalTasks"]>>>().toEqualTypeOf<
+			HostProjectRead<HostTaskSummary> | HostGoalReadError
+		>();
+		expectTypeOf<Awaited<ReturnType<HostProjectApi["readGoalPullRequest"]>>>().toEqualTypeOf<
+			HostLookupResult<HostPullRequestSummary | null>
+		>();
+		const childError: HostGoalReadError = { goalId: "goal-missing", status: "not-found" };
+		const pullRequestError: HostLookupResult<HostPullRequestSummary | null> = { id: "goal-missing", status: "not-found" };
+		expect(childError).toEqual({ goalId: "goal-missing", status: "not-found" });
+		expect(pullRequestError).toEqual({ id: "goal-missing", status: "not-found" });
 	});
 
 	it("normalizes bounded pages with offset continuation", () => {

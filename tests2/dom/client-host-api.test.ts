@@ -375,12 +375,14 @@ async function clientProjectReads() {
 	const originalFetch = window.fetch;
 	let mintCount = 0;
 	const requests: Array<{ path: string; method?: string; sessionHeader: string | null; body: Record<string, unknown> }> = [];
-	registerSurfaceTokenMinter("sess-project", async () => {
-		mintCount += 1;
-		return mintCount === 1 ? "stale-project-token" : "fresh-project-token";
-	});
 	window.fetch = (async (input: any, init?: any) => {
 		const path = new URL(String(input), window.location.href).pathname;
+		if (path === "/api/ext/surface-token") {
+			mintCount += 1;
+			return new Response(JSON.stringify({
+				token: mintCount === 1 ? "stale-project-token" : "fresh-project-token",
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}
 		if (path !== "/api/ext/project/read") return new Response("not found", { status: 404 });
 		const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
 		requests.push({
@@ -398,8 +400,8 @@ async function clientProjectReads() {
 		});
 	}) as any;
 	try {
-		const host = getHostApi("sess-project", undefined, {
-			kind: "pack", packId: "fixture", contributionKind: "panel", contributionId: "dashboard",
+		const host = getHostApi("sess-project", "tool-use-project", {
+			kind: "tool", tool: "fixture.read", packId: "fixture",
 		});
 		const results = [
 			await host.project.readStaff({ limit: 2 }),
@@ -412,7 +414,6 @@ async function clientProjectReads() {
 		return { mintCount, requests, results };
 	} finally {
 		window.fetch = originalFetch;
-		unregisterSurfaceTokenMinter("sess-project");
 	}
 }
 
@@ -456,7 +457,7 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 		});
 	});
 
-	it("uses six fixed project-read operations and remints one stale token without caller identity", async () => {
+	it("uses six fixed project-read operations with closure-bound session identity and one stale-token remint", async () => {
 		const result = await clientProjectReads();
 		expect(result.mintCount).toBe(2);
 		expect(result.results).toEqual([
@@ -470,36 +471,36 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 		expect(result.requests).toEqual([
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "staff", surfaceToken: "stale-project-token", selector: { limit: 2 } },
+				body: { sessionId: "sess-project", operation: "staff", surfaceToken: "stale-project-token", selector: { limit: 2 } },
 			},
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "staff", surfaceToken: "fresh-project-token", selector: { limit: 2 } },
+				body: { sessionId: "sess-project", operation: "staff", surfaceToken: "fresh-project-token", selector: { limit: 2 } },
 			},
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "sessions", surfaceToken: "fresh-project-token", selector: { mode: "ids", ids: ["session-2", "session-1"] } },
+				body: { sessionId: "sess-project", operation: "sessions", surfaceToken: "fresh-project-token", selector: { mode: "ids", ids: ["session-2", "session-1"] } },
 			},
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "goals", surfaceToken: "fresh-project-token" },
+				body: { sessionId: "sess-project", operation: "goals", surfaceToken: "fresh-project-token" },
 			},
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "goal-tasks", surfaceToken: "fresh-project-token", goalId: "goal-1", selector: { cursor: 10, limit: 5 } },
+				body: { sessionId: "sess-project", operation: "goal-tasks", surfaceToken: "fresh-project-token", goalId: "goal-1", selector: { cursor: 10, limit: 5 } },
 			},
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "goal-gates", surfaceToken: "fresh-project-token", goalId: "goal-1", selector: { mode: "ids", ids: ["gate-2"] } },
+				body: { sessionId: "sess-project", operation: "goal-gates", surfaceToken: "fresh-project-token", goalId: "goal-1", selector: { mode: "ids", ids: ["gate-2"] } },
 			},
 			{
 				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
-				body: { operation: "goal-pull-request", surfaceToken: "fresh-project-token", goalId: "goal-1" },
+				body: { sessionId: "sess-project", operation: "goal-pull-request", surfaceToken: "fresh-project-token", goalId: "goal-1" },
 			},
 		]);
 		for (const { body } of result.requests) {
 			expect(body).not.toHaveProperty("projectId");
-			expect(body).not.toHaveProperty("sessionId");
+			expect(body.sessionId).toBe("sess-project");
 			expect(body).not.toHaveProperty("toolUseId");
 			expect(body).not.toHaveProperty("url");
 		}
