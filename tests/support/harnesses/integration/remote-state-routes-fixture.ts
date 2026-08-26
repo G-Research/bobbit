@@ -28,6 +28,11 @@ function apiFetch(path: string, opts: RequestInit = {}): Promise<Response> {
 	}
 	return rawApiFetch(path, opts);
 }
+
+/** Deterministic fixture seam for a read arriving in the already-open force epoch. */
+function apiFetchAtCurrentForceEpoch(path: string, opts: RequestInit = {}): Promise<Response> {
+	return rawApiFetch(path, opts);
+}
 type PersistenceMode = "sqlite" | "json" | undefined;
 interface MutableProjectPersistenceOptions {
 	goalPersistence?: PersistenceMode;
@@ -160,6 +165,12 @@ async function handoffRemoteStateRouteRunner(
 	));
 	await Promise.all(handoffs.map(response => response.arrayBuffer()));
 	expect(runner.execFile, "remote-state runner changed during lifecycle handoff").toBe(predecessor);
+	// The drained predecessor read owns the current force marker. Seal a distinct
+	// production-sized epoch before changing runner ownership so the first read
+	// after handoff cannot coalesce onto that predecessor snapshot. Keep the epoch
+	// advance and runner replacement synchronous: an await here would reopen the
+	// mutable runner ownership gap this handoff closes.
+	crossForceCoalescingWindow();
 	runner.execFile = replacement;
 	return () => {
 		if (runner.execFile === replacement) runner.execFile = predecessor;
@@ -287,7 +298,7 @@ export function installRemoteStateRouteHooks(): void {
 export {
 	mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync,
 	EventEmitter, tmpdir, PassThrough, dirname, join, awaitableRm, test, expect,
-	apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject,
+	apiFetch, apiFetchAtCurrentForceEpoch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject,
 	createCommandSpawnAdapter, crossForceCoalescingWindow, unexpectedRunnerCommand,
 	standardSingleRepositoryProbe, commandName, credentialHelperResult, ownedHeadEvidence,
 	ownedHeadEvidenceForSlug, createRemoteStateSession, removeSiblingWorktree,

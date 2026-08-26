@@ -7,6 +7,7 @@ import {
 	test,
 	expect,
 	apiFetch,
+	apiFetchAtCurrentForceEpoch,
 	connectWs,
 	createGoal,
 	deleteGoal,
@@ -27,7 +28,7 @@ import {
 test.describe("remote-state coordinator routes", () => {
 	installRemoteStateRouteHooks();
 
-	test("hands final-binding predecessor work to the asserted PR runner", async ({ gateway }) => {
+	test("seals the drained predecessor force epoch before installing the asserted PR runner", async ({ gateway }) => {
 		const ownedCwd = gitCwd();
 		const goal = await createGoal({
 			title: `PR runner handoff ${Date.now()}`,
@@ -48,15 +49,17 @@ test.describe("remote-state coordinator routes", () => {
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const defaultExecFile = runner.execFile;
 		let predecessorActive = false;
+		let predecessorReads = 0;
 		let predecessorStartedResolve!: () => void;
 		const predecessorStarted = new Promise<void>(resolve => { predecessorStartedResolve = resolve; });
 		let releasePredecessor!: () => void;
 		const predecessorGate = new Promise<void>(resolve => { releasePredecessor = resolve; });
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
-				return { stdout: "https://github.com/acme/predecessor.git\n", stderr: "" };
+				return { stdout: "https://github.com/acme/epoch-owner.git\n", stderr: "" };
 			}
 			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
+				predecessorReads += 1;
 				predecessorActive = true;
 				predecessorStartedResolve();
 				await predecessorGate;
@@ -71,19 +74,19 @@ test.describe("remote-state coordinator routes", () => {
 		let assertedPrReads = 0;
 		const assertedExecFile = async (file: string, args: readonly string[], options?: any) => {
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
-				return { stdout: "https://github.com/acme/asserted.git\n", stderr: "" };
+				return { stdout: "https://github.com/acme/epoch-owner.git\n", stderr: "" };
 			}
 			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				assertedPrReads += 1;
 				return { stdout: JSON.stringify([{
 					number: 71,
-					url: "https://github.com/acme/asserted/pull/71",
+					url: "https://github.com/acme/epoch-owner/pull/71",
 					title: "asserted runner owns first read",
 					state: "OPEN",
 					mergeable: "MERGEABLE",
 					headRefName: "fixture/final-binding-handoff",
 					baseRefName: "main",
-					...ownedHeadEvidence("acme", "asserted"),
+					...ownedHeadEvidence("acme", "epoch-owner"),
 				}]), stderr: "" };
 			}
 			const probe = standardSingleRepositoryProbe(file, args, ownedCwd);
@@ -91,10 +94,8 @@ test.describe("remote-state coordinator routes", () => {
 			return unexpectedRunnerCommand(file, args, options);
 		};
 
-		const predecessorRequest = apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit&optional=1`);
 		let restoreRunner: (() => void) | undefined;
 		try {
-			await predecessorStarted;
 			let handoffSettled = false;
 			const handoff = handoffRemoteStateRouteRunner(
 				gateway,
@@ -104,24 +105,28 @@ test.describe("remote-state coordinator routes", () => {
 				handoffSettled = true;
 				return restore;
 			});
+			await predecessorStarted;
 			await new Promise<void>(resolve => setImmediate(resolve));
-			expect(handoffSettled, "runner handoff must join predecessor PR work").toBe(false);
+			expect(handoffSettled, "runner handoff must drain predecessor PR work").toBe(false);
 			expect(predecessorActive).toBe(true);
+			expect(predecessorReads).toBe(1);
 			releasePredecessor();
 			restoreRunner = await handoff;
 			expect(predecessorActive).toBe(false);
-			expect((await predecessorRequest).status).toBe(204);
 
-			const status = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			// Deliberately stay in the fixture's current force epoch. The handoff—not
+			// a retry, cache clear, elapsed timer, or the apiFetch burst wrapper—must
+			// make this first post-drain read authoritative for the installed runner.
+			const status = await apiFetchAtCurrentForceEpoch(`/api/goals/${goalId}/pr-status?intent=explicit`);
 			expect(status.status).toBe(200);
 			expect(await status.json()).toMatchObject({
 				stale: false,
 				data: { number: 71, title: "asserted runner owns first read" },
 			});
+			expect(predecessorReads).toBe(1);
 			expect(assertedPrReads).toBe(1);
 		} finally {
 			releasePredecessor();
-			await predecessorRequest.catch(() => undefined);
 			restoreRunner?.();
 			runner.execFile = defaultExecFile;
 			await deleteGoal(goalId);
