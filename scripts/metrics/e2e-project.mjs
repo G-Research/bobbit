@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { ensureFullBuild, measureCommand, metricFile, parsePlaywrightJson, pathFromRoot } from "./lib.mjs";
+import { ensureFullBuild, measureCommand, metricFile, parsePlaywrightJson, pathFromRoot, playwrightE2EMetricProjects } from "./lib.mjs";
 
 const project = process.argv[2];
-if (!project || !["api", "api-realpush", "browser"].includes(project)) {
-	console.error("Usage: node scripts/metrics/e2e-project.mjs <api|api-realpush|browser>");
+if (!project || !playwrightE2EMetricProjects.includes(project)) {
+	console.error(`Usage: node scripts/metrics/e2e-project.mjs <${playwrightE2EMetricProjects.join("|")}>`);
 	process.exit(1);
 }
 

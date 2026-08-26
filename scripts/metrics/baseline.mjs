@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { baselineMetricsDir, copyMetricToBaseline, ensureDir, listJsonFiles, metricFile, npmCommand, npmRunArgs, projectRoot, requiredMetricNames, runSyncStep, writeJson } from "./lib.mjs";
+import { baselineMetricFile, baselineMetricsDir, copyMetricToBaseline, ensureDir, listJsonFiles, metricFile, npmCommand, npmRunArgs, projectRoot, requiredMetricNames, runSyncStep, writeJson } from "./lib.mjs";
 
-const optionalMetricsToCopy = ["e2e-api-realpush"];
-const metricsToCopy = [...requiredMetricNames, ...optionalMetricsToCopy];
+const metricsToCopy = requiredMetricNames;
+const retiredBaselineMetrics = ["e2e-api-realpush"];
 const coverageMapOnly = process.argv.includes("--coverage-map-only");
 const effectiveBaselineMetricsDir = process.env.BOBBIT_METRICS_BASELINE_DIR
 	? resolve(process.env.BOBBIT_METRICS_BASELINE_DIR)
@@ -74,6 +74,11 @@ function updateCoverageMapBaselineSection(baselineFiles) {
 	}
 
 	writeFileSync(coverageMapPath, existing.endsWith("\n") ? existing : `${existing}\n`);
+}
+
+for (const metric of retiredBaselineMetrics) {
+	const retiredBaseline = baselineMetricFile(metric, effectiveBaselineMetricsDir);
+	if (existsSync(retiredBaseline)) rmSync(retiredBaseline, { force: true });
 }
 
 if (!coverageMapOnly) {

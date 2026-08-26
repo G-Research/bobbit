@@ -20,6 +20,21 @@ export const requiredMetricNames = [
 	"slice-scroll",
 	"slice-sidebar",
 ];
+export const playwrightE2EMetricProjects = Object.freeze(["api", "browser"]);
+
+export function playwrightE2EProjectEntries(projects) {
+	if (!projects || typeof projects !== "object" || Array.isArray(projects)) {
+		throw new Error("metrics:e2e:all could not derive project splits from the Playwright JSON report");
+	}
+	for (const project of playwrightE2EMetricProjects) {
+		if (!projects[project]) throw new Error(`metrics:e2e:all missing required ${project} project split in the Playwright JSON report`);
+	}
+	const unexpectedProjects = Object.keys(projects).filter((project) => !playwrightE2EMetricProjects.includes(project));
+	if (unexpectedProjects.length > 0) {
+		throw new Error(`metrics:e2e:all found unsupported Playwright project split(s): ${unexpectedProjects.sort().join(", ")}; expected only ${playwrightE2EMetricProjects.join(" and ")}`);
+	}
+	return playwrightE2EMetricProjects.map((project) => [project, projects[project]]);
+}
 
 export function ensureDir(dir) {
 	mkdirSync(dir, { recursive: true });
@@ -339,23 +354,18 @@ function addTestToBucket(bucket, status, duration) {
 }
 
 function ensureFileBucket(files, file) {
-	if (!files[file]) files[file] = { ...emptyTestBucket(), titles: [] };
+	if (!files[file]) files[file] = emptyTestBucket();
 	return files[file];
 }
 
 function walkPlaywrightSuites(suites, entries = [], context = {}) {
 	for (const suite of suites || []) {
 		const file = suite.file || context.file;
-		const suiteTitle = typeof suite.title === "string" ? suite.title : "";
-		const fileLikeTitle = suite.file && normalizeReportPath(suiteTitle) === normalizeReportPath(suite.file);
-		const titles = suiteTitle && !fileLikeTitle ? [...(context.titles || []), suiteTitle] : (context.titles || []);
 		for (const spec of suite.specs || []) {
 			const specFile = spec.file || file;
-			const specTitle = typeof spec.title === "string" ? spec.title : "";
-			const title = [...titles, specTitle].filter(Boolean).join(" >> ");
-			for (const test of spec.tests || []) entries.push({ test, file: normalizeReportPath(specFile), title });
+			for (const test of spec.tests || []) entries.push({ test, file: normalizeReportPath(specFile) });
 		}
-		walkPlaywrightSuites(suite.suites, entries, { file, titles });
+		walkPlaywrightSuites(suite.suites, entries, { file });
 	}
 	return entries;
 }
@@ -375,7 +385,7 @@ export function parsePlaywrightJson(file) {
 		files: {},
 		projects: {},
 	};
-	for (const { test, file: testFile, title } of testEntries) {
+	for (const { test, file: testFile } of testEntries) {
 		const project = test.projectName || "unknown";
 		if (!summary.projects[project]) summary.projects[project] = { ...emptyTestBucket(), files: {} };
 		const target = summary.projects[project];
@@ -383,10 +393,8 @@ export function parsePlaywrightJson(file) {
 		const duration = (test.results || []).reduce((sum, result) => sum + (result.duration || 0), 0);
 		addTestToBucket(summary, status, duration);
 		addTestToBucket(target, status, duration);
-		for (const fileBucket of [ensureFileBucket(summary.files, testFile), ensureFileBucket(target.files, testFile)]) {
-			addTestToBucket(fileBucket, status, duration);
-			fileBucket.titles.push({ title, status, project });
-		}
+		addTestToBucket(ensureFileBucket(summary.files, testFile), status, duration);
+		addTestToBucket(ensureFileBucket(target.files, testFile), status, duration);
 	}
 	return summary;
 }
