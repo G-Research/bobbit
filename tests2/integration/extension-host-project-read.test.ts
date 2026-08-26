@@ -254,6 +254,7 @@ test("tool-bound project reads require the closure-bound session echo and an all
 	const toolName = `project_read_tool_${suffix}`;
 	const packDir = writeToolPack(gateway, packName, toolName);
 	const bound = seedBoundSession(gateway, [toolName]);
+	const disallowed = seedBoundSession(gateway, [`not_${toolName}`]);
 	try {
 		await refreshServerPackIndex(gateway);
 		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
@@ -274,8 +275,23 @@ test("tool-bound project reads require the closure-bound session echo and an all
 		expect(omitted.status).toBe(403);
 		const mismatched = await projectRead(bound.id, "goals", { sessionId: `${bound.id}-other` }, surfaceToken);
 		expect(mismatched.status).toBe(403);
+
+		const disallowedToken = mintSurfaceToken({
+			sessionId: disallowed.id,
+			packId: packName,
+			contributionId: `${location?.groupDir}/${toolName}`,
+			tool: toolName,
+		});
+		const forbidden = await projectRead(
+			disallowed.id,
+			"goals",
+			{ sessionId: disallowed.id },
+			disallowedToken,
+		);
+		expect(forbidden.status).toBe(403);
 	} finally {
 		bound.store.remove(bound.id);
+		disallowed.store.remove(disallowed.id);
 		rmSync(packDir, { recursive: true, force: true });
 		await refreshServerPackIndex(gateway);
 	}

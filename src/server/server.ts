@@ -10837,24 +10837,28 @@ async function handleApiRoute(
 			json({ error: surface.error }, surface.status);
 			return;
 		}
-		// Tool surfaces layer the canonical allowedTools guard. Pack-bound panels,
-		// entrypoints, and routes were already re-resolved as installed + active.
-		// codeql[js/user-controlled-bypass] Signed surface kind selects one of two complete authorization contracts.
-		const guard = surface.tool !== undefined
-			? authorizeScopedRequest({
+		// Every surface passes the common session guard. Tool surfaces then layer the
+		// canonical allowedTools check onto that mandatory authorization contract.
+		const commonGuard = packBoundScopedGuard(headerSessionId, request.sessionId, resolveSession);
+		if (!commonGuard.ok) {
+			json({ error: commonGuard.error }, commonGuard.status);
+			return;
+		}
+		if (surface.tool !== undefined) {
+			const toolGuard = authorizeScopedRequest({
 				tool: surface.tool,
 				headerSessionId: rawHeaderSessionId,
 				bodySessionId: request.sessionId,
 				resolveSession,
-			})
-			: packBoundScopedGuard(headerSessionId, request.sessionId, resolveSession);
-		if (!guard.ok) {
-			json({ error: guard.error }, guard.status);
-			return;
+			});
+			if (!toolGuard.ok) {
+				json({ error: toolGuard.error }, toolGuard.status);
+				return;
+			}
 		}
 		// Project-move fence: token validation and scoped authorization may consult
 		// stores. Re-resolve immediately before touching any project record.
-		if (resolveHostNotificationSessionProject(sessionManager, guard.sessionId) !== projectId) {
+		if (resolveHostNotificationSessionProject(sessionManager, commonGuard.sessionId) !== projectId) {
 			json({ error: "session project authority changed" }, 403);
 			return;
 		}
