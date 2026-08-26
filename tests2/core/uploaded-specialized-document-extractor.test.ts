@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
 import { deflateSync } from "node:zlib";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
@@ -10,7 +9,7 @@ import {
 import {
 	extractPdfTextInIsolate,
 	MAX_CONCURRENT_PDF_EXTRACTIONS,
-	type PdfExtractionChildOptions,
+	type PdfExtractionWorkerOptions,
 } from "../../src/server/agent/uploaded-pdf-extractor-isolate.js";
 
 function pdfWithContentStream(stream: Buffer, compressed = false): Buffer {
@@ -56,22 +55,20 @@ async function ooxml(entries: Record<string, string>): Promise<Uint8Array> {
 	return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }
 
-class FakeChild extends EventEmitter {
-	readonly stdin = new PassThrough();
-	readonly stdout = new PassThrough();
-	killCount = 0;
-	kill(): boolean {
-		this.killCount++;
-		return true;
+class FakeWorker extends EventEmitter {
+	terminateCount = 0;
+	async terminate(): Promise<number> {
+		this.terminateCount++;
+		return 1;
 	}
 	succeed(result: unknown): void {
-		this.stdout.write(JSON.stringify(result));
-		this.emit("close", 0, null);
+		this.emit("message", result);
+		this.emit("exit", 0);
 	}
 }
 
-function fakeFactory(fake: FakeChild, inspect?: (options: PdfExtractionChildOptions) => void) {
-	return (_source: string, options: PdfExtractionChildOptions) => {
+function fakeFactory(fake: FakeWorker, inspect?: (options: PdfExtractionWorkerOptions) => void) {
+	return (_source: string, options: PdfExtractionWorkerOptions) => {
 		inspect?.(options);
 		return fake;
 	};
@@ -115,54 +112,64 @@ describe("uploaded specialized document extractor", () => {
 	}, 10_000);
 
 	it("rejects excess concurrent submissions immediately instead of queueing them", async () => {
-		const children: FakeChild[] = [];
+		const workers: FakeWorker[] = [];
 		const pending = Array.from({ length: MAX_CONCURRENT_PDF_EXTRACTIONS }, () => extractPdfTextInIsolate(Buffer.from("pdf"), {
 			timeoutMs: 1_000,
-			childFactory: (_source, options) => {
-				expect(options).toEqual({
-					args: ["--max-old-space-size=64", "--max-semi-space-size=8", "--stack-size=4096"],
-					windowsHide: true,
+			workerFactory: (_source, options) => {
+				expect(options.eval).toBe(true);
+				expect(options.resourceLimits).toEqual({
+					maxOldGenerationSizeMb: 32,
+					maxYoungGenerationSizeMb: 4,
+					stackSizeMb: 2,
 				});
-				const child = new FakeChild();
-				children.push(child);
-				return child;
+				expect(Buffer.from(options.workerData.bytes)).toEqual(Buffer.from("pdf"));
+				expect(options.workerData.childSource).toContain("pdfjs-dist/legacy/build/pdf.mjs");
+				expect(options.workerData.execPath).toBe(process.execPath);
+				expect(options.workerData.childArgs).toEqual([
+					"--max-old-space-size=64",
+					"--max-semi-space-size=8",
+					"--stack-size=4096",
+				]);
+				expect(options.workerData.timeoutMs).toBe(1_000);
+				expect(options.workerData.maxOutputBytes).toBe(MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES * 2 + 128);
+				expect(options.transferList).toEqual([options.workerData.bytes.buffer]);
+				const worker = new FakeWorker();
+				workers.push(worker);
+				return worker;
 			},
 		}));
-		expect(children).toHaveLength(MAX_CONCURRENT_PDF_EXTRACTIONS);
+		expect(workers).toHaveLength(MAX_CONCURRENT_PDF_EXTRACTIONS);
 		const started = Date.now();
 		await expect(extractPdfTextInIsolate(Buffer.from("not queued"), {
-			childFactory: () => { throw new Error("must not spawn"); },
+			workerFactory: () => { throw new Error("must not start"); },
 		})).resolves.toBeUndefined();
 		expect(Date.now() - started).toBeLessThan(100);
-		for (const child of children) child.succeed({ kind: "result", text: "done" });
-		await expect(Promise.all(pending)).resolves.toEqual(children.map(() => "done"));
-		expect(children.every((child) => child.killCount === 0)).toBe(true);
+		for (const worker of workers) worker.succeed({ kind: "result", text: "done" });
+		await expect(Promise.all(pending)).resolves.toEqual(workers.map(() => "done"));
+		expect(workers.every((worker) => worker.terminateCount === 0)).toBe(true);
 	});
 
 	it("cleans up timeout, worker-error, and invalid-output paths", async () => {
-		const timedOut = new FakeChild();
+		const timedOut = new FakeWorker();
 		await expect(extractPdfTextInIsolate(Buffer.from("timeout"), {
 			timeoutMs: 20,
-			childFactory: fakeFactory(timedOut),
+			workerFactory: fakeFactory(timedOut),
 		})).resolves.toBeUndefined();
-		expect(timedOut.killCount).toBe(1);
+		expect(timedOut.terminateCount).toBe(1);
 		expect(timedOut.eventNames()).toEqual([]);
-		expect(timedOut.stdin.listenerCount("error")).toBe(0);
-		expect(timedOut.stdout.listenerCount("data")).toBe(0);
-		expect(timedOut.stdout.listenerCount("error")).toBe(0);
 
-		const errored = new FakeChild();
-		const errorResult = extractPdfTextInIsolate(Buffer.from("error"), { childFactory: fakeFactory(errored) });
-		errored.emit("error", new Error("child failed"));
+		const errored = new FakeWorker();
+		const errorResult = extractPdfTextInIsolate(Buffer.from("error"), { workerFactory: fakeFactory(errored) });
+		errored.emit("error", new Error("worker failed"));
 		await expect(errorResult).resolves.toBeUndefined();
-		expect(errored.killCount).toBe(1);
+		expect(errored.terminateCount).toBe(1);
 		expect(errored.eventNames()).toEqual([]);
 
-		const oversized = new FakeChild();
-		const oversizedResult = extractPdfTextInIsolate(Buffer.from("oversized"), { childFactory: fakeFactory(oversized) });
-		oversized.stdout.write("x".repeat(MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES * 3));
+		const oversized = new FakeWorker();
+		const oversizedResult = extractPdfTextInIsolate(Buffer.from("oversized"), { workerFactory: fakeFactory(oversized) });
+		oversized.emit("message", { kind: "result", text: "x".repeat(MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES * 3) });
 		await expect(oversizedResult).resolves.toBeUndefined();
-		expect(oversized.killCount).toBe(1);
+		expect(oversized.terminateCount).toBe(1);
 		expect(oversized.eventNames()).toEqual([]);
 	});
 
