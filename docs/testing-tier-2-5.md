@@ -3,10 +3,12 @@
 Tier 2.5 is a **layer on top of** Playwright browser tests under
 `tests/browser/` and real-fidelity browser E2E tests under `tests/e2e/browser/`.
 Tests that opt in capture a labeled screenshot at every
-meaningful UX moment; the run produces a self-contained scrubbable HTML
-report with a per-test WebM video and clickable thumbnail strip. The report
-is for human review — a debugging artifact you can scrub through long after
-the run finishes.
+meaningful UX moment. The real-fidelity E2E config can assemble those beats
+into a self-contained scrubbable HTML report with a per-test WebM video and
+clickable thumbnail strip. The report is for human review — a debugging
+artifact you can scrub through long after the run finishes. Normal-browser
+report assembly has the current limitation described under **How to opt a
+test in**.
 
 When `RECORDSCREEN=1` is **not** set, every Tier 2.5 mechanism is a no-op.
 The opted-in tests behave identically to current master.
@@ -20,8 +22,13 @@ The opted-in tests behave identically to current master.
 
 A Tier 2.5 test is a **regular browser E2E test** with two changes:
 
-1. The import line points at `./fixtures.ts` instead of `../gateway-harness.js`.
+1. Import `test` and `expect` from the canonical support fixture at `tests/support/harnesses/browser/legacy-ui/fixtures.ts`.
 2. Sprinkle `await rec.capture("Label describing this UX moment")` at user-visible moments.
+
+For a test under `tests/browser/journeys/ui/`, the import is
+`../../../support/harnesses/browser/legacy-ui/fixtures.js`. Tests in other
+semantic cells must use the relative path from their own location to that same
+canonical fixture; do not copy the fixture into the test directory.
 
 That's it. All existing assertions, helpers, and `gateway-harness` semantics carry over unchanged.
 
@@ -29,7 +36,7 @@ When `RECORDSCREEN=1`:
 
 - A red cursor dot is injected so clicks are visible in screenshots.
 - Each `rec.capture(label)` writes one PNG (~50ms) and appends an entry to an in-memory list.
-- At end of run, the `tier-2-5-reporter` walks every `beats.jsonl`, runs ffmpeg to encode a WebM (each beat held for 1500ms) plus a thumbnail strip, and writes `tests/results/tier-2-5/report.html`. The report path is printed to stdout.
+- When the E2E Playwright config runs, the `tier-2-5-reporter` walks every `beats.jsonl`, runs ffmpeg to encode a WebM (each beat held for 1500ms) plus a thumbnail strip, and writes `tests/results/tier-2-5/report.html`. The report path is printed to stdout.
 - If ffmpeg is not installed, the reporter logs a warning and still writes `report.html` (with a banner; videos and thumbnails are absent). See **ffmpeg resolution** below.
 
 When `RECORDSCREEN` is unset:
@@ -40,9 +47,11 @@ When `RECORDSCREEN` is unset:
 
 ## How to opt a test in
 
+For a spec in `tests/browser/journeys/ui/`:
+
 ```ts
 // before
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../_helpers/gateway-harness.js";
 
 test("my test", async ({ page }) => {
   // ...
@@ -51,7 +60,7 @@ test("my test", async ({ page }) => {
 
 ```ts
 // after
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../../../support/harnesses/browser/legacy-ui/fixtures.js";
 
 test("my test", async ({ page, rec }) => {
   await rec.capture("Empty composer ready");
@@ -59,6 +68,11 @@ test("my test", async ({ page, rec }) => {
   await rec.capture("Final state — all assertions passed");
 });
 ```
+
+For a fixture, a journey outside `ui/`, or a real-fidelity browser E2E spec,
+adjust only the relative path depth so it still resolves to
+`tests/support/harnesses/browser/legacy-ui/fixtures.ts`. Do not create a local
+`fixtures.ts` compatibility copy.
 
 Run a canonical browser journey with capture on:
 
@@ -72,7 +86,7 @@ Run normally (no capture):
 npm run test:browser -- tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts
 ```
 
-The recorder writes beat artifacts in both browser cells. Automatic Tier 2.5 HTML report assembly is currently registered only by `playwright-e2e.config.ts`; normal-browser runs do not yet assemble those beats into the report.
+> **Current limitation:** the recorder writes beat PNGs and `beats.jsonl` for any spec that imports the canonical fixture. `playwright-e2e.config.ts` conditionally registers the Tier 2.5 reporter when `RECORDSCREEN=1`, while `playwright-v2.config.ts` currently registers only its standard console and JSON reporters. The normal-browser command above therefore captures beats but does not assemble them into `tests/results/tier-2-5/report.html`. This documents current configuration behavior; report assembly for the normal-browser lane is not an acceptance requirement of this guide.
 
 The canonical worked example is [`tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts`](../tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts) — the test PR #433 added. Additional migrated specs that follow the same pattern include `tests/browser/journeys/ui/queue-ui.journey.spec.ts`, `ask-user-choices-ui.journey.spec.ts`, and `stories-streaming.journey.spec.ts`, plus `tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts`. Use them as templates when picking beat boundaries for queue/steer flows, scroll-state interactions, ask-widget round-trips, and reconnect-mid-stream dedup respectively.
 
