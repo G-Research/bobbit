@@ -2,7 +2,7 @@
 // The route echoes only its declared record references plus the authenticated
 // session identity supplied by the Host; it cannot choose a project.
 export const routes = {
-	async panelData(ctx, request) {
+	async "panel-data"(ctx, request) {
 		const query = request?.query ?? {};
 		return {
 			sessionId: ctx.sessionId,

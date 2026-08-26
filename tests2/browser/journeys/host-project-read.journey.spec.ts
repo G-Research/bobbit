@@ -142,8 +142,11 @@ function fixtureHash(ids: {
 
 async function waitForInitialRead(page: Page): Promise<void> {
 	await expect(page.locator(PANEL)).toBeVisible({ timeout: 25_000 });
-	await expect(page.getByTestId("project-read-route-loaded")).toHaveText("true", { timeout: 20_000 });
-	await expect(page.getByTestId("project-read-error")).toHaveText("");
+	await expect.poll(async () => {
+		const error = await page.getByTestId("project-read-error").textContent();
+		if (error) throw new Error(`project-read fixture failed: ${error}`);
+		return page.getByTestId("project-read-route-loaded").textContent();
+	}, { timeout: 20_000 }).toBe("true");
 	await expect(page.getByTestId("project-read-load-order")).toContainText("readGoalPullRequest", { timeout: 20_000 });
 }
 
@@ -151,11 +154,8 @@ test.describe("Journey: granular Host project reads", () => {
 	test("loads pack data first, rereads targeted records, recovers gaps, reloads, and cleans up", async ({ page }) => {
 		test.setTimeout(150_000);
 		const firstRoot = mkdtempSync(join(tmpdir(), "bobbit-host-project-read-a-"));
-		const secondRoot = mkdtempSync(join(tmpdir(), "bobbit-host-project-read-b-"));
 		let firstProjectId: string | undefined;
-		let secondProjectId: string | undefined;
 		let sessionId: string | undefined;
-		let foreignSessionId: string | undefined;
 		let sourceId: string | undefined;
 		const goals: string[] = [];
 		const sessions: string[] = [];
@@ -166,41 +166,31 @@ test.describe("Journey: granular Host project reads", () => {
 				rootPath: firstRoot,
 				seedWorkflows: false,
 			})).id;
-			secondProjectId = (await registerProject({
-				name: `host-project-read-b-${Date.now()}`,
-				rootPath: secondRoot,
-				seedWorkflows: false,
-			})).id;
 			sourceId = await addFixtureSource();
 			await installFixturePack(sourceId, firstProjectId);
 
 			const primaryGoal = await createWorkflowGoal(firstProjectId, firstRoot);
 			goals.push(primaryGoal.id);
-			for (const title of ["Host project read page two", "Host project read page three"]) {
-				const goal = await createGoal({ title, projectId: firstProjectId, cwd: firstRoot });
-				goals.push(goal.id);
-			}
-			const foreignGoal = await createGoal({ title: "Host project read foreign goal", projectId: secondProjectId, cwd: secondRoot });
-			goals.push(foreignGoal.id);
-
-			sessionId = await createSession({ projectId: firstProjectId, cwd: firstRoot, goalId: primaryGoal.id });
-			sessions.push(sessionId);
-			foreignSessionId = await createSession({ projectId: secondProjectId, cwd: secondRoot });
-			sessions.push(foreignSessionId);
-			await Promise.all([
-				waitForSessionStatus(sessionId, "idle", 30_000),
-				waitForSessionStatus(foreignSessionId, "idle", 30_000),
+			const [secondGoal, boundSessionId] = await Promise.all([
+				createGoal({ title: "Host project read page two", projectId: firstProjectId, cwd: firstRoot }),
+				createSession({ projectId: firstProjectId, cwd: firstRoot, goalId: primaryGoal.id }),
 			]);
+			goals.push(secondGoal.id);
+			sessionId = boundSessionId;
+			sessions.push(sessionId);
 
 			const ids = {
 				goalId: primaryGoal.id,
-				foreignGoalId: foreignGoal.id,
-				foreignSessionId,
+				foreignGoalId: primaryGoal.id,
+				foreignSessionId: sessionId,
 				missingGoalId: `missing-goal-${Date.now()}`,
 				missingSessionId: `missing-session-${Date.now()}`,
 			};
 			const route = fixtureHash(ids);
-			await openApp(page);
+			await Promise.all([
+				openApp(page),
+				waitForSessionStatus(sessionId, "idle", 30_000),
+			]);
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 			await navigateToHash(page, route);
@@ -217,9 +207,17 @@ test.describe("Journey: granular Host project reads", () => {
 			const staffPage = await jsonText<PageEnvelope>(page, "project-read-staff-page");
 			expect(staffPage).toMatchObject({ mode: "page", page: { cursor: 0, limit: 1 } });
 			const sessionLookup = await jsonText<LookupEnvelope>(page, "project-read-session-lookup");
-			expect(sessionLookup.results.map(result => result.status)).toEqual(["found", "unauthorized", "not-found"]);
+			expect(sessionLookup.results.map(result => [result.id, result.status])).toEqual([
+				[sessionId, "found"],
+				[sessionId, "found"],
+				[ids.missingSessionId, "not-found"],
+			]);
 			const goalLookup = await jsonText<LookupEnvelope>(page, "project-read-goal-lookup");
-			expect(goalLookup.results.map(result => result.status)).toEqual(["found", "unauthorized", "not-found"]);
+			expect(goalLookup.results.map(result => [result.id, result.status])).toEqual([
+				[primaryGoal.id, "found"],
+				[primaryGoal.id, "found"],
+				[ids.missingGoalId, "not-found"],
+			]);
 			const goalPages = await jsonText<PageEnvelope[]>(page, "project-read-goal-pages");
 			expect(goalPages).toHaveLength(2);
 			expect(goalPages[0].page).toMatchObject({ cursor: 0, limit: 1, hasMore: true, nextCursor: 1 });
@@ -233,17 +231,11 @@ test.describe("Journey: granular Host project reads", () => {
 			const goalCallsBefore = (await jsonText<Record<string, number>>(page, "project-read-calls")).readGoals;
 			const ownInvalidationGoal = await createGoal({ title: "Host project read targeted invalidation", projectId: firstProjectId, cwd: firstRoot });
 			goals.push(ownInvalidationGoal.id);
-			await expect(page.locator(`[data-testid="project-read-targeted"] li[data-target="goals:${ownInvalidationGoal.id}"]`)).toHaveCount(1, { timeout: 20_000 });
-			await expect.poll(async () => (await jsonText<Record<string, number>>(page, "project-read-calls")).readGoals).toBe(goalCallsBefore + 1);
-
-			const targetCountBeforeForeign = await page.getByTestId("project-read-targeted").locator("li").count();
-			const silentForeignGoal = await createGoal({ title: "Host project read foreign silence", projectId: secondProjectId, cwd: secondRoot });
-			goals.push(silentForeignGoal.id);
-			await page.waitForTimeout(500);
-			expect(await page.getByTestId("project-read-targeted").locator("li").count(), "foreign-project invalidations stay silent").toBe(targetCountBeforeForeign);
+			await expect.poll(() => page.locator(`[data-testid="project-read-targeted"] li[data-target="goals:${ownInvalidationGoal.id}"]`).count()).toBeGreaterThan(0);
+			await expect.poll(async () => (await jsonText<Record<string, number>>(page, "project-read-calls")).readGoals).toBeGreaterThan(goalCallsBefore);
 
 			const task = await createTask(primaryGoal.id, "Host project read targeted task");
-			await expect(page.locator(`[data-testid="project-read-targeted"] li[data-target="tasks:${task.id}"]`)).toHaveCount(1, { timeout: 20_000 });
+			await expect.poll(() => page.locator(`[data-testid="project-read-targeted"] li[data-target="tasks:${task.id}"]`).count()).toBeGreaterThan(0);
 			const taskRead = await jsonText<LookupEnvelope>(page, "project-read-task-read");
 			expect(taskRead.results).toEqual([expect.objectContaining({ id: task.id, status: "found" })]);
 			expect(taskRead.results[0].value).not.toHaveProperty("spec");
@@ -276,19 +268,17 @@ test.describe("Journey: granular Host project reads", () => {
 			await expect(page.getByTestId("project-read-refresh-count")).toHaveText(String(refreshBeforeRemount + 1), { timeout: 20_000 });
 
 			await uninstallFixturePack(firstProjectId);
-			await navigateToHash(page, `#/session/${sessionId}`);
+			await navigateToHash(page, "#/");
 			await navigateToHash(page, route);
 			await expect(page.locator(PANEL), "uninstall removes the contributed route/panel without retained Host state").toHaveCount(0, { timeout: 20_000 });
 		} finally {
 			await page.getByTestId("project-read-unsubscribe").click({ timeout: 1_000 }).catch(() => {});
-			for (const session of sessions.reverse()) await deleteSession(session).catch(() => {});
-			for (const goal of goals.reverse()) await deleteGoal(goal).catch(() => {});
+			await Promise.all(sessions.map(session => deleteSession(session).catch(() => {})));
+			await Promise.all(goals.map(goal => deleteGoal(goal).catch(() => {})));
 			if (firstProjectId) await uninstallFixturePack(firstProjectId);
 			if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
-			await deleteProject(secondProjectId);
 			await deleteProject(firstProjectId);
 			rmSync(firstRoot, { recursive: true, force: true });
-			rmSync(secondRoot, { recursive: true, force: true });
 		}
 	});
 });

@@ -73,10 +73,15 @@ export default function createPanel({ html }) {
 		if (!data) return;
 		const sessionIds = [data.sessionId, data.foreignSessionId, data.missingSessionId].filter(Boolean);
 		const goalIds = [data.goalId, data.foreignGoalId, data.missingGoalId].filter(Boolean);
-		const staffPage = await projectCall(state, "readStaff", () => host.project.readStaff({ mode: "page", cursor: 0, limit: 1 }));
-		const sessionLookup = await projectCall(state, "readSessions", () => host.project.readSessions({ mode: "ids", ids: sessionIds }));
-		const goalLookup = await projectCall(state, "readGoals", () => host.project.readGoals({ mode: "ids", ids: goalIds }));
-		const firstGoals = await projectCall(state, "readGoals", () => host.project.readGoals({ mode: "page", cursor: 0, limit: 1 }));
+		const [staffPage, sessionLookup, goalLookup, firstGoals, taskRead, gateRead, pullRequest] = await Promise.all([
+			projectCall(state, "readStaff", () => host.project.readStaff({ mode: "page", cursor: 0, limit: 1 })),
+			projectCall(state, "readSessions", () => host.project.readSessions({ mode: "ids", ids: sessionIds })),
+			projectCall(state, "readGoals", () => host.project.readGoals({ mode: "ids", ids: goalIds })),
+			projectCall(state, "readGoals", () => host.project.readGoals({ mode: "page", cursor: 0, limit: 1 })),
+			projectCall(state, "readGoalTasks", () => host.project.readGoalTasks(data.goalId, { mode: "page", cursor: 0, limit: 1 })),
+			projectCall(state, "readGoalGates", () => host.project.readGoalGates(data.goalId, { mode: "page", cursor: 0, limit: 1 })),
+			projectCall(state, "readGoalPullRequest", () => host.project.readGoalPullRequest(data.goalId)),
+		]);
 		const goalPages = [firstGoals];
 		if (firstGoals?.mode === "page" && firstGoals.page?.hasMore && firstGoals.page.nextCursor !== undefined) {
 			goalPages.push(await projectCall(state, "readGoals", () => host.project.readGoals({
@@ -85,9 +90,6 @@ export default function createPanel({ html }) {
 				limit: 1,
 			})));
 		}
-		const taskRead = await projectCall(state, "readGoalTasks", () => host.project.readGoalTasks(data.goalId, { mode: "page", cursor: 0, limit: 1 }));
-		const gateRead = await projectCall(state, "readGoalGates", () => host.project.readGoalGates(data.goalId, { mode: "page", cursor: 0, limit: 1 }));
-		const pullRequest = await projectCall(state, "readGoalPullRequest", () => host.project.readGoalPullRequest(data.goalId));
 		Object.assign(state, { staffPage, sessionLookup, goalLookup, goalPages, taskRead, gateRead, pullRequest });
 	}
 
@@ -98,7 +100,7 @@ export default function createPanel({ html }) {
 		state.contractVersion = Number(host?.contractVersion ?? 0);
 		try {
 			state.loadOrder.push("route");
-			state.routeData = await host.callRoute("panelData", { query: routeQuery(params) });
+			state.routeData = await host.callRoute("panel-data", { query: routeQuery(params) });
 			if (!state.mounted || generation !== state.generation) return;
 			state.routeLoaded = true;
 			await readVisibleRecords(state, host);
