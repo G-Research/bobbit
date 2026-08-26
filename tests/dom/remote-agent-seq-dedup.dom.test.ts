@@ -15,6 +15,11 @@ import "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
 import "../../src/ui/lazy/safe-markdown-block.js";
 import { setRenderApp } from "../../src/app/state.js";
+import {
+	applyAskQuestionDismissed,
+	dismissedAskToolUseIds,
+	resetAskDismissalsForTests,
+} from "../../src/app/ask-dismissals.js";
 
 setRenderApp(() => {});
 
@@ -63,6 +68,7 @@ function makeAgent() {
 }
 
 afterEach(() => {
+	resetAskDismissalsForTests();
 	vi.unstubAllGlobals();
 });
 
@@ -111,6 +117,32 @@ describe("RemoteAgent seq-dedup / ordering / resume", () => {
 
 		expect(sent[0]).toEqual({ type: "resume", fromSeq: 2 });
 		expect(sent[1]).toEqual({ type: "get_state" });
+	});
+
+	it("authenticated reconnect force-loads dismissals without a UI callback and preserves cache on failure", async () => {
+		vi.stubGlobal("WebSocket", FakeWS);
+		const fetchedUrls: string[] = [];
+		vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+			const url = String(input);
+			fetchedUrls.push(url);
+			if (url.includes("/api/internal/user-question/dismissals")) {
+				throw new Error("deterministic dismissal refresh failure");
+			}
+			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+		}));
+		applyAskQuestionDismissed("seq-dedup-session", "ask-known-before-reconnect");
+		const a = makeAgent();
+		a.onReconnect = undefined;
+
+		a._connectWs(false);
+		const ws: FakeWS = a.ws;
+		ws.onopen?.();
+		ws.onmessage?.({ data: JSON.stringify({ type: "auth_ok" }) });
+		await vi.waitFor(() => expect(fetchedUrls.some((url) =>
+			url.includes("/api/internal/user-question/dismissals?sessionId=seq-dedup-session")
+		)).toBe(true));
+
+		expect(dismissedAskToolUseIds("seq-dedup-session")).toEqual(new Set(["ask-known-before-reconnect"]));
 	});
 
 	it("reconnect falls back to get_messages when highestSeq === 0", () => {

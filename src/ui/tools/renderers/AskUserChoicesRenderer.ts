@@ -5,13 +5,13 @@
  * `{ status: "posted", tool_use_id }` result. The user's answers (if any)
  * live in a *later* user message with an envelope prefix
  * `[ask_user_choices_response tool_use_id=<id>]` — we look those up via
- * `ctx.getAskResponseAnswers(toolUseId)` and flip the widget to read-only
- * "Answered mode" when found.
+ * `ctx.getAskResponseAnswers(toolUseId)` and durable dismissal state to flip
+ * the widget into read-only Answered or Dismissed mode.
  */
 import { icon } from "@mariozechner/mini-lit";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { html, type TemplateResult } from "lit";
-import { Check, HelpCircle } from "lucide";
+import { Check, CircleSlash2, HelpCircle } from "lucide";
 import { renderHeader, getToolState, type ToolHeaderState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types.js";
 // `<ask-user-choices-widget>` is loaded lazily — the 21 kB widget
@@ -20,6 +20,7 @@ import type { ToolRenderer, ToolRenderContext, ToolRenderResult } from "../types
 // tag once the chunk lands; property bindings are preserved.
 import { ensureAskUserChoicesWidget } from "../../../app/lazy-widgets.js";
 import { classifyAskUserChoicesState } from "../ask-user-choices-state.js";
+import { isAskQuestionDismissed } from "../../../app/ask-dismissals.js";
 
 /** Read the tool_result's content as a string. */
 function getResultText(result: ToolResultMessage | undefined): string {
@@ -84,11 +85,13 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 			: null;
 		const askState = classifyAskUserChoicesState(result, fromTranscript);
 		const { posted, answers, failed: errored } = askState;
+		const dismissed = !answers && !errored && !historyMode
+			&& isAskQuestionDismissed(ctx?.sessionId, ctx?.toolUseId);
 
 		// Interactive mode: tool posted, no envelope yet, not errored.
 		//   - If `posted` is false but the tool has produced a non-stub result,
 		//     the card is effectively complete (legacy path with answers or an error).
-		const showHeaderInProgress = !historyMode
+		const showHeaderInProgress = !historyMode && !dismissed
 			&& (state === "inprogress" || (posted && !answers && !errored));
 
 		return {
@@ -106,7 +109,17 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 									Answered
 								</span>`,
 							)
-							: renderHeader(state, HelpCircle, "Multiple-choice question")}
+							: dismissed
+								? renderHeader(
+									state,
+									HelpCircle,
+									"Multiple-choice question",
+									html`<span class="ask-dismissed-badge inline-flex items-center gap-1 px-1.5 py-0.5 text-xs font-medium rounded border border-border bg-muted/40 text-muted-foreground">
+										${icon(CircleSlash2, "sm")}
+										Dismissed
+									</span>`,
+								)
+								: renderHeader(state, HelpCircle, "Multiple-choice question")}
 					${historyMode && !answers && !errored ? html`
 						<div class="ask-history-readonly text-xs text-muted-foreground" role="status">
 							This unanswered question is from read-only history.
@@ -115,6 +128,7 @@ export class AskUserChoicesRenderer implements ToolRenderer {
 					<ask-user-choices-widget
 						.questions=${params.questions}
 						.answers=${answers}
+						.dismissed=${dismissed}
 						.sessionId=${historyMode ? "" : (ctx?.sessionId ?? "")}
 						.toolUseId=${ctx?.toolUseId ?? ""}
 						.readOnly=${historyMode}

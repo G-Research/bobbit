@@ -350,7 +350,7 @@ test.describe("Journey: Author metadata", () => {
 			const systemBubble = promptBubble(page, systemPrompt);
 			await expectBadgeText(systemBubble, "System");
 			await expect(humanBubble.locator(".prompt-author-initial")).toHaveAttribute("data-initial", "U");
-			await expect(systemBubble.locator(".prompt-author-initial")).toHaveAttribute("data-initial", "S");
+			await expect(systemBubble.locator(".prompt-author-system-icon svg")).toBeVisible();
 			await expect(systemBubble.locator(".prompt-author-avatar")).toHaveCount(0);
 			await expect(page.locator("assistant-message .prompt-author-badge")).toHaveCount(0);
 			expect(normalizedText(await humanBubble.locator(".prompt-author-badge").innerText())).not.toContain("Human");

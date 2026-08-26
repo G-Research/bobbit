@@ -268,6 +268,37 @@ describe("AgentInterface transcript navigation integration", () => {
 		expect(element._escapedFromLock).toBe(true);
 	});
 
+	it("re-reads target geometry while deferred content shifts a downward jump", async () => {
+		const element = document.createElement("agent-interface") as any;
+		const scrollContainer = document.createElement("div");
+		element._scrollContainer = scrollContainer;
+		element._getTopPromptNavOffsetPx = () => 40;
+		element._refreshJumpButton = vi.fn();
+
+		Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 5_000 });
+		Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 500 });
+		scrollContainer.scrollTop = 100;
+		scrollContainer.getBoundingClientRect = () => ({ top: 20, bottom: 520 } as DOMRect);
+
+		const target = document.createElement("user-message");
+		let targetTop = 620;
+		target.getBoundingClientRect = () => ({ top: targetTop, bottom: targetTop + 200 } as DOMRect);
+		const sampledTargets: number[] = [];
+		element._springScrollTo = vi.fn(async (readTarget: () => number) => {
+			sampledTargets.push(readTarget());
+			// Advancing the viewport by 200px would move the target up by 200px,
+			// but materializing deferred rows above it adds another 400px.
+			scrollContainer.scrollTop = 300;
+			targetTop = 820;
+			sampledTargets.push(readTarget());
+		});
+
+		await element._scrollTranscriptElementIntoView(target);
+
+		expect(element._springScrollTo).toHaveBeenCalledWith(expect.any(Function));
+		expect(sampledTargets).toEqual([660, 1_060]);
+	});
+
 	it("escapes follow-tail before spring targeting with highlight", async () => {
 		const list = document.createElement("message-list") as any;
 		const target = document.createElement("assistant-message");

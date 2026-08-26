@@ -213,6 +213,29 @@ test.describe("ask_user_choices widget", () => {
 		]);
 	});
 
+	test("Dismiss All persists the whole card and makes it read-only", async ({ page }) => {
+		await page.evaluate(() => (window as any).mountWidget({
+			questions: [
+				{ question: "Q1", options: ["a", "b"], tab_label: "First" },
+				{ question: "Q2", options: ["c", "d"], tab_label: "Second" },
+			],
+			sessionId: "session-dismiss",
+			toolUseId: "ask-dismiss",
+			dismissFetch: async (_url: string, init: any) => {
+				(window as any)._lastDismissBody = JSON.parse(init.body);
+				return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+			},
+		}));
+		await expect(page.locator(".ask-dismiss-all")).toHaveText("Dismiss All");
+		await page.locator(".ask-dismiss-all").click();
+		await expect(page.locator(".ask-widget")).toHaveClass(/ask-dismissed/);
+		await expect(page.locator(".ask-dismiss-all, .ask-submit")).toHaveCount(0);
+		expect(await page.evaluate(() => (window as any)._lastDismissBody)).toEqual({
+			sessionId: "session-dismiss",
+			toolUseId: "ask-dismiss",
+		});
+	});
+
 	test("submit() with Other → selected='Other', other_text=trimmed", async ({ page }) => {
 		await page.evaluate(() => (window as any).mountWidget({
 			questions: [

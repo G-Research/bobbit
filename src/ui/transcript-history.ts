@@ -10,22 +10,27 @@ import {
 	isToolResultOnlyMessage,
 	normalizeMessageAuthorLabel,
 	type BobbitMessage,
+	type MessageAuthor,
 	type MessageAuthorKind,
 } from "../shared/message-author.js";
 import { classifyAskUserChoicesState } from "./tools/ask-user-choices-state.js";
 
 export type TranscriptHistoryKind = "user" | "system" | "agent" | "question";
 export type TranscriptHistoryFilter = "all" | TranscriptHistoryKind;
+export type TranscriptHistoryQuestionStatus = "unanswered" | "answered" | "dismissed" | "failed";
 
 export interface TranscriptHistoryEntry {
 	id: string;
 	targetId: string;
 	ordinal: number;
 	kind: TranscriptHistoryKind;
+	author?: MessageAuthor;
 	authorLabel: string;
 	typeLabel: string;
 	excerpt: string;
 	unresolved: boolean;
+	toolUseId?: string;
+	questionStatus?: TranscriptHistoryQuestionStatus;
 }
 
 export interface DOMRectLike {
@@ -41,6 +46,7 @@ interface AskCandidate {
 	entry: TranscriptHistoryEntry;
 	result?: ToolResultMessage;
 	responseAnswers: AskResponseAnswer[] | null;
+	dismissed: boolean;
 }
 
 const ASK_TOOL_USE_ID_REGEX = new RegExp(`^(?:${ASK_TOOL_USE_ID_PATTERN})$`);
@@ -88,12 +94,17 @@ function textContent(message: Record<string, unknown>): string {
 		.join("\n");
 }
 
+function messageAuthor(message: Record<string, unknown>): MessageAuthor | undefined {
+	return isMessageAuthor(message.author) ? message.author : undefined;
+}
+
 function authorKind(message: Record<string, unknown>, fallback: MessageAuthorKind): MessageAuthorKind {
-	return isMessageAuthor(message.author) ? message.author.kind : fallback;
+	return messageAuthor(message)?.kind ?? fallback;
 }
 
 function authorLabel(message: Record<string, unknown>, fallback: string): string {
 	if (!isMessageAuthor(message.author)) return fallback;
+	if (message.author.kind === "system") return "System";
 	return normalizeMessageAuthorLabel(message.author.label) ?? fallback;
 }
 
@@ -165,10 +176,15 @@ function blockToolResults(message: Record<string, unknown>): Array<{ id: string;
 }
 
 function refreshCandidate(candidate: AskCandidate): void {
-	candidate.entry.unresolved = classifyAskUserChoicesState(
-		candidate.result,
-		candidate.responseAnswers,
-	).unresolved;
+	const state = classifyAskUserChoicesState(candidate.result, candidate.responseAnswers);
+	candidate.entry.questionStatus = state.answers
+		? "answered"
+		: state.failed
+			? "failed"
+			: candidate.dismissed
+				? "dismissed"
+				: "unanswered";
+	candidate.entry.unresolved = candidate.entry.questionStatus === "unanswered";
 }
 
 function pushEntry(
@@ -183,6 +199,7 @@ function pushEntry(
 /** Build the chronological client-only navigation projection from the active transcript. */
 export function deriveTranscriptNavigation(
 	messages: readonly BobbitMessage<any>[] | null | undefined,
+	options: { dismissedToolUseIds?: ReadonlySet<string> } = {},
 ): TranscriptNavigation {
 	const entries: TranscriptHistoryEntry[] = [];
 	const asks = new Map<string, AskCandidate>();
@@ -217,13 +234,15 @@ export function deriveTranscriptNavigation(
 		if (role === "user" || role === "user-with-attachments") {
 			const text = excerpt(textContent(message));
 			if (!text) continue;
-			const kind = authorKind(message, "user");
+			const author = messageAuthor(message);
+			const kind = author?.kind ?? "user";
 			pushEntry(entries, {
 				id: `${targetId}:${kind}`,
 				targetId,
 				kind: historyKind(kind),
+				...(author ? { author } : {}),
 				authorLabel: authorLabel(message, kind === "user" ? "User" : kind === "system" ? "System" : "Agent"),
-				typeLabel: kind === "user" ? "Prompt" : kind === "system" ? "System prompt" : "Agent prompt",
+				typeLabel: kind === "user" ? "Prompt" : kind === "system" ? "System Message" : "Agent prompt",
 				excerpt: text,
 				unresolved: false,
 			});
@@ -236,10 +255,12 @@ export function deriveTranscriptNavigation(
 				: role === "mutation-pending" ? message.summary : message.content;
 			const text = excerpt(typeof raw === "string" ? raw : "");
 			if (!text) continue;
+			const author = messageAuthor(message);
 			pushEntry(entries, {
 				id: `${targetId}:system`,
 				targetId,
 				kind: "system",
+				...(author ? { author } : {}),
 				authorLabel: authorLabel(message, "System"),
 				typeLabel: role === "error" ? "Error" : "System event",
 				excerpt: text,
@@ -250,6 +271,7 @@ export function deriveTranscriptNavigation(
 
 		if (role !== "assistant" || !Array.isArray(message.content)) continue;
 		const fallbackKind = authorKind(message, "agent");
+		const owningAuthor = messageAuthor(message);
 		const owningAuthorLabel = authorLabel(
 			message,
 			fallbackKind === "agent" ? "Assistant" : fallbackKind === "system" ? "System" : "User",
@@ -263,8 +285,9 @@ export function deriveTranscriptNavigation(
 					id: `${targetId}:${fallbackKind}:${textStart}`,
 					targetId,
 					kind: historyKind(fallbackKind),
+					...(owningAuthor ? { author: owningAuthor } : {}),
 					authorLabel: owningAuthorLabel,
-					typeLabel: fallbackKind === "agent" ? "Response" : fallbackKind === "system" ? "System message" : "Message",
+					typeLabel: fallbackKind === "agent" ? "Response" : fallbackKind === "system" ? "System Message" : "Message",
 					excerpt: text,
 					unresolved: false,
 				});
@@ -301,16 +324,20 @@ export function deriveTranscriptNavigation(
 			const params = toolParams(block);
 			if (!id || !ASK_TOOL_USE_ID_REGEX.test(id) || !validAskParams(params)) continue;
 			const questions = params.questions.map((question) => question.question).join(" · ");
+			const dismissed = options.dismissedToolUseIds?.has(id) === true;
 			const entry = pushEntry(entries, {
 				id: `${targetId}:question:${id}`,
 				targetId,
 				kind: "question",
+				...(owningAuthor ? { author: owningAuthor } : {}),
 				authorLabel: owningAuthorLabel,
 				typeLabel: "Multiple-choice question",
 				excerpt: excerpt(questions),
-				unresolved: true,
+				unresolved: !dismissed,
+				toolUseId: id,
+				questionStatus: dismissed ? "dismissed" : "unanswered",
 			});
-			const candidate: AskCandidate = { entry, responseAnswers: null };
+			const candidate: AskCandidate = { entry, responseAnswers: null, dismissed };
 			asks.set(id, candidate);
 			refreshCandidate(candidate);
 		}

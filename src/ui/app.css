@@ -4765,6 +4765,23 @@ html {
 	content: attr(data-initial);
 }
 
+.prompt-author-system-icon {
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: 16px;
+	height: 16px;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	background: var(--secondary);
+	color: var(--secondary-foreground);
+}
+
+.prompt-author-system-icon svg {
+	width: 10px;
+	height: 10px;
+}
+
 .prompt-author-name {
 	flex: 1 1 auto;
 	min-width: 0;

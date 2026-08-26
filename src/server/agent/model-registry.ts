@@ -21,8 +21,8 @@ import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendi
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
-import { inspectAigwTargetRealm, type AigwTargetRealm } from "./aigw-models-json.js";
+import { discoverAigwModels, getAigwUrl, writeModelsJsonText } from "./aigw-manager.js";
+import { adoptLegacyAigwProvider, comparableAigwUrl, type AigwTargetRealm } from "./aigw-models-json.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
@@ -176,6 +176,7 @@ export function invalidateModelCache(): void {
 	cachedModels = null;
 	cachedDynamicModels = new Map();
 	cacheExpiry = 0;
+	userOwnedAigwNotices.clear();
 }
 
 // ── Live model-state metadata resolver ─────────────────────────────
@@ -291,17 +292,6 @@ function getPrefsVersion(prefs: PreferencesStore): number {
 
 // ── Model Assembly ─────────────────────────────────────────────────
 
-function comparableAigwUrl(value: unknown): string | undefined {
-	if (typeof value !== "string" || !value.trim()) return undefined;
-	try {
-		const url = new URL(value.trim());
-		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-		return url.href.replace(/\/+$/, "");
-	} catch {
-		return undefined;
-	}
-}
-
 interface ComposedAigwModels {
 	/** A structurally valid target source exists; an empty model list is authoritative. */
 	available: boolean;
@@ -352,16 +342,55 @@ async function composeAigwTargetModels(
 	}
 }
 
-/** Read and classify models.json without normalizing or writing user-owned bytes. */
-function readAigwTargetRealm(): AigwTargetRealm {
+/**
+ * Read and classify models.json without normalizing or writing user-owned bytes.
+ *
+ * The one exception is adoption: a block that is byte-recognisably Bobbit's own
+ * pre-0.17.0 publication is marked as managed here, so an upgraded install
+ * resumes live discovery and provenance on its very first model read. Persisting
+ * that marker is best-effort — a read-only or unwritable agent dir logs and
+ * continues with the in-memory managed classification.
+ */
+function readAigwTargetRealm(configuredUrl: string): AigwTargetRealm {
 	try {
 		const modelsPath = path.join(globalAgentDir(), "models.json");
 		const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
-		return inspectAigwTargetRealm(source);
+		const adoption = adoptLegacyAigwProvider(source, configuredUrl);
+		if (adoption.adopted) {
+			try {
+				writeModelsJsonText(adoption.text);
+				console.log("[model-registry] Adopted a pre-0.17.0 Bobbit providers.aigw block; managed discovery resumed");
+			} catch (error) {
+				console.error(
+					"[model-registry] Could not persist the adopted providers.aigw marker; continuing with managed classification:",
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+		}
+		return adoption.realm;
 	} catch (error) {
 		return { kind: "invalid", reason: error instanceof Error ? error.message : String(error) };
 	}
 }
+
+/**
+ * A user-owned providers.aigw block silently disables gateway discovery, so say
+ * so exactly once per classification (never per model row) and never echo
+ * headers, credentials, model definitions, or file contents.
+ */
+const userOwnedAigwNotices = new Set<string>();
+
+function noteUserOwnedAigwTarget(modelsPath: string, configuredUrl: string): void {
+	const key = `${modelsPath}|${comparableAigwUrl(configuredUrl) ?? configuredUrl}`;
+	if (userOwnedAigwNotices.has(key)) return;
+	userOwnedAigwNotices.add(key);
+	console.warn(
+		`[model-registry] providers.aigw in ${modelsPath} is user-owned (no x-bobbit-managed marker and not a `
+		+ `recognizable Bobbit publication): live AI Gateway discovery is skipped and upstream-provider tags are `
+		+ `unavailable. Remove that block (or let Bobbit republish it) to restore managed discovery.`,
+	);
+}
+
 
 async function readManagedRetainedAigwModels(
 	configuredUrl: string,
@@ -451,9 +480,10 @@ async function assembleModels(
 	// while malformed/ambiguous target configuration fails closed.
 	if (aigwUrl) {
 		const sourceKey = `aigw:${comparableAigwUrl(aigwUrl) ?? aigwUrl}`;
-		const targetRealm = readAigwTargetRealm();
+		const targetRealm = readAigwTargetRealm(aigwUrl);
 		let sourceModels: ApiModel[] | undefined;
 		if (targetRealm.kind === "unmarked-user") {
+			noteUserOwnedAigwTarget(path.join(globalAgentDir(), "models.json"), aigwUrl);
 			const composed = await composeAigwTargetModels(targetRealm.provider);
 			sourceModels = composed.available ? composed.models : [];
 		} else if (targetRealm.kind === "invalid") {

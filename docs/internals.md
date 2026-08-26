@@ -1978,7 +1978,7 @@ Each provider's `options.baseURL` becomes the **per-model `baseUrl`**, which pi-
 
 The SDK's `baseURL`-plus-`/responses` behaviour is exactly why the baseURL must end in `…/openai/v1` and not the bare origin.
 
-Bobbit publishes only a `providers.aigw` block carrying `x-bobbit-managed: {kind:"aigw-publication",version:1}`. The JSONC editor inserts an absent block or updates documented fields in an unambiguous marked block; an unmarked block is user-owned, while malformed or duplicate target paths fail closed without a preference commit. Localized edits preserve comments and unknown fields outside managed values before temp-file-plus-rename atomic replacement.
+Bobbit publishes only a `providers.aigw` block carrying `x-bobbit-managed: {kind:"aigw-publication",version:1}`. The JSONC editor inserts an absent block or updates documented fields in an unambiguous marked block; an unmarked block is user-owned unless it is recognisably one of Bobbit's own pre-v0.17.0 publications (see [Publication ownership and legacy block adoption](#publication-ownership-and-legacy-block-adoption)), while malformed or duplicate target paths fail closed without a preference commit. Localized edits preserve comments and unknown fields outside managed values before temp-file-plus-rename atomic replacement.
 
 Docker file bind mounts retain the old inode in an already-running container, so successful publication or removal notifies every tracked project sandbox. Each sandbox maintains monotonic published/mounted generations and serializes remounts with health recovery; a second publication during recreation therefore triggers another recreation until the mounted generation is current. Workspaces/worktrees survive, and live sandboxed sessions respawn through the normal container-recovery event. Direct host agent processes are not recreated by this path and retain their spawn-time model registry/guard until respawn. The durable model/preferences commit invalidates registry and SessionManager caches and broadcasts preferences before remount recovery; a Docker failure is returned as `remountPending: true` without falsely reporting the committed configuration as rolled back, while normal health recovery remains queued. Startup staleness also compares in-container model content with the active host file, catching a replacement that occurred while Bobbit was down.
 
@@ -2023,9 +2023,44 @@ When the well-known config is absent, the legacy `/v1/models` + `inferLegacyAigw
 
 Cold authoritative discovery makes one request, fallback makes the well-known and `/v1/models` requests, and one-hop remote discovery makes two requests within the shared deadline. Configure reuses discovery output. The existing five-second registry and sixty-second SessionManager caches remain unchanged.
 
+### Publication ownership and legacy block adoption
+
+`models.json` is co-owned: Bobbit publishes gateway models into `providers.aigw`, while the rest of the file (and possibly that block itself) can be hand-authored and hold real provider credentials. All ownership logic therefore lives in one module, `src/server/agent/aigw-models-json.ts`, which is a pure text-in/text-out layer over `jsonc-parser`; `aigw-manager.ts` owns the only writer (`writeModelsJsonText`, temp file plus rename). Nothing else writes the file, which is what keeps "never rewrite user bytes" checkable in one place.
+
+`inspectAigwTargetRealm(source)` classifies the block without normalizing anything, returning `absent`, `managed`, `unmarked-user`, or `invalid`. Tree-level ambiguity is checked before any value is read: duplicate `providers`, duplicate `providers.aigw`, or duplicate managed field names throw `AigwModelsJsonOwnershipError`, which surfaces as `invalid` on the read path and as a refused publication on the write path. `publishManagedAigwProvider()` inserts a marked block when none exists and otherwise refreshes only the documented fields of an unambiguous marked block; it throws on an unmarked block rather than claiming it. `removeManagedAigwProvider()` is the mirror image for Disconnect.
+
+#### Adoption criteria
+
+`adoptLegacyAigwProvider(source, configuredAigwUrl)` is the one exception to "reads never write". It exists because the `x-bobbit-managed` marker only arrived in v0.17.0: an install upgraded from v0.16.3 or earlier would otherwise classify Bobbit's own publication as `unmarked-user` forever, freezing the catalog and dropping `upstreamProvider` provenance with no in-product repair path. Adoption inserts the marker and nothing else, then re-classifies the resulting text and refuses to report success unless those bytes really read back as `managed`.
+
+Recognition is safe only because the generated provider in `writeAigwModelsJson()` is fully deterministic. The predicate requires all of the following, and treats any deviation as hand-authored:
+
+| Requirement | Why it is checkable |
+|---|---|
+| Property count equals the generated key set, and each of `baseUrl`, `apiKey`, `api`, `headers`, `models` appears exactly once | Extra or missing keys mean the block is not Bobbit's output |
+| `apiKey === "none"` and `api === "openai-completions"` | Generated constants at provider level (per-model `api`/`baseUrl` may still vary) |
+| `headers` is an object with exactly two properties: a `User-Agent` in the published pre-marker allowlist (`Bobbit/0.12.0`, `0.13.0`, `0.13.1`, `0.14.0`, `0.14.1`, `0.14.2`, `0.15.0`, `0.15.1`, `0.16.1`, `0.16.2`, `0.16.3`), and `x-opencode-session` equal to the generated `!node -e "…BOBBIT_SESSION_ID…"` resolver literal | Both header values are generated verbatim; explicit releases prevent arbitrary, marker-era, current, or unreleased `Bobbit/` suffixes from becoming ownership evidence |
+| `models` is an array whose entries are all non-array objects | Cheap structural check; individual row fields are not re-validated |
+| `comparableAigwUrl(baseUrl)` equals `comparableAigwUrl(configuredAigwUrl)` | Shared URL comparison: trailing slashes and host casing are insignificant, and anything unparsable or non-HTTP is incomparable and never matches |
+| The exact byte range of the `providers.aigw` value contains no comment and no trailing comma | Scanned with `jsonc-parser`'s visitor, not a regex, so comment-like text inside a string value cannot trigger a false negative. Comments and trailing commas *outside* that range are irrelevant and preserved |
+
+URL match alone is deliberately insufficient: a hand-authored block targeting the same gateway is the normal case, not a suspicious one. `comparableAigwUrl` is exported from this module and reused by the registry so ownership and cache keying can never disagree about what "the same gateway" means.
+
+#### Call sites
+
+- `model-registry.ts` → `readAigwTargetRealm(configuredUrl)` calls adoption on the ordinary model-assembly read (only while `aigw.url` is set), persists the adopted text through `writeModelsJsonText`, and logs `Adopted a pre-0.17.0 Bobbit providers.aigw block`. A failed persist is logged and the managed classification is used for that process anyway, so a read-only agent directory degrades to "repaired in memory" instead of failing.
+- `aigw-manager.ts` → `writeAigwModelsJson()` calls adoption before `publishManagedAigwProvider()`, so configure and Refresh Models heal a legacy block instead of failing closed, while a genuinely hand-authored block still raises the ownership error.
+- A block that stays `unmarked-user` triggers `noteUserOwnedAigwTarget()`, one deduplicated `console.warn` per (file, normalized URL) naming the state and the remedy. The set is cleared by `invalidateModelCache()` so the notice reappears after configuration changes. It never echoes headers, credentials, model rows, or file contents.
+
+#### File permissions
+
+Because sibling provider blocks can hold API keys, `writeModelsJsonText()` must not widen the file. `rename()` publishes a new inode, so every existing regular target's mode bits — including a valid `0o000` — are read first and re-applied to the replacement; an absent, unstatable, or non-regular target falls back to owner-only `0o600`. The staging file is opened exclusively with that mode and `fchmod`-ed on the still-empty descriptor — the process umask can clear bits `open()` asked for — so content never exists at a wider mode, not even transiently. POSIX modes are not meaningful on Windows, where `openSync` alone is the best available.
+
+Coverage: `tests2/core/aigw-legacy-block-adoption.test.ts` pins adoption on both the read and publication paths, the non-adoption cases (extra fields, comments inside the block, mismatched `baseUrl`), fail-closed behaviour on ambiguous documents, byte preservation outside the block, the single sanitized warning, and permission preservation.
+
 ### Managed `providers.aigw.headers`
 
-`writeAigwModelsJson()` inserts or refreshes only a provider carrying Bobbit's forward-only ownership marker. It refuses an unmarked user block and malformed or ambiguous JSONC. The managed provider-level header block contains both headers:
+`writeAigwModelsJson()` inserts or refreshes only a provider carrying Bobbit's forward-only ownership marker, after first adopting a recognisable pre-v0.17.0 publication. It refuses an unmarked user block and malformed or ambiguous JSONC. The managed provider-level header block contains both headers:
 
 ```json
 {
@@ -2057,14 +2092,14 @@ pi-ai v0.79.6+ natively forwards provider-level `headers` into the AWS SDK reque
 
 On gateway startup, `startupAigwCheck()` checks whether `aigw.url` is already configured. If it is, Bobbit sets the Bedrock environment variables for subprocesses and, unless `BOBBIT_SKIP_AIGW_DISCOVERY=1` is set, re-discovers models from the configured gateway.
 
-A successful discovery refreshes the current model, cost, header, and marker fields only when `providers.aigw` is absent or already marked. Historical unmarked blocks are intentionally user-owned; startup does not adopt or rewrite them. Malformed JSONC and ambiguous duplicate target paths also remain byte-identical and produce an ownership/publication diagnostic. If the gateway is unreachable, Bobbit leaves the existing file untouched rather than replacing a working exact catalog with partial data. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
+A successful discovery refreshes the current model, cost, header, and marker fields when `providers.aigw` is absent, already marked, or adopted as a recognisable pre-v0.17.0 Bobbit publication. An unmarked block that is not recognisable stays user-owned; startup does not rewrite it. Malformed JSONC and ambiguous duplicate target paths also remain byte-identical and produce an ownership/publication diagnostic. If the gateway is unreachable, Bobbit leaves the existing file untouched rather than replacing a working exact catalog with partial data. With `BOBBIT_SKIP_AIGW_DISCOVERY=1`, Bobbit skips only the network discovery call; it still applies Bedrock environment variables and keeps the existing file as-is.
 
 ### No-leakage boundaries
 
 The Bobbit AI Gateway user agent is not a process-wide default HTTP header. It is attached only by AI Gateway-specific helpers or by the generated `providers.aigw` entry:
 
 - `aigwUserAgentHeaders()` is used for AI Gateway discovery, proxying, and gateway title/goal-summary calls.
-- `writeAigwModelsJson()` writes headers only under a marked `providers.aigw`; non-aigw and unmarked AIGW providers are preserved as-is.
+- `writeAigwModelsJson()` writes headers only under a marked `providers.aigw`; non-aigw providers and unmarked AIGW blocks that are not recognisable Bobbit publications are preserved as-is.
 - `removeAigwModelsJson()` removes only a marked Bobbit publication and leaves user-owned blocks unchanged.
 - Direct public-provider paths, such as Anthropic title fallback or non-aigw model completion, do not use the Bobbit AI Gateway user-agent helper.
 - Bedrock custom headers are emitted only by models under the generated `aigw` provider; public Bedrock models are unchanged.

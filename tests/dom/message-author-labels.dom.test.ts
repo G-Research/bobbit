@@ -189,15 +189,17 @@ describe("prompt author badge DOM", () => {
 		expect(list.textContent).not.toContain("Human");
 		expect(badges[1].textContent).not.toContain("Bobbit");
 		expect(badges[0].querySelector(".prompt-author-initial")?.getAttribute("data-initial")).toBe("U");
-		expect(badges[1].querySelector(".prompt-author-initial")?.getAttribute("data-initial")).toBe("S");
+		expect(badges[1].querySelector(".prompt-author-initial")).toBeNull();
+		expect(badges[1].querySelector(".prompt-author-system-icon svg")).not.toBeNull();
 		expect(badges[2].querySelector(".prompt-author-initial")).toBeNull();
 		expect(badges.map((badge) => badge.tagName)).toEqual(["DIV", "DIV", "A"]);
 		expect(badges[2].getAttribute("href")).toBe("#/session/1ae73f53-dc48-4ca4");
 		expect(badges[2].getAttribute("title")).toBe("Test Coordinator | Agent");
 	});
 
-	it("renders only the agent avatar through the static canonical sprite path", async () => {
+	it("renders the shared system icon and agent avatar through their canonical paths", async () => {
 		const list = await renderMessageList([prompt("system", SYSTEM), prompt("agent", AGENT)]);
+		expect(list.querySelectorAll(".prompt-author-system-icon svg")).toHaveLength(1);
 		expect(list.querySelectorAll(".prompt-author-avatar")).toHaveLength(1);
 		const avatar = list.querySelector(".prompt-author-avatar")!;
 		expect(avatar.getAttribute("aria-hidden")).toBe("true");

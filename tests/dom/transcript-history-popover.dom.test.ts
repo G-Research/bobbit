@@ -2,7 +2,7 @@ import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "./_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TranscriptHistoryEntry } from "../../src/ui/transcript-history.js";
 import type { TranscriptHistoryPopover, TranscriptHistorySelectDetail } from "../../src/ui/components/TranscriptHistoryPopover.js";
 
@@ -12,6 +12,7 @@ const ENTRIES: TranscriptHistoryEntry[] = [
 		targetId: "target-user",
 		ordinal: 0,
 		kind: "user",
+		author: { kind: "user", id: "user:local", label: "User" },
 		authorLabel: "You",
 		typeLabel: "Prompt",
 		excerpt: "Set up the release checklist",
@@ -22,6 +23,7 @@ const ENTRIES: TranscriptHistoryEntry[] = [
 		targetId: "target-agent",
 		ordinal: 1,
 		kind: "agent",
+		author: { kind: "agent", id: "session:primary", label: "Primary assistant" },
 		authorLabel: "Primary assistant",
 		typeLabel: "Response",
 		excerpt: "The checklist is ready for review",
@@ -32,6 +34,7 @@ const ENTRIES: TranscriptHistoryEntry[] = [
 		targetId: "target-question",
 		ordinal: 2,
 		kind: "question",
+		author: { kind: "agent", id: "session:primary", label: "Primary assistant" },
 		authorLabel: "Primary assistant",
 		typeLabel: "Question",
 		excerpt: "Which release channel should be used?",
@@ -42,6 +45,7 @@ const ENTRIES: TranscriptHistoryEntry[] = [
 		targetId: "target-system",
 		ordinal: 3,
 		kind: "system",
+		author: { kind: "system", id: "system:bobbit", label: "System" },
 		authorLabel: "System",
 		typeLabel: "Event",
 		excerpt: "Verification completed",
@@ -52,6 +56,14 @@ const ENTRIES: TranscriptHistoryEntry[] = [
 beforeAll(async () => {
 	await import("../../src/ui/components/TranscriptHistoryPopover.js");
 	__syncCE();
+});
+
+beforeEach(() => {
+	const canvasContext = new Proxy({}, { get: () => () => {}, set: () => true });
+	vi.spyOn(HTMLCanvasElement.prototype, "getContext")
+		.mockReturnValue(canvasContext as CanvasRenderingContext2D);
+	vi.spyOn(HTMLCanvasElement.prototype, "toDataURL")
+		.mockReturnValue("data:image/png;base64,c3RhdGlj");
 });
 
 afterEach(() => {
@@ -71,11 +83,13 @@ async function mount(options: {
 	entries?: TranscriptHistoryEntry[];
 	anchor?: HTMLElement;
 	availableHeight?: number;
+	resolvePromptAuthorAppearance?: TranscriptHistoryPopover["resolvePromptAuthorAppearance"];
 } = {}): Promise<TranscriptHistoryPopover> {
 	const popover = document.createElement("transcript-history-popover") as TranscriptHistoryPopover;
 	popover.entries = options.entries ?? ENTRIES;
 	popover.anchorEl = options.anchor ?? null;
 	popover.availableHeight = options.availableHeight ?? 535;
+	popover.resolvePromptAuthorAppearance = options.resolvePromptAuthorAppearance;
 	popover.open = true;
 	document.body.appendChild(popover);
 	await settle(popover);
@@ -95,7 +109,8 @@ function clickFilter(popover: ParentNode, label: string): void {
 
 describe("TranscriptHistoryPopover", () => {
 	it("renders an accessible light-DOM dialog in transcript order without groups or shortcuts", async () => {
-		const popover = await mount({ availableHeight: 240 });
+		const resolveAppearance = vi.fn(() => ({ hueRotate: 45, accessoryId: "none" }));
+		const popover = await mount({ availableHeight: 240, resolvePromptAuthorAppearance: resolveAppearance });
 		const dialog = popover.querySelector<HTMLElement>("[role='dialog']");
 		const search = popover.querySelector<HTMLInputElement>(".transcript-history-search");
 
@@ -113,10 +128,44 @@ describe("TranscriptHistoryPopover", () => {
 			"entry-system",
 		]);
 		expect(rows(popover)[2].getAttribute("aria-label")).toContain("Primary assistant, Question, unanswered");
-		expect(popover.textContent).toContain("Oldest → newest");
+		expect(Array.from(popover.querySelectorAll<HTMLElement>(".transcript-history-row-icon"))
+			.map((rowIcon) => rowIcon.dataset.kind)).toEqual(["user", "agent", "question", "system"]);
+		expect(popover.querySelectorAll(".transcript-history-row-icon .prompt-author-avatar")).toHaveLength(2);
+		expect(Array.from(popover.querySelectorAll<HTMLElement>(".transcript-history-row-icon .prompt-author-initial"))
+			.map((initial) => initial.dataset.initial)).toEqual(["U"]);
+		expect(popover.querySelectorAll(".transcript-history-row-icon .prompt-author-system-icon svg")).toHaveLength(1);
+		expect(resolveAppearance).toHaveBeenCalledTimes(2);
+		expect(popover.textContent).not.toContain("Oldest → newest");
 		expect(popover.textContent).not.toContain("Recent");
 		expect(popover.textContent).not.toContain("Earlier today");
+		expect(popover.querySelector(".transcript-history-footer")).toBeNull();
+		const styles = popover.querySelector("style")?.textContent;
+		expect(styles).toContain("flex-wrap: wrap");
+		expect(styles).toContain("background: var(--card)");
+		expect(styles).toContain("width: min(420px");
 		expect(popover.querySelector("kbd")).toBeNull();
+	});
+
+	it("shows unanswered, answered, and dismissed question status", async () => {
+		const question = ENTRIES[2];
+		const popover = await mount({
+			entries: [
+				{ ...question, id: "question-unanswered", questionStatus: "unanswered", unresolved: true },
+				{ ...question, id: "question-answered", questionStatus: "answered", unresolved: false },
+				{ ...question, id: "question-dismissed", questionStatus: "dismissed", unresolved: false },
+			],
+		});
+		expect(Array.from(popover.querySelectorAll<HTMLElement>(".transcript-history-question-status"))
+			.map((status) => [status.dataset.status, status.textContent])).toEqual([
+			["unanswered", "Unanswered"],
+			["answered", "Answered"],
+			["dismissed", "Dismissed"],
+		]);
+		expect(rows(popover).map((row) => row.getAttribute("aria-label"))).toEqual([
+			expect.stringContaining(", unanswered:"),
+			expect.stringContaining(", answered:"),
+			expect.stringContaining(", dismissed:"),
+		]);
 	});
 
 	it("opens with the chronological list scrolled to its newest match", async () => {

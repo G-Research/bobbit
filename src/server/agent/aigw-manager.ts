@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { parse as parseJsonc } from "jsonc-parser";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
-import { publishManagedAigwProvider, removeManagedAigwProvider } from "./aigw-models-json.js";
+import { adoptLegacyAigwProvider, publishManagedAigwProvider, removeManagedAigwProvider } from "./aigw-models-json.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -302,14 +302,53 @@ function readModelsJson(): Record<string, any> {
 	return { providers: {} };
 }
 
-function writeModelsJsonText(text: string): void {
+/**
+ * models.json can carry hand-authored sibling provider blocks with real API
+ * keys, so it must never be widened by our own writes. Used when there is no
+ * existing file, or when its mode cannot be determined.
+ */
+const MODELS_JSON_FALLBACK_MODE = 0o600;
+
+/** The mode the replacement inode must end up with: the target's own bits, else owner-only. */
+function resolveModelsJsonMode(target: string): number {
+	try {
+		const stat = fs.statSync(target);
+		if (stat.isFile()) return stat.mode & 0o777;
+	} catch { /* absent or unreadable — fall through to owner-only */ }
+	return MODELS_JSON_FALLBACK_MODE;
+}
+
+/**
+ * Create `target` exclusively with `mode` and write `text` into it. The mode is
+ * applied at creation and re-applied on the still-empty fd, because the process
+ * umask can clear bits that `open()` was asked for; the staging file therefore
+ * never holds content at a wider mode, not even transiently.
+ */
+function writeFileExclusiveWithMode(target: string, text: string, mode: number): void {
+	const fd = fs.openSync(target, "wx", mode);
+	try {
+		// POSIX modes are not meaningful on Windows; openSync already did what it can.
+		if (process.platform !== "win32") {
+			try { fs.fchmodSync(fd, mode); } catch { /* best-effort on exotic filesystems */ }
+		}
+		fs.writeFileSync(fd, text, "utf-8");
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/** Atomic (tmp-file + rename) writer for the active models.json. Single writer. */
+export function writeModelsJsonText(text: string): void {
 	const p = getModelsJsonPath();
 	let tmp = "";
 	try {
 		const dir = path.dirname(p);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		// rename() publishes a new inode, so the target's permission bits have to be
+		// carried across explicitly or a 0o600 file silently becomes 0o644.
+		const mode = resolveModelsJsonMode(p);
 		tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-		fs.writeFileSync(tmp, text, "utf-8");
+		writeFileExclusiveWithMode(tmp, text, mode);
 		fs.renameSync(tmp, p);
 		console.log(`[aigw-manager] Wrote models.json to ${p}`);
 	} catch (err) {
@@ -419,7 +458,11 @@ export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void 
 			};
 		}),
 	};
-	const updated = publishManagedAigwProvider(source, provider);
+	// Repair a pre-0.17.0 unmarked Bobbit publication first, so Refresh Models and
+	// gateway reconfigure self-heal instead of failing closed. A block that is not
+	// recognisably Bobbit's own output stays user-owned and still throws below.
+	const adopted = adoptLegacyAigwProvider(source, aigwUrl);
+	const updated = publishManagedAigwProvider(adopted.text, provider);
 	if (updated !== source) writeModelsJsonText(updated);
 	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(provider));
 	setBedrockEnvVars(aigwUrl);
