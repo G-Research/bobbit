@@ -5,7 +5,8 @@ import { PassThrough } from "node:stream";
 import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../../e2e/_helpers/test-utils/cleanup.js";
 import { test, expect } from "../../../integration/gateway/_helpers/e2e/in-process-harness.js";
-import { apiFetch as rawApiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "../../../integration/gateway/_helpers/e2e/e2e-setup.js";
+import { apiFetch as rawApiFetch, connectWs, createGoal as rawCreateGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "../../../integration/gateway/_helpers/e2e/e2e-setup.js";
+import { gatewaySync } from "../../../integration/gateway/_helpers/e2e/runtime.js";
 import { loadServerTestRuntime } from "../shared/server-runtime.js";
 import { createCommandSpawnAdapter } from "../../../../src/server/owned-tree-command-spawn.js";
 
@@ -124,6 +125,57 @@ function ownedHeadEvidenceForSlug(slug: string): Record<string, unknown> {
 	return ownedHeadEvidence(owner, repository);
 }
 
+async function completeRemoteStateRouteHandoff(owner: "goals" | "sessions", id: string): Promise<void> {
+	// An explicit route read is the coordinator's public blocking join boundary:
+	// it waits for existing refresh work (or its own) before replying. Complete
+	// both resource lifecycles before a test replaces the shared command runner.
+	// `optional=1` keeps a definitive missing PR successful; failed probes remain
+	// observable responses whose bodies must still be consumed.
+	const [gitHandoff, prHandoff] = await Promise.all([
+		apiFetch(`/api/${owner}/${id}/git-status?intent=explicit`),
+		apiFetch(`/api/${owner}/${id}/pr-status?intent=explicit&optional=1`),
+	]);
+	if (owner === "sessions") {
+		expect(gitHandoff.status, "remote-state fixture Git lifecycle handoff failed").toBe(200);
+		expect([200, 204], "remote-state fixture PR lifecycle handoff failed").toContain(prHandoff.status);
+	}
+	await Promise.all([gitHandoff.arrayBuffer(), prHandoff.arrayBuffer()]);
+}
+
+async function createGoal(
+	opts: Parameters<typeof rawCreateGoal>[0],
+): Promise<Awaited<ReturnType<typeof rawCreateGoal>>> {
+	const goal = await rawCreateGoal(opts);
+	const goalId = String(goal.id);
+	const projectId = typeof goal.projectId === "string" ? goal.projectId : undefined;
+	expect(projectId, "remote-state fixture goal project unavailable").toEqual(expect.any(String));
+	const goalStore = gatewaySync().sessionManager.getGoalStoreForProject(projectId!);
+	const persisted = goalStore.get(goalId);
+	expect(persisted, "remote-state fixture goal unavailable after creation").toBeTruthy();
+	const originalBinding = {
+		branch: persisted.branch,
+		worktreePath: persisted.worktreePath,
+		setupStatus: persisted.setupStatus,
+	};
+
+	// The compatibility helper intentionally creates standalone (`worktree:false`)
+	// goals, so their public remote routes normally reject the missing branch and
+	// worktree before reaching the coordinator. Give the goal a temporary routable
+	// binding solely for this lifecycle handoff, then restore its exact standalone
+	// shape before exposing it to the test. The returned API object is untouched.
+	goalStore.update(goalId, {
+		branch: "fixture/remote-state-bootstrap",
+		worktreePath: persisted.cwd,
+		setupStatus: "ready",
+	});
+	try {
+		await completeRemoteStateRouteHandoff("goals", goalId);
+	} finally {
+		goalStore.update(goalId, originalBinding);
+	}
+	return goal;
+}
+
 async function createRemoteStateSession(gateway: any, cwd: string, requestedProjectId?: string): Promise<string> {
 	const projectId = requestedProjectId ?? await defaultProjectId();
 	const response = await apiFetch("/api/sessions", {
@@ -145,20 +197,7 @@ async function createRemoteStateSession(gateway: any, cwd: string, requestedProj
 	});
 	expect(gateway.sessionManager.getSession(sessionId)?.worktreePath).toBeUndefined();
 
-	// The fork-scoped coordinator can still own work admitted by an earlier
-	// automatic read for this repository. An explicit route read is its public,
-	// blocking join boundary: it waits for an existing refresh (or its own) before
-	// replying. Complete both resource lifecycles before callers replace the
-	// shared command runner, so their first explicit read cannot join work that
-	// captured the predecessor runner. `optional=1` keeps a definitive missing PR
-	// successful; failed optional probes remain observable 200 snapshots.
-	const [gitHandoff, prHandoff] = await Promise.all([
-		apiFetch(`/api/sessions/${sessionId}/git-status?intent=explicit`),
-		apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`),
-	]);
-	expect(gitHandoff.status, "remote-state fixture Git lifecycle handoff failed").toBe(200);
-	expect([200, 204], "remote-state fixture PR lifecycle handoff failed").toContain(prHandoff.status);
-	await Promise.all([gitHandoff.arrayBuffer(), prHandoff.arrayBuffer()]);
+	await completeRemoteStateRouteHandoff("sessions", sessionId);
 	return sessionId;
 }
 
