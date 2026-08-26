@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "metricName": "e2e-full",
   "kind": "e2e-full",
+  "historicalContext": "Captured before the canonical test-layout migration, when Playwright had api, api-realpush, and browser projects. The current B/C metrics coordinator has only api and browser; preserve this file only as aggregate historical evidence.",
   "createdAt": "2026-06-17T22:34:13.968Z",
   "startedAt": "2026-06-17T22:23:53.793Z",
   "status": "passed",

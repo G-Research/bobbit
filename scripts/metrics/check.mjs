@@ -82,8 +82,6 @@ const defaultThresholds = {
 	cpuMaxIncreaseMs: 120_000,
 	memoryMaxIncreaseRatio: 1.75,
 	memoryMaxIncreaseBytes: 512 * 1024 * 1024,
-	retainedSmokeFiles: [],
-	retainedSmokeCoverage: [],
 	metricBudgets: {},
 	browserE2eBudget: {
 		// Disabled by default so ad-hoc scoped checks keep their historical behavior.
@@ -119,8 +117,35 @@ function mergeThresholds(base, override) {
 	return merged;
 }
 
-const thresholds = existsSync(thresholdFile)
-	? mergeThresholds(defaultThresholds, readJson(thresholdFile))
+const retiredRegistryKeys = new Set([
+	"retainedSmokeFiles",
+	"retainedSmokeCoverage",
+	"requiredTitleRegexes",
+	"titleRegexes",
+	"minNonSkippedTests",
+	"minRunnableTests",
+]);
+
+function findRetiredRegistryKeys(value, path = "thresholds") {
+	if (!value || typeof value !== "object") return [];
+	if (Array.isArray(value)) return value.flatMap((child, index) => findRetiredRegistryKeys(child, `${path}[${index}]`));
+	const found = [];
+	for (const [key, child] of Object.entries(value)) {
+		const childPath = `${path}.${key}`;
+		if (retiredRegistryKeys.has(key)) found.push(childPath);
+		found.push(...findRetiredRegistryKeys(child, childPath));
+	}
+	return found;
+}
+
+const configuredThresholds = existsSync(thresholdFile) ? readJson(thresholdFile) : null;
+const retiredConfiguredKeys = findRetiredRegistryKeys(configuredThresholds);
+if (retiredConfiguredKeys.length > 0) {
+	console.error(`[metrics:check] retired per-test registry key(s) in ${rel(thresholdFile)}: ${retiredConfiguredKeys.join(", ")}. Remove them; test ownership and discovery come from canonical paths and lane runners.`);
+	process.exit(2);
+}
+const thresholds = configuredThresholds
+	? mergeThresholds(defaultThresholds, configuredThresholds)
 	: defaultThresholds;
 
 function requiredMetrics() {
@@ -339,84 +364,6 @@ function baselinePathForMetric(metricName) {
 	return baselineMetricFile(metricName, baselineDir);
 }
 
-function normalizeReportPath(file) {
-	return String(file || "").replace(/\\/g, "/");
-}
-
-function retainedSmokeCoverageEntries() {
-	const configured = [
-		...(Array.isArray(thresholds.retainedSmokeCoverage) ? thresholds.retainedSmokeCoverage : []),
-		...(Array.isArray(thresholds.browserE2eBudget?.retainedSmokeCoverage) ? thresholds.browserE2eBudget.retainedSmokeCoverage : []),
-	];
-	return configured
-		.map((entry) => typeof entry === "string" ? { file: entry } : entry)
-		.filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry) && typeof entry.file === "string" && entry.file.trim() !== "")
-		.map((entry) => ({
-			metric: normalizeMetricName(entry.metric || entry.metricName || "e2e-browser"),
-			file: normalizeReportPath(entry.file.trim()),
-			minNonSkippedTests: Number.isFinite(entry.minNonSkippedTests)
-				? entry.minNonSkippedTests
-				: (Number.isFinite(entry.minRunnableTests) ? entry.minRunnableTests : 1),
-			requiredTitleRegexes: Array.isArray(entry.requiredTitleRegexes)
-				? entry.requiredTitleRegexes
-				: (Array.isArray(entry.titleRegexes) ? entry.titleRegexes : []),
-		}));
-}
-
-function checkRetainedSmokeFiles() {
-	const configured = [
-		...(Array.isArray(thresholds.retainedSmokeFiles) ? thresholds.retainedSmokeFiles : []),
-		...(Array.isArray(thresholds.browserE2eBudget?.retainedSmokeFiles) ? thresholds.browserE2eBudget.retainedSmokeFiles : []),
-		...retainedSmokeCoverageEntries().map((entry) => entry.file),
-	];
-	const seen = new Set();
-	const failures = [];
-	for (const entry of configured) {
-		if (typeof entry !== "string" || entry.trim() === "") continue;
-		const normalized = normalizeReportPath(entry);
-		if (seen.has(normalized)) continue;
-		seen.add(normalized);
-		const filePath = resolve(projectRoot, normalized);
-		if (!existsSync(filePath)) failures.push(`retained smoke file missing: ${normalized}`);
-	}
-	return failures;
-}
-
-function titleMatches(titleEntry, pattern) {
-	try {
-		return new RegExp(pattern).test(titleEntry?.title || "");
-	} catch (error) {
-		throw new Error(`invalid retained smoke title regex ${JSON.stringify(pattern)}: ${error.message}`);
-	}
-}
-
-function checkRetainedSmokeCoverageForMetric(metricName, current) {
-	const entries = retainedSmokeCoverageEntries().filter((entry) => entry.metric === metricName);
-	if (entries.length === 0) return [];
-	const files = current.tests?.files;
-	if (!files || typeof files !== "object") {
-		return scopedComparison ? [] : [`${metricName}.json: retained smoke coverage requires tests.files data in the current metric`];
-	}
-	const failures = [];
-	for (const entry of entries) {
-		const file = normalizeReportPath(entry.file);
-		const bucket = files[file];
-		if (!bucket) {
-			failures.push(`${metricName}.json: retained smoke file absent from browser report: ${file}`);
-			continue;
-		}
-		const nonSkipped = Number(bucket.nonSkipped ?? ((bucket.total || 0) - (bucket.skipped || 0)));
-		if (!Number.isFinite(nonSkipped) || nonSkipped < entry.minNonSkippedTests) {
-			failures.push(`${metricName}.json: retained smoke file ${file} has ${Number.isFinite(nonSkipped) ? nonSkipped : 0} non-skipped test(s), min ${entry.minNonSkippedTests}`);
-		}
-		for (const pattern of entry.requiredTitleRegexes) {
-			const matched = (bucket.titles || []).some((title) => title.status !== "skipped" && titleMatches(title, pattern));
-			if (!matched) failures.push(`${metricName}.json: retained smoke file ${file} missing required non-skipped title matching /${pattern}/`);
-		}
-	}
-	return failures;
-}
-
 function comparisonPairs() {
 	if (baselineInputKind === "file") {
 		const metricName = normalizeMetricName(baselineInput);
@@ -447,7 +394,6 @@ function compareMetric({ baselinePath, currentPath, label }) {
 	const current = readJson(currentPath);
 	const failures = [];
 	if (current.status && current.status !== "passed") failures.push(`${label}: current status is ${current.status}`);
-	failures.push(...checkRetainedSmokeCoverageForMetric(metricName, current));
 	failures.push(...compareCoverage(label, baseline, current));
 	failures.push(...compareGenericMetricBudget(label, metricName, current));
 	failures.push(...compareBrowserBudget(label, metricName, baseline, current));
@@ -507,6 +453,7 @@ function compareMetric({ baselinePath, currentPath, label }) {
 const scopedComparison = baselineInputKind === "file" || currentInputKind === "file";
 const pairs = comparisonPairs();
 const requiredMetricNamesForCheck = requiredMetrics();
+const retiredMetricNames = new Set(["e2e-api-realpush"]);
 const failures = [];
 if (!scopedComparison || cli.required != null || process.env.BOBBIT_METRICS_REQUIRED != null) {
 	for (const name of requiredMetricNamesForCheck) {
@@ -520,8 +467,14 @@ if (pairs.length === 0) {
 	failures.push(`no baseline JSON files found in ${baselineDir}`);
 }
 
-for (const pair of pairs) failures.push(...compareMetric(pair));
-if (!scopedComparison) failures.push(...checkRetainedSmokeFiles());
+for (const pair of pairs) {
+	const metricName = normalizeMetricName(pair.baselinePath);
+	if (retiredMetricNames.has(metricName)) {
+		failures.push(`${pair.label}: retired metric baseline; remove it because Playwright E2E metrics now have only api and browser projects`);
+		continue;
+	}
+	failures.push(...compareMetric(pair));
+}
 
 if (!scopedComparison && thresholds.browserImprovement?.enabled) {
 	for (const name of ["e2e-browser", "slice-renderer", "slice-scroll", "slice-sidebar"]) {

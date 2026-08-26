@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { relative } from "node:path";
-import { ensureFullBuild, measureCommand, metricFile, parsePlaywrightJson, pathFromRoot, projectRoot, schemaVersion, writeJson } from "./lib.mjs";
+import { ensureFullBuild, measureCommand, metricFile, parsePlaywrightJson, pathFromRoot, playwrightE2EProjectEntries, projectRoot, schemaVersion, writeJson } from "./lib.mjs";
 
 ensureFullBuild();
 
@@ -52,15 +52,7 @@ const full = await measureCommand({
 	parseArtifacts: async () => ({ tests: parsePlaywrightJson(reportFile) }),
 });
 
-const projects = full.tests?.projects;
-if (!projects || typeof projects !== "object") {
-	throw new Error("metrics:e2e:all could not derive project splits from the Playwright JSON report");
-}
-for (const project of ["api", "browser"]) {
-	if (!projects[project]) throw new Error(`metrics:e2e:all missing required ${project} project split in the Playwright JSON report`);
-}
-
-const projectEntries = Object.entries(projects).sort(([a], [b]) => a.localeCompare(b));
+const projectEntries = playwrightE2EProjectEntries(full.tests?.projects);
 const weightSource = chooseWeightSource(projectEntries);
 const weightedEntries = projectEntries.map(([project, tests]) => ({
 	project,
