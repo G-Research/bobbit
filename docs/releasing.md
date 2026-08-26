@@ -29,14 +29,17 @@ The post-merge build is deliberate because it produces the exact tarball that sh
 
 **The same contract also runs before the merge.** `build-unit-gate.yml` runs `validate-release-commit.mjs --mode pre-merge` on every pull request. It decides whether a PR is a release the same way `detect` does — by comparing `package.json` against the base — and exits immediately when the version is unchanged. Every content rule then runs against that base, including the append-only changelog check and the version-increase check, so a wrong branch name, title, lockfile, changelog entry, backwards version or unpublished binary pin fails while it still costs one push — rather than after the merge, when the version is on `main` and the number is spent. The post-merge run is the authority; the pre-merge run is there so the authority rarely has to say no.
 
-### Why browser and e2e tests are not in the release gate
+### Release PR test ownership
 
-`npm run test:browser` and `npm run test:e2e` are **not** part of this workflow, or of any workflow. They are not runner-shaped yet:
+The release preflight runs the complete unit, browser, and E2E lanes locally before it creates the release commit. The release PR then receives the same hosted coverage as every pull request through `build-unit-gate.yml`:
 
-- **browser** — carries a 3600 s wall budget, and `playwright-v2.config.ts` reserves workers from `scripts/testing-v2/ledger.mjs`. That ledger exists to share one 24-core development machine between concurrent agent sessions; on a single-tenant runner it reserves against contention that does not exist, so the numbers it produces are meaningless there.
-- **e2e** — needs a Docker daemon and real git worktrees.
+- layout validation, build, type-check, and the complete unit lane run on Linux, Windows, and macOS, with an additional Linux run on the newer supported Node line;
+- the complete browser lane runs on Linux, Windows, and macOS with platform-specific worker limits;
+- the complete E2E lane runs on Linux, Windows, and macOS, including real Git/worktree/process/restart/MCP coverage;
+- Linux builds the version-matched sandbox image before E2E so Docker-owned cases run there, while Windows and macOS retain the non-Docker E2E coverage;
+- the release-contract job validates the version, branch, title, lockfile, changelog, binary pins, and registry state before merge.
 
-Adding them to a workflow today would not gate anything; it would fail or mislead. Making them runner-shaped is separate work. Run the full suite locally before opening the release PR — the skill's pre-flight does exactly that — and let the PR's required unit matrix provide the hosted unit gate. The post-merge release workflow rebuilds and type-checks the package without repeating that unit matrix.
+This split keeps publication authority narrow without weakening release qualification. Browser and E2E need Chromium, real worktrees, process control, and, on Linux, Docker; the pull-request workflow owns that runner setup. The post-merge `release-publish.yml` workflow instead revalidates the merged release commit, installs dependencies, rebuilds, type-checks, and packs the exact tarball that receives npm provenance. It does not repeat the test matrix because the required release PR checks already tested the mergeable tree and the local release preflight already ran every complete lane.
 
 Publish, tag and release are separate jobs so each holds only the permissions it needs: `id-token: write` to publish, `contents: write` to tag, `contents: write` to create the release. None checks out the repository, installs dependencies, or runs package lifecycle scripts. Before the publishable artifact enters the OIDC-enabled job, that job uses a small inline registry check to confirm the dist-tag still has the value recorded by verification. It then downloads and publishes the verified tarball with `--ignore-scripts`; the release job downloads the reviewed notes from the same immutable artifact. Dependency lifecycle code therefore never receives publish or repository-write authority, and the tarball produced after all gates is the tarball sent to npm.
 
