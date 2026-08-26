@@ -147,7 +147,7 @@ describe("restoreSession source guard", () => {
 	it("respawn, force-abort, and delegate paths carry durable effective thinking", () => {
 		const src = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-manager.ts"), "utf-8");
 		const roleStart = src.indexOf("const respawnPersisted = this.resolveStoreForSession(id).get(id);");
-		const roleWindow = src.slice(roleStart, roleStart + 8_000);
+		const roleWindow = src.slice(roleStart, roleStart + 10_000);
 		assert.match(roleWindow, /respawnPersisted\?\.effectiveThinkingLevel/);
 		assert.match(roleWindow, /await this\.tryApplyDefaultThinkingLevel\(stagedSession\)/);
 

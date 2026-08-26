@@ -29,7 +29,12 @@ import {
 	validatedE2ERunId,
 	type PackLocalDataMountPlan,
 } from "./docker-args.js";
-import { activeAgentSessionsDir } from "./agent-session-path.js";
+import {
+	activeAgentSessionsDir,
+	sessionStateSessionsRoot,
+	sessionTranscriptRoot,
+	trustedAgentSessionsRoots,
+} from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
@@ -48,12 +53,92 @@ const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL:
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
 
+export const SESSION_RUNTIME_ROLE_LABEL = "bobbit-session-runtime";
+export const SESSION_RUNTIME_ROLE_VERSION = "2";
+const LEGACY_SESSION_RUNTIME_ROLE_VERSIONS = new Set(["1"]);
+export const SESSION_RUNTIME_PROJECT_LABEL = "bobbit-runtime-project";
+export const SESSION_RUNTIME_SESSION_LABEL = "bobbit-runtime-session";
+export const SESSION_RUNTIME_MEMORY_LIMIT = "4g";
+export const SESSION_RUNTIME_CPU_LIMIT = "2";
+export const SESSION_RUNTIME_PIDS_LIMIT = "256";
+/** Hard ceiling for one gateway-owned transcript operation. */
+export const MAX_SESSION_TRANSCRIPT_OPERATION_BYTES = 256 * 1024 * 1024;
+
+export type SessionTranscriptRuntimeOperation =
+	| { kind: "exists"; path: string }
+	| { kind: "read"; path: string }
+	| { kind: "writeAtomic"; path: string; content: string | Buffer }
+	| { kind: "renameAtomic"; sourcePath: string; targetPath: string }
+	| { kind: "delete"; path: string };
+
+const SAFE_RUNTIME_LABEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SESSION_TRANSCRIPT_ROOT = "/home/node/.bobbit/agent/sessions";
+
+const SESSION_TRANSCRIPT_OPERATION_SCRIPT = [
+	'const fs=require("node:fs"),path=require("node:path");',
+	'const [kind,...args]=process.argv.slice(1);',
+	'const limit=Number(args.at(-1));',
+	'const regular=p=>{try{const s=fs.lstatSync(p);return s.isFile()&&!s.isSymbolicLink();}catch{return false;}};',
+	'if(kind==="exists"){process.stdout.write(regular(args[0])?"1":"0");}',
+	'else if(kind==="read"){',
+	'  if(!regular(args[0])) process.exit(44);',
+	'  const fd=fs.openSync(args[0],"r");',
+	'  try { const s=fs.fstatSync(fd); if(!s.isFile()||s.size>limit) process.exit(45);',
+	'    const b=Buffer.allocUnsafe(s.size); let n=0,r; while(n<s.size&&(r=fs.readSync(fd,b,n,s.size-n,n))>0)n+=r; process.stdout.write(b.subarray(0,n));',
+	'  } finally { fs.closeSync(fd); }',
+	'}',
+	'else if(kind==="writeAtomic"){',
+	'  const [target,temp]=args; const chunks=[]; let size=0,settled=false;',
+	'  const fail=()=>{if(!settled){settled=true;process.exitCode=46;process.stdin.resume();}};',
+	'  process.stdin.on("data",c=>{size+=c.length;if(size>limit)fail();else chunks.push(c);});',
+	'  process.stdin.on("end",()=>{if(settled)return;settled=true;let fd;',
+	'    try{fs.mkdirSync(path.dirname(target),{recursive:true});fd=fs.openSync(temp,"wx",0o600);for(const c of chunks)fs.writeSync(fd,c);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;fs.renameSync(temp,target);}',
+	'    finally{if(fd!==undefined)try{fs.closeSync(fd);}catch{};try{fs.unlinkSync(temp);}catch{}}',
+	'  });',
+	'}',
+	'else if(kind==="renameAtomic"){const [source,target]=args;fs.mkdirSync(path.dirname(target),{recursive:true});fs.renameSync(source,target);}',
+	'else if(kind==="delete"){try{fs.unlinkSync(args[0]);}catch(e){if(e?.code!=="ENOENT")throw e;}}',
+	'else process.exit(47);',
+].join("\n");
+
+function canonicalSessionTranscriptRuntimePath(value: string): string | null {
+	if (!value || /[\u0000-\u001f\u007f]/.test(value) || value.includes("\\")) return null;
+	const normalized = path.posix.normalize(value);
+	return normalized === value && normalized.startsWith(`${SESSION_TRANSCRIPT_ROOT}/`) ? normalized : null;
+}
+
+const SESSION_RUNTIME_SECRET_ENV_KEYS = new Set([
+	"BOBBIT_TOKEN",
+	"BOBBIT_SESSION_SECRET",
+	"BOBBIT_PROJECT_TOKEN",
+	"GITHUB_TOKEN",
+]);
+
 interface DockerMountInfo {
 	Type?: string;
+	Name?: string;
 	Source?: string;
 	Destination?: string;
 	RW?: boolean;
 	Mode?: string;
+}
+
+interface DockerContainerInspection {
+	Id?: string;
+	Image?: string;
+	State?: { Running?: boolean };
+	Config?: { Image?: string; Labels?: Record<string, string> | null; Env?: string[] | null };
+	HostConfig?: {
+		PidMode?: string;
+		NetworkMode?: string;
+		ExtraHosts?: string[] | null;
+		Privileged?: boolean;
+		Memory?: number;
+		NanoCpus?: number;
+		PidsLimit?: number;
+		RestartPolicy?: { Name?: string };
+	};
+	Mounts?: DockerMountInfo[];
 }
 
 type SandboxVolumeOwnershipEvidence = {
@@ -75,6 +160,14 @@ export interface AgentDirMountStalenessResult {
 
 export interface StateDirMountExpectation {
 	stateDir: string;
+}
+
+export interface SessionPreviewMountExpectation extends StateDirMountExpectation {
+	sessionId: string;
+}
+
+export interface SessionTranscriptMountExpectation extends SessionPreviewMountExpectation {
+	agentSessionsRoot?: string;
 }
 
 /** Live project-aware resolver; callers must not snapshot winning pack mounts. */
@@ -147,6 +240,15 @@ function mountSourceMatches(source: string | undefined, expectedHostPath: string
 	return hostPathMountCandidates(expectedHostPath).has(comparableMountPath(source));
 }
 
+function mountSourceIsWithin(source: string | undefined, expectedHostRoot: string): boolean {
+	if (!source) return false;
+	const candidate = comparableMountPath(source);
+	for (const root of hostPathMountCandidates(expectedHostRoot)) {
+		if (candidate === root || candidate.startsWith(`${root}/`)) return true;
+	}
+	return false;
+}
+
 function isMountReadOnly(mount: DockerMountInfo): boolean {
 	if (mount.RW === false) return true;
 	return typeof mount.Mode === "string" && mount.Mode.split(",").includes("ro");
@@ -178,12 +280,14 @@ export function getAgentDirMountStaleness(
 
 export function getStateDirMountStaleness(
 	mounts: DockerMountInfo[] | unknown,
-	expected: StateDirMountExpectation,
+	expected: StateDirMountExpectation & { sessionId?: string },
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
 	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 		const destination = `/bobbit-state/${sub}`;
-		const hostPath = path.join(expected.stateDir, sub);
+		const hostPath = sub === "sessions" && expected.sessionId
+			? sessionStateSessionsRoot(expected.stateDir, expected.sessionId)
+			: path.join(expected.stateDir, sub);
 		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
 		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
 		const compatible = stateMounts.some((mount) => {
@@ -193,6 +297,85 @@ export function getStateDirMountStaleness(
 		if (!compatible) {
 			const mode = readOnly ? "read-only" : "writable";
 			return { stale: true, reason: `state mount ${destination} does not match the active ${mode} state directory` };
+		}
+	}
+	return { stale: false };
+}
+
+/** Require exact writable owner transcript/state binds and no shared or sibling exposure. */
+export function getSessionTranscriptMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: SessionTranscriptMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	const broadAgentRoots = [expected.agentSessionsRoot ?? activeAgentSessionsDir(), ...trustedAgentSessionsRoots()];
+	const agentRoot = sessionTranscriptRoot(expected.sessionId, expected.agentSessionsRoot ?? activeAgentSessionsDir());
+	const broadStateRoot = path.join(expected.stateDir, "sessions");
+	const stateRoot = sessionStateSessionsRoot(expected.stateDir, expected.sessionId);
+	const contracts = [
+		{ destination: CONTAINER_AGENT_SESSIONS_DIR, source: agentRoot, label: "agent transcript" },
+		{ destination: "/bobbit-state/sessions", source: stateRoot, label: "state sessions" },
+	] as const;
+	const accepted = new Set<DockerMountInfo>();
+	for (const contract of contracts) {
+		const matching = mounts.filter(mount => normalizeContainerMountDestination(mount?.Destination) === contract.destination);
+		if (matching.length !== 1) return { stale: true, reason: `${matching.length ? "duplicate" : "missing"} ${contract.label} mount` };
+		const mount = matching[0];
+		if (mount.Type !== "bind" || !mountSourceMatches(mount.Source, contract.source)) {
+			return { stale: true, reason: `${contract.label} mount source does not match this session` };
+		}
+		if (mount.RW !== true || isMountReadOnly(mount)) return { stale: true, reason: `${contract.label} mount is not writable` };
+		accepted.add(mount);
+		try {
+			const stat = fs.lstatSync(contract.source);
+			if (!stat.isDirectory() || stat.isSymbolicLink()) return { stale: true, reason: `${contract.label} source is unsafe` };
+		} catch {
+			return { stale: true, reason: `${contract.label} source is unavailable` };
+		}
+	}
+	for (const mount of mounts) {
+		if (accepted.has(mount)) continue;
+		if (broadAgentRoots.some(root => mountSourceIsWithin(mount.Source, root))) {
+			return { stale: true, reason: "session runtime exposes a shared, sibling, or historical agent transcript root" };
+		}
+		if (mountSourceIsWithin(mount.Source, broadStateRoot)) {
+			return { stale: true, reason: "session runtime exposes a shared or sibling state sessions root" };
+		}
+	}
+	return { stale: false };
+}
+
+/** Require one writable, session-specific preview bind and no other preview-tree exposure. */
+export function getSessionPreviewMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: SessionPreviewMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	const previewRoot = path.join(expected.stateDir, "preview");
+	const expectedSource = path.join(previewRoot, expected.sessionId);
+	const sessionMounts = mounts.filter((mount) =>
+		normalizeContainerMountDestination(mount?.Destination) === "/bobbit/preview");
+	if (sessionMounts.length !== 1) {
+		return { stale: true, reason: sessionMounts.length === 0
+			? "missing required session preview mount"
+			: "duplicate session preview mounts" };
+	}
+	const sessionMount = sessionMounts[0];
+	if (sessionMount.Type !== "bind" || !mountSourceMatches(sessionMount.Source, expectedSource)) {
+		return { stale: true, reason: "session preview mount source does not match this session" };
+	}
+	if (sessionMount.RW !== true || isMountReadOnly(sessionMount)) {
+		return { stale: true, reason: "session preview mount is not writable" };
+	}
+
+	for (const mount of mounts) {
+		if (mount === sessionMount) continue;
+		const destination = normalizeContainerMountDestination(mount?.Destination);
+		if (destination === "/bobbit/preview-root") {
+			return { stale: true, reason: "session runtime exposes the shared preview root" };
+		}
+		if (mountSourceIsWithin(mount?.Source, previewRoot)) {
+			return { stale: true, reason: "session runtime has an additional project or sibling preview bind" };
 		}
 	}
 	return { stale: false };
@@ -394,6 +577,40 @@ export type SandboxHealthEvent =
 	| { type: "container-died"; projectId: string; containerId: string }
 	| { type: "container-recovered"; projectId: string; containerId: string };
 
+export interface SessionRuntimeExpectation {
+	sessionId: string;
+	containerId?: string;
+}
+
+function validatedSessionRuntimeLabel(kind: "project" | "session", value: string): string {
+	if (typeof value !== "string" || !SAFE_RUNTIME_LABEL_VALUE.test(value)) {
+		throw new Error(`[project-sandbox] Invalid ${kind} identity for session runtime`);
+	}
+	return value;
+}
+
+function runtimeLabels(projectId: string, sessionId: string, e2eRunId?: string): Record<string, string> {
+	const labels: Record<string, string> = {
+		[SESSION_RUNTIME_ROLE_LABEL]: SESSION_RUNTIME_ROLE_VERSION,
+		[SESSION_RUNTIME_PROJECT_LABEL]: validatedSessionRuntimeLabel("project", projectId),
+		[SESSION_RUNTIME_SESSION_LABEL]: validatedSessionRuntimeLabel("session", sessionId),
+	};
+	if (e2eRunId) labels["bobbit-e2e-run"] = e2eRunId;
+	return labels;
+}
+
+function exactRuntimeLabelsMatch(
+	labels: Record<string, string> | null | undefined,
+	projectId: string,
+	sessionId: string,
+	e2eRunId?: string,
+): boolean {
+	if (!labels || labels["bobbit-project"] !== undefined) return false;
+	const expected = runtimeLabels(projectId, sessionId, e2eRunId);
+	return Object.entries(expected).every(([key, value]) => labels[key] === value)
+		&& (e2eRunId ? labels["bobbit-e2e-run"] === e2eRunId : labels["bobbit-e2e-run"] === undefined);
+}
+
 // ── ProjectSandbox ─────────────────────────────────────────────────────────
 
 export class ProjectSandbox {
@@ -412,6 +629,10 @@ export class ProjectSandbox {
 	private _modelMountGeneration = 0;
 	/** Latest publication generation known to be mounted by the live container. */
 	private _mountedModelGeneration = 0;
+	/** Exact live execution-container identity by owning session. */
+	private readonly _sessionRuntimes = new Map<string, string>();
+	/** Serializes ensure/remove/reconcile for each session identity. */
+	private readonly _sessionRuntimeTails = new Map<string, Promise<void>>();
 	private readonly commandRunner: CommandRunner;
 	private readonly clock: Clock;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -463,6 +684,7 @@ export class ProjectSandbox {
 
 		try {
 			await this._initContainer();
+			await this._removeLegacySessionRuntimes();
 			this._status = "ready";
 			this._readyResolve!();
 		} catch (err: any) {
@@ -486,6 +708,185 @@ export class ProjectSandbox {
 			status: this._status,
 			projectId: this.options.projectId,
 		};
+	}
+
+	/**
+	 * Ensure one isolated execution container for a session. The project
+	 * container remains the control/worktree owner; this runtime only shares its
+	 * named data volumes and safe immutable/bounded mounts.
+	 */
+	async ensureSessionRuntime(sessionId: string, expectedId?: string): Promise<string> {
+		validatedSessionRuntimeLabel("project", this.options.projectId);
+		validatedSessionRuntimeLabel("session", sessionId);
+		if (expectedId !== undefined && (typeof expectedId !== "string" || !expectedId)) {
+			throw new Error("[project-sandbox] Expected session runtime identity must be non-empty");
+		}
+		await this.getContainerId();
+		return this._withSessionRuntimeLifecycle(sessionId, async () => {
+			const registered = this._sessionRuntimes.get(sessionId);
+			if (registered) {
+				if (expectedId && registered !== expectedId) {
+					throw new Error(`[project-sandbox] Session runtime identity mismatch for ${sessionId}`);
+				}
+				if (await this._isSessionRuntimeCandidateValid(sessionId, registered)) return registered;
+				this._sessionRuntimes.delete(sessionId);
+				if (await this._isOwnedSessionRuntime(sessionId, registered)) await this._removeContainer(registered);
+				if (expectedId) throw new Error(`[project-sandbox] Expected session runtime is not live and isolated for ${sessionId}`);
+			}
+
+			const discovered = await this._findSessionRuntimeContainerIds(sessionId);
+			if (discovered.length > 1) {
+				throw new Error(`[project-sandbox] Duplicate session runtimes found for ${sessionId}`);
+			}
+			const candidate = discovered[0];
+			if (candidate) {
+				if (expectedId && candidate !== expectedId) {
+					throw new Error(`[project-sandbox] Unexpected session runtime identity for ${sessionId}`);
+				}
+				if (await this._isSessionRuntimeCandidateValid(sessionId, candidate)) {
+					this._sessionRuntimes.set(sessionId, candidate);
+					return candidate;
+				}
+				if (!(await this._isOwnedSessionRuntime(sessionId, candidate))) {
+					throw new Error(`[project-sandbox] Refusing unowned or control-container runtime candidate for ${sessionId}`);
+				}
+				await this._removeContainer(candidate);
+				if (expectedId) throw new Error(`[project-sandbox] Expected session runtime is not live and isolated for ${sessionId}`);
+			} else if (expectedId) {
+				throw new Error(`[project-sandbox] Expected session runtime was not found for ${sessionId}`);
+			}
+
+			const created = await this._createSessionRuntime(sessionId);
+			if (!(await this._isSessionRuntimeCandidateValid(sessionId, created))) {
+				await this._removeContainer(created);
+				throw new Error(`[project-sandbox] Created session runtime failed isolation attestation for ${sessionId}`);
+			}
+			this._sessionRuntimes.set(sessionId, created);
+			return created;
+		});
+	}
+
+	/** Remove only the runtime proven to belong to this project/session. */
+	async removeSessionRuntime(sessionId: string): Promise<void> {
+		validatedSessionRuntimeLabel("session", sessionId);
+		await this._withSessionRuntimeLifecycle(sessionId, async () => {
+			const candidates = new Set<string>();
+			for (const containerId of await this._findSessionRuntimeContainerIds(sessionId)) {
+				if (await this._isOwnedSessionRuntime(sessionId, containerId)) candidates.add(containerId);
+			}
+			const registered = this._sessionRuntimes.get(sessionId);
+			if (registered && await this._isOwnedSessionRuntime(sessionId, registered)) candidates.add(registered);
+			this._sessionRuntimes.delete(sessionId);
+			for (const containerId of candidates) await this._removeContainer(containerId);
+		});
+	}
+
+	/** Exact live attestation; never trusts a client/container-ID prefix. */
+	async isSessionRuntimeIsolated(sessionId: string, containerId: string): Promise<boolean> {
+		try {
+			validatedSessionRuntimeLabel("session", sessionId);
+			if (!containerId || this._sessionRuntimes.get(sessionId) !== containerId) return false;
+			return await this._isSessionRuntimeCandidateValid(sessionId, containerId);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Execute fixed, bounded transcript code only in the exact registered and
+	 * freshly attested session runtime. No host path is accepted or returned.
+	 */
+	async runSessionTranscriptOperation(
+		sessionId: string,
+		containerId: string,
+		operation: SessionTranscriptRuntimeOperation,
+	): Promise<string | boolean | void> {
+		validatedSessionRuntimeLabel("session", sessionId);
+		return this._withSessionRuntimeLifecycle(sessionId, async () => {
+			if (this._sessionRuntimes.get(sessionId) !== containerId
+				|| !(await this._isSessionRuntimeCandidateValid(sessionId, containerId))) {
+				throw new Error(`[project-sandbox] Session transcript runtime failed exact isolation attestation for ${sessionId}`);
+			}
+
+			const paths = operation.kind === "renameAtomic"
+				? [operation.sourcePath, operation.targetPath]
+				: [operation.path];
+			if (paths.some(candidate => !canonicalSessionTranscriptRuntimePath(candidate))) {
+				throw new Error("[project-sandbox] Session transcript operation path is invalid");
+			}
+			if (operation.kind === "writeAtomic"
+				&& (Buffer.isBuffer(operation.content)
+					? operation.content.length
+					: Buffer.byteLength(operation.content, "utf8")) > MAX_SESSION_TRANSCRIPT_OPERATION_BYTES) {
+				throw new Error("[project-sandbox] Session transcript operation exceeds the byte limit");
+			}
+
+			const scriptArgs = operation.kind === "renameAtomic"
+				? [operation.kind, operation.sourcePath, operation.targetPath]
+				: operation.kind === "writeAtomic"
+					? [operation.kind, operation.path, path.posix.join(
+						path.posix.dirname(operation.path),
+						`.${path.posix.basename(operation.path)}.bobbit-stage-${randomUUID()}.tmp`,
+					)]
+					: [operation.kind, operation.path];
+			const dockerArgs = [
+				"exec",
+				...(operation.kind === "writeAtomic" ? ["-i"] : []),
+				containerId,
+				"node", "-e", SESSION_TRANSCRIPT_OPERATION_SCRIPT, "--",
+				...scriptArgs,
+				String(MAX_SESSION_TRANSCRIPT_OPERATION_BYTES),
+			];
+			const output = operation.kind === "writeAtomic"
+				? await this._dockerExecWithInput(dockerArgs, operation.content)
+				: String((await this.execDocker(dockerArgs, {
+					timeout: 60_000,
+					env: DOCKER_ENV,
+					maxBuffer: MAX_SESSION_TRANSCRIPT_OPERATION_BYTES + 1024,
+				})).stdout);
+			if (operation.kind === "exists") return output === "1";
+			if (operation.kind === "read") return output;
+		});
+	}
+
+	/**
+	 * Restart reconciliation. Expected exact identities are adopted only after
+	 * live attestation; unexpected Bobbit-owned runtimes are removed.
+	 */
+	async reconcileSessionRuntimes(expectations: readonly SessionRuntimeExpectation[]): Promise<Map<string, string>> {
+		const expected = new Map<string, string | undefined>();
+		for (const item of expectations) {
+			validatedSessionRuntimeLabel("session", item.sessionId);
+			if (expected.has(item.sessionId)) throw new Error(`[project-sandbox] Duplicate runtime expectation for ${item.sessionId}`);
+			expected.set(item.sessionId, item.containerId);
+		}
+
+		const discovered = await this._findProjectSessionRuntimeContainerIds();
+		for (const containerId of discovered) {
+			const owner = await this._sessionRuntimeOwner(containerId);
+			if (owner && !expected.has(owner)) await this._removeContainer(containerId);
+		}
+		this._sessionRuntimes.clear();
+
+		const reconciled = new Map<string, string>();
+		for (const [sessionId, expectedId] of expected) {
+			const containerId = await this.ensureSessionRuntime(sessionId, expectedId);
+			reconciled.set(sessionId, containerId);
+		}
+		return reconciled;
+	}
+
+	/** Remove every Bobbit-owned session runtime before control-container cleanup. */
+	async removeAllSessionRuntimes(): Promise<void> {
+		const containerIds = new Set<string>();
+		for (const containerId of await this._findProjectSessionRuntimeContainerIds()) {
+			if (await this._sessionRuntimeOwner(containerId)) containerIds.add(containerId);
+		}
+		for (const [sessionId, containerId] of this._sessionRuntimes) {
+			if (await this._isOwnedSessionRuntime(sessionId, containerId)) containerIds.add(containerId);
+		}
+		this._sessionRuntimes.clear();
+		for (const containerId of containerIds) await this._removeContainer(containerId);
 	}
 
 	/** Create a git worktree inside the container. Returns the container-internal path. */
@@ -1051,6 +1452,7 @@ export class ProjectSandbox {
 	/** Graceful shutdown: stop the container (don't remove — named volume persists). */
 	async shutdown(): Promise<void> {
 		this.stopHealthMonitor();
+		await this.removeAllSessionRuntimes();
 		if (!this.containerId) return;
 		try {
 			// Audit worktree state before stopping — helps diagnose lost worktrees on restart
@@ -1071,6 +1473,7 @@ export class ProjectSandbox {
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
+		await this.removeAllSessionRuntimes();
 		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
 		// Production retains its historic workspace-only destroy behavior. Legacy
 		// E2E owns both run-namespaced volumes and must remove both even when a
@@ -1646,6 +2049,210 @@ export class ProjectSandbox {
 		}
 	}
 
+	private async _withSessionRuntimeLifecycle<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+		const prior = this._sessionRuntimeTails.get(sessionId) ?? Promise.resolve();
+		let release!: () => void;
+		const turn = new Promise<void>((resolve) => { release = resolve; });
+		const tail = prior.catch(() => {}).then(() => turn);
+		this._sessionRuntimeTails.set(sessionId, tail);
+		await prior.catch(() => {});
+		try {
+			return await operation();
+		} finally {
+			release();
+			if (this._sessionRuntimeTails.get(sessionId) === tail) this._sessionRuntimeTails.delete(sessionId);
+		}
+	}
+
+	private async _createSessionRuntime(sessionId: string): Promise<string> {
+		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs } = this.options;
+		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
+		const packLocalDataMounts = this.options.resolvePackLocalDataMounts
+			? await this._resolvePackLocalDataMounts()
+			: undefined;
+		const dockerArgs = buildDockerRunArgs({
+			image,
+			workspaceDir: "",
+			projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
+			additionalLabels: runtimeLabels(projectId, sessionId, this.e2eRunId),
+			e2eRunId: this.e2eRunId ?? "",
+			projectId,
+			stateDir,
+			sessionId,
+			memoryLimit: SESSION_RUNTIME_MEMORY_LIMIT,
+			cpuLimit: SESSION_RUNTIME_CPU_LIMIT,
+			pidsLimit: SESSION_RUNTIME_PIDS_LIMIT,
+			restartPolicy: "no",
+			sandboxMounts,
+			// Secrets belong on the later docker-exec agent process, never PID 1.
+			sandboxAgentAuthAllowed,
+			sandboxAgentAuthGoogleAllowed,
+			sandboxAgentAuthPrefs,
+			sandboxNetwork,
+			toolManager: this.options.toolManager,
+			packLocalDataMounts,
+		}, this.commandRunner);
+		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: DOCKER_ENV });
+		const containerId = stdout.trim();
+		if (!containerId) throw new Error(`[project-sandbox] docker run returned empty session runtime ID for ${sessionId}`);
+		console.log(`[project-sandbox] Created session runtime ${containerId.substring(0, 12)} for ${sessionId}`);
+		return containerId;
+	}
+
+	private async _inspectContainer(containerId: string): Promise<DockerContainerInspection | null> {
+		try {
+			const { stdout } = await this.execDocker([
+				"inspect", "--format", "{{json .}}", containerId,
+			], { timeout: 5_000, env: DOCKER_ENV });
+			const value = JSON.parse(stdout.trim()) as DockerContainerInspection;
+			return value && typeof value === "object" ? value : null;
+		} catch {
+			return null;
+		}
+	}
+
+	private async _sessionRuntimeOwner(containerId: string): Promise<string | null> {
+		const inspection = await this._inspectContainer(containerId);
+		if (!inspection || inspection.Id !== containerId) return null;
+		const labels = inspection.Config?.Labels;
+		if (!labels || labels["bobbit-project"] !== undefined) return null;
+		const version = labels[SESSION_RUNTIME_ROLE_LABEL];
+		if (version !== SESSION_RUNTIME_ROLE_VERSION && !LEGACY_SESSION_RUNTIME_ROLE_VERSIONS.has(version ?? "")) return null;
+		if (labels[SESSION_RUNTIME_PROJECT_LABEL] !== this.options.projectId) return null;
+		if (this.e2eRunId && labels["bobbit-e2e-run"] !== this.e2eRunId) return null;
+		const sessionId = labels[SESSION_RUNTIME_SESSION_LABEL];
+		try { return validatedSessionRuntimeLabel("session", sessionId); } catch { return null; }
+	}
+
+	private async _isOwnedSessionRuntime(sessionId: string, containerId: string): Promise<boolean> {
+		return await this._sessionRuntimeOwner(containerId) === sessionId;
+	}
+
+	private _hasRequiredSessionRuntimeVolumes(mounts: DockerMountInfo[] | undefined): boolean {
+		if (!Array.isArray(mounts)) return false;
+		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId ?? "");
+		return Object.entries({ "/workspace": volumes.workspace, "/workspace-wt": volumes.worktrees }).every(([destination, name]) => {
+			const matches = mounts.filter((mount) => normalizeContainerMountDestination(mount.Destination) === destination);
+			return matches.length === 1 && matches[0].Type === "volume" && matches[0].Name === name && matches[0].RW !== false;
+		});
+	}
+
+	private _sessionRuntimeHasPid1Secrets(env: string[] | null | undefined): boolean {
+		const forbidden = new Set([
+			...SESSION_RUNTIME_SECRET_ENV_KEYS,
+			...Object.keys(this.options.sandboxCredentials ?? {}),
+		]);
+		return (env ?? []).some((entry) => {
+			const key = entry.split("=", 1)[0] ?? "";
+			return forbidden.has(key) || /^BOBBIT_.*(?:TOKEN|SECRET)$/i.test(key);
+		});
+	}
+
+	private async _sessionRuntimeMountsAreCurrent(inspection: DockerContainerInspection, containerId: string, sessionId: string): Promise<boolean> {
+		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
+		// Check the isolation-critical preview bind before optional content reads.
+		// Old/shared runtimes must fail closed even if another mount is stale too.
+		if (getSessionPreviewMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
+		if (getSessionTranscriptMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
+		const activeAgentDir = globalAgentDir();
+		const modelsJson = path.join(activeAgentDir, "models.json");
+		let modelsJsonExists = false;
+		try { modelsJsonExists = fs.statSync(modelsJson).isFile(); } catch { /* absent is valid */ }
+		if (getAgentDirMountStaleness(inspection.Mounts, {
+			sessionsDir: sessionTranscriptRoot(sessionId),
+			modelsJson,
+			modelsJsonExists,
+		}).stale) return false;
+		if (getStateDirMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
+		if (this.options.resolvePackLocalDataMounts) {
+			const expected = await this._resolvePackLocalDataMounts();
+			if (getPackLocalDataMountStaleness(inspection.Mounts, expected).stale) return false;
+		}
+		if (modelsJsonExists) {
+			const hostContent = fs.readFileSync(modelsJson, "utf-8");
+			const containerContent = await this._dockerExec(containerId, ["cat", CONTAINER_AGENT_MODELS_JSON], { timeout: 5_000 });
+			if (getModelsJsonContentStaleness(hostContent, containerContent).stale) return false;
+		}
+		return true;
+	}
+
+	private async _isSessionRuntimeCandidateValid(sessionId: string, containerId: string): Promise<boolean> {
+		try {
+			if (!containerId || containerId === this.containerId) return false;
+			const inspection = await this._inspectContainer(containerId);
+			if (!inspection || inspection.Id !== containerId || inspection.State?.Running !== true) return false;
+			if (!exactRuntimeLabelsMatch(inspection.Config?.Labels, this.options.projectId, sessionId, this.e2eRunId)) return false;
+			if (inspection.Config?.Image !== this.options.image) return false;
+			if (inspection.HostConfig?.PidMode || inspection.HostConfig?.Privileged !== false) return false;
+			if (inspection.HostConfig?.RestartPolicy?.Name !== "no") return false;
+			if (inspection.HostConfig?.Memory !== 4 * 1024 ** 3) return false;
+			if (inspection.HostConfig?.NanoCpus !== 2 * 1_000_000_000) return false;
+			if (inspection.HostConfig?.PidsLimit !== Number(SESSION_RUNTIME_PIDS_LIMIT)) return false;
+			if (this.options.sandboxNetwork) {
+				if (inspection.HostConfig?.NetworkMode !== this.options.sandboxNetwork) return false;
+				const extraHosts = new Set(inspection.HostConfig?.ExtraHosts ?? []);
+				for (const entry of [
+					"metadata.google.internal:0.0.0.0",
+					"metadata.internal:0.0.0.0",
+					"169.254.169.254:0.0.0.0",
+				]) if (!extraHosts.has(entry)) return false;
+			}
+			if (this._sessionRuntimeHasPid1Secrets(inspection.Config?.Env)) return false;
+			if (!this._hasRequiredSessionRuntimeVolumes(inspection.Mounts)) return false;
+
+			const { stdout: currentImageId } = await this.execDocker([
+				"inspect", "--format", "{{.Id}}", this.options.image,
+			], { timeout: 5_000, env: DOCKER_ENV });
+			if (!inspection.Image || inspection.Image !== currentImageId.trim()) return false;
+			if (!(await this._sessionRuntimeMountsAreCurrent(inspection, containerId, sessionId))) return false;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async _findSessionRuntimeContainerIds(sessionId: string): Promise<string[]> {
+		const labels = runtimeLabels(this.options.projectId, sessionId, this.e2eRunId);
+		const args = ["ps", "-a", "--no-trunc"];
+		for (const [key, value] of Object.entries(labels)) args.push("--filter", `label=${key}=${value}`);
+		args.push("--format", "{{.ID}}");
+		try {
+			const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
+			return stdout.trim().split("\n").filter(Boolean);
+		} catch {
+			return [];
+		}
+	}
+
+	private async _findProjectSessionRuntimeContainerIds(): Promise<string[]> {
+		const args = [
+			"ps", "-a", "--no-trunc",
+			"--filter", `label=${SESSION_RUNTIME_ROLE_LABEL}`,
+			"--filter", `label=${SESSION_RUNTIME_PROJECT_LABEL}=${validatedSessionRuntimeLabel("project", this.options.projectId)}`,
+		];
+		if (this.e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${this.e2eRunId}`);
+		args.push("--format", "{{.ID}}");
+		try {
+			const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
+			return stdout.trim().split("\n").filter(Boolean);
+		} catch {
+			return [];
+		}
+	}
+
+	private async _removeLegacySessionRuntimes(): Promise<void> {
+		for (const containerId of await this._findProjectSessionRuntimeContainerIds()) {
+			const inspection = await this._inspectContainer(containerId);
+			const labels = inspection?.Config?.Labels;
+			if (inspection?.Id === containerId
+				&& labels
+				&& LEGACY_SESSION_RUNTIME_ROLE_VERSIONS.has(labels[SESSION_RUNTIME_ROLE_LABEL] ?? "")
+				&& await this._sessionRuntimeOwner(containerId)) {
+				await this._removeContainer(containerId);
+			}
+		}
+	}
+
 	private async _findContainerByLabel(label: string, e2eRunId?: string): Promise<string | null> {
 		try {
 			const args = [
@@ -1724,6 +2331,59 @@ export class ProjectSandbox {
 				env: DOCKER_ENV,
 			});
 		} catch { /* already gone */ }
+	}
+
+	private async _dockerExecWithInput(dockerArgs: string[], input: string | Buffer): Promise<string> {
+		const spawn = this.commandRunner.spawn;
+		if (!spawn) throw new Error("[project-sandbox] Command runner cannot stream transcript input");
+		return await new Promise<string>((resolve, reject) => {
+			const child = spawn(DOCKER_BIN, dockerArgs, {
+				stdio: ["pipe", "pipe", "pipe"],
+				env: DOCKER_ENV,
+				windowsHide: true,
+			});
+			const stdout: Buffer[] = [];
+			const stderr: Buffer[] = [];
+			let stdoutBytes = 0;
+			let stderrBytes = 0;
+			let settled = false;
+			const timer = this.clock.setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				child.kill("SIGKILL");
+				reject(new Error("[project-sandbox] Session transcript operation timed out"));
+			}, 60_000);
+			child.stdout?.on("data", (chunk: Buffer | string) => {
+				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				stdoutBytes += bytes.length;
+				if (stdoutBytes <= 1024) stdout.push(bytes);
+			});
+			child.stderr?.on("data", (chunk: Buffer | string) => {
+				const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+				stderrBytes += bytes.length;
+				if (stderrBytes <= 64 * 1024) stderr.push(bytes);
+			});
+			child.once("error", (error) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				reject(error);
+			});
+			// A bounded script can close stdin early on rejection; consume EPIPE so
+			// the child close/error boundary below remains authoritative.
+			child.stdin?.on("error", () => {});
+			child.once("close", (code) => {
+				if (settled) return;
+				settled = true;
+				this.clock.clearTimeout(timer);
+				if (code === 0 && stdoutBytes <= 1024 && stderrBytes <= 64 * 1024) {
+					resolve(Buffer.concat(stdout).toString("utf8"));
+				} else {
+					reject(new Error(`[project-sandbox] Session transcript operation failed (${code ?? "signal"}): ${Buffer.concat(stderr).toString("utf8").trim()}`));
+				}
+			});
+			child.stdin?.end(input, "utf8");
+		});
 	}
 
 	private async _dockerExec(

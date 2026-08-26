@@ -7,6 +7,7 @@ import { copyGitTemplate } from "../harness/git-template.js";
 import { apiFetch as harnessApiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
 import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 import { readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
+import { sessionTranscriptHostPath } from "../../src/server/agent/agent-session-path.js";
 
 let operatorCookie: string | undefined;
 
@@ -399,11 +400,12 @@ test.describe("current-session goal promotion recovery and ownership continuity"
 
 			const missing = await jsonResponse(await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`));
 			expect(missing.eligibility).toMatchObject({ eligible: false, code: "TRANSCRIPT_UNAVAILABLE" });
-			expect(sandboxFs.calls.some(call => call.args[0] === "test" && call.args[1] === "-f" && call.args[2] === transcriptPath)).toBe(true);
+			expect(sandboxFs.calls.some(call => call.args[0] === "test" && call.args[1] === "-f" && call.args[2] === transcriptPath)).toBe(false);
 
-			const transcriptHostPath = sandboxFs.hostPath(transcriptPath);
-			fs.mkdirSync(path.dirname(transcriptHostPath), { recursive: true });
-			fs.writeFileSync(transcriptHostPath, '{"type":"message","message":{"role":"user","content":"sandbox history"}}\n');
+			const transcriptHostPath = sessionTranscriptHostPath(ownerId, transcriptPath);
+			expect(transcriptHostPath).toBeTruthy();
+			fs.mkdirSync(path.dirname(transcriptHostPath!), { recursive: true });
+			fs.writeFileSync(transcriptHostPath!, '{"type":"message","message":{"role":"user","content":"sandbox history"}}\n');
 
 			const projection = await jsonResponse(await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`));
 			expect(projection.eligibility.eligible, JSON.stringify(projection)).toBe(true);

@@ -680,6 +680,7 @@ export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContex
 function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	plan.bridgeOptions = {
 		cwd: plan.cwd,
+		sessionId: plan.id,
 		args: plan.agentArgs ? [...plan.agentArgs] : [],
 		// S1: inject the per-session capability secret alongside the session id.
 		// Only this session's process receives its own secret — see
@@ -1681,13 +1682,15 @@ export async function executeWorktreeAsync(
 		// embeds a slug derived from cwd in the path. So the clone is currently
 		// stranded under the project-root slug-dir. Rebase it onto the agent's
 		// actual cwd-slug before issuing switch_session.
-		const { formatAgentSessionFilePath } = await import("./agent-session-path.js");
-		const correctPath = formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
+		const { formatAgentSessionFilePath, formatOwnedAgentSessionFilePath } = await import("./agent-session-path.js");
+		const correctPath = plan.sandboxed
+			? formatOwnedAgentSessionFilePath(plan.cwd, Date.now(), session.id)
+			: formatAgentSessionFilePath(plan.cwd, Date.now(), session.id);
 		const sourceFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
 		// The formatter returns the host mount path. A container-coordinate clone
 		// stays in that realm through publication, rebase, persistence, and replay.
 		const correctAgentPath = sourceFsCtx.sandboxed
-			? switchSessionPathForAgent({ sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
+			? switchSessionPathForAgent({ id: session.id, sandboxed: true, agentSessionFile: correctPath } as PersistedSession)
 			: correctPath;
 		if (correctAgentPath !== plan.preExistingAgentSessionFile) {
 			if (sourceFsCtx.sandboxed) {
@@ -1732,6 +1735,7 @@ export async function executeWorktreeAsync(
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchSessionPath = switchSessionPathForAgent({
+			id: session.id,
 			sandboxed: plan.sandboxed,
 			agentSessionFile: plan.preExistingAgentSessionFile,
 		} as PersistedSession);
@@ -1905,6 +1909,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		);
 		const switchTimeout = plan.sandboxed ? 60_000 : 15_000;
 		const switchSessionPath = switchSessionPathForAgent({
+			id: session.id,
 			sandboxed: plan.sandboxed,
 			agentSessionFile: plan.preExistingAgentSessionFile,
 		} as PersistedSession);

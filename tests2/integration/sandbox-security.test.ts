@@ -17,6 +17,10 @@ import { EventBuffer } from "../../src/server/agent/event-buffer.js";
 import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
 import { emitSessionEvent } from "../../src/server/agent/session-manager.js";
+import {
+	persistUploadedAttachmentOccurrence,
+	purgeUploadedAttachments,
+} from "../../src/server/agent/uploaded-attachment-store.js";
 import { broadcastStatus } from "../../src/server/agent/session-status.js";
 import type { PersistedTask } from "../../src/server/agent/task-store.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -168,7 +172,7 @@ test.describe("Sandbox Security Boundaries", () => {
 	let restoreSessionFixture: () => void;
 
 	test.beforeEach(({ gateway }) => {
-		sessionId = `sandbox-security-${fixtureSequence++}`;
+		sessionId = `00000000-0000-4000-8000-${String(fixtureSequence++).padStart(12, "0")}`;
 		gateway.sessionManager.sandboxTokenStore.remove(projectId);
 		restoreSessionFixture = installSyntheticSession(gateway, sessionId);
 		scopedToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
@@ -237,6 +241,71 @@ test.describe("Sandbox Security Boundaries", () => {
 	});
 
 	// ── ALLOWED endpoints ──────────────────────────────────────────────
+
+	test("an exactly attested isolated session can read its uploaded bytes", async ({ gateway }) => {
+		const marker = `ISOLATED_ATTACHMENT_SECRET_${sessionId}`;
+		const bytes = Buffer.from(marker);
+		const manager = gateway.sessionManager as any;
+		const live = manager.getSession(sessionId);
+		const originalSandboxed = live.sandboxed;
+		const originalContainerId = live.containerId;
+		const originalAllowedTools = live.allowedTools;
+		const isolatedContainerId = `bobbit-session-${sessionId}-isolated`;
+		Object.assign(live, {
+			sandboxed: true,
+			containerId: isolatedContainerId,
+			allowedTools: ["session_attachment"],
+		});
+		const sandboxManager = manager.getSandboxManager();
+		const attestation = vi.spyOn(sandboxManager, "isSessionRuntimeIsolated").mockImplementation(
+			async (...args: unknown[]) => {
+				const [projectId, candidateSessionId, containerId] = args as [string, string, string];
+				return projectId === live.projectId
+					&& candidateSessionId === sessionId
+					&& containerId === isolatedContainerId;
+			},
+		);
+		const saved = await persistUploadedAttachmentOccurrence(sessionId, "isolated-sandbox-occurrence", [{
+			id: "private-upload",
+			type: "document",
+			fileName: "private.opaque",
+			mimeType: "application/octet-stream",
+			size: bytes.length,
+			content: bytes.toString("base64"),
+		}]);
+		const secret = manager.sessionSecretStore.getOrCreateSecret(sessionId);
+		try {
+			const response = await sandboxFetch(
+				gateway.baseURL,
+				`/api/sessions/${sessionId}/uploaded-attachments/query`,
+				scopedToken,
+				{
+					method: "POST",
+					headers: { "X-Bobbit-Session-Secret": secret },
+					body: JSON.stringify({
+						operation: "read",
+						pointer: saved.attachments[0].pointer,
+						offset: 2,
+						length: 8,
+					}),
+				},
+			);
+			const responseText = await response.text();
+			expect(response.status).toBe(200);
+			const body = JSON.parse(responseText);
+			expect(body).toMatchObject({ operation: "read", encoding: "base64", offset: 2, bytesRead: 8 });
+			expect(Buffer.from(body.data, "base64")).toEqual(bytes.subarray(2, 10));
+			expect(attestation).toHaveBeenCalledWith(live.projectId, sessionId, isolatedContainerId);
+			expect(responseText).not.toContain(marker);
+			expect(responseText).not.toContain(nonGitCwd());
+		} finally {
+			attestation.mockRestore();
+			await purgeUploadedAttachments(sessionId);
+			live.sandboxed = originalSandboxed;
+			live.containerId = originalContainerId;
+			live.allowedTools = originalAllowedTools;
+		}
+	});
 
 	test("valid-secret tool callbacks still require exact current Pi lifecycle provenance", async ({ gateway }) => {
 		const manager = gateway.sessionManager as any;

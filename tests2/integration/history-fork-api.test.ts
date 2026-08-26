@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { sessionTranscriptHostPath } from "../../src/server/agent/agent-session-path.js";
 import {
 	apiFetch,
 	createSession as createSessionFromHarness,
@@ -39,6 +40,7 @@ let serverModule: any;
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 const fixtureRoots: string[] = [];
+const sandboxFixtureFinalizers: Array<() => Promise<void>> = [];
 
 const SYSTEM_AUTHOR = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
 const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
@@ -312,6 +314,7 @@ function installSandboxSessionFilesystem(
 		throw new Error("history fork fixture requires the production SandboxManager");
 	}
 	const originalGet = sandboxManager.get;
+	const originalEnsureForProject = sandboxManager.ensureForProject;
 	const containerRoot = path.join(gateway.bobbitDir, `sandbox-session-fs-${label}-${randomUUID()}`);
 	fixtureRoots.push(containerRoot);
 	const filesystem = new SandboxSessionFilesystem({
@@ -319,10 +322,28 @@ function installSandboxSessionFilesystem(
 		hostAgentSessionsDir: agentSessionsDir,
 		removeWorktree: name => { removed.push(name); },
 	});
+	// Keep the production SandboxManager registry and lifecycle serialization in
+	// the test path. Only replace its Docker project boundary with the exact fake
+	// runtime; this avoids both shared-control-container access and real Docker.
+	sandboxManager.ensureForProject = async () => {};
 	sandboxManager.get = () => filesystem;
+	let finalized = false;
+	sandboxFixtureFinalizers.push(async () => {
+		if (finalized) return;
+		finalized = true;
+		const runtimes = sandboxManager._sessionRuntimes as Map<string, { projectId: string; containerId: string }>;
+		for (const [sessionId, runtime] of [...runtimes]) {
+			if (runtime.containerId !== `fixture-runtime:${sessionId}`) continue;
+			await sandboxManager.releaseSessionRuntime(runtime.projectId, sessionId);
+		}
+		sandboxManager.get = originalGet;
+		sandboxManager.ensureForProject = originalEnsureForProject;
+	});
 	return {
 		filesystem,
-		restore: () => { sandboxManager.get = originalGet; },
+		// Session cleanup still needs the registered fake runtimes. The afterEach
+		// finalizer restores the production boundary after those sessions terminate.
+		restore: () => {},
 	};
 }
 
@@ -383,11 +404,17 @@ test.describe("history fork API", () => {
 
 	test.afterEach(async ({ gateway }) => {
 		serverModule?.__clearHistoryForkSidecarCopyFake();
-		await sessions.cleanup(gateway);
-		for (const root of fixtureRoots.splice(0)) {
-			try {
-				fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
-			} catch { /* the isolated run-root owner performs the final safety sweep */ }
+		try {
+			await sessions.cleanup(gateway);
+		} finally {
+			for (const finalize of sandboxFixtureFinalizers.splice(0).reverse()) {
+				await finalize();
+			}
+			for (const root of fixtureRoots.splice(0)) {
+				try {
+					fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 });
+				} catch { /* the isolated run-root owner performs the final safety sweep */ }
+			}
 		}
 	});
 
@@ -902,6 +929,7 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "flatten-borrower");
 		let capturedOptions: any;
 		manager.createSession = async (...args: any[]) => {
 			capturedOptions = args[4];
@@ -917,6 +945,7 @@ test.describe("history fork API", () => {
 			response = await historyFork(gateway, borrowerId, "selected-user", false);
 		} finally {
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(response.status, JSON.stringify(await responseJson(response))).toBe(201);
@@ -932,13 +961,14 @@ test.describe("history fork API", () => {
 	});
 
 	test("publishes, rebases, and rehydrates a sandbox history transcript using canonical container coordinates", async ({ gateway }) => {
-		const sourceId = await createTrackedSession();
+		const project = await registerUntrackedFixtureProject(gateway, "container-coordinate-project");
+		const sourceId = await createTrackedSession(project.rootPath, project.id);
 		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `container-coordinate-${randomUUID()}`);
 		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
 		const manager = gateway.sessionManager;
 		const sandboxFixture = installSandboxSessionFilesystem(gateway, "container-coordinate");
 		const sourceContainerPath = `/home/node/.bobbit/agent/sessions/--canonical-source--/${sourceId}.jsonl`;
-		const sourceHostPath = sandboxFixture.filesystem.hostPath(sourceContainerPath);
+		const sourceHostPath = sessionTranscriptHostPath(sourceId, sourceContainerPath)!;
 		fs.mkdirSync(path.dirname(sourceHostPath), { recursive: true });
 		fs.writeFileSync(sourceHostPath, seeded.content, "utf8");
 		setPersistedTranscriptPath(gateway, sourceId, sourceContainerPath);
@@ -947,15 +977,14 @@ test.describe("history fork API", () => {
 		const originalSendCommand = rpcBridgeModule.RpcBridge.prototype.sendCommand;
 		manager.applySandboxWiring = async (options: any) => {
 			options.cwd = nonGitCwd();
+			options.sandboxed = true;
 			delete options.containerId;
 			return true;
 		};
 		rpcBridgeModule.RpcBridge.prototype.sendCommand = function(command: any, ...rest: any[]) {
 			if (command?.type === "switch_session" && typeof command.sessionPath === "string") {
-				command = {
-					...command,
-					sessionPath: sandboxFixture.filesystem.hostPath(command.sessionPath),
-				};
+				const owner = path.basename(command.sessionPath, ".jsonl").split("_").at(-1)!;
+				command = { ...command, sessionPath: sessionTranscriptHostPath(owner, command.sessionPath) };
 			}
 			return originalSendCommand.call(this, command, ...rest);
 		};
@@ -980,7 +1009,7 @@ test.describe("history fork API", () => {
 		});
 		expect(persisted.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
 		const destinationBytes = fs.readFileSync(
-			sandboxFixture.filesystem.hostPath(persisted.agentSessionFile),
+			sessionTranscriptHostPath(fork.id, persisted.agentSessionFile)!,
 			"utf8",
 		);
 		expect(destinationBytes).toContain("retained prompt");
@@ -1064,7 +1093,10 @@ test.describe("history fork API", () => {
 		expect(removed).toEqual([]);
 		expect(manager.getSession(sourceId)).toBe(source);
 		const preservedSource = manager.getPersistedSession(sourceId);
-		expect(preservedSource?.agentSessionFile).toBe(seeded.file);
+		expect(preservedSource?.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const preservedSourceHost = sessionTranscriptHostPath(sourceId, preservedSource!.agentSessionFile);
+		expect(preservedSourceHost).toBeTruthy();
+		expect(fs.readFileSync(preservedSourceHost!, "utf8")).toBe(seeded.content);
 		expect(preservedSource?.archived).not.toBe(true);
 		expect(manager.getSession(forkId)).toBeTruthy();
 		expect(manager.getPersistedSession(forkId)).toMatchObject({
@@ -1287,8 +1319,12 @@ test.describe("history fork API", () => {
 		expect(sourceStopCalls).toBe(0);
 		expect(removed).toEqual([]);
 		expect(manager.getSession(sourceId)).toBe(source);
-		expect(manager.getPersistedSession(sourceId)).toMatchObject({ agentSessionFile: seeded.file });
-		expect(manager.getPersistedSession(sourceId)?.archived).not.toBe(true);
+		const preservedSource = manager.getPersistedSession(sourceId);
+		expect(preservedSource?.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const preservedSourceHost = sessionTranscriptHostPath(sourceId, preservedSource!.agentSessionFile);
+		expect(preservedSourceHost).toBeTruthy();
+		expect(fs.readFileSync(preservedSourceHost!, "utf8")).toBe(seeded.content);
+		expect(preservedSource?.archived).not.toBe(true);
 		expect(manager.getSession(forkId)).toBeTruthy();
 		expect(manager.getPersistedSession(forkId)).toMatchObject({
 			projectId: project.id,
@@ -1430,6 +1466,7 @@ test.describe("history fork API", () => {
 
 		const manager = gateway.sessionManager;
 		const originalCreateSession = manager.createSession;
+		const sandboxFixture = installSandboxSessionFilesystem(gateway, "failed-deduplication");
 		let capturedDestinationId = "";
 		let capturedDestinationFile = "";
 		let capturedOptions: any;
@@ -1481,22 +1518,31 @@ test.describe("history fork API", () => {
 				rejectLaunch(new Error("fixture released blocked launch during assertion cleanup"));
 			}
 			manager.createSession = originalCreateSession;
+			sandboxFixture.restore();
 		}
 
 		expect(capturedDestinationId).toBeTruthy();
-		expect(path.isAbsolute(capturedDestinationFile)).toBe(true);
-		expect(capturedDestinationFile.replace(/\\/g, "/")).not.toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-		const destinationRelative = path.relative(agentSessionsDir, capturedDestinationFile);
-		expect(path.isAbsolute(destinationRelative)).toBe(false);
-		expect(destinationRelative).not.toMatch(/^\.\.(?:[\\/]|$)/);
-		expect(fs.existsSync(capturedDestinationFile)).toBe(false);
+		expect(capturedDestinationFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const capturedDestinationHost = sessionTranscriptHostPath(capturedDestinationId, capturedDestinationFile);
+		expect(capturedDestinationHost).toBeTruthy();
+		expect(fs.existsSync(capturedDestinationHost!)).toBe(false);
 		expect(fs.existsSync(authorPath(gateway, capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "skill-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "proposal-drafts", capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "tool-content", capturedDestinationId))).toBe(false);
 
-		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, { sandboxed: false });
+		const migratedSource = gateway.sessionManager.getPersistedSession(sourceId);
+		const migratedSourceHost = sessionTranscriptHostPath(sourceId, migratedSource.agentSessionFile);
+		expect(migratedSourceHost).toBeTruthy();
+		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, {
+			sandboxed: false,
+			agentSessionFile: migratedSourceHost!,
+		});
+		Object.assign(gateway.sessionManager.getSession(sourceId), {
+			sandboxed: false,
+			agentSessionFile: migratedSourceHost!,
+		});
 		const retry = await historyFork(gateway, sourceId, "selected-user", false);
 		expect(retry.status, JSON.stringify(await responseJson(retry))).toBe(201);
 		const retried = await retry.json();

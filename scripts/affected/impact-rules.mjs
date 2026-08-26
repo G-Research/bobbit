@@ -897,7 +897,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
 		allowReason: "test-owned persisted sandbox transcript used to prove byte preservation across reload and termination",
 		reads: frozen([
-			{ expression: "fixture.restored.agentSessionFile", count: 2 },
+			{ expression: "sourceHostFile", count: 2 },
 		]),
 	},
 	{
@@ -919,12 +919,10 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/session-fs-sandbox-publication.test.ts",
-		allowReason: "isolated test-owned sandbox filesystem transcript, canary, and staging artifacts",
+		allowReason: "test-owned outside sentinels prove exact runtime transcript operations never follow hostile host links",
 		reads: frozen([
-			{ expression: "hostDestination", count: 1 },
-			{ expression: "path.join(sentinel, \"sentinel.txt\")", count: 1 },
-			{ expression: "filesystem.hostPath(destination)", count: 2 },
-			{ expression: "hostCanary", count: 1 },
+			{ expression: "sentinel", count: 2 },
+			{ expression: "hostileEntry", count: 1 },
 		]),
 	},
 	{
@@ -1002,15 +1000,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/staff-fork-reproducer.test.ts",
-		allowReason: "test-owned host and sandbox transcript fixtures plus the durable staff store in the isolated integration gateway used to prove whole/history cloning, source-byte preservation, and crash-safe publication",
+		allowReason: "test-owned host and owner-root transcript fixtures plus the durable staff store in the isolated integration gateway used to prove whole/history cloning, source-byte preservation, and crash-safe publication",
 		reads: frozen([
 			{ expression: "(context.staffStore as any).storeFile", count: 1 },
 			{ expression: "staffFile", count: 1 },
 			{ expression: "seededHostPath", count: 1 },
-			{ expression: "sandboxFixture.filesystem.hostPath(sourcePath)", count: 2 },
-			{ expression: "sourcePath", count: 2 },
-			{ expression: "sandboxFixture.filesystem.hostPath(persisted.agentSessionFile)", count: 1 },
-			{ expression: "persisted.agentSessionFile", count: 2 },
+			{ expression: "canonicalSourceHostPath ?? sourcePath", count: 2 },
+			{ expression: "destinationHostPath!", count: 1 },
+			{ expression: "persisted.agentSessionFile", count: 1 },
 			{ expression: "forkSessionRecord.agentSessionFile", count: 1 },
 			{ expression: "transcript", count: 2 },
 		]),
@@ -1198,7 +1195,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway and test-owned transcript, proposal, and worktree artifacts",
 		reads: frozen([
 			{ expression: "seeded.file", count: 5 },
-			{ expression: "sandboxFixture.filesystem.hostPath(persisted.agentSessionFile)", count: 1 },
+			{ expression: "sessionTranscriptHostPath(fork.id, persisted.agentSessionFile)!", count: 1 },
+			{ expression: "preservedSourceHost!", count: 2 },
 			{ expression: "stagedFile", count: 1 },
 			{ expression: "forkPersisted.agentSessionFile", count: 4 },
 			{ expression: "path.join(proposalFork, \"goal.md\")", count: 1 },
@@ -1528,6 +1526,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["indirect:source-pin-merge-invariants"]),
 		reads: frozen([
 			{ expression: "path.join(REPO_ROOT, p)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/skill-sidecar.test.ts",
+		allowReason: "test-owned temporary skill-sidecar JSONL output read to prove raw persistence excludes image base64 while retaining document previews",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"skill-sidecar\", `${sid}.jsonl`)", count: 1 },
 		]),
 	},
 	{
