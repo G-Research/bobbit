@@ -13,11 +13,11 @@
  * Wiring those scenarios in-process is infeasible without modifying
  * `pi-coding-agent` / `pi-ai` (explicitly out of scope) — the REST E2E
  * harness doesn't fire real LLM calls. Those four scenarios live in
- * `tests/manual-integration/` (manual smoke against `tools/dummy-aigw`)
+ * `tests/manual/` (manual smoke against `tools/dummy-aigw`)
  * and are also covered structurally by:
- *   - `tests/aigw-headers.test.ts` (unit) — proves the literal lands in
+ *   - `tests/unit/core/aigw-headers.unit.test.ts` (unit) — proves the literal lands in
  *     models.json at the provider level, on the aigw provider only.
- *   - `tests/aigw-header-resolver.test.ts` (behavioural) — proves the
+ *   - `tests/unit/core/aigw-header-resolver.unit.test.ts` (behavioural) — proves the
  *     literal `node -e "..."` command round-trips through the host
  *     shell with the documented "omit on empty" semantics.
  *   - `tests/spawn-env.test.ts` (unit) — proves the spawn path always

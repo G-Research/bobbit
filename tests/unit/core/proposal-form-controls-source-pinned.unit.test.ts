@@ -24,7 +24,7 @@
  *
  * Runtime behaviour (toggle, clamp, submission wiring, server persistence)
  * is independently pinned by:
- *   - tests/e2e/ui/goal-proposal-form.spec.ts (browser E2E + REST round-trip)
+ *   - tests/browser/journeys/proposal-controls.journey.spec.ts (browser + REST round-trip)
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";

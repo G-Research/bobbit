@@ -16,7 +16,7 @@
  *      bucket. The bucket is informational — it MUST NOT roll into the
  *      tree's `totalCostUsd`.
  *
- * Pattern follows tests/e2e/session-recovery.spec.ts — own gateway per test,
+ * Pattern follows tests/e2e/api/session-recovery.api-e2e.spec.ts — own gateway per test,
  * two boots against the same BOBBIT_DIR. Between boots we seed
  * `session-costs.json` + a sidecar pair so backfill has work to do.
  */

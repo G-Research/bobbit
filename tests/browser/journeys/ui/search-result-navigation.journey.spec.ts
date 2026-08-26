@@ -7,7 +7,7 @@
  * lightweight `tests/ui-fixtures/search-preview-search-page.spec.ts` fixture.
  *
  * T2 (server-side orphan filtering) is covered exhaustively by the API E2E
- * `tests/e2e/search-orphan-filter.spec.ts`.
+ * `tests/integration/gateway/search-orphan-filter.gateway.test.ts`.
  *
  * T6 (phantom-match message rows filtered) is covered at API level in the
  * same orphan-filter spec — it requires crafting a synthetic FlexDoc with

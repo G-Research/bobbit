@@ -60,7 +60,7 @@ function hashTree(root: string): string {
 }
 
 function invalidTemplate(message: string): Error {
-	return new Error(`[tests2/git-template] cannot adopt template: ${message}`);
+	return new Error(`[tests/support/harnesses/shared/git-template] cannot adopt template: ${message}`);
 }
 
 function validateTemplateShape(repository: string): void {
@@ -80,7 +80,7 @@ function validateTemplateShape(repository: string): void {
 			throw invalidTemplate("initial commit object is missing or invalid");
 		}
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("[tests2/git-template]")) throw error;
+		if (error instanceof Error && error.message.startsWith("[tests/support/harnesses/shared/git-template]")) throw error;
 		throw invalidTemplate("source is missing or incomplete");
 	}
 }
@@ -114,11 +114,11 @@ function adoptGitTemplate(path: string | undefined, expectedDigest: string | und
 function assertSafeDestination(source: string, destination: string): void {
 	const target = resolve(destination);
 	if (target === source || relative(source, target).split(/[\\/]/)[0] !== "..") {
-		throw new Error(`[tests2/git-template] destination must be outside the immutable template: ${target}`);
+		throw new Error(`[tests/support/harnesses/shared/git-template] destination must be outside the immutable template: ${target}`);
 	}
 	if (existsSync(target)) {
 		if (!statSync(target).isDirectory() || readdirSync(target).length > 0) {
-			throw new Error(`[tests2/git-template] destination must be an empty directory or absent: ${target}`);
+			throw new Error(`[tests/support/harnesses/shared/git-template] destination must be an empty directory or absent: ${target}`);
 		}
 	}
 }
@@ -163,13 +163,13 @@ function removeContainer(container: string): void {
 export function readGitTemplateBootstrapAudit(descriptor: GitTemplateDescriptor): GitTemplateBootstrapAudit {
 	const source = realpathSync(descriptor.path);
 	if (!isOwnedRunChild(getRunRoot(), source)) {
-		throw new Error("[tests2/git-template] bootstrap audit source must be an owned descendant of the run root");
+		throw new Error("[tests/support/harnesses/shared/git-template] bootstrap audit source must be an owned descendant of the run root");
 	}
 	const audit = JSON.parse(readFileSync(join(dirname(source), BOOTSTRAP_AUDIT_FILENAME), "utf8")) as Partial<GitTemplateBootstrapAudit>;
 	if (!Number.isSafeInteger(audit.ownerPid) || (audit.ownerPid ?? 0) <= 0
 		|| !Array.isArray(audit.commands)
 		|| audit.commands.some(command => !Array.isArray(command) || command.some(argument => typeof argument !== "string"))) {
-		throw new Error("[tests2/git-template] coordinator bootstrap audit is missing or invalid");
+		throw new Error("[tests/support/harnesses/shared/git-template] coordinator bootstrap audit is missing or invalid");
 	}
 	return audit as GitTemplateBootstrapAudit;
 }
@@ -207,7 +207,7 @@ export async function commitInitialFixture(
 			const commitState = await initialFixtureCommitState(runGit, repository);
 			if (commitState === "landed") return;
 			if (commitState === "invalid") {
-				throw new Error("[tests2/git-template] initial commit reported failure after creating an unexpected repository state");
+				throw new Error("[tests/support/harnesses/shared/git-template] initial commit reported failure after creating an unexpected repository state");
 			}
 		}
 	}
@@ -257,7 +257,7 @@ export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): P
 	);
 	if (selected.mode === "adopt") return adoptGitTemplate(selected.path, selected.expectedDigest);
 	if (explicitCoordinatorCreate && !isRunRootOwner()) {
-		throw new Error("[tests2/git-template] explicit template creation is coordinator-only");
+		throw new Error("[tests/support/harnesses/shared/git-template] explicit template creation is coordinator-only");
 	}
 
 	const shared = state();
@@ -272,7 +272,7 @@ export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): P
 		const repository = join(container, "repo");
 		const home = join(container, "home");
 		if (explicitCoordinatorCreate && existsSync(container)) {
-			throw new Error(`[tests2/git-template] coordinator template container already exists: ${container}`);
+			throw new Error(`[tests/support/harnesses/shared/git-template] coordinator template container already exists: ${container}`);
 		}
 		mkdirSync(repository, { recursive: true });
 		mkdirSync(home);
@@ -336,13 +336,13 @@ export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): P
 export function copyGitTemplate(destination: string): string {
 	const shared = state();
 	if (!shared.path || !shared.digest) {
-		throw new Error("[tests2/git-template] template is not prepared; await prepareGitTemplate() before installing the tier-1 spawn guard");
+		throw new Error("[tests/support/harnesses/shared/git-template] template is not prepared; await prepareGitTemplate() before installing the tier-1 spawn guard");
 	}
 	if (typeof destination !== "string" || destination.trim().length === 0) {
-		throw new TypeError("[tests2/git-template] destination must be a non-empty filesystem path");
+		throw new TypeError("[tests/support/harnesses/shared/git-template] destination must be a non-empty filesystem path");
 	}
 	if (hashTree(shared.path) !== shared.digest) {
-		throw new Error("[tests2/git-template] immutable template was modified; tests must mutate only copyGitTemplate() destinations");
+		throw new Error("[tests/support/harnesses/shared/git-template] immutable template was modified; tests must mutate only copyGitTemplate() destinations");
 	}
 	const target = resolve(destination);
 	assertSafeDestination(shared.path, target);

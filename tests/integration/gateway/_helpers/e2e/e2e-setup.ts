@@ -112,9 +112,9 @@ export async function defaultProjectId(): Promise<string | undefined> {
 
 export async function defaultProject(): Promise<{ id: string; rootPath: string; name?: string }> {
 	const id = await defaultProjectId();
-	if (!id) throw new Error("[tests2/e2e-compat] defaultProject failed to resolve id");
+	if (!id) throw new Error("[tests/integration/gateway/_helpers/e2e] defaultProject failed to resolve id");
 	const project = (await listProjects()).find(p => p.id === id && !p.hidden);
-	if (!project?.rootPath) throw new Error(`[tests2/e2e-compat] defaultProject ${id} missing rootPath`);
+	if (!project?.rootPath) throw new Error(`[tests/integration/gateway/_helpers/e2e] defaultProject ${id} missing rootPath`);
 	return { id, rootPath: project.rootPath, name: project.name };
 }
 export async function defaultProjectRootPath(): Promise<string> { return (await defaultProject()).rootPath; }

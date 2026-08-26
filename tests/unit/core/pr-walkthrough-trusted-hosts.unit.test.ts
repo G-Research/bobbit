@@ -16,7 +16,7 @@ guardProcessEnv();
  * The legacy `WalkthroughAgentManager.launch` trust-check tests were removed with
  * the launcher (host.agents reviewer migration, design Decision F Phase 3); the
  * launch trust enforcement now lives in the github-adapter + the pack `run` route
- * and is covered by `tests/e2e/pr-walkthrough-host-agents.spec.ts`. These remaining
+ * and is covered by `tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts`. These remaining
  * tests pin the surviving PURE target/error helpers.
  */
 import { describe, it, beforeEach, afterEach } from "vitest";

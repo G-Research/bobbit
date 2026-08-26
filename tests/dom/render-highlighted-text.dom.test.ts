@@ -5,7 +5,7 @@ __syncBeforeAll(() => __syncCE());
 // The legacy fixture mirrored the pure helpers in plain JS; this port imports
 // the REAL splitByQuery / filterArchivedGoalsByQuery / filterArchivedSessionsByQuery
 // from src/app/render-helpers.ts (higher fidelity). Integration at the lit-html
-// level is covered by tests/e2e/ui/sidebar-mobile-archived-search.spec.ts.
+// level is covered by tests/browser/journeys/ui/sidebar-archived-search-repro.journey.spec.ts.
 import { describe, expect, it } from "vitest";
 import {
 	splitByQuery,

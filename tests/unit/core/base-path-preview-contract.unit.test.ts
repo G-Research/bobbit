@@ -80,7 +80,7 @@ function decodeV3Snapshot(block: string, parse: StoredPreviewParser, fallbackEnt
 
 async function readGeneratedPreview(filePath: string): Promise<string> {
 	// Preview writer paths are test-owned outputs under the isolated temporary
-	// root, not repository inputs that should add affected-test graph edges.
+	// root, not repository test inputs or discovery candidates.
 	const relative = path.relative(previewRoot, filePath);
 	assert.ok(
 		relative !== ""

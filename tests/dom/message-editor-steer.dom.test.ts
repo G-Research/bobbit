@@ -1,7 +1,7 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "./_helpers/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// Native DOM coverage in the canonical semantic test layout.
 //
 // Real-component DOM coverage for the Ctrl/Cmd+Enter composer steer shortcut
 // (goal edbb4afd). Renders the REAL <message-editor> under happy-dom and drives

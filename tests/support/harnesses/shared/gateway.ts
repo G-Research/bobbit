@@ -187,7 +187,7 @@ async function seedDefaultWorkflows(baseURL: string, token: string, projectId: s
 	});
 	if (!resp.ok) {
 		const body = await resp.text().catch(() => "<failed to read body>");
-		throw new Error(`[tests2/gateway] default workflow seed failed: ${resp.status} ${resp.statusText} body=${body}`);
+		throw new Error(`[tests/support/harnesses/shared/gateway] default workflow seed failed: ${resp.status} ${resp.statusText} body=${body}`);
 	}
 }
 
@@ -198,9 +198,9 @@ async function registerDefaultProject(baseURL: string, token: string, rootPath: 
 		body: JSON.stringify({ name: "default", rootPath, upsert: true, acceptCanonical: true }),
 	});
 	const text = await resp.text().catch(() => "<failed to read body>");
-	if (!resp.ok) throw new Error(`[tests2/gateway] default project register failed: ${resp.status} ${resp.statusText} body=${text}`);
+	if (!resp.ok) throw new Error(`[tests/support/harnesses/shared/gateway] default project register failed: ${resp.status} ${resp.statusText} body=${text}`);
 	const project = JSON.parse(text) as { id?: string };
-	if (!project.id) throw new Error(`[tests2/gateway] default project register returned no id: ${text}`);
+	if (!project.id) throw new Error(`[tests/support/harnesses/shared/gateway] default project register returned no id: ${text}`);
 	return project.id;
 }
 
@@ -218,7 +218,7 @@ function prepareBuiltinPacksDir(bobbitDir: string): string {
 	mkdirSync(curated, { recursive: true });
 	for (const name of FIRST_PARTY_PACKS) {
 		const src = join(BUILTIN_PACKS_SRC, name);
-		if (!existsSync(src)) throw new Error(`[tests2/gateway] first-party pack not found: ${src}`);
+		if (!existsSync(src)) throw new Error(`[tests/support/harnesses/shared/gateway] first-party pack not found: ${src}`);
 		cpSync(src, join(curated, name), {
 			recursive: true,
 			filter: (source) => !BUILTIN_PACK_SKIP_DIRS.has(source.split(/[\\/]/).pop() ?? ""),
@@ -246,7 +246,7 @@ async function boot(): Promise<BootedGateway> {
 	// Seed state exactly as in-process-harness: empty projects list, setup
 	// marker, subgoals-experimental ON (so nested-goal tests work unchanged).
 	writeFileSync(join(stateDir, "projects.json"), "[]");
-	writeFileSync(join(stateDir, "setup-complete"), "tests2\n");
+	writeFileSync(join(stateDir, "setup-complete"), "tests\n");
 	// Register the in-process agent's exact tuple through the same manual-provider
 	// preferences production model validation reads. Seed before gateway boot so
 	// every ordinary test session starts from an explicit selectable model rather
@@ -291,7 +291,7 @@ async function boot(): Promise<BootedGateway> {
 	const { loadOrCreateToken } = runtime.authToken;
 	const { createGateway } = runtime.server;
 	const { configureAigwRuntimeFlags } = runtime.aigwManager;
-	console.log(`[tests2/gateway] fork ${process.pid}: server runtime=${serverRuntimeMode()}`);
+	console.log(`[tests/support/harnesses/shared/gateway] fork ${process.pid}: server runtime=${serverRuntimeMode()}`);
 
 	setProjectRoot(bobbitDir);
 	scaffoldBobbitDir(bobbitDir);
@@ -318,7 +318,7 @@ async function boot(): Promise<BootedGateway> {
 		agentBridgeFactory,
 		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),
 	};
-	if (useFakeCommandStep) console.log(`[tests2/gateway] fork ${process.pid}: injecting FAKE verification command-step runner (no shell spawns)`);
+	if (useFakeCommandStep) console.log(`[tests/support/harnesses/shared/gateway] fork ${process.pid}: injecting FAKE verification command-step runner (no shell spawns)`);
 
 	const gw = createGateway({
 		host: "127.0.0.1",
@@ -411,7 +411,7 @@ async function boot(): Promise<BootedGateway> {
 		async apiJson<T = any>(path: string, init?: RequestInit): Promise<T> {
 			const resp = await this.api(path, init);
 			const text = await resp.text();
-			if (!resp.ok) throw new Error(`[tests2/gateway] ${init?.method ?? "GET"} ${path} -> ${resp.status} ${resp.statusText}: ${text}`);
+			if (!resp.ok) throw new Error(`[tests/support/harnesses/shared/gateway] ${init?.method ?? "GET"} ${path} -> ${resp.status} ${resp.statusText}: ${text}`);
 			return (text ? JSON.parse(text) : undefined) as T;
 		},
 		async connectWs(suffix, opts) {
@@ -425,7 +425,7 @@ async function boot(): Promise<BootedGateway> {
 					let msg: any;
 					try { msg = JSON.parse(String(raw)); } catch { return; }
 					if (msg.type === "auth_ok") { cleanup(); resolvePromise(ws); }
-					else if (msg.type === "auth_failed") { cleanup(); ws.close(); reject(new Error("[tests2/gateway] ws auth_failed")); }
+					else if (msg.type === "auth_failed") { cleanup(); ws.close(); reject(new Error("[tests/support/harnesses/shared/gateway] ws auth_failed")); }
 				};
 				const cleanup = () => { ws.off("error", onError); ws.off("message", onMessage); };
 				ws.on("error", onError);

@@ -15,7 +15,7 @@
  * exercising the real render path with a realistic data shape without
  * depending on the backend producing a real merge conflict.
  *
- * Reference: tests/e2e/ui/plan-tab-archived-children.spec.ts.
+ * Historical reference: tests/e2e/ui/plan-tab-archived-children.spec.ts.
  */
 import type { Page } from "@playwright/test";
 import { test, expect } from "../../_helpers/journey-fixture.js";

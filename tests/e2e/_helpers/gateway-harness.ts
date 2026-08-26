@@ -328,7 +328,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// legacy e2e config) and fully fail-open: any import/acquire error proceeds
 	// without a lease. Its own large fixture timeout covers a long queue wait — the
 	// wait is charged here, NOT against the 60 s gateway/test timeouts. Cap in
-	// tests2/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
+	// tests/support/data/shared/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
 	browserRenderLease: [async ({}, use) => {
 		let release: () => void = () => {};
 		if (process.env.BOBBIT_V2_BROWSER_LEASE === "1") {
@@ -436,7 +436,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		writeFileSync(join(bobbitDir, "state", "setup-complete"), "e2e\n");
 		// Default the system-scope Subgoals (Experimental) flag ON for browser
 		// E2E tests. The OFF path is exercised explicitly by
-		// tests/e2e/ui/subgoals-experimental-toggle.spec.ts. Register the mock
+		// tests/browser/journeys/ui/subgoals-experimental-toggle.journey.spec.ts. Register the mock
 		// agent's exact tuple through the same manual-provider preferences that
 		// production model validation reads, before the gateway boots.
 		writeFileSync(

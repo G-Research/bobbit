@@ -17,9 +17,9 @@
  *      end-to-end here because saving a `sandboxed: true` staff requires
  *      Docker — covered at the data-model layer by
  *      tests/staff-sandboxed-persistence.test.ts and at the API layer by
- *      tests/e2e/staff.spec.ts.
+ *      tests/integration/gateway/staff.gateway.test.ts.
  *
- * Pattern mirrors tests/e2e/ui/settings.spec.ts for navigation + reload.
+ * Pattern mirrors the historical tests/e2e/ui/settings.spec.ts for navigation + reload.
  */
 import { test, expect } from "../../_helpers/gateway-harness.js";
 import { apiFetch, defaultProject } from "../../_helpers/e2e-setup.js";

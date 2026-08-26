@@ -17,7 +17,7 @@
  * node. `helpers.ts` deliberately imports only `highlight.js/lib/core` (pure JS),
  * so it is node-safe and is the single source of truth for the pure logic + the
  * `buildArtifactBody` dispatch the bundle re-exports. Real pdfjs/docx page
- * rendering is asserted in the browser E2E (tests/e2e/ui/artifacts-pack.spec.ts);
+ * rendering is asserted in tests/browser/journeys/ui/artifacts-pack.journey.spec.ts;
  * REAL hljs highlighting (pure JS) is asserted HERE.
  *
  * `buildArtifactBody` is the only DOM-touching helper; we drive it with a minimal

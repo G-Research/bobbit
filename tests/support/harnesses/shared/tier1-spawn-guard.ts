@@ -57,7 +57,7 @@ function displayExecutable(api: GuardedApi, firstArgument: unknown): string {
 function blocked(api: GuardedApi, firstArgument: unknown): never {
 	const executable = displayExecutable(api, firstArgument);
 	throw new Error(
-		`[tests2/tier1-spawn-guard] blocked child_process.${api} executable=${JSON.stringify(executable)}. ` +
+		`[tests/support/harnesses/shared/tier1-spawn-guard] blocked child_process.${api} executable=${JSON.stringify(executable)}. ` +
 		"Tier-1 tests must inject a commandRunner/gitRunner fake or copy the prebuilt repository with copyGitTemplate(); " +
 		"unavoidable bootstrap commands belong in runFixtureCommand() before this guard is installed.",
 	);

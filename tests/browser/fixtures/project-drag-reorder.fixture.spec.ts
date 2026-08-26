@@ -2,7 +2,7 @@
  * Browser E2E coverage for Project Drag Reorder.
  *
  * Expected command:
- *   npm run build && npx playwright test --config playwright-e2e.config.ts --project=browser tests/e2e/ui/project-drag-reorder.spec.ts
+ *   npm run build && npx playwright test --config playwright-v2.config.ts --project=browser-v2 tests/browser/fixtures/project-drag-reorder.fixture.spec.ts
  */
 import type { Locator, Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";

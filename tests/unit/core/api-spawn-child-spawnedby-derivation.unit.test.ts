@@ -15,7 +15,7 @@
  *   5. fallback → undefined (caller logs)
  *
  * The HTTP route-level path is exercised separately in
- * `tests/e2e/api-goals-spawn-child-route.spec.ts`; this file is the
+ * `tests/e2e/api/api-goals-spawn-child-route.api-e2e.spec.ts`; this file is the
  * single source of truth for the cascade semantics.
  */
 

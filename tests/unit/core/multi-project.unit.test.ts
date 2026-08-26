@@ -379,7 +379,7 @@ describe("ProjectRegistry", () => {
 	// ensureDefaultProject() was removed as part of the "eliminate default project"
 	// refactor — fresh installs now start with zero projects and the UI forces the
 	// user through explicit Add Project. Tests previously here are superseded by
-	// GR-09 (first-run zero-project UX) in tests/e2e/ui/stories-goal-routing.spec.ts.
+	// GR-09 (first-run zero-project UX) in tests/browser/journeys/ui/stories-goal-routing.journey.spec.ts.
 });
 
 // ── ConfigResolver ──────────────────────────────────────────────────

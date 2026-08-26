@@ -12,7 +12,7 @@ import { test, expect, openApp, navigateToHash, createSession, createGoal, delet
 test.describe("Journey: Goal Paused Banner (UI)", () => {
 	test.skip("shows banner with Resume button when goal is paused; disappears on resume", async ({ page }) => {
 		// Skipped: activeSession.goalId not populated in v2 journey context;
-		// covered by legacy suite (tests/e2e/ui/goal-paused-banner.spec.ts).
+		// historical source: tests/e2e/ui/goal-paused-banner.spec.ts.
 		test.slow(); // WS broadcast + Lit re-render under concurrent load
 		const goal = await createGoal({ title: "v2-paused-banner-goal", autoStartTeam: false });
 		const goalId = goal.id as string;

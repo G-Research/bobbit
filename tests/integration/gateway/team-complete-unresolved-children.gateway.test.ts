@@ -11,7 +11,7 @@
  *      streaming cap in readBody()).
  *
  * Mirrors the in-process harness import pattern from
- * tests/e2e/api-goals-spawn-child-route.spec.ts.
+ * tests/e2e/api/api-goals-spawn-child-route.api-e2e.spec.ts.
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import {

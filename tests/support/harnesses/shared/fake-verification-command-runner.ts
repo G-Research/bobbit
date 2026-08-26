@@ -19,7 +19,7 @@
  * The command interpreter models exactly the primitive shapes the migrated
  * fake-target specs use (echo, node -e console.log/process.exit/setTimeout,
  * true/false). Fidelity vs the real runner is pinned by the contract test
- * tests2/core/verification-command-runner-contract.test.ts; anything the real
+ * tests/unit/core/verification-command-runner-contract.unit.test.ts; anything the real
  * shell would do differently is caught there.
  */
 import { EventEmitter } from "node:events";

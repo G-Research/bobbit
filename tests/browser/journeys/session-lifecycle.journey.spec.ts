@@ -267,7 +267,7 @@ test.describe("Journey: Fork Session", () => {
 	/**
 	 * Fork via sidebar: we route the fork API to avoid needing a real git worktree
 	 * (the test harness sessions have no worktree) — this mirrors the technique used
-	 * in tests/e2e/ui/session-actions.spec.ts "fork trailing toggle" test.
+	 * in the historical tests/e2e/ui/session-actions.spec.ts "fork trailing toggle" test.
 	 * The UI behavior under test is: sidebar-actions → fork row → client POSTs to
 	 * /fork → navigates to the new session route.
 	 */

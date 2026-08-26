@@ -267,7 +267,7 @@ export async function runFixtureCommandWithBackend(
 			: `exited with code ${failure.exitCode}${failure.signal ? ` (${failure.signal})` : ""}`;
 	const detail = stderr ? `\nstderr:\n${stderr}` : "";
 	throw new FixtureCommandError(
-		`[tests2/fixture-command] ${command} ${reason} after ${attempts} attempt${attempts === 1 ? "" : "s"}${detail}`,
+		`[tests/support/harnesses/shared/spawn-with-retry] ${command} ${reason} after ${attempts} attempt${attempts === 1 ? "" : "s"}${detail}`,
 		attempts,
 		{ ...failure, stderr },
 	);

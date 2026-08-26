@@ -9,7 +9,7 @@
  * source — the same pure function used by server.ts POST /api/sessions handler
  * to decide whether a new session gets a git worktree.
  *
- * Replaces the flaky E2E tests:
+ * Replaces the historical flaky E2E tests:
  *   - tests/e2e/session-worktree.spec.ts (git lock contention)
  *   - tests/e2e/ui/session-worktree.spec.ts (same issue)
  */

@@ -13,7 +13,7 @@
  *     → parseProposalFile(...)
  *     → { fields: { title, cwd, workflow, options, spec } }
  *
- * Companion E2E: `tests/e2e/ui/proposal-spec-survives-navigate.spec.ts`
+ * Companion browser journey: `tests/browser/journeys/ui/proposal-spec-survives-navigate.journey.spec.ts`
  * exercises the CLIENT-side rehydrate path end-to-end. This unit suite
  * proves the server layer is NOT to blame: the spec field survives every
  * shape the goal-proposal frontmatter / body can take, including an empty

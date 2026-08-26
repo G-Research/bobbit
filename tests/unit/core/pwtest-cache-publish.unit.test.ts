@@ -1,7 +1,7 @@
 /**
  * Pins the persistent Playwright transform-cache seed/publish helpers
  * (scripts/testing-v2/pwtest-cache.ts) used by playwright-v2.config.ts and
- * tests2/browser-global-teardown.ts:
+ * tests/support/harnesses/browser/global-teardown.ts:
  *   - seed copies the `latest` snapshot into a run dir without clobbering
  *     existing run-dir files, tolerates a missing `latest`, and fails open;
  *   - publish atomically replaces `latest` from a non-empty run dir, skips

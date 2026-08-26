@@ -4,7 +4,7 @@
 // lint (see no-new-sleeps.mjs::walk). Test specs should import from here
 // rather than inlining their own setTimeout polling loops.
 //
-// Imported by:
+// Historical importer before migration:
 //   - tests/e2e/human-signoff.spec.ts
 import { apiFetch } from "../e2e-setup.js";
 

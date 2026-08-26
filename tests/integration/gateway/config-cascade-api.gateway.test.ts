@@ -239,7 +239,8 @@ test.describe("Config Cascade API", () => {
 	// part of the cascade (no builtin/server layer for them), so the
 	// customize/override endpoints have nothing upstream to copy from. The
 	// surviving project-only revert path is exercised by
-	// `tests/e2e/workflows-project-scope.spec.ts` and `workflows-api.spec.ts`.
+	// `tests/integration/gateway/workflows-project-scope.gateway.test.ts` and
+	// `tests/integration/gateway/workflows-api.gateway.test.ts`.
 
 	test("tools with projectId scope return origin fields", async () => {
 		const res = await apiFetch(`/api/tools?projectId=${primaryProject.id}`);

@@ -56,7 +56,7 @@ export function assertNoLeaks(before: EntityCounts, after: EntityCounts): void {
 				? "baseline clobber detected — a test net-removed a baseline entity (destroyed shared state)"
 				: "entity leak detected — a test did not clean up after itself";
 		throw new Error(
-			`[tests2/leak-detector] ${kind}. ` +
+			`[tests/support/harnesses/shared/leak-detector] ${kind}. ` +
 			`Deltas { ${parts.join(", ")} }. before=${JSON.stringify(before)} after=${JSON.stringify(after)}. ` +
 			`Wrap created sessions/goals/projects in createScope() and let afterEach delete them.`,
 		);

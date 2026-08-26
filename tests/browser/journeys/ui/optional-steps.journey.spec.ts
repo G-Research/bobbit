@@ -1,7 +1,7 @@
 /**
  * Browser E2E coverage for optional steps goal proposal parsing.
  *
- * API/gate coverage lives in tests/e2e/optional-steps-api.spec.ts.
+ * API/gate coverage lives in tests/integration/gateway/optional-steps-api.gateway.test.ts.
  */
 import { test, expect } from "../../_helpers/journey-fixture.js";
 import { openApp, sendMessage, createGoalAssistantViaUI } from "../../../support/harnesses/browser/legacy-ui/ui-helpers.js";

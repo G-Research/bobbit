@@ -1,7 +1,7 @@
 /**
  * API coverage for optional workflow verification steps.
  *
- * Browser proposal parsing stays in tests/e2e/ui/optional-steps.spec.ts.
+ * Browser proposal parsing lives in tests/browser/journeys/ui/optional-steps.journey.spec.ts.
  */
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, nonGitCwd } from "./_helpers/e2e/e2e-setup.js";

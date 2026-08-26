@@ -26,7 +26,7 @@
  * install would be invisible to those endpoints. afterEach uninstalls + clears
  * sources so the server-scope pack never leaks into sibling specs on the worker.
  *
- * Pattern: mirrors tests/e2e/ui/ask-user-choices-ui.spec.ts (drive a real
+ * Pattern: mirrors tests/browser/journeys/ui/ask-user-choices-ui.journey.spec.ts (drive a real
  * session whose mock-agent turn emits a tool call that renders a custom inline
  * widget, asserting on its DOM + reload restore).
  *

@@ -16,8 +16,8 @@
  *     system-level entries leak in (workflows have no `builtin`/`server`
  *     origin badges).
  *
- * Canonical pattern: tests/e2e/ui/settings.spec.ts
- *                    tests/e2e/ui/config-scope.spec.ts
+ * Historical patterns: tests/e2e/ui/settings.spec.ts
+ *                      tests/e2e/ui/config-scope.spec.ts
  */
 import { test, expect } from "../../_helpers/gateway-harness.js";
 import { apiFetch, rawApiFetch } from "../../_helpers/e2e-setup.js";

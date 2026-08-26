@@ -127,7 +127,7 @@ const KNOWN_MODELS = {
 	// reports the same shape the real agent does (1M context, reasoning, and the
 	// forced-adaptive-thinking map). Without this the mock would return the 128k
 	// unknown-model stub on reconnect, masking the real behaviour the Fable
-	// model-state e2e (tests/e2e/fable-model-state-frame.spec.ts) verifies.
+	// model-state e2e (tests/integration/gateway/fable-model-state-frame.gateway.test.ts) verifies.
 	"claude-fable-5": { provider: "anthropic", id: "claude-fable-5", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, thinkingLevelMap: { off: null, xhigh: "xhigh" } },
 };
 
@@ -883,7 +883,7 @@ export class MockAgentCore {
 
 		if (lower.includes("mock_error")) return { mockError: true };
 
-		// Extension-host litmus (tests/e2e/ui/extension-host.spec.ts): emit a
+		// Extension-host litmus (tests/browser/journeys/ui/extension-host.journey.spec.ts): emit a
 		// `sample_action` tool call so the retry-demo pack's PACK renderer mounts in
 		// the live session view. The toolId is STABLE so the browser E2E can write a
 		// matching transcript line for the action endpoint's toolUseId-ownership
@@ -892,7 +892,7 @@ export class MockAgentCore {
 			return { tool: "sample_action", input: {}, output: "sample action tool executed", toolId: "tu-sample-1" };
 		}
 
-		// Extension-host Phase-2 litmus (tests/e2e/ui/artifacts-pack.spec.ts): emit an
+		// Extension-host Phase-2 litmus (tests/browser/journeys/ui/artifacts-pack.journey.spec.ts): emit an
 		// `artifact_demo` tool call carrying a stable artifactId + filename + content in
 		// its INPUT so the artifacts pack's PACK renderer mounts the inline pill and the
 		// renderer can persist the payload to the pack store on a user click. Stable
@@ -911,7 +911,7 @@ export class MockAgentCore {
 			};
 		}
 
-		// Multi-type variants of the artifacts litmus (tests/e2e/ui/artifacts-pack.spec.ts):
+		// Multi-type variants of the artifacts litmus (tests/browser/journeys/ui/artifacts-pack.journey.spec.ts):
 		// each emits an `artifact_demo` tool call with a DISTINCT artifactId/filename/content
 		// so the strengthened E2E can exercise the viewer's per-type rendering (markdown,
 		// svg, image) end-to-end alongside the html-with-sandbox case above. Stable
@@ -1015,7 +1015,7 @@ export class MockAgentCore {
 		}
 
 		// Orchestration Core (team_delegate) card render litmus
-		// (tests/e2e/ui/team-delegate.spec.ts). Emits a team_delegate tool_use +
+		// (tests/browser/journeys/ui/team-delegate.journey.spec.ts). Emits a team_delegate tool_use +
 		// toolResult carrying details.delegates so the shared DelegateRenderer
 		// mounts. CANNED — does NOT spawn a real child (the renderer is what the
 		// browser test asserts; real spawn/wait/dismiss are covered by the API
@@ -1266,7 +1266,7 @@ export class MockAgentCore {
 		// mimicking the real LLM stream that triggers the dual-render bug.
 		// The toolCall id is stable so the synthetic-id fallback
 		// `synth:tc:<id>` is deterministic. Used by
-		// tests/e2e/ui/bg-wait-no-dup.spec.ts. Distinct from BG_WAIT:<ms>
+		// tests/browser/journeys/ui/bg-wait-no-dup.journey.spec.ts. Distinct from BG_WAIT:<ms>
 		// (real-process flow, handled below) because the regression specifically
 		// targets the synthetic-event timing where message_end races ahead of
 		// the pendingToolCalls update.
@@ -2159,7 +2159,7 @@ export class MockAgentCore {
 	 *
 	 * After this turn the transcript should contain exactly ONE interactive
 	 * `<ask-user-choices-widget>` (tabs + .ask-submit) preceded by ONE
-	 * `.ask-error` chip. Drives tests/e2e/ui/ask-user-choices-ui.spec.ts's
+	 * `.ask-error` chip. Drives tests/browser/journeys/ui/ask-user-choices-ui.journey.spec.ts's
 	 * error-then-retry case.
 	 */
 	async _handleAskUserChoicesErrorThenRetry() {
@@ -3101,7 +3101,7 @@ export class MockAgentCore {
 	 * Emit a canned team_delegate tool_use + toolResult whose toolResult carries
 	 * `details.delegates` in the shape the shared DelegateRenderer consumes
 	 * (see defaults/tools/agent/extension.ts + src/ui/tools/renderers/DelegateRenderer.ts).
-	 * Used by tests/e2e/ui/team-delegate.spec.ts to assert the blocking-one-shot
+	 * Used by tests/browser/journeys/ui/team-delegate.journey.spec.ts to assert the blocking-one-shot
 	 * card renders. Deterministic: no real child is spawned.
 	 */
 	async _handleTeamDelegateCard(variant) {
@@ -3515,7 +3515,7 @@ export class MockAgentCore {
 					// removed + ledger pushed, awaiting the user-role
 					// message_end echo) is wide enough to be observed by a
 					// client `get_messages` poll. Used by
-					// tests/e2e/steer-snapshot-continuity.spec.ts to pin the
+					// tests/integration/gateway/steer-snapshot-continuity.gateway.test.ts to pin the
 					// invariant that the steer text never disappears from both
 					// the queue pill and the transcript simultaneously.
 					const delayMs = parseInt(this.env.MOCK_STEER_ECHO_DELAY_MS || "0", 10);

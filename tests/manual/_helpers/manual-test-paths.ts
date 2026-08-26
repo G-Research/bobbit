@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 
 /**
- * Canonical OS temp root for manual-integration fixtures.
+ * Canonical OS temp root for manual-lane fixtures.
  *
  * On macOS `/tmp` is a symlink to `/private/tmp`. Project registration
  * (`POST /api/projects`) rejects symlinked roots with the `symlink_root`

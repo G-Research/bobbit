@@ -24,7 +24,7 @@
  *      forever (the showstopper bug from 0f7e6a64).
  *
  * Mirrors the in-process harness import pattern from
- * `tests/e2e/gates-api.spec.ts`.
+ * `tests/integration/gateway/gates-api.gateway.test.ts`.
  */
 import { test, expect } from "../_helpers/in-process-harness.js";
 import {

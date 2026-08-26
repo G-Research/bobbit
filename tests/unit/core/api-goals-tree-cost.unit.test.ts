@@ -16,7 +16,7 @@
  * `goalId` directly to `computeTreeCost`. Passing `goal.rootGoalId`
  * (the topmost ancestor) is the bug this test guards against —
  * descendant dashboards would otherwise leak the whole project's
- * grand total. See also `tests/e2e/ui/tree-cost-rollup.spec.ts`.
+ * grand total. See also `tests/browser/journeys/ui/tree-cost-rollup.journey.spec.ts`.
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
