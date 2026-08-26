@@ -156,5 +156,5 @@ Relevant tests include:
 Recommended focused verification when changing unified tree expansion behavior:
 
 ```bash
-npx playwright test tests/browser/journeys/ui/sidebar-unified-tree.journey.spec.ts tests/browser/journeys/ui/sidebar-tree-restart.journey.spec.ts --reporter=line
+npx playwright test --config playwright-v2.config.ts tests/browser/journeys/ui/sidebar-unified-tree.journey.spec.ts tests/browser/journeys/ui/sidebar-tree-restart.journey.spec.ts --reporter=line
 ```

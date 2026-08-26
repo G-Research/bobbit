@@ -280,9 +280,9 @@ Run once after implementation on a real development project:
 Focused feedback while developing tests:
 
 ```bash
-npx playwright test --config playwright-e2e.config.ts --project=api tests/integration/gateway/maintenance-api.gateway.test.ts
-npx playwright test --config tests/playwright.config.ts tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts
-npx playwright test --config playwright-e2e.config.ts --project=browser tests/browser/journeys/ui/settings-maintenance-archived-worktrees.journey.spec.ts
+npx vitest run --config vitest.config.ts --project v2-integration tests/integration/gateway/maintenance-api.gateway.test.ts
+npx playwright test --config playwright-v2.config.ts tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts
+npx playwright test --config playwright-v2.config.ts tests/browser/journeys/ui/settings-maintenance-archived-worktrees.journey.spec.ts
 ```
 
 Required final verification for the goal branch:

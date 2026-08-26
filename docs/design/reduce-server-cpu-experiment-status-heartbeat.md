@@ -127,5 +127,5 @@ Verification run:
 - `npx tsx --test --test-force-exit tests/unit/core/session-manager-heartbeat.unit.test.ts tests/unit/core/session-manager-status.unit.test.ts` — passed.
 - `npm run check` — passed.
 - `npm run test:unit` — passed.
-- `npm run build --silent 2>/dev/null && npx playwright test --config playwright-e2e.config.ts tests/browser/journeys/ui/session-status-recovery.journey.spec.ts` — passed.
+- `npm run build --silent 2>/dev/null && npx playwright test --config playwright-v2.config.ts tests/browser/journeys/ui/session-status-recovery.journey.spec.ts` — passed.
 - `npm run test:e2e` — attempted; suite had one unrelated remaining failure in `tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts:705` after retries, with status/session-recovery coverage passing separately.

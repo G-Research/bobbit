@@ -299,7 +299,7 @@ Wherever the client currently dedupes by text or by `message.id`, add `seq` as t
 - `canResumeFrom(N)` is false when N is older than the retained window.
 - `lastSeq` reports the highest assigned seq.
 
-#### Unit — `tests/dom/remote-agent-seq-dedup.dom.test.ts` (new, Playwright file:// fixture)
+#### DOM — `tests/dom/remote-agent-seq-dedup.dom.test.ts` (new, happy-dom)
 
 Drive `RemoteAgent` via synthetic WS messages:
 1. Emit `{type:"event", data:{type:"message_end", message:{...id:"m1"}}, seq:1, ts:100}`.

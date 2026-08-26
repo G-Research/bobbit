@@ -433,7 +433,7 @@ Run focused suites first, then project gates:
 ```bash
 npx vitest run tests/dom/resolve-project-mode.dom.test.ts tests/dom/project-accept-dispatch.dom.test.ts
 npx vitest run tests/integration/gateway/cross-project-proposals.gateway.test.ts
-npx playwright test tests/browser/journeys/project-proposal-accept.journey.spec.ts
+npx playwright test --config playwright-v2.config.ts tests/browser/journeys/project-proposal-accept.journey.spec.ts
 npm run check
 npm run test:unit
 npm run test:browser

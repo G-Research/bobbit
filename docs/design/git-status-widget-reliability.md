@@ -690,7 +690,7 @@ If future render-tree changes reintroduce a wedge, the simpler model (sync close
 
 ### 14.4 Tests
 
-- **`tests/dom/git-status-widget-wedge.dom.test.ts`** — Playwright file:// regression suite, mounted via the real `git-status-widget-states` bundle so `disconnectedCallback` actually runs. Three scenarios, each open + perturb + click and assert the dropdown reopens:
+- **`tests/dom/git-status-widget-wedge.dom.test.ts`** — happy-dom regression suite, mounted via the real `git-status-widget-states` bundle so `disconnectedCallback` actually runs. Three scenarios, each open + perturb + click and assert the dropdown reopens:
   1. *Disconnect mid-close* — start the close animation, `removeChild` + `appendChild` the widget synchronously, then click. Mirrors the production trigger.
   2. *External portal removal* — yank `#git-status-dropdown` out of body while `expanded === true`. Self-heal must reopen.
   3. *`animationcancel` event* — start close, dispatch `animationcancel` synchronously. State must reset and the next click reopens.

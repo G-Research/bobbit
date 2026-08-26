@@ -95,5 +95,5 @@ Recommended verification for sidebar font-size changes:
 ```bash
 npm run check
 npm run test:unit
-npx playwright test tests/e2e/browser/sidebar-font-scale.browser-e2e.spec.ts --reporter=line
+npx playwright test --config playwright-e2e.config.ts --project=browser tests/e2e/browser/sidebar-font-scale.browser-e2e.spec.ts --reporter=line
 ```

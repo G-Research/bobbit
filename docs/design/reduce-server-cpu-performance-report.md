@@ -240,7 +240,8 @@ Implementation-gate verification on the merged goal branch:
 - `npm run build:server` — passed.
 - `npm run build:ui` — passed.
 - `npx tsx --test --test-force-exit tests/unit/core/bench-server-cpu.unit.test.ts tests/e2e/node/subsystem-cpu-attribution.node-e2e.test.ts` — passed.
-- `npx playwright test --config playwright-e2e.config.ts tests/integration/gateway/goal-fanout-ws.gateway.test.ts tests/integration/gateway/gate-signal-progress.gateway.test.ts tests/integration/gateway/gate-status-cache-ws.gateway.test.ts tests/browser/journeys/ui/goal-dashboard-fanout.journey.spec.ts tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts --workers=1` — passed, 15 tests.
+- `npx vitest run --config vitest.config.ts --project v2-integration tests/integration/gateway/goal-fanout-ws.gateway.test.ts tests/integration/gateway/gate-signal-progress.gateway.test.ts tests/integration/gateway/gate-status-cache-ws.gateway.test.ts` — passed.
+- `npx playwright test --config playwright-v2.config.ts tests/browser/journeys/ui/goal-dashboard-fanout.journey.spec.ts tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts --workers=1` — passed. The two focused commands ran 15 tests total.
 - `node scripts/bench-server-cpu.mjs --workload e2e-like --duration 5 --runs 1 --flush-ms 250 --out artifacts/cpu/e2e-like-merged-smoke.jsonl` — passed; raw artifact removed before push.
 
 Docs-only verification for this report:

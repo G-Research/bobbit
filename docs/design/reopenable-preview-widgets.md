@@ -330,7 +330,7 @@ The button lives inside the standard card wrapper (isCustom: false). No style cu
 
 ## Test plan
 
-### Unit tests (Playwright `file://` fixtures — `tests/dom/preview-renderer.dom.test.ts`, new)
+### DOM tests (happy-dom — `tests/dom/preview-renderer.dom.test.ts`, new)
 
 1. **Renders Open button for completed tool call with inline snapshot** — mount `<tool-message>` with a synthetic `preview_open` toolCall + toolResult containing two text blocks (status + `PREVIEW_SNAPSHOT_MARKER + "<h1>hi</h1>"`). Assert button visible + enabled.
 2. **Renders disabled Open button for historical tool call (no snapshot)** — toolResult has only the status block. Assert button present, `disabled` attribute set, title contains "Snapshot not captured".
