@@ -92,6 +92,30 @@ describe("test layout repository guard", () => {
 			expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/e2e/browser/**/*.browser-e2e.spec.ts");
 		}
 	});
+
+	it("guards public E2E and coverage entrypoints before allocating runners or builds", () => {
+		const manifest = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as {
+			scripts: Record<string, string>;
+		};
+		const e2eSteps = manifest.scripts["test:e2e:run"].split(/\s*&&\s*/);
+		const coverageSteps = manifest.scripts["test:coverage"].split(/\s*&&\s*/);
+
+		expect(e2eSteps).toEqual([
+			"npm run test:layout",
+			"node scripts/run-playwright-e2e.mjs",
+		]);
+		expect(coverageSteps).toEqual([
+			"npm run test:layout",
+			"npm run build:server",
+			"shx rm -rf coverage",
+			"node scripts/run-coverage.mjs",
+		]);
+		// npm appends arguments after the script text, so keeping the runner as the
+		// final command preserves project, file, and grep forwarding.
+		const forwardedArgs = "--project api tests/e2e/api/sample.api-e2e.spec.ts --grep smoke";
+		const invocationSteps = `${manifest.scripts["test:e2e:run"]} ${forwardedArgs}`.split(/\s*&&\s*/);
+		expect(invocationSteps.at(-1)).toBe(`node scripts/run-playwright-e2e.mjs ${forwardedArgs}`);
+	});
 });
 
 describe("canonical test scaffold", () => {
