@@ -1,6 +1,8 @@
 # Browser-uploaded attachments
 
-Browser uploads let a user give the current coding agent a send-time file snapshot without first placing that file in the workspace. The upload path is separate from [`@`-mentioned workspace files](at-mention-file-references.md): the browser supplies the bytes, and the gateway admits them into session-owned attachment storage before it accepts the prompt.
+Browser uploads let a user give the current coding agent a send-time file snapshot without first placing that file in the workspace. The browser supplies these bytes; a [binary `@` reference](at-mention-file-references.md#delivery-kinds) instead snapshots its bytes from the workspace resolver. After that distinct source capture, both enter the same authoritative, session-owned immutable document admission and use the same model-only pointer and policy-enabled bounded-tool delivery. Text `@` references remain `<file-reference>` blocks, and image references remain model image inputs.
+
+Sharing this downstream document path does not merge the input limits. `@` scanning and resolution keep their authenticated-text, candidate, target, and delivery bounds; browser-supplied attachments keep the count, per-file, serialized-send, and durable session-quota limits documented below.
 
 The design keeps three concerns separate:
 
