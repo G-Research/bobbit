@@ -510,6 +510,14 @@ describe("SessionManager current-session runtime promotion", () => {
 		fx.live.cwd = fx.persisted.cwd;
 		fx.live.worktreePath = fx.persisted.worktreePath;
 		fx.live.sandboxed = true;
+		// Exact-runtime transcript fixture: role staging probes the canonical
+		// conversation path after the replacement bridge starts.
+		fx.manager.sandboxManager = {
+			runSessionTranscriptOperation: vi.fn(async (_projectId: string, sessionId: string, operation: { kind: string }) => {
+				expect(sessionId).toBe(fx.live.id);
+				return operation.kind === "exists" ? true : undefined;
+			}),
+		};
 		const replacement = bridge();
 		let options: any;
 		registerRpcBridgeFactory((nextOptions: any) => {

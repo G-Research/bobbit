@@ -7,7 +7,13 @@
  */
 
 import { ProjectSandbox } from "./project-sandbox.js";
-import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, SessionRuntimeExpectation } from "./project-sandbox.js";
+import type {
+	ProjectSandboxOptions,
+	ContainerState,
+	SandboxHealthEvent,
+	SessionRuntimeExpectation,
+	SessionTranscriptRuntimeOperation,
+} from "./project-sandbox.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
@@ -278,6 +284,52 @@ export class SandboxManager {
 			if (!registered || registered.projectId !== projectId || registered.containerId !== containerId) return false;
 			const sandbox = this.sandboxes.get(projectId);
 			return sandbox ? await sandbox.isSessionRuntimeIsolated(sessionId, containerId) : false;
+		});
+	}
+
+	/**
+	 * Route one transcript operation through the exact server-owned session
+	 * runtime. Store-only/archived sessions receive a short-lived isolated
+	 * runtime that is removed before this call returns; no project-control or
+	 * host-path fallback is permitted.
+	 */
+	async runSessionTranscriptOperation(
+		projectId: string,
+		sessionId: string,
+		operation: SessionTranscriptRuntimeOperation,
+	): Promise<string | boolean | void> {
+		return this._withSessionRuntimeLifecycle(async () => {
+			const registered = this._sessionRuntimes.get(sessionId);
+			if (registered && registered.projectId !== projectId) {
+				throw new Error(`[sandbox-manager] Refusing foreign transcript runtime for ${sessionId}`);
+			}
+			let sandbox = this.get(projectId);
+			if (!sandbox || sandbox.getStatus().status !== "ready") {
+				await this.ensureForProject(projectId);
+				sandbox = this.get(projectId);
+			}
+			if (!sandbox || sandbox.getStatus().status !== "ready") {
+				throw new Error(`[sandbox-manager] No ready sandbox for transcript runtime ${sessionId}`);
+			}
+
+			let containerId = registered?.containerId;
+			let ephemeral = false;
+			if (!containerId) {
+				containerId = await sandbox.ensureSessionRuntime(sessionId);
+				this._sessionRuntimes.set(sessionId, { projectId, containerId });
+				ephemeral = true;
+			}
+			try {
+				return await sandbox.runSessionTranscriptOperation(sessionId, containerId, operation);
+			} finally {
+				if (ephemeral) {
+					const current = this._sessionRuntimes.get(sessionId);
+					if (current?.projectId === projectId && current.containerId === containerId) {
+						this._sessionRuntimes.delete(sessionId);
+					}
+					await sandbox.removeSessionRuntime(sessionId);
+				}
+			}
 		});
 	}
 

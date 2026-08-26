@@ -912,9 +912,10 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/session-fs-sandbox-publication.test.ts",
-		allowReason: "isolated test-owned owner-root transcript fixture used to prove exact sandbox publication",
+		allowReason: "test-owned outside sentinels prove exact runtime transcript operations never follow hostile host links",
 		reads: frozen([
-			{ expression: "sessionTranscriptHostPath(owners[0], canonical)!", count: 1 },
+			{ expression: "sentinel", count: 2 },
+			{ expression: "hostileEntry", count: 1 },
 		]),
 	},
 	{

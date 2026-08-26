@@ -585,6 +585,41 @@ describe("ProjectSandbox session execution runtimes", () => {
 		assert.deepEqual(removed, ["runtime-dead"]);
 	});
 
+	it("runs fixed bounded transcript code only after exact runtime attestation and keeps content out of argv", async () => {
+		const sandbox = makeRuntimeSandbox();
+		const containerId = "runtime-transcript";
+		(sandbox as any)._sessionRuntimes.set("session-a", containerId);
+		(sandbox as any)._isSessionRuntimeCandidateValid = async (sessionId: string, candidate: string) =>
+			sessionId === "session-a" && candidate === containerId;
+		const streamed: Array<{ args: string[]; input: string }> = [];
+		(sandbox as any)._dockerExecWithInput = async (args: string[], input: string) => {
+			streamed.push({ args, input });
+			return "";
+		};
+		const transcriptPath = "/home/node/.bobbit/agent/sessions/workspace/turn.jsonl";
+		const content = "SECRET_TRANSCRIPT_CONTENT";
+
+		await sandbox.runSessionTranscriptOperation("session-a", containerId, {
+			kind: "writeAtomic",
+			path: transcriptPath,
+			content,
+		});
+		assert.equal(streamed.length, 1);
+		assert.equal(streamed[0].input, content);
+		assert.equal(streamed[0].args[0], "exec");
+		assert.equal(streamed[0].args[1], "-i");
+		assert.equal(streamed[0].args[2], containerId);
+		assert.equal(streamed[0].args.includes(transcriptPath), true);
+		assert.equal(streamed[0].args.some(arg => arg.includes(content)), false);
+
+		await assert.rejects(() => sandbox.runSessionTranscriptOperation("session-a", "control-container", {
+			kind: "read", path: transcriptPath,
+		}), /attestation/);
+		await assert.rejects(() => sandbox.runSessionTranscriptOperation("session-a", containerId, {
+			kind: "read", path: "/home/node/.bobbit/agent/sessions/../outside.jsonl",
+		}), /invalid/);
+	});
+
 	it("serializes concurrent creation and removes unexpected runtimes during restart reconciliation", async () => {
 		const sandbox = makeRuntimeSandbox();
 		let creates = 0;
@@ -655,5 +690,48 @@ describe("SandboxManager session runtime registry", () => {
 		await manager.shutdownAll();
 		assert.equal(await manager.isSessionRuntimeIsolated("runtime-project", "session-a", "runtime-a"), false);
 		assert.ok(calls.includes("shutdown"));
+	});
+
+	it("executes transcripts only in the exact registry runtime and removes ephemeral archive runtimes", async () => {
+		const manager = new SandboxManager();
+		const calls: string[] = [];
+		const sandbox = {
+			getStatus: () => ({ projectId: "runtime-project", status: "ready", containerId: "control" }),
+			ensureSessionRuntime: async (sessionId: string) => { calls.push(`ensure:${sessionId}`); return `runtime-${sessionId}`; },
+			runSessionTranscriptOperation: async (sessionId: string, containerId: string, operation: { kind: string }) => {
+				calls.push(`run:${sessionId}:${containerId}:${operation.kind}`);
+				if (containerId !== `runtime-${sessionId}`) throw new Error("exact attestation rejected");
+				return operation.kind === "read" ? `content:${sessionId}` : undefined;
+			},
+			removeSessionRuntime: async (sessionId: string) => { calls.push(`remove:${sessionId}`); },
+		};
+		(manager as any).sandboxes.set("runtime-project", sandbox);
+
+		assert.equal(await manager.runSessionTranscriptOperation(
+			"runtime-project", "archived", { kind: "read", path: "/home/node/.bobbit/agent/sessions/a.jsonl" },
+		), "content:archived");
+		assert.deepEqual(calls, [
+			"ensure:archived",
+			"run:archived:runtime-archived:read",
+			"remove:archived",
+		]);
+		assert.equal((manager as any)._sessionRuntimes.has("archived"), false);
+
+		(manager as any)._sessionRuntimes.set("live", { projectId: "runtime-project", containerId: "runtime-live" });
+		assert.equal(await manager.runSessionTranscriptOperation(
+			"runtime-project", "live", { kind: "exists", path: "/home/node/.bobbit/agent/sessions/a.jsonl" },
+		), undefined);
+		assert.equal(calls.at(-1), "run:live:runtime-live:exists");
+
+		(manager as any)._sessionRuntimes.set("stale", { projectId: "runtime-project", containerId: "control" });
+		await assert.rejects(() => manager.runSessionTranscriptOperation(
+			"runtime-project", "stale", { kind: "read", path: "/home/node/.bobbit/agent/sessions/a.jsonl" },
+		), /exact attestation rejected/);
+		assert.equal(calls.includes("remove:stale"), false);
+
+		(manager as any)._sessionRuntimes.set("foreign", { projectId: "other-project", containerId: "runtime-foreign" });
+		await assert.rejects(() => manager.runSessionTranscriptOperation(
+			"runtime-project", "foreign", { kind: "read", path: "/home/node/.bobbit/agent/sessions/a.jsonl" },
+		), /foreign/);
 	});
 });
