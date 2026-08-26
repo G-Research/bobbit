@@ -19,6 +19,7 @@ import {
 	ownedHeadEvidenceForSlug,
 	createRemoteStateSession,
 	installRemoteStateRouteHooks,
+	handoffRemoteStateRouteRunner,
 } from "../../support/harnesses/integration/remote-state-routes-fixture.js";
 
 test.describe("remote-state coordinator routes", () => {
@@ -95,12 +96,10 @@ test.describe("remote-state coordinator routes", () => {
 		sandboxSession.worktreePath = worktreeRoot;
 		sandboxSession.repoWorktrees = productionRepoWorktrees;
 
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		const gitProbeCwds: string[] = [];
 		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
 		const apiSentinel = "WRONG API COMPONENT SENTINEL";
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		const routeExecFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
 			const cwd = String(options?.cwd ?? "");
 			if (command === "docker" && args.includes("rev-parse") && args.includes("--abbrev-ref")) {
@@ -165,6 +164,11 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			return unexpectedRunnerCommand(file, args, options);
 		};
+		const restoreRunner = await handoffRemoteStateRouteRunner(gateway, [
+			{ owner: "goals", id: goalId },
+			{ owner: "sessions", id: normalSessionId },
+			{ owner: "sessions", id: sandboxSessionId },
+		], routeExecFile);
 
 		try {
 			const routeCases = [
@@ -197,7 +201,7 @@ test.describe("remote-state coordinator routes", () => {
 				expect(call.args.slice(0, 5)).toEqual(["pr", "merge", "41", "--repo", "acme/owned-web"]);
 			}
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreRunner();
 			await Promise.all([deleteSession(normalSessionId), deleteSession(sandboxSessionId), deleteGoal(goalId)]);
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await awaitableRm(fixtureRoot, { maxAttempts: 5, backoffMs: 50 });
@@ -256,10 +260,8 @@ test.describe("remote-state coordinator routes", () => {
 			[nestedSource, { topLevel: nestedSource, commonDir: join(nestedSource, ".git"), slug: "acme/nested-repository", number: 202, title: "nested repository PR" }],
 			[nestedWorktree, { topLevel: nestedWorktree, commonDir: join(nestedSource, ".git"), slug: "acme/nested-repository", number: 202, title: "nested repository PR" }],
 		]);
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		const routeExecFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
 			const cwd = String(options?.cwd ?? "");
 			const repository = repositoryByCwd.get(cwd);
@@ -309,6 +311,10 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			return unexpectedRunnerCommand(file, args, options);
 		};
+		const restoreRunner = await handoffRemoteStateRouteRunner(gateway, [
+			{ owner: "goals", id: rootGoalId },
+			{ owner: "goals", id: nestedGoalId },
+		], routeExecFile);
 
 		try {
 			const routeCases = [
@@ -338,7 +344,7 @@ test.describe("remote-state coordinator routes", () => {
 				expect.objectContaining({ cwd: nestedWorktree, args: expect.arrayContaining(["202", "acme/nested-repository"]) }),
 			]));
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreRunner();
 			await Promise.all(goals.map(goal => deleteGoal(String(goal.id))));
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await Promise.all([
@@ -402,10 +408,8 @@ test.describe("remote-state coordinator routes", () => {
 		let rootOrigin: string | undefined = `https://github.com/${rootRepository.slug}.git`;
 		let nestedOrigin: string | undefined = "https://gitlab.example.test/acme/mixed-nested.git";
 		const originFor = (repository: RepositoryFixture): string | undefined => repository.kind === "root" ? rootOrigin : nestedOrigin;
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		const routeExecFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
 			const cwd = String(options?.cwd ?? "");
 			const repository = repositoryByCwd.get(cwd);
@@ -447,6 +451,10 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			return unexpectedRunnerCommand(file, args, options);
 		};
+		const restoreRunner = await handoffRemoteStateRouteRunner(gateway, [
+			{ owner: "goals", id: rootGoalId },
+			{ owner: "goals", id: nestedGoalId },
+		], routeExecFile);
 
 		const exerciseOrientation = async (trusted: { goalId: string; cwd: string; repository: RepositoryFixture }, untrustedGoalId: string) => {
 			const trustedStatus = await apiFetch(`/api/goals/${trusted.goalId}/pr-status?intent=explicit`);
@@ -477,7 +485,7 @@ test.describe("remote-state coordinator routes", () => {
 				expect(mergeCall?.args.slice(0, 5)).toEqual(["pr", "merge", String(repository.number), "--repo", repository.slug]);
 			}
 		} finally {
-			runner.execFile = originalExecFile;
+			restoreRunner();
 			await Promise.all(goals.map(goal => deleteGoal(String(goal.id))));
 			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await Promise.all([
