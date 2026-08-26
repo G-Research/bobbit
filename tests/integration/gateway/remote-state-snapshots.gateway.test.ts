@@ -76,6 +76,81 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+	test("waits for pre-override remote work before returning a fixture goal", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const firstGoal = await createGoal({
+			title: `fixture goal bootstrap predecessor ${Date.now()}`,
+			cwd: gitCwd(),
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const firstGoalId = String(firstGoal.id);
+		if (typeof firstGoal.projectId !== "string") throw new Error("fixture goal project unavailable");
+		const goalStore = gateway.sessionManager.getGoalStoreForProject(firstGoal.projectId);
+		goalStore.update(firstGoalId, {
+			branch: "fixture/remote-state-bootstrap",
+			worktreePath: gitCwd(),
+			setupStatus: "ready",
+		});
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const fixtureRemote = `https://github.com/acme/goal-bootstrap-drain-${Date.now()}.git`;
+		const secondGoalTitle = `fixture goal bootstrap successor ${Date.now()}`;
+		let oldRefreshActive = false;
+		let oldRefreshStartedResolve!: () => void;
+		const oldRefreshStarted = new Promise<void>(resolve => { oldRefreshStartedResolve = resolve; });
+		let releaseOldRefresh!: () => void;
+		const oldRefreshGate = new Promise<void>(resolve => { releaseOldRefresh = resolve; });
+		let releaseIssued = false;
+		let secondGoalId: string | undefined;
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const releaseDuringSuccessorDrain = () => {
+				const successorPersisted = goalStore.getAll().some((goal: { title: string }) => goal.title === secondGoalTitle);
+				if (!successorPersisted || !oldRefreshActive || releaseIssued) return;
+				releaseIssued = true;
+				releaseOldRefresh();
+			};
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				releaseDuringSuccessorDrain();
+				return { stdout: `${fixtureRemote}\n`, stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
+				oldRefreshActive = true;
+				oldRefreshStartedResolve();
+				await oldRefreshGate;
+				oldRefreshActive = false;
+				return { stdout: "[]", stderr: "" };
+			}
+			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+			if (probe) {
+				releaseDuringSuccessorDrain();
+				return probe;
+			}
+			return unexpectedRunnerCommand(file, args, options);
+		};
+
+		const oldRefresh = apiFetch(`/api/goals/${firstGoalId}/pr-status?intent=explicit&optional=1`);
+		try {
+			await oldRefreshStarted;
+			const secondGoal = await createGoal({
+				title: secondGoalTitle,
+				cwd: gitCwd(),
+				worktree: false,
+				autoStartTeam: false,
+			});
+			secondGoalId = String(secondGoal.id);
+			expect(oldRefreshActive, "fixture goal creation must hand off only after joined predecessor work settles").toBe(false);
+			expect((await oldRefresh).status).toBe(204);
+		} finally {
+			releaseOldRefresh();
+			await oldRefresh.catch(() => undefined);
+			runner.execFile = originalExecFile;
+			if (secondGoalId) await deleteGoal(secondGoalId);
+			await deleteGoal(firstGoalId);
+		}
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());
