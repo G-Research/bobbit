@@ -883,7 +883,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/aigw-legacy-block-adoption.test.ts",
 		allowReason: "isolated test-owned agent-dir models.json proving legacy AIGW block adoption, byte preservation, and owner-only permissions",
 		reads: frozen([
-			{ expression: "modelsPath", count: 8 },
+			{ expression: "modelsPath", count: 10 },
 		]),
 	},
 	{
