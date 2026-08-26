@@ -270,14 +270,74 @@ function bindingElementName(element) {
 	return ts.isIdentifier(element.name) ? element.name.text : null;
 }
 
+const API_BROWSER_FIXTURES = new Set(["page", "browser", "context"]);
+
 function browserFixtureInCallback(callback) {
 	const parameter = callback.parameters[0];
-	if (!parameter || !ts.isObjectBindingPattern(parameter.name)) return null;
-	for (const element of parameter.name.elements) {
-		const name = bindingElementName(element);
-		if (name && API_BROWSER_PRIMITIVES.has(name) && !["chromium", "firefox", "webkit"].includes(name)) return name;
+	if (!parameter) return null;
+
+	const fixtureObjectBindings = new Set();
+	const bindFixtureObjectPattern = (pattern) => {
+		for (const element of pattern.elements) {
+			const name = bindingElementName(element);
+			if (name && API_BROWSER_FIXTURES.has(name)) return name;
+			if (element.dotDotDotToken && ts.isIdentifier(element.name)) fixtureObjectBindings.add(element.name.text);
+		}
+		return null;
+	};
+
+	if (ts.isObjectBindingPattern(parameter.name)) {
+		const fixture = bindFixtureObjectPattern(parameter.name);
+		if (fixture) return fixture;
+	} else if (ts.isIdentifier(parameter.name)) {
+		fixtureObjectBindings.add(parameter.name.text);
+	} else {
+		return null;
 	}
-	return null;
+
+	const declarations = [];
+	const collectDeclarations = (node) => {
+		if (ts.isVariableDeclaration(node)) declarations.push(node);
+		ts.forEachChild(node, collectDeclarations);
+	};
+	collectDeclarations(callback.body);
+
+	// Follow only static aliases and object destructuring derived from the callback's
+	// fixture-object parameter. A fixed point covers aliases declared before or after
+	// one another without interpreting arbitrary helper return values.
+	let bindingsChanged = true;
+	while (bindingsChanged) {
+		bindingsChanged = false;
+		for (const declaration of declarations) {
+			if (!declaration.initializer) continue;
+			const path = expressionPath(declaration.initializer);
+			if (!path || !fixtureObjectBindings.has(path.root) || path.parts.length !== 0) continue;
+			if (ts.isIdentifier(declaration.name) && !fixtureObjectBindings.has(declaration.name.text)) {
+				fixtureObjectBindings.add(declaration.name.text);
+				bindingsChanged = true;
+			} else if (ts.isObjectBindingPattern(declaration.name)) {
+				const before = fixtureObjectBindings.size;
+				const fixture = bindFixtureObjectPattern(declaration.name);
+				if (fixture) return fixture;
+				bindingsChanged ||= fixtureObjectBindings.size !== before;
+			}
+		}
+	}
+
+	let browserFixture = null;
+	const inspectAccess = (node) => {
+		if (browserFixture) return;
+		if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+			const path = expressionPath(node);
+			if (path && fixtureObjectBindings.has(path.root) && API_BROWSER_FIXTURES.has(path.parts[0])) {
+				browserFixture = path.parts[0];
+				return;
+			}
+		}
+		ts.forEachChild(node, inspectAccess);
+	};
+	inspectAccess(callback.body);
+	return browserFixture;
 }
 
 function requireModuleName(expression) {
@@ -362,19 +422,22 @@ function analyzePlaywrightApiUsage(filePath, source) {
 		return Boolean(path && (testBindings.has(path.root)
 			|| (namespaceBindings.has(path.root) && path.parts[0] === "test")));
 	};
-	const isExtendedTest = (expression) => {
+	const extendedTestCall = (expression) => {
 		const candidate = unwrapExpression(expression);
-		if (!ts.isCallExpression(candidate)) return false;
+		if (!ts.isCallExpression(candidate)) return null;
 		const callee = unwrapExpression(candidate.expression);
 		if (ts.isPropertyAccessExpression(callee)) {
-			return callee.name.text === "extend" && isTestReference(callee.expression);
+			return callee.name.text === "extend" && isTestReference(callee.expression) ? candidate : null;
 		}
 		return ts.isElementAccessExpression(callee)
 			&& Boolean(callee.argumentExpression)
 			&& ts.isStringLiteralLike(callee.argumentExpression)
 			&& callee.argumentExpression.text === "extend"
-			&& isTestReference(callee.expression);
+			&& isTestReference(callee.expression)
+			? candidate
+			: null;
 	};
+	const isExtendedTest = (expression) => Boolean(extendedTestCall(expression));
 
 	// Test fixtures commonly wrap the imported binding before declaring cases. Resolve
 	// only static variable bindings, to a fixed point, so normal aliases remain visible
@@ -404,6 +467,36 @@ function analyzePlaywrightApiUsage(filePath, source) {
 		}
 	}
 
+	const resolveCallback = (expression) => {
+		const candidate = unwrapExpression(expression);
+		if (ts.isArrowFunction(candidate) || ts.isFunctionExpression(candidate)) return candidate;
+		return ts.isIdentifier(candidate) ? callbackBindings.get(candidate.text) : undefined;
+	};
+	const fixtureFactoryCallbacks = (extendCall) => {
+		const fixtureObject = extendCall.arguments[0] && unwrapExpression(extendCall.arguments[0]);
+		if (!fixtureObject || !ts.isObjectLiteralExpression(fixtureObject)) return [];
+		const callbacks = [];
+		for (const property of fixtureObject.properties) {
+			if (ts.isMethodDeclaration(property)) {
+				callbacks.push(property);
+				continue;
+			}
+			let initializer;
+			if (ts.isPropertyAssignment(property)) initializer = property.initializer;
+			else if (ts.isShorthandPropertyAssignment(property)) initializer = property.name;
+			else continue;
+			let candidate = unwrapExpression(initializer);
+			if (ts.isArrayLiteralExpression(candidate)) {
+				const first = candidate.elements[0];
+				if (!first || ts.isOmittedExpression(first) || ts.isSpreadElement(first)) continue;
+				candidate = unwrapExpression(first);
+			}
+			const callback = resolveCallback(candidate);
+			if (callback) callbacks.push(callback);
+		}
+		return callbacks;
+	};
+
 	let browserFixture = null;
 	const inspect = (node) => {
 		if (browserFixture && browserImport) return;
@@ -422,11 +515,14 @@ function analyzePlaywrightApiUsage(filePath, source) {
 		if (!browserFixture && ts.isCallExpression(node)) {
 			if (isTestReference(node.expression)) {
 				for (const argument of node.arguments) {
-					const candidate = unwrapExpression(argument);
-					const callback = ts.isArrowFunction(candidate) || ts.isFunctionExpression(candidate)
-						? candidate
-						: ts.isIdentifier(candidate) ? callbackBindings.get(candidate.text) : undefined;
+					const callback = resolveCallback(argument);
 					if (callback) browserFixture = browserFixtureInCallback(callback) ?? browserFixture;
+				}
+			}
+			const extendCall = extendedTestCall(node);
+			if (extendCall) {
+				for (const callback of fixtureFactoryCallbacks(extendCall)) {
+					browserFixture = browserFixtureInCallback(callback) ?? browserFixture;
 				}
 			}
 		}
