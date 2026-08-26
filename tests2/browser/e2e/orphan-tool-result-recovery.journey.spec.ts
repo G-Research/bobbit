@@ -259,8 +259,10 @@ test.describe("Journey: orphan tool-result recovery", () => {
 				}),
 				{ timeout: 20_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: stable-ID capped follow-up must sanitize, stop the poisoned bridge, and respawn before dispatch" },
 			).toEqual({ replaced: true, sanitized: true, oldBridgeStopped: true });
-			expect(sessionManager._sessionReplacementCoordinators.has(sessionId),
-				"poison recovery/redrive coordinator must release after canonical handoff").toBe(false);
+			await expect.poll(
+				() => sessionManager._sessionReplacementCoordinators.has(sessionId),
+				{ timeout: 20_000, message: "poison recovery/redrive coordinator must release after canonical handoff" },
+			).toBe(false);
 			session = requireSession(sessionManager, sessionId);
 			await expect.poll(() => messageTextCount(session, FOLLOW_UP_INTENT), { timeout: 20_000 }).toBe(1);
 			await expect.poll(() => session.promptQueue.toArray().filter((row: any) => row.text.includes(FOLLOW_UP_INTENT)).length, { timeout: 20_000 }).toBe(0);
