@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createMemFs } from "../harness/mem-fs.js";
+import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -31,7 +32,7 @@ const {
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
+const { sessionFileCopy, sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
 const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
 const { executePlan } = await import("../../src/server/agent/session-setup.ts");
 const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
@@ -79,6 +80,7 @@ loadOrCreateToken();
 
 const managers: any[] = [];
 const createdFiles: string[] = [];
+const exactSandboxFixtures: ExactSandboxFixture[] = [];
 const ORPHAN_ERROR =
 	"400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.88.content.0: unexpected tool_use_id found in tool_result blocks: toolu_fixture. Each tool_result block must have a corresponding tool_use block in the previous message.\"}}";
 
@@ -92,6 +94,7 @@ afterEach(() => {
 		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
 		manager.sessions?.clear?.();
 	}
+	while (exactSandboxFixtures.length > 0) exactSandboxFixtures.pop()!.cleanup();
 	while (createdFiles.length > 0) fs.rmSync(createdFiles.pop()!, { force: true });
 });
 
@@ -158,54 +161,130 @@ function containerTranscript(sessionId: string): { containerFile: string; hostFi
 	return { containerFile, hostFile };
 }
 
-function realSandboxFixture(sessionId: string, containerFile: string, runtimeContainerId = "container-boundary"): {
+interface ExactSandboxFixture {
 	projectConfigStore: any;
 	sandboxManager: any;
-	sandbox: any;
-} {
-	const hostFile = sessionTranscriptHostPath(sessionId, containerFile);
-	if (!hostFile) throw new Error("fixture container transcript path must be canonical");
-	const controlContainerId = `control-${runtimeContainerId}`;
-	const sandbox = {
-		getContainerId: vi.fn(async () => controlContainerId),
-		getStatus: vi.fn(() => ({
-			status: "ready",
-			containerId: controlContainerId,
-			projectId: "project-boundary",
-		})),
-		exec: vi.fn(async (args: string[]) => {
-			if (args[0] === "test" && args[1] === "-f" && args[2] === containerFile) return "";
-			if (args[0] === "cat" && args[1] === containerFile) {
-				return fs.readFileSync(hostFile, "utf8");
-			}
-			if (args[0] === "echo") return "ok";
-			throw new Error(`unexpected sandbox exec: ${args.join(" ")}`);
-		}),
+	sandbox: SandboxSessionFilesystem;
+	runtimeId: (sessionId: string) => string;
+	register: (sessionId: string) => Promise<string>;
+	write: (sessionId: string, containerFile: string, content: string) => Promise<void>;
+	read: (sessionId: string, containerFile: string) => Promise<string>;
+	cleanup: () => void;
+}
+
+/**
+ * Model the production SandboxManager boundary rather than granting transcript
+ * access through a project control container or a host mirror. Every operation
+ * first proves the exact project/session/runtime registration, then delegates to
+ * the canonical deterministic session-filesystem harness.
+ */
+function realSandboxFixture(label: string): ExactSandboxFixture {
+	const projectId = "project-boundary";
+	const owners = new Set<string>();
+	const runtimes = new Map<string, { projectId: string; containerId: string }>();
+	const sandbox = new SandboxSessionFilesystem({
+		root: path.join(tmpRoot, `sandbox-session-fs-${label}`),
+		hostAgentSessionsDir: activeAgentSessionsDir(),
+	});
+	const ensureForProject = vi.fn(async (candidateProjectId: string) => {
+		if (candidateProjectId !== projectId) throw new Error("fixture sandbox project mismatch");
+	});
+	const get = vi.fn((candidateProjectId: string) => candidateProjectId === projectId ? sandbox : undefined);
+	const ensureSessionRuntime = vi.fn(async (
+		candidateProjectId: string,
+		sessionId: string,
+		expectedId?: string,
+	) => {
+		await ensureForProject(candidateProjectId);
+		const existing = runtimes.get(sessionId);
+		if (existing && existing.projectId !== candidateProjectId) {
+			throw new Error("fixture session runtime project mismatch");
+		}
+		const containerId = await sandbox.ensureSessionRuntime(
+			sessionId,
+			expectedId ?? existing?.containerId,
+		);
+		runtimes.set(sessionId, { projectId: candidateProjectId, containerId });
+		owners.add(sessionId);
+		return containerId;
+	});
+	const isSessionRuntimeIsolated = vi.fn(async (
+		candidateProjectId: string,
+		sessionId: string,
+		containerId: string,
+	) => {
+		const registered = runtimes.get(sessionId);
+		return registered?.projectId === candidateProjectId
+			&& registered.containerId === containerId
+			&& await sandbox.isSessionRuntimeIsolated(sessionId, containerId);
+	});
+	const releaseSessionRuntime = vi.fn(async (candidateProjectId: string, sessionId: string) => {
+		const registered = runtimes.get(sessionId);
+		if (registered && registered.projectId !== candidateProjectId) {
+			throw new Error("fixture cannot release a foreign session runtime");
+		}
+		runtimes.delete(sessionId);
+		await sandbox.removeSessionRuntime(sessionId);
+	});
+	const runSessionTranscriptOperation = vi.fn(async (
+		candidateProjectId: string,
+		sessionId: string,
+		operation: any,
+	) => {
+		const registered = runtimes.get(sessionId);
+		if (!registered || registered.projectId !== candidateProjectId) {
+			throw new Error("fixture transcript runtime is not registered");
+		}
+		if (!await sandbox.isSessionRuntimeIsolated(sessionId, registered.containerId)) {
+			throw new Error("fixture transcript runtime failed exact isolation attestation");
+		}
+		return sandbox.runSessionTranscriptOperation(sessionId, registered.containerId, operation);
+	});
+	const sandboxManager = {
+		ensureForProject,
+		get,
+		ensureSessionRuntime,
+		isSessionRuntimeIsolated,
+		releaseSessionRuntime,
+		runSessionTranscriptOperation,
 	};
-	return {
+	const fixture: ExactSandboxFixture = {
 		projectConfigStore: {
 			get: vi.fn((key: string) => key === "sandbox" ? "docker" : undefined),
 			getSandboxTokens: vi.fn(() => []),
 		},
-		sandboxManager: {
-			ensureForProject: vi.fn(async () => sandbox),
-			get: vi.fn(() => sandbox),
-			ensureSessionRuntime: vi.fn(async (_projectId: string, _sessionId: string, expectedId?: string) => {
-				if (expectedId && expectedId !== runtimeContainerId) {
-					throw new Error("fixture session runtime identity mismatch");
-				}
-				return runtimeContainerId;
-			}),
-			isSessionRuntimeIsolated: vi.fn(async (_projectId: string, _sessionId: string, candidateId: string) =>
-				candidateId === runtimeContainerId),
-			releaseSessionRuntime: vi.fn(async () => {}),
-		},
+		sandboxManager,
 		sandbox,
+		runtimeId: sessionId => `fixture-runtime:${sessionId}`,
+		register: sessionId => ensureSessionRuntime(projectId, sessionId),
+		async write(sessionId, containerFile, content) {
+			await runSessionTranscriptOperation(projectId, sessionId, {
+				kind: "writeAtomic",
+				path: containerFile,
+				content,
+			});
+		},
+		async read(sessionId, containerFile) {
+			const content = await runSessionTranscriptOperation(projectId, sessionId, {
+				kind: "read",
+				path: containerFile,
+			});
+			if (typeof content !== "string") throw new Error("fixture transcript read returned no content");
+			return content;
+		},
+		cleanup() {
+			fs.rmSync(sandbox.root, { recursive: true, force: true });
+			for (const sessionId of owners) {
+				fs.rmSync(sessionTranscriptRoot(sessionId), { recursive: true, force: true });
+			}
+		},
 	};
+	exactSandboxFixtures.push(fixture);
+	return fixture;
 }
 
 function recordingBridge(
-	onSwitch: (sessionPath: string) => void,
+	onSwitch: (sessionPath: string) => unknown | Promise<unknown>,
 	initial?: { modelProvider: string; modelId: string; thinkingLevel: string },
 ): any {
 	let modelProvider = initial?.modelProvider ?? FIXTURE_MODEL_PROVIDER;
@@ -238,7 +317,7 @@ function recordingBridge(
 		},
 		async compact() { return { success: true }; },
 		async sendCommand(command: any) {
-			if (command?.type === "switch_session") onSwitch(command.sessionPath);
+			if (command?.type === "switch_session") await onSwitch(command.sessionPath);
 			return { success: true };
 		},
 		onEvent() { return () => {}; },
@@ -2893,13 +2972,15 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 	it("assignRole wires a real sandbox replacement before rehydrating container history", async () => {
 		const sessionId = "assign-role-real-sandbox";
-		const { containerFile, hostFile } = containerTranscript(sessionId);
-		const sandboxFx = realSandboxFixture(sessionId, containerFile, "container-role-boundary");
+		const containerFile = `/home/node/.bobbit/agent/sessions/--orphan-boundaries--/${sessionId}.jsonl`;
+		const sandboxFx = realSandboxFixture(sessionId);
+		await sandboxFx.register(sessionId);
+		await sandboxFx.write(sessionId, containerFile, orphanTranscript());
 		fs.writeFileSync(path.join(stateDir, "gateway-url"), "http://127.0.0.1:7890\n", "utf8");
 		const switches: string[] = [];
-		const replacement = recordingBridge((sessionPath) => {
+		const replacement = recordingBridge(async (sessionPath) => {
 			switches.push(sessionPath);
-			assertOrphanRewritten(fs.readFileSync(hostFile, "utf8"));
+			assertOrphanRewritten(await sandboxFx.read(sessionId, sessionPath));
 		});
 		const sendCommand = vi.spyOn(replacement, "sendCommand");
 		let replacementOptions: any;
@@ -2935,7 +3016,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 		})).resolves.toBe(true);
 
 		expect(sandboxFx.sandboxManager.ensureForProject).toHaveBeenCalledWith("project-boundary");
-		expect(sandboxFx.sandbox.getContainerId).toHaveBeenCalledTimes(1);
 		expect(sandboxFx.sandboxManager.ensureSessionRuntime).toHaveBeenCalledWith(
 			"project-boundary",
 			ps.id,
@@ -2944,10 +3024,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(sandboxFx.sandboxManager.isSessionRuntimeIsolated).toHaveBeenCalledWith(
 			"project-boundary",
 			ps.id,
-			"container-role-boundary",
+			sandboxFx.runtimeId(ps.id),
 		);
 		expect(replacementOptions).toMatchObject({
-			containerId: "container-role-boundary",
+			containerId: sandboxFx.runtimeId(ps.id),
 			sandboxed: true,
 			cwd: "/workspace",
 			gatewayUrl: "http://127.0.0.1:7890",
@@ -3755,8 +3835,10 @@ function pipelineContext(sandboxManager: any = null): any {
 		searchIndex: {},
 		sessions: new Map(),
 		assemblePrompt: () => undefined,
-		applySandboxWiring: async (options: any) => {
-			options.containerId = "container-boundary";
+		applySandboxWiring: async (options: any, sessionId: string) => {
+			options.containerId = sandboxManager
+				? await sandboxManager.ensureSessionRuntime("project-boundary", sessionId)
+				: "container-boundary";
 			return true;
 		},
 		handleAgentLifecycle() {},
@@ -3801,37 +3883,41 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 	});
 
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {
-		const sessionId = "continue-sandbox";
+		const sourceSessionId = "continue-sandbox-source";
+		const destinationSessionId = "continue-sandbox";
 		const containerFile = "/home/node/.bobbit/agent/sessions/--orphan-boundaries--/continue-sandbox.jsonl";
-		const sandbox = {
-			exec: vi.fn(async () => {
-				throw new Error("private transcript reads must not escape through the sandbox process");
-			}),
-		};
-		const hostFile = sessionTranscriptHostPath(sessionId, containerFile)!;
-		fs.mkdirSync(path.dirname(hostFile), { recursive: true });
-		fs.writeFileSync(hostFile, orphanTranscript(), "utf8");
-		createdFiles.push(hostFile);
-		const sandboxManager = {
-			ensureForProject: vi.fn(async () => sandbox),
-			get: vi.fn(() => sandbox),
-		};
+		const sandboxFx = realSandboxFixture(destinationSessionId);
+		await sandboxFx.register(sourceSessionId);
+		await sandboxFx.register(destinationSessionId);
+		await sandboxFx.write(sourceSessionId, containerFile, orphanTranscript());
+		await sessionFileCopy(
+			{ sandboxed: true, projectId: "project-boundary", sessionId: sourceSessionId },
+			containerFile,
+			{ sandboxed: true, projectId: "project-boundary", sessionId: destinationSessionId },
+			containerFile,
+			sandboxFx.sandboxManager,
+		);
 		const switches: string[] = [];
-		registerRpcBridgeFactory(() => recordingBridge((sessionPath) => {
+		registerRpcBridgeFactory(() => recordingBridge(async (sessionPath) => {
 			switches.push(sessionPath);
 			expect(sessionPath).toBe(containerFile);
-			assertOrphanRewritten(fs.readFileSync(hostFile, "utf8"));
+			assertOrphanRewritten(await sandboxFx.read(destinationSessionId, sessionPath));
+			expect(await sandboxFx.read(sourceSessionId, containerFile)).toBe(orphanTranscript());
 		}));
 
-		await executePlan(setupPlan(sessionId, containerFile, true), pipelineContext(sandboxManager));
+		await executePlan(
+			setupPlan(destinationSessionId, containerFile, true),
+			pipelineContext(sandboxFx.sandboxManager),
+		);
 
 		expect(switches).toEqual([containerFile]);
-		expect(hostFile).toBe(path.join(
-			sessionTranscriptRoot(sessionId),
-			"--orphan-boundaries--",
-			"continue-sandbox.jsonl",
-		));
-		expect(sandbox.exec).not.toHaveBeenCalled();
+		expect(sandboxFx.sandboxManager.runSessionTranscriptOperation).toHaveBeenCalledWith(
+			"project-boundary",
+			destinationSessionId,
+			expect.objectContaining({ kind: "writeAtomic", path: containerFile }),
+		);
+		expect(sandboxFx.sandbox.calls.some((call) => call.args[0] === "runtime")).toBe(true);
+		expect(sandboxFx.sandbox.calls.some((call) => call.args[0] !== "runtime")).toBe(false);
 	});
 });
 
