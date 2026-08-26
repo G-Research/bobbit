@@ -114,11 +114,11 @@ Focused retry-free coverage is split by boundary:
 
 ```sh
 npx vitest run --config vitest.config.ts --retry=0 \
-  tests2/core/spawn-tree-process-cleanup.test.ts \
-  tests2/core/verification-command-restart-lifecycle.test.ts \
-  tests2/core/verification-harness-timeout.test.ts
+  tests/unit/core/spawn-tree-process-cleanup.unit.test.ts \
+  tests/unit/core/verification-command-restart-lifecycle.unit.test.ts \
+  tests/unit/core/verification-harness-timeout.unit.test.ts
 
-npx tsx --test tests/spawn-tree-shutdown-survival.test.ts
+npx tsx --test tests/e2e/node/spawn-tree-shutdown-survival.node-e2e.test.ts
 ```
 
 The core tests cover sentinel identity mismatch and PID reuse, durable readiness/publication ordering, timeout and cancellation convergence, restart recovery, container witness/attestation mismatches, and zombie-only completion. The standalone native probe covers POSIX survival and Windows Job behavior where the platform is available.
@@ -126,7 +126,7 @@ The core tests cover sentinel identity mismatch and PID reuse, durable readiness
 The real Docker suite is intentionally manual because it starts a gateway and a real sandbox container:
 
 ```sh
-npm run test:manual -- tests/manual-integration/verification-container-ownership.spec.ts
+npm run test:manual -- tests/manual/verification-container-ownership.manual.spec.ts
 ```
 
 Its final coverage proves exact payload and host-transport lifecycle cleanup; per-exec attestation and isolation for concurrent steps; blocked forged results and an honest exit status of 23; cleanup after natural exit status 125 and expected failure; exact crash/restart recovery; a missing retained host-transport witness that remains running/pending until exact restoration and recovery; cancellation despite witness substitution; and structured-row or newline-injection resistance. Across destructive journeys, the target cleans up while an unrelated same-UID sibling remains alive.
@@ -146,6 +146,6 @@ npm run test:e2e
 - `src/server/agent/verification-command-runner.ts` — the command-step spawn boundary.
 - `src/server/agent/verification-harness.ts` — durable verification state, Docker attestation, cleanup ordering, and restart recovery.
 - `src/server/agent/verification-logic.ts` — recovery-mode selection and pure verification semantics.
-- `tests2/core/` — deterministic lifecycle and recovery regressions.
-- `tests/spawn-tree-shutdown-survival.test.ts` — native process ownership survival probe.
-- `tests/manual-integration/verification-container-ownership.spec.ts` — real Docker ownership journey.
+- `tests/unit/core/` — deterministic lifecycle and recovery regressions.
+- `tests/e2e/node/spawn-tree-shutdown-survival.node-e2e.test.ts` — native process ownership survival probe.
+- `tests/manual/verification-container-ownership.manual.spec.ts` — real Docker ownership journey.

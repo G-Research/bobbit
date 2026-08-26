@@ -51,7 +51,7 @@ The gate artifact is an HTML file with:
 10. bash_bg executed successfully (bg-1, bg-2 visible) [screenshot]
 
 ### Automated Test Gap
-The existing E2E test (tool-ask-policy.spec.ts) calls the REST endpoint
+The existing E2E test (tests/browser/journeys/ui/tool-ask-policy.journey.spec.ts) calls the REST endpoint
 directly, bypassing the guard extension. Recommend adding a test that
 exercises the real agent flow, or at minimum validates that the UI re-renders
 on tool_permission_needed WS messages.

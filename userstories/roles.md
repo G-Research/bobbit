@@ -58,7 +58,7 @@ The Roles page (`#/roles`) manages agent roles — their system prompts, accesso
 - Duplicate names are rejected (400, "already exists").
 - Missing name or label is rejected (400).
 
-**Coverage:** partial (API only) — `roles-api.spec.ts` covers POST validation and creation. No browser E2E for the assistant flow or the proposal accept interaction.
+**Coverage:** partial (API only) — `tests/integration/gateway/roles-api.gateway.test.ts` covers POST validation and creation. No browser E2E for the assistant flow or the proposal accept interaction.
 
 ---
 
@@ -95,7 +95,7 @@ The Roles page (`#/roles`) manages agent roles — their system prompts, accesso
 - Clicking Save with no changes: button stays disabled, nothing happens.
 - Editing a builtin role directly (without customizing first): changes are saved as an override. Origin badge updates accordingly.
 
-**Coverage:** partial (API only) — `roles-api.spec.ts` covers PUT for label, prompt, toolPolicies, and accessory. No browser E2E for the form interaction, tool access tab, or persistence across reload.
+**Coverage:** partial (API only) — `tests/integration/gateway/roles-api.gateway.test.ts` covers PUT for label, prompt, toolPolicies, and accessory. No browser E2E for the form interaction, tool access tab, or persistence across reload.
 
 ---
 
@@ -118,7 +118,7 @@ The Roles page (`#/roles`) manages agent roles — their system prompts, accesso
 - Deleting a role from the list view (via the trash icon on the row): same confirmation dialog, same behavior.
 - If deletion fails (network error), the role remains and the view stays on the edit page.
 
-**Coverage:** partial (API only) — `roles-api.spec.ts` covers DELETE for custom roles and builtin cascade behavior. No browser E2E for the confirmation dialog or visual removal from the list.
+**Coverage:** partial (API only) — `tests/integration/gateway/roles-api.gateway.test.ts` covers DELETE for custom roles and builtin cascade behavior. No browser E2E for the confirmation dialog or visual removal from the list.
 
 ---
 

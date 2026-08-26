@@ -24,7 +24,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
    - Spawn a new agent → badge increments.
    - Dismiss an agent → badge decrements (or the dismissed agent remains counted but marked).
 
-**Coverage:** covered (team-lifecycle-ui.spec.ts — dashboard rendering, role tags, status icons)
+**Coverage:** covered (tests/browser/journeys/team-operations.journey.spec.ts — dashboard rendering, role tags, status icons)
 
 ---
 
@@ -45,7 +45,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 4. Click the team lead row.
    - Navigates to the team lead's session, which shows the orchestration messages (spawn commands, merge operations, etc.).
 
-**Coverage:** covered (team-lifecycle-ui.spec.ts — agent row click, navigation)
+**Coverage:** covered (tests/browser/journeys/team-operations.journey.spec.ts — agent row click, navigation)
 
 ---
 
@@ -68,7 +68,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 5. Refresh the page.
    - The dismissed agent still shows as dismissed (state persists via server).
 
-**Coverage:** partial (team-lifecycle-ui.spec.ts — dismiss flow; team-abort.spec.ts — API validation)
+**Coverage:** partial (tests/browser/journeys/team-operations.journey.spec.ts — dismiss flow; tests/integration/gateway/team-abort.gateway.test.ts — API validation)
 
 ---
 
@@ -91,7 +91,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
    - The goal is in an aborted state — spawning is rejected (server returns an error).
 5. Non-team sessions (standalone sessions, other goals) are completely unaffected by the abort.
 
-**Coverage:** covered (team-abort.spec.ts — API abort, membership enforcement, stuck-agent abort, swarm compat)
+**Coverage:** covered (tests/integration/gateway/team-abort.gateway.test.ts — API abort, membership enforcement, stuck-agent abort, swarm compat)
 
 ---
 
@@ -116,7 +116,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 4. After completion, the goal appears in the sidebar's archived/completed section (if archived).
    - Clicking it still shows the dashboard with read-only historical data.
 
-**Coverage:** partial (team-lifecycle-ui.spec.ts — complete button; gate dependency enforcement tested in gates-api.spec.ts)
+**Coverage:** partial (tests/browser/journeys/team-operations.journey.spec.ts — complete button; gate dependency enforcement tested in tests/integration/gateway/gates-api.gateway.test.ts)
 
 ---
 
@@ -145,7 +145,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 6. Steer via the team lead (using `team_steer` tool) instead of navigating to the agent's session.
    - The steer is delivered identically — agent sees it as a user message interleaved with its current work.
 
-**Coverage:** covered (team-steer-prompt.spec.ts — API validation, membership enforcement, steer status 409; queue-ui.spec.ts — UI steer pills)
+**Coverage:** covered (tests/integration/gateway/team-steer-prompt.gateway.test.ts — API validation, membership enforcement, steer status 409; tests/browser/journeys/ui/queue-ui.journey.spec.ts — UI steer pills)
 
 ---
 
@@ -169,7 +169,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
    - The server rejects the request — dismissed agents cannot receive prompts.
    - An error message or disabled state prevents sending.
 
-**Coverage:** covered (team-steer-prompt.spec.ts — prompt dispatch, membership enforcement, validation)
+**Coverage:** covered (tests/integration/gateway/team-steer-prompt.gateway.test.ts — prompt dispatch, membership enforcement, validation)
 
 ---
 
@@ -194,7 +194,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
    - Expand again — they reappear in the same order.
 6. When an agent is dismissed, its session entry in the sidebar reflects the ended state (muted styling or removal).
 
-**Coverage:** covered (team-lifecycle-ui.spec.ts — sidebar nesting, session filtering)
+**Coverage:** covered (tests/browser/journeys/team-operations.journey.spec.ts — sidebar nesting, session filtering)
 
 ---
 
@@ -218,7 +218,7 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 6. In sandbox mode, the agent's commits are pushed automatically for durability before handoff.
    - No commits are lost even if the container is recycled.
 
-**Coverage:** partial (team-abort.spec.ts — worktree cleanup; git handoff fields tested via API in goals-workflows integration)
+**Coverage:** partial (tests/integration/gateway/team-abort.gateway.test.ts — worktree cleanup; git handoff fields tested via API in goals-workflows integration)
 
 ---
 
@@ -243,4 +243,4 @@ Team management covers the goal dashboard's Agents tab, team lifecycle (spawn, d
 5. Navigate away from the dashboard during setup and return after completion.
    - The dashboard shows the fully started team — no manual refresh needed (WebSocket push updates the UI).
 
-**Coverage:** partial (team-lifecycle-ui.spec.ts — team start after setup; gate dependency enforcement in gates-api.spec.ts)
+**Coverage:** partial (tests/browser/journeys/team-operations.journey.spec.ts — team start after setup; gate dependency enforcement in tests/integration/gateway/gates-api.gateway.test.ts)

@@ -25,7 +25,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
 6. Click "System" in the scope selector.
    - The list shows only system-level and builtin workflows (no project overrides).
 
-**Coverage:** config-scope.spec.ts (scope row, badges, scope switching); workflows-api.spec.ts (API list)
+**Coverage:** tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts (scope row, badges, scope switching); tests/integration/gateway/workflows-api.gateway.test.ts (API list)
 
 ---
 
@@ -49,7 +49,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
    - A label input (`.wf-vstep-optional-row input.wf-input`) shows the label text.
    - In the goal creation form, this description renders as a `span.cursor-help` ⓘ tooltip next to the toggle.
 
-**Coverage:** workflow-editor-phases.spec.ts (phase headers, step expansion, type select, optional checkbox, label input)
+**Coverage:** tests/browser/fixtures/goal-workflow-editor.fixture.spec.ts (phase headers, step expansion, type select, optional checkbox, label input)
 
 ---
 
@@ -79,7 +79,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
 9. Attempt to save a workflow with zero gates.
    - The server returns 400 with an error containing "at least one gate".
 
-**Coverage:** workflows-api.spec.ts (POST create, validation: empty gates, missing name, duplicate ID)
+**Coverage:** tests/integration/gateway/workflows-api.gateway.test.ts (POST create, validation: empty gates, missing name, duplicate ID)
 
 ---
 
@@ -113,7 +113,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
    - Create a goal using this workflow (via API). Edit the workflow and save changes.
    - `GET /api/goals/:id` shows the goal's snapshotted workflow is unchanged.
 
-**Coverage:** workflow-editor-phases.spec.ts (agent-qa type, phase grouping, Add Phase, optional checkbox + label, save/reload persistence, empty phase removal, phase compaction, default phase)
+**Coverage:** tests/browser/fixtures/goal-workflow-editor.fixture.spec.ts (agent-qa type, phase grouping, Add Phase, optional checkbox + label, save/reload persistence, empty phase removal, phase compaction, default phase)
 
 ---
 
@@ -139,7 +139,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
    - The delete action is not available (no delete button) or the server rejects the request.
    - Builtin workflows cannot be deleted.
 
-**Coverage:** workflows-api.spec.ts (DELETE 204, DELETE 404 for unknown, DELETE 409 when in-use by active goal)
+**Coverage:** tests/integration/gateway/workflows-api.gateway.test.ts (DELETE 204, DELETE 404 for unknown, DELETE 409 when in-use by active goal)
 
 ---
 
@@ -171,7 +171,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
 8. When the project lacks `qa_start_command`:
    - The QA toggle is automatically **disabled** with a tooltip explaining QA is not configured for this project.
 
-**Coverage:** goal-creation.spec.ts (optional step toggles in assistant and proposal panels, dismiss button); goal-form-tooltips.spec.ts (ⓘ icon visibility, title text, CSS classes, general workflow has no tooltips)
+**Coverage:** tests/browser/journeys/ui/goal-creation.journey.spec.ts (optional step toggles in assistant and proposal panels, dismiss button); tests/browser/journeys/ui/goal-form-tooltips.journey.spec.ts (ⓘ icon visibility, title text, CSS classes, general workflow has no tooltips)
 
 ---
 
@@ -197,7 +197,7 @@ These stories cover the Workflows settings page, the visual gate editor, verific
    - The origin badge reverts to grey "builtin". The row becomes dimmed again.
    - The original builtin gates and steps are restored.
 
-**Coverage:** config-scope.spec.ts (scope row with System and project tabs, origin badges, scope switching reloads list)
+**Coverage:** tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts (scope row with System and project tabs, origin badges, scope switching reloads list)
 
 ---
 
@@ -236,4 +236,4 @@ These stories cover the Workflows settings page, the visual gate editor, verific
    - All steps default to **Phase 0**.
    - The editor shows a single `.wf-phase-group` with a "Phase 0" header containing all steps.
 
-**Coverage:** workflow-editor-phases.spec.ts (phase grouping display, phase compaction on save, empty phase removal, default phase assignment, save/reload persistence)
+**Coverage:** tests/browser/fixtures/goal-workflow-editor.fixture.spec.ts (phase grouping display, phase compaction on save, empty phase removal, default phase assignment, save/reload persistence)

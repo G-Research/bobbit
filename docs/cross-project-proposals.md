@@ -222,7 +222,7 @@ there is no permission check. For goal, role, tool, and staff, the target is
 resolved and validated at seed time. For project proposals, despite the generic
 wording, omission means create rather than "this session"; acceptance applies
 the classifier above. The wording is kept within the per-parameter description
-budget pinned by `tests2/core/tool-description-budget.test.ts`.
+budget pinned by `tests/unit/core/tool-description-budget.unit.test.ts`.
 
 ## Omitted-id guarantees
 

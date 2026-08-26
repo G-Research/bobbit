@@ -129,6 +129,6 @@ The guard extension still uses `POST /api/sessions/:id/tool-grant-request` as th
 
 ## Regression coverage
 
-- `tests2/core/permission-reducer.test.ts` pins lifecycle transitions and supersession.
-- `tests2/dom/permission-card-ux.test.ts` pins blocked rendering, streaming preservation, shared inline/pinned state, stale-grant recovery, and navigation-derived pinned controls.
-- `tests2/browser/fixtures/permission-card-ux.spec.ts` pins visible non-overlapping pinned controls and grant/deny behavior from the pinned stack.
+- `tests/unit/core/permission-reducer.unit.test.ts` pins lifecycle transitions and supersession.
+- `tests/dom/permission-card-ux.dom.test.ts` pins blocked rendering, streaming preservation, shared inline/pinned state, stale-grant recovery, and navigation-derived pinned controls.
+- `tests/browser/fixtures/permission-card-ux.fixture.spec.ts` pins visible non-overlapping pinned controls and grant/deny behavior from the pinned stack.

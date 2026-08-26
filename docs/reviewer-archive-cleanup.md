@@ -71,15 +71,15 @@ This preserves access to real reviewer/QA transcripts while removing empty `New 
 
 Relevant tests:
 
-- `tests/reviewer-archive-metadata.test.ts` — verifier metadata is built before `createSession()`, and legacy `SessionStore` rows are backfilled.
-- `tests/ui-fixtures/sidebar-archived-fixture.spec.ts` — legacy verifier rows stay out of standalone archive buckets, nest near live/archived team leads when possible, preserve transcript fallback visibility, and keep ordinary standalone sessions visible.
-- `tests/ui-fixtures/sidebar-archived-fixture-entry.ts` — shared desktop/mobile fixture data for archived bucketing cases.
+- `tests/unit/core/reviewer-archive-metadata.unit.test.ts` — verifier metadata is built before `createSession()`, and legacy `SessionStore` rows are backfilled.
+- `tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts` — legacy verifier rows stay out of standalone archive buckets, nest near live/archived team leads when possible, preserve transcript fallback visibility, and keep ordinary standalone sessions visible.
+- `tests/support/fixtures/browser/ui/sidebar-archived-fixture-entry.ts` — shared desktop/mobile fixture data for archived bucketing cases.
 
 Focused checks while changing this area:
 
 ```bash
-npx tsx --test tests/reviewer-archive-metadata.test.ts
-npx playwright test tests/ui-fixtures/sidebar-archived-fixture.spec.ts
+npm run test:unit -- tests/unit/core/reviewer-archive-metadata.unit.test.ts
+npx playwright test tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts
 ```
 
 Run the broader checks required by the code touched: UI-only changes need `npm run test:unit`; server lifecycle changes need `npm run check` plus the relevant unit/E2E coverage.

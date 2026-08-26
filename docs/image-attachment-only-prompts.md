@@ -162,10 +162,10 @@ invalid content.
 
 | Concern | Test |
 |---|---|
-| `synthesizeAttachmentText` rule (blank/whitespace/text/no-attachment) | `tests/synthesize-attachment-text.test.ts` |
-| Dispatch boundary: empty/whitespace text + image → non-blank dispatch; stuck-session retry preserves image | `tests/image-only-prompt-dispatch.test.ts` |
-| Stuck-session recovery via respawn + sanitized rehydrate; legacy non-image case; non-poison errors unaffected | `tests/image-only-prompt-unstick-recovery.test.ts` |
-| Sanitizer correctness, idempotency, tool-result protection, path-safety guards | `tests/transcript-sanitizer.test.ts` |
+| `synthesizeAttachmentText` rule (blank/whitespace/text/no-attachment) | `tests/unit/core/synthesize-attachment-text.unit.test.ts` |
+| Dispatch boundary: empty/whitespace text + image → non-blank dispatch; stuck-session retry preserves image | `tests/unit/core/image-only-prompt-dispatch.unit.test.ts` |
+| Stuck-session recovery via respawn + sanitized rehydrate; legacy non-image case; non-poison errors unaffected | `tests/unit/core/image-only-prompt-unstick-recovery.unit.test.ts` |
+| Sanitizer correctness, idempotency, tool-result protection, path-safety guards | `tests/unit/core/transcript-sanitizer.unit.test.ts` |
 
 ## Related
 

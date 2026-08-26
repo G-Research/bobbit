@@ -1,5 +1,7 @@
 # Bobbit Specification Framework
 
+> **Historical planning record:** the story counts, gap examples, and retired test filenames below describe the framework proposal at the time it was written. They are retained as rationale, not current discovery or command guidance. Current coverage citations use canonical paths where a direct owner exists.
+
 ## The Goal
 
 A specification of every user flow in Bobbit, written in plain language, that:
@@ -28,7 +30,7 @@ A specification of every user flow in Bobbit, written in plain language, that:
    - Session B's draft includes both "draft B" text and the attachment tile.
    - Attachments are part of the draft and are preserved.
 
-**Coverage:** covered (message-editor-queue.spec.ts, draft-api.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/message-editor-queue.fixture.spec.ts, tests/integration/gateway/draft-api.gateway.test.ts)
 ```
 
 Problems: "attachment tile" is UI jargon. Coverage doesn't say which steps are tested. No mention of what triggers could break drafts.
@@ -62,9 +64,9 @@ Problems: "attachment tile" is UI jargon. Coverage doesn't say which steps are t
 **Contracts:** CT-02
 
 **Coverage:**
-- steps 1-8: message-editor-queue.spec.ts, draft-api.spec.ts
-- step 5-6 (reload): e2e/ui/queue-ui.spec.ts ("story 22")
-- step 9: message-editor-attach.spec.ts
+- steps 1-8: tests/browser/fixtures/message-editor-queue.fixture.spec.ts, tests/integration/gateway/draft-api.gateway.test.ts
+- step 5-6 (reload): tests/browser/journeys/ui/queue-ui.journey.spec.ts ("story 22")
+- step 9: tests/browser/fixtures/message-editor-attach.fixture.spec.ts
 ```
 
 What changed:
@@ -106,7 +108,7 @@ Any feature that re-renders the input area, changes session state,
 or triggers navigation must verify drafts are preserved.
 
 **Stories:** PI-04, PI-04b, PI-04c, PI-04d
-**Tests:** draft-persistence.spec.ts, e2e/ui/draft-loss.spec.ts, e2e/ui/queue-ui.spec.ts
+**Tests:** tests/browser/journeys/ui/stories-drafts.journey.spec.ts and tests/browser/journeys/ui/queue-ui.journey.spec.ts
 ```
 
 Now when an agent builds the model picker, it sees CT-02 in the feature matrix and knows: "I need to verify that changing the model doesn't clobber the draft." That produces a new sub-story:

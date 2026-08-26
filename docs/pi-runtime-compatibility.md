@@ -58,7 +58,7 @@ Pi `0.84.1` uses TypeBox v1. Bobbit pins `typebox@1.3.7` and migrates Pi-facing 
 
 ### Pinning coverage
 
-`tests2/core/pi-installed-contract.test.ts` executes the installed runtime to pin the aligned trio, delta-only event shape, terminal authority, manual-compaction ordering and prompt rejection, recoverable-length removal and one-retry cap, overflow `willRetry`, and steer queue acknowledgement boundary. `tests2/core/assistant-stream-delta.test.ts`, `assistant-stream-session-broadcast.test.ts`, and `tests2/dom/remote-agent-assistant-stream-delta.test.ts` pin bridge reconstruction and browser live/replay behavior.
+`tests/unit/core/pi-installed-contract.unit.test.ts` executes the installed runtime to pin the aligned trio, delta-only event shape, terminal authority, manual-compaction ordering and prompt rejection, recoverable-length removal and one-retry cap, overflow `willRetry`, and steer queue acknowledgement boundary. `tests/unit/core/assistant-stream-delta.unit.test.ts`, `tests/unit/core/assistant-stream-session-broadcast.unit.test.ts`, and `tests/dom/remote-agent-assistant-stream-delta.dom.test.ts` pin bridge reconstruction and browser live/replay behavior.
 
 ## Historical Pi `0.82.1` compatibility outcome
 
@@ -98,12 +98,12 @@ The follow-up ran deterministic reproductions after PR #1057. The historical imp
 
 Focused evidence:
 
-- `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts` covers durable-first cold restore and force-abort in both directions, explicit `assignRole` precedence, the existing A/B rollback ordering, stale recovery queued behind role replacement, and empty-transcript zombie admission.
-- `tests2/core/runtime-model-recovery-ownership.test.ts` covers role bridge B replacing recovery bridge R during read-back, B committing before quarantine admission, and replacement C winning while B verification is held.
-- `tests2/integration/context-bar-reconnect.test.ts` covers explicit `get_state`, second-connection hydration during partial mutation, complete durable metadata, and matching dynamic live metadata.
-- `tests2/core/controlled-model-fallback.test.ts` covers exact fallback tuple verification, fresh and staged role reclamping, durable-thinking reclamping, and inherited thinking through normal and worktree setup.
-- `tests2/core/runtime-model-zombie-recovery-repro.test.ts` retains the fail-closed canary for a genuinely owned, unverifiable recovery bridge.
-- `tests2/core/rpc-bridge-spawn-args.test.ts` and `tests2/integration/host-agents-sandbox-inheritance.test.ts` retain exact tuple propagation across the shared host/sandbox argument boundary and inherited child sessions.
+- `tests/e2e/vitest/orphan-tool-result-rehydration-boundaries.vitest-e2e.test.ts` covers durable-first cold restore and force-abort in both directions, explicit `assignRole` precedence, the existing A/B rollback ordering, stale recovery queued behind role replacement, and empty-transcript zombie admission.
+- `tests/unit/core/runtime-model-recovery-ownership.unit.test.ts` covers role bridge B replacing recovery bridge R during read-back, B committing before quarantine admission, and replacement C winning while B verification is held.
+- `tests/integration/gateway/context-bar-reconnect.gateway.test.ts` covers explicit `get_state`, second-connection hydration during partial mutation, complete durable metadata, and matching dynamic live metadata.
+- `tests/unit/core/controlled-model-fallback.unit.test.ts` covers exact fallback tuple verification, fresh and staged role reclamping, durable-thinking reclamping, and inherited thinking through normal and worktree setup.
+- `tests/unit/core/runtime-model-zombie-recovery-repro.unit.test.ts` retains the fail-closed canary for a genuinely owned, unverifiable recovery bridge.
+- `tests/unit/core/rpc-bridge-spawn-args.unit.test.ts` and `tests/integration/gateway/host-agents-sandbox-inheritance.gateway.test.ts` retain exact tuple propagation across the shared host/sandbox argument boundary and inherited child sessions.
 
 ### Authoritative Claude Opus 5 catalog
 
@@ -213,7 +213,7 @@ exited zero with no invalid, missing, stale, or extraneous edge. Every reported 
 | Design's nine-file core Pi canary command | 9 files passed; 92 tests passed and 1 platform-specific transcript test skipped. |
 | Extended OAuth, RPC lifecycle, tool normalization, transcript reader, Pi extension, binary, shrinkwrap-fixture, and sandbox-status canaries | 13 files passed; 167 tests passed and 1 platform-specific extension test skipped. |
 | Compaction DOM canary | 1 file passed; 2 tests passed. |
-| Sandbox missing/stale-image coverage | The existing two-test `sandbox-status` Docker-context canary passed. No focused image-version canary exists in `tests2/` or `tests/`; no dependency-only edit to `sandbox-status.ts` is justified. |
+| Sandbox missing/stale-image coverage | The existing two-test `sandbox-status` Docker-context canary passed. No focused image-version canary exists in the canonical test tree; no dependency-only edit to `sandbox-status.ts` is justified. |
 | Packed-consumer graph/binary canary | Reached the unchanged assertion expecting package name `bobbit`, but `npm pack` returns the current manifest name `@gresearch/bobbit`. Both the manifest name and canary are byte-identical to `origin/master`, so this pre-existing failure occurs before any Pi graph or binary assertion and is not a dependency-bump delta. |
 
 ### Deterministic failure ledger
@@ -306,7 +306,7 @@ The interaction uses Pi's root-exported `AuthInteraction` and credential types. 
 
 The migration preserves `callbackServer: true`, flow expiry and cancellation, OAuth credential persistence in the agent `auth.json`, `storeOAuthCredentials()`, and `clearOAuthCache()`. It changes only the Pi integration boundary, not the user-visible Codex login lifecycle.
 
-Pinned coverage: `tests2/core/oauth-external-callbacks.test.ts`.
+Pinned coverage: `tests/unit/core/oauth-external-callbacks.unit.test.ts`.
 
 ## Model runtime and catalog boundary
 
@@ -327,7 +327,7 @@ Bobbit exposes those fields through `/api/models`, the model selector, session s
 
 Pi also adds the RPC command `get_available_thinking_levels`. The RPC bridge accepts this additive command without changing Bobbit's source of truth: selectors and validation continue to use the synchronous model metadata already carried through Bobbit state.
 
-Pinned coverage includes `tests2/core/models-api.test.ts`, `tests2/core/thinking-levels.test.ts`, `tests2/core/role-store.test.ts`, `tests2/core/rpc-bridge-spawn-args.test.ts`, and `tests2/dom/thinking-levels-per-model.test.ts`.
+Pinned coverage includes `tests/unit/core/models-api.unit.test.ts`, `tests/unit/core/thinking-levels.unit.test.ts`, `tests/unit/core/role-store.unit.test.ts`, `tests/unit/core/rpc-bridge-spawn-args.unit.test.ts`, and `tests/dom/thinking-levels-per-model.dom.test.ts`.
 
 ### Fable model-state preservation
 
@@ -341,7 +341,7 @@ The `off: null` entry means Fable cannot disable adaptive thinking. The `max` en
 
 All live and rehydrated `state.model` frames route through `resolveModelStateMeta(provider, id)`. The resolver checks the last exact assembled registry row first, then an exact direct Pi row, and otherwise returns unavailable capability metadata. During a transient AIGW/custom refresh failure, the unchanged source retains its last exact row; identity-matching live fields may be preserved only when exact composition is temporarily unavailable. No family fallback is allowed to invent context, reasoning, modalities, or thinking tiers.
 
-Pinned coverage: `tests2/core/model-state-meta-resolver.test.ts` and `tests2/integration/fable-model-state-frame.test.ts`.
+Pinned coverage: `tests/unit/core/model-state-meta-resolver.unit.test.ts` and `tests/integration/gateway/fable-model-state-frame.gateway.test.ts`.
 
 ## Stream function and browser-safe boundary
 
@@ -357,7 +357,7 @@ Bobbit uses three browser-safe patterns:
 
 Do not reintroduce legacy direct provider imports such as `@earendil-works/pi-ai/anthropic` or `@earendil-works/pi-ai/openai-responses`.
 
-Pinned coverage: `tests2/core/pi-ai-browser-boundary.test.ts` and `tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts`.
+Pinned coverage: `tests/unit/core/pi-ai-browser-boundary.unit.test.ts` and `tests/browser/journeys/pi-runtime-upgrade.journey.spec.ts`.
 
 ## Code Assist pre-auth provider registration
 
@@ -372,7 +372,7 @@ The contract remains split deliberately:
 
 The shared credential check counts both a stored `auth.json` OAuth entry and a gateway `GOOGLE_CLOUD_ACCESS_TOKEN` Bearer token. A generic `GOOGLE_API_KEY` or `GEMINI_API_KEY` never authenticates Code Assist, and `GOOGLE_CLOUD_ACCESS_TOKEN` never authenticates the API-key-only `google` provider. See [Google OAuth models](google-oauth-models.md#account-backed-gemini-as-agent-session-models).
 
-Pinned coverage: `tests2/core/google-code-assist-provider-extension.test.ts` and `tests2/core/google-code-assist-registry.test.ts`.
+Pinned coverage: `tests/unit/core/google-code-assist-provider-extension.unit.test.ts` and `tests/unit/core/google-code-assist-registry.unit.test.ts`.
 
 ## Retry and lifecycle boundaries
 
@@ -382,7 +382,7 @@ Pi can emit `agent_end` for a failed attempt that it will retry internally. An e
 
 Bobbit therefore keeps the session streaming and does not revoke one-time tool grants, drain queued prompts, increment the completed-turn count, resolve `waitForIdle()`, or deliver the retryable `agent_end` to the browser. Settlement waits for the terminal `agent_end` where `willRetry !== true`.
 
-Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`.
+Pinned coverage: `tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts`.
 
 ### Summarization retries and post-compaction turn retry
 
@@ -392,7 +392,7 @@ By contrast, `compaction_end { willRetry: true }` means the compaction itself su
 
 Bobbit must therefore complete the compaction boundary on that event: clear `isCompacting`, persist the sidecar, attach the `compactionId`, refresh the transcript, forward the completion to clients, and retain `result.usage`. `willRetry` applies only to turn settlement. Turn waiters, queued prompts, one-time grants, idle status, and completed-turn accounting remain pending until the final `agent_end`. Keeping these boundaries separate prevents lost compaction history without dispatching queued work during the retried turn.
 
-Pinned coverage: `tests2/core/pi-rpc-agent-end-retry.test.ts`, `tests2/core/compaction-types.test.ts`, `tests2/dom/ui-fixtures/compaction-widget.test.ts`, and the full-stack `tests2/browser/e2e/pre-compaction-history.spec.ts` reload journey.
+Pinned coverage: `tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts`, `tests/unit/core/compaction-types.unit.test.ts`, `tests/dom/ui-fixtures/compaction-widget.dom.test.ts`, and the full-stack `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` reload journey.
 
 ## Tool lifecycle and optional result fields
 
@@ -404,7 +404,7 @@ Pi `0.81.1` exports more lifecycle contracts, including `AgentEvent`, tool execu
 
 Tool results can now carry optional `usage` and `addedToolNames`. Bobbit forwards and persists those fields when Pi supplies them, leaves them absent otherwise, and does not synthesize defaults. Their presence does not activate tools, change turn settlement, or create a new Bobbit cost-accounting source.
 
-Pinned coverage: `tests2/core/pi-tool-lifecycle-contract.test.ts`.
+Pinned coverage: `tests/unit/core/pi-tool-lifecycle-contract.unit.test.ts`.
 
 ### Tool-result error normalization
 
@@ -412,7 +412,7 @@ Pi may return tool errors where the top-level event says `isError: false`, but n
 
 Bobbit normalizes these events before rendering and persistence decisions. The normalizer inspects top-level flags, `result`/`output`, stringified JSON payloads, and text content nested under `result.content` or `output.content`. It returns a normalized copy and does not mutate the original Pi event.
 
-Pinned coverage: `tests2/core/tool-result-error-normalizer.test.ts`.
+Pinned coverage: `tests/unit/core/tool-result-error-normalizer.unit.test.ts`.
 
 ## Session storage, transcripts, and compaction
 
@@ -422,7 +422,7 @@ Bobbit does read Pi-owned JSONL. For valid transcripts, it preserves new `retain
 
 Session-tree metadata such as `active_tools_change`, `leaf`, `branch_summary`, and hidden `custom_message` rows is not chat content or Bobbit runtime metadata. Sanitization and cwd rebasing leave it intact. Only Bobbit-owned runtime headers are eligible for cwd rebasing during fork and continue-archived flows.
 
-Pinned coverage: `tests2/core/transcript-sanitizer.test.ts`, `tests2/core/compaction-types.test.ts`, and `tests2/browser/e2e/pre-compaction-history.spec.ts`.
+Pinned coverage: `tests/unit/core/transcript-sanitizer.unit.test.ts`, `tests/unit/core/compaction-types.unit.test.ts`, and `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`.
 
 ## Orphan tool-result persistence and recovery
 
@@ -477,10 +477,10 @@ It reports repair count and session context without tool IDs, tool payloads, tra
 
 Pinned coverage:
 
-- `tests2/core/transcript-orphan-tool-results.test.ts` covers structural validity, active/inactive branches, metadata, compaction, newline preservation, and idempotence;
-- `tests2/core/orphan-tool-result-recovery.test.ts` covers narrow classification and bounded Retry, follow-up, and REST/tool recovery;
-- `tests2/core/orphan-tool-result-rehydration-boundaries.test.ts` covers restore, respawn, role, force-abort, continue setup, filesystem realms, and path safety; and
-- `tests2/browser/e2e/orphan-tool-result-recovery.journey.spec.ts` covers user-visible Retry and follow-up recovery against a real filesystem.
+- `tests/unit/core/transcript-orphan-tool-results.unit.test.ts` covers structural validity, active/inactive branches, metadata, compaction, newline preservation, and idempotence;
+- `tests/unit/core/orphan-tool-result-recovery.unit.test.ts` covers narrow classification and bounded Retry, follow-up, and REST/tool recovery;
+- `tests/e2e/vitest/orphan-tool-result-rehydration-boundaries.vitest-e2e.test.ts` covers restore, respawn, role, force-abort, continue setup, filesystem realms, and path safety; and
+- `tests/e2e/browser/orphan-tool-result-recovery.browser-e2e.spec.ts` covers user-visible Retry and follow-up recovery against a real filesystem.
 
 ## Worktree setup timeout cleanup
 
@@ -492,7 +492,7 @@ The reason is operational rather than cosmetic: a worktree that appears claimabl
 
 ## Real-model context-pressure smoke
 
-`tests/manual-integration/reliable-agent-context-pressure.spec.ts` is an opt-in real Pi/real-model test of exact-once prompt and steer delivery through genuine automatic context pressure. Deterministic mock-Pi coverage remains the CI gate; this smoke validates the installed provider/runtime path when credentials and budget are available.
+`tests/manual/reliable-agent-context-pressure.manual.spec.ts` is an opt-in real Pi/real-model test of exact-once prompt and steer delivery through genuine automatic context pressure. Deterministic mock-Pi coverage remains the CI gate; this smoke validates the installed provider/runtime path when credentials and budget are available.
 
 ### Credentials and model selection
 
@@ -501,7 +501,7 @@ Choose one setup:
 ```bash
 MANUAL_TEST_MODEL="<provider>/<model>" \
 <provider-credential-environment> \
-npm run test:manual -- tests/manual-integration/reliable-agent-context-pressure.spec.ts --project=manual-integration --workers=1
+npm run test:manual -- tests/manual/reliable-agent-context-pressure.manual.spec.ts --project=manual-integration --workers=1
 ```
 
 Or explicitly inherit only the live server's model/auth subset into the isolated test gateway:
@@ -509,7 +509,7 @@ Or explicitly inherit only the live server's model/auth subset into the isolated
 ```bash
 BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1 \
 BOBBIT_DIR="/absolute/path/to/live/.bobbit" \
-npm run test:manual -- tests/manual-integration/reliable-agent-context-pressure.spec.ts --project=manual-integration --workers=1
+npm run test:manual -- tests/manual/reliable-agent-context-pressure.manual.spec.ts --project=manual-integration --workers=1
 ```
 
 `MANUAL_TEST_MODEL` overrides an inherited default; `MANUAL_TEST_THINKING_LEVEL` is optional. The inherit switch accepts `1` or `true`. On PowerShell, set the same variables through `$env:<NAME>` before running the unchanged npm command.
@@ -555,20 +555,20 @@ Run focused contract coverage before the broad gates:
 
 ```bash
 npx vitest run --config vitest.config.ts --project v2-core \
-  tests2/core/pi-installed-contract.test.ts \
-  tests2/core/assistant-stream-delta.test.ts \
-  tests2/core/assistant-stream-session-broadcast.test.ts \
-  tests2/core/reliable-intent-queue.test.ts \
-  tests2/core/reliable-intent-attempt.test.ts \
-  tests2/core/reliable-compaction-release.test.ts \
-  tests2/core/oauth-external-callbacks.test.ts \
-  tests2/core/pi-rpc-agent-end-retry.test.ts \
-  tests2/core/pi-tool-lifecycle-contract.test.ts \
-  tests2/core/pi-published-shrinkwrap-security.test.ts
+  tests/unit/core/pi-installed-contract.unit.test.ts \
+  tests/unit/core/assistant-stream-delta.unit.test.ts \
+  tests/unit/core/assistant-stream-session-broadcast.unit.test.ts \
+  tests/unit/core/reliable-intent-queue.unit.test.ts \
+  tests/unit/core/reliable-intent-attempt.unit.test.ts \
+  tests/unit/core/reliable-compaction-release.unit.test.ts \
+  tests/unit/core/oauth-external-callbacks.unit.test.ts \
+  tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts \
+  tests/unit/core/pi-tool-lifecycle-contract.unit.test.ts \
+  tests/unit/core/pi-published-shrinkwrap-security.unit.test.ts
 npx vitest run --config vitest.config.ts --project v2-integration \
-  tests2/integration/reliable-intent-recovery.test.ts \
-  tests2/integration/steer-gateway-restart.test.ts
-npm run test:e2e:run -- tests/e2e/pi-packed-consumer.spec.ts --project=api --workers=1 --retries=0
+  tests/integration/gateway/reliable-intent-recovery.gateway.test.ts \
+  tests/integration/gateway/steer-gateway-restart.gateway.test.ts
+npm run test:e2e:run -- tests/e2e/api/pi-packed-consumer.api-e2e.spec.ts --project=api --workers=1 --retries=0
 ```
 
 Then run the required project gates:
@@ -587,10 +587,10 @@ Run `npm run test:manual` when credentials and Docker are available. Also retain
 npm ls @earendil-works/pi-agent-core @earendil-works/pi-ai @earendil-works/pi-coding-agent brace-expansion protobufjs --all
 ```
 
-`tests/e2e/pi-packed-consumer.spec.ts` builds and packs Bobbit, installs the tarball into an empty project under normal consumer lock settings, inspects the dependency graph and shrinkwrap-owned paths, and smokes the installed `fd`/`rg` binaries. It intentionally does not call `npm audit`; normal unit, browser, and E2E gates must remain independent of mutable registry advisory output.
+`tests/e2e/api/pi-packed-consumer.api-e2e.spec.ts` builds and packs Bobbit, installs the tarball into an empty project under normal consumer lock settings, inspects the dependency graph and shrinkwrap-owned paths, and smokes the installed `fd`/`rg` binaries. It intentionally does not call `npm audit`; normal unit, browser, and E2E gates must remain independent of mutable registry advisory output.
 
 For release evaluation, first build Bobbit, then run `npm run audit:packed-consumer`. The command packs the built package and installs it into a clean temporary consumer, then runs `npm audit --omit=dev --json` against the public registry. Its child npm processes use fresh home/config/cache/temp directories, do not inherit registry credentials or auth tokens, and disable lifecycle scripts. The normal release policy requires a successful zero-finding result and treats an unavailable advisory service as blocking; see [Releasing Bobbit](releasing.md#required-packed-consumer-audit). This `0.82.1` delivery has one explicit, human-approved exception for the exact Pi-owned `brace-expansion@5.0.7` finding. The command remains non-zero and its report remains required evidence. The exception does not cover a changed advisory result, an additional finding, or an unavailable audit service.
 
-`tests2/core/pi-published-shrinkwrap-security.test.ts` uses local fixtures to pin why a clean root audit cannot replace consumer evidence without querying the registry.
+`tests/unit/core/pi-published-shrinkwrap-security.unit.test.ts` uses local fixtures to pin why a clean root audit cannot replace consumer evidence without querying the registry.
 
 Historical upgrade note: [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) records the Opus-specific model, thinking-level, spawn, and sandbox auth contracts from that earlier Pi line.

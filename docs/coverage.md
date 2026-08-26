@@ -57,13 +57,9 @@ The server TypeScript build (`tsconfig.server.json`) has `"sourceMap": true`. c8
 
 ## Adding New Test Files
 
-When you add a new `tests/*.test.ts` file:
+Use `npm run test:new -- <semantic> <name>` to create a test with the canonical directory and suffix. Runner and coverage discovery come from those path conventions; no script or registry needs a per-file entry.
 
-1. Add it to the `test:node` script in `package.json` (the file list after `--test-force-exit`)
-2. Add it to the `test:coverage` script (same file list in the c8-wrapped command)
-3. Add it to the `test:unit-coverage` script (same file list)
-
-All three scripts share the same explicit file list to keep test execution deterministic.
+Run `npm run test:layout` before the owning lane. It scans tracked, staged, and untracked files and reports the expected destination for any misplaced test.
 
 ## Coverage Baseline
 

@@ -402,43 +402,30 @@ npx playwright test --config playwright-e2e.config.ts
 
 ## Testing
 
-Use selective unit feedback while iterating, then run the authoritative phases required by the workflow:
+Run the complete deterministic lane that owns the change:
 
 ```bash
-npm run test:affected  # Default local feedback: effective Git diff + local PASS cache
-npm run test:unit      # Complete map-owned Vitest inventory
-npm run test:browser   # Playwright browser fixtures and journeys
-npm run test:e2e       # Real Git/worktree, Docker, MCP, process, port, and restart coverage
-npm test               # Unit, browser, then E2E
+npm run test:layout   # Validate test placement and semantic suffixes
+npm run test:unit     # Unit, DOM, isolated, and gateway integration tests
+npm run test:browser  # Playwright browser fixtures and journeys
+npm run test:e2e      # Real Git/worktree, Docker, MCP, process, port, and restart coverage
+npm run test:manual   # Opt-in real-model and external-service tests
+npm test              # Unit, browser, then E2E
 ```
 
-A practical loop is:
+Each lane discovers tests directly from the canonical `tests/` hierarchy and semantic suffixes. There is no per-file registry or affected-test dependency graph. Prefer a complete lane over maintaining an inferred subset.
 
-1. Run `npm run test:affected` after each change. It includes committed, staged, unstaged, and untracked files relative to the remote-primary merge base.
-2. Read the summary: `SKIP-ALL` is only known, unclaimed docs, `BOUNDED` reports selected/cache-hit/run counts, `CACHE-HIT-ALL` means every bounded file has an unchanged local PASS, and `RUN-ALL` is a cache-bypassing safety fallback. Git deletes and rename old sides are classified before graph construction: declared non-code ownership is preserved by tombstones, but unknown or deleted executable inputs run the full unit inventory. Shipped prompt, skill, and pack Markdown is graph-owned and never treated as ordinary docs.
-3. Inspect a plan without executing it when needed:
+Use `npm run test:new -- <semantic> <name>` to scaffold a test at its canonical path. `npm run test:layout` also scans staged and untracked files, so a misplaced test fails before commit with its expected destination.
 
-   ```bash
-   npm run test:affected -- --dry --json
-   npm run test:affected -- --base origin/main --dry --no-cache
-   npm run test:affected -- --changed src/ui/components/GitStatusWidget.ts --dry
-   ```
+Before merge, run the workflow's required complete lanes. Retry-free qualification uses:
 
-4. Before merge, run the canonical full phases. Retry-free qualification uses:
+```bash
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
+BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
+```
 
-   ```bash
-   BOBBIT_V2_RETRY_FREE=1 npm run test:unit
-   BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
-   BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
-   ```
-
-The affected cache under `.profiles/test-cache/` is ignored, checkout-local optimization state. Do not copy or share it, use it as evidence, or upload/restore it in CI. Affected testing is local developer feedback only; CI runs the cross-platform full unit suite, and browser/E2E gates are unchanged.
-
-When changing test ownership or dynamically loaded repository inputs, run `npm run test:unit:inventory` and the relevant affected-runner pins. New shipped role/tool/skill/pack/workflow/config families and computed readers need declared selector edges because the same closure controls both selection and cache invalidation. Declare deletion-safe ownership for dynamic families; tombstones retain declared impact, scan, and indirect-reader edges but cannot recover undeclared or old static source imports.
-
-Use `npm run test:affected:proof -- 14` for a fast selection-only replay through the current checkout's graph. Use `npm run test:affected:correctness` only for expensive manual or periodic qualification: it installs and executes each immutable sample from an owned detached worktree, uses that revision's execution map and inventory, and fails on selector errors or under-selection. Counts from these two commands have different denominators and should not be compared as if they were the same run.
-
-See the [affected-runner reference](../scripts/affected/README.md), [unit gate operating model](testing-v2/unit-gate.md), [testing strategy](testing-strategy.md), and [cross-OS test authoring guide](testing-v2/cross-os-test-authoring.md).
+See [testing strategy](testing-strategy.md) for lane ownership and [cross-OS test authoring](testing-v2/cross-os-test-authoring.md) for isolation and platform rules.
 
 ---
 
@@ -559,5 +546,5 @@ To get a fork change accepted into the upstream project:
 - **[REST API](rest-api.md)** — Full REST API reference
 - **[Security Model](security.md)** — Auth, TLS, and security details
 - **[Networking](networking.md)** — Bind addresses, TLS, deSEC, QR codes
-- **[Bundle profile workflow](perf/bundle-profile.md)** — Diagnose UI bundle-size regressions; budget guard at `tests/bundle-size.test.ts`
+- **[Bundle profile workflow](perf/bundle-profile.md)** — Diagnose UI bundle-size regressions; budget guard at `tests/unit/core/bundle-size.unit.test.ts`
 - **[AGENTS.md](../AGENTS.md)** — Agent context: repo layout, key concepts, common tasks, debugging tips

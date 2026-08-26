@@ -78,11 +78,11 @@ Build-size and build-warning checks live in the repo:
    `(!) Some chunks are larger than 600 kB after minification.` if any
    chunk crosses 600 KB raw. The build still succeeds, so this is
    advisory.
-2. **`npm run test:bundle`** (`tests/bundle-size.test.ts`) — fails the
+2. **`npm run test:bundle`** (`tests/unit/core/bundle-size.unit.test.ts`) — fails the
    build if the entry chunk exceeds 250 KB gzipped, any non-worker
    chunk exceeds 200 KB gzipped, or any non-worker chunk exceeds
    600 KB raw. Pinned thresholds, raise only after a measured win.
-3. **`tests2/core/clean-build-warnings-regression.test.ts`** and `tests2/core/pi-ai-browser-boundary.test.ts` — pin warning
+3. **`tests/unit/core/clean-build-warnings-regression.unit.test.ts`** and `tests/unit/core/pi-ai-browser-boundary.unit.test.ts` — pin warning
    classes that are easy to miss in green builds: no browser runtime
    bare imports from `@earendil-works/pi-ai`, Pi `0.81.1` streaming imports limited to package-exported API/provider subpaths, no misleading dynamic
    import of modules already statically imported, and quiet expected
@@ -157,7 +157,7 @@ a literal specifier per entry.
 
 - `vite.profile.config.ts` — the profile entry point. Header comment
   has the one-liner usage.
-- `tests/bundle-size.test.ts` — the budget regression test.
+- `tests/unit/core/bundle-size.unit.test.ts` — the budget regression test.
 - `docs/design/shrink-initial-bundle.md` — the design doc that landed
   the current set of lazy-load boundaries.
 - `docs/design/ui-bundle-size-reduction.md` — the earlier reduction

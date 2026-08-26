@@ -213,7 +213,7 @@ for the same hazard — now unified behind the shared constants.
 
 ## Pinning test
 
-`tests/cold-restart-reprompt.test.ts` pins the behaviour through observable seams
+`tests/unit/core/cold-restart-reprompt.unit.test.ts` pins the behaviour through observable seams
 (call order, the prompt timeout argument, whether a rejection escaped, how many
 times the cold agent is prompted), not symbol names, so it stays robust against
 implementation detail:
@@ -239,6 +239,6 @@ implementation detail:
 | `src/server/agent/session-manager.ts` | `enqueuePrompt` (`coldStart` opt) → `dispatchDirectPrompt` | Threads `coldStart` so the direct dispatch uses `promptWhenReady`. |
 | `src/server/agent/team-manager.ts` | `_bootResumeIdleTeamLeads`, `_dispatchBootResumeNudge` | Boot-resume nudge for idle leads with work; owns the async-drain rejection. |
 | `src/server/agent/verification-harness.ts` | `_tryResumeFromSession` | Reviewer resume — third consumer of `promptWhenReady` (see verification-restart.md). |
-| `tests2/core/cold-restart-reprompt.test.ts` | Restart recovery coverage | Pins readiness wait, owned rejection handling, pending-gate recovery, dormant-goal suppression, and prompt deduplication. |
+| `tests/unit/core/cold-restart-reprompt.unit.test.ts` | Restart recovery coverage | Pins readiness wait, owned rejection handling, pending-gate recovery, dormant-goal suppression, and prompt deduplication. |
 </content>
 </invoke>

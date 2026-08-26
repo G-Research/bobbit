@@ -27,7 +27,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
    - The selected session row has a visually distinct background (`bg-secondary` or equivalent).
    - Non-selected session rows have no active background.
 
-**Coverage:** covered (navigation.spec.ts — deep-link to session view, session to settings and back)
+**Coverage:** covered (tests/browser/journeys/app-smoke.journey.spec.ts — deep-link to session view, session to settings and back)
 
 ---
 
@@ -53,7 +53,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 5. Navigate to a goal that does not exist (manually set URL to `#/goal/nonexistent-uuid`).
    - The app handles the missing goal gracefully — no crash, no blank screen. Landing view or error state shown.
 
-**Coverage:** covered (navigation.spec.ts — navigate to goal dashboard via deep link, back navigation works)
+**Coverage:** covered (tests/browser/journeys/app-smoke.journey.spec.ts — navigate to goal dashboard via deep link, back navigation works)
 
 ---
 
@@ -83,7 +83,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 10. Navigate to `#/` or empty hash.
     - Landing view is shown (no session selected, no config page).
 
-**Coverage:** covered (navigation.spec.ts — deep-link to session view, navigate to goal dashboard via deep link; page-title.spec.ts)
+**Coverage:** covered (tests/browser/journeys/app-smoke.journey.spec.ts — deep-link to session view, navigate to goal dashboard via deep link; tests/browser/journeys/ui/page-title.journey.spec.ts)
 
 ---
 
@@ -112,7 +112,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
    - Press Back: returns to landing.
    - History stack is fully intact across view types.
 
-**Coverage:** covered (navigation.spec.ts — session to settings and back, back navigation works)
+**Coverage:** covered (tests/browser/journeys/app-smoke.journey.spec.ts — session to settings and back, back navigation works)
 
 ---
 
@@ -139,7 +139,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 6. Resize viewport from mobile (375px) to desktop (1280px) while sidebar is collapsed.
    - Sidebar respects the stored `bobbit-sidebar-collapsed` localStorage state rather than auto-expanding.
 
-**Coverage:** partial (navigation.spec.ts covers collapse/expand; no dedicated mobile viewport test)
+**Coverage:** partial (tests/browser/journeys/app-smoke.journey.spec.ts covers collapse/expand; no dedicated mobile viewport test)
 
 ---
 
@@ -166,7 +166,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 6. Open a new browser tab to the same app URL.
    - New tab reads `bobbit-sidebar-collapsed` from localStorage and starts with the matching sidebar state.
 
-**Coverage:** covered (navigation.spec.ts — sidebar collapse and expand)
+**Coverage:** covered (tests/browser/journeys/app-smoke.journey.spec.ts — sidebar collapse and expand)
 
 ---
 
@@ -184,7 +184,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 4. Navigate between sessions, goals, settings, and landing.
    - Title always follows the pattern `"<activeProjectName> · Bobbit"` — it does not change per view, only per active project.
 
-**Coverage:** covered (page-title.spec.ts — shows active project name with interpunct and Bobbit)
+**Coverage:** covered (tests/browser/journeys/ui/page-title.journey.spec.ts — shows active project name with interpunct and Bobbit)
 
 ---
 
@@ -220,7 +220,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 13. All navigation shortcuts (`Ctrl+[`, `Ctrl+,`, `Ctrl+ArrowUp`, `Ctrl+ArrowDown`, `Ctrl+T`, `Ctrl+/`) work even when the textarea has focus (`allowInInput: true`).
     - The shortcut fires instead of typing the character.
 
-**Coverage:** partial (navigation.spec.ts tests sidebar collapse button clicks; keyboard shortcut E2E tests not yet comprehensive)
+**Coverage:** partial (tests/browser/journeys/app-smoke.journey.spec.ts tests sidebar collapse button clicks; keyboard shortcut E2E tests not yet comprehensive)
 
 ---
 
@@ -255,7 +255,7 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
     - Sidebar highlight tracks the current view at each step.
     - Page title remains `"<ProjectName> · Bobbit"` throughout.
 
-**Coverage:** partial (navigation.spec.ts covers individual transitions; no single end-to-end journey test)
+**Coverage:** partial (tests/browser/journeys/app-smoke.journey.spec.ts covers individual transitions; no single end-to-end journey test)
 
 ---
 
@@ -283,4 +283,4 @@ Hash-based routing, sidebar interactions, deep links, browser history, keyboard 
 8. Navigate to `#/settings/shortcuts` (legacy format — tab only, no scope).
    - Interpreted as `#/settings/system/shortcuts`. Shortcuts tab renders under system scope.
 
-**Coverage:** partial (navigation.spec.ts tests session-to-settings round trip; no sub-tab navigation tests)
+**Coverage:** partial (tests/browser/journeys/app-smoke.journey.spec.ts tests session-to-settings round trip; no sub-tab navigation tests)

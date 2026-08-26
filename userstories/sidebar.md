@@ -127,7 +127,7 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
    - Only one session row is highlighted at a time.
    - URL updates to reflect the session.
 
-**Coverage:** `tests/sidebar-collapse.spec.ts` (collapse per-project persistence); navigation: partial via N-01.
+**Coverage:** `tests/dom/sidebar-collapse.dom.test.ts` (collapse per-project persistence); navigation: partial via N-01.
 
 ---
 
@@ -151,7 +151,7 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
 6. Reload the page.
    - Goal expand/collapse state is preserved.
 
-**Coverage:** `tests/goal-card-back-nav.spec.ts` (click session in goal, back nav); team nesting: none.
+**Coverage:** `tests/dom/goal-card-back-nav.dom.test.ts` (click session in goal, back nav); team nesting: none.
 
 ---
 
@@ -330,7 +330,7 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
 3. Toggle "Show archived" on.
    - The archived team lead and child agents appear under the goal, with greyscale styling.
 
-**Coverage:** `tests/sidebar-archive-cta.spec.ts` (archive CTA rendering); archived team visibility: none.
+**Coverage:** `tests/dom/sidebar-archive-cta.dom.test.ts` (archive CTA rendering); archived team visibility: none.
 
 ---
 
@@ -515,7 +515,7 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
    - Goal moves from the live goals section to the archived goals section.
    - If "Show archived" is off, the goal simply disappears from the live section.
 
-**Coverage:** `tests/sidebar-archive-cta.spec.ts` (CTA rendering); archive lifecycle: none.
+**Coverage:** `tests/dom/sidebar-archive-cta.dom.test.ts` (CTA rendering); archive lifecycle: none.
 
 ---
 
@@ -542,7 +542,7 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
    - Session opens. Query remains in the input (not cleared on navigation).
    - Sidebar continues to show filtered results.
 
-**Coverage:** `tests/search-box.spec.ts` (Ctrl+K, escape, clear, controls visibility). See also SR-01 in search.md.
+**Coverage:** `tests/dom/search-box.dom.test.ts` (Ctrl+K, escape, clear, controls visibility). See also SR-01 in search.md.
 
 **Matched-term highlighting:** When the query is non-empty, every matching substring in a visible goal title, session title, session role, or staff name is wrapped in a `<strong class="font-semibold">` span so the user can see *why* a row matched. Matching is case-insensitive, preserves original casing, bolds every occurrence, escapes regex special chars in the query, and leaves plain text untouched when the query is empty. Shared helper `renderHighlightedText` in `src/app/render-helpers.ts` is used by both `renderSidebar` and `renderMobileLanding`.
 
@@ -725,7 +725,7 @@ The tree has two rendering zones: **live** (always visible) and **archived** (vi
    - Goal creation dialog/assistant opens.
 5. Shortcuts do not fire when a text input or textarea elsewhere has focus.
 
-**Coverage:** `tests/search-box.spec.ts` (Ctrl+K); others: none.
+**Coverage:** `tests/dom/search-box.dom.test.ts` (Ctrl+K); others: none.
 
 ---
 

@@ -1,7 +1,8 @@
 # Tier 2.5 — opt-in beat-capture + video reports for browser E2E
 
-Tier 2.5 is a **layer on top of** the standard browser E2E suite
-(`tests/e2e/ui/`). Tests that opt in capture a labeled screenshot at every
+Tier 2.5 is a **layer on top of** Playwright browser tests under
+`tests/browser/` and real-fidelity browser E2E tests under `tests/e2e/browser/`.
+Tests that opt in capture a labeled screenshot at every
 meaningful UX moment; the run produces a self-contained scrubbable HTML
 report with a per-test WebM video and clickable thumbnail strip. The report
 is for human review — a debugging artifact you can scrub through long after
@@ -59,23 +60,25 @@ test("my test", async ({ page, rec }) => {
 });
 ```
 
-Run with capture on:
+Run a canonical browser journey with capture on:
 
 ```bash
-RECORDSCREEN=1 npm run test:e2e -- bg-wait-steer-flow.spec.ts
+RECORDSCREEN=1 npm run test:browser -- tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts
 ```
 
-Run normally (no capture, identical to master):
+Run normally (no capture):
 
 ```bash
-npm run test:e2e -- bg-wait-steer-flow.spec.ts
+npm run test:browser -- tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts
 ```
 
-The canonical worked example is [`tests/e2e/ui/bg-wait-steer-flow.spec.ts`](../tests/e2e/ui/bg-wait-steer-flow.spec.ts) — the test PR #433 added. Additional migrated specs that follow the same pattern: `queue-ui.spec.ts`, `jump-to-bottom.spec.ts`, `ask-user-choices-ui.spec.ts`, and `stories-streaming.spec.ts`. Use them as templates when picking beat boundaries for queue/steer flows, scroll-state interactions, ask-widget round-trips, and reconnect-mid-stream dedup respectively.
+The recorder writes beat artifacts in both browser cells. Automatic Tier 2.5 HTML report assembly is currently registered only by `playwright-e2e.config.ts`; normal-browser runs do not yet assemble those beats into the report.
+
+The canonical worked example is [`tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts`](../tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts) — the test PR #433 added. Additional migrated specs that follow the same pattern include `tests/browser/journeys/ui/queue-ui.journey.spec.ts`, `ask-user-choices-ui.journey.spec.ts`, and `stories-streaming.journey.spec.ts`, plus `tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts`. Use them as templates when picking beat boundaries for queue/steer flows, scroll-state interactions, ask-widget round-trips, and reconnect-mid-stream dedup respectively.
 
 ## Transcript-fidelity invariant
 
-[`tests/e2e/ui/transcript-fidelity.spec.ts`](../tests/e2e/ui/transcript-fidelity.spec.ts) is a generic regression guard for the bug class that PRs #436 and #437 fixed: the live DOM diverging from the server snapshot. The post-refresh DOM is hydrated from the persisted message snapshot — it is the ground truth of "what really happened in this session". The live DOM is the result of streaming reducer state. After a multi-cycle `STREAM_BURST:3` mock-agent burst, the two views must agree exactly: same number of messages, same fingerprints, same order, no live-only duplicates.
+[`tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts`](../tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts) is a generic regression guard for the bug class that PRs #436 and #437 fixed: the live DOM diverging from the server snapshot. The post-refresh DOM is hydrated from the persisted message snapshot — it is the ground truth of "what really happened in this session". The live DOM is the result of streaming reducer state. After a multi-cycle `STREAM_BURST:3` mock-agent burst, the two views must agree exactly: same number of messages, same fingerprints, same order, no live-only duplicates.
 
 The assertion shape:
 
@@ -115,8 +118,8 @@ caught PR #433 and PR #436. Copy them.
 This list is non-negotiable. Each item below was tried, rejected, and would re-introduce flakiness or false-bug-classes if reintroduced.
 
 - **It is not a replacement for unit tests.** Pure-Node tests for reducers, state machines, and pure functions remain the right tool — they run in milliseconds and isolate logic from the UI.
-- **It is not a replacement for browser E2E.** Standard `tests/e2e/ui/` tests are simpler, faster, and run in CI by default. Tier 2.5 is for **multi-step user-journey** tests where the value of the recorded video is real.
-- **It is not a manual-integration substitute.** Real-LLM tests (`tests/manual-integration/`) remain the only way to catch bugs that depend on real model latency, cost, or output content.
+- **It is not a replacement for browser coverage.** Standard fixtures and journeys under `tests/browser/` are simpler, faster, and run in CI by default. Tier 2.5 is for **multi-step user-journey** tests where beat artifacts add review value.
+- **It is not a manual-lane substitute.** Real-model tests under `tests/manual/` remain the only way to catch bugs that depend on real model latency, cost, or output content.
 - **No synthetic event reordering / chaos pipes / `ErraticChannel` abstractions.** Production has no reorder buffer — TCP delivers in order and the server stamps monotonic `seq`. Faking disorder fakes a bug class that doesn't exist in production. The right way to expand mock fidelity is to identify what *real* LLM streams do (per AGENTS.md debug entries) and have the mock emit those patterns.
 - **Don't slow scenarios down for visual clarity.** The "video controls + 1500ms beat hold" pattern solves visual review without slowing the test. `LINGER_MS` and `TYPE_DELAY_MS` were tried and reverted.
 - **Don't auto-launch Chrome from the test.** The test writes the report to disk and prints its path; opening it is the user's job (or a one-line shell command). `child_process.spawn`-to-open-browser was tried and added flakiness for no value.
@@ -126,7 +129,7 @@ This list is non-negotiable. Each item below was tried, rejected, and would re-i
 
 ## Mock trigger reference
 
-Every Tier 2.5 test uses the mock LLM agent at `tests/e2e/mock-agent-core.mjs`. The mock inspects user prompt text for trigger phrases and emits production-shape events (multi-delta `message_update`, `tool_execution_*` lifecycle, role-correct `message_end`) so any production reducer / state-machine change is exercised by tests that use these triggers.
+Every Tier 2.5 test uses the mock LLM agent at `tests/e2e/_helpers/mock-agent-core.mjs`. The mock inspects user prompt text for trigger phrases and emits production-shape events (multi-delta `message_update`, `tool_execution_*` lifecycle, role-correct `message_end`) so any production reducer / state-machine change is exercised by tests that use these triggers.
 
 The full trigger contract lives in the header comment of `mock-agent-core.mjs`. Summary:
 
@@ -154,10 +157,10 @@ When in doubt about exact event semantics, read the header comment in `mock-agen
 
 The fixture's plumbing is a few small files that nest cleanly into the existing E2E setup:
 
-- **`tests/e2e/ui/cursor-overlay.ts`** — `CURSOR_OVERLAY_SCRIPT` string, fed to Playwright's `addInitScript`. Self-contained IIFE, idempotent (`window.__protoCursorInstalled` guard). Red dot tracks pointer events, flashes yellow on mousedown.
-- **`tests/e2e/ui/beat-recorder.ts`** — `class BeatRecorder { capture(label); flush() }`. Each `capture()` writes one viewport PNG to `<testInfo.outputDir>/beats/<idx-padded-4>.png` and appends a record. `flush()` writes JSONL to `<testInfo.outputDir>/beats.jsonl`. Off-switch: every method early-returns when `RECORDSCREEN !== "1"`.
-- **`tests/e2e/ui/fixtures.ts`** — extends `baseTest` from `../gateway-harness.js` with a `rec: BeatRecorder` fixture. Conditionally injects the cursor overlay, auto-flushes after `use(rec)`. Re-exports `expect` from Playwright.
-- **`tests/e2e/report/tier-2-5-reporter.ts`** — Playwright `Reporter`. On `onEnd`, walks the test-results tree for `beats.jsonl`, encodes each test's `beats/*.png` into a 1500ms-per-beat WebM via ffmpeg, generates 240px thumbnails, and emits `tests/results/tier-2-5/report.html`. All references in the HTML are relative paths — **no base64 inlining**.
+- **`tests/support/harnesses/browser/legacy-ui/cursor-overlay.ts`** — `CURSOR_OVERLAY_SCRIPT` string, fed to Playwright's `addInitScript`. Self-contained IIFE, idempotent (`window.__protoCursorInstalled` guard). Red dot tracks pointer events, flashes yellow on mousedown.
+- **`tests/support/harnesses/browser/legacy-ui/beat-recorder.ts`** — `class BeatRecorder { capture(label); flush() }`. Each `capture()` writes one viewport PNG to `<testInfo.outputDir>/beats/<idx-padded-4>.png` and appends a record. `flush()` writes JSONL to `<testInfo.outputDir>/beats.jsonl`. Off-switch: every method early-returns when `RECORDSCREEN !== "1"`.
+- **`tests/support/harnesses/browser/legacy-ui/fixtures.ts`** — extends the canonical browser journey fixture with a `rec: BeatRecorder` fixture. It conditionally injects the cursor overlay, auto-flushes after `use(rec)`, and re-exports Playwright's `expect`.
+- **`tests/e2e/_helpers/report/tier-2-5-reporter.ts`** — Playwright `Reporter`. On `onEnd`, walks the test-results tree for `beats.jsonl`, encodes each test's `beats/*.png` into a 1500ms-per-beat WebM via ffmpeg, generates 240px thumbnails, and emits `tests/results/tier-2-5/report.html`. All references in the HTML are relative paths — **no base64 inlining**.
 - **`playwright-e2e.config.ts`** — gated reporter registration: when `RECORDSCREEN=1`, the reporter is appended to the `reporter` array; otherwise the file is never loaded.
 
 ## ffmpeg resolution
@@ -198,7 +201,7 @@ tests/results/tier-2-5/
 
 ## See also
 
-- [tests/e2e/ui/bg-wait-steer-flow.spec.ts](../tests/e2e/ui/bg-wait-steer-flow.spec.ts) — the canonical worked example.
-- [tests/e2e/mock-agent-core.mjs](../tests/e2e/mock-agent-core.mjs) — the mock LLM, header comment lists the full trigger contract.
+- [tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts](../tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts) — the canonical worked example.
+- [tests/e2e/_helpers/mock-agent-core.mjs](../tests/e2e/_helpers/mock-agent-core.mjs) — the mock LLM, header comment lists the full trigger contract.
 - [docs/testing-strategy.md](testing-strategy.md) — when to use Tier 2.5 vs unit / E2E / manual integration.
 - [docs/design/unified-message-ordering-reducer.md](design/unified-message-ordering-reducer.md) — the reducer Tier 2.5's mock-fidelity bumps stress.

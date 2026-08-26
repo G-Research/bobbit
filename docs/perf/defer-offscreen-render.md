@@ -68,11 +68,11 @@ flags accumulate configuration sprawl.
 
 Behaviour is pinned by:
 
-- `tests/defer-offscreen-render.spec.ts` — eager path, deferred
+- `tests/browser/fixtures/defer-offscreen-render.fixture.spec.ts` — eager path, deferred
   placeholder, IntersectionObserver promotion, scroll-anchor preservation,
   `Ctrl+F` force-resolve, flag-off zero wrappers, flag-on eager / placeholder
   split, edge case where N messages ≤ `DEFER_EAGER_TAIL`.
-- `tests/e2e/ui/transcript-fidelity.spec.ts` — the canonical correctness
+- `tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts` — the canonical correctness
   test. Asserts the live streaming DOM equals the post-refresh DOM after
   multi-cycle streaming bursts; calls `DeferredBlock.forceResolveAll()`
   before each DOM snapshot so placeholders do not mask content drift.

@@ -163,9 +163,9 @@ Why a chip instead of the full widget: when an ask call fails the agent typicall
 
 Invariants pinned by tests (treat these as the source of truth):
 
-- [`tests/ask-extension-execute.test.ts`](../tests/ask-extension-execute.test.ts) — the extension returns `isError: true` on each validation failure path.
-- [`tests/ask-user-choices-renderer.spec.ts`](../tests/ask-user-choices-renderer.spec.ts) — the renderer routes `isError: true` and unknown-shape completed results to the `ask-error` chip and never to the interactive widget.
-- [`tests/e2e/ui/ask-user-choices-ui.spec.ts`](../tests/e2e/ui/ask-user-choices-ui.spec.ts) — failure-then-retry scenario shows exactly one interactive widget, preceded by the minimal chip for the failed call.
+- [`tests/unit/core/ask-extension-execute.unit.test.ts`](../tests/unit/core/ask-extension-execute.unit.test.ts) — the extension returns `isError: true` on each validation failure path.
+- [`tests/dom/ask-user-choices-renderer.dom.test.ts`](../tests/dom/ask-user-choices-renderer.dom.test.ts) — the renderer routes `isError: true` and unknown-shape completed results to the `ask-error` chip and never to the interactive widget.
+- [`tests/browser/journeys/ui/ask-user-choices-ui.journey.spec.ts`](../tests/browser/journeys/ui/ask-user-choices-ui.journey.spec.ts) — failure-then-retry scenario shows exactly one interactive widget, preceded by the minimal chip for the failed call.
 
 The `tab_label` validation rules themselves are documented in `defaults/tools/ask/ask_user_choices.yaml` (the agent-facing tool contract) and summarised in the [Widget UX → Labels](#labels) section above. This page intentionally does not duplicate them.
 

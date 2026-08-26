@@ -254,21 +254,21 @@ The shared selector already returns ordered distinct validated human IDs, and th
 
 ## Verification map
 
-The authoritative registration and rationale live in `tests2/tests-map.json`.
+The canonical paths below identify each test's semantic lane and runner.
 
 | Contract | Primary coverage |
 |---|---|
-| Selector, exact strings, label/ID normalization, no human prefix | `tests2/core/message-author-surfacing.test.ts` |
-| Loaded-state hue/accessory resolution and safe fallback | `tests2/core/message-author-appearance.test.ts` |
-| Final dispatch, write-before-prefix, batching, recovery base text, replay/title projection | `tests2/core/message-author-dispatch.test.ts` |
-| Sidecar plaintext exclusion, semantic `modelPrefix` validation, raw-digest idempotence, structured blocks, corruption, exact-ID history filtering, copy/purge | `tests2/core/author-sidecar.test.ts` |
-| Prompt-only DOM labels and transcript-wide main/pre-compaction mode | `tests2/dom/message-author-labels.test.ts` |
-| Canonical open-eye sprite pixels, shared hue/accessory registries, and no timers/animation | `tests2/dom/message-author-sprite.test.ts` |
-| Pi versus live/snapshot/transcript/title/search text, mixed batches, and append-failure degradation | `tests2/integration/message-author-ws-server.test.ts` |
-| Extension transcript and tool-call projection/filtering | `tests2/integration/message-author-extension-projection.test.ts` |
-| Fork/continue binding copy, replay ordering, and failed-setup cleanup | `tests2/integration/continue-archived.test.ts` |
-| Live/reload/narrow-layout labels and sidebar-matched static avatar | `tests2/browser/journeys/author-metadata.journey.spec.ts` |
-| Raw Pi persistence, EventBuffer/reconnect idempotence, search rebuild, and gateway restart | `tests/e2e/message-author-prefix-restart.spec.ts` |
+| Selector, exact strings, label/ID normalization, no human prefix | `tests/unit/core/message-author-surfacing.unit.test.ts` |
+| Loaded-state hue/accessory resolution and safe fallback | `tests/unit/core/message-author-appearance.unit.test.ts` |
+| Final dispatch, write-before-prefix, batching, recovery base text, replay/title projection | `tests/unit/core/message-author-dispatch.unit.test.ts` |
+| Sidecar plaintext exclusion, semantic `modelPrefix` validation, raw-digest idempotence, structured blocks, corruption, exact-ID history filtering, copy/purge | `tests/unit/core/author-sidecar.unit.test.ts` |
+| Prompt-only DOM labels and transcript-wide main/pre-compaction mode | `tests/dom/message-author-labels.dom.test.ts` |
+| Canonical open-eye sprite pixels, shared hue/accessory registries, and no timers/animation | `tests/dom/message-author-sprite.dom.test.ts` |
+| Pi versus live/snapshot/transcript/title/search text, mixed batches, and append-failure degradation | `tests/integration/gateway/message-author-ws-server.gateway.test.ts` |
+| Extension transcript and tool-call projection/filtering | `tests/integration/gateway/message-author-extension-projection.gateway.test.ts` |
+| Fork/continue binding copy, replay ordering, and failed-setup cleanup | `tests/integration/gateway/continue-archived.gateway.test.ts` |
+| Live/reload/narrow-layout labels and sidebar-matched static avatar | `tests/browser/journeys/author-metadata.journey.spec.ts` |
+| Raw Pi persistence, EventBuffer/reconnect idempotence, search rebuild, and gateway restart | `tests/e2e/api/message-author-prefix-restart.api-e2e.spec.ts` |
 
 Retry, attachment, queue, provider-auth, force-abort, rehydration, and verification suites also pin that durable/recovery text stays unprefixed and each later RPC re-applies the final-dispatch contract.
 

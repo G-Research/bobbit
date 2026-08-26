@@ -1,6 +1,6 @@
 # Resilience — User Stories
 
-These stories cover crash/restart scenarios: server hard-kills, container deaths, and recovery of sessions, goals, worktrees, and sandboxes. All stories require `tests/manual-integration/` — they cannot run in normal E2E tests because they involve real process termination and restart.
+These stories cover crash/restart scenarios: server hard-kills, container deaths, and recovery of sessions, goals, worktrees, and sandboxes. Their opt-in real-process coverage lives in `tests/manual/session-resilience.manual.spec.ts`; it is excluded from automated E2E because it deliberately terminates and restarts real processes.
 
 ---
 
@@ -35,7 +35,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If the agent was mid-stream when the server was killed, the partial response is preserved up to the last flushed chunk. The response may appear truncated but is not lost entirely.
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`
 
 ---
 
@@ -64,7 +64,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If the server crashed during goal creation (mid-setup), the goal may appear with an error status and a "Retry" button on the dashboard. Clicking Retry re-runs the setup.
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`
 
 ---
 
@@ -96,7 +96,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If a worktree session's `.jsonl` file is missing or corrupted on disk, that session is skipped during restore — it will not appear in the sidebar. Other sessions are unaffected (no all-or-nothing failure).
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`
 
 ---
 
@@ -127,7 +127,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If the worktree directory was manually deleted while the server was down, the session restores but the agent will see file-not-found errors when it tries to access the working directory. The session itself is not lost — only the worktree is gone.
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`
 
 ---
 
@@ -154,7 +154,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If Docker itself is unavailable (daemon stopped), recovery fails. The sandbox status shows an error. Sessions continue to exist but commands that require the container will fail with a clear error message. The session is not automatically archived — the user can retry once Docker is available.
 
-**Coverage:** manual-integration — skips automatically when Docker is unavailable
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts` — skips automatically when Docker is unavailable
 
 ---
 
@@ -179,7 +179,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If the crash occurs during worktree creation (`git worktree add`), an orphaned worktree directory may remain on disk. This is cleaned up via Settings → Maintenance → "Orphaned Worktrees" scan.
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`
 
 ---
 
@@ -204,7 +204,7 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If the user sends multiple messages while offline, they are either all queued (delivered in order on reconnection) or all rejected (drafts preserved). There is no partial delivery.
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`
 
 ---
 
@@ -229,4 +229,4 @@ These stories cover crash/restart scenarios: server hard-kills, container deaths
 
 **Edge case:** If `sessions.json` is written partially (e.g., crash mid-write), the server should handle the corrupt file gracefully on startup — either by using a backup, recovering valid entries, or logging a clear error. Individual corrupted entries are skipped; valid sessions are still restored.
 
-**Coverage:** manual-integration (session-resilience.spec.ts)
+**Coverage:** `tests/manual/session-resilience.manual.spec.ts`

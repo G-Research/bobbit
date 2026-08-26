@@ -440,12 +440,12 @@ These fallbacks exist for already-running or restored reviewers. New code should
 
 Durable behavior is pinned by focused unit and browser tests:
 
-- `tests/extension-host-pack-store.test.ts` — real delete/deletePrefix, scoped quotas, PR Walkthrough panel state after scoped review payloads exceed the legacy cap, unscoped-write rejection, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
-- `tests/extension-host-server-host-api.test.ts` — server host store delegation for scoped `put`, `delete`, `deletePrefix`, and `stats` with server-derived pack ids.
-- `tests/extension-host-module-isolation.test.ts` — `ModuleHost` worker proxy forwarding of `host.store.put` quota options to the parent host.
-- `tests/client-host-api.spec.ts` — client `host.store` methods and structured `host.callRoute` error preservation.
-- `tests/pr-walkthrough-durable-routes.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum, coverage/read-receipt status, repeated references, completion-sweep behavior, and large-card-count publication.
-- `tests/pr-walkthrough-lifecycle-provider.test.ts` — provider registration, `beforePrompt` durable progress blocks, `beforeCompact` checkpointing, shutdown cleanup.
-- `tests/pr-walkthrough-role-tools-policy.test.ts` and `tests/pr-walkthrough-tool-metadata.test.ts` — reviewer prompt/tool metadata for the durable V2 chunk flow, hunk placement contract, status coverage, and exact PRW tool boundary.
-- `tests/pr-walkthrough-compact-bundle-format.test.ts` — compact bundle formatting, preserved legacy/default output, envelope suppression, hunk identity in compact reads, compact chunk-save output, read receipts, and full status readback.
-- `tests/pr-walkthrough-panel-parity.spec.ts` and `tests/e2e/ui/pr-walkthrough-pack.spec.ts` — panel draft/missing/quota error states and pack launch/render behavior.
+- `tests/unit/core/extension-host-pack-store.unit.test.ts` — real delete/deletePrefix, scoped quotas, PR Walkthrough panel state after scoped review payloads exceed the legacy cap, unscoped-write rejection, invalid quota scopes/profiles, emergency ceiling, overwrite rejection before corruption.
+- `tests/unit/core/extension-host-server-host-api.unit.test.ts` — server host store delegation for scoped `put`, `delete`, `deletePrefix`, and `stats` with server-derived pack ids.
+- `tests/unit/isolated/extension-host-module-isolation.isolated.test.ts` — `ModuleHost` worker proxy forwarding of `host.store.put` quota options to the parent host.
+- `tests/dom/client-host-api.dom.test.ts` — client `host.store` methods and structured `host.callRoute` error preservation.
+- `tests/unit/core/pr-walkthrough-durable-routes.unit.test.ts` — review-scoped run writes, chunk idempotency, finalization, trusted metadata overlay, authorization, compatibility conflicts, audit checklist minimum, coverage/read-receipt status, repeated references, completion-sweep behavior, and large-card-count publication.
+- `tests/unit/core/pr-walkthrough-lifecycle-provider.unit.test.ts` — provider registration, `beforePrompt` durable progress blocks, `beforeCompact` checkpointing, shutdown cleanup.
+- `tests/unit/core/pr-walkthrough-role-tools-policy.unit.test.ts` and `tests/unit/core/pr-walkthrough-tool-metadata.unit.test.ts` — reviewer prompt/tool metadata for the durable V2 chunk flow, hunk placement contract, status coverage, and exact PRW tool boundary.
+- `tests/unit/core/pr-walkthrough-compact-bundle-format.unit.test.ts` — compact bundle formatting, preserved legacy/default output, envelope suppression, hunk identity in compact reads, compact chunk-save output, read receipts, and full status readback.
+- `tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts` and `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` — panel draft/missing/quota error states and pack launch/render behavior.

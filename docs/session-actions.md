@@ -205,14 +205,14 @@ Goal links still use hash routes (`/#/goal/<goalId>`). The path-style behavior d
 
 Relevant coverage lives in:
 
-- `tests2/dom/prompt-history-actions.test.ts` — durable-row eligibility, desktop/mobile parity, canonical menu behavior, help/toggle accessibility, exact prompt copy, clipboard feedback, focus, dismissal, and duplicate suppression.
-- `tests2/integration/history-fork-api.test.ts` and `tests2/core/history-fork-transcript.test.ts` — authoritative cursor validation, exact cut, source immutability, context/sidecar filtering, worktree ownership, failure cleanup, and concurrent reservations.
-- `tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts` — desktop/touch prompt actions, help/copy/error feedback, both worktree modes, reload, source preservation, and destination transcript boundary.
-- `tests/e2e/ui/session-actions.spec.ts` — canonical id parity/order, staff/team labels and visibility, desktop and mobile header hamburgers opening the full action list, FLIP sources for all visible direct header buttons, hidden/non-interactive direct buttons while open, restoration on close, Fork toggle accessibility, and header action reachability.
-- `tests/e2e/ui/archived-session-actions.spec.ts` — archived sidebar and header menus on desktop/mobile, eligible and ineligible Continue visibility, exclusion of live/destructive/launcher actions, copy link, open-in-new-window, and row-selection preservation.
-- `tests/e2e/ui/copy-session-link.spec.ts` — path-style copy URL, direct `/session/<id>` load, hash canonicalization, reload behavior, and hash precedence.
-- `tests/e2e/ui/open-session-new-window.spec.ts` — path-style open-in-new-window behavior and middle-click no-navigation regression coverage.
-- `tests/ui-fixtures/sidebar-actions-menu-fixture.spec.ts` — sidebar menu ordering/title contract in a fast browser fixture.
-- `tests/sidebar-actions-flip.test.ts` — popover FLIP layout helper unit coverage.
+- `tests/dom/prompt-history-actions.dom.test.ts` — durable-row eligibility, desktop/mobile parity, canonical menu behavior, help/toggle accessibility, exact prompt copy, clipboard feedback, focus, dismissal, and duplicate suppression.
+- `tests/integration/gateway/history-fork-lifecycle.gateway.test.ts` and `tests/unit/core/history-fork-transcript.unit.test.ts` — authoritative cursor validation, exact cut, source immutability, context/sidecar filtering, worktree ownership, failure cleanup, and concurrent reservations.
+- `tests/browser/journeys/history-fork-prompt-actions.journey.spec.ts` — desktop/touch prompt actions, help/copy/error feedback, both worktree modes, reload, source preservation, and destination transcript boundary.
+- `tests/browser/fixtures/session-actions.fixture.spec.ts` — canonical id parity/order, staff/team labels and visibility, desktop and mobile header hamburgers opening the full action list, FLIP sources for all visible direct header buttons, hidden/non-interactive direct buttons while open, restoration on close, Fork toggle accessibility, and header action reachability.
+- `tests/browser/fixtures/archived-session-actions.fixture.spec.ts` — archived sidebar and header menus on desktop/mobile, eligible and ineligible Continue visibility, exclusion of live/destructive/launcher actions, copy link, open-in-new-window, and row-selection preservation.
+- `tests/browser/journeys/ui/copy-session-link.journey.spec.ts` — path-style copy URL, direct `/session/<id>` load, hash canonicalization, reload behavior, and hash precedence.
+- `tests/browser/journeys/ui/open-session-new-window.journey.spec.ts` — path-style open-in-new-window behavior and middle-click no-navigation regression coverage.
+- `tests/browser/fixtures/sidebar-actions-menu-fixture.fixture.spec.ts` — sidebar menu ordering/title contract in a fast browser fixture.
+- `tests/unit/core/sidebar-actions-flip.unit.test.ts` — popover FLIP layout helper unit coverage.
 
 For session-action UI work, run the focused browser specs above plus `npm run check` and `npm run test:unit` before broader E2E validation.

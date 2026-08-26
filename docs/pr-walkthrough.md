@@ -328,7 +328,7 @@ launch time.
 
 ### Test coverage
 
-`tests/pr-walkthrough-hunk-id-roundtrip.test.ts` covers both behaviors:
+`tests/unit/core/pr-walkthrough-hunk-id-roundtrip.unit.test.ts` covers both behaviors:
 
 **Test 1 — Hunk ID round-trip:** creates a bundle from a minimal parsed diff with
 an explicit hunk ID, reads that ID from the compact manifest, submits a review

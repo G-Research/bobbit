@@ -257,8 +257,9 @@ When `prefers-reduced-motion: reduce` matches, FLIP and slide animations are ski
 For changes to this feature, run the focused coverage first:
 
 ```bash
-npx tsx --import ./tests/helpers/css-stub-loader.mjs --test --test-force-exit tests/sidebar-actions-flip.test.ts
-npm run test:e2e -- tests/e2e/sidebar-actions-server.spec.ts tests/e2e/session-restart-api.spec.ts tests/e2e/ui/sidebar-actions-menu.spec.ts tests/e2e/ui/sidebar-refresh-agent.spec.ts tests/e2e/ui/session-actions.spec.ts tests/e2e/ui/copy-session-link.spec.ts tests/e2e/ui/open-session-new-window.spec.ts
+npm run test:unit -- tests/unit/core/sidebar-actions-flip.unit.test.ts tests/unit/core/sidebar-actions-server.unit.test.ts tests/integration/gateway/session-restart-api.gateway.test.ts
+npm run test:browser -- tests/browser/journeys/ui/sidebar-refresh-agent.journey.spec.ts tests/browser/fixtures/session-actions.fixture.spec.ts tests/browser/journeys/ui/copy-session-link.journey.spec.ts tests/browser/journeys/ui/open-session-new-window.journey.spec.ts
+npx playwright test --config playwright-e2e.config.ts --project=browser tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts
 ```
 
 Then run the broader validation expected for UI + server changes:
@@ -266,7 +267,8 @@ Then run the broader validation expected for UI + server changes:
 ```bash
 npm run check
 npm run test:unit
+npm run test:browser
 npm run test:e2e
 ```
 
-The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, sidebar/header canonical action parity, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), path-style copied/opened session links, hash-route canonicalization, `Refresh agent` visibility/targeting/feedback/busy confirmation, fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut opening a session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, mobile sidebar-row hamburger suppression, and mobile open-session header hamburger coverage. The server-coupled fork behavior is covered by `tests/e2e/sidebar-actions-server.spec.ts`; the restart REST contract is covered by `tests/e2e/session-restart-api.spec.ts`.
+The focused browser suite covers desktop hover/focus hamburger visibility, direct quick-action regressions, menu contents, sidebar/header canonical action parity, copy success and the insecure-context `execCommand` fallback (both flashing the toast with no modal), path-style copied/opened session links, hash-route canonicalization, `Refresh agent` visibility/targeting/feedback/busy confirmation, fork navigation with the New worktree checkbox toggle (toggling without firing/closing, and posting the chosen `newWorktree` value), `Open in new window` and the middle-click row shortcut opening a session deep link via a stubbed `window.open` without swapping the active session, `Open on GitHub` mirroring the PR badge (shown with the coloured icon when the badge is visible, hidden for gated/no-PR goals), flip-above near the bottom viewport edge, dismissal cleanup, reduced motion, mobile sidebar-row hamburger suppression, and mobile open-session header hamburger coverage. The server-coupled fork behavior is covered by `tests/unit/core/sidebar-actions-server.unit.test.ts`; the restart REST contract is covered by `tests/integration/gateway/session-restart-api.gateway.test.ts`.

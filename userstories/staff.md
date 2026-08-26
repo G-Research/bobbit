@@ -111,7 +111,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 7. Expand again.
    - Entries reappear in the same order.
 
-**Coverage:** unit (sidebar-staff-rendering.spec.ts — status indicators, wake button, retired dimming); needs browser E2E for full sidebar interaction
+**Coverage:** unit (tests/dom/sidebar-staff-rendering.dom.test.ts — status indicators, wake button, retired dimming); needs browser E2E for full sidebar interaction
 
 ---
 
@@ -134,7 +134,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 5. Click the "Monitor Bot" sidebar entry when it already has an active session.
    - Navigates to the existing session (no new session created).
 
-**Coverage:** API (staff.spec.ts — POST wake, paused staff rejected); needs browser E2E for wake button UI flow
+**Coverage:** API (tests/integration/gateway/staff.gateway.test.ts — POST wake, paused staff rejected); needs browser E2E for wake button UI flow
 
 ---
 
@@ -158,7 +158,7 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
    - While "Cron Bot" is paused, configured triggers do not fire (agent is not woken automatically).
    - After resuming, triggers are re-enabled and fire on schedule.
 
-**Coverage:** API (staff.spec.ts — paused staff cannot be woken); needs browser E2E for pause/resume toggle UI
+**Coverage:** API (tests/integration/gateway/staff.gateway.test.ts — paused staff cannot be woken); needs browser E2E for pause/resume toggle UI
 
 ---
 
@@ -180,4 +180,4 @@ Staff agents are persistent, project-scoped agents that can be triggered manuall
 6. Configure both a cron trigger and a git trigger, then save.
    - The Triggers column shows a combined summary (e.g. "Cron: 0 9 * * 1" and "Git: push").
 
-**Coverage:** API (staff.spec.ts — trigger ID auto-generation); needs browser E2E for trigger config UI
+**Coverage:** API (tests/integration/gateway/staff.gateway.test.ts — trigger ID auto-generation); needs browser E2E for trigger config UI

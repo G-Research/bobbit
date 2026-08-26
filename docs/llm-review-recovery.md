@@ -202,7 +202,7 @@ Live `llm-review` and `agent-qa` sessions use the same order (`runLlmReviewViaSe
 
 Why multiple fair reminders: the pre-regression path sent exactly **one** reminder and then, if the already-idle verifier had not started streaming within a tight 10s window, resolved `waitForIdle()` immediately and SIGTERM'd the verifier — killing a session that had completed its work but simply needed a beat to emit the tool call. Giving each nudge a genuine settle window and allowing a second reminder restores the previously-better reliability.
 
-The `waitForStreaming()` guard is still essential. Without it, `waitForIdle()` can resolve against the already-idle state immediately after the reminder is queued, causing the harness to fail and terminate the verifier before the reminder turn starts. This race is pinned by `tests2/core/verification-reminder-race.test.ts`.
+The `waitForStreaming()` guard is still essential. Without it, `waitForIdle()` can resolve against the already-idle state immediately after the reminder is queued, causing the harness to fail and terminate the verifier before the reminder turn starts. This race is pinned by `tests/unit/core/verification-reminder-race.unit.test.ts`.
 
 ## Same-session process-death resurrection
 
@@ -304,23 +304,23 @@ Failures reported while provider backoff is active include a suffix describing t
 
 Relevant unit coverage:
 
-- `tests2/core/verification-logic.test.ts` — socket/WebSocket/process classifiers, generic runtime retry, deterministic non-retryable failures, provider backoff classification, retry decisions.
-- `tests2/core/transient-review-error.test.ts` — legacy transient review classifier coverage.
-- `tests2/core/auto-retry-policy.test.ts` — session-level auto-retry policy and schedules.
-- `tests2/core/verification-reminder-race.test.ts` — restart-aware continuation prompt selection, ordinary idle reminder behavior, and the reminder `waitForStreaming()` guard.
-- `tests2/core/verification-harness-review-reliability.test.ts` — fresh session id per from-scratch attempt (attempt 1's transcript preserved), late-`verification_result`-during-teardown honored (not 404-dropped), and the "did not call after reminder" non-transient classification.
-- `tests2/core/verification-verifier-lifecycle-repro.test.ts` — `agent-qa` same-session retryable fetch recovery, dead `llm-review` process resurrection up to 3 attempts, fresh per-recovery timeout allowances, no fake resurrection attempts after alive-idle recovery, `agent-qa` reminder/grace parity, and busy-verifier dispatch/recovery without duplicate delivery or verdicts.
-- `tests2/core/session-id-clobber-guard.test.ts` — `createSession` refuses to clobber a live session id, while `allowSessionReuse` bypasses the guard for the sanctioned resume path.
-- `tests2/core/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
-- `tests2/core/verification-resume-restart-recovery.test.ts` — cold verifier readiness wait and transient resume failure rerun path.
-- `tests2/core/reviewer-archive-metadata.test.ts` — verifier metadata persistence before startup and legacy SessionStore backfill.
-- `tests2/browser/fixtures/sidebar-archived-fixture.spec.ts` — archived verifier bucketing and transcript/placeholder fallback visibility.
+- `tests/unit/core/verification-logic.unit.test.ts` — socket/WebSocket/process classifiers, generic runtime retry, deterministic non-retryable failures, provider backoff classification, retry decisions.
+- `tests/unit/core/transient-review-error.unit.test.ts` — legacy transient review classifier coverage.
+- `tests/unit/core/auto-retry-policy.unit.test.ts` — session-level auto-retry policy and schedules.
+- `tests/unit/core/verification-reminder-race.unit.test.ts` — restart-aware continuation prompt selection, ordinary idle reminder behavior, and the reminder `waitForStreaming()` guard.
+- `tests/unit/core/verification-harness-review-reliability.unit.test.ts` — fresh session id per from-scratch attempt (attempt 1's transcript preserved), late-`verification_result`-during-teardown honored (not 404-dropped), and the "did not call after reminder" non-transient classification.
+- `tests/unit/core/verification-verifier-lifecycle-repro.unit.test.ts` — `agent-qa` same-session retryable fetch recovery, dead `llm-review` process resurrection up to 3 attempts, fresh per-recovery timeout allowances, no fake resurrection attempts after alive-idle recovery, `agent-qa` reminder/grace parity, and busy-verifier dispatch/recovery without duplicate delivery or verdicts.
+- `tests/unit/core/session-id-clobber-guard.unit.test.ts` — `createSession` refuses to clobber a live session id, while `allowSessionReuse` bypasses the guard for the sanctioned resume path.
+- `tests/unit/core/verification-resume-restart-prompt.unit.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
+- `tests/unit/core/verification-resume-restart-recovery.unit.test.ts` — cold verifier readiness wait and transient resume failure rerun path.
+- `tests/unit/core/reviewer-archive-metadata.unit.test.ts` — verifier metadata persistence before startup and legacy SessionStore backfill.
+- `tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts` — archived verifier bucketing and transcript/placeholder fallback visibility.
 
 Focused checks while changing this area:
 
 ```bash
-npm exec vitest -- run tests2/core/verification-verifier-lifecycle-repro.test.ts tests2/core/verification-logic.test.ts tests2/core/transient-review-error.test.ts tests2/core/verification-reminder-race.test.ts tests2/core/verification-resume-restart-prompt.test.ts tests2/core/verification-resume-restart-recovery.test.ts tests2/core/reviewer-archive-metadata.test.ts
-npx playwright test tests2/browser/fixtures/sidebar-archived-fixture.spec.ts
+npm exec vitest -- run tests/unit/core/verification-verifier-lifecycle-repro.unit.test.ts tests/unit/core/verification-logic.unit.test.ts tests/unit/core/transient-review-error.unit.test.ts tests/unit/core/verification-reminder-race.unit.test.ts tests/unit/core/verification-resume-restart-prompt.unit.test.ts tests/unit/core/verification-resume-restart-recovery.unit.test.ts tests/unit/core/reviewer-archive-metadata.unit.test.ts
+npx playwright test tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts
 ```
 
 Full required checks for production changes in this area:

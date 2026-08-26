@@ -31,7 +31,7 @@ Status endpoint: `GET /api/sandbox-status`. Container label: `bobbit-project=<pr
 - If Docker is not installed or the daemon is not running, container creation fails with a clear error surfaced to the session.
 - If the project has no `sandbox` key, all commands run on the host (default behavior).
 
-**Coverage:** sandbox-security.spec.ts (API-level), manual integration tests
+**Coverage:** tests/integration/gateway/sandbox-security.gateway.test.ts (API-level), manual integration tests
 
 ---
 
@@ -56,7 +56,7 @@ Status endpoint: `GET /api/sandbox-status`. Container label: `bobbit-project=<pr
 - Long-running commands inside the container respect the same timeout as host commands.
 - If the container is stopped mid-command, the bash tool call returns an error (not a hang).
 
-**Coverage:** sandbox-security.spec.ts, sandbox-branch-reconcile.spec.ts
+**Coverage:** tests/integration/gateway/sandbox-security.gateway.test.ts, tests/integration/gateway/sandbox-branch-reconcile.gateway.test.ts
 
 ---
 
@@ -100,7 +100,7 @@ Status endpoint: `GET /api/sandbox-status`. Container label: `bobbit-project=<pr
 - Rapid repeated kills (kill → recover → kill) do not produce duplicate containers. Only one container per project at any time.
 - Data in non-mounted paths inside the container is lost on recreation (expected — only mounted volumes persist).
 
-**Coverage:** sandbox-recovery.spec.ts
+**Coverage:** tests/e2e/api/sandbox-recovery.api-e2e.spec.ts
 
 ---
 
@@ -144,7 +144,7 @@ Status endpoint: `GET /api/sandbox-status`. Container label: `bobbit-project=<pr
 - Branch name mismatch causes PR lookups to fail silently (wrong branch queried).
 - Agent sees a different branch than the UI shows, leading to confusion in multi-agent workflows.
 
-**Coverage:** sandbox-branch-reconcile.spec.ts
+**Coverage:** tests/integration/gateway/sandbox-branch-reconcile.gateway.test.ts
 
 ---
 
@@ -174,7 +174,7 @@ Path traversal attempts (e.g. `../../.ssh`) are normalized and rejected.
 - New cloud provider credential paths added to user home but not to blocklist.
 - Symlinks inside mounted directories pointing to sensitive host paths (mitigated by mount configuration).
 
-**Coverage:** sandbox-security.spec.ts, sandbox-pentest.spec.ts
+**Coverage:** tests/integration/gateway/sandbox-security.gateway.test.ts, tests/integration/gateway/sandbox-pentest.gateway.test.ts
 
 ---
 
@@ -204,4 +204,4 @@ Only the minimum necessary directories are mounted: the project source tree and 
 - A new secret file is added to `.bobbit/` and inadvertently included in a broad mount.
 - Environment variable leakage if container inherits host env (mitigated by explicit env configuration in `docker-args.ts`).
 
-**Coverage:** sandbox-token.spec.ts
+**Coverage:** tests/integration/gateway/sandbox-token.gateway.test.ts

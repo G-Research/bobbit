@@ -163,9 +163,9 @@ See [REST API](rest-api.md) for the route table and [Orchestration](orchestratio
 
 Focused coverage lives in:
 
-- `tests2/core/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, target metadata, and non-interactive rules.
-- `tests2/integration/team-steer-prompt.test.ts` — goal-team recovery, blocked/action-required behavior, queued-intent preservation, and workflow context injection.
-- `tests2/core/session-prompt-policy.test.ts` — `session_prompt` policy and default-tool exclusion.
-- `tests2/dom/session-prompt-renderer.test.ts` — prompt/steer card rendering and server errors.
-- `tests/e2e/session-prompt.spec.ts` — API/tool-route behavior, including reliable delivery routing.
-- `tests2/core/model-selection-required-prompt-boundary.test.ts` and `tests2/browser/journeys/model-selection-recovery.journey.spec.ts` — conditioned delivery is rejected before acceptance, and the browser retains its text and attachment draft through model recovery.
+- `tests/unit/core/session-prompt-delivery.unit.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, target metadata, and non-interactive rules.
+- `tests/integration/gateway/team-steer-prompt.gateway.test.ts` — goal-team recovery, blocked/action-required behavior, queued-intent preservation, and workflow context injection.
+- `tests/unit/core/session-prompt-policy.unit.test.ts` — `session_prompt` policy and default-tool exclusion.
+- `tests/dom/session-prompt-renderer.dom.test.ts` — prompt/steer card rendering and server errors.
+- `tests/e2e/api/session-prompt.api-e2e.spec.ts` — API/tool-route behavior, including reliable delivery routing.
+- `tests/unit/core/model-selection-required-prompt-boundary.unit.test.ts` and `tests/browser/journeys/model-selection-recovery.journey.spec.ts` — conditioned delivery is rejected before acceptance, and the browser retains its text and attachment draft through model recovery.

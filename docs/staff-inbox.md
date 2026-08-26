@@ -199,7 +199,7 @@ make the history pane useless for audit. Likewise dismissal reasons are
 mandatory at the REST layer (the server returns 400 on empty `reason`).
 
 Tool description budget: descriptions are kept ≤ 150 chars and parameter
-descriptions ≤ 80 chars, enforced by `tests/tool-description-budget.test.ts`.
+descriptions ≤ 80 chars, enforced by `tests/unit/core/tool-description-budget.unit.test.ts`.
 
 ## REST surface
 
@@ -332,7 +332,7 @@ viewport-scoped:
 - Desktop uses the same pane-scoped dialog, preserving the existing behavior of
   overlaying the inbox/unified panel rather than the whole browser viewport.
 
-The mobile regression is pinned in `tests/e2e/ui/staff-inbox.spec.ts`: the test
+The mobile regression is pinned in `tests/browser/fixtures/staff-inbox.fixture.spec.ts`: the test
 opens the Inbox pane, opens "+ Add to inbox", verifies the transformed slider
 track is wider than the visible pane, and asserts both the dialog host and
 backdrop bounding boxes stay inside `[data-testid="inbox-panel-root"]`.

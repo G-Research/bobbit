@@ -6,7 +6,7 @@ The config cascade resolves configuration items (roles, workflows, tools) across
 
 **Key source files:** `src/app/config-scope.ts` (scope row, origin badges, customize/revert API helpers), `src/server/config-cascade.ts` (resolution logic), `src/server/builtin-config.ts` (builtin layer).
 
-**Existing tests:** `tests/e2e/config-cascade-api.spec.ts` (API), `tests/e2e/ui/config-scope.spec.ts` (browser).
+**Existing tests:** `tests/integration/gateway/config-cascade-api.gateway.test.ts` (API), `tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts` (browser).
 
 ---
 
@@ -28,7 +28,7 @@ The config cascade resolves configuration items (roles, workflows, tools) across
 4. Switch back to System scope.
    - The "coder" row shows the server badge again. No project badge is visible — project overrides do not leak into system scope.
 
-**Coverage:** covered (config-cascade-api.spec.ts, config-scope.spec.ts)
+**Coverage:** covered (tests/integration/gateway/config-cascade-api.gateway.test.ts, tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts)
 
 ---
 
@@ -53,7 +53,7 @@ The config cascade resolves configuration items (roles, workflows, tools) across
 5. Rapidly click between Project A → System → Project B.
    - Each click fully replaces the item list. No flicker of stale data between transitions.
 
-**Coverage:** covered (config-scope.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts)
 
 ---
 
@@ -78,7 +78,7 @@ The config cascade resolves configuration items (roles, workflows, tools) across
    - Badge is green. Overrides text reads "overrides builtin".
 5. Inherited items (origin is `"builtin"` or `"server"` in project scope) appear visually dimmed compared to locally-defined project items.
 
-**Coverage:** covered (config-scope.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts)
 
 ---
 
@@ -102,7 +102,7 @@ The config cascade resolves configuration items (roles, workflows, tools) across
    - Green badge persists. Item remains non-dimmed.
    - The modified values are served when this project's sessions resolve the "reviewer" role.
 
-**Coverage:** partial (config-cascade-api.spec.ts covers API; config-scope.spec.ts covers badge update)
+**Coverage:** partial (tests/integration/gateway/config-cascade-api.gateway.test.ts covers API; tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts covers badge update)
 
 ---
 
@@ -123,7 +123,7 @@ The config cascade resolves configuration items (roles, workflows, tools) across
    - "reviewer" still shows as inherited/dimmed — the revert persisted, it is not just a UI state change.
 4. The project-level override file on disk is deleted (`.bobbit/config/roles/reviewer.yaml` is removed for this project).
 
-**Coverage:** partial (config-cascade-api.spec.ts covers API; config-scope.spec.ts covers badge revert)
+**Coverage:** partial (tests/integration/gateway/config-cascade-api.gateway.test.ts covers API; tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts covers badge revert)
 
 ---
 
@@ -190,4 +190,4 @@ The config cascade resolves configuration items (roles, workflows, tools) across
    - `overflow-x: auto` and `scrollbar-width: thin` allow horizontal scrolling without breaking layout.
    - All project buttons remain clickable.
 
-**Coverage:** partial (config-scope.spec.ts covers basic switching; race condition edge case needs targeted test)
+**Coverage:** partial (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts covers basic switching; race condition edge case needs targeted test)

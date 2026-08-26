@@ -160,13 +160,13 @@ npm run test:e2e
 Useful targeted checks while iterating:
 
 ```bash
-npx tsx --test --test-force-exit tests/model-utils.test.ts
-npx tsx --test --test-force-exit tests/thinking-levels.test.ts
-npx tsx --test --test-force-exit tests/rpc-bridge-spawn-args.test.ts
-npx tsx --test --test-force-exit tests/session-store.test.ts tests/session-manager-restore.test.ts
-npx tsx --test --test-force-exit tests/transcript-reader.test.ts
-npx tsx --test --test-force-exit tests/rpc-bridge-lifecycle.test.ts
-npx playwright test --config tests/playwright.config.ts tests/ui-fixtures/model-selector-fixture.spec.ts tests/thinking-levels-per-model.spec.ts
+npm run test:unit -- tests/unit/core/model-utils.unit.test.ts
+npm run test:unit -- tests/unit/core/thinking-levels.unit.test.ts
+npm run test:unit -- tests/unit/core/rpc-bridge-spawn-args.unit.test.ts
+npm run test:unit -- tests/unit/core/session-store.unit.test.ts tests/unit/core/session-manager-restore.unit.test.ts
+npm run test:unit -- tests/unit/core/transcript-reader.unit.test.ts
+npm run test:unit -- tests/unit/core/rpc-bridge-lifecycle.unit.test.ts
+npm run test:unit -- tests/dom/ui-fixtures/model-selector-fixture.dom.test.ts tests/dom/thinking-levels-per-model.dom.test.ts
 ```
 
 For package hygiene, also verify the lockfile has no stale Pi `0.75.x` entries:

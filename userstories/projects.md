@@ -23,7 +23,7 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
 5. Enter the same path again via Add Project → Continue.
    - The project is not duplicated. An error or no-op prevents re-adding.
 
-**Coverage:** covered (add-project-flow.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/add-project-flow.fixture.spec.ts)
 
 ---
 
@@ -50,7 +50,7 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
    - Worktree pool is initialized for the project.
 6. The project is now fully usable — new sessions and goals can be created under it.
 
-**Coverage:** covered (project-assistant.spec.ts — 15 tests)
+**Coverage:** covered (tests/browser/journeys/ui/project-assistant.journey.spec.ts — 15 tests)
 
 ---
 
@@ -101,7 +101,7 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
    - The "Remove Project" button is disabled or not shown.
    - The default project cannot be removed.
 
-**Coverage:** covered (project-removal.spec.ts)
+**Coverage:** covered (tests/browser/journeys/ui/remove-first-project.journey.spec.ts)
 
 ---
 
@@ -175,7 +175,7 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
 7. Reset the appearance to defaults.
    - Sessions in this project revert to the system default theme.
 
-**Coverage:** partial (settings.spec.ts — appearance tab)
+**Coverage:** partial (tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts — appearance tab)
 
 ---
 
@@ -202,7 +202,7 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
 7. Cancel the directory browser without selecting.
    - The browser closes. The path input remains unchanged (retains any previously entered value).
 
-**Coverage:** covered (add-project-flow.spec.ts)
+**Coverage:** covered (tests/browser/fixtures/add-project-flow.fixture.spec.ts)
 
 ---
 
@@ -229,7 +229,7 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
 7. Add a second project.
    - The sidebar transitions to the multi-project layout with section headers for each project.
 
-**Coverage:** covered (single-project-sidebar.spec.ts, project-management.spec.ts)
+**Coverage:** covered (tests/browser/journeys/project-onboarding-dialog.journey.spec.ts, tests/browser/journeys/ui/project-management.journey.spec.ts)
 
 ---
 
@@ -249,4 +249,4 @@ Adding, configuring, and managing projects. These stories cover the Add Project 
 4. Attempt Add Project again with the same path.
    - The flow starts fresh — a new assistant session opens as if the project was never attempted.
 
-**Coverage:** covered (project-assistant.spec.ts)
+**Coverage:** covered (tests/browser/journeys/ui/project-assistant.journey.spec.ts)

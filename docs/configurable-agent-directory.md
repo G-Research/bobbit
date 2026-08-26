@@ -147,13 +147,13 @@ Primary implementation modules:
 
 Representative regression tests:
 
-- `tests/bobbit-dir-agent-dir.test.ts`
-- `tests/agent-dir-validation.test.ts`
-- `tests/agent-dir-migration.test.ts`
-- `tests/e2e/agent-dir-settings.spec.ts`
-- `tests/e2e/ui/settings-agent-dir.spec.ts`
-- `tests/session-recovery-agent-dir.test.ts`
-- `tests/transcript-host-absolute-context.test.ts`
-- `tests/docker-args.test.ts`
-- `tests/sandbox-clone-source.test.ts`
-- `tests/scaffold-agent-gitignore.test.ts`
+- `tests/unit/isolated/bobbit-dir-agent-dir.isolated.test.ts`
+- `tests/unit/core/agent-dir-validation.unit.test.ts`
+- `tests/unit/core/agent-dir-migration.unit.test.ts`
+- `tests/integration/gateway/agent-dir-settings.gateway.test.ts`
+- `tests/browser/journeys/ui/settings-agent-dir.journey.spec.ts`
+- `tests/unit/core/session-recovery-agent-dir.unit.test.ts`
+- `tests/unit/core/transcript-host-absolute-context.unit.test.ts`
+- `tests/unit/core/docker-args.unit.test.ts`
+- `tests/unit/core/sandbox-clone-source.unit.test.ts`
+- `tests/unit/core/scaffold-agent-gitignore.unit.test.ts`
