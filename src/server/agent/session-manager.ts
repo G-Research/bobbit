@@ -2499,7 +2499,12 @@ export function prepareVisibleAgentEvent(
 			&& !promptAuthorBindingMatchesText(liveKeylessTerminalGuard, modelText)))) {
 		session.lastKeylessPromptAuthorEnd = undefined;
 	}
-	let stableBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
+	// A user update is occurrence-proven only when its key was already bound by
+	// the preceding start. Keep this distinct from a binding inferred while
+	// processing the update itself so provisional raw-text matching cannot gain
+	// outward display authority.
+	const precedingMessageBinding = messageKey ? session.promptAuthorMessageBindings?.get(messageKey) : undefined;
+	let stableBinding = precedingMessageBinding;
 	if (!stableBinding && userRole && !messageKey && raw.type === "message_end") {
 		stableBinding = session.lastKeylessPromptAuthorEnd;
 	}
@@ -2637,6 +2642,13 @@ export function prepareVisibleAgentEvent(
 		promptAuthor: author,
 	});
 	const prepared = stripVisiblePromptEntryIdProvenance(normalized);
+	if (raw.type === "message_update" && userRole && precedingMessageBinding) {
+		(prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] = {
+			promptId: precedingMessageBinding.promptId,
+			attemptId: precedingMessageBinding.attemptId,
+			alreadySettled: precedingMessageBinding.settled,
+		} satisfies PromptAuthorEventBinding;
+	}
 	if (bufferedPending) {
 		const messageId = promptAuthorMessageId(message, raw);
 		bufferedPending[PROMPT_AMBIGUOUS_ECHO] = {
@@ -3139,14 +3151,16 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 }
 
 /**
- * If `event` is a `message_end` for a user role and the session has a
- * pending skill-expansion envelope whose `modelText` matches the message
- * body, return a cloned event with:
- *   - the user message body rewritten to `originalText`
- *   - `skillExpansions` attached as a top-level field on the message
- * The pending envelope is consumed (FIFO). The original event object is
- * never mutated; the agent's internal transcript continues to reference
- * the un-spliced (modelText) message — that is what the model has seen.
+ * Project a proven user prompt occurrence into its outward-only display form.
+ * A correlated `message_start` is rendered immediately by clients, so it must
+ * receive the same projection as the terminal event without consuming the
+ * envelope needed by that later terminal. Pi emits user starts and ends (not
+ * user updates); any future update fails closed unless it carries the same
+ * trusted occurrence binding.
+ *
+ * Only `message_end` retains the legacy unbound compatibility lookup and
+ * consumes the matching envelope. The original event and Pi transcript remain
+ * model-facing and unmodified.
  */
 function spliceSkillExpansionsIntoEvent(
 	session: {
@@ -3157,17 +3171,22 @@ function spliceSkillExpansionsIntoEvent(
 ): unknown {
 	const ev = event as any;
 	if (!ev || typeof ev !== "object") return event;
-	if (ev.type !== "message_end") return event;
+	const terminal = ev.type === "message_end";
+	if (!terminal && ev.type !== "message_start" && ev.type !== "message_update") return event;
 	const msg = ev.message;
 	if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return event;
 	const pending = session.pendingSkillExpansions;
 	if (!pending || pending.length === 0) return event;
 	const body = extractUserMessageText(msg);
 	const binding = ev[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+	// Starts/updates are provisional outward projections. They may only use the
+	// occurrence binding established at the author-admission boundary; raw text is
+	// never sufficient because equal model text can belong to separate prompts.
+	if (!terminal && !binding) return event;
 	let idx = binding
 		? pending.findIndex((candidate) => candidate.promptId === binding.promptId && candidate.modelText === body)
 		: pending.findIndex((candidate) => candidate.promptId === undefined && candidate.modelText === body);
-	if (idx === -1 && !binding) {
+	if (terminal && idx === -1 && !binding) {
 		// Legacy/raw emitters do not carry the author binding that normally proves
 		// occurrence identity. A poison-history respawn can nevertheless have bound
 		// its restored display envelope before that raw echo reaches this boundary.
@@ -3184,7 +3203,7 @@ function spliceSkillExpansionsIntoEvent(
 		}
 	}
 	if (idx === -1) return event;
-	const envelope = pending.splice(idx, 1)[0];
+	const envelope = terminal ? pending.splice(idx, 1)[0] : pending[idx];
 	const rewrittenMsg = projectPromptDisplayMessage(msg, {
 		ts: 0,
 		modelText: envelope.modelText,
