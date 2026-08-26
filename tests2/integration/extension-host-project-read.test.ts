@@ -22,7 +22,7 @@ function projectRead(
 	return apiFetch("/api/ext/project/read", {
 		method: "POST",
 		headers: { "x-bobbit-session-id": sessionId },
-		body: JSON.stringify({ operation, surfaceToken, ...payload }),
+		body: JSON.stringify({ operation, surfaceToken, sessionId, ...payload }),
 	});
 }
 
@@ -248,6 +248,22 @@ test("project child reads authorize the parent first and reread current canonica
 	}
 });
 
+test("pack-bound project reads require the closure-bound session echo", async ({ gateway }) => {
+	const bound = seedBoundSession(gateway, ["some-real-tool"]);
+	try {
+		const matching = await projectRead(bound.id, "goals");
+		expect(matching.status, await matching.clone().text()).toBe(200);
+		expect(await matching.json()).toMatchObject({ mode: "page" });
+
+		const omitted = await projectRead(bound.id, "goals", { sessionId: undefined });
+		expect(omitted.status).toBe(403);
+		const mismatched = await projectRead(bound.id, "goals", { sessionId: `${bound.id}-other` });
+		expect(mismatched.status).toBe(403);
+	} finally {
+		bound.store.remove(bound.id);
+	}
+});
+
 test("tool-bound project reads require the closure-bound session echo and an allowed active pack tool", async ({ gateway }) => {
 	const suffix = randomUUID().replaceAll("-", "");
 	const packName = `project-read-tool-${suffix}`;
@@ -271,7 +287,7 @@ test("tool-bound project reads require the closure-bound session echo and an all
 		expect(matching.status, await matching.clone().text()).toBe(200);
 		expect(await matching.json()).toMatchObject({ mode: "page" });
 
-		const omitted = await projectRead(bound.id, "goals", {}, surfaceToken);
+		const omitted = await projectRead(bound.id, "goals", { sessionId: undefined }, surfaceToken);
 		expect(omitted.status).toBe(403);
 		const mismatched = await projectRead(bound.id, "goals", { sessionId: `${bound.id}-other` }, surfaceToken);
 		expect(mismatched.status).toBe(403);
