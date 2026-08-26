@@ -11,7 +11,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-goal-promotion-runti
 process.env.BOBBIT_DIR = root;
 process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
 
-const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { activeAgentSessionsDir, sessionTranscriptRoot } = await import("../../src/server/agent/agent-session-path.ts");
 const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
@@ -79,18 +79,23 @@ afterEach(() => {
 
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
-function transcript(name: string): string {
-	const dir = path.join(activeAgentSessionsDir(), "--promotion-runtime--");
+function transcript(name: string, sandboxed: boolean): string {
+	const relative = path.join("--promotion-runtime--", `${name}.jsonl`);
+	const dir = sandboxed
+		? path.join(sessionTranscriptRoot(name), "--promotion-runtime--")
+		: path.join(activeAgentSessionsDir(), "--promotion-runtime--");
 	fs.mkdirSync(dir, { recursive: true });
-	const file = path.join(dir, `${name}.jsonl`);
-	fs.writeFileSync(file, `${JSON.stringify({
+	const hostFile = path.join(dir, `${name}.jsonl`);
+	fs.writeFileSync(hostFile, `${JSON.stringify({
 		type: "message",
 		id: "existing-user-message",
 		parentId: null,
 		message: { role: "user", content: [{ type: "text", text: "work already in progress" }] },
 	})}\n`, "utf8");
-	files.push(file);
-	return file;
+	files.push(hostFile);
+	return sandboxed
+		? `/home/node/.bobbit/agent/sessions/${relative.replace(/\\/g, "/")}`
+		: hostFile;
 }
 
 function bridge(initial: { provider?: string; modelId?: string; thinkingLevel?: string } = {}): any {
@@ -140,7 +145,7 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 	oldBridge: any;
 	store: any;
 } {
-	const file = transcript(name);
+	const file = transcript(name, overrides.sandboxed === true);
 	const persisted: any = {
 		id: name,
 		title: "Existing regular session",
@@ -692,7 +697,7 @@ describe("SessionManager current-session runtime promotion", () => {
 
 		await fx.manager.restoreOneSession(fx.persisted);
 
-		expect(sandboxExec).toHaveBeenCalledTimes(2);
+		expect(sandboxExec).not.toHaveBeenCalled();
 		expect(fx.store.archive).not.toHaveBeenCalled();
 		expect(fx.persisted).toEqual(before);
 		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({

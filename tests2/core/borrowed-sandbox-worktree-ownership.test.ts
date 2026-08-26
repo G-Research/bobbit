@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
 
-import { activeAgentSessionsDir } from "../../src/server/agent/agent-session-path.js";
+import {
+	sessionTranscriptHostPath,
+	sessionTranscriptRoot,
+} from "../../src/server/agent/agent-session-path.js";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.js";
 import { registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.js";
@@ -74,10 +77,12 @@ function deferred<T = void>(): {
 }
 
 function writeTranscript(id: string): string {
-	const dir = path.join(activeAgentSessionsDir(), `--borrowed-worktree-ownership-${process.pid}--`);
-	fs.mkdirSync(dir, { recursive: true });
-	transcriptRoots.push(dir);
-	const file = path.join(dir, `${id}.jsonl`);
+	const relative = `--borrowed-worktree-ownership-${process.pid}--/${id}.jsonl`;
+	const containerFile = `/home/node/.bobbit/agent/sessions/${relative}`;
+	const file = sessionTranscriptHostPath(id, containerFile);
+	if (!file) throw new Error("could not resolve owner transcript fixture");
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	transcriptRoots.push(sessionTranscriptRoot(id));
 	fs.writeFileSync(file, [
 		{ type: "session", version: 3, id: `pi-${id}`, cwd: "/workspace" },
 		{
@@ -87,7 +92,13 @@ function writeTranscript(id: string): string {
 			message: { role: "user", content: [{ type: "text", text: "retained" }] },
 		},
 	].map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf8");
-	return file;
+	return containerFile;
+}
+
+function transcriptHostFile(sessionId: string, containerFile: string): string {
+	const host = sessionTranscriptHostPath(sessionId, containerFile);
+	if (!host) throw new Error("could not resolve owner transcript fixture");
+	return host;
 }
 
 async function persistedReloadFixture(borrowed: boolean): Promise<{
@@ -273,7 +284,8 @@ afterEach(() => {
 describe("borrowed sandbox worktree ownership", () => {
 	it("round-trips borrowed ownership across persistence and never verifies or removes the source worktree", async () => {
 		const fixture = await persistedReloadFixture(true);
-		const sourceBytes = fs.readFileSync(fixture.restored.agentSessionFile);
+		const sourceHostFile = transcriptHostFile(fixture.restored.id, fixture.restored.agentSessionFile);
+		const sourceBytes = fs.readFileSync(sourceHostFile);
 		const sourceCoordinates = {
 			cwd: fixture.restored.cwd,
 			worktreePath: fixture.restored.worktreePath,
@@ -295,7 +307,7 @@ describe("borrowed sandbox worktree ownership", () => {
 		await fixture.manager.terminateSession(fixture.restored.id);
 
 		assert.equal(fixture.removeWorktree.mock.calls.length, 0, "terminating the borrower must not remove the owner's worktree");
-		assert.equal(fs.readFileSync(fixture.restored.agentSessionFile).equals(sourceBytes), true, "source transcript bytes stay unchanged");
+		assert.equal(fs.readFileSync(sourceHostFile).equals(sourceBytes), true, "source transcript bytes stay unchanged");
 		assert.deepEqual(sourceCoordinates, {
 			cwd: "/workspace-wt/session/source/packages/web",
 			worktreePath: undefined,

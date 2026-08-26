@@ -4340,6 +4340,22 @@ export class SessionManager {
 					break;
 				}
 			}
+			if (!source) {
+				const exactLegacyPaths = new Set<string>([ps.agentSessionFile]);
+				for (const boundary of normalizeContextClearBoundaries(ps.contextClearBoundaries)) {
+					exactLegacyPaths.add(boundary.previousAgentSessionFile);
+					exactLegacyPaths.add(boundary.activatedAgentSessionFile);
+				}
+				if (exactLegacyPaths.has(filePath)) {
+					trustPersistedAgentSessionFile(filePath);
+					const readable = resolveReadablePersistedAgentSessionFile(filePath);
+					if (readable) {
+						source = readable;
+						const sourceKey = createHash("sha256").update(path.resolve(readable)).digest("hex");
+						relative = `--bobbit-legacy--/${sourceKey}-${path.basename(readable)}`;
+					}
+				}
+			}
 		}
 		const container = relative ? sessionTranscriptContainerPath(relative) : null;
 		if (!container || !source) throw new Error("Sandbox transcript migration source is invalid");
@@ -4349,10 +4365,12 @@ export class SessionManager {
 	}
 
 	private async _publishLegacySandboxFile(source: string, destination: string, ownerRoot: string): Promise<void> {
+		const MAX_LEGACY_MIGRATION_BYTES = 256 * 1024 * 1024;
 		let sourceStat: fs.Stats;
 		try { sourceStat = await fsp.lstat(source); }
 		catch (error: any) { if (error?.code === "ENOENT") return; throw error; }
 		if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error("Legacy sandbox transcript source is unsafe");
+		if (sourceStat.size > MAX_LEGACY_MIGRATION_BYTES) throw new Error("Legacy sandbox transcript exceeds the migration limit");
 		const relative = path.relative(path.resolve(ownerRoot), path.resolve(destination));
 		if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("Sandbox transcript migration destination escapes its owner root");
 		let cursor = path.resolve(ownerRoot);

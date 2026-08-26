@@ -17,7 +17,7 @@ import type { FileHandle } from "node:fs/promises";
 import type { SandboxManager } from "./sandbox-manager.js";
 import {
 	containerTranscriptRelativePath,
-	ensurePrivateSessionRoot,
+	ensurePrivateSessionRootAsync,
 	sessionTranscriptRoot,
 } from "./agent-session-path.js";
 import { sidecarPathFor } from "./session-sidecar.js";
@@ -79,35 +79,36 @@ export function sessionFsContextForAgentFile(
 	};
 }
 
-function ownedHostPath(ctx: SessionFsContext, filePath: string, createParents = false): string {
+async function ownedHostPath(ctx: SessionFsContext, filePath: string, createParents = false): Promise<string> {
 	if (!ctx.sandboxed || !ctx.sessionId) throw new CrossRealmCopyError("sandbox transcript owner is unavailable");
 	const relative = containerTranscriptRelativePath(filePath);
 	if (!relative) throw new CrossRealmCopyError("sandbox transcript path is invalid");
 	const sharedRoot = path.dirname(path.dirname(sessionTranscriptRoot(ctx.sessionId)));
-	const root = ensurePrivateSessionRoot(sessionTranscriptRoot(ctx.sessionId), sharedRoot);
+	const root = await ensurePrivateSessionRootAsync(sessionTranscriptRoot(ctx.sessionId), sharedRoot);
 	const parts = relative.split("/");
 	let cursor = root;
 	for (const part of parts.slice(0, -1)) {
 		cursor = path.join(cursor, part);
 		try {
-			const stat = fs.lstatSync(cursor);
+			const stat = await fs.promises.lstat(cursor);
 			if (!stat.isDirectory() || stat.isSymbolicLink()) throw new CrossRealmCopyError("sandbox transcript parent is unsafe");
 		} catch (error: any) {
 			if (error?.code !== "ENOENT" || !createParents) throw error;
-			fs.mkdirSync(cursor, { mode: 0o700 });
-			const created = fs.lstatSync(cursor);
+			try { await fs.promises.mkdir(cursor, { mode: 0o700 }); }
+			catch (mkdirError: any) { if (mkdirError?.code !== "EEXIST") throw mkdirError; }
+			const created = await fs.promises.lstat(cursor);
 			if (!created.isDirectory() || created.isSymbolicLink()) throw new CrossRealmCopyError("sandbox transcript parent creation was replaced");
 		}
 	}
 	return path.join(root, ...parts);
 }
 
-function safeOwnedRegularFile(filePath: string): boolean {
+async function ownedRegularFileState(filePath: string): Promise<"regular" | "missing" | "unsafe"> {
 	try {
-		const stat = fs.lstatSync(filePath);
-		return stat.isFile() && !stat.isSymbolicLink();
-	} catch {
-		return false;
+		const stat = await fs.promises.lstat(filePath);
+		return stat.isFile() && !stat.isSymbolicLink() ? "regular" : "unsafe";
+	} catch (error: any) {
+		return error?.code === "ENOENT" ? "missing" : "unsafe";
 	}
 }
 
@@ -130,8 +131,11 @@ export async function sessionFileExists(
 	filePath: string,
 	_sandboxManager: SandboxManager | null,
 ): Promise<boolean> {
-	if (!ctx.sandboxed) return fs.existsSync(filePath);
-	try { return safeOwnedRegularFile(ownedHostPath(ctx, filePath)); }
+	if (!ctx.sandboxed) {
+		try { return (await fs.promises.lstat(filePath)).isFile(); }
+		catch { return false; }
+	}
+	try { return await ownedRegularFileState(await ownedHostPath(ctx, filePath)) === "regular"; }
 	catch { return false; }
 }
 
@@ -155,12 +159,14 @@ export async function sessionFileRead(
 	_sandboxManager: SandboxManager | null,
 ): Promise<string | null> {
 	if (!ctx.sandboxed) {
-		try { return fs.readFileSync(filePath, "utf-8"); }
+		try { return await fs.promises.readFile(filePath, "utf-8"); }
 		catch { return null; }
 	}
 	try {
-		const hostPath = ownedHostPath(ctx, filePath);
-		return safeOwnedRegularFile(hostPath) ? fs.readFileSync(hostPath, "utf-8") : null;
+		const hostPath = await ownedHostPath(ctx, filePath);
+		return await ownedRegularFileState(hostPath) === "regular"
+			? await fs.promises.readFile(hostPath, "utf-8")
+			: null;
 	} catch { return null; }
 }
 
@@ -177,7 +183,7 @@ export async function sessionFileWriteAtomic(
 	_sandboxManager: SandboxManager | null,
 ): Promise<void> {
 	if (ctx.sandboxed) {
-		filePath = ownedHostPath(ctx, filePath, true);
+		filePath = await ownedHostPath(ctx, filePath, true);
 	}
 
 	const directory = path.dirname(filePath);
@@ -217,9 +223,9 @@ export async function sessionFileRenameAtomic(
 	_sandboxManager: SandboxManager | null,
 ): Promise<void> {
 	if (!ctx.sandboxed) throw new CrossRealmCopyError("cross-realm session rename not supported");
-	const source = ownedHostPath(ctx, sourcePath);
-	const target = ownedHostPath(ctx, targetPath, true);
-	if (!safeOwnedRegularFile(source)) throw new Error("Session transcript source is unavailable");
+	const source = await ownedHostPath(ctx, sourcePath);
+	const target = await ownedHostPath(ctx, targetPath, true);
+	if (await ownedRegularFileState(source) !== "regular") throw new Error("Session transcript source is unavailable");
 	await fs.promises.rename(source, target);
 }
 
@@ -235,9 +241,10 @@ export async function sessionFileDeleteContainerOnly(
 ): Promise<boolean> {
 	if (!ctx.sandboxed) return false;
 	try {
-		const target = ownedHostPath(ctx, filePath);
-		if (fs.existsSync(target) && !safeOwnedRegularFile(target)) return false;
-		await fs.promises.unlink(target).catch((error: any) => { if (error?.code !== "ENOENT") throw error; });
+		const target = await ownedHostPath(ctx, filePath);
+		const state = await ownedRegularFileState(target);
+		if (state === "unsafe") return false;
+		if (state === "regular") await fs.promises.unlink(target);
 		return true;
 	} catch {
 		return false;
@@ -280,10 +287,10 @@ export async function sessionFileCopy(
 		if (!srcCtx.projectId || !dstCtx.projectId || srcCtx.projectId !== dstCtx.projectId) {
 			throw new CrossRealmCopyError("cross-realm continue not supported");
 		}
-		const source = ownedHostPath(srcCtx, srcPath);
-		const destination = ownedHostPath(dstCtx, dstPath, true);
-		if (!safeOwnedRegularFile(source)) throw new Error("Session transcript source is unavailable");
-		fsImpl.copyFileSync(source, destination);
+		const source = await ownedHostPath(srcCtx, srcPath);
+		const destination = await ownedHostPath(dstCtx, dstPath, true);
+		if (await ownedRegularFileState(source) !== "regular") throw new Error("Session transcript source is unavailable");
+		await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
 		return;
 	}
 
@@ -320,8 +327,10 @@ export async function sessionFileDelete(
 		}
 	}
 	try {
-		const target = ownedHostPath(ctx, filePath);
-		if (fs.existsSync(target) && !safeOwnedRegularFile(target)) return false;
+		const target = await ownedHostPath(ctx, filePath);
+		const state = await ownedRegularFileState(target);
+		if (state === "unsafe") return false;
+		if (state === "missing") return true;
 		await fsImpl.unlink(target);
 		return true;
 	} catch (error: any) {

@@ -1064,7 +1064,10 @@ test.describe("history fork API", () => {
 		expect(removed).toEqual([]);
 		expect(manager.getSession(sourceId)).toBe(source);
 		const preservedSource = manager.getPersistedSession(sourceId);
-		expect(preservedSource?.agentSessionFile).toBe(seeded.file);
+		expect(preservedSource?.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const preservedSourceHost = sessionTranscriptHostPath(sourceId, preservedSource!.agentSessionFile);
+		expect(preservedSourceHost).toBeTruthy();
+		expect(fs.readFileSync(preservedSourceHost!, "utf8")).toBe(seeded.content);
 		expect(preservedSource?.archived).not.toBe(true);
 		expect(manager.getSession(forkId)).toBeTruthy();
 		expect(manager.getPersistedSession(forkId)).toMatchObject({
@@ -1287,8 +1290,12 @@ test.describe("history fork API", () => {
 		expect(sourceStopCalls).toBe(0);
 		expect(removed).toEqual([]);
 		expect(manager.getSession(sourceId)).toBe(source);
-		expect(manager.getPersistedSession(sourceId)).toMatchObject({ agentSessionFile: seeded.file });
-		expect(manager.getPersistedSession(sourceId)?.archived).not.toBe(true);
+		const preservedSource = manager.getPersistedSession(sourceId);
+		expect(preservedSource?.agentSessionFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const preservedSourceHost = sessionTranscriptHostPath(sourceId, preservedSource!.agentSessionFile);
+		expect(preservedSourceHost).toBeTruthy();
+		expect(fs.readFileSync(preservedSourceHost!, "utf8")).toBe(seeded.content);
+		expect(preservedSource?.archived).not.toBe(true);
 		expect(manager.getSession(forkId)).toBeTruthy();
 		expect(manager.getPersistedSession(forkId)).toMatchObject({
 			projectId: project.id,
@@ -1484,19 +1491,27 @@ test.describe("history fork API", () => {
 		}
 
 		expect(capturedDestinationId).toBeTruthy();
-		expect(path.isAbsolute(capturedDestinationFile)).toBe(true);
-		expect(capturedDestinationFile.replace(/\\/g, "/")).not.toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
-		const destinationRelative = path.relative(agentSessionsDir, capturedDestinationFile);
-		expect(path.isAbsolute(destinationRelative)).toBe(false);
-		expect(destinationRelative).not.toMatch(/^\.\.(?:[\\/]|$)/);
-		expect(fs.existsSync(capturedDestinationFile)).toBe(false);
+		expect(capturedDestinationFile).toMatch(/^\/home\/node\/\.bobbit\/agent\/sessions\//);
+		const capturedDestinationHost = sessionTranscriptHostPath(capturedDestinationId, capturedDestinationFile);
+		expect(capturedDestinationHost).toBeTruthy();
+		expect(fs.existsSync(capturedDestinationHost!)).toBe(false);
 		expect(fs.existsSync(authorPath(gateway, capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "skill-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "compaction-sidecar", capturedDestinationId, ".jsonl"))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "proposal-drafts", capturedDestinationId))).toBe(false);
 		expect(fs.existsSync(statePath(gateway, "tool-content", capturedDestinationId))).toBe(false);
 
-		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, { sandboxed: false });
+		const migratedSource = gateway.sessionManager.getPersistedSession(sourceId);
+		const migratedSourceHost = sessionTranscriptHostPath(sourceId, migratedSource.agentSessionFile);
+		expect(migratedSourceHost).toBeTruthy();
+		gateway.sessionManager.getSessionStore(sourcePersisted.projectId).update(sourceId, {
+			sandboxed: false,
+			agentSessionFile: migratedSourceHost!,
+		});
+		Object.assign(gateway.sessionManager.getSession(sourceId), {
+			sandboxed: false,
+			agentSessionFile: migratedSourceHost!,
+		});
 		const retry = await historyFork(gateway, sourceId, "selected-user", false);
 		expect(retry.status, JSON.stringify(await responseJson(retry))).toBe(201);
 		const retried = await retry.json();
