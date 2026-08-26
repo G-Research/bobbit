@@ -262,12 +262,15 @@ sandbox-FS plumbing is required. This is the same pattern the
 skill-sidecar uses, and works for both single-repo and sandboxed
 sessions.
 
-The transcript file itself may be inside the sandbox container. The
-endpoint reads it via the existing `sessionFileRead` helper in
-`src/server/agent/session-fs.ts`, which dispatches host vs
-`docker exec cat` based on `SessionFsContext.sandboxed`. The
-dead-container recovery path (`containerPathToHost`) covers sessions
-whose container has been GC'd.
+The transcript file itself may use sandbox container coordinates. The
+endpoint reads it through `sessionFileRead` in
+`src/server/agent/session-fs.ts`. Direct sessions use the validated host
+path. Sandboxed reads run as a bounded operation in the exact registered,
+freshly attested session runtime; archived or store-only reads use a
+short-lived isolated runtime. There is no project-control-container or
+container-path-to-host fallback, so unavailable runtime authority fails
+closed. This keeps pre-compaction history within the same transcript
+isolation boundary as live and recovery reads.
 
 ## Client UI
 
