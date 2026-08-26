@@ -523,6 +523,34 @@ async function joinArchivedProjection(page: Page, occurrence: number): Promise<v
 	await page.evaluate((value) => (window as any).__joinRevealArchivedProjection(value), occurrence);
 }
 
+async function expectArchivedHierarchyReconciled(page: Page, sessionId: string): Promise<void> {
+	await expect.poll(() => page.evaluate((id) => {
+		const state = (window as any).__bobbitState;
+		return {
+			searchQuery: state.searchQuery,
+			searchInput: document.querySelector<HTMLInputElement>("input[data-search]")?.value ?? null,
+			showArchived: state.showArchived,
+			filtersOpen: state.filtersPopoverOpen,
+			revealSessionId: state.sidebarRevealSessionId,
+			live: state.gatewaySessions.some((session: any) => session.id === id),
+			archived: state.archivedSessions.some((session: any) => session.id === id),
+			ancestors: (window as any).__revealTreeAncestors(id),
+		};
+	}, sessionId), { message: `${MARK}: archived cache, hierarchy, and client search reconcile before row assertion` }).toEqual({
+		searchQuery: "",
+		searchInput: "",
+		showArchived: false,
+		filtersOpen: false,
+		revealSessionId: sessionId,
+		live: false,
+		archived: true,
+		ancestors: [
+			treeKey("project-archived", IDS.project),
+			treeKey("project", IDS.project),
+		],
+	});
+}
+
 async function storedExpansion(page: Page, key: string): Promise<string | undefined> {
 	return page.evaluate(({ storageKey, key }) => {
 		try { return JSON.parse(localStorage.getItem(storageKey) || "{}").expansion?.[key]; }
@@ -819,7 +847,12 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		await expect(navRow(page, IDS.archived), `${MARK}: cold target is absent before reveal`).toHaveCount(0);
 		await setFilters(page, { busy: false, read: false });
 		const search = page.locator("input[data-search]");
-		await search.fill("cold-archive-query-with-no-match");
+		const coldArchiveQuery = "cold-archive-query-with-no-match";
+		await search.fill(coldArchiveQuery);
+		// SearchBox owns a debounced client event. Wait for that event to reach the
+		// canonical state before Reveal clears it, otherwise its stale callback can
+		// cross the reveal transaction and remove the archived hierarchy afterward.
+		await expect.poll(() => page.evaluate(() => (window as any).__bobbitState.searchQuery)).toBe(coldArchiveQuery);
 		await installRevealProbes(page, IDS.archived);
 
 		await activateReveal(page);
@@ -864,6 +897,7 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		await expect(navRow(page, IDS.unrelatedArchived)).toHaveCount(0);
 		await page.keyboard.press("Escape");
 		await activateReveal(page);
+		await expectArchivedHierarchyReconciled(page, IDS.archived);
 		await expect(archivedRow).toBeVisible();
 		await expect(navRow(page, IDS.unrelatedArchived)).toHaveCount(0);
 
