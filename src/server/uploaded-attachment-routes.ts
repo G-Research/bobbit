@@ -37,6 +37,27 @@ function writeError(res: http.ServerResponse, error: unknown): void {
 	json(res, 500, { error: "Uploaded attachment request failed", code: "UPLOADED_ATTACHMENT_READ_FAILED", retryable: true });
 }
 
+function attachmentToolAllowed(session: { allowedTools?: string[] }): boolean {
+	return session.allowedTools === undefined
+		|| session.allowedTools.some((tool) => tool.toLowerCase() === UPLOADED_ATTACHMENT_TOOL_NAME);
+}
+
+function writeAuthorityUnavailable(res: http.ServerResponse, sandboxed: boolean): void {
+	if (sandboxed) {
+		json(res, 403, {
+			error: "Uploaded attachment sandbox runtime is unavailable",
+			code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
+			retryable: false,
+		});
+		return;
+	}
+	json(res, 403, {
+		error: "Uploaded attachment access is forbidden",
+		code: "UPLOADED_ATTACHMENT_FORBIDDEN",
+		retryable: false,
+	});
+}
+
 /**
  * Session-secret authenticated read-only route used by the first-party
  * `session_attachment` extension. The URL owner and capability owner must be
@@ -58,14 +79,51 @@ export async function handleUploadedAttachmentToolRoute(
 
 	const rawSecret = req.headers["x-bobbit-session-secret"];
 	const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
-	const authenticatedSessionId = deps.sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-		typeof secret === "string" && secret.trim() ? secret.trim() : undefined,
-	);
+	const normalizedSecret = typeof secret === "string" && secret.trim() ? secret.trim() : undefined;
+	const authenticatedSessionId = deps.sessionManager.sessionSecretStore.resolveSessionIdBySecret(normalizedSecret);
 	const liveSession = deps.sessionManager.getSession(sessionId);
 	if (authenticatedSessionId !== sessionId || !liveSession) {
 		json(res, 403, { error: "Uploaded attachment access is forbidden", code: "UPLOADED_ATTACHMENT_FORBIDDEN", retryable: false });
 		return true;
 	}
+
+	// Capture only server-owned authority. Reads have asynchronous file/hash work,
+	// so object identity alone is insufficient: respawn can replace its runtime on
+	// the same SessionInfo object, while termination/replacement bumps lifecycle
+	// state. This exact tuple is synchronously compared again immediately before
+	// response bytes are emitted.
+	const replacementAdmission = deps.sessionManager.getSessionReplacementAdmission(sessionId);
+	const admittedAuthority = {
+		session: liveSession,
+		status: liveSession.status,
+		statusVersion: liveSession.statusVersion,
+		rpcClient: liveSession.rpcClient,
+		sandboxed: liveSession.sandboxed,
+		projectId: liveSession.projectId,
+		containerId: liveSession.containerId,
+		replacementGeneration: replacementAdmission.generation,
+	};
+	const authorityIsCurrent = (): boolean => {
+		const currentSession = deps.sessionManager.getSession(sessionId);
+		const currentReplacement = deps.sessionManager.getSessionReplacementAdmission(sessionId);
+		return deps.sessionManager.sessionSecretStore.resolveSessionIdBySecret(normalizedSecret) === sessionId
+			&& currentSession === admittedAuthority.session
+			&& currentSession.status !== "terminated"
+			&& currentSession.status === admittedAuthority.status
+			&& currentSession.statusVersion === admittedAuthority.statusVersion
+			&& currentSession.rpcClient === admittedAuthority.rpcClient
+			&& currentSession.sandboxed === admittedAuthority.sandboxed
+			&& currentSession.projectId === admittedAuthority.projectId
+			&& currentSession.containerId === admittedAuthority.containerId
+			&& currentReplacement.active === false
+			&& currentReplacement.generation === admittedAuthority.replacementGeneration
+			&& attachmentToolAllowed(currentSession);
+	};
+	if (liveSession.status === "terminated" || replacementAdmission.active || !attachmentToolAllowed(liveSession)) {
+		writeAuthorityUnavailable(res, liveSession.sandboxed === true);
+		return true;
+	}
+
 	// A session secret and transcript pointer can both be observed by code in a
 	// sandbox. Before parsing caller-controlled input or consulting the store,
 	// require the server-owned runtime registry and Docker Engine to attest the
@@ -88,24 +146,10 @@ export async function handleUploadedAttachmentToolRoute(
 				attested = false;
 			}
 		}
-		const currentSession = deps.sessionManager.getSession(sessionId);
-		if (!attested
-			|| currentSession !== liveSession
-			|| currentSession.sandboxed !== true
-			|| currentSession.projectId !== projectId
-			|| currentSession.containerId !== containerId) {
-			json(res, 403, {
-				error: "Uploaded attachment sandbox runtime is unavailable",
-				code: "UPLOADED_ATTACHMENT_SANDBOX_UNAVAILABLE",
-				retryable: false,
-			});
+		if (!attested || !authorityIsCurrent()) {
+			writeAuthorityUnavailable(res, true);
 			return true;
 		}
-	}
-	if (liveSession.allowedTools !== undefined
-		&& !liveSession.allowedTools.some((tool) => tool.toLowerCase() === UPLOADED_ATTACHMENT_TOOL_NAME)) {
-		json(res, 403, { error: "Uploaded attachment tool is not allowed for this session", code: "UPLOADED_ATTACHMENT_FORBIDDEN", retryable: false });
-		return true;
 	}
 
 	try {
@@ -119,6 +163,12 @@ export async function handleUploadedAttachmentToolRoute(
 				throw new UploadedAttachmentStoreError(400, "UPLOADED_ATTACHMENT_INVALID", "Invalid attachment list request fields");
 			}
 			const attachments = await listUploadedAttachments(sessionId, pointer);
+			// No await may be introduced between this exact authority check and the
+			// synchronous response write: the captured session owns this payload.
+			if (!authorityIsCurrent()) {
+				writeAuthorityUnavailable(res, admittedAuthority.sandboxed === true);
+				return true;
+			}
 			json(res, 200, { operation: "list", attachments });
 			return true;
 		}
@@ -132,6 +182,13 @@ export async function handleUploadedAttachmentToolRoute(
 				offset: body.offset as number | undefined,
 				length: body.length as number | undefined,
 			});
+			// The store serializes reads with purge, but the session/runtime owner can
+			// be revoked after store completion. Revalidate the exact admitted tuple
+			// immediately before the synchronous byte response.
+			if (!authorityIsCurrent()) {
+				writeAuthorityUnavailable(res, admittedAuthority.sandboxed === true);
+				return true;
+			}
 			json(res, 200, { operation: "read", ...range });
 			return true;
 		}

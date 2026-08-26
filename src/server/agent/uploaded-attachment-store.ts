@@ -15,6 +15,14 @@ export const MAX_UPLOADED_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_AGGREGATE_BYTES = 200 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_SERIALIZED_SEND_BYTES = 200 * 1024 * 1024;
 export const MAX_UPLOADED_ATTACHMENT_READ_BYTES = 64 * 1024;
+/**
+ * Every range read verifies one complete, admission-bounded snapshot before
+ * projecting bytes. Reserve the worst case up front so concurrent callers can
+ * never turn the 64 KiB response API into unbounded gateway memory growth.
+ */
+export const MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVATIONS = 2;
+const MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVED_BYTES =
+	MAX_UPLOADED_ATTACHMENT_BYTES * MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVATIONS;
 /** Durable exact-byte snapshots retained by one session across prompt occurrences. */
 export const MAX_UPLOADED_ATTACHMENT_SESSION_BYTES = 1024 * 1024 * 1024;
 
@@ -25,7 +33,6 @@ const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0
 const VALID_HASH = /^[a-f0-9]{64}$/;
 const VALID_FILE_KEY = /^[A-Za-z0-9_-]{24}$/;
 const POINTER_PATTERN = /^bobbit-attachment:v1:([a-f0-9]{64}):([a-f0-9]{64}):([A-Za-z0-9_-]{24})$/;
-const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const INVALID_METADATA_CHARACTERS = /[\x00-\x1f\x7f]/;
 
 export interface UploadedAttachmentSnapshotInput {
@@ -134,6 +141,31 @@ let testHooks: UploadedAttachmentStoreTestHooks | undefined;
 const sessionUsageBytes = new Map<string, number>();
 const purgedSessionKeys = new Set<string>();
 const sessionOperationTails = new Map<string, Promise<unknown>>();
+let uploadedAttachmentSnapshotReadReservedBytes = 0;
+
+/**
+ * Fail-fast process-wide ownership for the full verified snapshots retained by
+ * range reads. Each owner reserves the maximum possible allocation before it
+ * enters a per-session operation tail; no waiter queue is created.
+ */
+function acquireUploadedAttachmentSnapshotReadReservation(): () => void {
+	if (uploadedAttachmentSnapshotReadReservedBytes
+		> MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVED_BYTES - MAX_UPLOADED_ATTACHMENT_BYTES) {
+		throw new UploadedAttachmentStoreError(
+			429,
+			"UPLOADED_ATTACHMENT_BUSY",
+			"Uploaded attachment reads are busy; retry later",
+			true,
+		);
+	}
+	uploadedAttachmentSnapshotReadReservedBytes += MAX_UPLOADED_ATTACHMENT_BYTES;
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		uploadedAttachmentSnapshotReadReservedBytes -= MAX_UPLOADED_ATTACHMENT_BYTES;
+	};
+}
 
 function withSessionOperation<T>(sessionKey: string, operation: () => Promise<T>): Promise<T> {
 	const previous = (sessionOperationTails.get(sessionKey) ?? Promise.resolve()).then(
@@ -241,8 +273,29 @@ function secureEqualHex(left: string, right: string): boolean {
 	return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
 }
 
+function isBase64Character(code: number): boolean {
+	return (code >= 0x41 && code <= 0x5a)
+		|| (code >= 0x61 && code <= 0x7a)
+		|| (code >= 0x30 && code <= 0x39)
+		|| code === 0x2b
+		|| code === 0x2f;
+}
+
+function hasValidBase64Shape(value: string): boolean {
+	if (value.length % 4 !== 0) return false;
+	const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+	const contentLength = value.length - padding;
+	for (let index = 0; index < contentLength; index++) {
+		if (!isBase64Character(value.charCodeAt(index))) return false;
+	}
+	return padding === 0 || contentLength >= 2;
+}
+
 function decodeBase64(value: unknown, declaredSize: unknown): Buffer {
-	if (typeof value !== "string" || value.length % 4 !== 0 || !BASE64_PATTERN.test(value)) invalid("Invalid attachment base64 content");
+	// Avoid a repeated-group regexp here: V8 can exhaust its regexp stack on a
+	// valid attachment near the 20 MiB admission limit. This bounded linear scan
+	// enforces the same alphabet/padding shape without another large allocation.
+	if (typeof value !== "string" || !hasValidBase64Shape(value)) invalid("Invalid attachment base64 content");
 	if (typeof declaredSize !== "number" || !Number.isSafeInteger(declaredSize) || declaredSize < 0 || declaredSize > MAX_UPLOADED_ATTACHMENT_BYTES) {
 		invalid("Invalid attachment size");
 	}
@@ -638,6 +691,7 @@ export async function readUploadedAttachmentRange(input: {
 	length?: number;
 	expectedOccurrenceId?: string;
 }): Promise<UploadedAttachmentRange> {
+	validateSessionId(input.sessionId);
 	const parsed = parsePointer(input.pointer);
 	const offset = input.offset ?? 0;
 	const length = input.length ?? MAX_UPLOADED_ATTACHMENT_READ_BYTES;
@@ -645,60 +699,74 @@ export async function readUploadedAttachmentRange(input: {
 	if (!Number.isSafeInteger(length) || length <= 0 || length > MAX_UPLOADED_ATTACHMENT_READ_BYTES) {
 		invalid(`Attachment read length must be an integer from 1 to ${MAX_UPLOADED_ATTACHMENT_READ_BYTES}`);
 	}
-	const manifest = await loadManifest(input.sessionId, parsed);
-	if (input.expectedOccurrenceId !== undefined && manifest.occurrenceId !== input.expectedOccurrenceId) unavailable();
-	const attachment = manifest.attachments.find((candidate) => candidate.fileKey === parsed.fileKey);
-	if (!attachment) unavailable();
-	if (offset > attachment.size) throw new UploadedAttachmentStoreError(416, "UPLOADED_ATTACHMENT_RANGE_INVALID", "Attachment read offset is beyond the end of the snapshot");
 
-	const file = path.join(occurrenceDir(parsed.sessionKey, parsed.occurrenceKey), `${parsed.fileKey}.bin`);
-	let handle: fs.promises.FileHandle | undefined;
+	// Lock order is always global reservation then session tail. Persistence and
+	// purge never need a global read reservation, so they cannot form a cycle.
+	const releaseReservation = acquireUploadedAttachmentSnapshotReadReservation();
+	const { sessionKey } = keys(input.sessionId, "placeholder");
 	try {
-		const fileStat = await fs.promises.lstat(file);
-		if (!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size !== attachment.size) unavailable();
-		handle = await fs.promises.open(file, "r");
-		const openedStat = await handle.stat();
-		if (!openedStat.isFile() || openedStat.size !== attachment.size) unavailable();
+		return await withSessionOperation(sessionKey, async () => {
+			// Purge installs this process-lifetime fence while owning the same tail.
+			// A read is therefore wholly before purge or fails wholly after it.
+			if (purgedSessionKeys.has(sessionKey)) unavailable();
+			const manifest = await loadManifest(input.sessionId, parsed);
+			if (input.expectedOccurrenceId !== undefined && manifest.occurrenceId !== input.expectedOccurrenceId) unavailable();
+			const attachment = manifest.attachments.find((candidate) => candidate.fileKey === parsed.fileKey);
+			if (!attachment) unavailable();
+			if (offset > attachment.size) throw new UploadedAttachmentStoreError(416, "UPLOADED_ATTACHMENT_RANGE_INVALID", "Attachment read offset is beyond the end of the snapshot");
 
-		// Files are admission-bounded to 20 MiB. Read that bounded immutable view
-		// once, verify the persisted digest, then slice the in-memory snapshot. A
-		// path replacement after open cannot redirect the handle, and a same-inode
-		// mutation during the read either fails the exact-length checks or digest.
-		const snapshot = Buffer.alloc(attachment.size);
-		let snapshotBytesRead = 0;
-		while (snapshotBytesRead < snapshot.length) {
-			const result = await handle.read(snapshot, snapshotBytesRead, snapshot.length - snapshotBytesRead, snapshotBytesRead);
-			if (result.bytesRead === 0) unavailable();
-			snapshotBytesRead += result.bytesRead;
-		}
-		const verifiedStat = await handle.stat();
-		if (!verifiedStat.isFile() || verifiedStat.size !== attachment.size) unavailable();
-		const snapshotSha256 = createHash("sha256").update(snapshot).digest("hex");
-		if (!secureEqualHex(snapshotSha256, attachment.sha256)) unavailable();
-		await testHooks?.afterReadIntegrityVerified?.({ sessionId: input.sessionId, pointer: input.pointer });
+			const file = path.join(occurrenceDir(parsed.sessionKey, parsed.occurrenceKey), `${parsed.fileKey}.bin`);
+			let handle: fs.promises.FileHandle | undefined;
+			try {
+				const fileStat = await fs.promises.lstat(file);
+				if (!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size !== attachment.size) unavailable();
+				handle = await fs.promises.open(file, "r");
+				const openedStat = await handle.stat();
+				if (!openedStat.isFile() || openedStat.size !== attachment.size) unavailable();
 
-		const requested = Math.min(length, attachment.size - offset);
-		const range = snapshot.subarray(offset, offset + requested);
-		const nextOffset = offset + range.length;
-		return {
-			pointer: attachment.pointer,
-			fileName: attachment.fileName,
-			mimeType: attachment.mimeType,
-			size: attachment.size,
-			offset,
-			length,
-			bytesRead: range.length,
-			nextOffset,
-			eof: nextOffset === attachment.size,
-			encoding: "base64",
-			data: range.toString("base64"),
-		};
-	} catch (error) {
-		if (error instanceof UploadedAttachmentStoreError) throw error;
-		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") unavailable();
-		throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_READ_FAILED", "Uploaded attachment could not be read", true);
+				// Files are admission-bounded to 20 MiB. Read that bounded immutable view
+				// once, verify the persisted digest, then slice the in-memory snapshot. A
+				// path replacement after open cannot redirect the handle, and a same-inode
+				// mutation during the read either fails the exact-length checks or digest.
+				const snapshot = Buffer.alloc(attachment.size);
+				let snapshotBytesRead = 0;
+				while (snapshotBytesRead < snapshot.length) {
+					const result = await handle.read(snapshot, snapshotBytesRead, snapshot.length - snapshotBytesRead, snapshotBytesRead);
+					if (result.bytesRead === 0) unavailable();
+					snapshotBytesRead += result.bytesRead;
+				}
+				const verifiedStat = await handle.stat();
+				if (!verifiedStat.isFile() || verifiedStat.size !== attachment.size) unavailable();
+				const snapshotSha256 = createHash("sha256").update(snapshot).digest("hex");
+				if (!secureEqualHex(snapshotSha256, attachment.sha256)) unavailable();
+				await testHooks?.afterReadIntegrityVerified?.({ sessionId: input.sessionId, pointer: input.pointer });
+
+				const requested = Math.min(length, attachment.size - offset);
+				const range = snapshot.subarray(offset, offset + requested);
+				const nextOffset = offset + range.length;
+				return {
+					pointer: attachment.pointer,
+					fileName: attachment.fileName,
+					mimeType: attachment.mimeType,
+					size: attachment.size,
+					offset,
+					length,
+					bytesRead: range.length,
+					nextOffset,
+					eof: nextOffset === attachment.size,
+					encoding: "base64",
+					data: range.toString("base64"),
+				};
+			} catch (error) {
+				if (error instanceof UploadedAttachmentStoreError) throw error;
+				if ((error as NodeJS.ErrnoException)?.code === "ENOENT") unavailable();
+				throw new UploadedAttachmentStoreError(500, "UPLOADED_ATTACHMENT_READ_FAILED", "Uploaded attachment could not be read", true);
+			} finally {
+				await handle?.close().catch(() => undefined);
+			}
+		});
 	} finally {
-		await handle?.close().catch(() => undefined);
+		releaseReservation();
 	}
 }
 

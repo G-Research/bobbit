@@ -5,7 +5,9 @@ import * as path from "node:path";
 import JSZip from "jszip";
 import { MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES } from "../../src/server/agent/uploaded-specialized-document-extractor.js";
 import {
+	MAX_UPLOADED_ATTACHMENT_BYTES,
 	MAX_UPLOADED_ATTACHMENT_READ_BYTES,
+	MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVATIONS,
 	listUploadedAttachments,
 	persistUploadedAttachmentOccurrence,
 	purgeUploadedAttachments,
@@ -19,6 +21,7 @@ import {
 
 const SESSION_A = "11111111-1111-4111-8111-111111111111";
 const SESSION_B = "22222222-2222-4222-8222-222222222222";
+const SESSION_C = "33333333-3333-4333-8333-333333333333";
 
 function document(id: string, fileName: string, mimeType: string, bytes: Buffer) {
 	return {
@@ -445,6 +448,88 @@ describe("immutable uploaded attachment store", () => {
 		]), "UPLOADED_ATTACHMENT_QUOTA_EXCEEDED");
 		const range = await readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer });
 		expect(Buffer.from(range.data, "base64").toString()).toBe("123456");
+	});
+
+	it("fails fast at the global verified-snapshot budget and recovers after readers release it", async () => {
+		expect(MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVATIONS).toBe(2);
+		const maxSaved = await persistUploadedAttachmentOccurrence(SESSION_A, "max-read-owner", [
+			document("max", "max.bin", "application/octet-stream", Buffer.alloc(MAX_UPLOADED_ATTACHMENT_BYTES, 0x61)),
+		]);
+		const secondSaved = await persistUploadedAttachmentOccurrence(SESSION_B, "second-read-owner", [
+			document("second", "second.bin", "application/octet-stream", Buffer.from("second marker")),
+		]);
+		const overflowSaved = await persistUploadedAttachmentOccurrence(SESSION_C, "overflow-read-owner", [
+			document("overflow", "overflow.bin", "application/octet-stream", Buffer.from("overflow private marker")),
+		]);
+
+		let verifiedReaders = 0;
+		let releaseReaders!: () => void;
+		let capacityReached!: () => void;
+		const held = new Promise<void>((resolve) => { releaseReaders = resolve; });
+		const atCapacity = new Promise<void>((resolve) => { capacityReached = resolve; });
+		setUploadedAttachmentStoreHooksForTesting({
+			afterReadIntegrityVerified: async () => {
+				verifiedReaders += 1;
+				if (verifiedReaders === MAX_UPLOADED_ATTACHMENT_SNAPSHOT_READ_RESERVATIONS) capacityReached();
+				await held;
+			},
+		});
+
+		const maxRead = readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: maxSaved.attachments[0].pointer, length: 1 });
+		const secondRead = readUploadedAttachmentRange({ sessionId: SESSION_B, pointer: secondSaved.attachments[0].pointer, length: 1 });
+		await atCapacity;
+		const overflowRead = readUploadedAttachmentRange({ sessionId: SESSION_C, pointer: overflowSaved.attachments[0].pointer, length: 1 });
+		await expect(overflowRead).rejects.toMatchObject({
+			statusCode: 429,
+			code: "UPLOADED_ATTACHMENT_BUSY",
+			retryable: true,
+			message: "Uploaded attachment reads are busy; retry later",
+		});
+		await overflowRead.catch((error) => {
+			const rendered = `${error.message} ${error.stack ?? ""}`;
+			expect(rendered).not.toContain("overflow private marker");
+			expect(rendered).not.toContain(overflowSaved.attachments[0].sha256);
+			expect(rendered).not.toContain(root);
+		});
+
+		releaseReaders();
+		const [maxRange, secondRange] = await Promise.all([maxRead, secondRead]);
+		expect(Buffer.from(maxRange.data, "base64")).toEqual(Buffer.from("a"));
+		expect(Buffer.from(secondRange.data, "base64")).toEqual(Buffer.from("s"));
+		const recovered = await readUploadedAttachmentRange({ sessionId: SESSION_C, pointer: overflowSaved.attachments[0].pointer });
+		expect(Buffer.from(recovered.data, "base64").toString()).toBe("overflow private marker");
+	});
+
+	it("serializes verified reads with purge and permanently rejects post-purge reads", async () => {
+		const bytes = Buffer.from("read before purge");
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_A, "read-purge-race", [
+			document("read", "read.bin", "application/octet-stream", bytes),
+		]);
+		let releaseRead!: () => void;
+		let readVerified!: () => void;
+		const held = new Promise<void>((resolve) => { releaseRead = resolve; });
+		const verified = new Promise<void>((resolve) => { readVerified = resolve; });
+		setUploadedAttachmentStoreHooksForTesting({
+			afterReadIntegrityVerified: async () => {
+				readVerified();
+				await held;
+			},
+		});
+
+		const reading = readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer });
+		await verified;
+		let purgeResolved = false;
+		const purging = purgeUploadedAttachments(SESSION_A).then(() => { purgeResolved = true; });
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(purgeResolved).toBe(false);
+
+		releaseRead();
+		const range = await reading;
+		expect(Buffer.from(range.data, "base64")).toEqual(bytes);
+		await purging;
+		expect(purgeResolved).toBe(true);
+		await expectCode(readUploadedAttachmentRange({ sessionId: SESSION_A, pointer: saved.attachments[0].pointer }), "UPLOADED_ATTACHMENT_NOT_FOUND");
 	});
 
 	it("serializes purge with persistence and permanently fences recreation", async () => {

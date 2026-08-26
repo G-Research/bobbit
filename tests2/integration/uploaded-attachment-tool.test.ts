@@ -8,6 +8,7 @@ import { computeToolActivationArgs, tagAllowedTools } from "../../src/server/age
 import {
 	persistUploadedAttachmentOccurrence,
 	setUploadedAttachmentRootForTesting,
+	setUploadedAttachmentStoreHooksForTesting,
 } from "../../src/server/agent/uploaded-attachment-store.js";
 import { handleUploadedAttachmentToolRoute } from "../../src/server/uploaded-attachment-routes.js";
 import { createUploadedAttachmentExtension } from "../../defaults/tools/attachments/extension.js";
@@ -142,6 +143,7 @@ describe("uploaded attachment remote-agent tool integration", () => {
 				},
 			},
 			getSession: (sessionId: string) => sessions.get(sessionId),
+			getSessionReplacementAdmission: () => ({ active: false, generation: 0 }),
 			getSandboxManager: () => activeSandboxManager,
 		};
 		const server = http.createServer(async (req, res) => {
@@ -266,6 +268,119 @@ describe("uploaded attachment remote-agent tool integration", () => {
 		}
 	});
 
+	it("rejects post-read termination, replacement, runtime changes, and authority revocation without emitting bytes", async () => {
+		const marker = "POST_READ_PRIVATE_MARKER";
+		const bytes = Buffer.from(marker);
+		const saved = await persistUploadedAttachmentOccurrence(SESSION_ID, "post-read-authority", [{
+			id: "post-read-file",
+			type: "document",
+			fileName: "post-read.bin",
+			mimeType: "application/octet-stream",
+			size: bytes.length,
+			content: bytes.toString("base64"),
+		}]);
+		const pointer = saved.attachments[0].pointer;
+		const makeSession = () => ({
+			id: SESSION_ID,
+			status: "streaming",
+			statusVersion: 1,
+			rpcClient: {},
+			sandboxed: false,
+			allowedTools: ["session_attachment"],
+		});
+		let session = makeSession();
+		const sessions = new Map<string, any>([[SESSION_ID, session]]);
+		let replacementGeneration = 0;
+		let secretOwner: string | undefined = SESSION_ID;
+		const sessionManager = {
+			sessionSecretStore: {
+				resolveSessionIdBySecret: (secret: string | undefined) => secret === "session-secret" ? secretOwner : undefined,
+			},
+			getSession: (sessionId: string) => sessions.get(sessionId),
+			getSessionReplacementAdmission: () => ({ active: false, generation: replacementGeneration }),
+		};
+		const server = http.createServer(async (req, res) => {
+			const handled = await handleUploadedAttachmentToolRoute(
+				new URL(req.url ?? "/", "http://127.0.0.1"),
+				req,
+				res,
+				{
+					sessionManager: sessionManager as any,
+					readBody: async (request, maxBytes = 16 * 1024) => {
+						const chunks: Buffer[] = [];
+						let total = 0;
+						for await (const chunk of request) {
+							const buffer = Buffer.from(chunk);
+							total += buffer.length;
+							if (total > maxBytes) throw new Error("too large");
+							chunks.push(buffer);
+						}
+						return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+					},
+				},
+			);
+			if (!handled) {
+				res.writeHead(404);
+				res.end();
+			}
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") throw new Error("missing test server address");
+			const query = async () => {
+				const response = await fetch(`http://127.0.0.1:${address.port}/api/sessions/${SESSION_ID}/uploaded-attachments/query`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", "X-Bobbit-Session-Secret": "session-secret" },
+					body: JSON.stringify({ operation: "read", pointer }),
+				});
+				return { response, text: await response.text() };
+			};
+			const scenarios: Array<[string, () => void]> = [
+				["termination", () => { session.status = "terminated"; session.statusVersion += 1; }],
+				["session replacement", () => { sessions.set(SESSION_ID, { ...session }); }],
+				["runtime replacement", () => { session.rpcClient = {}; }],
+				["replacement generation", () => { replacementGeneration += 1; }],
+				["tool revocation", () => { session.allowedTools = []; }],
+				["secret revocation", () => { secretOwner = undefined; }],
+			];
+			for (const [label, revoke] of scenarios) {
+				session = makeSession();
+				sessions.set(SESSION_ID, session);
+				replacementGeneration = 0;
+				secretOwner = SESSION_ID;
+				let releaseRead!: () => void;
+				let readVerified!: () => void;
+				const held = new Promise<void>((resolve) => { releaseRead = resolve; });
+				const verified = new Promise<void>((resolve) => { readVerified = resolve; });
+				setUploadedAttachmentStoreHooksForTesting({
+					afterReadIntegrityVerified: async () => {
+						readVerified();
+						await held;
+					},
+				});
+				const pending = query();
+				await verified;
+				revoke();
+				releaseRead();
+				const denied = await pending;
+				setUploadedAttachmentStoreHooksForTesting(undefined);
+				expect(denied.response.status, label).toBe(403);
+				expect(JSON.parse(denied.text), label).toMatchObject({
+					code: "UPLOADED_ATTACHMENT_FORBIDDEN",
+					retryable: false,
+				});
+				expect(denied.text, label).not.toContain(marker);
+				expect(denied.text, label).not.toContain(bytes.toString("base64"));
+				expect(denied.text, label).not.toContain(saved.attachments[0].sha256);
+				expect(denied.text, label).not.toContain(temp);
+			}
+		} finally {
+			setUploadedAttachmentStoreHooksForTesting(undefined);
+			await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+		}
+	});
+
 	it("preserves exact persisted reads for a non-sandbox session", async () => {
 		const bytes = Buffer.from([0xde, 0xad, 0x00, 0xbe, 0xef]);
 		const saved = await persistUploadedAttachmentOccurrence(SESSION_ID, "accepted-occurrence", [{
@@ -277,13 +392,13 @@ describe("uploaded attachment remote-agent tool integration", () => {
 			content: bytes.toString("base64"),
 		}]);
 		const pointer = saved.attachments[0].pointer;
+		const directSession = { id: SESSION_ID, sandboxed: false, allowedTools: ["session_attachment"] };
 		const sessionManager = {
 			sessionSecretStore: {
 				resolveSessionIdBySecret: (secret: string | undefined) => secret === "session-secret" ? SESSION_ID : undefined,
 			},
-			getSession: (sessionId: string) => sessionId === SESSION_ID
-				? { id: SESSION_ID, sandboxed: false, allowedTools: ["session_attachment"] }
-				: undefined,
+			getSession: (sessionId: string) => sessionId === SESSION_ID ? directSession : undefined,
+			getSessionReplacementAdmission: () => ({ active: false, generation: 0 }),
 		};
 		const server = http.createServer(async (req, res) => {
 			const handled = await handleUploadedAttachmentToolRoute(
