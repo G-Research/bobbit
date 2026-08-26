@@ -3,6 +3,28 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.19.0
+
+Upgrading from v0.18.0. This release adds durable file attachments, searchable transcript navigation, smoother question handling, and broader enterprise Git host support, while strengthening AI Gateway migration and project-scoped tool routing.
+
+### ✨ New Features
+
+* 📎 **Attach any browser file**: Upload arbitrary files while retaining specialized image and document handling. Large document context stays bounded, agents can read immutable attachment ranges on demand, and attachment identity survives queueing, retries, recovery, history, reloads, and sandbox handoff.
+
+* 🧭 **Searchable transcript navigation**: Move between prompts with segmented controls, search and filter conversation history, jump to unresolved questions, and return reliably to the latest message across desktop and mobile layouts.
+
+* 💬 **Durable question handling**: Dismiss an entire question card without waking the agent, while answered and unanswered state remains race-safe across reloads and appears consistently in sidebar indicators.
+
+* 🌐 **Credential-aware enterprise PR status**: Bobbit can read PR status from structurally valid GitHub Enterprise remotes vouched for by local Git credentials, without broadening destructive merge permissions or exposing ambient credentials.
+
+### 🐛 Bug Fixes
+
+* 🤖 **Safe AI Gateway migration**: Verified legacy Bobbit AI Gateway provider blocks are adopted without rewriting user-owned JSONC. Live discovery and provider provenance are restored, and model-file permissions survive atomic updates.
+
+* 🧰 **Project-correct agent tools**: Tool discovery, policy, activation, delegation, replacement, and marketplace invalidation now consistently use the owning project, preventing server or another project’s tool configuration from leaking into a session.
+
+* 🗄️ **Cleaner archived goal output**: Agent-facing goal reads no longer include REST-only archived-session enrichment, keeping responses bounded while archived sessions remain available through the dedicated session tools.
+
 ## v0.18.0
 
 Upgrading from v0.17.0. This release adds in-place session promotion, fresh-context controls, richer Extension Host APIs, independent staff forks, clearer context limits, and stronger startup and team recovery.

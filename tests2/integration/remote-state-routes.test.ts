@@ -653,13 +653,9 @@ test.describe("remote-state coordinator routes", () => {
 				"repo", "view", "--repo", `${host}/acme/widget`, "--json", "viewerPermission",
 			]);
 		} finally {
-			// Completing one stale tree may schedule its serialized successor in a
-			// microtask, so drain twice before awaiting any still-pending routes.
-			for (let pass = 0; pass < 3; pass++) {
-				for (const probe of probes) probe.complete(false);
-				await new Promise<void>(resolve => setImmediate(resolve));
-			}
-			await Promise.allSettled(routeRequests);
+			// Restore shared runner state before any cleanup await. A stale helper may
+			// schedule a serialized successor in a microtask; that successor must use
+			// the normal fenced runner rather than leaking this fixture into later tests.
 			runner.execFile = originalExecFile;
 			runner.spawn = originalSpawn;
 			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
@@ -668,7 +664,10 @@ test.describe("remote-state coordinator routes", () => {
 				if (value === undefined) delete process.env[name];
 				else process.env[name] = value;
 			}
+			for (const probe of probes) probe.complete(false);
 			gateway.clock.advance(60_000);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			await Promise.allSettled(routeRequests);
 			try {
 				if (sessionId) await deleteSession(sessionId);
 			} finally {
