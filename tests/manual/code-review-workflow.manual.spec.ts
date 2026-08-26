@@ -11,7 +11,7 @@
  *   GATEWAY_AUTH_TOKEN                optional token override
  *   CODE_REVIEW_RUNS                  repetitions (default 1)
  *   CODE_REVIEW_VERBOSE               set to 1 for tool progress
- *   CODE_REVIEW_BRANCH / _BASE        compared branches
+ *   CODE_REVIEW_BRANCH / CODE_REVIEW_BASE  compared branches (base defaults to origin/HEAD, then main)
  *   CODE_REVIEW_REPORT_DIR            optional persistent report directory
  *   CODE_REVIEW_WORKFLOW_STATE_DIR    optional workflow-state directory
  *
@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { WebSocket } from "ws";
+import { resolveCodeReviewBaseBranch } from "./_helpers/resolve-primary-branch.js";
 
 const GATEWAY_HOST = process.env.GATEWAY_HOST || "localhost";
 const GATEWAY_PORT = Number.parseInt(process.env.GATEWAY_PORT || "3001", 10);
@@ -36,7 +37,9 @@ const STATE_DIR = process.env.CODE_REVIEW_WORKFLOW_STATE_DIR
 const VERBOSE = process.env.CODE_REVIEW_VERBOSE === "1";
 const NUM_RUNS = Number.parseInt(process.env.CODE_REVIEW_RUNS || "1", 10);
 const FEATURE_BRANCH = process.env.CODE_REVIEW_BRANCH || "test/realistic-change";
-const BASE_BRANCH = process.env.CODE_REVIEW_BASE || "master";
+// An explicit override wins; otherwise ask Git, with a documented `main` fallback
+// so Playwright --list remains safe when Git or origin/HEAD is unavailable.
+const BASE_BRANCH = resolveCodeReviewBaseBranch(REPO_PATH);
 
 interface PhaseInfo { name: string; durationMs: number }
 interface RunResult {
