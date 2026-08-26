@@ -193,7 +193,7 @@ callers get identical semantics:
 
 ### 4. Tool-wording nudge (advisory, ≤80 chars per budget test)
 
-`tests2/core/tool-description-budget.test.ts` caps every parameter description at
+`tests/unit/core/tool-description-budget.unit.test.ts` caps every parameter description at
 **80 chars**. Use this exact string on the `projectId` param of all five tools
 (74 chars):
 ```
@@ -334,7 +334,7 @@ propose_X(projectId?) ──argsWithProjectId──▶ POST /seed { args:{ proje
 
 ## Testing
 
-- **Unit/integration** (`tests2/integration`, seed endpoint): (a) omitted →
+- **Unit/integration** (`tests/integration/gateway/`, seed endpoint): (a) omitted →
   session incl. `system`→`headquarters`; (b) explicit valid cross-project
   accepted for goal/role/tool/staff/project; (c) explicit unknown rejected 422
   for goal/role/tool/staff; (d) unknown allowed for brand-new `propose_project`;
@@ -342,7 +342,7 @@ propose_X(projectId?) ──argsWithProjectId──▶ POST /seed { args:{ proje
   workflow the session's project lacks → passes; session's workflow unknown to
   target → rejected).
 - **Budget test** stays green (nudge ≤80 chars).
-- **Browser** (`tests2/browser`): cross-project proposal from project A into
+- **Browser** (`tests/browser/journeys/`): cross-project proposal from project A into
   project B — (i) banner shown when target≠proposer, (ii) no banner same-project,
   (iii) entity lands in target on accept.
 - `npm run check` clean; existing proposal tests green.
@@ -350,9 +350,9 @@ propose_X(projectId?) ──argsWithProjectId──▶ POST /seed { args:{ proje
 ## File ownership (parallel implementation)
 
 - **Server + tools + server tests:** `src/server/server.ts` (seed handler),
-  `defaults/tools/proposals/extension.ts`, `tests2/integration/*` seed tests.
+  `defaults/tools/proposals/extension.ts`, `tests/integration/gateway/*.gateway.test.ts` seed tests.
 - **UI + browser test:** `src/app/proposal-panels.ts` (+ any small CSS),
-  `tests2/browser/*` cross-project journey.
+  `tests/browser/journeys/*.journey.spec.ts` cross-project journey.
 
 These touch disjoint files; the only shared contract is
 `proposal.fields.projectId = resolved target`, defined above.

@@ -1,5 +1,7 @@
 # Reduce Server CPU — diagnostics and benchmark research
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Scope read
 
 Read-only review covered:
@@ -149,7 +151,7 @@ BOBBIT_SKIP_MCP=1 \
 BOBBIT_SKIP_AIGW_DISCOVERY=1 \
 BOBBIT_SKIP_TITLE_GEN=1 \
 BOBBIT_NO_OPEN=1 \
-node dist/server/cli.js --host 127.0.0.1 --port 0 --cwd <temp-project> --no-ui --no-tls --auth --agent-cli tests/e2e/mock-agent.mjs
+node dist/server/cli.js --host 127.0.0.1 --port 0 --cwd <temp-project> --no-ui --no-tls --auth --agent-cli tests/e2e/_helpers/mock-agent.mjs
 ```
 
 Then read `<temp-project>/.bobbit/state/gateway-url` and token, drive HTTP/WS workload traffic, collect JSONL, and terminate the child cleanly.

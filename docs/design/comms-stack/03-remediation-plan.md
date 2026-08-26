@@ -1,5 +1,7 @@
 # Bobbit Real-Time Comms Stack — Master Remediation Plan (Step 3)
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > Historical remediation plan, not current runtime reference. Stable occurrence identity and delivery settlement are documented in [Reliable prompt and steer delivery](../../prompt-queue.md).
 
 > Derived from [01-understanding.md](01-understanding.md) (architecture map, file:line anchors) and
@@ -232,7 +234,7 @@ omitted; echo timing is instant.
 
 #### Prerequisite red tests (authored here, flipped green by later packages)
 
-- `tests/mock-agent-core-image-echo.test.ts` (NEW, pure `node:test` over `MockAgentCore`) — pins that
+- `tests/unit/core/mock-agent-core-image-echo.unit.test.ts` (NEW, pure `node:test` over `MockAgentCore`) — pins that
   the mock can build `{role:'user', content:[text, image]}` from forwarded images. RED on master (echo
   is text-only; `handleCommand` discards `msg.images`). GREEN after steps 1–4.
 - `tests/mock-abort-shape.test.ts` (NEW, pure `node:test`) — pins the DEFAULT abort emits the full
@@ -244,7 +246,7 @@ omitted; echo timing is instant.
   `tests/session-manager-wedged-streaming.test.ts` (NEW, real `SessionManager` + node mock timers /
   fake bridge) — characterization-green tests documenting S8/S40, with a `test.fixme` stub for the
   eventual correct-behaviour assertion tagged with the owning package (WP9/WP10/WP6 region).
-- `tests/e2e/ui/image-attach-roundtrip.spec.ts` (NEW, browser E2E) — the WP1 target; WP0 authors the
+- `tests/browser/journeys/ui/image-attach-roundtrip.journey.spec.ts` (NEW, browser E2E) — the WP1 target; WP0 authors the
   faithful harness, leaves the live-tile assertion for WP1.
 
 #### Steps
@@ -294,14 +296,14 @@ omitted; echo timing is instant.
    (b) reorder — 1,3,2 → assert dispatch order `[1,2,3]` (GREEN on master, must stay green); (c)
    post-overflow stall — after snapshot, deliver seq=504 and assert it gap-buffers (characterizes S9).
 6. `tests/session-manager-heartbeat-resync.test.ts` (NEW) — template
-   `tests/session-manager-heartbeat.test.ts`. Real `SessionManager` via dynamic import (set
+   `tests/unit/core/session-manager-heartbeat.unit.test.ts`. Real `SessionManager` via dynamic import (set
    `BOBBIT_DIR` to a mkdtemp first). Drive `_emitStatusHeartbeat` re-broadcast (GREEN), `status_resync`
    recovery (GREEN), and a wedged-streaming **characterization** (status `streaming`,
    `streamingStartedAt` long-past, no `agent_end`; assert NO escalation today — documents S8 for WP9).
    The `_maybeReplayGrant` grant-replay coupling is browser code → assert it in a browser spec reusing
    the step-5 bundle.
 7. `tests/session-manager-auto-retry-fire-cancel.test.ts` (NEW) — template
-   `tests/session-manager-direct-prompt-lifecycle.test.ts` (uses `t.mock.timers`). Real
+   `tests/unit/core/session-manager-direct-prompt-lifecycle.unit.test.ts` (uses `t.mock.timers`). Real
    `SessionManager` + mock `rpcClient.prompt`. Cases: (1) timer fires while idle → prompt called
    (GREEN); (2) new prompt before fire → cancel → prompt NOT called (GREEN); (3) **characterization**:
    `forceAbort` the idle session in the backoff window → advance timers → assert prompt WAS called
@@ -338,7 +340,7 @@ omitted; echo timing is instant.
    `message_start` is a no-op in the STATE reducer (`remote-agent.ts:2081-2085`) but triggers
    `AgentInterface._updateAndPin()` (`AgentInterface.ts:1088`) — verify no follow-tail / scroll /
    jump-button spec regresses from the extra pin before merge.
-10. `tests/e2e/ui/repro-h3-snapshot-live-interleave.spec.ts:144` (the `test.fixme`). AUTHOR a
+10. `tests/browser/journeys/ui/repro-h3-snapshot-live-interleave.journey.spec.ts:144` (the `test.fixme`). AUTHOR a
     deterministic gate (reuse the `USER_ECHO_DELAY` knob from step 4 to widen the gap and fire
     `requestMessages()` inside it; escalate to a dedicated `SNAPSHOT_GATE` trigger only if the delay
     proves flaky under CI parallelism). **Review correction:** do NOT un-`fixme` case A — the comment
@@ -380,8 +382,8 @@ snapshot path (`:245`), never on the live-event path (`:188-241`) — that asymm
 "heals" only on reload.
 
 #### Prerequisite red tests
-- `tests/user-message-image-render.html` + `…-entry.ts` + `…-bundle.js` + `tests/user-message-image-render.spec.ts`
-  (NEW). **Review correction:** mirror `tests/ask-user-choices-renderer.spec.ts` (which bundles the
+- `tests/user-message-image-render.html` + `…-entry.ts` + `…-bundle.js` + `tests/dom/user-message-image-render.dom.test.ts`
+  (NEW). **Review correction:** mirror `tests/dom/ask-user-choices-renderer.dom.test.ts` (which bundles the
   REAL `UserMessage`/`AttachmentTile` Lit components via esbuild with `--tsconfig=tsconfig.web.json`
   and the pdfjs empty-shim alias), NOT `message-editor-attach.html` (a hand-rolled vanilla replica
   that would defeat the S6 pin). Add the missing `-entry.ts` and `-bundle.js` artifacts. Cases:
@@ -389,7 +391,7 @@ snapshot path (`:245`), never on the live-event path (`:188-241`) — that asymm
   src starts `data:image/png;base64,`; (ii) no image block → zero tiles; (iii) JPEG block → src starts
   `data:image/jpeg;base64,`; (iv) `user-with-attachments` with BOTH a non-empty `attachments` array
   AND image content blocks → tiles come from `attachments` (rich wins), count not doubled.
-- `tests/message-reducer.test.ts` (NEW cases): (i) live image echo → single stored row
+- `tests/unit/core/message-reducer.unit.test.ts` (NEW cases): (i) live image echo → single stored row
   `role==='user-with-attachments'`, `attachments[0].content==='AAA'`; (ii) two concurrent optimistic +
   two image echoes → exactly 2 rows, each with its own image; (iii) an ASSISTANT live message whose
   content contains an image block is NOT enriched (pins the `role!=='user'` short-circuit). All red on
@@ -457,7 +459,7 @@ persisted user row, and the live echo (RC1). Server user/aborted/errored rows ar
 reconciliation with four holes: S7/S10 (id-less EMPTY-text rows skip the multiset), S18 (optimistic
 survivor deduped by id only), S17 (skill-expanded echo text diverges).
 
-#### Prerequisite red tests (all `tests/message-reducer.test.ts`, pure reducer, `needsHarnessChange:false`)
+#### Prerequisite red tests (all `tests/unit/core/message-reducer.unit.test.ts`, pure reducer, `needsHarnessChange:false`)
 - **S7/S10:** id-less EMPTY-text aborted/errored assistant live row + snapshot with the same id-less
   empty row → ONE row; a second snapshot stays one (idempotent). RED on master (2).
 - **S18:** optimistic same-text prompt + snapshot-before-echo → ONE; later id-less live echo → still
@@ -550,14 +552,14 @@ droppable `send()`.
   `repro-h3-snapshot-live-interleave.spec.ts`). Idle session: close the socket, `ra.prompt('lost-xyz')`
   synchronously before reconnect; assert the optimistic bubble carries `[data-pending-send]` and after
   reconnect the server transcript has exactly ONE copy. RED on master.
-- `tests/remote-agent-outbox.spec.ts` (NEW). When `ws.readyState!==OPEN`: `{type:'prompt'}` enqueues,
+- `tests/dom/remote-agent-outbox.dom.test.ts` (NEW). When `ws.readyState!==OPEN`: `{type:'prompt'}` enqueues,
   `{type:'get_state'}` does not; on `auth_ok` the outbox flushes FIFO then clears; bounded (oldest
   dropped past cap). **Review addition:** also assert `{type:'steer'}` and `{type:'retry'}` enqueue
   while CLOSED and `set_model`/`status_resync`/`abort` do not.
 - `tests/composer-aggregate-size-guard.spec.ts` (NEW, model on `message-editor-attach.spec.ts`). An
   over-aggregate Send → `onSend` NOT called, `[data-testid=composer-size-error]` shown, value/
   attachments retained.
-- `tests/ws-max-payload.test.ts` (NEW). Assert the constructed wss options include a numeric
+- `tests/unit/core/ws-max-payload.unit.test.ts` (NEW). Assert the constructed wss options include a numeric
   `maxPayload === WS_MAX_PAYLOAD_BYTES` (extract the options into an exported const so it imports
   without booting a socket).
 - `tests/e2e/ui/grant-replay-outbox.spec.ts` (NEW). The post-grant replay survives a flap and reaches
@@ -645,12 +647,12 @@ dispatches without advancing `_highestSeq`) and never enter the ring (never repl
 (resume-loss, stale partial) and S21 (orphaned banner).
 
 #### Step 0 (TEST-FIRST — from review): write the tests and confirm RED on unmodified master
-Author `tests/seqless-broadcast-exhaustive.test.ts`, `tests/auto-retry-seqless-routing.test.ts`, and
+Author `tests/unit/core/seqless-broadcast-exhaustive.unit.test.ts`, `tests/auto-retry-seqless-routing.test.ts`, and
 the `auto-retry-banner.spec.ts` extension FIRST; run on master to confirm RED (3 raw broadcast sites;
 `seq===undefined`; `eventBuffer.size===0`; banner stays after snapshot). Only then apply the fixes.
 
 #### Prerequisite red tests
-- `tests/seqless-broadcast-exhaustive.test.ts` (NEW). **Review correction to the allowlist:** scope the
+- `tests/unit/core/seqless-broadcast-exhaustive.unit.test.ts` (NEW). **Review correction to the allowlist:** scope the
   source-walk to `broadcast(session.clients, {type:"event"})` callsites **within
   `src/server/agent/session-manager.ts` only** (NOT `send(...)`, NOT `src/server/` globally). A
   `src/server/`-wide grep would falsely flag `server.ts:2160-2161` (the `BOBBIT_E2E` test-replay
@@ -663,7 +665,7 @@ the `auto-retry-banner.spec.ts` extension FIRST; run on master to confirm RED (3
   `emitSessionEvent(fakeSession, event)` and asserts seq is numeric, `eventBuffer.size` increments,
   `since()` replays. The fake session shares ONE `EventBuffer` across the three sub-cases (seqs 1/2/3;
   use `since(prevSeq)` tracking). `emitSessionEvent` IS exported and synchronous (verified).
-- `tests/e2e/ui/auto-retry-banner.spec.ts` (EXTEND). Inject `auto_retry_pending` via the window hook;
+- `tests/browser/journeys/ui/auto-retry-banner.journey.spec.ts` (EXTEND). Inject `auto_retry_pending` via the window hook;
   drive `remoteAgent.handleServerMessage({type:'messages', data:[…]})` (a snapshot) WITHOUT a preceding
   cancel → assert the banner is GONE. RED on master (snapshot handler never resets `autoRetryPending`).
   **Review guard:** wrap the `page.evaluate` in a try and assert no console error (the real `messages`
@@ -682,7 +684,7 @@ the `auto-retry-banner.spec.ts` extension FIRST; run on master to confirm RED (3
    `:1337`. Add `this._state.autoRetryPending = null;` (server snapshot authoritative for banner
    state; the now-seq'd pending replays AFTER the snapshot if a retry is genuinely pending). Do NOT
    also clear in `case "state"` (partial frames).
-5. Author `tests/seqless-broadcast-exhaustive.test.ts` + `tests/auto-retry-seqless-routing.test.ts`
+5. Author `tests/unit/core/seqless-broadcast-exhaustive.unit.test.ts` + `tests/auto-retry-seqless-routing.test.ts`
    (finalize step 0).
 6. Run all three gates.
 
@@ -718,14 +720,14 @@ it → `since(fromSeq)` has a permanent hole → a client resuming across a DENI
 gap-buffers behind it forever.
 
 #### Prerequisite red tests
-- `tests/event-buffer.test.ts` — modify the `pushFrame stamps a fresh seq+ts but does NOT retain` test
+- `tests/unit/core/event-buffer.unit.test.ts` — modify the `pushFrame stamps a fresh seq+ts but does NOT retain` test
   (lines 209-221) to the post-fix contract (`size===3`, `getAll().map(seq)===[1,2,3]`) and add a
   `since()`-hole-free test (`since(1)===[2,3,4]`). **Review correction (BASELINE-BREAKING):** ALSO
   update the SECOND test at lines 223-233 (`pushFrame seqs are monotonic and consumed even with no
   pushes`), which asserts `buf.size === 0` after three no-arg `pushFrame()` calls — after the fix
   retention is unconditional so size becomes 3. Change `assert.equal(buf.size, 0)` → `3` and add
   `assert.deepEqual(buf.getAll().map(e=>e.seq),[1,2,3])`. Without this the baseline regresses.
-- `tests/remote-agent-seq-overflow.spec.ts` (NEW, browser E2E driving the REAL
+- `tests/dom/remote-agent-seq-overflow.dom.test.ts` (NEW, browser E2E driving the REAL
   `RemoteAgent.handleServerMessage`, sibling to `repro-h3-snapshot-live-interleave.spec.ts`). Force
   overflow (seq 1 baseline, then seqs 3..503 with a gap at 2 → 501 gap-buffered events trip overflow
   on the 501st). Assert `ra._highestSeq===0 && ra._seqInitialized===false` post-fix; deliver seq=504 as
@@ -739,7 +741,7 @@ gap-buffers behind it forever.
   spurious permission card or a spurious `_state.messages` row (pins the benign-holder "never paints").
 
 #### Steps
-1. `tests/event-buffer.test.ts` — author the red prerequisites (both the 209-221 edit AND the 223-233
+1. `tests/unit/core/event-buffer.unit.test.ts` — author the red prerequisites (both the 209-221 edit AND the 223-233
    edit). Run → these fail on master.
 2. `src/server/agent/event-buffer.ts:41-43`. Make `pushFrame(frame?)` retain a frame-shaped event:
    ```ts
@@ -769,7 +771,7 @@ gap-buffers behind it forever.
 5. `src/app/remote-agent.ts:1418-1425`. Confirm the S9 spec is red, THEN add `this._seqInitialized = false;`
    in the overflow block so the next seq'd frame re-baselines via the existing first-frame baseline
    (`:1401-1408`). Do NOT touch `resume_gap` (`:1443`) or `_advanceTopLevelSeq` (`:1115`).
-6. `tests/remote-agent-seq-overflow.spec.ts` (NEW) — the production-driving S9 spec.
+6. `tests/dom/remote-agent-seq-overflow.dom.test.ts` (NEW) — the production-driving S9 spec.
 7. `tests/fixtures/remote-agent-seq-dedup.html` (optional hygiene) — add a one-line comment pointing to
    the new overflow spec as the authoritative pin (do NOT rely on the fixture for the overflow
    invariant).
@@ -907,7 +909,7 @@ routine 15s heartbeat mints a redundant second prompt.
 
 #### Prerequisite red tests
 - `tests/respawn-suppresses-continuation-prompt.test.ts` (NEW) — template
-  `tests/sandbox-recovery-respawn-helper.test.ts`. Behaviour (shim): FakeManager.restoreSession mirrors
+  `tests/unit/core/sandbox-recovery-respawn-helper.unit.test.ts`. Behaviour (shim): FakeManager.restoreSession mirrors
   `if (ps.wasStreaming && !ps._suppressContinuationPrompt) prompts.push(CONTINUE)`. (A) `restartAgent`
   respawn with the flag → prompts 0; (B) direct restore with `wasStreaming:true` no flag → prompts 1
   (genuine boot restore preserved); (C) cleanup → flag deleted in finally. SOURCE-PIN: assert the
@@ -917,7 +919,7 @@ routine 15s heartbeat mints a redundant second prompt.
   reaches the flag THROUGH `_restartSessionWithUpdatedRole`; do NOT hunt for a third edit site in
   `grantToolPermission`. **Scope to this WP:** only `restartAgent` and role-switch set the flag (NOT
   the grant path — see scope decision). Negative source-pin: `recoverSandboxSessions` does NOT set it.
-- `tests/fixtures/remote-agent-status.html` (EDIT) + `tests/remote-agent-status.spec.ts`. Mirror BOTH
+- `tests/fixtures/remote-agent-status.html` (EDIT) + `tests/dom/remote-agent-status.dom.test.ts`. Mirror BOTH
   current `_maybeReplayGrant` calls, then assert heartbeat does NOT replay and transition DOES.
 - `tests/remote-agent-status-source.test.ts` (NEW, node:test). Assert the REAL `case "session_status"`
   idempotent sub-branch does NOT contain `_maybeReplayGrant` and the full block contains exactly one
@@ -999,12 +1001,12 @@ S20: `RemoteAgent.prompt()` (`remote-agent.ts:879-884`) ships full document `con
 the frame ~3×, inflating toward the 100 MiB cap.
 
 #### Prerequisite red tests
-- `tests/prompt-queue.spec.ts` — `toBroadcastArray()` strips `images[].data`/`attachments[].content`/
+- `tests/dom/prompt-queue.dom.test.ts` — `toBroadcastArray()` strips `images[].data`/`attachments[].content`/
   `attachments[].preview` (keeping metadata); `toArray()` keeps full `images[].data`.
 - `tests/payload-slimming.test.ts` (NEW). `broadcastQueue` projects: the `queue_update` frame and the
   persisted `messageQueue` carry no image data / attachment content / preview, while the in-memory
   `promptQueue` still re-dispatches the full image to `rpcClient.prompt`.
-- `tests/e2e/queue-e2e.spec.ts` (EXTEND). Queue an image prompt while STAY_BUSY; assert the
+- `tests/integration/gateway/queue-e2e.gateway.test.ts` (EXTEND). Queue an image prompt while STAY_BUSY; assert the
   `queue_update` row has no image data. (The "agent receives the image on drain" half asserts via the
   captured prompt command image arg using the in-process mock bridge.)
 - **Review correction (test-first violation):** `RemoteAgent` is browser-only and NOT Node-unit-
@@ -1044,7 +1046,7 @@ the frame ~3×, inflating toward the 100 MiB cap.
    `extractedText` to the model-facing `text` (`[Document: <name>]\n<extractedText>`, mirroring
    `convertAttachments` `Messages.ts:676-679`); keep the optimistic bubble showing the user's verbatim
    text. **Default for the WP7 PR: deferred** (pure slimming, zero model-behaviour change).
-7. `tests/e2e/queue-e2e.spec.ts` (EXTEND) + `tests/payload-slimming.test.ts` (incl. the restart-
+7. `tests/integration/gateway/queue-e2e.gateway.test.ts` (EXTEND) + `tests/payload-slimming.test.ts` (incl. the restart-
    persistence assertion: reload from persisted `messageQueue` → `images[].data` survived,
    `attachments[].content` did not).
 
@@ -1081,7 +1083,7 @@ stderr `:306`); S32 per-delta proposal scans build 5 fresh RegExps with no prech
 round-trip (`aigw-manager.ts:387-390`).
 
 #### Prerequisite red tests
-- `tests/rpc-bridge-utf8-split.test.ts` (NEW). Spawn a real `RpcBridge` against a stub CLI whose
+- `tests/unit/core/rpc-bridge-utf8-split.unit.test.ts` (NEW). Spawn a real `RpcBridge` against a stub CLI whose
   handler writes one event line in TWO `process.stdout.write()` calls splitting a 3-byte CJK and a
   4-byte emoji across the byte boundary; assert the captured text equals the original (no U+FFFD). RED
   on master. **Review addition:** a stderr-tail variant pinning the `:306` decoder edit too.
@@ -1105,7 +1107,7 @@ round-trip (`aigw-manager.ts:387-390`).
   dropped when unset" on the request path.
 
 #### Steps
-1. Author `tests/rpc-bridge-utf8-split.test.ts` (red).
+1. Author `tests/unit/core/rpc-bridge-utf8-split.unit.test.ts` (red).
 2. `src/server/agent/rpc-bridge.ts:1` + `:142-144` + `:298-311`. Add
    `import { StringDecoder } from "node:string_decoder";`; add `_stdoutDecoder`/`_stderrDecoder` fields;
    replace `chunk.toString("utf-8")` at `:300` with `this._stdoutDecoder.write(chunk)` and at `:306`
@@ -1139,7 +1141,7 @@ round-trip (`aigw-manager.ts:387-390`).
 12. `src/server/agent/aigw-manager.ts:381-390`. Replace the header literal with `"${BOBBIT_SESSION_ID}"`
     and fix the comment to state the truth (set → resolves with zero subprocess; unset → THROWS on the
     request path, same as `!cmd`; `BOBBIT_SESSION_ID` is always set for real sessions). UPDATE the two
-    existing literal-pinning tests (`tests/aigw-headers.test.ts`, `tests/aigw-header-resolver.test.ts`)
+    existing literal-pinning tests (`tests/unit/core/aigw-headers.unit.test.ts`, `tests/unit/core/aigw-header-resolver.unit.test.ts`)
     to the new invariant (the invariant CHANGED — no longer a shell command).
 13. Run `npm run check && npm run test:unit && npm run test:e2e`.
 
@@ -1173,7 +1175,7 @@ split and S43 spy approach are corrected.
 **Root cause removed.** Eight independent localized gaps (02-analysis §5 "lower-risk standalone").
 
 #### S3 — IME guard
-- Red: `tests/message-editor-ime.html` + `…-entry.ts` + `…-bundle.js` + `tests/message-editor-ime.spec.ts`
+- Red: `tests/message-editor-ime.html` + `…-entry.ts` + `…-bundle.js` + `tests/browser/fixtures/message-editor-ime.fixture.spec.ts`
   (NEW). **Review correction:** bundle the REAL `MessageEditor` (mirror
   `streaming-message-container-set-message.spec.ts`), NOT the hand-copy `message-editor-send.html`.
   Cases: composing Enter (`isComposing:true`) → 0 sends; `keyCode:229` → 0 sends; plain Enter → exactly
@@ -1218,13 +1220,13 @@ split and S43 spy approach are corrected.
   paths — `client_joined` loop, `server.ts:1331` `broadcastToSession` — is a follow-up.)
 
 #### S42 — multiset steer dedup
-- Red: `tests/session-manager-getmessages-splice.test.ts` (EXTEND) — two identical-text steers splice
+- Red: `tests/unit/core/session-manager-getmessages-splice.unit.test.ts` (EXTEND) — two identical-text steers splice
   as two distinct rows (length 3). RED on master (Set collapses → 2).
 - Fix: `src/server/agent/splice-inflight-message.ts:94-120` — replace the `Set` with a per-text count
   map, decrementing one match per present snapshot row (mirrors the reducer's `serverPlainTextCounts`).
 
 #### S43 — removeAllListeners before kill
-- Red: `tests/rpc-bridge-lifecycle.test.ts` (EXTEND). **Review correction:** make
+- Red: `tests/unit/core/rpc-bridge-lifecycle.unit.test.ts` (EXTEND). **Review correction:** make
   `spy on ChildProcess.prototype.removeAllListeners` the PRIMARY assertion (the pre-null child capture
   is awkward against the real-spawn harness).
 - Fix: `src/server/agent/rpc-bridge.ts:242` — `this.process?.removeAllListeners();` before
@@ -1295,16 +1297,16 @@ it; (3) `project-assistant-saved-state.spec.ts` — a client-only `markAccepted`
 `dynamic-chat-tabs.spec.ts` — a `contentHash` settling race.
 
 #### Prerequisite red tests
-- `tests/search/flex-store.spec.ts` — close() resolves only after the final rename; a flush losing its
+- `tests/dom/search/flex-store.dom.test.ts` — close() resolves only after the final rename; a flush losing its
   dir mid-write surfaces (not silently swallowed).
 - `tests/project-context-close.spec.ts` (NEW) — `close()`/`closeAll()` return an awaitable that
   resolves only after the search flush; **review addition:** a case that `remove(projectId)` (the
   project-deletion path) also awaits the flush.
-- `tests/e2e/ui/pre-compaction-history.spec.ts` — the seeded `agentSessionFile` override survives a
+- `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` — the seeded `agentSessionFile` override survives a
   forced `getState()` (assert `probeJson.total===3` after forcing one).
-- `tests/e2e/ui/project-assistant-saved-state.spec.ts` — every reliance on the "Changes Saved" heading
+- `tests/browser/fixtures/project-assistant-saved-state.fixture.spec.ts` — every reliance on the "Changes Saved" heading
   is gated on a SERVER-authoritative draft poll (`accepted===true`).
-- `tests/e2e/ui/dynamic-chat-tabs.spec.ts` — the historical v3 card collapses to the live tab with zero
+- `tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts` — the historical v3 card collapses to the live tab with zero
   remount POSTs, **sampling the contentHash from the field production actually reads**.
 
 #### Steps
@@ -1324,23 +1326,23 @@ it; (3) `project-assistant-saved-state.spec.ts` — a client-only `markAccepted`
    `__pinnedAgentSessionFiles` Map + exported `__pinAgentSessionFile`/`__clearPinnedAgentSessionFile`;
    guard the `update({agentSessionFile})` at `:4262` (and the parallel `:4644`/`:5714` if they write
    it) with the pinned value (production never calls `__pin*`, so behaviour is unchanged).
-5. `tests/e2e/ui/pre-compaction-history.spec.ts:143-150`/`:206-213`. After each `store.update`, call
+5. `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts:143-150`/`:206-213`. After each `store.update`, call
    `(gateway.sessionManager as any).__pinAgentSessionFile?.(sessionId, dedicatedJsonl)`; add a
    prerequisite assertion that forces a `getState()` before the probe and asserts `total===3`.
-6. `tests/e2e/ui/project-assistant-saved-state.spec.ts`. Before every "Changes Saved" reliance, add an
+6. `tests/browser/fixtures/project-assistant-saved-state.fixture.spec.ts`. Before every "Changes Saved" reliance, add an
    `expect.poll` on `GET /api/sessions/:id/draft?type=project` asserting `accepted===true`. **Review
    correction (in-place step-3 breakage):** KEEP `markAccepted`'s client-state mutation (the heading
    reads `state.projectProposalAcceptedBySessionId`, hydrated from the draft ONLY on reload via
    `session-manager.ts:578-579`; a server-only PUT never sets the client flag for the no-reload step 3).
    Add the server poll ALONGSIDE, or use the real "Apply Changes" click variant.
-7. `tests/e2e/ui/dynamic-chat-tabs.spec.ts:338-356`/`:631-633`. **Review correction (wrong hash
+7. `tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts:338-356`/`:631-633`. **Review correction (wrong hash
    source):** the collapse decision at `preview-panel.ts:218` is
    `previewContentHashFromTab(currentFilenameTab) === contentHash`, reading the LIVE TAB's stored
    `tab.state.contentHash` — NOT `state.previewPanelContentHash` and NOT `previewTabsHaveSameContent`
    (verified: zero call sites in `src/app`). Sample the v3 card's hash from the live tab's stored hash
    via `page.evaluate` (poll until a stable 64-hex string), and assert the single-source-of-truth as
    `GET-mount contentHash === currentFilenameTab.state.contentHash`.
-8. `tests/search/flex-store.spec.ts`. Add the two prerequisite cases (close() resolves after rename;
+8. `tests/dom/search/flex-store.dom.test.ts`. Add the two prerequisite cases (close() resolves after rename;
    close() does not reject when the dir is removed mid-write, exercising the `[search] flex flush error`
    catch).
 

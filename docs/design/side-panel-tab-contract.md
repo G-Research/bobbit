@@ -1,6 +1,8 @@
 # Side-Panel Tab Contract
 
-Pinned by [`tests/e2e/ui/side-panel-tabs.spec.ts`](../../tests/e2e/ui/side-panel-tabs.spec.ts).
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
+Pinned by [`tests/browser/fixtures/side-panel-tabs.fixture.spec.ts`](../../tests/browser/fixtures/side-panel-tabs.fixture.spec.ts).
 Companion to [`preview-architecture.md`](../preview-architecture.md) (v3 mount,
 SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-widgets.md)
 (historical preview tab UX).
@@ -480,7 +482,7 @@ So:
 ## 10. Tests
 
 Browser E2E lives in
-[`tests/e2e/ui/side-panel-tabs.spec.ts`](../../tests/e2e/ui/side-panel-tabs.spec.ts).
+[`tests/browser/fixtures/side-panel-tabs.fixture.spec.ts`](../../tests/browser/fixtures/side-panel-tabs.fixture.spec.ts).
 The user stories the spec pins (each corresponds to assertions in the goal
 spec):
 
@@ -528,18 +530,18 @@ canonicalization, reorder revision checks, migration, and next-active selection)
 is covered by unit tests against the side-panel workspace helpers plus preview
 helpers. Existing preview regression coverage stays green:
 
-- [`tests/preview-renderer.spec.ts`](../../tests/preview-renderer.spec.ts)
-- [`tests/e2e/ui/dynamic-chat-tabs.spec.ts`](../../tests/e2e/ui/dynamic-chat-tabs.spec.ts)
-- [`tests/e2e/ui/preview-happy-path.spec.ts`](../../tests/e2e/ui/preview-happy-path.spec.ts)
+- [`tests/dom/preview-renderer.dom.test.ts`](../../tests/dom/preview-renderer.dom.test.ts)
+- [`tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts`](../../tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts)
+- [`tests/browser/journeys/ui/preview-happy-path.journey.spec.ts`](../../tests/browser/journeys/ui/preview-happy-path.journey.spec.ts)
 - [`tests/e2e/ui/preview-new-tab.spec.ts`](../../tests/e2e/ui/preview-new-tab.spec.ts)
 - [`tests/e2e/ui/preview-refresh.spec.ts`](../../tests/e2e/ui/preview-refresh.spec.ts)
 
 *(The former `tests/e2e/ui/pr-walkthrough-panel.spec.ts` was deleted with the
 bespoke walkthrough tab; the pack-served viewer is now pinned by
-`tests/e2e/ui/pr-walkthrough-pack.spec.ts`.)*
+`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`.)*
 
 The v3 snapshot block stays pinned by
-[`tests/e2e/preview-token-cost.spec.ts`](../../tests/e2e/preview-token-cost.spec.ts).
+[`tests/integration/gateway/preview-token-cost.gateway.test.ts`](../../tests/integration/gateway/preview-token-cost.gateway.test.ts).
 `artifactId` is included in the v3 payload only when it (and any other
 optional fields the builder is trying to fit) keeps the marker block at
 or under 250 bytes.

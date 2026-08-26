@@ -1,5 +1,7 @@
 # Marketplace MCP support — research and implementation design
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: historical implemented design record; superseded for gateway-source polish by [mcp-gateway-polish.md](mcp-gateway-polish.md)
 Scope: original Marketplace support for installable MCP server definitions and official MCP Registry API sources without changing the existing manual MCP config cascade.
 
@@ -78,24 +80,24 @@ Relevant files:
 ### Tests and docs already pinning behavior
 
 - Marketplace backend/unit:
-  - `tests/pack-marketplace.test.ts`
-  - `tests/marketplace-install.test.ts`
-  - `tests/marketplace-activation-tool-catalogue.test.ts`
-  - `tests/market-tool-runtime.test.ts`
-  - `tests/market-tool-activation-runtime.test.ts`
-  - `tests/marketplace-source-builtin.test.ts`
+  - `tests/unit/core/pack-marketplace.unit.test.ts`
+  - `tests/e2e/vitest/marketplace-install.vitest-e2e.test.ts`
+  - `tests/unit/core/marketplace-activation-tool-catalogue.unit.test.ts`
+  - `tests/unit/core/market-tool-runtime.unit.test.ts`
+  - `tests/unit/core/market-tool-activation-runtime.unit.test.ts`
+  - `tests/unit/core/marketplace-source-builtin.unit.test.ts`
 - Marketplace API/browser:
-  - `tests/e2e/marketplace-provider-activation.spec.ts` already proves schema-2 `catalogue.mcp` and `disabled.mcp` round-trip.
-  - `tests/e2e/ui/market-activation.spec.ts`
-  - `tests/e2e/ui/marketplace.spec.ts`
+  - `tests/integration/gateway/marketplace-provider-activation.gateway.test.ts` already proves schema-2 `catalogue.mcp` and `disabled.mcp` round-trip.
+  - `tests/browser/journeys/ui/market-activation.journey.spec.ts`
+  - `tests/browser/journeys/ui/marketplace.journey.spec.ts`
 - MCP:
-  - `tests/mcp-unit.spec.ts`
-  - `tests/mcp-failure-isolation.test.ts`
+  - `tests/dom/mcp-unit.dom.test.ts`
+  - `tests/unit/core/mcp-failure-isolation.unit.test.ts`
   - `tests/mcp-meta-*.test.ts`
-  - `tests/mcp-write-extensions-isolation.test.ts`
-  - `tests/e2e/mcp-integration.spec.ts`
-  - `tests/e2e/mcp-meta-call.spec.ts`
-  - `tests/e2e/mcp-tool-permission.spec.ts`
+  - `tests/unit/core/mcp-write-extensions-isolation.unit.test.ts`
+  - `tests/e2e/api/mcp-integration.api-e2e.spec.ts`
+  - `tests/integration/gateway/mcp-meta-call.gateway.test.ts`
+  - `tests/e2e/api/mcp-tool-permission.api-e2e.spec.ts`
 - Reference docs updated with implementation behavior:
   - `docs/marketplace.md` documents the MCP contribution schema, registry sources, activation/status split, trust model, and manual-over-Marketplace precedence.
   - `docs/extension-host-authoring.md` points `contents.mcp` authors to Marketplace MCP because it is schema-2-only and not an Extension-Host surface.
@@ -200,7 +202,7 @@ Implementation files/functions:
   - `export interface McpPackContribution`.
   - `export function loadMcpContributions(packRoot: string, manifest: PackManifest): McpPackContribution[]`.
   - Include `mcp: McpPackContribution[]` on `PackContributions` only if useful for shared catalogue/status metadata; MCP runtime discovery can also call `loadMcpContributions()` directly.
-- Add tests in a new `tests/marketplace-mcp-contributions.test.ts` for YAML and JSON happy paths, unsafe basename, invalid server names, mixed transport, invalid HTTP URL, and `cwd` containment.
+- Add tests in a new `tests/unit/core/marketplace-mcp-contributions.unit.test.ts` for YAML and JSON happy paths, unsafe basename, invalid server names, mixed transport, invalid HTTP URL, and `cwd` containment.
 
 ## 4. Registry/discovery source support
 
@@ -620,7 +622,7 @@ Expected effect after PUT returns:
 1. **Schema and loader**
    - `src/server/agent/pack-contributions.ts`: add `McpPackContribution` and `loadMcpContributions()`.
    - `src/server/agent/marketplace-install.ts`: extend `readPackEntityDescriptions()` or add MCP-specific descriptions for browse/activation.
-   - Tests: `tests/marketplace-mcp-contributions.test.ts`.
+   - Tests: `tests/unit/core/marketplace-mcp-contributions.unit.test.ts`.
 2. **Marketplace source type and registry browse**
    - `marketplace-source-store.ts`: source `type` persistence.
    - New `mcp-registry-source.ts`: fetch/validate/map/materialize.
@@ -648,7 +650,7 @@ Expected effect after PUT returns:
 
 ### Unit tests
 
-- `tests/marketplace-mcp-contributions.test.ts`
+- `tests/unit/core/marketplace-mcp-contributions.unit.test.ts`
   - Parses stdio contribution.
   - Parses HTTP contribution.
   - Rejects unsafe `contents.mcp` basename.
@@ -656,14 +658,14 @@ Expected effect after PUT returns:
   - Rejects mixed/missing transport.
   - Rejects bad HTTP URL.
   - Rejects or normalizes unsafe `cwd`.
-- `tests/marketplace-source-store.test.ts` or extend `tests/marketplace-install.test.ts`
+- `tests/marketplace-source-store.test.ts` or extend `tests/e2e/vitest/marketplace-install.vitest-e2e.test.ts`
   - `MarketplaceSource.type` persists and defaults to `pack` for legacy rows.
   - `ref` rejected/ignored for `mcp-registry`.
 - `tests/marketplace-mcp-registry.test.ts`
   - Mock fetch registry response with multiple servers.
   - Browse returns virtual pack records with `contents.mcp` chips.
   - Install materializes normal schema-2 pack with `.pack-meta.yaml`.
-- `tests/mcp-manager-marketplace-discovery.test.ts`
+- `tests/unit/core/mcp-manager-marketplace-discovery.unit.test.ts`
   - Marketplace server discovered before manual sources.
   - Manual `.bobbit/config/mcp.json` overrides same-name marketplace config.
   - Disabled `DisabledRefs.mcp` entry omitted.
@@ -671,7 +673,7 @@ Expected effect after PUT returns:
 
 ### API E2E
 
-- Extend or add `tests/e2e/marketplace-mcp.spec.ts`:
+- Extend or add `tests/e2e/api/marketplace-mcp.api-e2e.spec.ts`:
   - Add registry source.
   - Browse two MCP virtual packs.
   - Install one to server scope.
@@ -685,7 +687,7 @@ Expected effect after PUT returns:
 
 ### Browser E2E
 
-- New `tests/e2e/ui/marketplace-mcp.spec.ts`:
+- New `tests/browser/journeys/ui/marketplace-mcp.journey.spec.ts`:
   1. Open Market.
   2. Add an official MCP Registry API URL using the new source type.
   3. Browse multiple servers as cards with MCP chips.
@@ -708,10 +710,10 @@ npm run test:e2e
 
 Pay special attention to existing MCP tests:
 
-- `tests/e2e/mcp-integration.spec.ts`
-- `tests/e2e/mcp-meta-call.spec.ts`
-- `tests/e2e/mcp-tool-permission.spec.ts`
-- `tests/grant-policy.test.ts`
+- `tests/e2e/api/mcp-integration.api-e2e.spec.ts`
+- `tests/integration/gateway/mcp-meta-call.gateway.test.ts`
+- `tests/e2e/api/mcp-tool-permission.api-e2e.spec.ts`
+- `tests/unit/core/grant-policy.unit.test.ts`
 
 ## 11. Risks and decisions
 

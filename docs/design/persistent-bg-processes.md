@@ -1,5 +1,7 @@
 # Persistent `bash_bg` processes — survive gateway restart + re-attach to live processes
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: implemented
 Owner: bg-process feature
 
@@ -1287,7 +1289,7 @@ restart (§11). Importing the module launches nothing, so it is unit-testable in
 
 ### Unit (`tests/`, `node:test`, no real OS processes)
 
-Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-persistence.test.ts`**:
+Extend/replace `tests/unit/core/bg-process-manager.unit.test.ts` and add **`tests/unit/core/bg-process-persistence.unit.test.ts`**:
 
 > Two host mechanisms are both fully persistent: the **POSIX shell wrapper** (Git Bash on Windows,
 > `/bin/sh` elsewhere/docker) and the **Node bg-runner helper** (Windows without Git Bash). Both are
@@ -1334,7 +1336,7 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   `hostPid` is never signalled and the group form is used. **Manual/integration (needs Docker):**
   assert killing a docker bg process stops the actual long-running **child** command (e.g. a
   `sleep`/printing loop inside `( <command> )`), not just the wrapper shell — extend
-  `tests/manual-integration/sandbox-recovery-docker.spec.ts`.
+  `tests/manual/sandbox-recovery-docker.manual.spec.ts`.
 - **Docker container recreated/removed — host projection retained:** persisted docker record whose
   container no longer resolves (or has a new `containerId`). `restoreSession()` **always** loads +
   shows the **HOST** `<bgId>.log` projection tail (output retained). If the **host status snapshot**
@@ -1384,7 +1386,7 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   stdout/stderr and assert each spool is trimmed to the last `<KEEP>` (bounded ring, in-place,
   restart-independent); emit an `exit` with code 7 and assert the helper writes `7` to the status
   file and `processPid`+`nonce` to the pidfile. No real processes.
-- **Windows dev-harness restart survival (reproducing) — `tests/bg-process-windows-restart.test.ts`:**
+- **Windows dev-harness restart survival (reproducing) — `tests/unit/core/bg-process-windows-restart.unit.test.ts`:**
   pins the three fixable seams of the Windows restart bug, all with injected deps (fake `SpawnFn`,
   noop tailers, isolated temp `BgProcessStore`, faked `BgEnv`) so **no real OS process** is touched.
   (A) `src/server/harness-kill.ts` exports `windowsGatewayKillArgs(pid)` returning a `taskkill`
@@ -1396,7 +1398,7 @@ Extend/replace `tests/bg-process-manager.test.ts` and add **`tests/bg-process-pe
   and persists the pidfile pid and re-attaches (`running`, not `unrecoverable`). Every assertion
   message carries the `WIN_BG_RESTART_BUG` marker for the reproducing-test gate.
 
-### Browser E2E (required) — `tests/e2e/ui/bg-process-persistence.spec.ts`
+### Browser E2E (required) — `tests/browser/journeys/ui/bg-process-persistence.journey.spec.ts`
 
 Pattern from `tests/e2e/ui/settings.spec.ts`, spawned-gateway harness:
 
@@ -1417,13 +1419,13 @@ Pattern from `tests/e2e/ui/settings.spec.ts`, spawned-gateway harness:
    (offset rebases to `0`, the retained tail shows, new lines keep arriving). (Docker variant noted
    for `test:manual` below.)
 
-Keep `tests/e2e/bg-process-sandbox-guard.spec.ts` green (the `sandboxed && !containerId` guard is
+Keep `tests/integration/gateway/bg-process-sandbox-guard.gateway.test.ts` green (the `sandboxed && !containerId` guard is
 unchanged). Docker re-attach — including the **copytruncate offset rebase after restart** (a chatty
 in-container process whose spool the in-container trimmer copytruncated, then a gateway restart still
 resumes streaming via probe + `tail -c +1 -F` from the normalized offset) — is covered by
 `test:manual` (extend `sandbox-recovery-docker.spec.ts`).
 
-### Manual-integration (real gateway + real detached wrappers) — `tests/manual-integration/bg-process-restart-survival.spec.ts`
+### Manual-integration (real gateway + real detached wrappers) — `tests/manual/bg-process-restart-survival.manual.spec.ts`
 
 This is the natural home for the **restart-survival acceptance** because it needs a real spawn + a
 real restart (the unit test stubs both). It drives a REAL gateway with REAL detached `bash_bg`

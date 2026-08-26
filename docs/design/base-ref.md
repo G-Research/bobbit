@@ -1,5 +1,7 @@
 # Configurable base ref per project
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: in-progress · Tracked in goal `goal/configurab-99c9ffe2`.
 
 ## Problem
@@ -550,7 +552,7 @@ identical on the acceptance list. Implementation tasks will tick each row.)
 This goal is user-facing (a new Settings field, a new workflow variable, a new
 ahead/behind comparator). Every behaviour above needs a browser E2E.
 
-`tests/e2e/ui/base-ref-settings.spec.ts`:
+`tests/browser/journeys/ui/base-ref-settings.journey.spec.ts`:
 
 1. **Persistence happy path.** Navigate to project Settings → General. Enter
    `origin/develop`. Save. Reload. Assert the field still shows
@@ -569,7 +571,7 @@ ahead/behind comparator). Every behaviour above needs a browser E2E.
    upstream. Change `base_ref` on the project. Assert the per-branch
    ahead/behind reads against the branch's `@{u}`, not the base.
 
-API E2E in `tests/e2e/base-ref-api.spec.ts`:
+API E2E in `tests/integration/gateway/base-ref-api.gateway.test.ts`:
 
 6. **PUT round-trip.** PUT `base_ref = "origin/develop"`. GET. Assert echoed.
 7. **Worktree start-point.** PUT base. Create a goal. Assert worktree HEAD =
@@ -580,7 +582,7 @@ API E2E in `tests/e2e/base-ref-api.spec.ts`:
 9. **Pool entry adopts new base.** Seed the pool at base A. Change base to B.
    Claim an entry. Assert HEAD = B.
 
-Unit (`tests/base-ref-parse.spec.ts`):
+Unit (`tests/unit/core/base-ref-parse.unit.test.ts`):
 
 10. `parseBaseRef` covers local / remote / nested-slash / empty / whitespace /
     non-origin remote rejection.

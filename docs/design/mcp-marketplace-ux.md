@@ -316,7 +316,7 @@ If the backend keeps `mcp: string[]` initially, the UI should still render funct
 - Add source-kind segmented control styles only if existing button/input classes cannot express it.
 - Add transport preview and command/details styles using muted text and existing border tokens.
 
-### `tests/e2e/ui/marketplace-mcp.spec.ts`
+### `tests/browser/journeys/ui/marketplace-mcp.journey.spec.ts`
 
 Add a dedicated browser E2E covering:
 
@@ -329,7 +329,7 @@ Add a dedicated browser E2E covering:
 7. Re-enable and assert runtime status returns connected or error.
 8. Uninstall and assert card cleanup plus Browse returns to Install.
 
-Use project-scope isolation like `tests/e2e/ui/marketplace.spec.ts` to avoid leaking MCP installs across browser workers.
+Use project-scope isolation like `tests/browser/journeys/ui/marketplace.journey.spec.ts` to avoid leaking MCP installs across browser workers.
 
 ## Consistency rationale
 

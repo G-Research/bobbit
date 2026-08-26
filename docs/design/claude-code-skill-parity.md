@@ -1,5 +1,7 @@
 # Claude Code Skill Parity — Design Doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Goal: make Bobbit's runtime behavior for `SKILL.md` files equivalent to Claude Code's, so a skill authored once and shared between both tools produces the same agent behavior. Focus on file-system/progressive-disclosure parity — not tool-name compatibility, not `allowed-tools` enforcement.
 
 The parity test: drop a skill from `https://github.com/anthropics/skills` into `.claude/skills/<name>/` and the Bobbit agent uses it the same way Claude Code's agent does — including reading `references/REFERENCE.md` and running `scripts/foo.sh` when the SKILL.md tells it to.
@@ -204,7 +206,7 @@ That keeps the contract honest without misleading the model about a path it can'
 
 ### 4.1 Unit tests
 
-New file: `tests/skill-manifest.spec.ts` (Node test runner, file-system fixtures under `tests/fixtures/skills/`).
+New file: `tests/unit/core/skill-manifest.unit.test.ts` (Node test runner, file-system fixtures under `tests/fixtures/skills/`).
 
 - **`buildSkillResourceManifest` — all three subdirs present.** Fixture: `references/REFERENCE.md`, `references/api.md`, `scripts/hello.sh`, `assets/template.txt`. Expect `resources` to contain exactly those four paths, alphabetically per-subdir, in `references → scripts → assets` order. `root` equals the absolute fixture path.
 - **One subdir missing.** Fixture has only `scripts/`. Expect `resources` length 1, no error, no synthetic empty section.
@@ -232,7 +234,7 @@ Extend existing: `tests/resolve-skill-expansions.spec.ts`.
 
 ### 4.2 E2E tests
 
-New file: `tests/e2e/ui/skill-multifile.spec.ts` (browser E2E, spawned gateway).
+New file: `tests/browser/journeys/ui/skill-multifile.journey.spec.ts` (browser E2E, spawned gateway).
 
 Fixture skill at `tests/fixtures/skills-e2e/multi/`:
 - `SKILL.md` with frontmatter and a body referencing `references/REFERENCE.md` and `scripts/hello.sh`.

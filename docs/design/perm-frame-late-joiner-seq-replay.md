@@ -83,13 +83,13 @@ double-prompting.
 
 ### 4.1 Single-allocation-site invariant
 
-Pinned by `tests/perm-frame-late-joiner-seq-gap.test.ts`:
+Pinned by `tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts`:
 
 1. **Structural** — grep-asserts that `EventBuffer.pushFrame()` is called
    from exactly one location in `src/server/` (excluding the definition in
    `event-buffer.ts`). Any future regression that re-introduces a unicast
    `pushFrame()` in `ws/handler.ts` (or anywhere else) fails CI immediately.
-   Same shape as `tests/sandbox-recovery-respawn-helper.test.ts`'s
+   Same shape as `tests/unit/core/sandbox-recovery-respawn-helper.unit.test.ts`'s
    "all four callsites route through the helper" assertion.
 2. **API-shape** — `getPendingToolPermission()`'s return type exposes
    `seq` and `ts`; the on-attach replay path reads them from this method
@@ -117,4 +117,4 @@ need to "know" the rule — the rule lives in the type system and in the test.
   `getPendingToolPermission()`.
 - `src/server/ws/handler.ts` — on-attach replay reuses
   `getPendingToolPermission()`'s `seq`/`ts`; never calls `pushFrame()`.
-- `tests/perm-frame-late-joiner-seq-gap.test.ts` — five-pin regression suite.
+- `tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts` — five-pin regression suite.

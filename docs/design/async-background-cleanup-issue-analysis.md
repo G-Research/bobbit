@@ -442,8 +442,8 @@ It shares one dynamic queue across directory reads and candidate stats, defaults
 
 Two synchronous legacy twins are production-unreferenced:
 
-- `src/server/agent/orphan-cleanup.ts::scanOrphanedTranscripts` (called only by `tests2/core/session-manager-orphan-keep.test.ts`);
-- `src/server/agent/session-store.ts::SessionStore.scanOrphanedTranscripts` (called only by tests, including a sync/async parity assertion in `tests2/integration/session-store-real-fs.test.ts`).
+- `src/server/agent/orphan-cleanup.ts::scanOrphanedTranscripts` (called only by `tests/unit/core/session-manager-orphan-keep.unit.test.ts`);
+- `src/server/agent/session-store.ts::SessionStore.scanOrphanedTranscripts` (called only by tests, including a sync/async parity assertion in `tests/integration/gateway/session-store-real-fs.gateway.test.ts`).
 
 Delete the `orphan-cleanup.ts` synchronous scanner required by the goal. The clean zero-twin end state is also to remove the production-unreferenced `SessionStore` scanner and port its semantic tests to `scanOrphanedTranscriptsAsync`; this is orphan-cleanup scope, not a general SessionStore migration.
 
@@ -459,7 +459,7 @@ The production gate is `src/server/agent/orphan-cleanup.ts::shouldKeepDespiteOrp
 
 Convert it to an async promise-only gate and await it at every site. Preserve the exact AND decision: worktree path exists **and** transcript stat succeeds **and** `Date.now() - mtimeMs < 24h`. Missing paths and all I/O errors return false. Keep the short circuit so a missing worktree does not stat a transcript. Container-internal sandbox paths continue to fail the host existence check naturally.
 
-`src/server/agent/session-store.ts` also exports a second sync predicate of the same name, but no production code calls it; only `tests2/core/session-store-orphan-cleanup.test.ts` does. Remove/consolidate this test-only duplicate so one async predicate owns the safety policy and accepts an injected promise filesystem/clock for deterministic boundary tests.
+`src/server/agent/session-store.ts` also exports a second sync predicate of the same name, but no production code calls it; only `tests/unit/core/session-store-orphan-cleanup.unit.test.ts` does. Remove/consolidate this test-only duplicate so one async predicate owns the safety policy and accepts an injected promise filesystem/clock for deterministic boundary tests.
 
 ## 8. Existing coverage and gaps
 
@@ -467,10 +467,10 @@ Convert it to an async promise-only gate and await it at every site. Preserve th
 
 Existing coverage:
 
-- `tests2/core/preview-artifacts.test.ts`: exact bytes/metadata, same-hash dedupe, source-independent restore, missing/wrong-session/corrupt restore non-mutation, idempotent removal, basic orphan sweep.
-- `tests2/integration/preview-mount-route.test.ts`: HTML/file/manifest mounting, artifact ID round-trip and restore, current mount hash, path/auth/content behavior.
-- `tests2/core/preview-mount.test.ts`: mount validation, asset/glob/symlink behavior, swap safety, and idempotent mount removal.
-- `tests2/browser/journeys/misc.journey.spec.ts` and existing preview browser fixtures cover artifact UI entry and restore/reload behavior.
+- `tests/unit/core/preview-artifacts.unit.test.ts`: exact bytes/metadata, same-hash dedupe, source-independent restore, missing/wrong-session/corrupt restore non-mutation, idempotent removal, basic orphan sweep.
+- `tests/integration/gateway/preview-mount-route.gateway.test.ts`: HTML/file/manifest mounting, artifact ID round-trip and restore, current mount hash, path/auth/content behavior.
+- `tests/unit/core/preview-mount.unit.test.ts`: mount validation, asset/glob/symlink behavior, swap safety, and idempotent mount removal.
+- `tests/browser/journeys/misc.journey.spec.ts` and existing preview browser fixtures cover artifact UI entry and restore/reload behavior.
 
 Missing acceptance coverage:
 
@@ -488,11 +488,11 @@ Missing acceptance coverage:
 
 Existing coverage:
 
-- `tests/worktree-sweeper.test.ts`: pool/active/orphan/repair classification, primary skip, current/legacy branch shapes, archived branch preservation, cwd/team/container ownership, real cleanup, no upward parent-repo sweep.
-- `tests2/core/worktree-inventory.test.ts`: live/archived/pool/container/delegate/multi-repo guards, nested repo root, configured worktree root, legacy adapters.
-- `tests2/integration/maintenance-api.test.ts` and `tests2/integration/helpers/maintenance-api-archived-*.test.ts`: route shapes, validation, selectors, safe/all cleanup and shared-live guards.
-- `tests/worktree-pool.test.ts` and related pool suites: reclaim, incomplete/mixed multi-repo rejection, duplicate prevention, abandoned-pool reuse, fill/setup, claim behavior, and drain quiescence.
-- `tests2/core/shared-worktree-guard-repro.test.ts`, `tests2/core/headquarters-no-worktree-runtime.test.ts`, `tests/system-project-pool-leak.test.ts`, and existing pool E2E specs pin shared ownership, Headquarters/system exclusion, restart reclaim, and pool behavior.
+- `tests/e2e/node/worktree-sweeper.node-e2e.test.ts`: pool/active/orphan/repair classification, primary skip, current/legacy branch shapes, archived branch preservation, cwd/team/container ownership, real cleanup, no upward parent-repo sweep.
+- `tests/unit/core/worktree-inventory.unit.test.ts`: live/archived/pool/container/delegate/multi-repo guards, nested repo root, configured worktree root, legacy adapters.
+- `tests/integration/gateway/maintenance-api.gateway.test.ts` and `tests/integration/gateway/maintenance/maintenance-api-archived-*.gateway.test.ts`: route shapes, validation, selectors, safe/all cleanup and shared-live guards.
+- `tests/e2e/node/worktree-pool.node-e2e.test.ts` and related pool suites: reclaim, incomplete/mixed multi-repo rejection, duplicate prevention, abandoned-pool reuse, fill/setup, claim behavior, and drain quiescence.
+- `tests/unit/core/shared-worktree-guard-repro.unit.test.ts`, `tests/unit/core/headquarters-no-worktree-runtime.unit.test.ts`, `tests/e2e/node/system-project-pool-leak.node-e2e.test.ts`, and existing pool E2E specs pin shared ownership, Headquarters/system exclusion, restart reclaim, and pool behavior.
 
 Missing acceptance coverage:
 
@@ -507,12 +507,12 @@ Missing acceptance coverage:
 
 Existing coverage:
 
-- `tests2/core/plan-mutation-store.test.ts`: CRUD, replacement/order isolation, expiry, idempotency, persistence. Timers are disabled in these tests.
-- `tests2/integration/maintenance-api.test.ts`: expired-archive endpoint shapes and newly archived/not-yet-expired behavior.
-- `tests2/core/shared-worktree-guard-repro.test.ts` and `session-recovery-agent-dir.test.ts`: purge shared-worktree protection and no deletion outside trusted transcript roots.
+- `tests/unit/core/plan-mutation-store.unit.test.ts`: CRUD, replacement/order isolation, expiry, idempotency, persistence. Timers are disabled in these tests.
+- `tests/integration/gateway/maintenance-api.gateway.test.ts`: expired-archive endpoint shapes and newly archived/not-yet-expired behavior.
+- `tests/unit/core/shared-worktree-guard-repro.unit.test.ts` and `session-recovery-agent-dir.test.ts`: purge shared-worktree protection and no deletion outside trusted transcript roots.
 - prompt-section integration/browser coverage pins survival through archive.
-- `tests2/core/orphan-cleanup-async-walk.test.ts`: nested semantics, missing root, caps, per-item failure isolation, global scan concurrency, wide-tree single-worker behavior.
-- `tests2/core/session-manager-orphan-keep.test.ts` and `session-store-orphan-cleanup.test.ts`: current sync gate decision matrix and legacy scanner semantics.
+- `tests/unit/core/orphan-cleanup-async-walk.unit.test.ts`: nested semantics, missing root, caps, per-item failure isolation, global scan concurrency, wide-tree single-worker behavior.
+- `tests/unit/core/session-manager-orphan-keep.unit.test.ts` and `session-store-orphan-cleanup.test.ts`: current sync gate decision matrix and legacy scanner semantics.
 
 Missing acceptance coverage:
 
@@ -525,11 +525,11 @@ Missing acceptance coverage:
 
 ## 9. New test and static-guard plan
 
-All new tests belong in `tests2/` and must be registered in `tests2/tests-map.json`.
+All new tests use the canonical `tests/` semantic path and suffix so lane discovery is automatic.
 
 ### 9.1 TypeScript-AST static guard
 
-Add `tests2/core/async-background-cleanup-static.test.ts` as a v2-native unit entry. Build a TypeScript `Program`/`TypeChecker`, seed the production roots below, and follow resolved local/imported function and method declarations. Report the root-to-violation trace with `file:line`.
+Add `tests/unit/core/async-background-cleanup-static.unit.test.ts` as a v2-native unit entry. Build a TypeScript `Program`/`TypeChecker`, seed the production roots below, and follow resolved local/imported function and method declarations. Report the root-to-violation trace with `file:line`.
 
 Roots:
 

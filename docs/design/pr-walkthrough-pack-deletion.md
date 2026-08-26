@@ -101,7 +101,7 @@ contributions + the durable Host API:
 | Launcher + SPA deep-link | legacy composer/git-widget launch + the `"walkthrough"` `RouteView` in `src/app/routing.ts` (its union entry + `getRouteFromHash` case) | `entrypoints:` (composer-slash + session-menu launchers + `kind:"route"` `routeId:"pr-walkthrough"`) → `host.ui.navigate`/`openPanel`, `#/ext/pr-walkthrough?jobId=…` |
 | Submitted YAML handoff | bespoke transcript access / viewer feed | the pack-spawned reviewer calls `submit_pr_walkthrough_yaml`; the server resolves the caller session, writes the pack-store submitted marker, and the panel observes it through `status`/`recover` |
 
-The mandatory E2E `tests/e2e/ui/pr-walkthrough-pack.spec.ts` exercises the full
+The mandatory E2E `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` exercises the full
 chain end-to-end (the pack comes from the built-in band with no install step →
 session-menu launcher opens the panel at `#/ext/pr-walkthrough` →
 `bundle` recomputes the **REAL changeset LIVE via `git`** in the confined worker

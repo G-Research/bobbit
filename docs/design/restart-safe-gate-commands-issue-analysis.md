@@ -200,13 +200,13 @@ The process substrate can be shared; the gate-verdict and workflow semantics sho
 
 Existing coverage is useful but incomplete:
 
-- `tests2/core/verification-harness-restart.test.ts` covers zombie command active entries and a PID-age reuse guard.
-- `tests/e2e/verification-restart-resignal.spec.ts` covers re-signaling after a simulated zombie verification.
-- `tests2/core/verification-resume-restart-prompt.test.ts` and `tests2/core/verification-resume-restart-recovery.test.ts` pin LLM reviewer resume behavior: restart-prompt timeouts leave the gate pending, slow revived reviewers are prompted after readiness, and transient reattach failures rerun from scratch without a hard `Resume Error`.
-- `tests/spawn-tree-shutdown-survival.test.ts` pins `markSurvival()`/`killAllTracked()` behavior.
-- `tests2/core/bg-process-persistence.test.ts`, `tests2/core/bg-process-windows-restart.test.ts`, and `tests/manual-integration/bg-process-restart-survival.spec.ts` cover the mature `bash_bg` process model.
-- `tests2/core/notify-team-lead-failure.test.ts` already pins that skipped steps are omitted from failure notifications when marked correctly.
-- Optional-step behavior is pinned by `tests2/core/verification-logic.test.ts` (`partitionOptionalSteps` and `computeAllPassed` cases for optional-skipped and phase-skipped rows) plus `tests/e2e/optional-steps-api.spec.ts` (`optional step skipped when not enabled` and `optional step auto-passes when enabled`).
+- `tests/unit/core/verification-harness-restart.unit.test.ts` covers zombie command active entries and a PID-age reuse guard.
+- `tests/integration/gateway/verification-restart-resignal.gateway.test.ts` covers re-signaling after a simulated zombie verification.
+- `tests/unit/core/verification-resume-restart-prompt.unit.test.ts` and `tests/unit/core/verification-resume-restart-recovery.unit.test.ts` pin LLM reviewer resume behavior: restart-prompt timeouts leave the gate pending, slow revived reviewers are prompted after readiness, and transient reattach failures rerun from scratch without a hard `Resume Error`.
+- `tests/e2e/node/spawn-tree-shutdown-survival.node-e2e.test.ts` pins `markSurvival()`/`killAllTracked()` behavior.
+- `tests/unit/core/bg-process-persistence.unit.test.ts`, `tests/unit/core/bg-process-windows-restart.unit.test.ts`, and `tests/manual/bg-process-restart-survival.manual.spec.ts` cover the mature `bash_bg` process model.
+- `tests/unit/core/notify-team-lead-failure.unit.test.ts` already pins that skipped steps are omitted from failure notifications when marked correctly.
+- Optional-step behavior is pinned by `tests/unit/core/verification-logic.unit.test.ts` (`partitionOptionalSteps` and `computeAllPassed` cases for optional-skipped and phase-skipped rows) plus `tests/integration/gateway/optional-steps-api.gateway.test.ts` (`optional step skipped when not enabled` and `optional step auto-passes when enabled`).
 
 Missing coverage: a command verification that is genuinely running across a gateway restart and then produces a real exit code.
 
@@ -329,10 +329,10 @@ Add a Windows-focused/manual test mirroring the `bash_bg` manual integration, bu
 |---|---|
 | Command restart success/failure | New API E2E or manual-integration tests using the pre-fix workflow above, covering exit `0` and non-zero after restart. |
 | Gone with no durable status | New unit recovery case asserting `restart-interrupted`/pending or infrastructure-failed/no-verdict semantics, with no fabricated exit code. |
-| Phase skip + notifications | New recovery test for downstream skipped rows, plus existing `tests2/core/notify-team-lead-failure.test.ts`. |
-| LLM-review resume non-regression | Run existing `tests2/core/verification-resume-restart-prompt.test.ts` and `tests2/core/verification-resume-restart-recovery.test.ts`; no command-runner change may bypass their pending/rerun behavior. |
-| Optional-step non-regression | Run existing `tests2/core/verification-logic.test.ts` optional/compute cases and `tests/e2e/optional-steps-api.spec.ts` skipped/enabled cases; optional-skipped rows remain skipped-as-passed and distinct from phase-skipped rows. |
-| `bash_bg` non-regression | Run existing `tests2/core/bg-process-persistence.test.ts`, `tests2/core/bg-process-windows-restart.test.ts`, and the manual restart-survival spec when touching shared process primitives. |
+| Phase skip + notifications | New recovery test for downstream skipped rows, plus existing `tests/unit/core/notify-team-lead-failure.unit.test.ts`. |
+| LLM-review resume non-regression | Run existing `tests/unit/core/verification-resume-restart-prompt.unit.test.ts` and `tests/unit/core/verification-resume-restart-recovery.unit.test.ts`; no command-runner change may bypass their pending/rerun behavior. |
+| Optional-step non-regression | Run existing `tests/unit/core/verification-logic.unit.test.ts` optional/compute cases and `tests/integration/gateway/optional-steps-api.gateway.test.ts` skipped/enabled cases; optional-skipped rows remain skipped-as-passed and distinct from phase-skipped rows. |
+| `bash_bg` non-regression | Run existing `tests/unit/core/bg-process-persistence.unit.test.ts`, `tests/unit/core/bg-process-windows-restart.unit.test.ts`, and the manual restart-survival spec when touching shared process primitives. |
 
 ## 6. Downstream phase semantics and notification bug
 

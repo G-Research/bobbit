@@ -1,5 +1,7 @@
 # Unified Message Ordering Reducer — Design Doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: historical implemented design. Its prompt text-fallback assumptions are superseded by reliable `deliveryIntentId` correlation; see [Reliable prompt and steer delivery](../prompt-queue.md).
 Companion to [`streaming-dedup-reorder.md`](./streaming-dedup-reorder.md), which fixes
 **transport-level** dedup; this doc fixes **client-state-level** ordering.
@@ -297,7 +299,7 @@ can keep distinguishing a settled survivor from a pending one.
 
 **Tests.**
 
-- `tests/message-reducer.test.ts` — pure-reducer suite **R1–R6**:
+- `tests/unit/core/message-reducer.unit.test.ts` — pure-reducer suite **R1–R6**:
   - **R1** errored turn settles the prompt so a *later* live event sorts after
     it (and the row is not deleted);
   - **R2** a settled row survives an *independent* snapshot (no id/text match)
@@ -316,7 +318,7 @@ can keep distinguishing a settled survivor from a pending one.
     row with no echo **and no turn-end** stays at the sentinel after a snapshot
     (previously this case enshrined the buggy permanent-tail ordering as if it
     were correct even post-termination).
-- `tests/remote-agent-settle.spec.ts` — wiring spec that drives the bundled
+- `tests/dom/remote-agent-settle.dom.test.ts` — wiring spec that drives the bundled
   production handlers with a stub transport and asserts both the `error` and
   `agent_end` paths move the row out of the sentinel while keeping it visible.
   The assertions are **mechanism-agnostic** (they check observable `_order`
@@ -490,7 +492,7 @@ from ~600 combined today), and every transcript mutation is one `apply()`.
 
 ## 10. Test plan
 
-### 10.1 Unit — `tests/message-reducer.test.ts` (new)
+### 10.1 Unit — `tests/unit/core/message-reducer.unit.test.ts` (new)
 
 Pure synchronous Node tests. No Playwright, no WS, no DOM. Each scenario is a
 sequence of `Action`s applied to the initial state; assertion is byte-equal
@@ -513,7 +515,7 @@ on the resulting `messages.map(m => ({ id: m.id, _order: m._order, role: m.role 
 
 Pass criterion: byte-equal output array of `(id, _order)` pairs.
 
-### 10.2 E2E — extend `tests/e2e/ui/stories-streaming.spec.ts`
+### 10.2 E2E — extend `tests/browser/journeys/ui/stories-streaming.journey.spec.ts`
 
 | Story | User-visible assertion |
 |---|---|
@@ -527,9 +529,9 @@ Pass criterion: byte-equal output array of `(id, _order)` pairs.
   internally to call the new reducer (the test currently constructs a
   `RemoteAgent` and feeds frames via reflection; rewrite to construct
   `ReducerState` + `Action`s).
-- `tests/e2e/ui/stories-streaming.spec.ts::RE-07` (preferences-snapshot
+- `tests/browser/journeys/ui/stories-streaming.journey.spec.ts::RE-07` (preferences-snapshot
   ordering) — must still pass, no transport change.
-- `tests/e2e/ui/stories-streaming.spec.ts::ST-DEDUP-01` — replay-pacing path
+- `tests/browser/journeys/ui/stories-streaming.journey.spec.ts::ST-DEDUP-01` — replay-pacing path
   is unchanged.
 - Manual: open a session that previously showed the proposal-out-of-order
   symptom; confirm widgets are in order on first paint without reload.

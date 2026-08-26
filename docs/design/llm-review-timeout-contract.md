@@ -262,9 +262,9 @@ The implementation/documentation phase updates all three requested documents; th
 
 ## Focused test plan
 
-All new files must be registered in `tests2/tests-map.json` under `v2Native` with a concise invariant-focused reason.
+All new files must use canonical semantic paths and suffixes so their lanes discover them automatically.
 
-### Unit: `tests2/core/verification-review-timeout-contract.test.ts`
+### Unit: `tests/unit/core/verification-review-timeout-contract.unit.test.ts`
 
 Use fake clocks/session managers; no real LLM or long wait.
 
@@ -294,9 +294,9 @@ Use fake clocks/session managers; no real LLM or long wait.
    - source assertions that `runLlmReviewDirect()` and the obsolete direct-turn wait helper remain absent;
    - the shared managed-session timeout result retains its machine-readable status and timing.
 
-Extend `tests2/core/verification-verifier-lifecycle-repro.test.ts` only where its old shared-resurrection-budget assertion contradicts the new locked contract; update it to pin fresh per-recovery windows while preserving same-session identity and the alive-idle duplicate-prompt guard.
+Extend `tests/unit/core/verification-verifier-lifecycle-repro.unit.test.ts` only where its old shared-resurrection-budget assertion contradicts the new locked contract; update it to pin fresh per-recovery windows while preserving same-session identity and the alive-idle duplicate-prompt guard.
 
-### Integration: `tests2/integration/verification-review-timeout-payload.test.ts`
+### Integration: `tests/integration/gateway/verification-review-timeout-payload.gateway.test.ts`
 
 Run a real `VerificationHarness` + `GateStore` + snapshot mapping with a deterministic fake reviewer timeout:
 
@@ -313,24 +313,24 @@ Run a real `VerificationHarness` + `GateStore` + snapshot mapping with a determi
 
 Run alongside:
 
-- `tests2/core/verification-harness-review-reliability.test.ts`
-- `tests2/core/verification-verifier-lifecycle-repro.test.ts`
-- `tests2/core/verification-reminder-race.test.ts`
-- `tests2/core/verification-resume-restart-prompt.test.ts`
-- `tests2/core/verification-resume-restart-recovery.test.ts`
-- `tests2/core/gate-verification-snapshot.test.ts`
-- `tests2/core/verification-logic.test.ts`
+- `tests/unit/core/verification-harness-review-reliability.unit.test.ts`
+- `tests/unit/core/verification-verifier-lifecycle-repro.unit.test.ts`
+- `tests/unit/core/verification-reminder-race.unit.test.ts`
+- `tests/unit/core/verification-resume-restart-prompt.unit.test.ts`
+- `tests/unit/core/verification-resume-restart-recovery.unit.test.ts`
+- `tests/unit/core/gate-verification-snapshot.unit.test.ts`
+- `tests/unit/core/verification-logic.unit.test.ts`
 
 Suggested command:
 
 ```bash
-npm exec vitest -- run tests2/core/verification-review-timeout-contract.test.ts tests2/integration/verification-review-timeout-payload.test.ts tests2/core/verification-harness-review-reliability.test.ts tests2/core/verification-verifier-lifecycle-repro.test.ts tests2/core/verification-reminder-race.test.ts tests2/core/verification-resume-restart-prompt.test.ts tests2/core/verification-resume-restart-recovery.test.ts tests2/core/gate-verification-snapshot.test.ts tests2/core/verification-logic.test.ts
+npm exec vitest -- run tests/unit/core/verification-review-timeout-contract.unit.test.ts tests/integration/gateway/verification-review-timeout-payload.gateway.test.ts tests/unit/core/verification-harness-review-reliability.unit.test.ts tests/unit/core/verification-verifier-lifecycle-repro.unit.test.ts tests/unit/core/verification-reminder-race.unit.test.ts tests/unit/core/verification-resume-restart-prompt.unit.test.ts tests/unit/core/verification-resume-restart-recovery.unit.test.ts tests/unit/core/gate-verification-snapshot.unit.test.ts tests/unit/core/verification-logic.unit.test.ts
 npm run check
 ```
 
 ## Browser E2E journey
 
-Because the workflow editor help/placeholder is user-facing, add and register `tests2/browser/workflow-review-timeout-editor.spec.ts` (or fold the scenario into the existing workflow editor browser suite if one exists at implementation time):
+Because the workflow editor help/placeholder is user-facing, add and register `tests/browser/journeys/workflow-review-timeout-editor.journey.spec.ts` (or fold the scenario into the existing workflow editor browser suite if one exists at implementation time):
 
 1. Navigate to Settings → Workflows and customize/create a disposable workflow.
 2. Add/select a `command` verification step; expand Advanced and assert timeout placeholder `300` plus command-specific help.
@@ -356,4 +356,4 @@ This SG1 browser journey validates authoring UX only. The separate timeout-rende
 - Command/build behavior is unchanged.
 - `llm-review` routing is session-only; the legacy direct review route and its obsolete wait helper remain absent.
 - The three requested docs and type-aware workflow editor are updated during implementation.
-- Focused unit/integration tests and the authoring browser journey are registered in `tests2/tests-map.json`.
+- Focused unit/integration tests and the authoring browser journey use canonical paths and semantic suffixes.

@@ -61,10 +61,10 @@ These guards allow a background agent to maintain its session-local transcript w
 
 ## Regression evidence
 
-The stable regression coverage is registered in `tests2/tests-map.json`:
+The stable regression coverage is discovered from canonical paths and semantic suffixes:
 
-- `tests2/dom/portrait-session-cache-repro.test.ts` uses mocked panels and agents to pin strict admission, active-reference clearing, healthy ownership take, stale fallback, bounded eviction and disconnect, explicit and externally pushed cleanup, inactive reconnect hydration isolation, and preservation of back-to-list cleanup.
-- `tests2/dom/review-tool-active-guard.test.ts` pins review and proposal isolation for cached agents, including session changes across asynchronous review hydration.
-- `tests2/browser/journeys/portrait-session-cache.journey.spec.ts` exercises portrait list round-trips, stale-socket fallback, landscape parity, reload non-persistence, transcript hydration, and session cleanup against the real UI.
+- `tests/dom/portrait-session-cache-repro.dom.test.ts` uses mocked panels and agents to pin strict admission, active-reference clearing, healthy ownership take, stale fallback, bounded eviction and disconnect, explicit and externally pushed cleanup, inactive reconnect hydration isolation, and preservation of back-to-list cleanup.
+- `tests/dom/review-tool-active-guard.dom.test.ts` pins review and proposal isolation for cached agents, including session changes across asynchronous review hydration.
+- `tests/browser/journeys/portrait-session-cache.journey.spec.ts` exercises portrait list round-trips, stale-socket fallback, landscape parity, reload non-persistence, transcript hydration, and session cleanup against the real UI.
 
 The browser journey does not infer reuse from elapsed time. Before navigation it installs a `MutationObserver` for `[data-testid="bobbit-loader"]`, retains the exact panel identity, and counts session WebSocket creation. A healthy return must preserve panel identity with no loader mount or new socket. Deliberately disconnecting the cached agent must instead mount the normal loader, create one replacement session socket, and restore the transcript. Reload evidence similarly requires a new panel and connection while retaining persisted history.

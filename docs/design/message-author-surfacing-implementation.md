@@ -726,11 +726,11 @@ No changes are required to client command schemas, Pi message declarations, queu
 
 ## 13. Test plan and tier ownership
 
-All new test files must be registered in `tests2/tests-map.json`; descriptions for modified author suites must be updated to mention prefix projection rather than byte-equivalent provider input.
+All new test files must use canonical semantic paths and suffixes; descriptions for modified author suites must mention prefix projection rather than byte-equivalent provider input.
 
 ### 13.1 Core/unit
 
-Add `tests2/core/message-author-surfacing.test.ts`:
+Add `tests/unit/core/message-author-surfacing.unit.test.ts`:
 
 - selector suppresses empty, invalid, and all-human histories, including two distinct synthetic user IDs;
 - any validated agent/system prompt triggers mode;
@@ -741,20 +741,20 @@ Add `tests2/core/message-author-surfacing.test.ts`:
 - deterministic display IDs for `user:`, `session:`, and `staff:`;
 - `modelPrefixForPromptAuthor()` returns no human prefix, exact system prefix, and exact normalized agent prefix.
 
-Add pure appearance coverage to `tests2/core/message-author-surfacing.test.ts`:
+Add pure appearance coverage to `tests/unit/core/message-author-surfacing.unit.test.ts`:
 
 - `session:*` resolves live then archived session colour/accessory;
 - `staff:*` resolves shared-sanitized staff ID through `currentSessionId` live/archived state;
 - missing/invalid values return the same frozen fallback and do not mutate `sessionColorMap`;
 - `resolveBodyPixels(CANONICAL_PALETTE, "center", false)` pins the standard open-eye pixels used by the wrapper.
 
-Render the actual canvas/template wrapper under Happy DOM in `tests2/dom/message-author-sprite.test.ts`:
+Render the actual canvas/template wrapper under Happy DOM in `tests/dom/message-author-sprite.dom.test.ts`:
 
 - supplied hue/accessory inputs match the resolved/sidebar inputs;
 - generated DOM has no breathing, bob, blink, desaturation, transient-status, or timer-driven class/style;
 - the sprite is decorative and the containing badge owns the semantic name.
 
-Extend `tests2/core/author-sidecar.test.ts`:
+Extend `tests/unit/core/author-sidecar.unit.test.ts`:
 
 - v2 row stores exact `modelPrefix`, digest matches prefixed Pi text, and raw file contains no body plaintext;
 - absent legacy prefix remains valid and authorizes no stripping, including otherwise valid legacy agent/system rows;
@@ -786,13 +786,13 @@ Add focused dispatch/lifecycle coverage (new dependency-light suite if importing
 
 Update pinning expectations in:
 
-- `tests2/core/verification-author-producer.test.ts` (provider RPC is now system-prefixed; visible/base text remains unchanged);
-- `tests2/core/splice-inflight-steer-occurrence.test.ts` (synthetic ledger row stays unprefixed; a raw prefixed settled echo is recognized by exact sidecar digest plus ID/timestamp and does not produce a duplicate row);
-- `tests2/core/session-manager-snapshot-memo.test.ts` where snapshot author correlation is asserted.
+- `tests/unit/core/verification-author-producer.unit.test.ts` (provider RPC is now system-prefixed; visible/base text remains unchanged);
+- `tests/unit/core/splice-inflight-steer-occurrence.unit.test.ts` (synthetic ledger row stays unprefixed; a raw prefixed settled echo is recognized by exact sidecar digest plus ID/timestamp and does not produce a duplicate row);
+- `tests/unit/core/session-manager-snapshot-memo.unit.test.ts` where snapshot author correlation is asserted.
 
 ### 13.2 DOM
 
-Add `tests2/dom/message-author-labels.test.ts` using the real `MessageList`/`UserMessage`:
+Add `tests/dom/message-author-labels.dom.test.ts` using the real `MessageList`/`UserMessage`:
 
 - all-human loaded messages produce no `.prompt-author-badge` and retain the old unlabelled row structure/classes;
 - an agent/system prompt causes badges on every valid prompt row, including the human context row;
@@ -805,11 +805,11 @@ Add `tests2/dom/message-author-labels.test.ts` using the real `MessageList`/`Use
 - attachments, image tiles, slash-skill chips, file-mention chips, and markdown remain descendants of the unchanged bubble body, not the badge;
 - agent sprite is `aria-hidden`, uses the resolved hue/accessory, and has no animation classes/styles.
 
-Keep and extend `tests2/dom/client-message-author.test.ts` to prove reducer/searchable content contains no literal prefix after live/snapshot replacement.
+Keep and extend `tests/dom/client-message-author.dom.test.ts` to prove reducer/searchable content contains no literal prefix after live/snapshot replacement.
 
 ### 13.3 Integration/unit gate
 
-Extend `tests2/integration/message-author-ws-server.test.ts` with mock-bridge RPC capture:
+Extend `tests/integration/gateway/message-author-ws-server.gateway.test.ts` with mock-bridge RPC capture:
 
 - normal human RPC and visible echo are both unprefixed;
 - system and authenticated agent RPCs contain exact prefixes;
@@ -825,15 +825,15 @@ Extend `tests2/integration/message-author-ws-server.test.ts` with mock-bridge RP
 
 Update:
 
-- `tests2/integration/team-delegate.test.ts` for exact agent provider prefix while visible kickoff text remains unchanged;
-- `tests2/integration/continue-archived.test.ts` for copied prefix metadata and projected fork/continue replay;
-- `tests2/integration/steer-gateway-restart.test.ts` for base ledger text and exact-once redispatch (human remains unprefixed; add system/agent coverage if practical).
+- `tests/integration/gateway/team-delegate.gateway.test.ts` for exact agent provider prefix while visible kickoff text remains unchanged;
+- `tests/integration/gateway/continue-archived.gateway.test.ts` for copied prefix metadata and projected fork/continue replay;
+- `tests/integration/gateway/steer-gateway-restart.gateway.test.ts` for base ledger text and exact-once redispatch (human remains unprefixed; add system/agent coverage if practical).
 
-Search coverage in `tests2/dom/search/index-source-contract.test.ts`, `search-service-extras.test.ts`, and `indexer.test.ts` must compare pre-feature base text/snippet/weight/hash values against prefixed raw transcript fixtures. Prefix/label terms must not become searchable. Add a bounded-resolver degradation case proving ambiguous prompt rows are omitted rather than indexed raw or stripped by pattern.
+Search coverage in `tests/dom/search/index-source-contract.dom.test.ts`, `search-service-extras.test.ts`, and `indexer.test.ts` must compare pre-feature base text/snippet/weight/hash values against prefixed raw transcript fixtures. Prefix/label terms must not become searchable. Add a bounded-resolver degradation case proving ambiguous prompt rows are omitted rather than indexed raw or stripped by pattern.
 
 ### 13.4 Browser gate
 
-Update `tests2/browser/journeys/author-metadata.journey.spec.ts` and rename its “without adding visible labels” assertions narrowly to the all-human case. Add a mixed-source journey using the browser fixture's gateway handle to deliver trusted system and agent prompts:
+Update `tests/browser/journeys/author-metadata.journey.spec.ts` and rename its “without adding visible labels” assertions narrowly to the all-human case. Add a mixed-source journey using the browser fixture's gateway handle to deliver trusted system and agent prompts:
 
 1. all-human live/reload remains badge-free;
 2. system/agent arrival turns labels on for earlier valid human rows;
@@ -846,7 +846,7 @@ Update `tests2/browser/journeys/author-metadata.journey.spec.ts` and rename its 
 
 ### 13.5 E2E gate
 
-Add `tests/e2e/message-author-prefix-restart.spec.ts` and register it in the v2 integration bucket:
+Add `tests/e2e/api/message-author-prefix-restart.api-e2e.spec.ts` and register it in the v2 integration bucket:
 
 - deliver an authenticated agent prompt to a target session;
 - assert raw mock-agent/Pi transcript contains exactly one expected agent prefix;

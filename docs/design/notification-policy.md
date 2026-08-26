@@ -2,7 +2,7 @@
 
 Status: implemented. Shipped under the goal *Scope notifications to human attention* (branch `goal/scope-noti-bad2ad9b`); extended under *Human Sign-Off Gates* (branch `goal/human-sign-off-0333f6af`) with the four-rule team-lead disjunction in §2.1.
 
-The canonical predicate lives at [`src/app/notification-policy.ts`](../../src/app/notification-policy.ts). Pinning tests: [`tests/notification-policy.spec.ts`](../../tests/notification-policy.spec.ts) (unit) and [`tests/e2e/ui/notification-policy.spec.ts`](../../tests/e2e/ui/notification-policy.spec.ts) (browser E2E).
+The canonical predicate lives at [`src/app/notification-policy.ts`](../../src/app/notification-policy.ts). Pinning tests: [`tests/dom/notification-policy.dom.test.ts`](../../tests/dom/notification-policy.dom.test.ts) (unit) and [`tests/browser/journeys/ui/notification-policy.journey.spec.ts`](../../tests/browser/journeys/ui/notification-policy.journey.spec.ts) (browser E2E).
 
 Sections 1–8 cover the UI-side predicate (beep / favicon badge / sidebar dot). Section 9 covers a sibling concern on the server side: how often `TeamManager` nudges an idle team-lead session. Both are about *not* spamming whichever consumer (human or team-lead bot) is listening for a turn-finished signal.
 
@@ -133,12 +133,12 @@ The team-goal filter is then replaced by a call to `needsHumanAttention`. Behavi
 
 ## 7. Pinning tests
 
-- **Unit (`tests/notification-policy.spec.ts`)** — file:// fixture bundling `notification-policy.ts` against a small `__seed` helper. Covers the standalone / delegate / team-member branches plus the full team-lead disjunction matrix: rules 1–4 in isolation, rule 4's debounce (lead idle for less than `STUCK_IDLE_THRESHOLD_MS` stays silent), rule 4's suppressors (live sibling, `verifying`, `awaitingHumanSignoff` each individually — false), the rule 2 / 3 read-filter bypass, and the idle-transition split that suppresses Rule 4 beeps while preserving complete/sign-off notifications. Mirrors the structure of `tests/spurious-idle-unread.spec.ts`.
-- **Browser E2E (`tests/e2e/ui/notification-policy.spec.ts`)** — three scenarios driving the wiring at the sidebar:
+- **Unit (`tests/dom/notification-policy.dom.test.ts`)** — file:// fixture bundling `notification-policy.ts` against a small `__seed` helper. Covers the standalone / delegate / team-member branches plus the full team-lead disjunction matrix: rules 1–4 in isolation, rule 4's debounce (lead idle for less than `STUCK_IDLE_THRESHOLD_MS` stays silent), rule 4's suppressors (live sibling, `verifying`, `awaitingHumanSignoff` each individually — false), the rule 2 / 3 read-filter bypass, and the idle-transition split that suppresses Rule 4 beeps while preserving complete/sign-off notifications. Mirrors the structure of `tests/dom/spurious-idle-unread.dom.test.ts`.
+- **Browser E2E (`tests/browser/journeys/ui/notification-policy.journey.spec.ts`)** — three scenarios driving the wiring at the sidebar:
   1. Standalone idle session shows the dot; patching the session to a team member silences it; reverting restores it.
   2. Team lead with a fabricated `complete` goal shows the dot via the `renderTeamLeadRow` path (which uses `data-nav-id="session:<id>"` rather than `data-session-id`); flipping to in-progress + adding a streaming sibling member hides it.
   3. Dot state on reload matches server-side `lastReadAt` from `/api/sessions/:id/mark-read`.
-- **`tests/spurious-idle-unread.spec.ts`** — continues to pass unchanged. The new predicate doesn't change what it asserts (the heartbeat must not bump `lastActivity`, which is a separate invariant).
+- **`tests/dom/spurious-idle-unread.dom.test.ts`** — continues to pass unchanged. The new predicate doesn't change what it asserts (the heartbeat must not bump `lastActivity`, which is a separate invariant).
 
 The browser E2E uses three test-only window hooks installed by `src/app/main.ts`: `__bobbitState`, `__bobbitRenderApp`, and `__bobbitExpandedGoals`. They are documented in [docs/testing-strategy.md — Test-only window hooks](../testing-strategy.md#test-only-window-hooks).
 
@@ -146,7 +146,7 @@ The browser E2E uses three test-only window hooks installed by `src/app/main.ts`
 
 A sibling notification mechanism on the server side: when a team-lead session goes idle mid-goal, `TeamManager` periodically prompts ("nudges") it to check in on workers or wrap up. That cadence has its own correctness problem and its own fix.
 
-Tests: [`tests/team-manager-idle-nudge-backoff.test.ts`](../../tests/team-manager-idle-nudge-backoff.test.ts). Diagnostic entry: [docs/debugging.md — Auto-nudge cadence never escapes base delay](../debugging.md#auto-nudge-cadence-never-escapes-base-delay).
+Tests: [`tests/unit/core/team-manager-idle-nudge-backoff.unit.test.ts`](../../tests/unit/core/team-manager-idle-nudge-backoff.unit.test.ts). Diagnostic entry: [docs/debugging.md — Auto-nudge cadence never escapes base delay](../debugging.md#auto-nudge-cadence-never-escapes-base-delay).
 
 ### Reset-driven rearm
 
@@ -213,7 +213,7 @@ The first nudge of a fresh idle period still arrives at the base delay, so genui
 
 A second server-side notification mechanism, distinct from §9. When a **team member (worker)** session finishes a turn (`agent_end`), `TeamManager` tells the team lead so it can reassign work: a steer like *"Agent &lt;id&gt; (&lt;role&gt;) has finished with no assigned tasks."* That nudge is correct when the worker is genuinely done — but `agent_end` also fires on transient blips.
 
-Tests: [`tests/team-manager-worker-idle-debounce.test.ts`](../../tests/team-manager-worker-idle-debounce.test.ts). The behaviour change also rippled into [`tests/team-manager-reviewer-resume.test.ts`](../../tests/team-manager-reviewer-resume.test.ts) and the E2E [`tests/e2e/gate-verification-resume.spec.ts`](../../tests/e2e/gate-verification-resume.spec.ts), which were adapted to wait out (or shrink) the new debounce window.
+Tests: [`tests/unit/core/team-manager-worker-idle-debounce.unit.test.ts`](../../tests/unit/core/team-manager-worker-idle-debounce.unit.test.ts). The behaviour change also rippled into [`tests/unit/core/team-manager-reviewer-resume.unit.test.ts`](../../tests/unit/core/team-manager-reviewer-resume.unit.test.ts) and the E2E [`tests/e2e/api/gate-verification-resume.api-e2e.spec.ts`](../../tests/e2e/api/gate-verification-resume.api-e2e.spec.ts), which were adapted to wait out (or shrink) the new debounce window.
 
 ### 9b.1 The problem
 
@@ -259,8 +259,8 @@ The 5s duration is also exposed as an overridable instance field `workerIdleNudg
 | `src/app/remote-agent.ts` | Active-session `agent_end` call site. |
 | `src/app/render-helpers.ts` | `hasUnseenActivity` — sidebar unread dot call site. |
 | `src/app/main.ts` | Exposes the test-only window hooks (`__bobbitState`, `__bobbitRenderApp`, `__bobbitExpandedGoals`). |
-| `tests/notification-policy.spec.ts` | Unit pin — 9-row truth table + bonus. |
-| `tests/e2e/ui/notification-policy.spec.ts` | Browser E2E — sidebar wiring + reload persistence. |
-| `tests/spurious-idle-unread.spec.ts` | Independent invariant — the 15s status heartbeat must not bump `lastActivity` and therefore must not produce spurious dots. Unchanged by this work. |
+| `tests/dom/notification-policy.dom.test.ts` | Unit pin — 9-row truth table + bonus. |
+| `tests/browser/journeys/ui/notification-policy.journey.spec.ts` | Browser E2E — sidebar wiring + reload persistence. |
+| `tests/dom/spurious-idle-unread.dom.test.ts` | Independent invariant — the 15s status heartbeat must not bump `lastActivity` and therefore must not produce spurious dots. Unchanged by this work. |
 | `src/server/agent/team-manager.ts` | Server-side idle nudges (§9, §9b): `subscribeTeamLeadEvents`, `subscribeWorkerEvents`, `pendingIdleNotify`, `WORKER_IDLE_NUDGE_DEBOUNCE_MS`, `notifyTeamLead`, `dismissRole`. |
-| `tests/team-manager-worker-idle-debounce.test.ts` | Unit pin for the 5s worker-idle debounce (§9b): blip-within-window suppressed, idle-past-window delivered, cleared on removal. |
+| `tests/unit/core/team-manager-worker-idle-debounce.unit.test.ts` | Unit pin for the 5s worker-idle debounce (§9b): blip-within-window suppressed, idle-past-window delivered, cleared on removal. |

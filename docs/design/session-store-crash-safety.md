@@ -250,7 +250,7 @@ Production:
 
 Tests:
 
-- `tests/session-manager-orphan-keep.test.ts` — `shouldKeepDespiteOrphan`
+- `tests/unit/core/session-manager-orphan-keep.unit.test.ts` — `shouldKeepDespiteOrphan`
   truth table.
 - `tests/session-store-*` — atomic-write crash simulation, stale-load
   guard, backup fallback, v1→v2 migration.

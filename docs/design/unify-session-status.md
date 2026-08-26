@@ -1,5 +1,7 @@
 # Unify Session Status — Design Doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Goal**: `goal-unify-sess-d3fd6b8d` ("Unify Session Status")
 **Author**: coder-b7d954c9
 **Status**: design
@@ -492,7 +494,7 @@ The `state` server frame carries an unstructured `data: unknown`, so no protocol
 
 ## 6. Tests
 
-### 6.1 Unit — `tests/remote-agent-status.test.ts` (new)
+### 6.1 Unit — `tests/dom/remote-agent-status.dom.test.ts` (new)
 
 Drives a `RemoteAgent` against a scripted in-memory WS and asserts the canonical status after each event sequence. Setup mirrors the existing `tests/remote-agent.spec.ts` harness.
 
@@ -509,9 +511,9 @@ Drives a `RemoteAgent` against a scripted in-memory WS and asserts the canonical
 
 Each test asserts both the Stop-button predicate (`agent.isStreaming`) and a mock `statusBobbit()` spy (sprite predicate `session.status === "streaming"`) are **always equal** after each frame — the divergence-impossibility invariant.
 
-### 6.2 E2E — `tests/e2e/ui/session-status-recovery.spec.ts` (new)
+### 6.2 E2E — `tests/browser/journeys/ui/session-status-recovery.journey.spec.ts` (new)
 
-Browser test against spawned gateway. Pattern follows `tests/e2e/ui/session-interactions.spec.ts`.
+Browser test against spawned gateway. Pattern follows `tests/browser/journeys/session-interactions.journey.spec.ts`.
 
 ```ts
 test("recovers from missed agent_end via heartbeat", async ({ page, gateway }) => {
@@ -534,7 +536,7 @@ test("no duplicate user message after stuck-flag recovery", async ({ page, gatew
 
 Both tests reuse `tests/e2e/ui/gateway-harness.ts`. The fake-status hook is a 5-line addition to `RemoteAgent` guarded by `import.meta.env.MODE !== "production"`.
 
-### 6.3 Server unit — `tests/session-manager-status.test.ts` (new)
+### 6.3 Server unit — `tests/unit/core/session-manager-status.unit.test.ts` (new)
 
 - Construct a `SessionManager`, simulate a session, call every transition (start, end, abort, terminate, archive). Assert `statusVersion` increments **monotonically** and **broadcasts include the current version**.
 - Assert heartbeat timer broadcasts the current frame **without bumping `statusVersion`**.
@@ -608,7 +610,7 @@ That brings the net to roughly break-even or slightly negative. Implementer's ca
 | 1 | No two-flag divergence is reachable. | §4.1 derived getter; §6.1 unit tests #1–8 (every test asserts Stop-predicate ≡ sprite-predicate). |
 | 2 | Bounded staleness (≤1 heartbeat). | §3.4 server timer; §4.3 client gap detection; §6.1 test #6 + §6.2 first E2E. |
 | 3 | Duplicate-message bug gone. | §4.1 + §4.10 (line 648 unchanged but underlying bug eliminated); §6.2 second E2E. |
-| 4 | All existing user-visible behaviour preserved. | §4.6 keeps beep/favicon/turnStartTime side effects in `agent_end`; §4.11 zero changes to readers; existing `tests/e2e/ui/session-interactions.spec.ts`, `tail-chat-real-stream.spec.ts`, `copy-session-link.spec.ts` must pass unchanged in CI. |
+| 4 | All existing user-visible behaviour preserved. | §4.6 keeps beep/favicon/turnStartTime side effects in `agent_end`; §4.11 zero changes to readers; existing `tests/browser/journeys/session-interactions.journey.spec.ts`, `tail-chat-real-stream.spec.ts`, `copy-session-link.spec.ts` must pass unchanged in CI. |
 | 5 | Net code reduction. | §8 — writer count drops 4→1 (client) and 14→1 (server). LOC roughly neutral; tightened further by collapsing `_isAborting` and removing debug logs. |
 
 ---
@@ -638,14 +640,14 @@ That brings the net to roughly break-even or slightly negative. Implementer's ca
 
 The landing diff matches the design above. A few small deviations from the as-designed prose, recorded for future spelunkers (the body sections 1–11 are left intact for historical context):
 
-- **`broadcastStatus()` lives in its own file.** Section §3.2 placed the helper inside `session-manager.ts`. It actually landed at `src/server/agent/session-status.ts` so unit tests (`tests/session-manager-status.test.ts`) can exercise the helper without dragging in the rest of the SessionManager dependency graph (search, flexstore, sandbox, mcp). `session-manager.ts` re-exports it for the existing import sites. The signature, `extras` shape, and contract are unchanged.
+- **`broadcastStatus()` lives in its own file.** Section §3.2 placed the helper inside `session-manager.ts`. It actually landed at `src/server/agent/session-status.ts` so unit tests (`tests/unit/core/session-manager-status.unit.test.ts`) can exercise the helper without dragging in the rest of the SessionManager dependency graph (search, flexstore, sandbox, mcp). `session-manager.ts` re-exports it for the existing import sites. The signature, `extras` shape, and contract are unchanged.
 - **Helper accepts a `BroadcastableSession` structural subset.** Rather than typing the helper against the full `SessionInfo`, it's parameterised over the four fields it actually touches (`status`, `statusVersion`, `clients`, `streamingStartedAt?`). This keeps the test fixture trivial.
 - **`case "error"` retained no status-related side effects.** Per §4.5 the error frame stopped writing `isStreaming`; only `turnStartTime` cleanup remained. Confirmed in the implementation — the matching `session_status: idle` from the server is the sole status writer for the termination path.
 - **Derived getters chosen via `Object.defineProperty`** (the simpler alternative flagged in §2.1), not the Proxy variant. `isStreaming`, `isArchived`, and `isPreparing` are all installed once in the `RemoteAgent` constructor. The Proxy alternative was unnecessary because no reader iterates `state` keys.
-- **E2E test resilience.** The recovery spec at `tests/e2e/ui/session-status-recovery.spec.ts` initially used `waitForTimeout`; this was replaced with an event-driven idle wait (commit `76eb423b`) to keep the duplicate-message regression test deterministic against scheduler jitter.
+- **E2E test resilience.** The recovery spec at `tests/browser/journeys/ui/session-status-recovery.journey.spec.ts` initially used `waitForTimeout`; this was replaced with an event-driven idle wait (commit `76eb423b`) to keep the duplicate-message regression test deterministic against scheduler jitter.
 - **`_isAborting` mirror retained.** Section §8's optional further deletion (collapse `_isAborting` into a getter) was deferred — the field is updated in lock-step with `_state.status` inside the single `session_status` writer, so it cannot drift, and keeping it avoids touching every `isAborting` reader in this PR.
 
-The four client writers of `_state.isStreaming` collapsed to a single canonical-status writer, and the ~14 server transition sites collapsed to `broadcastStatus()` calls. Acceptance criteria 1–4 are covered by `tests/remote-agent-status.spec.ts`, `tests/session-manager-status.test.ts`, and `tests/e2e/ui/session-status-recovery.spec.ts`. AC #5 ("net code reduction") landed as the writer-count reduction described in §8 — raw LOC is roughly neutral once the heartbeat, gap-detection branch, and JSDoc are accounted for.
+The four client writers of `_state.isStreaming` collapsed to a single canonical-status writer, and the ~14 server transition sites collapsed to `broadcastStatus()` calls. Acceptance criteria 1–4 are covered by `tests/dom/remote-agent-status.dom.test.ts`, `tests/unit/core/session-manager-status.unit.test.ts`, and `tests/browser/journeys/ui/session-status-recovery.journey.spec.ts`. AC #5 ("net code reduction") landed as the writer-count reduction described in §8 — raw LOC is roughly neutral once the heartbeat, gap-detection branch, and JSDoc are accounted for.
 
 ### Follow-up: preparing-UX bootstrap fix (`goal/fix-prepar-0d718a5c`)
 

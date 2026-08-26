@@ -67,8 +67,8 @@ A genuine first-ever check still has no cache entry, so it starts `gitRepoKnown 
 
 ## Tests that pin the contract
 
-- `tests2/core/git-empty-widget-cache.test.ts` covers the HQ `409 GOAL_GIT_UNAVAILABLE` error path, hidden cache persistence, no-loading cached-hidden reconnect, one quiet recheck, and reveal when content later appears.
-- `tests2/core/git-widget-quiet-refresh.test.ts` keeps the existing cached-`'no'` quiet-refresh behavior pinned.
-- `tests2/core/git-repo-cache.test.ts` pins cache parsing, bounded persistence, pruning, broken-storage tolerance, and connect-state mapping.
+- `tests/unit/core/git-empty-widget-cache.unit.test.ts` covers the HQ `409 GOAL_GIT_UNAVAILABLE` error path, hidden cache persistence, no-loading cached-hidden reconnect, one quiet recheck, and reveal when content later appears.
+- `tests/unit/core/git-widget-quiet-refresh.unit.test.ts` keeps the existing cached-`'no'` quiet-refresh behavior pinned.
+- `tests/unit/core/git-repo-cache.unit.test.ts` pins cache parsing, bounded persistence, pruning, broken-storage tolerance, and connect-state mapping.
 
-All three are registered in `tests2/tests-map.json`.
+All three are discovered from their canonical paths and semantic suffixes.

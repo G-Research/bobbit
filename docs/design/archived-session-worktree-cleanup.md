@@ -322,7 +322,7 @@ Add stable selectors for fixture tests:
 
 ## Test plan
 
-### API E2E: `tests/e2e/maintenance-api.spec.ts`
+### API E2E: `tests/integration/gateway/maintenance-api.gateway.test.ts`
 
 Add coverage for:
 
@@ -338,7 +338,7 @@ Add coverage for:
 10. A `repoWorktrees` archived session returns one item per repo and cleans each independently.
 11. A sandbox/container-internal path like `/workspace-wt/session/x` is skipped with `sandbox-container-path`.
 
-### UI fixture: `tests/ui-fixtures/search-preview-maintenance.spec.ts` and entry
+### UI fixture: `tests/browser/fixtures/search-preview-maintenance.fixture.spec.ts` and entry
 
 Update the fixture entry to mock:
 

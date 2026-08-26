@@ -11,7 +11,7 @@ catalog, highlight.js core, qrcode/jszip, vendor `manualChunks`).
 ## What & why
 
 The entry chunk had crept back to **638.39 KB raw**, tripping the
-`tests/bundle-size.test.ts` raw-size guard (assertion #3, which pins
+`tests/unit/core/bundle-size.unit.test.ts` raw-size guard (assertion #3, which pins
 Vite's `chunkSizeWarningLimit: 600`) and re-emitting the
 `(!) Some chunks are larger than 600 kB after minification.` warning.
 
@@ -91,7 +91,7 @@ that point is the refactor, not raising the budget.
 ## Verification
 
 - `npm run test:bundle` — builds the UI then runs
-  `tests/bundle-size.test.ts`; all three budget assertions pass (entry
+  `tests/unit/core/bundle-size.unit.test.ts`; all three budget assertions pass (entry
   ≤ 250 KB gz, per-chunk ≤ 200 KB gz, no non-worker chunk > 600 KB
   raw).
 - `npm run build:ui` emits no chunk-size warning.
@@ -104,7 +104,7 @@ that point is the refactor, not raising the budget.
 - [`docs/perf/bundle-profile.md`](../perf/bundle-profile.md) — how to
   profile the bundle and find the next offender; the app-seam
   `manualChunks` rule is the lever this pass used.
-- `tests/bundle-size.test.ts` — the regression guard and its
+- `tests/unit/core/bundle-size.unit.test.ts` — the regression guard and its
   budget-bump policy.
 - `vite.config.ts` — `build.rollupOptions.output.manualChunks`, where
   the app-seam and vendor rules live.

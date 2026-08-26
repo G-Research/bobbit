@@ -50,10 +50,10 @@ the SAME authorization path Phase 1 built.
 
 **Invariants preserved (pinned by existing tests; must stay green):**
 
-- `buildPackList` byte-identical — `tests/pack-marketplace.test.ts`. Zero market packs ⇒
+- `buildPackList` byte-identical — `tests/unit/core/pack-marketplace.unit.test.ts`. Zero market packs ⇒
   resolution unchanged. All new contribution fields are additive
   (`tool-manager.ts:67 contributionFields` is "additive, never reorders").
-- Tool-description budget — `tests/tool-description-budget.test.ts`.
+- Tool-description budget — `tests/unit/core/tool-description-budget.unit.test.ts`.
 - AGENTS.md byte budget — keep AGENTS.md edits to one line (a single pointer here).
 
 ---
@@ -1381,7 +1381,7 @@ see the §0 capability-signaling convention). Uses ALL reserved keys.
 
 ### D2.2 Test adaptation + deletion
 
-Adapt PR-walkthrough tests + `tests/e2e/ui/extension-host.spec.ts` pattern. Stage deletion
+Adapt PR-walkthrough tests + `tests/browser/journeys/ui/extension-host.journey.spec.ts` pattern. Stage deletion
 of `src/ui/components/pr-walkthrough/` and bespoke viewer dispatch once parity E2E is green.
 Current PR walkthrough reviewer tools are pack-owned under
 `market-packs/pr-walkthrough/tools/pr-walkthrough/`; they remain normal agent tools, not
@@ -1445,7 +1445,7 @@ the pack route worker.** The implemented split:
 
 So D2's `bundle` route is a LIVE git/diff computer for the diff + a STORE reader for the
 LLM cards — never an in-worker LLM caller. The D2 E2E
-(`tests/e2e/ui/pr-walkthrough-pack.spec.ts`) seeds a realistic persisted bundle through the
+(`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`) seeds a realistic persisted bundle through the
 pack's own `publish` route (proving the READ/render path) AND drives a live recompute over a
 real git working dir (proving the disclosed-`git` worker path), plus the session-menu launcher
 surface and the `kind:"route"` deep-link.
@@ -1520,7 +1520,7 @@ files, all serialized above.
 
 Unit tests prefer `file://` fixtures + the existing `tests/fixtures/market-sources/`
 pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
-`tests/e2e/ui/extension-host.spec.ts`.
+`tests/browser/journeys/ui/extension-host.journey.spec.ts`.
 
 | Slice | Test (file) | Asserts | Accept # |
 |---|---|---|---|
@@ -1536,8 +1536,8 @@ pattern (extend `retry-demo-src` or add per-slice fixture packs). E2Es follow
 | — | `tool-contributions.test.ts` (extend) | formerly-reserved keys now PARSED+TYPED (panels/routes/stores/entrypoints) and ACT (wire fields populated); malformed still degrades, never rejects | 2 |
 | — | `host-api-v1-frozen.test.ts` (extend/add) | `HOST_API_VERSION===1` unchanged; v1 types compile unchanged; capabilities flip per host | 2 |
 | — | existing `pack-marketplace.test.ts` / budget tests | `buildPackList` byte-identical; tool-description budget; AGENTS budget | invariants |
-| **D1** | `tests/e2e/ui/artifacts-pack.spec.ts` (**mandatory E2E**) | install → inline pill renders → open viewer panel → persist across reload (store) → **deep-link: `navigate({route:"artifacts",params:{artifactId}})` opens the `artifacts.viewer` panel rehydrated from `store.get(artifactId)`, surviving reload on the deep-link route** → uninstall reconciles | **1** |
-| **D2** | `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (**mandatory E2E**) | install → entrypoint launches → panel renders from pack `callRoute` (`/api/ext/route/bundle` with `tool`) + store → `readToolCall` after `session` flag live → deep-link route → uninstall | **1** |
+| **D1** | `tests/browser/journeys/ui/artifacts-pack.journey.spec.ts` (**mandatory E2E**) | install → inline pill renders → open viewer panel → persist across reload (store) → **deep-link: `navigate({route:"artifacts",params:{artifactId}})` opens the `artifacts.viewer` panel rehydrated from `store.get(artifactId)`, surviving reload on the deep-link route** → uninstall reconciles | **1** |
+| **D2** | `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` (**mandatory E2E**) | install → entrypoint launches → panel renders from pack `callRoute` (`/api/ext/route/bundle` with `tool`) + store → `readToolCall` after `session` flag live → deep-link route → uninstall | **1** |
 
 Gate: `npm run check`, `npm run test:unit`, `npm run test:e2e` green; the two litmus E2Es
 are the acceptance proofs.

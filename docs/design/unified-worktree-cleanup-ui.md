@@ -31,7 +31,7 @@ Settings → Maintenance currently renders two overlapping worktree surfaces in 
      - cleanup result banner;
      - server-authoritative rescan after cleanup;
      - grouped diagnostic examples by reason.
-   - Current browser tests pin this behavior in `tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts`, `tests/ui-fixtures/search-preview-maintenance.spec.ts`, and `tests/ui-fixtures/settings-admin-fixture.spec.ts`.
+   - Current browser tests pin this behavior in `tests/browser/journeys/ui/settings-maintenance-archived-worktrees.journey.spec.ts`, `tests/browser/fixtures/search-preview-maintenance.fixture.spec.ts`, and `tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts`.
 
 The unified design should keep the archived card’s actionable-first interaction model, but remove the confusing split between “Orphaned Worktrees” and “Archived Session Worktrees”.
 

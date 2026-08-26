@@ -478,7 +478,7 @@ A pure status-view selector/classifier SHOULD accept sessions, active-view filte
 
 ## 17. Test and acceptance plan
 
-All new tests belong in `tests2/` and must be registered in `tests2/tests-map.json`.
+All new tests use the canonical `tests/` semantic path and suffix so lane discovery is automatic.
 
 ### 17.1 Core tests
 

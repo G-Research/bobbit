@@ -1,5 +1,7 @@
 # PR Walkthrough — Post via local `gh` + trust-prompt unknown remote hosts
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: design (implement from this doc). Goal: **PR Walkthrough gh Posting** (items 4a + 4b).
 
 This design makes the PR Walkthrough able to **post review comments to a real PR by
@@ -552,7 +554,7 @@ since `runSpawnLauncher` resolves it).
 
 Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
 
-### Unit — `github-adapter.ts` (`tests/pr-walkthrough-export-mapper.test.ts` + `tests/pr-walkthrough-trusted-hosts.test.ts`)
+### Unit — `github-adapter.ts` (`tests/unit/core/pr-walkthrough-export-mapper.unit.test.ts` + `tests/unit/core/pr-walkthrough-trusted-hosts.unit.test.ts`)
 
 1. **Reason text**: `resolveGithubPr` with a failing fake `gh` and no env token →
    `export.available === false` and `export.reason` matches `/gh auth login/`. (Extend the
@@ -564,7 +566,7 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
    `available` reflects the **gh** path only (env token never forwarded). Reuse the existing
    `fakeGhBin`/`withGithubAuthEnv` helpers.
 
-### Unit — `export-mapper.ts` (`tests/pr-walkthrough-export-mapper.test.ts`)
+### Unit — `export-mapper.ts` (`tests/unit/core/pr-walkthrough-export-mapper.unit.test.ts`)
 
 3. **`submitGithubReview` gh path**: with a fake `gh` (via `BOBBIT_GH_COMMAND`, extend
    `fakeGhBin` to echo a `{ "html_url": ... }` and capture stdin), no token →
@@ -603,7 +605,7 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
    case; add a **gh** case (no `GITHUB_TOKEN`, stub `BOBBIT_GH_COMMAND`) asserting the review
    posts via gh with `ghHost` derived from the changeset `prUrl`.
 
-### Unit — pack worker `run` trust gate (`tests/pr-walkthrough-trusted-hosts.test.ts` or new)
+### Unit — pack worker `run` trust gate (`tests/unit/core/pr-walkthrough-trusted-hosts.unit.test.ts` or new)
 
 9. Import `routes.run` from `market-packs/pr-walkthrough/lib/routes.mjs` with a **mock `ctx`**
    (`{ sessionId, host: { store: <in-mem>, agents: { spawn, prompt, dismiss } } }`):
@@ -625,7 +627,7 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
     accept → second `callRoute` carries `trustedHostAck`+`prUrl` and the panel opens; on
     decline → `onResult({ ok:false })`, no second call.
 
-### Server E2E — `tests/e2e/pr-walkthrough-api.spec.ts`
+### Server E2E — `tests/integration/gateway/pr-walkthrough-api.gateway.test.ts`
 
 12. **Update** "GitHub PR resolve can be faked from local SHAs and remains preview-only
     without credentials": rename/repurpose — **without** gh/env creds assert
@@ -652,13 +654,13 @@ Verify with: `npm run check`, `npm run test:unit`, `npm run test:e2e`.
 
 ### Invariants to keep green
 
-- `tests/pr-walkthrough-no-submit-proof.test.ts` — introduce no forbidden submit-proof
+- `tests/unit/core/pr-walkthrough-no-submit-proof.unit.test.ts` — introduce no forbidden submit-proof
   tokens (this design uses only the session-secret pattern already in the tree).
-- `tests/pr-walkthrough-trusted-hosts.test.ts` — env token never forwarded to enterprise
+- `tests/unit/core/pr-walkthrough-trusted-hosts.unit.test.ts` — env token never forwarded to enterprise
   hosts (unchanged; `resolveGithubExportAuth` reuses `resolveGithubToken`).
-- `tests/tool-description-budget.test.ts` — if a `submit_pr_walkthrough_review` tool yaml is
+- `tests/unit/core/tool-description-budget.unit.test.ts` — if a `submit_pr_walkthrough_review` tool yaml is
   added, keep its description within budget.
-- Panel parity spec (`tests/pr-walkthrough-panel-parity.spec.ts`) — rebuild `lib/panel.js`
+- Panel parity spec (`tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts`) — rebuild `lib/panel.js`
   from `src/panel.js`; keep existing `data-testid`s.
 
 ---

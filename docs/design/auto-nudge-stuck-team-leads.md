@@ -46,5 +46,5 @@ This preserves the distinction between two outcomes:
 
 - [Auto-Retry](../auto-retry.md) describes retry classification, scheduling, and UI events.
 - [Notification Policy](notification-policy.md#9-team-lead-idle-nudge-backoff) describes team-lead idle nudge cadence and prompt provenance.
-- `tests/team-manager-idle-nudge-backoff.test.ts` covers retry-before-nudge, suppression for unknown/non-retryable errors, and duplicate-card prevention while auto-retry is pending.
-- `tests/team-manager.test.ts` covers worker-idle notification recovery for errored idle team leads.
+- `tests/unit/core/team-manager-idle-nudge-backoff.unit.test.ts` covers retry-before-nudge, suppression for unknown/non-retryable errors, and duplicate-card prevention while auto-retry is pending.
+- `tests/e2e/vitest/team-manager.vitest-e2e.test.ts` covers worker-idle notification recovery for errored idle team leads.

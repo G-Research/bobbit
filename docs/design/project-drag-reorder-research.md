@@ -1,5 +1,7 @@
 # Project Drag Reorder — design research
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Current shape
 
 - Server registry is `src/server/agent/project-registry.ts`.
@@ -27,8 +29,8 @@
 - Relevant existing docs/tests:
   - `docs/rest-api.md` documents project routes and should get the new reorder route.
   - `docs/sidebar-keyboard-navigation.md` says DOM order is the sidebar navigation source of truth; reordering project DOM rows will automatically affect keyboard traversal.
-  - Registry tests are currently in `tests/multi-project.test.ts` and `tests/project-registry-symlink.test.ts`.
-  - Project API/UI patterns are in `tests/e2e/project-delete-last.spec.ts`, `tests/e2e/project-bugs.spec.ts`, `tests/e2e/ui/project-management.spec.ts`, `tests/e2e/ui/single-project-sidebar.spec.ts`, `tests/e2e/ui/remove-first-project.spec.ts`.
+  - Registry tests are currently in `tests/unit/core/multi-project.unit.test.ts` and `tests/unit/core/project-registry-symlink.unit.test.ts`.
+  - Project API/UI patterns are in `tests/integration/gateway/project-delete-last.gateway.test.ts`, `tests/integration/gateway/project-bugs.gateway.test.ts`, `tests/browser/journeys/ui/project-management.journey.spec.ts`, `tests/e2e/ui/single-project-sidebar.spec.ts`, `tests/browser/journeys/ui/remove-first-project.journey.spec.ts`.
 
 ## Proposed data model and migration
 
@@ -159,7 +161,7 @@ Suggested test selectors:
 
 Unit:
 
-- `tests/multi-project.test.ts` or new `tests/project-registry-order.test.ts`:
+- `tests/unit/core/multi-project.unit.test.ts` or new `tests/unit/core/project-registry-order.unit.test.ts`:
   - legacy `projects.json` without `position` migrates in existing created-at/on-disk order;
   - `list()` respects custom positions over `createdAt`;
   - `setVisibleOrder()` persists and reloads;
@@ -169,7 +171,7 @@ Unit:
 
 API E2E:
 
-- New `tests/e2e/project-reorder-api.spec.ts`:
+- New `tests/integration/gateway/project-reorder-api.gateway.test.ts`:
   - create A/B/C, `PUT /api/projects/order` to C/A/B, then `GET /api/projects` returns C/A/B;
   - reload/restart harness still returns persisted order;
   - duplicate, unknown, hidden/system, missing visible, extra/stale IDs fail and leave order unchanged;
@@ -178,7 +180,7 @@ API E2E:
 
 Browser E2E:
 
-- New `tests/e2e/ui/project-drag-reorder.spec.ts`:
+- New `tests/browser/fixtures/project-drag-reorder.fixture.spec.ts`:
   - desktop: handle hidden until project header hover/focus; dragging handle reorders; project contents collapse while dragging and restore after drop/cancel; reload persists;
   - desktop: clicking header outside handle still toggles expansion; clicking settings/new-goal does not initiate reorder;
   - collapsed desktop sidebar shows projects in persisted order and no reorder handle;

@@ -1,5 +1,7 @@
 # Design — Skill UX & Autonomous Activation
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Goal: ship the two parts described in the goal spec.
 
 - **Part A — Chat UX**: persist the user's literal message + a list of resolved skill expansions; render the bubble with the original text and clickable disclosure chips. Model still receives the fully-expanded prompt (byte-equal to today).
@@ -258,7 +260,7 @@ case "prompt": {
 
 ### Byte-equality snapshot test plan
 
-`tests/skill-resolve.spec.ts` (Node test runner):
+`tests/unit/core/skill-resolve.unit.test.ts` (Node test runner):
 
 | Case | Input | Expectation |
 | --- | --- | --- |
@@ -370,7 +372,7 @@ pi.registerTool({
   // pi's contract: execute(toolCallId, params, signal, onUpdate, ctx) — the
   // tool-call id is FIRST, validated params SECOND. Reading params off the
   // first arg silently drops `name`/`args` (gateway then 400s `name is
-  // required`). Pinned by tests/activate-skill-extension.test.ts.
+  // required`). Pinned by tests/unit/core/activate-skill-extension.unit.test.ts.
   async execute(_toolCallId, { name, args }) {
     const resp = await api("POST", `/api/sessions/${sessionId}/activate-skill`, { name, args: args ?? "" });
     // NOTE: a returned `{ isError: true }` does NOT propagate to the UI — pi's
@@ -462,7 +464,7 @@ The `convertToLlm` path in `Messages.ts` is unchanged — `skillExpansions` is p
 
 ## 9. Test plan
 
-### Unit (`tests/skill-resolve.spec.ts`, `tests/skill-sidecar.spec.ts`)
+### Unit (`tests/unit/core/skill-resolve.unit.test.ts`, `tests/unit/core/skill-sidecar.unit.test.ts`)
 
 - **resolveSkillExpansions**:
   - prefix-only no args / with args
@@ -472,11 +474,11 @@ The `convertToLlm` path in `Messages.ts` is unchanged — `skillExpansions` is p
   - unknown skill (no expansion, captured in `unknown[]`)
   - byte-equality regression: snapshot vs current handler block for 6 representative inputs.
 - **applySubstitutions** (already covered, kept).
-- **Sidecar round-trip** (`tests/skill-sidecar.spec.ts`):
+- **Sidecar round-trip** (`tests/unit/core/skill-sidecar.unit.test.ts`):
   - write a sidecar entry; read it back; assert `originalText`, `expansions`, `expanded` survive.
   - non-existent sidecar → empty merge; agent message renders as today.
 
-### Server snapshot (`tests/e2e/skill-prompt-bytes.spec.ts`, in-process harness)
+### Server snapshot (`tests/integration/gateway/skill-prompt-bytes.gateway.test.ts`, in-process harness)
 
 - Send `/mockup hero` and `see /git-conventions` via WS prompt.
 - Capture the text passed to `rpcClient.prompt`.
@@ -488,10 +490,10 @@ The `convertToLlm` path in `Messages.ts` is unchanged — `skillExpansions` is p
 - Assert:
   1. The `tool_result` text equals `buildSlashSkillPrompt(mockup, "")`.
   2. The next assistant turn's input contains the resolved body.
-  3. `disable-model-invocation: true` skill rejected with 403; the tool returns an error result whose text content (`activate_skill failed: …`) is surfaced by the renderer. Do NOT assert on `result.isError` — pi hardcodes `isError:false` for returned (non-thrown) tool results, so the renderer must surface the error text independently of the flag (pinned by `tests/activate-skill-renderer.spec.ts`).
+  3. `disable-model-invocation: true` skill rejected with 403; the tool returns an error result whose text content (`activate_skill failed: …`) is surfaced by the renderer. Do NOT assert on `result.isError` — pi hardcodes `isError:false` for returned (non-thrown) tool results, so the renderer must surface the error text independently of the flag (pinned by `tests/dom/activate-skill-renderer.dom.test.ts`).
   4. `Skills: never` policy → tool not registered → 4xx during agent activation init (existing tool-guard test pattern).
 
-### Browser E2E (`tests/e2e/ui/skills-chip.spec.ts`)
+### Browser E2E (`tests/browser/journeys/ui/skills-chip.journey.spec.ts`)
 
 Per AGENTS.md "E2E coverage requirement" (navigation, happy path, persistence, cleanup):
 

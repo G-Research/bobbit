@@ -1,5 +1,7 @@
 # Mid-session project proposals
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Historical implementation plan.** This design predates the unified
 > server-backed side-panel workspace. Proposal tab behavior now follows
 > [docs/side-panel-workspace.md](../side-panel-workspace.md): a project proposal
@@ -375,9 +377,9 @@ Client-side only. Already fires for any assistantType (proof:
 | Type | File | Scope |
 | --- | --- | --- |
 | Unit (Playwright `file://`) | `tests/ui/project-proposal-panel.spec.ts` | `projectProposalPanel()` renders diff: changed rows show "Changed" pill; unchanged rows collapse into a `<details>` group; `root_path` is read-only; unknown keys render in "Custom fields"; provisional mode (no `currentConfig`) still renders legacy UI. |
-| API E2E (in-process harness) | `tests/e2e/project-config-api.spec.ts` | `PUT /api/projects/:id/config` accepts every field in §3e (config-sourced ones); `PUT /api/projects/:id` accepts `name`; `PUT /api/preferences` accepts the three model keys. |
-| Browser E2E (REQUIRED) | `tests/e2e/ui/mid-session-project-proposal.spec.ts` | Spawned gateway + mock agent. Flow: create regular session in a registered project; mock agent emits `<project_proposal>` with diffed fields; assert (1) `proposal:project` appears in the shared side-panel workspace, (2) diff rows rendered with "Changed" pills, (3) Apply Changes calls `PUT /api/projects/:id/config` + (if name changed) `PUT /api/projects/:id`, (4) session stays connected (no landing nav), (5) reload — proposal cleared, config persisted (GET returns new values), (6) Dismiss path: emit proposal, click Dismiss, tab disappears, reload → still gone, config untouched. Pattern: `tests/e2e/ui/settings.spec.ts`. |
-| Regression | `tests/e2e/ui/project-assistant.spec.ts` | Must stay green: provisional promote + terminate + navigate-to-landing flow unchanged. |
+| API E2E (in-process harness) | `tests/integration/gateway/project-config-api.gateway.test.ts` | `PUT /api/projects/:id/config` accepts every field in §3e (config-sourced ones); `PUT /api/projects/:id` accepts `name`; `PUT /api/preferences` accepts the three model keys. |
+| Browser E2E (REQUIRED) | `tests/browser/journeys/ui/mid-session-project-proposal.journey.spec.ts` | Spawned gateway + mock agent. Flow: create regular session in a registered project; mock agent emits `<project_proposal>` with diffed fields; assert (1) `proposal:project` appears in the shared side-panel workspace, (2) diff rows rendered with "Changed" pills, (3) Apply Changes calls `PUT /api/projects/:id/config` + (if name changed) `PUT /api/projects/:id`, (4) session stays connected (no landing nav), (5) reload — proposal cleared, config persisted (GET returns new values), (6) Dismiss path: emit proposal, click Dismiss, tab disappears, reload → still gone, config untouched. Pattern: `tests/e2e/ui/settings.spec.ts`. |
+| Regression | `tests/browser/journeys/ui/project-assistant.journey.spec.ts` | Must stay green: provisional promote + terminate + navigate-to-landing flow unchanged. |
 
 ### 6. Non-goals (per spec)
 
@@ -399,5 +401,5 @@ Client-side only. Already fires for any assistantType (proof:
 | `src/server/server.ts` | No change — existing `PUT /api/projects/:id/config` + `PUT /api/projects/:id` cover all registered-mode writes. |
 | `src/server/agent/project-registry.ts` | No change. |
 | `tests/ui/project-proposal-panel.spec.ts` | New — unit test for diff rendering. |
-| `tests/e2e/project-config-api.spec.ts` | New — API coverage for all fields. |
-| `tests/e2e/ui/mid-session-project-proposal.spec.ts` | New — browser E2E happy + dismiss + persistence. |
+| `tests/integration/gateway/project-config-api.gateway.test.ts` | New — API coverage for all fields. |
+| `tests/browser/journeys/ui/mid-session-project-proposal.journey.spec.ts` | New — browser E2E happy + dismiss + persistence. |

@@ -35,7 +35,7 @@ but the type signature requires both to be present.
   support yet"` error so the flow fails loudly via the existing
   `loginPromise.catch` path rather than hanging on a missing UI.
 
-Pinning test: `tests/oauth-external-callbacks.test.ts`.
+Pinning test: `tests/unit/core/oauth-external-callbacks.unit.test.ts`.
 
 ## Node engine requirement
 

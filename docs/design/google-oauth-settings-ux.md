@@ -1,5 +1,7 @@
 # Google Account Auth — Settings / UX Design
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Archived design artifact — superseded.** This file preserves the pre-implementation UX
 > proposal for historical rationale only. It is not the current specification, and its file
 > references, state descriptions, and checklists are not authoritative implementation targets.

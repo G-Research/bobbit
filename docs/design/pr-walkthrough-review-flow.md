@@ -543,29 +543,29 @@ Work:
 
 | Acceptance criterion | Primary tests to add/update |
 |---|---|
-| Same-file multi-card PRs render intended hunks without file-wide duplication | `tests/pr-walkthrough-yaml-schema.test.ts`: two chunks with same file but different `hunk_id`s produce two cards with only their selected hunks. `tests/pr-walkthrough-panel-parity.spec.ts` or new browser fixture: same file appears on multiple cards with distinct visible hunks. |
+| Same-file multi-card PRs render intended hunks without file-wide duplication | `tests/unit/core/pr-walkthrough-yaml-schema.unit.test.ts`: two chunks with same file but different `hunk_id`s produce two cards with only their selected hunks. `tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts` or new browser fixture: same file appears on multiple cards with distinct visible hunks. |
 | V2 narrative contract drives interleaved order | Shared schema/synthesis test with `review_chunks[].narrative[]` containing text, diff, note, suggested comment, and checklist entries preserves order in `card.narrative`; legacy chunks without narrative synthesize fallback order. |
 | Repeated hunk appears collapsed with previous-card hint | Shared synthesis test for primary + secondary placement metadata where `primaryState` stays `primary-reviewed` and `secondaryCardIds`/`repeatedReferenceCount` are populated. Browser fixture asserting secondary diff has `data-expanded="false"`, hint text `Also shown in Card 2: ...`, and can expand. |
-| Duplicate primary ownership rejected before publication | `tests/pr-walkthrough-yaml-schema.test.ts` for shared validation error. `tests/pr-walkthrough-durable-routes.test.ts` for `finalizeSubmission` returning `PRW_DUPLICATE_PRIMARY_HUNK` and not writing `reviews/<jobId>/final/payload`. |
+| Duplicate primary ownership rejected before publication | `tests/unit/core/pr-walkthrough-yaml-schema.unit.test.ts` for shared validation error. `tests/unit/core/pr-walkthrough-durable-routes.unit.test.ts` for `finalizeSubmission` returning `PRW_DUPLICATE_PRIMARY_HUNK` and not writing `reviews/<jobId>/final/payload`. |
 | Ambiguous older-bundle hunk refs fail closed | Shared resolver test where duplicate file/header candidates without index/coordinates return `PRW_HUNK_REF_UNRESOLVED`; fallback ids include hunk index and coordinates. |
 | More than 12 logical cards render | Durable route test with 13+ `chunk:*` records finalizing to all cards. Browser fixture asserts exact logical card count in the rail and navigation. |
-| Token spend reduced by avoiding broad rereads/repeated diff bodies | `tests/pr-walkthrough-compact-bundle-format.test.ts`: compact manifest includes hunk IDs and file follow-up suppresses envelope. New read-receipt test: status after reads lists hunk IDs and avoids requiring reread after resume. Synthesis test asserts YAML/final chunks contain hunk refs, not diff bodies. |
+| Token spend reduced by avoiding broad rereads/repeated diff bodies | `tests/unit/core/pr-walkthrough-compact-bundle-format.unit.test.ts`: compact manifest includes hunk IDs and file follow-up suppresses envelope. New read-receipt test: status after reads lists hunk IDs and avoids requiring reread after resume. Synthesis test asserts YAML/final chunks contain hunk refs, not diff bodies. |
 | Final card focuses on completeness/plumbing/shrapnel | Shared synthesis test: non-major unassigned hunks go to derived completion sweep; deterministic major remaining hunks return `PRW_MAJOR_REMAINING_HUNKS` and are not first shown only in audit. Durable route test checks coverage summary and generated/binary skips. |
-| Status exposes saved chunks, read receipts, coverage, skipped, repeated, remaining | `tests/pr-walkthrough-durable-routes.test.ts`: `submissionStatus` includes bounded `readReceipts`, primary coverage summaries, repeated-reference counts, and `major_remaining`. Panel draft-state test asserts draft/missing state renders saved chunks and coverage hints without huge lists. |
+| Status exposes saved chunks, read receipts, coverage, skipped, repeated, remaining | `tests/unit/core/pr-walkthrough-durable-routes.unit.test.ts`: `submissionStatus` includes bounded `readReceipts`, primary coverage summaries, repeated-reference counts, and `major_remaining`. Panel draft-state test asserts draft/missing state renders saved chunks and coverage hints without huge lists. |
 | `review_chunks[].files` is metadata only | Shared synthesis test with `files: [src/a.ts]` and empty rendered hunk refs produces no card diff blocks; remaining hunks appear in completion sweep or major-remaining error by policy. |
 | Read receipt coverage distinguishes reviewed vs referenced | Bundle route/store test: file hunk read creates receipt for selected hunk only. Finalization test: primary hunk without receipt is counted unread, secondary hunk points to primary without changing primary state, skip with reason is skipped. |
 | Large PR safety bounds outputs, not card count | Compact bundle read-window tests continue to pass. Add finalization test with many hunk refs/cards and no arbitrary `slice(0, N)` publication. |
 
 Existing tests that should remain green and be extended rather than replaced:
 
-- `tests/pr-walkthrough-yaml-schema.test.ts`
-- `tests/pr-walkthrough-durable-routes.test.ts`
-- `tests/pr-walkthrough-compact-bundle-format.test.ts`
-- `tests/pr-walkthrough-bundle-store-read-window.test.ts`
-- `tests/pr-walkthrough-panel-parity.spec.ts`
-- `tests/e2e/ui/pr-walkthrough-pack.spec.ts`
-- `tests/pr-walkthrough-role-tools-policy.test.ts`
-- `tests/pr-walkthrough-tool-metadata.test.ts`
+- `tests/unit/core/pr-walkthrough-yaml-schema.unit.test.ts`
+- `tests/unit/core/pr-walkthrough-durable-routes.unit.test.ts`
+- `tests/unit/core/pr-walkthrough-compact-bundle-format.unit.test.ts`
+- `tests/unit/core/pr-walkthrough-bundle-store-read-window.unit.test.ts`
+- `tests/e2e/browser/pr-walkthrough-panel-parity.browser-e2e.spec.ts`
+- `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts`
+- `tests/unit/core/pr-walkthrough-role-tools-policy.unit.test.ts`
+- `tests/unit/core/pr-walkthrough-tool-metadata.unit.test.ts`
 
 ## Resolved policy and open decisions
 

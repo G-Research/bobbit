@@ -43,7 +43,7 @@ mirroring `goal-assistant.ts` / `project-assistant.ts`. Content requirements:
   `bobbit_admin` (behind `ask` — destructive: restart/shutdown/provider-keys/marketplace).
 - Note that some appearance/state is client-only — for those, guide the user rather than
   offering to apply.
-- Keep it within prompt budgets (`tests2/core/tool-description-budget.test.ts` is
+- Keep it within prompt budgets (`tests/unit/core/tool-description-budget.unit.test.ts` is
   tool-description-only, but keep the prompt lean regardless).
 
 **`src/server/agent/assistant-registry.ts`** — add to `FALLBACK_DEFAULTS`:
@@ -128,7 +128,7 @@ session gets `bobbit_orchestrate`/`bobbit_admin` grants.
 "files": ["dist/", "data/", "docker/", "docs/", "src/", "README.md"]
 ```
 
-Tests live in `tests/` + `tests2/` (already excluded). This grows the tarball ~4.4 MB.
+Tests live under the single `tests/` root (already excluded). This grows the tarball ~4.4 MB.
 There is currently **no** npm-pack size budget test (bundle-size.test.ts is UI-dist only), so
 none needs updating — but we ADD a packaging test (below) that asserts `docs/` + `src/` ship.
 
@@ -210,23 +210,23 @@ Import `HEADQUARTERS_PROJECT_ID` in dialogs.ts (from `./headquarters.js`).
 
 ## 6. Tests
 
-- **`tests2/core/role-bobbit-tools-policy.test.ts`** — extend (do NOT weaken): the
+- **`tests/unit/core/role-bobbit-tools-policy.unit.test.ts`** — extend (do NOT weaken): the
   orchestrate-granting set becomes `["general", "support", "team-lead"]`; the admin-granting
   set becomes `["general", "support"]`; assert `support` resolves `bobbit_orchestrate=allow`
   and `bobbit_admin=ask`. Update the leading comment block to reflect the widened surface.
-- **New unit test** (e.g. `tests2/core/support-assistant.test.ts`): `getAssistantDef("support")`
+- **New unit test** (e.g. `tests/unit/core/support-assistant.unit.test.ts`): `getAssistantDef("support")`
   present with title "Support" / promptTitle "Bobbit Support Assistant"; `support.yaml` loads
   with `accessory: headset` + the two toolPolicies; `SUPPORT_ASSISTANT_PROMPT` contains the
   confirmation-first sentence; `assistantRoleForType("support") === "support"` and
   `assistantRoleForType("goal") === "assistant"`.
-- **New packaging test** (e.g. `tests2/core/package-files.test.ts`): `package.json` `files`
+- **New packaging test** (e.g. `tests/unit/core/package-files.unit.test.ts`): `package.json` `files`
   includes `docs/` and `src/`; run `npm pack --dry-run --json` and assert the file list
   contains at least one `docs/` and one `src/` entry. Also assert `resolveBundledDocsDir()`
   / `resolveBundledSrcDir()` return existing directories in this repo layout.
-- **Browser journey** (`tests2/browser`): `support-launcher` hidden when a normal project is
+- **Browser journey** (`tests/browser/journeys/`): `support-launcher` hidden when a normal project is
   active, visible only under Headquarters; sits left of the QR button in desktop + mobile;
   clicking creates + opens a Support session in HQ; reload keeps the session. Register in
-  `tests2/tests-map.json`.
+  its canonical path and semantic suffix.
 
 ## 7. Partition (parallel work)
 
@@ -236,7 +236,7 @@ Disjoint file sets → two parallel coders + reused verification gates:
   `bundled-paths.ts`, `session-setup.ts`, `session-manager.ts`, `package.json`; plus the
   backend unit tests (registry/role/prompt, role-bobbit-tools-policy extension, packaging).
 - **Frontend (coder B)** — `render.ts`, `dialogs.ts`, `dialogs-lazy.ts`; plus the
-  `tests2/browser` launcher journey + `tests-map.json`.
+  canonical `tests/browser/journeys/` launcher journey.
 
 No shared files between A and B. Team lead merges both, runs `npm run check` + targeted
 unit/browser checks, then signals implementation.

@@ -92,8 +92,8 @@ This shows the intended classification: each goal event reaches exactly the matc
 
 - `npm run check` — passed.
 - `npm run test:unit` — passed.
-- `npx tsx --test --test-force-exit tests/bench-server-cpu.test.ts` — passed.
-- `npx playwright test --config playwright-e2e.config.ts tests/e2e/goal-fanout-ws.spec.ts tests/e2e/gate-status-cache-ws.spec.ts tests/e2e/gate-resign-cancel.spec.ts` — passed.
+- `npx tsx --test --test-force-exit tests/unit/core/bench-server-cpu.unit.test.ts` — passed.
+- `npx vitest run --config vitest.config.ts --project v2-integration tests/integration/gateway/goal-fanout-ws.gateway.test.ts tests/integration/gateway/gate-status-cache-ws.gateway.test.ts tests/integration/gateway/gate-resign-cancel.gateway.test.ts` — passed.
 - `npm run build:server` — passed before benchmark runs.
 
 The new E2E test proves a viewer socket and matching goal session receive `gate_signal_received`/`gate_status_changed`, while an unrelated regular session receives no goal broadcast. Existing gate WS tests were updated to attach matching goal-session sockets instead of relying on the removed fallback.

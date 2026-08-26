@@ -143,7 +143,7 @@ Success:
 { "path": "<created absolute path>" }
 ```
 
-Structured API coverage lives in `tests/e2e/project-detect-browse.spec.ts` and
+Structured API coverage lives in `tests/integration/gateway/project-detect-browse.gateway.test.ts` and
 validates success, invalid input, existing directory, existing file, and
 missing-parent failures.
 
@@ -159,25 +159,25 @@ missing-parent failures.
 
 ## Test references
 
-- `tests/e2e/ui/add-project-flow.spec.ts`
+- `tests/browser/fixtures/add-project-flow.fixture.spec.ts`
   - exact extended hint copy;
   - centered inline `Directory doesn't exist` + `Create Directory` in `add-project-status-slot`;
   - no `Create Directory` button in `add-project-footer`;
   - happy-path creation, detection refresh, preflight refresh, and scaffolding handoff;
   - recoverable `already_exists` refresh;
   - inline structured and routed server errors that keep the dialog open.
-- `tests/e2e/ui/add-project-typeahead.spec.ts`
+- `tests/browser/journeys/ui/add-project-typeahead.journey.spec.ts`
   - prefix suggestions;
   - completed-path suppression after suggestion selection;
   - no suggestion reopen after successful creation;
   - trailing-separator child suggestions after creation;
   - blur invalidation and Escape behavior.
-- `tests/e2e/ui/add-project-browse-modal.spec.ts`
+- `tests/browser/journeys/ui/add-project-browse-modal.journey.spec.ts`
   - Browse/Select current writes a completed path and does not open child suggestions.
-- `tests/e2e/project-detect-browse.spec.ts`
+- `tests/integration/gateway/project-detect-browse.gateway.test.ts`
   - `POST /api/create-directory` response shape and structured error codes;
   - `GET /api/browse-directory` prefix/limit behavior used by typeahead.
-- `tests/e2e/ui/add-project-footer-stability.spec.ts`
+- `tests/browser/fixtures/add-project-footer-stability.fixture.spec.ts`
   - footer bounding-box stability across Add Project path-step transitions.
 
 ## Related docs

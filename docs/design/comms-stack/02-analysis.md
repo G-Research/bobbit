@@ -128,7 +128,7 @@ file:line · user-visible symptom · test-catches · minimal repro · lowest-ris
   widens — matching "worse over VPN" and "single local tab."
 - **Minimal repro.** Reducer/live-path test feeding two optimistic-prompt + two `role:'user'`
   image-block `message_end` frames; assert each user row carries its OWN attachment.
-  `tests/message-reducer.test.ts` has zero attachment coverage; the mock echoes text-only.
+  `tests/unit/core/message-reducer.unit.test.ts` has zero attachment coverage; the mock echoes text-only.
 - **Lowest-risk fix.** Adopt S6's render-from-content fix so the slot becomes non-load-bearing for
   image DATA. Interim: key pending attachments by optimistic id / text (a `Map`) instead of one slot
   and match on echo.

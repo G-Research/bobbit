@@ -1,5 +1,7 @@
 # Cross-Suite Test Runtime Isolation
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Decision
 
 Reconstruct only the coherent final-state reliability changes from
@@ -28,7 +30,7 @@ project/workflow-command environments are not sanitized by this contract.
 
 ## Canonical run environment
 
-`tests2/harness/run-isolation.ts` is the shared root and environment policy.
+`tests/support/harnesses/shared/run-isolation.ts` is the shared root and environment policy.
 Before any Bobbit discovery/server import or owned child spawn, its coordinator
 entry point:
 
@@ -60,7 +62,7 @@ sibling cache or the outer coordinator's cleanup authority.
 
 ### Ambient-input policy
 
-The sanitizer is shared by `tests2/harness/run-isolation.ts` and
+The sanitizer is shared by `tests/support/harnesses/shared/run-isolation.ts` and
 `scripts/run-playwright-e2e.mjs`, and runs before imports **and** when copying a
 child environment. It removes provider credentials plus ambient Bobbit runtime
 and discovery controls, including `BOBBIT_BUILTIN_PACKS_DIR`,
@@ -74,7 +76,7 @@ then writes the canonical root/ledger values. A fixture that needs one of these
 inputs supplies it in its local config or explicit child environment and
 restores it. No fixture may depend on a developer shell value.
 
-`tests2/core/run-isolation.test.ts` seeds credentials and every named ambient
+`tests/unit/core/run-isolation.unit.test.ts` seeds credentials and every named ambient
 input, proves removal in coordinators and child environments, proves Windows
 case handling and preserved suite controls, and proves a fixture-local explicit
 override remains visible only in that fixture.
@@ -88,12 +90,12 @@ collection, or discovery. Vitest forks inherit its root; coverage reports go to
 an owned run child. The fixed worker cap and normal developer `retry: 3` remain,
 but qualification always passes `--retry=0`.
 
-`tests2/harness/gateway.ts` obtains per-gateway state through `createRunChild()`
+`tests/support/harnesses/shared/gateway.ts` obtains per-gateway state through `createRunChild()`
 and restores the run-owned HOME, Bobbit, agent, and secrets roots when a test
 resets runtime singletons. Source-pack staging remains an explicit
 `GatewayConfig` input, not ambient discovery.
 
-`tests2/harness/v2-dom-environment.ts` obtains happy-dom's actual window through
+`tests/support/harnesses/shared/v2-dom-environment.ts` obtains happy-dom's actual window through
 `document[PropertySymbol.window]`, exposes and clears that window's local and
 session storage on `globalThis`, then restores prior descriptors after each
 test. It does not use `document.defaultView`, `window`, or `self`, which can
@@ -104,27 +106,27 @@ alias Node globals on Node 26.
 Mutable fixture trees are created below the active run by
 `createRunChild()` (or passed as an explicit test-local path); fixtures never
 consult a developer HOME, global Git config, network service, or checkout
-state. `tests2/harness/git-template.ts` supplies the Git template with an empty
+state. `tests/support/harnesses/shared/git-template.ts` supplies the Git template with an empty
 fixture HOME, `GIT_CONFIG_NOSYSTEM`, fixed identity, disabled maintenance, and
-LF `.gitattributes`; `tests2/harness/with-env.ts` scopes and restores config and
-credential overrides; and `tests2/harness/fenced-fetch.ts` permits only explicit
+LF `.gitattributes`; `tests/support/harnesses/shared/with-env.ts` scopes and restores config and
+credential overrides; and `tests/support/harnesses/shared/fenced-fetch.ts` permits only explicit
 fixtures or loopback requests. Tests use injected runners, local `file://`
 pack trees, or in-process loopback servers rather than host executables or
 remote services.
 
 Focused coverage keeps all required families host-independent: Git template
-and line-ending behavior in `tests2/core/git-template-copy.test.ts` and
-`tests2/core/gitattributes-lf.test.ts`; MCP stubs/local gateway behavior in
-`tests2/core/marketplace-mcp-gateway.test.ts` and
-`tests2/integration/mcp-meta-call.test.ts`; marketplace file-tree fixtures in
-`tests2/core/marketplace-install.test.ts` and
-`tests2/core/marketplace-source-builtin.test.ts`; temporary `SKILL.md` trees in
-`tests2/core/skill-resolve.test.ts`; explicit temporary config roots in
-`tests2/core/config-directories.test.ts` and
-`tests2/core/project-config-store-native-yaml.test.ts`; scoped credential state
-in `tests2/core/bobbit-tool-credentials.test.ts` and
-`tests2/core/run-isolation.test.ts`; and canonical LF/CRLF text assertions in
-`tests2/core/text-selection.test.ts`. Each regression seeds conflicting host
+and line-ending behavior in `tests/unit/core/git-template-copy.unit.test.ts` and
+`tests/unit/core/gitattributes-lf.unit.test.ts`; MCP stubs/local gateway behavior in
+`tests/unit/core/marketplace-mcp-gateway.unit.test.ts` and
+`tests/integration/gateway/mcp-meta-call.gateway.test.ts`; marketplace file-tree fixtures in
+`tests/e2e/vitest/marketplace-install.vitest-e2e.test.ts` and
+`tests/unit/core/marketplace-source-builtin.unit.test.ts`; temporary `SKILL.md` trees in
+`tests/unit/core/skill-resolve.unit.test.ts`; explicit temporary config roots in
+`tests/unit/core/config-directories.unit.test.ts` and
+`tests/unit/core/project-config-store-native-yaml.unit.test.ts`; scoped credential state
+in `tests/unit/core/bobbit-tool-credentials.unit.test.ts` and
+`tests/unit/core/run-isolation.unit.test.ts`; and canonical LF/CRLF text assertions in
+`tests/unit/core/text-selection.unit.test.ts`. Each regression seeds conflicting host
 values where applicable, proves only its explicit fixture input is observed,
 and restores process state before the next test.
 
@@ -150,7 +152,7 @@ Both `playwright-v2.config.ts` projects and `playwright-e2e.config.ts` use
 normal developer `retries: 3` and set retries to zero only when
 `BOBBIT_V2_RETRY_FREE=1`; Group A has no retry mechanism.
 
-Integration tests use the same Vitest owner and `tests2/harness/gateway.ts`;
+Integration tests use the same Vitest owner and `tests/support/harnesses/shared/gateway.ts`;
 they therefore receive the same roots and scrubber rather than inventing a
 second integration environment.
 
@@ -198,12 +200,12 @@ and replacement creation as one ownership operation. Thus a concurrent
 coordinator with the same project but a different run ID cannot be selected,
 remounted, or destroyed. Teardown continues to enumerate by the run label and
 accepts only its validated namespace, so a failed remount cannot broaden
-cleanup. `tests/e2e/sandbox-recovery.spec.ts` adds the focused remount/run
+cleanup. `tests/e2e/api/sandbox-recovery.api-e2e.spec.ts` adds the focused remount/run
 ownership case: two run IDs for one project are seeded, an atomic model-file
 replacement forces recreation for one run, and the observed Docker lookup and
 mount names must remain that run's while the sibling-labelled container and
-volumes survive. `tests2/core/docker-args.test.ts` and
-`tests2/core/run-isolation.test.ts` pin the pure volume/label selection and
+volumes survive. `tests/unit/core/docker-args.unit.test.ts` and
+`tests/unit/core/run-isolation.unit.test.ts` pin the pure volume/label selection and
 labelled teardown halves without requiring a daemon.
 
 The narrow `src/server/agent/worktree-sweeper.ts` companion change canonicalizes
@@ -229,7 +231,7 @@ rebuilding. Before a destructive build the old manifest is removed; after the
 required artifacts exist, a temp manifest is renamed atomically. Thus no
 consumer accepts a stale manifest paired with partial `dist` output.
 
-`tests2/core/ensure-dist-build-key.test.ts` covers key inputs, cache hits,
+`tests/unit/core/ensure-dist-build-key.unit.test.ts` covers key inputs, cache hits,
 reader/builder serialization, stale owners/acquisition intents, atomic
 publication, and concurrent same-worktree consumers.
 
@@ -237,16 +239,16 @@ publication, and concurrent same-worktree consumers.
 
 Only test/harness corrections with observable lifecycle ownership belong here:
 
-- `tests2/browser/e2e/{source-vite-runtime-helpers,packaged-runtime-helpers}.ts`
+- `tests/e2e/browser/_helpers/{source-vite-runtime-helpers,packaged-runtime-helpers}.ts`
   wait for concrete health/readiness and process close; their test-local cleanup
   starts while root ownership is live and does not target a departed numeric
   identity.
-- `tests2/browser/e2e/terminal-pack.spec.ts` waits for terminal dispatch and
+- `tests/e2e/browser/terminal-pack.browser-e2e.spec.ts` waits for terminal dispatch and
   close completion rather than a paste/sleep assumption.
 - Browser source/packaged runtime specs observe route/hydration ownership and
   teardown completion rather than blind reloads or incidental fetch handlers.
 - Proposal tests install a `MutationObserver` immediately before the action and
-  await the exact mutation. `tests2/browser/e2e/tail-chat-real-stream.spec.ts`
+  await the exact mutation. `tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts`
   registers marker correlation before send, samples settled post-repin growth,
   and requires exact observed phases.
 - Sidebar/font/focus tests assert semantic geometry/focus boundaries tolerant
@@ -255,19 +257,19 @@ Only test/harness corrections with observable lifecycle ownership belong here:
   assertion.
 
 Focused regressions live with those helpers/specs and in
-`tests2/core/ensure-dist-build-key.test.ts`,
-`tests2/core/worktree-sweeper-multi.test.ts`,
-`tests2/core/docker-args.test.ts`, `tests2/core/run-isolation.test.ts`, and the
-Docker-gated `tests/e2e/sandbox-recovery.spec.ts` remount case.
-`tests2/core/run-isolation.test.ts` covers coordinator and nested-root
+`tests/unit/core/ensure-dist-build-key.unit.test.ts`,
+`tests/unit/core/worktree-sweeper-multi.unit.test.ts`,
+`tests/unit/core/docker-args.unit.test.ts`, `tests/unit/core/run-isolation.unit.test.ts`, and the
+Docker-gated `tests/e2e/api/sandbox-recovery.api-e2e.spec.ts` remount case.
+`tests/unit/core/run-isolation.unit.test.ts` covers coordinator and nested-root
 construction, environment scrubbing, Windows key handling, and retry-free
-wiring. Only this goal's entries are added to `tests2/tests-map.json`.
+wiring. The goal's tests are discovered from their canonical paths and semantic suffixes.
 
 ## Qualification
 
 `.github/workflows/build-unit-gate.yml` runs native Windows, Linux, and macOS
 Node 22 plus Ubuntu Node 26, then builds, type-checks, and runs the standard
-unit gate once. `tests2/core/build-unit-gate-ci.test.ts` pins that structure.
+unit gate once. `tests/unit/core/build-unit-gate-ci.unit.test.ts` pins that structure.
 CI also runs the native matrix and CodeQL required by the goal.
 
 Before publication run `npm run check`, then run the unit command and qualify

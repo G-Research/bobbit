@@ -143,9 +143,9 @@ See [docs/nested-goals.md — Security model](../nested-goals.md#security-model)
 
 ## Test coverage
 
-- `tests2/core/operator-pause-durability-repro.test.ts` — operator provenance survives manager re-initialization with unmet dependencies; pre-provenance dependency pauses still migrate to `blocked` and unpaused; a resolved paused sibling is queued rather than started.
-- `tests2/browser/e2e/crash-restart.journey.spec.ts` — UI and persisted state remain paused after a real gateway crash/restart with an unmet dependency.
-- `tests2/integration/api-goals-prompt-paused.test.ts` — 409 `GOAL_PAUSED` for team/prompt and session/prompt; pause/resume without subgoals enabled.
-- `tests2/integration/api-subgoals-disabled.test.ts` — pause and resume are excluded from the `SUBGOALS_DISABLED` routes list.
-- `tests2/browser/journeys/goal-paused-banner.journey.spec.ts` — banner appears on pause, Resume button opens dialog, banner disappears on resume.
-- `tests2/dom/goal-pause-resume-feedback.test.ts` — dashboard and transcript-banner pending labels, duplicate suppression, and failure recovery.
+- `tests/unit/core/operator-pause-durability-repro.unit.test.ts` — operator provenance survives manager re-initialization with unmet dependencies; pre-provenance dependency pauses still migrate to `blocked` and unpaused; a resolved paused sibling is queued rather than started.
+- `tests/e2e/browser/crash-restart.browser-e2e.spec.ts` — UI and persisted state remain paused after a real gateway crash/restart with an unmet dependency.
+- `tests/integration/gateway/api-goals-prompt-paused.gateway.test.ts` — 409 `GOAL_PAUSED` for team/prompt and session/prompt; pause/resume without subgoals enabled.
+- `tests/integration/gateway/api-subgoals-disabled.gateway.test.ts` — pause and resume are excluded from the `SUBGOALS_DISABLED` routes list.
+- `tests/browser/journeys/goal-paused-banner.journey.spec.ts` — banner appears on pause, Resume button opens dialog, banner disappears on resume.
+- `tests/dom/goal-pause-resume-feedback.dom.test.ts` — dashboard and transcript-banner pending labels, duplicate suppression, and failure recovery.

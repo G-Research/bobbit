@@ -157,7 +157,7 @@ The implementation composes these verified existing seams rather than creating p
 | `goal-metadata.ts::GOAL_METADATA_WALK_DEPTH_CAP` and its current seen-id, missing-parent walk | Extract that already bounded walk into an exported helper shared by `resolveGoalMetadata` and the builder; retain the cap and traversal semantics instead of introducing another ancestry algorithm. |
 | `LifecycleHub.dispatch` and its existing `hookCtx` construction / `ModuleHost.invoke` loop | Resolve once immediately at the dispatch boundary, then attach the immutable result to the already-created provider contexts. No new dispatch, provider filtering, worker, or Host API path is introduced. |
 | `session-setup.ts::resolveDynamicContext`, `server.ts::resolveHookCtx`, and `SessionManager` lifecycle/shutdown methods | Carry only source coordinates already selected by these boundaries. `resolveHookCtx` becomes the existing REST source-selection seam for both base fields and scope input. |
-| `tests2/core/lifecycle-hub.test.ts`, `goal-metadata.test.ts`, and `goal-metadata-edges.test.ts` | Reuse their realistic hub/`ModuleHost` fixture, metadata edge coverage, and provider-filtering assertions; add the focused builder test rather than duplicating broad lifecycle harnesses. |
+| `tests/unit/isolated/lifecycle-hub.isolated.test.ts`, `goal-metadata.test.ts`, and `goal-metadata-edges.test.ts` | Reuse their realistic hub/`ModuleHost` fixture, metadata edge coverage, and provider-filtering assertions; add the focused builder test rather than duplicating broad lifecycle harnesses. |
 
 Every planned addition or change is accounted for below. “State owner” is intentionally absent: the snapshot is an event-local `const`, and no cache, registry, persistence, grant, or storage owner is added.
 
@@ -169,9 +169,9 @@ Every planned addition or change is accounted for below. “State owner” is in
 | `src/server/server.ts` | **Modify** shared-hub construction and the existing REST `resolveHookCtx` path. | Wires the one builder and returns the already selected live-or-persisted source coordinates alongside the existing base fields. | No route, response, or session state change. |
 | `src/server/agent/session-setup.ts` | **Modify** the existing `sessionSetup` dispatch call. | Passes plan coordinates already available to `resolveDynamicContext`; does not resolve scope there. | No new state. |
 | `src/server/agent/session-manager.ts` | **Modify** existing `afterTurn` and two `sessionShutdown` dispatch calls. | Passes captured live/persisted session coordinates at the point each existing event is dispatched; no new lifecycle path. | No new state. |
-| `tests2/core/hook-scope-context.test.ts` | **Add** focused v2-native unit coverage. | Owns builder-specific project isolation, lineage, component, freeze, and failure cases without duplicating integration scaffolding. | Test-only fixture state. |
-| `tests2/core/lifecycle-hub.test.ts` | **Modify** additively. | Uses its existing realistic `ModuleHost` seam to pin once-per-dispatch identity and a provider that ignores the field. | Test-only assertions. |
-| `tests2/tests-map.json` | **Modify** registration only. | Registers the new v2-native test as required by the suite inventory. | No runtime effect. |
+| `tests/unit/core/hook-scope-context.unit.test.ts` | **Add** focused v2-native unit coverage. | Owns builder-specific project isolation, lineage, component, freeze, and failure cases without duplicating integration scaffolding. | Test-only fixture state. |
+| `tests/unit/isolated/lifecycle-hub.isolated.test.ts` | **Modify** additively. | Uses its existing realistic `ModuleHost` seam to pin once-per-dispatch identity and a provider that ignores the field. | Test-only assertions. |
+| `scripts/testing/layout-policy.mjs` | **No change.** | The canonical unit path and suffix already provide discovery. | No runtime effect. |
 | `docs/lifecycle-hub.md`, `docs/extension-host-authoring.md` | **Modify** canonical contract/table and a link. | Documents one public-facing contract without a duplicate marketplace schema. | No runtime effect. |
 
 Failure handling stays at the layer that can safely degrade: the builder returns absent/partial data for absent session/project/goal lineage or ambiguous coordinates; the hub catches an unexpected builder error once and continues provider dispatch; existing provider-level errors, timeouts, block validation, budgets, and trace handling remain untouched. This gives the focused tests a direct builder seam for malformed/cyclic/cross-project data and a direct hub seam for resolution count, immutable identity, and no-op-provider equivalence.
@@ -207,7 +207,7 @@ Update `docs/lifecycle-hub.md`'s `HookCtx` field table and dispatch algorithm wi
 
 ## Test Suite v2 plan
 
-Add `tests2/core/hook-scope-context.test.ts` and register it in `tests2/tests-map.json` as a v2-native core test. Keep existing lifecycle tests unchanged except for additive assertions in `tests2/core/lifecycle-hub.test.ts` where its realistic ModuleHost fixture is useful.
+Add `tests/unit/core/hook-scope-context.unit.test.ts`; its canonical unit path and suffix provide discovery. Keep existing lifecycle tests unchanged except for additive assertions in `tests/unit/isolated/lifecycle-hub.isolated.test.ts` where its realistic ModuleHost fixture is useful.
 
 Coverage must pin:
 
@@ -223,7 +223,7 @@ Commands after implementation:
 
 ```bash
 npm run check
-npx vitest run tests2/core/hook-scope-context.test.ts tests2/core/lifecycle-hub.test.ts tests2/core/goal-metadata.test.ts tests2/core/goal-metadata-edges.test.ts
+npx vitest run tests/unit/core/hook-scope-context.unit.test.ts tests/unit/isolated/lifecycle-hub.isolated.test.ts tests/unit/core/goal-metadata.unit.test.ts tests/unit/isolated/goal-metadata-edges.isolated.test.ts
 npm run test:unit
 npm run test:browser
 npm run test:e2e

@@ -1,5 +1,7 @@
 # Bobbit Real-Time Comms Stack — Consolidated Understanding (Reliability/UX Audit, Step 1)
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > Pre-remediation audit snapshot. File anchors and prompt-delivery claims below describe the audited baseline, not current behavior. See [Reliable prompt and steer delivery](../../prompt-queue.md).
 
 > Single authoritative map of the prompt → WS → gateway → RPC → LLM → events → reducer → render
@@ -267,7 +269,7 @@ De-duplication notes:
 | S19 | `broadcastQueue` re-serializes & persists full base64 image data on every queue mutation | `session-manager.ts` | perf-resource | medium | no | Multi-MB queued image re-JSON'd + re-sent to all clients + rewritten to `sessions.json` per mutation; can push `bufferedAmount` toward the overflow terminate threshold |
 | S20 | Non-image attachments base64-inflated and sent as full bytes over WS + into server memory but never used as model input | `remote-agent.ts:829-831`, `:884`; `handler.ts:583` | perf-resource | medium | no | Up to 10×20 MB redundant document bytes per send; model consumes only `extractedText` |
 | S21 | `auto_retry_pending`/`cancelled` unbuffered (no seq, no replay) ⇒ reconnect during backoff orphans a stale "Retrying in Xs" banner | `session-manager.ts` retry broadcasts; client `remote-agent.ts` clears | transient-failure | medium | **yes** | Banner cleared only by `agent_start`/`auto_retry_cancelled`; a cancel-without-following-turn leaves it orphaned (needs reconnect-in-window repro) |
-| S22 | Heartbeat & `status_resync` real code paths pinned only by inline-mirror unit tests | `tests/session-manager-status.test.ts:108`, `:151` | transient-failure | medium | no | A regression in the *real* sole self-heal mechanism would pass CI — the missing real-path test IS the bug |
+| S22 | Heartbeat & `status_resync` real code paths pinned only by inline-mirror unit tests | `tests/unit/core/session-manager-status.unit.test.ts:108`, `:151` | transient-failure | medium | no | A regression in the *real* sole self-heal mechanism would pass CI — the missing real-path test IS the bug |
 | S23 | Seq sequencer pinned by hand-copied HTML fixtures, not production `handleServerMessage` | `tests/fixtures/remote-agent-seq-dedup.html`, `remote-agent-sequence-hole.html` | other | medium | no | S9 and S10 (the two riskiest branches) are effectively untested; fixtures can silently diverge |
 | S24 | `_advanceTopLevelSeq` gap path sets `_highestSeq=seq` and only `requestMessages()` — non-message events in the skipped range (tool exec, compaction, agent start/end side effects) are lost | `remote-agent.ts:1107-1118` | transient-failure | medium | **yes** | Snapshot carries only the message list, not event side effects → stuck spinner / never-clearing streaming flag (needs a top-level-frame gap repro) |
 | S25 | Resume across an un-granted tool-permission `pushFrame` seq hole strands the pending buffer until 500-event overflow | `handler.ts:917-934`; `event-buffer.ts:41-43` | flush-delay | medium | **yes** | Disconnect straddling an ungranted permission → resume can't fill the hole (perm only re-sent on full attach) → hard streaming stall (narrow window) |
@@ -302,75 +304,75 @@ Format: **invariant — where enforced — pinned by** (or **UNPINNED / partial*
 ### Sequencing & transport
 - **Per-session seq monotonicity; client dedups (`seq<=_highestSeq`) and reorders
   (`seq!=_highestSeq+1`).** `event-buffer.ts:27` (push) + `remote-agent.ts:1409-1428`. Pinned by
-  `tests/remote-agent-seq-dedup.spec.ts`, `tests/message-reducer.test.ts` (case 3). **Partial:** the
+  `tests/dom/remote-agent-seq-dedup.dom.test.ts`, `tests/unit/core/message-reducer.unit.test.ts` (case 3). **Partial:** the
   sequencer test drives a hand-copied HTML fixture, not production (S23).
 - **First seq'd frame baselines `_highestSeq=seq-1` so the initial-connect gap doesn't stall.**
   `remote-agent.ts:1401-1408`. Pinned by the seq-dedup fixture + `restart-preserves-streaming-frame.test.ts`.
 - **Top-level frames that consume a server seq (tool_permission) advance `_highestSeq`.**
-  `remote-agent.ts:1096-1121`. Pinned by `tests/remote-agent-sequence-hole.spec.ts`,
-  `tests/perm-frame-late-joiner-seq-gap.test.ts`.
+  `remote-agent.ts:1096-1121`. Pinned by `tests/dom/remote-agent-sequence-hole.dom.test.ts`,
+  `tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts`.
 - **Server replays the ORIGINAL perm seq/ts on late-join (single `pushFrame` callsite =
-  `requestToolGrant`).** `session-manager.ts`. Pinned by `tests/perm-frame-late-joiner-seq-gap.test.ts`.
+  `requestToolGrant`).** `session-manager.ts`. Pinned by `tests/unit/core/perm-frame-late-joiner-seq-gap.unit.test.ts`.
 - **Resume only when `canResumeFrom(fromSeq)`, else `resume_gap` → full snapshot.** `handler.ts:917`;
-  `event-buffer.ts`. Pinned by `tests/event-buffer.test.ts` (canResumeFrom cases). **Gap:** no test
+  `event-buffer.ts`. Pinned by `tests/unit/core/event-buffer.unit.test.ts` (canResumeFrom cases). **Gap:** no test
   covers resume across an un-granted perm seq hole (S25).
 - **`seedNextSeq` preserves the seq frame-of-reference across in-place respawn.**
-  `event-buffer.ts:88-92` + `session-manager.ts`. Pinned by `tests/restart-preserves-streaming-frame.test.ts`,
-  `tests/sandbox-recovery-preserves-streaming-frame.test.ts`.
+  `event-buffer.ts:88-92` + `session-manager.ts`. Pinned by `tests/unit/core/restart-preserves-streaming-frame.unit.test.ts`,
+  `tests/unit/core/sandbox-recovery-preserves-streaming-frame.unit.test.ts`.
 - **Every retained live event carries seq+ts assigned once in `EventBuffer.push`; snapshot `_order`
-  floor sorts before live.** `event-buffer.ts:15,27`. Pinned by `tests/event-buffer.test.ts`.
+  floor sorts before live.** `event-buffer.ts:15,27`. Pinned by `tests/unit/core/event-buffer.unit.test.ts`.
   **Gap:** no test asserts the **seq-less bypass set** (S5) is exhaustive/intentional.
 
 ### Reducer & render
 - **Optimistic reconciled vs echo by id then exact-text (`optimistic_` prefix).**
-  `message-reducer.ts:211-232`. Pinned by `tests/message-reducer.test.ts` cases (6)/(7) — **but those
+  `message-reducer.ts:211-232`. Pinned by `tests/unit/core/message-reducer.unit.test.ts` cases (6)/(7) — **but those
   use `role:user`, not `user-with-attachments`** (S1/S6 gap).
 - **Optimistic rows survive a snapshot (different server id) and are removed only on live echo
-  (id-only).** `message-reducer.ts:403-408`. Pinned by `tests/message-reducer.test.ts` case (5) —
+  (id-only).** `message-reducer.ts:403-408`. Pinned by `tests/unit/core/message-reducer.unit.test.ts` case (5) —
   **case (5) uses different text, so same-text duplicate (S18) is uncaught.**
 - **Snapshot dedup is id/toolCallId/multiset-(role|text) based; H3 guard keeps a just-landed live row
-  over a stale snapshot.** `message-reducer.ts:243-401`. Pinned by `tests/message-reducer.test.ts`
-  snapshot survivor cases + case (10), `tests/e2e/ui/new-tab-no-duplicate-messages.spec.ts`.
+  over a stale snapshot.** `message-reducer.ts:243-401`. Pinned by `tests/unit/core/message-reducer.unit.test.ts`
+  snapshot survivor cases + case (10), `tests/browser/journeys/ui/new-tab-no-duplicate-messages.journey.spec.ts`.
 - **Snapshot clears `streamingMessageId` and `_state.streamingMessage`.** Pinned by
-  `tests/snapshot-clears-streaming-message.test.ts`.
+  `tests/unit/core/snapshot-clears-streaming-message.unit.test.ts`.
 - **Streaming row renders in exactly one surface (`visibleMessages` filter + shared
   `computeStreamingMessageId`).** `AgentInterface.ts:1547`, `streaming-message-id.ts:21`. Pinned by
-  `tests/e2e/ui/new-tab-no-duplicate-messages.spec.ts`. **Gap:** id-less plain-text row (S7) relies on
+  `tests/browser/journeys/ui/new-tab-no-duplicate-messages.journey.spec.ts`. **Gap:** id-less plain-text row (S7) relies on
   reference equality with no dedicated reorder-stability test for `keyFor`.
 - **StreamingMessageContainer self-heals (`_immediateUpdate` reset; clears partial on
-  isStreaming→false).** Pinned by `tests/streaming-message-container-set-message.spec.ts` (cases 1,2).
+  isStreaming→false).** Pinned by `tests/dom/streaming-message-container-set-message.dom.test.ts` (cases 1,2).
 - **Deferred-render fidelity: live DOM == post-refresh DOM; every block resolves.** Pinned by
-  `tests/defer-offscreen-render.spec.ts`, `tests/e2e/ui/transcript-fidelity.spec.ts`.
-- **Follow-tail stick-to-bottom.** Pinned by `tests/follow-tail.spec.ts`,
-  `tests/ui-fixtures/chat-scroll.spec.ts`, `tests/collapse-scroll-bugs.spec.ts`,
+  `tests/browser/fixtures/defer-offscreen-render.fixture.spec.ts`, `tests/e2e/ui/transcript-fidelity.spec.ts`.
+- **Follow-tail stick-to-bottom.** Pinned by `tests/browser/fixtures/follow-tail.fixture.spec.ts`,
+  `tests/browser/fixtures/chat-scroll.fixture.spec.ts`, `tests/browser/fixtures/collapse-scroll-bugs.fixture.spec.ts`,
   `tests/agent-interface-scroll*.spec.ts`.
 - **Editor draft survives reattach/reload.** Pinned by `tests/e2e/ui/draft-loss.spec.ts`.
 - **Skill-expansion chips render optimistically, replaced on echo.** Pinned by
-  `tests/e2e/ui/skills-chip.spec.ts`.
+  `tests/browser/journeys/ui/skills-chip.journey.spec.ts`.
 
 ### Status & reliability
 - **Single server writer (`broadcastStatus`) keeps `statusVersion` monotonic.** `session-status.ts:46`.
-  Pinned by `tests/session-manager-status.test.ts` (monotonic case). **Partial:** heartbeat &
+  Pinned by `tests/unit/core/session-manager-status.unit.test.ts` (monotonic case). **Partial:** heartbeat &
   `status_resync` sub-suites mirror logic inline, not the real sites (S22).
 - **Divergence impossibility: `isStreaming` is a getter over `_state.status`.** `remote-agent.ts:519`.
-  Pinned by `tests/remote-agent-status.spec.ts` — **but against a fixture copy, not the real class.**
+  Pinned by `tests/dom/remote-agent-status.dom.test.ts` — **but against a fixture copy, not the real class.**
 - **Heartbeat self-heal within 15s; `status_resync` heals stuck-streaming.** Pinned by
-  `tests/e2e/ui/session-status-recovery.spec.ts`.
+  `tests/browser/journeys/ui/session-status-recovery.journey.spec.ts`.
 - **Aborting status broadcast; steered/queued messages survive abort.** Pinned by
-  `tests/e2e/abort-status-e2e.spec.ts`. **Gap:** no detection/test for **server-side** wedged-streaming
+  `tests/integration/gateway/abort-status-e2e.gateway.test.ts`. **Gap:** no detection/test for **server-side** wedged-streaming
   with a dead bridge (S8).
 - **Back-pressure: a single transient `bufferedAmount` spike never terminates; only a persistent one
-  does.** `session-manager.ts`. Pinned by `tests/ws-overflow-guard.test.ts`. **Gap:** the
+  does.** `session-manager.ts`. Pinned by `tests/unit/core/ws-overflow-guard.unit.test.ts`. **Gap:** the
   handler-local `broadcast()` (S36) is unguarded and untested for this.
 - **Pending RPC requests reject exactly once on child exit; idempotent `stop()`.** Pinned by
-  `tests/rpc-bridge-lifecycle.test.ts`.
+  `tests/unit/core/rpc-bridge-lifecycle.unit.test.ts`.
 - **Backoff finite/non-negative/capped; provider-overload unbounded, others bounded 3×; dispatch
-  failure re-enqueues at front.** Pinned by `tests/backoff-delay.test.ts`,
-  `tests/auto-retry-policy.test.ts`, `tests/queue-dispatch.spec.ts`. **Gap:** no behavioural test that
+  failure re-enqueues at front.** Pinned by `tests/unit/core/backoff-delay.unit.test.ts`,
+  `tests/unit/core/auto-retry-policy.unit.test.ts`, `tests/dom/queue-dispatch.dom.test.ts`. **Gap:** no behavioural test that
   the auto-retry timer fires/cancels under the `status!=='idle'` guard (S40).
 - **`spliceInFlightMessage`/`spliceInFlightSteers` reference-stable no-ops; recognise
-  `user-with-attachments`.** Pinned by `tests/session-manager-getmessages-splice.test.ts`.
-- **Composer caps ≤10 files / ≤20 MB.** Pinned by `tests/message-editor-attach.spec.ts`.
+  `user-with-attachments`.** Pinned by `tests/unit/core/session-manager-getmessages-splice.unit.test.ts`.
+- **Composer caps ≤10 files / ≤20 MB.** Pinned by `tests/browser/fixtures/message-editor-attach.fixture.spec.ts`.
 - **Title generation single-shot per session.** `session-manager.ts` (convention; no
   dedicated concurrency test cited).
 

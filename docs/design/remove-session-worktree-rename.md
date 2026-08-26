@@ -271,12 +271,12 @@ deferred-rename plumbing entirely.
 
 | Test file | Change |
 |---|---|
-| `tests/worktree-pool.test.ts` lines ~67–95 ("happy path: claim renames branch and moves directory") | Keep — already exercises the synchronous claim path. Update assertion at line ~89 to reflect that `path.basename(claim!.worktreePath)` is now `session-<id8>` not `session-test-12345678` (since the slug is gone). |
-| `tests/worktree-pool.test.ts` lines ~96–124 ("degraded fallback") | **Delete.** Degraded mode no longer exists; failure paths fall back to `createWorktree`. Replace with a test that asserts a directory-rename failure causes `claim()` to return `null` (caller fallback). |
-| `tests/worktree-pool.test.ts` lines ~125–144 ("claimUnnamed returns entry without renaming and yields a poolId") | **Delete** — `claimUnnamed` is gone. |
-| `tests/worktree-pool-multi.test.ts` ("claimUnnamed should expose multi-repo worktrees", lines ~110–129) | **Delete** for the same reason. Add a multi-repo `claim()` test asserting per-repo branches all end on `session/<id8>` after a single claim call. |
-| `tests/e2e/pool-flow.spec.ts` | Update the persistence-check loop (lines ~64–95) to expect `session/<id8>` immediately after session creation, not after first prompt. The current "branch starts with `pool/_pool-`" assertion describes the deferred-rename behaviour — invert it. |
-| `tests/manual-integration/restart-minimal.spec.ts:199` | Comment/assertion describes `setTitle` triggering rename. Remove the rename expectation; assert title-set is metadata-only and branch is unchanged. |
+| `tests/e2e/node/worktree-pool.node-e2e.test.ts` lines ~67–95 ("happy path: claim renames branch and moves directory") | Keep — already exercises the synchronous claim path. Update assertion at line ~89 to reflect that `path.basename(claim!.worktreePath)` is now `session-<id8>` not `session-test-12345678` (since the slug is gone). |
+| `tests/e2e/node/worktree-pool.node-e2e.test.ts` lines ~96–124 ("degraded fallback") | **Delete.** Degraded mode no longer exists; failure paths fall back to `createWorktree`. Replace with a test that asserts a directory-rename failure causes `claim()` to return `null` (caller fallback). |
+| `tests/e2e/node/worktree-pool.node-e2e.test.ts` lines ~125–144 ("claimUnnamed returns entry without renaming and yields a poolId") | **Delete** — `claimUnnamed` is gone. |
+| `tests/e2e/node/worktree-pool-multi.node-e2e.test.ts` ("claimUnnamed should expose multi-repo worktrees", lines ~110–129) | **Delete** for the same reason. Add a multi-repo `claim()` test asserting per-repo branches all end on `session/<id8>` after a single claim call. |
+| `tests/e2e/api/pool-flow.api-e2e.spec.ts` | Update the persistence-check loop (lines ~64–95) to expect `session/<id8>` immediately after session creation, not after first prompt. The current "branch starts with `pool/_pool-`" assertion describes the deferred-rename behaviour — invert it. |
+| `tests/manual/restart-minimal.manual.spec.ts:199` | Comment/assertion describes `setTitle` triggering rename. Remove the rename expectation; assert title-set is metadata-only and branch is unchanged. |
 
 ### 5.2 New regression tests
 
@@ -286,11 +286,11 @@ deferred-rename plumbing entirely.
    --list` still shows exactly `session/abcd1234`. (Best done in the
    API E2E layer where `setTitle` is reachable.)
 2. **Multi-repo claim consistency**
-   (`tests/worktree-pool-multi.test.ts`): after `pool.claim("session/abcd1234")`,
+   (`tests/e2e/node/worktree-pool-multi.node-e2e.test.ts`): after `pool.claim("session/abcd1234")`,
    every repo's worktree is on `session/abcd1234` and located under
    `<wtRoot>/session-abcd1234/<repo>/`.
 3. **Restart resume on a pool-claimed session**
-   (`tests/manual-integration/restart-minimal.spec.ts` or analogous):
+   (`tests/manual/restart-minimal.manual.spec.ts` or analogous):
    create session → restart server before first prompt → resume →
    assert no rename code path runs (instrument via log probe or branch
    inspection). Branch should already be `session/<id8>`.
@@ -398,9 +398,9 @@ Test impact (additions to §5.1):
 
 | Test | Change |
 |---|---|
-| `tests/e2e/sandbox-branch-reconcile.spec.ts:63` | Update regex `/^session\/new-session-[a-f0-9]{8}$/` → `/^session\/[a-f0-9]{8}$/`. |
-| `tests/e2e/sandbox-branch-reconcile.spec.ts:152` | Same regex update. |
-| `tests/sandbox-branch-reconcile.test.ts:61,93,98,108,113,123,128` | Replace literal `session/new-session-620e30c0` with `session/620e30c0` (or whatever 8-hex prefix the fixture uses post-update). |
+| `tests/integration/gateway/sandbox-branch-reconcile.gateway.test.ts:63` | Update regex `/^session\/new-session-[a-f0-9]{8}$/` → `/^session\/[a-f0-9]{8}$/`. |
+| `tests/integration/gateway/sandbox-branch-reconcile.gateway.test.ts:152` | Same regex update. |
+| `tests/unit/core/sandbox-branch-reconcile.unit.test.ts:61,93,98,108,113,123,128` | Replace literal `session/new-session-620e30c0` with `session/620e30c0` (or whatever 8-hex prefix the fixture uses post-update). |
 
 Acceptance criteria addition (§9):
 
@@ -507,7 +507,7 @@ disk, the fewer migration paths.
 
 ## 16. E2E test plan
 
-### 16.1 Updates to `tests/e2e/pool-flow.spec.ts:64-95`
+### 16.1 Updates to `tests/e2e/api/pool-flow.api-e2e.spec.ts:64-95`
 
 Replace the current "warm to `pool/_pool-*` then session creation
 claims one" assertion sequence with a stepwise lifecycle assertion:
@@ -551,7 +551,7 @@ claims one" assertion sequence with a stepwise lifecycle assertion:
 
 ### 16.2 New restart-resume E2E
 
-**File:** `tests/e2e/pool-claim-restart-resume.spec.ts` (new spec, sits
+**File:** `tests/e2e/api/pool-claim-restart-resume.api-e2e.spec.ts` (new spec, sits
 alongside `pool-flow.spec.ts`).
 
 **Scenario.** Pool warms; create a session (claims a pool entry on
@@ -569,7 +569,7 @@ just assert `existsSync` plus contents-unchanged).
 
 ### 16.3 Multi-repo lifecycle E2E
 
-**Extend `tests/e2e/multi-repo-pool.spec.ts`** with a new test case:
+**Extend `tests/e2e/api/multi-repo-pool.api-e2e.spec.ts`** with a new test case:
 `"multi-repo session lifecycle: branch + dir stable across creation, prompt, restart, archive"`.
 
 Scenario:
@@ -585,7 +585,7 @@ Scenario:
 7. Archive; assert all per-repo branches deleted from each repo's
    local refs (and remote, gated by `BOBBIT_TEST_NO_PUSH`).
 
-The existing single-claim test in `tests/worktree-pool-multi.test.ts`
+The existing single-claim test in `tests/e2e/node/worktree-pool-multi.node-e2e.test.ts`
 (unit-level) covers claim mechanics; this E2E layer covers the full
 lifecycle through real REST + WS + restart.
 

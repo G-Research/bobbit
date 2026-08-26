@@ -1,5 +1,7 @@
 # Compaction E2E + Rich Summary — Design Doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Goal: `Compaction E2E + Rich Summary` (id `goal-compaction-20bc17a9`).
 
 Three deliverables: (1) a real‑LLM Playwright e2e, (2) a manual‑integration
@@ -173,7 +175,7 @@ if (m._origin === "synthetic") {
 ```
 
 This is what test case (12) and "snapshot drops trailing synthetic compaction
-marker" (`tests/message-reducer.test.ts:249–292, 297–323`) pin. The invariant
+marker" (`tests/unit/core/message-reducer.unit.test.ts:249–292, 297–323`) pin. The invariant
 is: when a fresh snapshot from the server contains a row whose text starts
 with `"Context compacted"`, any client‑side synthetic compaction marker is
 dropped to avoid the visible double. Without this, the user briefly sees two
@@ -182,7 +184,7 @@ identical compaction lines.
 Documented in `docs/internals.md:2406` and
 `docs/design/unified-message-ordering-reducer.md:183, 400`.
 
-### 1.5 Unit coverage — `tests/message-reducer.test.ts`
+### 1.5 Unit coverage — `tests/unit/core/message-reducer.unit.test.ts`
 
 - Case (12) "compaction placeholder + server marker — server wins, no double"
   (lines 249–278). Sequence:
@@ -195,7 +197,7 @@ Documented in `docs/internals.md:2406` and
 
 ### 1.6 Sidebar / status‑indicator unit coverage
 
-`tests/sidebar-session-rendering.spec.ts:197–203` pins the
+`tests/dom/sidebar-session-rendering.dom.test.ts:197–203` pins the
 `getSessionIndicatorType({ status: "idle", isCompacting: true })` → `"compacting"`
 mapping. Touched only if we relabel the indicator (we are not).
 
@@ -235,7 +237,7 @@ then calls `(session as any).compact()` which RPC‑calls the server's
 
 ### 1.9 Manual‑integration scaffolding
 
-Existing pattern: `tests/manual-integration/restart-minimal.spec.ts:1–60` is
+Existing pattern: `tests/manual/restart-minimal.manual.spec.ts:1–60` is
 the smallest viable scaffold — spawns a gateway with a temp BOBBIT_DIR via
 `spawn(node, [SERVER_CLI, …])`, waits for the token file, then drives the
 gateway via REST + a Playwright browser. `session-resilience.spec.ts:1–80`
@@ -244,7 +246,7 @@ will follow the minimal pattern.
 
 ### 1.10 Tool description budget
 
-`tests/tool-description-budget.test.ts:1–40` budgets every registered tool
+`tests/unit/core/tool-description-budget.unit.test.ts:1–40` budgets every registered tool
 description. The new rich‑summary "tool" is a **UI‑only synthetic** — it is
 not registered with the LLM via `defaults/tools/*/extension.ts` and therefore
 **does not affect the budget**. (We will explicitly assert this in the doc so
@@ -410,7 +412,7 @@ if (m._origin === "synthetic") {
 ```
 
 Result: cases (12) and "snapshot drops trailing synthetic compaction marker"
-in `tests/message-reducer.test.ts:249–292, 297–323` continue to pass
+in `tests/unit/core/message-reducer.unit.test.ts:249–292, 297–323` continue to pass
 **unchanged**, because the text‑form they construct still matches
 `isSyntheticCompactionMarker` via the legacy branch.
 
@@ -563,7 +565,7 @@ other tool render.
 
 `__compaction_summary` is never registered via
 `defaults/tools/*/extension.ts`, never reaches the LLM, never shows up in any
-role's tool list. `tests/tool-description-budget.test.ts:1–40` walks
+role's tool list. `tests/unit/core/tool-description-budget.unit.test.ts:1–40` walks
 extensions, not renderers — so no budget pin change. We add a one‑line
 comment to `tools/index.ts` near the registration explaining this so the
 reviewer doesn't ask.
@@ -581,7 +583,7 @@ reviewer doesn't ask.
 > mid-run, so it could not authenticate reliably. The manual `/compact`
 > lifecycle is now covered deterministically (mock agent, no LLM) by the
 > `@live-compaction-affordance` "manual /compact" test in
-> `tests/e2e/ui/pre-compaction-history.spec.ts`. The section below is retained
+> `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`. The section below is retained
 > for historical design rationale.
 
 Claims the `compaction.spec.ts` slot in
@@ -685,11 +687,11 @@ Flake avoidance:
 > could not authenticate reliably. The auto/threshold compaction lifecycle it
 > covered is now asserted deterministically (mock agent, no LLM) by the
 > `@live-compaction-affordance` test in
-> `tests/e2e/ui/pre-compaction-history.spec.ts`, which checks the summary card
+> `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`, which checks the summary card
 > resolves to `data-state="complete"` / `data-verdict="ok"`. The section below
 > is retained for historical design rationale.
 
-Follow `tests/manual-integration/restart-minimal.spec.ts:1–60` for the
+Follow `tests/manual/restart-minimal.manual.spec.ts:1–60` for the
 gateway scaffold:
 
 1. `mkdirSync` a fresh temp BOBBIT_DIR, spawn `dist/server/cli.js` on a free
@@ -717,7 +719,7 @@ Sandbox: no Docker requirement — this test exercises the agent process, not
 the sandbox. The existing `playwright-manual.config.ts` worker spawns the
 gateway directly. Wall time target ≤ 5 min.
 
-### 3.3 Unit tests — `tests/message-reducer.test.ts`
+### 3.3 Unit tests — `tests/unit/core/message-reducer.unit.test.ts`
 
 Edits required:
 
@@ -789,7 +791,7 @@ Edits required:
 
 ### 3.4 Description‑budget test
 
-`tests/tool-description-budget.test.ts` — **no change**. Confirmed in §2.7.
+`tests/unit/core/tool-description-budget.unit.test.ts` — **no change**. Confirmed in §2.7.
 
 ---
 
@@ -835,7 +837,7 @@ Edits required:
 5. **Renderer registry collision with future real tool named
    `__compaction_summary`.** Trivially avoided by the underscore prefix —
    real tools never start with `__`. Add an assertion in
-   `tests/tool-description-budget.test.ts` that no registered tool name
+   `tests/unit/core/tool-description-budget.unit.test.ts` that no registered tool name
    starts with `__`? Out of scope; flag for follow‑up.
 
 6. **Dangling `tests/playwright-e2e.config.ts` entries other than
@@ -858,7 +860,7 @@ Edits required:
 | `src/app/message-reducer.ts` (50–53, 257–261, 346–354, 454–467) | Extend action type with `toolResult?`; extend dedup with `isSyntheticCompactionMarker`; add reload‑path upgrade. |
 | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` | **New** renderer. |
 | `src/ui/tools/index.ts` (~47) | Register `__compaction_summary`. |
-| `tests/message-reducer.test.ts` (after case 12) | Add cases (12b), (12c). |
+| `tests/unit/core/message-reducer.unit.test.ts` (after case 12) | Add cases (12b), (12c). |
 
 No changes required in `src/server/` or `defaults/tools/`. No description
 budget impact. No new MCP / agent‑facing tool.
@@ -948,14 +950,14 @@ same `__compaction_summary` synthetic tool as completion.
 
 **Pinning tests** for this invariant:
 
-- `tests/message-reducer.test.ts` case (12d) — in‑progress synthetic
+- `tests/unit/core/message-reducer.unit.test.ts` case (12d) — in‑progress synthetic
   transitions in place on result; asserts exactly one row with id
   `compact_active` survives across the two‑step sequence.
-- `tests/message-reducer.test.ts` case (12) — rich in‑progress placeholder
+- `tests/unit/core/message-reducer.unit.test.ts` case (12) — rich in‑progress placeholder
   carries no plaintext (no `"Compacting context…"` string anywhere).
-- `tests/message-reducer.test.ts` case (12e) — overflow trigger survives
+- `tests/unit/core/message-reducer.unit.test.ts` case (12e) — overflow trigger survives
   the reducer round‑trip with `tokensBefore` parsed from the error.
-- Browser E2E `tests/e2e/ui/compaction-widget.spec.ts` drives the renderer
+- Browser E2E `tests/dom/ui-fixtures/compaction-widget.dom.test.ts` drives the renderer
   through `in-progress → complete` and `in-progress → error (overflow)`,
   asserting single‑card DOM identity, absence of the plaintext string in
   the transcript at any point, and that the trigger pill text matches the
@@ -985,8 +987,8 @@ is why overflow was misclassified as `manual`.
 | `src/app/message-reducer.ts` | `compaction-result` filters by stable id; in‑progress fold path. |
 | `src/ui/tools/renderers/CompactionSummaryRenderer.ts` | Three‑state branch (in‑progress / complete / error); tightened label+value layout; `overflow` pill styling via `--warning`. |
 | `src/server/ws/handler.ts` | `reason: "manual"` on `compaction_start` / `compaction_end` broadcasts. |
-| `tests/message-reducer.test.ts` | New cases (12), (12d), (12e); existing (12b), (12c) retained. |
-| `tests/e2e/ui/compaction-widget.spec.ts` | **New** — `file://` fixture driving both lifecycle paths. |
+| `tests/unit/core/message-reducer.unit.test.ts` | New cases (12), (12d), (12e); existing (12b), (12c) retained. |
+| `tests/dom/ui-fixtures/compaction-widget.dom.test.ts` | **New** — `file://` fixture driving both lifecycle paths. |
 
 No description‑budget impact (the renderer remains UI‑only synthetic
 per §2.7). No reducer action shape changes beyond the existing

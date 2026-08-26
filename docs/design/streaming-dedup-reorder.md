@@ -1,5 +1,7 @@
 # Streaming Dedup/Reorder Fix — Design Doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Goal**: Fix live-streaming message duplication and reordering.
 **Scope**: Live streaming only (not reload-replay). Agent execution is correct; this is a transport/rendering bug.
 
@@ -17,7 +19,7 @@ User-facing symptom: during live streaming, chat responses and tool results occa
 
 ### 1.1 Reconnect mid-stream (highest signal)
 
-The RE-07 harness (`tests/e2e/ui/stories-resilience.spec.ts:218`) covers reconnect *after* a full turn, but the bug surfaces when the socket drops **during** a turn. Flow:
+The RE-07 harness (`tests/browser/journeys/ui/stories-resilience.journey.spec.ts:218`) covers reconnect *after* a full turn, but the bug surfaces when the socket drops **during** a turn. Flow:
 
 1. Client connects, agent is streaming, `message_update` events arrive.
 2. Socket drops (wifi blip, dev-server restart, tab resume from sleep).
@@ -289,7 +291,7 @@ Wherever the client currently dedupes by text or by `message.id`, add `seq` as t
 
 ### 4.7 Tests
 
-#### Unit — `tests/event-buffer.spec.ts` (new)
+#### Unit — `tests/unit/core/event-buffer.unit.test.ts` (new)
 
 - `push()` assigns monotonic seq starting at 1.
 - `push()` eviction: after 1001 pushes, `buffer[0].seq === 2`.
@@ -297,7 +299,7 @@ Wherever the client currently dedupes by text or by `message.id`, add `seq` as t
 - `canResumeFrom(N)` is false when N is older than the retained window.
 - `lastSeq` reports the highest assigned seq.
 
-#### Unit — `tests/remote-agent-seq-dedup.spec.ts` (new, Playwright file:// fixture)
+#### DOM — `tests/dom/remote-agent-seq-dedup.dom.test.ts` (new, happy-dom)
 
 Drive `RemoteAgent` via synthetic WS messages:
 1. Emit `{type:"event", data:{type:"message_end", message:{...id:"m1"}}, seq:1, ts:100}`.
@@ -305,7 +307,7 @@ Drive `RemoteAgent` via synthetic WS messages:
 3. Emit `seq:3` before `seq:2` → assert neither fires yet.
 4. Emit `seq:2` → assert both 2 and 3 dispatch in order.
 
-#### E2E — `tests/e2e/ui/stories-streaming.spec.ts` (extend or new CT-01 story)
+#### E2E — `tests/browser/journeys/ui/stories-streaming.journey.spec.ts` (extend or new CT-01 story)
 
 **Reproducing test — must fail on master, pass after fix:**
 
@@ -324,7 +326,7 @@ The test uses the existing spawned-gateway harness (`tests/e2e/ui/gateway-harnes
 
 #### RE-07 regression guard
 
-`tests/e2e/ui/stories-resilience.spec.ts:218` already covers reconnect-after-finish; no changes needed. Re-run as part of the PR. The new `resume` path is exercised on every reconnect; if `_highestSeq === 0` it no-ops server-side.
+`tests/browser/journeys/ui/stories-resilience.journey.spec.ts:218` already covers reconnect-after-finish; no changes needed. Re-run as part of the PR. The new `resume` path is exercised on every reconnect; if `_highestSeq === 0` it no-ops server-side.
 
 ### 4.8 Rollout / compat
 
@@ -389,6 +391,6 @@ The guard now defers the terminate decision once. Decision logic lives in `src/s
 - **Deferred re-check, still > 4 MiB:** returns `terminate`. The spike is genuine and the client gets force-closed (same as before, just delayed by 10 ms).
 - **Deferred re-check, drained back below 4 MiB:** returns `send`. No terminate — the spike was transient.
 
-The per-client "deferred check pending" flag is a `WeakSet` so subsequent broadcasts during the 10 ms window don't pile up duplicate timers; only the original observer schedules the re-check. Unit tests for the policy live in `tests/ws-overflow-guard.test.ts`.
+The per-client "deferred check pending" flag is a `WeakSet` so subsequent broadcasts during the 10 ms window don't pile up duplicate timers; only the original observer schedules the re-check. Unit tests for the policy live in `tests/unit/core/ws-overflow-guard.unit.test.ts`.
 
 This change is conservative: every persistent overflow still terminates (within ~10 ms of the original detection), so DoS protection and reconnect-resume semantics are preserved. The only behavioural change is that healthy clients with brief kernel-buffer spikes no longer get killed.

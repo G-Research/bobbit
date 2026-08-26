@@ -6,7 +6,7 @@ Task: read-only investigation of high-frequency REST polling and git/status endp
 
 - Client: `src/app/api.ts`, `src/app/goal-dashboard.ts`, `src/app/git-status-refresh.ts`, plus session git-status wiring in `src/app/session-manager.ts` where needed to understand cadence.
 - Server: relevant endpoints and caches in `src/server/server.ts`.
-- Tests/docs: `tests/e2e/git-status-caching.spec.ts`, `tests/git-status-retry.test.ts`, `tests/session-manager-git-dropdown-listener.test.ts`, `tests/goal-dashboard-setup-poll-repro.spec.ts`, `docs/internals.md`, `docs/debugging.md`, `docs/design/git-status-widget-reliability.md`.
+- Tests/docs: `tests/integration/gateway/git-status-caching.gateway.test.ts`, `tests/unit/core/git-status-retry.unit.test.ts`, `tests/unit/core/session-manager-git-dropdown-listener.unit.test.ts`, `tests/dom/goal-dashboard-setup-poll-repro.dom.test.ts`, `docs/internals.md`, `docs/debugging.md`, `docs/design/git-status-widget-reliability.md`.
 
 ## Call cadence
 

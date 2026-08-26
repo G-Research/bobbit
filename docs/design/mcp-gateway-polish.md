@@ -1,5 +1,7 @@
 # MCP Gateway Polish
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: implemented design record
 Scope: Marketplace MCP gateway source identity, all-source Browse, installed gateway package operation selection, MCP Tools policy hierarchy, and runtime union/conflict behavior.
 
@@ -662,16 +664,16 @@ Backwards compatibility is not required for previous experimental MCP gateway so
 
 Add/update:
 
-- `tests/marketplace-install.test.ts`
+- `tests/e2e/vitest/marketplace-install.vitest-e2e.test.ts`
   - gateway source display name normalization strips protocol/query/hash/trailing slash;
   - duplicate readable names receive persisted deterministic suffixes;
   - exact duplicate URLs are rejected;
   - source-qualified gateway pack names allow same provider id from two gateway sources.
-- `tests/marketplace-mcp-gateway.test.ts`
+- `tests/unit/core/marketplace-mcp-gateway.unit.test.ts`
   - fixed gateway response parsing remains unchanged;
   - operation metadata is parsed and materialized;
   - virtual browse rows include operations and source-safe pack names.
-- `tests/marketplace-mcp-contributions.test.ts`
+- `tests/unit/core/marketplace-mcp-contributions.unit.test.ts`
   - optional `operations` parsing;
   - malformed operation metadata is dropped without hiding the MCP contribution.
 - `tests/marketplace-browse-union.test.ts` (new or existing marketplace test)
@@ -680,12 +682,12 @@ Add/update:
   - every row has source metadata and stable browse key.
 - `tests/project-config-store.test.ts` or existing config tests
   - `pack_activation.*.*.mcpOperations` native YAML round-trips and normalizes.
-- `tests/mcp-manager-marketplace-discovery.test.ts`
+- `tests/unit/core/mcp-manager-marketplace-discovery.unit.test.ts`
   - two gateway sources with different runtime configs expose union of distinct public operation names;
   - identical public operation name collision resolves by pack order/precedence;
   - manual JSON MCP overrides Marketplace collision;
   - disabled operation is omitted from `getToolInfos()` and rejected by `callTool()`.
-- `tests/mcp-meta-policy.test.ts` / `tests/grant-policy.test.ts`
+- `tests/unit/core/mcp-meta-policy.unit.test.ts` / `tests/unit/core/grant-policy.unit.test.ts`
   - group-policy store operation key beats package/server keys;
   - package key beats server key;
   - `mcpPolicyPrefix()` still returns server prefix for old callers.

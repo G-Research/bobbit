@@ -1,5 +1,7 @@
 # Design — Editable Proposals
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: design-doc gate
 Goal: `Editable Proposals`
 Branch: `goal/goal-editable-p-1ee1e84f`
@@ -38,9 +40,9 @@ plumbing around them.
 | `src/app/proposal-helpers.ts` | Unified `loadProposalDraft` / `deleteProposalDraft` / `markProposalDismissed` / `clearProposalDismissed`, generalised from the goal-proposal helpers. |
 | `defaults/tools/proposals/view_proposal.yaml` | Tool descriptor. |
 | `defaults/tools/proposals/edit_proposal.yaml` | Tool descriptor. |
-| `tests/proposal-files.test.ts` | Unit: read/write/edit/parse-error round-trip per type. |
-| `tests/e2e/proposal-edit-api.spec.ts` | API E2E: edit-before-propose, restart survival, malformed rollback. |
-| `tests/e2e/ui/proposal-edit-flow.spec.ts` | Browser E2E: project propose→edit→accept happy path. |
+| `tests/unit/core/proposal-files.unit.test.ts` | Unit: read/write/edit/parse-error round-trip per type. |
+| `tests/integration/gateway/proposal-edit-api.gateway.test.ts` | API E2E: edit-before-propose, restart survival, malformed rollback. |
+| `tests/browser/journeys/ui/proposal-edit-flow.journey.spec.ts` | Browser E2E: project propose→edit→accept happy path. |
 | `tests/e2e/ui/proposal-types-uX-parity.spec.ts` | Per-type UX-parity matrix: dismissal stickiness, "Open proposal", first-emit auto-select, restart survival. |
 
 ### Files to delete (Part 0 — total)
@@ -636,29 +638,29 @@ The verification harness for this matrix is the new
 
 | Test | File | Asserts |
 |---|---|---|
-| Project propose → edit → accept happy path | `tests/e2e/ui/proposal-edit-flow.spec.ts` | Mock agent calls `propose_project` then `edit_proposal type=project old=… new=…`; UI panel updates between the two calls; accept submits the edited config; `PUT /api/projects/:id/config` payload reflects the edit. |
-| Edit-before-propose returns clean error | `tests/e2e/proposal-edit-api.spec.ts` | `POST /api/sessions/:id/proposal/goal/edit` with no prior `propose_goal` returns `404 {code:"FILE_NOT_FOUND"}` with a message that names the right `propose_*` tool. |
-| Edit survives server restart | `tests/e2e/proposal-edit-api.spec.ts` | Seed file via `propose_*`; restart in-process gateway via harness; `GET /api/sessions/:id/proposal/<type>` returns the same body; on reattach, client receives `proposal_update { source: "rehydrate" }`. |
-| Malformed-edit rolls back the file write | `tests/e2e/proposal-edit-api.spec.ts` | Seed valid `project.yaml`; call edit_proposal with `new_text` that breaks YAML; assert response is `400 {code:"YAML_PARSE_ERROR"}`; assert the file on disk is byte-for-byte identical to pre-edit (compare SHA-256). Repeat for `MISSING_REQUIRED_FIELD` (delete the `name:` line) and `STRUCTURAL_VALIDATION_FAILED`. |
+| Project propose → edit → accept happy path | `tests/browser/journeys/ui/proposal-edit-flow.journey.spec.ts` | Mock agent calls `propose_project` then `edit_proposal type=project old=… new=…`; UI panel updates between the two calls; accept submits the edited config; `PUT /api/projects/:id/config` payload reflects the edit. |
+| Edit-before-propose returns clean error | `tests/integration/gateway/proposal-edit-api.gateway.test.ts` | `POST /api/sessions/:id/proposal/goal/edit` with no prior `propose_goal` returns `404 {code:"FILE_NOT_FOUND"}` with a message that names the right `propose_*` tool. |
+| Edit survives server restart | `tests/integration/gateway/proposal-edit-api.gateway.test.ts` | Seed file via `propose_*`; restart in-process gateway via harness; `GET /api/sessions/:id/proposal/<type>` returns the same body; on reattach, client receives `proposal_update { source: "rehydrate" }`. |
+| Malformed-edit rolls back the file write | `tests/integration/gateway/proposal-edit-api.gateway.test.ts` | Seed valid `project.yaml`; call edit_proposal with `new_text` that breaks YAML; assert response is `400 {code:"YAML_PARSE_ERROR"}`; assert the file on disk is byte-for-byte identical to pre-edit (compare SHA-256). Repeat for `MISSING_REQUIRED_FIELD` (delete the `name:` line) and `STRUCTURAL_VALIDATION_FAILED`. |
 | Per-type UX parity matrix | `tests/e2e/ui/proposal-types-uX-parity.spec.ts` | For each of the six types: dismissal sticks across reload; "Open proposal" reopens cleanly; first-emit auto-selects right tab; streaming partial does not clobber prior structured fields. |
-| `proposal-files.ts` unit | `tests/proposal-files.test.ts` | write/read/parse/edit/delete round-trip per type; atomic-write rollback on parse failure (forced via fault-injected parser); path-traversal rejection. |
+| `proposal-files.ts` unit | `tests/unit/core/proposal-files.unit.test.ts` | write/read/parse/edit/delete round-trip per type; atomic-write rollback on parse failure (forced via fault-injected parser); path-traversal rejection. |
 
 ### 9.2 Existing tests that MUST pass unchanged
 
-- `tests/goal-proposal-dismiss.spec.ts` — dismissal stickiness reference.
-- `tests/e2e/ui/project-assistant.spec.ts` — three-view panel, `[data-panel="project-proposal"]`.
-- `tests/e2e/ui/mid-session-project-proposal.spec.ts` — mid-session edits.
-- `tests/e2e/ui/proposal-panel-streaming.spec.ts` — streaming flag + scroll.
-- `tests/e2e/ui/proposal-panel-subsection-diff.spec.ts` — diff view.
-- `tests/e2e/ui/proposal-tools.spec.ts` — `propose_*` tool-card rendering.
-- `tests/project-proposal-views.spec.ts` — components/workflows/diff views.
+- `tests/dom/goal-proposal-dismiss.dom.test.ts` — dismissal stickiness reference.
+- `tests/browser/journeys/ui/project-assistant.journey.spec.ts` — three-view panel, `[data-panel="project-proposal"]`.
+- `tests/browser/journeys/ui/mid-session-project-proposal.journey.spec.ts` — mid-session edits.
+- `tests/browser/fixtures/proposal-panel-streaming.fixture.spec.ts` — streaming flag + scroll.
+- `tests/dom/proposal-panel-subsection-diff.dom.test.ts` — diff view.
+- `tests/browser/journeys/ui/proposal-tools.journey.spec.ts` — `propose_*` tool-card rendering.
+- `tests/dom/project-proposal-views.dom.test.ts` — components/workflows/diff views.
 
 ### 9.3 Tests to delete (Part 0)
 
 - `tests/setup-wizard-visibility.spec.ts`
 - `tests/setup-wizard-visibility.html`
 - `tests/e2e/setup-wizard-bugs.spec.ts`
-- `tests/e2e/setup-status.spec.ts` test cases #4 (assistantType:"setup")
+- `tests/integration/gateway/setup-status.gateway.test.ts` test cases #4 (assistantType:"setup")
   and #5 (session metadata) — keep #1–#3 (which test
   `/api/setup-status` GET/POST and the `setupComplete` health field; the
   sentinel mechanism stays for the "Setup Wizard" sidebar banner —
@@ -699,7 +701,7 @@ Remove specific lines/blocks:
 
 **Caveat — sentinel kept, banner gone:** the `setup-complete` sentinel file
 mechanism (lines 1202, 1453, 1492–1503 in `server.ts`) is left in place so
-existing test infra (`tests/e2e/setup-status.spec.ts` cases #1–#3 and the
+existing test infra (`tests/integration/gateway/setup-status.gateway.test.ts` cases #1–#3 and the
 in-process harness's setup) continues to work, but the sidebar Setup Wizard
 banner that used to launch the setup assistant is removed entirely. Cases
 #4 and #5 of `setup-status.spec.ts` (which test
@@ -731,8 +733,8 @@ to confirm no orphan refs.
 `src/server/proposals/proposal-types.ts` (new), `src/server/server.ts`
 (add 3 REST handlers + WS rehydrate hook), `src/server/ws/protocol.ts`
 (`proposal_update` / `proposal_cleared`), `src/server/ws/handler.ts`
-(rehydrate emit), `tests/proposal-files.test.ts` (new),
-`tests/e2e/proposal-edit-api.spec.ts` (new).
+(rehydrate emit), `tests/unit/core/proposal-files.unit.test.ts` (new),
+`tests/integration/gateway/proposal-edit-api.gateway.test.ts` (new).
 **Dependency:** none (touches no UI files).
 **Description:** Build the on-disk source-of-truth layer per §3, §4, §5, §6.4.
 Atomic write/rollback semantics. Path safety. Per-session directory cleanup
@@ -790,7 +792,7 @@ changes; verify all goal-proposal E2E tests pass unchanged.
 ### Slice F — UX parity tests (independent of code)
 
 **Files:** `tests/e2e/ui/proposal-types-uX-parity.spec.ts` (new),
-`tests/e2e/ui/proposal-edit-flow.spec.ts` (new).
+`tests/browser/journeys/ui/proposal-edit-flow.journey.spec.ts` (new).
 **Dependency:** none up-front (can be authored against the spec); CI run
 gated on Slice E completion.
 **Description:** Encode the §8 matrix as one parametrised E2E spec running

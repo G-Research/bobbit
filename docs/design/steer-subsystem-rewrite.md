@@ -1,5 +1,7 @@
 # Steer subsystem rewrite — single source of truth, exactly-once, durable
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > Historical design. Its text-ledger, batching, queue-removal, and Sent-pill descriptions predate stable occurrence identity and the delivery outbox. Use [Reliable prompt and steer delivery](../prompt-queue.md) for current behavior.
 
 Status: implemented (commits `f37aadd8`, `3d3d34cd`, `377f4bb7`, `6ed08fc9`). Reverted on `master` between `v0.8.0` and the freeze investigation, then restored on `goal/restore-st-ac566fee` once the actual freeze culprit was isolated to PR #514 (the WebSocket `emitSessionEvent` refactor — out of scope for this design and intentionally absent from `master`). The four implementation commits plus the three follow-ups (#477 abort-race, #478 listener-ordering, #480 `bash_bg wait` end-of-turn hint) are all back in place.
@@ -245,17 +247,17 @@ Current implementation uses `SessionInfo.inFlightSteerTexts: string[]` as a pers
 | `src/server/agent/session-manager.ts` | Replace `deliverLiveSteer` body, `steerQueued` body (streaming promotions dequeue the steered front group and immediately call `_dispatchSteer`; idle promotions drain normally), `_dispatchSteeredMessages` (delete), `handleAgentLifecycle` `message_end(user)` hook (delete `removeDispatched`), `agent_end` `wasAborting` block (replace `resetDispatched` with `_reconcileAfterAbort`), `forceAbort` reconciliation, and add `_dispatchSteer` / `_reconcileAfterAbort`. |
 | `src/ui/...` | If sent-indicator was keyed on `dispatched`, remove that DOM. (Audit at impl time — likely `QueuedMessageList.ts` or `Composer.ts`.) |
 | `tests/e2e/mock-agent-core.mjs` | Remove the `[STEER_RECEIVED] <text>` ACK string. Steer handler delivers text into transcript via `message_start(user)` + `message_end(user)` events with the steer text — same shape as production. |
-| `tests/e2e/queue-e2e.spec.ts` | Update assertions that read `.dispatched`. |
-| `tests/queue-dispatch.spec.ts` | Rewrite to assert on row-removal + SDK reconciliation, not on `dispatched` flag transitions. |
-| `tests/prompt-queue.spec.ts` | Drop `markDispatched`/`removeDispatched`/`resetDispatched` cases. Add `enqueueAtFront` cases. |
-| `tests/e2e/ui/bg-wait-steer-flow.spec.ts` | Assert on rendered `<user-message>` element, not on `[STEER_RECEIVED]`. |
-| `tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts` | Replace with §6.5 exactly-once test. |
-| `tests/e2e/ui/queue-ui.spec.ts` (PI-10, PI-10b) | Assert on `<user-message>` (and §6.4 sent-indicator-or-row-removed within 2 s). |
-| `tests/e2e/steer-midturn.spec.ts` | Assert on transcript, not ACK string. |
-| `tests/e2e/abort-status-e2e.spec.ts` (PI-25b) | Same. |
-| `tests/e2e/steer-reconnect.spec.ts` *(new)* | Audit §6.1 — STAY_BUSY, `steer_queued`, close, reopen, drive idle, count `<user-message>` === 1. |
-| `tests/e2e/steer-gateway-restart.spec.ts` *(new, may end up in `tests/manual-integration/` if harness restart isn't supported in-process)* | Audit §6.2. |
-| `tests/e2e/steer-multitab.spec.ts` *(new)* | Audit §6.3. |
+| `tests/integration/gateway/queue-e2e.gateway.test.ts` | Update assertions that read `.dispatched`. |
+| `tests/dom/queue-dispatch.dom.test.ts` | Rewrite to assert on row-removal + SDK reconciliation, not on `dispatched` flag transitions. |
+| `tests/dom/prompt-queue.dom.test.ts` | Drop `markDispatched`/`removeDispatched`/`resetDispatched` cases. Add `enqueueAtFront` cases. |
+| `tests/browser/journeys/ui/bg-wait-steer-flow.journey.spec.ts` | Assert on rendered `<user-message>` element, not on `[STEER_RECEIVED]`. |
+| `tests/browser/journeys/ui/bg-wait-steer-stop-flow.journey.spec.ts` | Replace with §6.5 exactly-once test. |
+| `tests/browser/journeys/ui/queue-ui.journey.spec.ts` (PI-10, PI-10b) | Assert on `<user-message>` (and §6.4 sent-indicator-or-row-removed within 2 s). |
+| `tests/integration/gateway/steer-midturn.gateway.test.ts` | Assert on transcript, not ACK string. |
+| `tests/integration/gateway/abort-status-e2e.gateway.test.ts` (PI-25b) | Same. |
+| `tests/integration/gateway/steer-reconnect.gateway.test.ts` *(new)* | Audit §6.1 — STAY_BUSY, `steer_queued`, close, reopen, drive idle, count `<user-message>` === 1. |
+| `tests/integration/gateway/steer-gateway-restart.gateway.test.ts` *(new, may end up in `tests/manual-integration/` if harness restart isn't supported in-process)* | Audit §6.2. |
+| `tests/integration/gateway/steer-multitab.gateway.test.ts` *(new)* | Audit §6.3. |
 
 ## 5. Acceptance test mapping
 
@@ -322,7 +324,7 @@ Landed as the four-commit stack on `goal/steer-subs-bd19361f`:
 - **`SessionManager`** (`src/server/agent/session-manager.ts`): single dispatch site `_dispatchSteer()` records the joined batch in `inFlightSteerTexts`, removes rows from `promptQueue`, persists queue+ledger together, then awaits `rpcClient.steer()`. `deliverLiveSteer`, streaming `steerQueued` promotions, and defensive `tool_execution_end` / `agent_end` boundary flushes all funnel through it. While streaming, `steerQueued` dequeues the steered front group and immediately calls `_dispatchSteer()`; idle promotions drain normally. `bgProcessManager.abortAllWaits()` for steer delivery is owned by `_dispatchSteer()`, so wait abort/recovery is shared by fresh live steers and queued promotions.
 - **Shadow ledger** (`SessionInfo.inFlightSteerTexts: string[]`): chosen because the SDK queue-drain surface is not available through Bobbit's RPC bridge and the agent-side dispatch table lives inside `node_modules/@earendil-works/pi-coding-agent`. `_dispatchSteer()` records the batch before row removal and persists `inFlightSteerTexts` with the queue update; `_consumeSteerEcho()` splices on matching `message_end(role:user)`; `_reconcileAfterAbort()` and restore drain un-echoed entries back to the front of `promptQueue` via `enqueueAtFront`. If a late steer RPC rejection arrives after reconciliation already drained the ledger entry, the catch path does not enqueue a duplicate.
 - **Reconciliation on abort**: `_reconcileAfterAbort()` runs in two places — `handleAgentLifecycle`'s `agent_end while wasAborting` branch (graceful) and `forceAbort` after `rpcClient.stop()` (force-kill). Either way Bobbit-owned un-echoed ledger entries are pulled back into the queue and redispatched exactly once after the agent is ready.
-- **Tests**: five P0 specs in place — `tests/e2e/ui/bg-wait-steer-stop-flow.spec.ts` (§1 exactly-once), `tests/e2e/steer-reconnect.spec.ts` (§2 WS reconnect), `tests/e2e/steer-gateway-restart.spec.ts` (§3 gateway restart), `tests/e2e/steer-multitab.spec.ts` (§4 multi-tab convergence), `tests/e2e/ui/queue-ui.spec.ts` PI-10 (§5 sent-indicator removal). Plus `tests/queue-dispatch.spec.ts` and `tests/prompt-queue.spec.ts` rewritten to assert on row-removal + `enqueueAtFront` rather than on the deleted `dispatched` flag.
+- **Tests**: five P0 specs in place — `tests/browser/journeys/ui/bg-wait-steer-stop-flow.journey.spec.ts` (§1 exactly-once), `tests/integration/gateway/steer-reconnect.gateway.test.ts` (§2 WS reconnect), `tests/integration/gateway/steer-gateway-restart.gateway.test.ts` (§3 gateway restart), `tests/integration/gateway/steer-multitab.gateway.test.ts` (§4 multi-tab convergence), `tests/browser/journeys/ui/queue-ui.journey.spec.ts` PI-10 (§5 sent-indicator removal). Plus `tests/dom/queue-dispatch.dom.test.ts` and `tests/dom/prompt-queue.dom.test.ts` rewritten to assert on row-removal + `enqueueAtFront` rather than on the deleted `dispatched` flag.
 - **Mock cleanup**: `tests/e2e/mock-agent-core.mjs` no longer emits `[STEER_RECEIVED] <text>`. Browser tests scrape `<user-message>` elements; API tests read `agent_session.messages`. `grep -r STEER_RECEIVED tests/` returns 0 matches.
 
 ### Verification greps

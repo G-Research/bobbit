@@ -1,5 +1,7 @@
 # Design: Fix orphaned remote branch cleanup
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Goal:** stop Bobbit from leaking remote branches on goal-archive and session-archive.
 **Status:** design.
 **Scope:** code fixes for two real bugs + verification of the staff path. The
@@ -293,7 +295,7 @@ or was a one-off — out of scope.
 
 ### Bug 2 — unit test (focused, no full E2E harness)
 
-`tests/orphan-branch-eager-delete.test.ts` (Node test runner; no Playwright
+`tests/unit/core/orphan-branch-eager-delete.unit.test.ts` (Node test runner; no Playwright
 needed — pure logic test).
 
 Strategy: test the new `maybeEagerDeleteRemoteSessionBranch` logic in
@@ -409,7 +411,7 @@ race-y polling of `git ls-remote`.
 
 ### Bug 1 — E2E test against a local bare-repo origin
 
-`tests/e2e/goal-archive-branch-cleanup.spec.ts` — must spin up a real remote
+`tests/e2e/api/goal-archive-branch-cleanup.api-e2e.spec.ts` — must spin up a real remote
 because the bug is in **call-site composition** (data flow), not in a single
 function we can unit-test.
 
@@ -546,8 +548,8 @@ and request body shape; signatures live in `server.ts` near the other
 | `src/server/server.ts` | Bug 1: snapshot agent branches before teardown; change `deleteRemoteGoalBranches` signature to take `readonly string[]`. |
 | `src/server/agent/session-manager.ts` | Bug 2: add fire-and-forget eager remote-delete hook in `terminateSession`. |
 | `src/server/agent/session-eager-branch-delete.ts` (new, small) | Bug 2: extracted pure helper for unit testing. |
-| `tests/orphan-branch-eager-delete.test.ts` (new) | Bug 2 unit tests. |
-| `tests/e2e/goal-archive-branch-cleanup.spec.ts` (new) | Bug 1 E2E. |
+| `tests/unit/core/orphan-branch-eager-delete.unit.test.ts` (new) | Bug 2 unit tests. |
+| `tests/e2e/api/goal-archive-branch-cleanup.api-e2e.spec.ts` (new) | Bug 1 E2E. |
 | `tests/e2e/in-process-harness-realpush.ts` (new) | Test harness variant without `BOBBIT_TEST_NO_PUSH`. |
 | `tests/e2e/playwright-e2e.config.ts` | Register the new spec/project for isolation. |
 

@@ -1,5 +1,7 @@
 # Inline Comments on Proposals — Design
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 ## Summary
 
 Extend the existing review-pane inline-comment UX to the markdown body of
@@ -418,7 +420,7 @@ Also clear on `proposal_cleared` (already handled in the same
 
 ## 8. Test plan
 
-### Browser E2E — `tests/e2e/ui/proposal-inline-comments.spec.ts`
+### Browser E2E — `tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts`
 
 Pattern: import from `../gateway-harness.js`, follow the canonical
 `tests/e2e/ui/settings.spec.ts` shape. Use mock-agent fixture to inject a
@@ -487,7 +489,7 @@ test("annotations are ephemeral across reload", async ({ page, gateway }) => {
 });
 ```
 
-### Unit — `tests/proposal-annotations.test.ts`
+### Unit — `tests/unit/core/proposal-annotations.unit.test.ts`
 
 Node test runner, no DOM:
 
@@ -572,7 +574,7 @@ bucket. Consistent.
 The MVP shipped the *create / send / clear* path. A follow-up goal closed
 the edit/delete gaps so an annotation has a complete in-place lifecycle.
 All behaviour is exercised by
-[`tests/e2e/ui/proposal-inline-comments.spec.ts`](../../tests/e2e/ui/proposal-inline-comments.spec.ts)
+[`tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts`](../../tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts)
 (8 tests) — treat that spec as the executable contract; the prose below
 is orientation.
 
@@ -678,8 +680,8 @@ This replaces the previous "Submit" label, which collided with chat's
 
 - `src/ui/components/CommentableMarkdown.ts` — wrapper Lit element (~60 lines).
 - `src/ui/components/review/proposal-annotations.ts` — ephemeral store (~40 lines).
-- `tests/e2e/ui/proposal-inline-comments.spec.ts` — happy path + clearing.
-- `tests/proposal-annotations.test.ts` — keying + clearing unit tests.
+- `tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts` — happy path + clearing.
+- `tests/unit/core/proposal-annotations.unit.test.ts` — keying + clearing unit tests.
 
 **Touched files (minimal):**
 

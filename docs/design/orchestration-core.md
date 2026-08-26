@@ -1,5 +1,7 @@
 # Orchestration Core — Design Document
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 **Status:** Design record (HISTORICAL SNAPSHOT, pre-implementation). Three sequenced sub-goals: **A** (core + rename + restart), **B** (archive cascade + modal, deps A), **C** (`host.agents` + fixture, deps A). The feature has since shipped; for current behaviour see [orchestration.md](../orchestration.md).
 
 This document specifies the **HOW**. The product **WHAT** is locked in the goal spec and is not relitigated here. **All `file:line` references below are a point-in-time snapshot captured during design and are intentionally NOT maintained** — they will drift as the code evolves. Treat the cited **symbol/module names** as authoritative and `grep` for them; ignore the line numbers except as a historical record of where things stood at design time.
@@ -193,9 +195,9 @@ The core keeps `Map<ownerSessionId, ChildHandle[]>` **in memory only**. It is **
 **What we still do NOT do (the one nuance kept from the original decision).** We still do **not** splice a **synthetic `tool_result`** into the parent's transcript. A blocking `team_delegate`'s in-flight long-poll lived in the now-dead agent subprocess; on restart the parent is rebuilt from transcript with a `tool_use` and no matching `tool_result`, and we do not fabricate one. The difference from the original model is what happens **on the child side**: instead of the child staying a dormant husk, the child survives **live** and **re-runs** its durable task, and the parent re-collects explicitly via `team_wait` (resurfaced by the reminder). So "no synthetic tool_result splicing" survives; "delegates stay dormant / no re-run" was replaced.
 
 **Pinned by:**
-- `tests/e2e/orchestrate-restart.spec.ts` — a delegate child is restored **LIVE** with its task intact across a `restoreSessions` reboot (parent gets the reminder, `team_wait` re-collects a real result, no orphan).
-- `tests/session-store.test.ts` — durable-task round-trip (`PersistedSession.instructions`/`context` persist and reload).
-- `tests/session-manager-delegate-restore.test.ts` — delegate-branch prompt re-assembly in `restoreSession` (revived delegate's prompt contains its original instructions + context).
+- `tests/integration/gateway/orchestrate-restart.gateway.test.ts` — a delegate child is restored **LIVE** with its task intact across a `restoreSessions` reboot (parent gets the reminder, `team_wait` re-collects a real result, no orphan).
+- `tests/unit/core/session-store.unit.test.ts` — durable-task round-trip (`PersistedSession.instructions`/`context` persist and reload).
+- `tests/unit/core/session-manager-delegate-restore.unit.test.ts` — delegate-branch prompt re-assembly in `restoreSession` (revived delegate's prompt contains its original instructions + context).
 
 ---
 
@@ -253,14 +255,14 @@ Pinned by a browser E2E (§11).
 
 ## 7. Recursion guard — mechanism change (locked #5)
 
-Remove the `BOBBIT_DELEGATE_OF` env early-return (`extension.ts:316`) and the env-var write in `session-setup.ts:355` (and update `tests/spawn-env.test.ts` which asserts it). Replace with **a single core guard + allowed-tools subtraction**:
+Remove the `BOBBIT_DELEGATE_OF` env early-return (`extension.ts:316`) and the env-var write in `session-setup.ts:355` (and update `tests/unit/core/spawn-env.unit.test.ts` which asserts it). Replace with **a single core guard + allowed-tools subtraction**:
 
 - **The core guard `OrchestrationCore.assertCanSpawn(ownerId)`** (built in sub-goal A): throws if `getPersistedSession(ownerId)` has `delegateOf` or a `childKind` set (i.e. the owner is itself a bound child). `spawn` calls it first. This is the **one** mechanism that both spawn paths share: the agent-tool spawn path (A) and, later, `host.agents.spawn` (C) both call the same `assertCanSpawn`. No child, of any kind, spawns grandchildren.
 - **`spawn` computes the child's `allowedTools`** = owner's `allowedTools` filter-out `["team_delegate","team_spawn"]`. Passed to `createSession`/`createDelegateSession`. A child therefore never has any spawn verb registered → belt-and-braces with `assertCanSpawn`.
 - **`host.agents.spawn` reuses `assertCanSpawn`** (§8.3, sub-goal C): the C-built capability surface calls the A-built guard, so a bound child session's `host.agents.spawn` throws. The denial **mechanism** lives in A's core; the **capability-surface** denial test ships in C (the `host.agents` namespace does not exist in A).
 - The `read_session` tool stays registered for children (it is registered **before** the old guard today, `extension.ts:257`) — children must still read transcripts.
 
-Pinned by tests split across sub-goals (§13): A's `tests/recursion-guard.test.ts` pins the **core guard** (`assertCanSpawn` rejects a bound-child owner id; child `allowedTools` excludes both spawn verbs) — NOT the `host.agents` namespace; C pins the **capability-surface** `host.agents.spawn` denial (which calls the same guard).
+Pinned by tests split across sub-goals (§13): A's `tests/unit/core/recursion-guard.unit.test.ts` pins the **core guard** (`assertCanSpawn` rejects a bound-child owner id; child `allowedTools` excludes both spawn verbs) — NOT the `host.agents` namespace; C pins the **capability-surface** `host.agents.spawn` denial (which calls the same guard).
 
 ---
 
@@ -426,7 +428,7 @@ Every verified site and what it becomes (sub-goal A unless noted):
 
 **Recursion-guard plumbing**
 - `src/server/agent/session-setup.ts:355` — remove `BOBBIT_DELEGATE_OF` env write.
-- `tests/spawn-env.test.ts:66-78` — update to assert the env var is gone and that `allowedTools` subtraction is the mechanism.
+- `tests/unit/core/spawn-env.unit.test.ts:66-78` — update to assert the env var is gone and that `allowedTools` subtraction is the mechanism.
 
 **Pen-test skill**
 - `.claude/skills/pen-test/SKILL.md:17` lists `delegate` as an allowed tool — update to `team_delegate`.
@@ -446,29 +448,29 @@ Every verified site and what it becomes (sub-goal A unless noted):
 
 ## 13. Test plan
 
-Phase rules (AGENTS.md / `tests/test-phase-invariant.test.ts`): unit = `tests/*.test.ts` (node) / `*.spec.ts` (file://); API E2E = `tests/e2e/*.spec.ts`; browser E2E = `tests/e2e/ui/*.spec.ts`. **No `test:manual`** for any new test (host.agents fixture is canned/no-LLM).
+Phase rules (AGENTS.md / `tests/e2e/node/test-phase-invariant.node-e2e.test.ts`): unit, DOM, and gateway integration use their semantic cells under `tests/{unit,dom,integration}/`; API E2E uses `tests/e2e/api/**/*.api-e2e.spec.ts`; browser E2E uses `tests/e2e/browser/**/*.browser-e2e.spec.ts`. **No `test:manual`** for any new test (host.agents fixture is canned/no-LLM).
 
 **Sub-goal A**
-- `tests/orchestration-core.test.ts` (unit, fake `OrchestrationSessionView`): `spawn` model inheritance (asserts `initialModel` = resolver output; per-call override wins); `allowedTools` subtraction (child loses `team_delegate`/`team_spawn`); `wait` policy `all` vs `first`; index rebuild from persisted fields; `shouldReapChildOnBoot` table (delegate owner-gone reaps; owner-restoring does not; pr-walkthrough terminal parity).
-- `tests/reviewer-cannot-team-delegate.test.ts` (unit): resolve reviewer/spec-auditor/security-reviewer/code-reviewer tool policies → assert `team_delegate` is `never`.
-- `tests/recursion-guard.test.ts` (unit): pins the **A-built core guard** — `OrchestrationCore.assertCanSpawn` rejects a bound-child owner id (one with `delegateOf`/`childKind`); `spawn` calls it; child `allowedTools` excludes both spawn verbs. Does **NOT** assert the `host.agents` namespace (it does not exist in A) — the capability-surface `host.agents.spawn` denial test is **deferred to Sub-goal C** (C's surface calls this same guard).
-- Update `tests/spawn-env.test.ts` (remove `BOBBIT_DELEGATE_OF`).
-- `tests/e2e/team-delegate.spec.ts` (API): non-goal agent `team_delegate` blocking one-shot (+ `parallel` waits for all); `team_prompt`→`team_wait`→`read_session`→`team_dismiss`; team-lead can also `team_delegate`/`team_wait` with no goal-tool regression.
-- `tests/e2e/team-wait-semantics.spec.ts` (API): first-idle return, all-children status line, await-the-rest instruction, already-idle immediate, not-started ≠ idle, timeout. **Terminal-child handling:** one child exits/terminates (or times out) while others continue → `wait` still returns (never rejects the aggregate) with that child marked `terminated`/`timeout`/`failed` and the other children's real statuses; `policy:"all"` resolves when all are settled, `policy:"first"` resolves on the first settled (idle or terminal).
-- `tests/e2e/orchestrate-restart.spec.ts` (API or `tests/e2e/ui`): kill + reboot mid-orchestration → children survive, owner gets the live-children reminder, `team_wait` re-collects, no orphan; non-blocking children re-link; owner-gone child reaped.
-- `tests/e2e/ui/team-delegate.spec.ts` (browser): blocking one-shot card render; non-goal spawn→prompt→wait→read→dismiss; team-lead helper; restart reminder + re-collect.
-- Reuse/rename existing: `tests/e2e/sandbox-delegate.spec.ts`, `tests/e2e/archived-delegates-api.spec.ts`, `tests/sidebar-archived-delegates.spec.ts`, `tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts` — these assert the `delegateOf` **session relationship** (unchanged) but invoke the tool; update tool name where used.
-- `tests/tool-description-budget.test.ts` (`EXTENSION_FILES` includes `agent`) — keep `team_delegate`/`team_wait` within budget.
+- `tests/unit/core/orchestration-core.unit.test.ts` (unit, fake `OrchestrationSessionView`): `spawn` model inheritance (asserts `initialModel` = resolver output; per-call override wins); `allowedTools` subtraction (child loses `team_delegate`/`team_spawn`); `wait` policy `all` vs `first`; index rebuild from persisted fields; `shouldReapChildOnBoot` table (delegate owner-gone reaps; owner-restoring does not; pr-walkthrough terminal parity).
+- `tests/unit/core/reviewer-cannot-team-delegate.unit.test.ts` (unit): resolve reviewer/spec-auditor/security-reviewer/code-reviewer tool policies → assert `team_delegate` is `never`.
+- `tests/unit/core/recursion-guard.unit.test.ts` (unit): pins the **A-built core guard** — `OrchestrationCore.assertCanSpawn` rejects a bound-child owner id (one with `delegateOf`/`childKind`); `spawn` calls it; child `allowedTools` excludes both spawn verbs. Does **NOT** assert the `host.agents` namespace (it does not exist in A) — the capability-surface `host.agents.spawn` denial test is **deferred to Sub-goal C** (C's surface calls this same guard).
+- Update `tests/unit/core/spawn-env.unit.test.ts` (remove `BOBBIT_DELEGATE_OF`).
+- `tests/integration/gateway/team-delegate.gateway.test.ts` (API): non-goal agent `team_delegate` blocking one-shot (+ `parallel` waits for all); `team_prompt`→`team_wait`→`read_session`→`team_dismiss`; team-lead can also `team_delegate`/`team_wait` with no goal-tool regression.
+- `tests/integration/gateway/team-wait-semantics.gateway.test.ts` (API): first-idle return, all-children status line, await-the-rest instruction, already-idle immediate, not-started ≠ idle, timeout. **Terminal-child handling:** one child exits/terminates (or times out) while others continue → `wait` still returns (never rejects the aggregate) with that child marked `terminated`/`timeout`/`failed` and the other children's real statuses; `policy:"all"` resolves when all are settled, `policy:"first"` resolves on the first settled (idle or terminal).
+- `tests/integration/gateway/orchestrate-restart.gateway.test.ts` (API or `tests/e2e/ui`): kill + reboot mid-orchestration → children survive, owner gets the live-children reminder, `team_wait` re-collects, no orphan; non-blocking children re-link; owner-gone child reaped.
+- `tests/browser/journeys/ui/team-delegate.journey.spec.ts` (browser): blocking one-shot card render; non-goal spawn→prompt→wait→read→dismiss; team-lead helper; restart reminder + re-collect.
+- Reuse/rename existing: `tests/integration/gateway/sandbox-delegate.gateway.test.ts`, `tests/integration/gateway/archived-delegates-api.gateway.test.ts`, `tests/dom/sidebar-archived-delegates.dom.test.ts`, `tests/e2e/ui/sidebar-archived-delegates-e2e.spec.ts` — these assert the `delegateOf` **session relationship** (unchanged) but invoke the tool; update tool name where used.
+- `tests/unit/core/tool-description-budget.unit.test.ts` (`EXTENSION_FILES` includes `agent`) — keep `team_delegate`/`team_wait` within budget.
 
 **Sub-goal B**
-- `tests/orchestration-cascade.test.ts` (unit): `cascadeReapOwner` reaps all child kinds on archive **and** terminate; dormant/persisted children archived.
-- `tests/e2e/ui/archive-child-cascade.spec.ts` (browser): non-goal archive confirm modal **lists** child agents (`session-manager.ts:2392` path); after confirm, children are archived (cascade), parity with team-shutdown archival; assert goal-archival path (`api.ts`) is unchanged.
+- `tests/unit/core/orchestration-cascade.unit.test.ts` (unit): `cascadeReapOwner` reaps all child kinds on archive **and** terminate; dormant/persisted children archived.
+- `tests/browser/journeys/ui/archive-child-cascade.journey.spec.ts` (browser): non-goal archive confirm modal **lists** child agents (`session-manager.ts:2392` path); after confirm, children are archived (cascade), parity with team-shutdown archival; assert goal-archival path (`api.ts`) is unchanged.
 
 **Sub-goal C**
 - `market-packs/_fixtures/host-agents-exerciser/` — deterministic fixture pack whose child is **canned / no-LLM** (the spawned child runs a fixed scripted transcript, not a real model) so the E2E is non-flaky and stays in the e2e phase.
-- `tests/e2e/host-agents.spec.ts` (API): fixture handler `spawn`→`prompt`→poll `status`/`list`/`read`→`dismiss` (poll-based, no blocking wait); scoped to own children.
-- `tests/host-agents-scope.test.ts` (unit): `ServerHostCapabilities.agents===true` & `has("agents")`; **no** foreign-session method on the type (compile-time + runtime assertion that `agents` exposes only the six verbs); **filtered scoping** — a `delegate`-sourced (or `team`) child of the **same** bound session is **NOT** visible to `host.agents.list/read/status/dismiss/prompt` (only `childKind==="host-agents"` children are); **capability-surface `host.agents.spawn` denial** for a bound child session (the surface calls A's `assertCanSpawn`).
-- `tests/host-agents-sandbox-inheritance.spec.ts` (API): child inherits the bound session's sandbox/credential scope and cannot exceed it.
+- `tests/e2e/api/host-agents.api-e2e.spec.ts` (API): fixture handler `spawn`→`prompt`→poll `status`/`list`/`read`→`dismiss` (poll-based, no blocking wait); scoped to own children.
+- `tests/unit/core/host-agents-scope.unit.test.ts` (unit): `ServerHostCapabilities.agents===true` & `has("agents")`; **no** foreign-session method on the type (compile-time + runtime assertion that `agents` exposes only the six verbs); **filtered scoping** — a `delegate`-sourced (or `team`) child of the **same** bound session is **NOT** visible to `host.agents.list/read/status/dismiss/prompt` (only `childKind==="host-agents"` children are); **capability-surface `host.agents.spawn` denial** for a bound child session (the surface calls A's `assertCanSpawn`).
+- `tests/integration/gateway/host-agents-sandbox-inheritance.gateway.test.ts` (API): child inherits the bound session's sandbox/credential scope and cannot exceed it.
 - `PROXYABLE` allowlist test (extend `module-host-worker` tests): `agents` methods proxy; non-listed names throw.
 
 **All sub-goals:** `.gitattributes` LF (no CRLF in `.ts`/`.md`/`.yaml`); `npm run check` + unit + e2e green at/above baseline.
@@ -480,19 +482,19 @@ Phase rules (AGENTS.md / `tests/test-phase-invariant.test.ts`): unit = `tests/*.
 Sequence: **A** first (no deps); then **B** and **C** in parallel (both dep A only). The shared-file hotspots are `session-manager.ts`, `server.ts`, `team-manager.ts`. A owns the structural seams in all three so B and C only **append** to them.
 
 ### Sub-goal A — Core + rename + restart (owns the seams)
-**Creates:** `src/server/agent/orchestration-core.ts` (incl. generalized `shouldReapChildOnBoot`, the `assertCanSpawn` recursion guard §7, and the `abort` verb §8.2 — both consumed by the agent-tool path now and by `host.agents` in C); `tests/orchestration-core.test.ts`, `tests/reviewer-cannot-team-delegate.test.ts`, `tests/recursion-guard.test.ts`, `tests/e2e/team-delegate.spec.ts`, `tests/e2e/team-wait-semantics.spec.ts`, `tests/e2e/orchestrate-restart.spec.ts`, `tests/e2e/ui/team-delegate.spec.ts`. Rename `delegate.yaml`→`team_delegate.yaml`.
-**Edits:** `session-manager.ts` (extend `createDelegateSession` to forward `initialModel`/`initialThinkingLevel`; add `rebuildIndexFromPersisted` call + reminder hook in `restoreSessions`; extract `cascadeReapOwner` **stub** that A wires into `terminateSession` so B can fill the archive seam); `server.ts` (construct `OrchestrationCore`; add `/api/sessions/:id/orchestrate/*` routes — `spawn`/`prompt`/`steer`/`abort`/`wait`/`dismiss`/`children` + the blocking `/orchestrate/delegate` route §8.2.1; pass `orchestrationCore` into the two `createServerHostApi` calls as injected dep — **flag stays false in A**); `team-manager.ts` (route `spawnRole` spawn/`dismissRole`/prompt/steer through the core — behaviour-preserving); `session-setup.ts` (remove `BOBBIT_DELEGATE_OF` write); `defaults/tools/agent/extension.ts`; all grant/deny/prose sites in §12; `src/ui/tools/index.ts`, `ToolGroup.ts`, `MessageList.ts`, `Messages.ts`, `DelegateRenderer.ts`; `tests/spawn-env.test.ts`.
+**Creates:** `src/server/agent/orchestration-core.ts` (incl. generalized `shouldReapChildOnBoot`, the `assertCanSpawn` recursion guard §7, and the `abort` verb §8.2 — both consumed by the agent-tool path now and by `host.agents` in C); `tests/unit/core/orchestration-core.unit.test.ts`, `tests/unit/core/reviewer-cannot-team-delegate.unit.test.ts`, `tests/unit/core/recursion-guard.unit.test.ts`, `tests/integration/gateway/team-delegate.gateway.test.ts`, `tests/integration/gateway/team-wait-semantics.gateway.test.ts`, `tests/integration/gateway/orchestrate-restart.gateway.test.ts`, `tests/browser/journeys/ui/team-delegate.journey.spec.ts`. Rename `delegate.yaml`→`team_delegate.yaml`.
+**Edits:** `session-manager.ts` (extend `createDelegateSession` to forward `initialModel`/`initialThinkingLevel`; add `rebuildIndexFromPersisted` call + reminder hook in `restoreSessions`; extract `cascadeReapOwner` **stub** that A wires into `terminateSession` so B can fill the archive seam); `server.ts` (construct `OrchestrationCore`; add `/api/sessions/:id/orchestrate/*` routes — `spawn`/`prompt`/`steer`/`abort`/`wait`/`dismiss`/`children` + the blocking `/orchestrate/delegate` route §8.2.1; pass `orchestrationCore` into the two `createServerHostApi` calls as injected dep — **flag stays false in A**); `team-manager.ts` (route `spawnRole` spawn/`dismissRole`/prompt/steer through the core — behaviour-preserving); `session-setup.ts` (remove `BOBBIT_DELEGATE_OF` write); `defaults/tools/agent/extension.ts`; all grant/deny/prose sites in §12; `src/ui/tools/index.ts`, `ToolGroup.ts`, `MessageList.ts`, `Messages.ts`, `DelegateRenderer.ts`; `tests/unit/core/spawn-env.unit.test.ts`.
 **Acceptance:** §"Sub-goal A" acceptance criteria in the goal spec; all A tests green.
 **B/C must NOT touch (A owns):** `orchestration-core.ts` public API, the `/orchestrate/*` routes, the `createDelegateSession`/`restoreSessions` edits, the rename, all §12 grant sites.
 
 ### Sub-goal B — Archive cascade + modal (deps A)
-**Creates:** `tests/orchestration-cascade.test.ts`, `tests/e2e/ui/archive-child-cascade.spec.ts`.
+**Creates:** `tests/unit/core/orchestration-cascade.unit.test.ts`, `tests/browser/journeys/ui/archive-child-cascade.journey.spec.ts`.
 **Edits:** **fills** `cascadeReapOwner` (A left the seam) and routes all archive entry points (`archive(id)` callers, `purgeOneSession`, teardown) through the single archive seam in `session-manager.ts`; `src/app/session-manager.ts` `terminateSession` non-goal `else` branch (`:2392`) — child enumeration in the confirm body; optional `GET /api/sessions/:id/children-count` route in `server.ts` (append-only).
 **Acceptance:** §"Sub-goal B".
 **Must NOT touch:** the `/orchestrate/*` routes, `host.agents`, `src/app/api.ts` goal-archival path (leave it — it already enumerates).
 
 ### Sub-goal C — host.agents + fixture (deps A)
-**Creates:** `market-packs/_fixtures/host-agents-exerciser/`; `tests/e2e/host-agents.spec.ts`, `tests/host-agents-scope.test.ts`, `tests/host-agents-sandbox-inheritance.spec.ts`; `module-host-worker` PROXYABLE test.
+**Creates:** `market-packs/_fixtures/host-agents-exerciser/`; `tests/e2e/api/host-agents.api-e2e.spec.ts`, `tests/unit/core/host-agents-scope.unit.test.ts`, `tests/integration/gateway/host-agents-sandbox-inheritance.gateway.test.ts`; `module-host-worker` PROXYABLE test.
 **Edits:** `src/server/extension-host/server-host-api.ts` (add `ServerHostAgentsApi`, `agents` to `ServerHostCapabilities`, implement the namespace, flip `agents:true` in `flags`); `module-host-worker.ts:112` (add `agents` to `PROXYABLE`); `server.ts` — the `agents` namespace consumes the `orchestrationCore` dep **A already passes into `createServerHostApi`** (C only flips the flag + implements; the injection point is A's seam).
 **Acceptance:** §"Sub-goal C".
 **Must NOT touch:** the `/orchestrate/*` routes, `team-manager.ts`, the rename, the cascade seam (B owns).

@@ -1,5 +1,7 @@
 # Goal proposal panel — root-cause analysis (two failure modes)
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: analysis only (no production code changed by this document).
 Scope: the **goal-assistant** ("+ New Goal") right-hand proposal panel.
 Owner hand-off: a coder can implement directly from §"Proposed fix" + §"Files to change" + §"Test strategy" below.
@@ -276,10 +278,10 @@ and the mock agent (`tests/e2e/mock-agent-core.mjs`). The mock already mirrors
 the real seed/edit endpoints (`_seedProposal` → `/seed`, `_editProposal` →
 `/edit`, `mock-agent-core.mjs:1817-1835`), so `proposal_update {seed|edit}`
 frames really fire. Model the files on
-`tests/e2e/ui/goal-proposal-dismiss-reload.spec.ts` and
-`tests/e2e/ui/proposal-edit-flow.spec.ts`.
+`tests/browser/journeys/ui/goal-proposal-dismiss-reload.journey.spec.ts` and
+`tests/browser/journeys/ui/proposal-edit-flow.journey.spec.ts`.
 
-### Mode A — `tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts` (new)
+### Mode A — `tests/browser/journeys/ui/goal-proposal-revision-autoupdate.journey.spec.ts` (new)
 Triggers: `GOAL_PROPOSAL` (1st), then a 2nd `propose_goal`, then `edit_proposal`.
 
 1. `+ New Goal` → `sendMessage("GOAL_PROPOSAL")`; assert the assistant title
@@ -313,7 +315,7 @@ if (text.includes("GOAL_EDITABLE_EDIT")) {
 (Pair it with an initial `propose_goal` whose spec contains the `old_text`
 substring.)
 
-### Mode B — `tests/e2e/ui/goal-proposal-offscreen-return.spec.ts` (new)
+### Mode B — `tests/browser/journeys/ui/goal-proposal-offscreen-return.journey.spec.ts` (new)
 Cover all three return paths. Use two sessions: S1 = goal assistant, S2 = a plain
 session (`createSessionViaUI`).
 

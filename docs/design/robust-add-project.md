@@ -163,7 +163,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 ];
 ```
 
-A pinning unit test (`tests/bobbit-archive-allowlist.spec.ts`) re-greps `src/server/` for every literal joined onto `bobbitStateDir()` / `bobbitConfigDir()` and asserts each segment is covered by the allowlist (or explicitly tagged `// archive-safe` in the comment near the write site). This prevents silent drift when new server-level state is added.
+A pinning unit test (`tests/unit/core/bobbit-archive-allowlist.unit.test.ts`) re-greps `src/server/` for every literal joined onto `bobbitStateDir()` / `bobbitConfigDir()` and asserts each segment is covered by the allowlist (or explicitly tagged `// archive-safe` in the comment near the write site). This prevents silent drift when new server-level state is added.
 
 Note: `bobbitConfigDir()` writes are all user-editable project config (system-prompt.md, tools/, mcp.json). These are project-scoped and **should** be archived when the user opts in.
 
@@ -273,7 +273,7 @@ The 404 fallback (`preflightUnavailable = true`, silently hide the panel) is pre
 
 ## Testing
 
-### Unit (`tests/project-preflight.spec.ts`, `tests/bobbit-archive.spec.ts`)
+### Unit (`tests/unit/core/project-preflight.unit.test.ts`, `tests/unit/core/bobbit-archive.unit.test.ts`)
 
 `file://` fixtures with tmp dirs covering each check id:
 
@@ -296,19 +296,19 @@ Archive tests:
 - Cross-volume rename simulated by stubbing `fs.renameSync` to throw `EXDEV` — copy fallback triggers.
 - Partial failure: one file is locked / unreadable; `partial.failed` populated; other files still archived; manifest reflects truth.
 
-Allowlist pinning test (`tests/bobbit-archive-allowlist.spec.ts`):
+Allowlist pinning test (`tests/unit/core/bobbit-archive-allowlist.unit.test.ts`):
 
 - Greps `src/server/` for `bobbitStateDir(`, `bobbitConfigDir(`, `path.join(bobbitState`, etc.
 - For each hit, extracts the literal next segment (the immediate child name).
 - Asserts every distinct segment under `state/` is either in `GATEWAY_OWNED_FILES` or annotated with `// archive-safe` near the call site.
 
-### API E2E (`tests/e2e/projects-preflight.spec.ts`)
+### API E2E (`tests/integration/gateway/projects-preflight.gateway.test.ts`)
 
 - `GET /api/projects/preflight?path=…` against in-process gateway with isolated tmp dirs.
 - `POST /api/projects/archive-bobbit` happy path + 409 on empty `.bobbit/`.
 - Combined flow: preflight → archive → preflight again → register.
 
-### Browser E2E (`tests/e2e/ui/add-project-preflight.spec.ts`)
+### Browser E2E (`tests/browser/journeys/ui/add-project-preflight.journey.spec.ts`)
 
 Required per AGENTS.md ("every user-facing feature MUST have a browser E2E"):
 

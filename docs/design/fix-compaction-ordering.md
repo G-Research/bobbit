@@ -169,7 +169,7 @@ Land these BEFORE touching production code; confirm the listed pre-fix failure.
 
 ### 3.1 Primary repro — pure reducer unit test (fast, deterministic)
 
-File: `tests/message-reducer.test.ts` (unit·node). New cases, naming follows the
+File: `tests/unit/core/message-reducer.unit.test.ts` (unit·node). New cases, naming follows the
 existing `(12x)` compaction family:
 
 - **`(12e) live compact_active card sorts before preserved tail after
@@ -207,7 +207,7 @@ existing `(12x)` compaction family:
 
 ### 3.2 End-to-end DOM-order regression (browser)
 
-File: `tests/e2e/ui/pre-compaction-history.spec.ts`, extend the existing
+File: `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`, extend the existing
 `@live-compaction-affordance` live test (which already asserts one card +
 affordance, but **not** vertical order). Add an assertion that the compaction
 card's DOM position precedes the first preserved-tail message — e.g. compare
@@ -216,7 +216,7 @@ post-compaction `user-message`/`assistant-message`, or compare DOM index via
 `evaluate`. **Pre-fix failure**: card `y` is greater than the tail row's `y`
 (card below the preserved messages).
 
-Optionally add to `tests/e2e/ui/compaction-persistence.spec.ts` an explicit
+Optionally add to `tests/browser/journeys/ui/compaction-persistence.journey.spec.ts` an explicit
 "live order == reload order" check: capture the ordered list of card + tail
 testids live, reload, and assert equality.
 
@@ -430,12 +430,12 @@ Pinned by `(12j)`.
 
 ### 8.6 Regression coverage
 
-- `tests/message-reducer.test.ts` — `(12f)` terminal-before-snapshot,
+- `tests/unit/core/message-reducer.unit.test.ts` — `(12f)` terminal-before-snapshot,
   `(12g)` snapshot-before-terminal, `(12h)` live≡reload ordering,
   `(12i)` exactly-one-card + adjacent toolResult across both paths,
   `(12j)` placeholder removes stale paired toolResult,
   `(12k)` interim single-card-before-tail.
-- `tests/e2e/ui/pre-compaction-history.spec.ts` —
+- `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts` —
   `@live-compaction-affordance` now asserts **DOM document order**: both the
   `[data-testid='compaction-summary-card']` and the
   `[data-testid='pre-compaction-history']` affordance appear before the first
@@ -455,7 +455,7 @@ durable sidecar/affordance invariants.
 - `docs/design/compaction-e2e-rich-summary.md` — rich summary card lifecycle (§7.3, §7.4).
 - `src/app/message-reducer.ts`, `src/server/agent/compaction-sidecar.ts`,
   `src/app/remote-agent.ts`, `src/ui/components/MessageList.ts`.
-- Tests: `tests/message-reducer.test.ts`, `tests/e2e/ui/pre-compaction-history.spec.ts`,
-  `tests/e2e/ui/compaction-persistence.spec.ts`.
+- Tests: `tests/unit/core/message-reducer.unit.test.ts`, `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`,
+  `tests/browser/journeys/ui/compaction-persistence.journey.spec.ts`.
 </content>
 </invoke>

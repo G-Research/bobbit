@@ -55,12 +55,12 @@ Cache only non-mutating, proven sensitive/insensitive evidence and key it by dia
 
 Copy only the directly coupled reference assertions, registered in the existing test map lanes:
 
-- `tests2/core/project-registry-root-paths.test.ts`: POSIX/drive/UNC dialects on every host; roots and separators; `/var`-style canonical aliases; existing and missing suffixes; sensitive, insensitive, and case-sensitive-descendant behavior; bounded read-only evidence; failed probe; cache invalidation; directory incarnation replacement; double-slash aliases; stale-alias-safe dedupe/containment.
-- `tests2/core/project-registry-provisional-dedupe.test.ts`: provisional and Headquarters dedupe under proven insensitive identity, and separation under sensitive identity.
-- `tests2/core/extension-host-path-guard.test.ts` and `tests2/core/preview-path-guard.test.ts`: in-root, outside-root, canonical alias, missing, escaping symlink, and swapped outside symlink cases. Where link creation is unavailable, use a scoped `realpathSync` seam rather than skipping the security assertion.
-- `tests2/core/transcript-sanitizer.test.ts`: lexical/canonical trusted-file aliases, in-root symlink rejection, and CRLF transcript recognition before read-only trust.
-- `tests2/core/component-path-traversal.test.ts` and `tests2/core/project-preflight.test.ts`: foreign separator/absolute component rejection and case-alias project preflight behavior.
-- `tests2/integration/base-ref-api.test.ts` and `tests2/integration/project-ui-api.test.ts`: fixtures/assertions use canonical roots so API/base-ref expectations remain valid through TMPDIR aliases.
+- `tests/unit/core/project-registry-root-paths.unit.test.ts`: POSIX/drive/UNC dialects on every host; roots and separators; `/var`-style canonical aliases; existing and missing suffixes; sensitive, insensitive, and case-sensitive-descendant behavior; bounded read-only evidence; failed probe; cache invalidation; directory incarnation replacement; double-slash aliases; stale-alias-safe dedupe/containment.
+- `tests/unit/core/project-registry-provisional-dedupe.unit.test.ts`: provisional and Headquarters dedupe under proven insensitive identity, and separation under sensitive identity.
+- `tests/unit/core/extension-host-path-guard.unit.test.ts` and `tests/unit/core/preview-path-guard.unit.test.ts`: in-root, outside-root, canonical alias, missing, escaping symlink, and swapped outside symlink cases. Where link creation is unavailable, use a scoped `realpathSync` seam rather than skipping the security assertion.
+- `tests/unit/core/transcript-sanitizer.unit.test.ts`: lexical/canonical trusted-file aliases, in-root symlink rejection, and CRLF transcript recognition before read-only trust.
+- `tests/unit/core/component-path-traversal.unit.test.ts` and `tests/unit/core/project-preflight.unit.test.ts`: foreign separator/absolute component rejection and case-alias project preflight behavior.
+- `tests/integration/gateway/base-ref-api.gateway.test.ts` and `tests/integration/gateway/project-ui-api.gateway.test.ts`: fixtures/assertions use canonical roots so API/base-ref expectations remain valid through TMPDIR aliases.
 
 No tests from the reference's process ownership, runtime isolation, workflow/UI race, terminal, or command-environment clusters are included.
 

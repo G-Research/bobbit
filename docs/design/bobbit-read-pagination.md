@@ -256,22 +256,22 @@ Backward compatibility rule: REST endpoints must keep their existing response sh
 
 ## 11. Focused test plan
 
-Update or add core tests only under `tests2/core/` and register any new file in `tests2/tests-map.json` if needed.
+Update or add core tests only under `tests/unit/core/` with the `.unit.test.ts` suffix; discovery is automatic.
 
-- `tests2/core/bobbit-tool-dispatch.test.ts`
+- `tests/unit/core/bobbit-tool-dispatch.unit.test.ts`
   - `list_sessions` default call appends `limit=50&offset=0` or otherwise returns a default page through the postprocessor.
   - `list_sessions` explicit `{ projectId: "p1", limit: 10, offset: 20 }` forwards `projectId`, `limit`, and `offset` together.
   - `list_goals` forwards `projectId` plus paging and preserves `archived`/`q`.
   - `list_staff`, `list_roles`, and `list_mcp_servers` forward `projectId`.
   - Archived goals/sessions forward cursor (`after` or `cursor`) when supplied.
-- New or expanded `tests2/core/bobbit-tool-pagination.test.ts`
+- New or expanded `tests/unit/core/bobbit-tool-pagination.unit.test.ts`
   - Tool fallback pages a stubbed `{ tools: [..], diagnostics: ... }` response and returns `{ tools: firstPage, diagnostics, pagination }`.
   - Bare-array fallback for `list_mcp_servers` normalizes to a bounded keyed payload.
   - `search` response `{ results, total }` gains correct `pagination.hasMore`/`nextOffset`.
   - Maintenance probe fallback pages `{ sessions: [...] }` and `{ count, sample: [...] }` without losing `count`.
-- `tests2/core/bobbit-tool-validation.test.ts`
+- `tests/unit/core/bobbit-tool-validation.unit.test.ts`
   - Schema exposes shared `limit`, `offset`, `after`, and `cursor` with non-search descriptions.
-- `tests2/core/bobbit-tool-tiers.test.ts`
+- `tests/unit/core/bobbit-tool-tiers.unit.test.ts`
   - Keep operation catalogue unchanged unless adding no new operations.
   - Add a YAML/detail-doc drift assertion if practical: docs mention shared paging and `projectId` filters for the affected operations.
 - REST-focused tests if helpers are extracted/pure:
@@ -283,7 +283,7 @@ Verification commands:
 
 ```bash
 npm run check
-npx vitest run tests2/core/bobbit-tool-dispatch.test.ts tests2/core/bobbit-tool-validation.test.ts tests2/core/bobbit-tool-tiers.test.ts tests2/core/bobbit-tool-pagination.test.ts
+npx vitest run tests/unit/core/bobbit-tool-dispatch.unit.test.ts tests/unit/core/bobbit-tool-validation.unit.test.ts tests/unit/core/bobbit-tool-tiers.unit.test.ts tests/unit/core/bobbit-tool-pagination.unit.test.ts
 ```
 
 If no new test file is added, omit it from the Vitest command.

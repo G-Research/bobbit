@@ -1,5 +1,7 @@
 # Shrink Initial Bundle — design doc
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: shipped (HEAD `ed850b65`)  •  Goal branch: `goal/shrink-ini-cf48655b`  •  Author: team-lead
 
 > **Follow-up:** later passes kept this boundary strict. First,
@@ -17,7 +19,7 @@ Status: shipped (HEAD `ed850b65`)  •  Goal branch: `goal/shrink-ini-cf48655b` 
 All planned tasks shipped. `npm run build:ui` now emits **no chunk-size
 warnings** at the existing `chunkSizeWarningLimit: 600`. Both target
 chunks dropped well below budget; the bundle-size regression guard
-(`tests/bundle-size.test.ts`) was tightened to pin the new ceiling.
+(`tests/unit/core/bundle-size.unit.test.ts`) was tightened to pin the new ceiling.
 
 | Chunk | Before | After | Reduction |
 |---|---|---|---|
@@ -61,7 +63,7 @@ What landed:
 - **Bundle-profile tooling** — `vite.profile.config.ts` (new) +
   `rollup-plugin-visualizer` devDep. Workflow documented in
   [`docs/perf/bundle-profile.md`](../perf/bundle-profile.md).
-- **Bundle-size regression guard** — `tests/bundle-size.test.ts`
+- **Bundle-size regression guard** — `tests/unit/core/bundle-size.unit.test.ts`
   budgets tightened: entry ≤ 250 KB gz, per-chunk ≤ 200 KB gz, no
   non-worker chunk > 600 KB raw (pins Vite's `chunkSizeWarningLimit:
   600`). Run with `npm run test:bundle`.
@@ -95,7 +97,7 @@ Acceptance criteria (all met):
 | Entry chunk | < 700 kB raw / < 200 kB gz | 582 kB raw / 150 kB gz |
 | Artifacts chunk | < 250 kB raw / < 80 kB gz | 151 kB raw / 44 kB gz |
 | `npm run test:unit` + `npm run test:e2e` | pass | pass |
-| `tests/bundle-size.test.ts` budget guard | tightened, passes | 250/200/600 KB enforced |
+| `tests/unit/core/bundle-size.unit.test.ts` budget guard | tightened, passes | 250/200/600 KB enforced |
 
 ## Original problem & plan (for reference)
 
@@ -118,7 +120,7 @@ This goal targeted:
 | Entry chunk | < 700 kB raw / < 200 kB gz |
 | Artifacts chunk | < 250 kB raw / < 80 kB gz |
 | `npm run test:unit` + `npm run test:e2e` | pass |
-| Existing `tests/bundle-size.test.ts` budget guard | passes (already does — tighten) |
+| Existing `tests/unit/core/bundle-size.unit.test.ts` budget guard | passes (already does — tighten) |
 
 Profiling (`rollup-plugin-visualizer`) attributed the bloat to a small,
 specific set of imports. Each one had a known, mechanical fix. The
@@ -246,7 +248,7 @@ Current implementation is stricter than the original lazy-wrapper plan:
 - `npm run check` — types must resolve without the static import.
 - `npm run build:ui` — browser chunks no longer warn about `node:fs`
   being externalized by `@earendil-works/pi-ai`.
-- `vitest run --config vitest.config.ts tests2/core/pi-ai-browser-boundary.test.ts` — pins
+- `vitest run --config vitest.config.ts tests/unit/core/pi-ai-browser-boundary.unit.test.ts` — pins
   the no-bare-runtime-import rule and the Pi `0.80.x` API/provider subpath allowlist for browser code.
 - `npm run test:e2e` — chat flow still works. Existing E2E coverage of
   message streaming is enough; no new test needed.
@@ -495,7 +497,7 @@ without it failing.
 2. **Confirm `vite.profile.config.ts` is committed.** If absent in the
    worktree, add it (extend `vite.config.ts` with the `visualizer`
    plugin from `rollup-plugin-visualizer`).
-3. **Tighten `tests/bundle-size.test.ts` budgets** post-implementation:
+3. **Tighten `tests/unit/core/bundle-size.unit.test.ts` budgets** post-implementation:
    - Main entry: lower from 600 kB gz → **250 kB gz** (with 50 kB head-
      room over expected ~200 kB gz post-shrink).
    - Per-chunk (non-worker): lower from 500 kB gz → **120 kB gz**.
@@ -508,7 +510,7 @@ without it failing.
 ### Files modified
 
 - new: `docs/perf/bundle-profile.md`
-- edit: `tests/bundle-size.test.ts` (lower budgets, add raw-size guard)
+- edit: `tests/unit/core/bundle-size.unit.test.ts` (lower budgets, add raw-size guard)
 - maybe: `vite.profile.config.ts` (add if missing)
 - maybe: `docs/dev-workflow.md` (cross-link)
 
@@ -581,7 +583,7 @@ parallel:
 | B | `src/ui/tools/highlight-core.ts` (new), `src/ui/tools/artifacts/{Text,Svg,Html,Markdown}Artifact.ts`, `src/ui/tools/renderers/{Write,Html}Renderer.ts` |
 | C | `src/app/dialogs.ts` (one function only — single hunk) |
 | D | `src/ui/utils/attachment-utils.ts` (one function only — single hunk) |
-| E | `docs/perf/bundle-profile.md` (new), `tests/bundle-size.test.ts`, maybe `vite.profile.config.ts`, maybe `docs/dev-workflow.md` |
+| E | `docs/perf/bundle-profile.md` (new), `tests/unit/core/bundle-size.unit.test.ts`, maybe `vite.profile.config.ts`, maybe `docs/dev-workflow.md` |
 
 No two tasks edit the same file. Spawn A–D simultaneously; spawn E
 after the others merge so its tightened budgets reflect the actual

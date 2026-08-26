@@ -539,24 +539,24 @@ under the `ui` capability).
 
 | # | Acceptance criterion | Test (new / extended) | Phase |
 |---|---|---|---|
-| A1 | The generated tool **guard** for `pr-reviewer` contains **no `never`** entry for the PR Walkthrough reviewer tools | **New unit**: drive `writeToolGuardExtension` (or assert via `resolveGrantPolicy` over the cascade-resolved `pr-reviewer` role + `groupPolicyStore`) and assert none of the reviewer tools resolve to `never`. Complements the existing `tests/pr-walkthrough-role-tools-policy.test.ts` (which proves the *role* policy; this proves the *guard generation* path that was bugged). | unit·node |
-| A2 | A spawned reviewer child can actually **call** the reviewer tools (not merely hold them) | **Extend** `tests/e2e/pr-walkthrough-host-agents.spec.ts`: after `run`, assert the child's guard does not block the PR Walkthrough tools. Drive representative real paths with the child secret and assert **none** is rejected as "not permitted for this role": bundle read, read-only shell, and durable submission/finalization. | E2E·api |
+| A1 | The generated tool **guard** for `pr-reviewer` contains **no `never`** entry for the PR Walkthrough reviewer tools | **New unit**: drive `writeToolGuardExtension` (or assert via `resolveGrantPolicy` over the cascade-resolved `pr-reviewer` role + `groupPolicyStore`) and assert none of the reviewer tools resolve to `never`. Complements the existing `tests/unit/core/pr-walkthrough-role-tools-policy.unit.test.ts` (which proves the *role* policy; this proves the *guard generation* path that was bugged). | unit·node |
+| A2 | A spawned reviewer child can actually **call** the reviewer tools (not merely hold them) | **Extend** `tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts`: after `run`, assert the child's guard does not block the PR Walkthrough tools. Drive representative real paths with the child secret and assert **none** is rejected as "not permitted for this role": bundle read, read-only shell, and durable submission/finalization. | E2E·api |
 | A3 | The YAML schema is present in the reviewer's prompt | **Extend** the same E2E: read the reviewer child's system prompt (prompt-sections API / persisted snapshot) and assert it contains `submit_pr_walkthrough_yaml` schema markers (`schema_version`, `merge_assessment`). | E2E·api |
 | A4 | Reviewer survives a gateway restart with its tools | **New/extend** restart test: spawn reviewer → simulate restart → assert `resolveSessionRole(ps.role, …, ps.projectId)` resolves the cascade role and the restored allowlist + guard still grant the reviewer tools. | E2E·api |
-| B1 | git-widget click → child auto-spawns with **no** second click | **New browser E2E** (`tests/e2e/ui/pr-walkthrough-pack.spec.ts` extension): click the git-widget launcher → assert a reviewer child appears with the `review` accessory and `run` fired exactly once (no Run-button click). | E2E·browser |
+| B1 | git-widget click → child auto-spawns with **no** second click | **New browser E2E** (`tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` extension): click the git-widget launcher → assert a reviewer child appears with the `review` accessory and `run` fired exactly once (no Run-button click). | E2E·browser |
 | B2 | autorun is one-shot (reload does not double-spawn) | **New browser E2E**: after autorun, reload → assert no second reviewer (route idempotency); `created:false` on the dedup path. | E2E·browser |
 | B3 | deep-link / non-autorun keeps the manual Run button | **Extend** browser E2E: open `#/ext/pr-walkthrough` (no `autorun`) → assert the Run button is present and nothing auto-runs. | E2E·browser |
 | C1 | A long-but-progressing reviewer is **not** errored by the 2-min clock | **New** unit/browser: drive `status` returning `phase:"running"` past `SLOW_HINT_MS` → assert the panel shows the "still reviewing" hint and **stays** `running` (no error); a `phase:"error"` ends it. | unit·browser |
 | D1 | Pane renders **pending** in the **child** session view | **New browser E2E**: autorun → UI navigates to the child session → assert the child's pane shows the pending/"reviewing" state (pane bound to `__sessionId = childSessionId`). | E2E·browser |
-| D2 | `status`/`recover` authorize from the child side (right-job routing intact) | **Extend** `tests/e2e/pr-walkthrough-host-agents.spec.ts`: call `status` with `ctx.sessionId = childSessionId` (child self) → succeeds; a foreign session (neither owner nor child) → `phase:"error"`. `recover` from the child self-resolves `binding/<child>` → submitted YAML; from a foreign session → `found:false`. | E2E·api |
+| D2 | `status`/`recover` authorize from the child side (right-job routing intact) | **Extend** `tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts`: call `status` with `ctx.sessionId = childSessionId` (child self) → succeeds; a foreign session (neither owner nor child) → `phase:"error"`. `recover` from the child self-resolves `binding/<child>` → submitted YAML; from a foreign session → `found:false`. | E2E·api |
 | D3 | Submit → **ready cards in the child-session pane**; reload persists | **New browser E2E**: submit (via the direct endpoint with the child secret, as the existing spec does) → assert the child pane flips to ready cards → reload → assert the child pane re-renders the cards via `recover`. | E2E·browser |
 | D4 | `PanelTarget.sessionId` opens the panel in the chosen session's view | **New unit** (`pack-panels` fixture): `openPackPanel({panelId, sessionId})` selects that session and mounts the tab under it; `host.contractVersion === 2`. | unit·node |
 | D5 | Dismissed reviewer remains viewable | **Extend** restart/cleanup test: after submit + server-dismiss, assert the child session is still selectable and its pane renders. | E2E·api |
-| — | Security model unchanged | **Kept** `tests/pr-walkthrough-role-tools-policy.test.ts` (group default-deny; only `pr-reviewer` grants); **kept** the no-secret grep test. | unit·node |
+| — | Security model unchanged | **Kept** `tests/unit/core/pr-walkthrough-role-tools-policy.unit.test.ts` (group default-deny; only `pr-reviewer` grants); **kept** the no-secret grep test. | unit·node |
 
 Use the **e2e mock agent** (canned, non-flaky) for all spawn/poll E2E — never
-`test:manual` — exactly as `tests/e2e/pr-walkthrough-host-agents.spec.ts` and
-`tests/e2e/host-agents.spec.ts` do.
+`test:manual` — exactly as `tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts` and
+`tests/e2e/api/host-agents.api-e2e.spec.ts` do.
 
 ---
 
@@ -570,12 +570,12 @@ document is that reconciliation.
 | Group | Area | Files (disjoint for parallelism) |
 |---|---|---|
 | **G1** | A — role resolution | `src/server/agent/session-setup.ts` (`_resolveToolActivation` → `lookupRole`); `src/server/agent/session-manager.ts` (`resolveSessionRole` + its two call sites — the persisted-session restore and the force-abort respawn); verify spawn rolePrompt path |
-| **G2** | A tests | `tests/pr-walkthrough-role-tools-policy.test.ts` (extend / add guard-generation assertion); `tests/e2e/pr-walkthrough-host-agents.spec.ts` (call-the-tools + schema-in-prompt) |
+| **G2** | A tests | `tests/unit/core/pr-walkthrough-role-tools-policy.unit.test.ts` (extend / add guard-generation assertion); `tests/e2e/api/pr-walkthrough-host-agents.api-e2e.spec.ts` (call-the-tools + schema-in-prompt) |
 | **G3** | B + C — panel + entrypoints | `market-packs/pr-walkthrough/src/panel.js` (autorun one-shot + poll-loop change) → rebuild `lib/panel.js`; `entrypoints/pr-walkthrough-git-widget.yaml`; `entrypoints/pr-walkthrough-route.yaml`; `docs/pr-walkthrough-panel.md` |
 | **G4** | D — routes + panel re-key | `market-packs/pr-walkthrough/lib/routes.mjs` (`status` child-auth, `recover` child branch); `market-packs/pr-walkthrough/src/panel.js` (child re-key + `openPanel({sessionId})`) → rebuild `lib/panel.js` |
 | **G5** | D — Host API + client | `src/shared/extension-host/host-api.ts` (`PanelTarget.sessionId`, version bump); `src/app/pack-panels.ts` (`mountPackPanelTab` sessionId); `docs/extension-host-authoring.md` |
 | **G6** | D — server viewability | confirm/keep dismissed reviewer selectable (R3); minimal session-manager change only if needed |
-| **G7** | D tests | `tests/e2e/ui/pr-walkthrough-pack.spec.ts` (child-pane pending→ready→reload); api-spec extensions for child-side status/recover |
+| **G7** | D tests | `tests/e2e/browser/pr-walkthrough-pack.browser-e2e.spec.ts` (child-pane pending→ready→reload); api-spec extensions for child-side status/recover |
 
 **Conflict note:** G3 and G4 both edit `src/panel.js`. Sequence them (B+C land
 first, then D re-keys) or assign both to one coder — do **not** run two parallel

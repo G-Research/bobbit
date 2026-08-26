@@ -1,5 +1,7 @@
 # Hierarchical goal metadata
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: **implemented** (`goal/f6c39aa2/*` off `master`). This document is the
 as-built reference; it began as a design and has been reconciled with the
 shipped code. Where the implementation chose differently from the original
@@ -14,7 +16,7 @@ filtering), `session-setup.ts` / `session-manager.ts` / `goal-manager.ts` (edge
 wiring + hook dispatch), `tool-activation.ts` (tool filter), `system-prompt.ts`
 (section order), `src/app/proposal-helpers.ts` + `proposal-panels.ts` (UI
 editor). Unit tests: `tests/goal-metadata*.test.ts`; E2E:
-`tests/e2e/goal-metadata-hierarchy.spec.ts`, `tests/e2e/ui/goal-metadata.spec.ts`.
+`tests/e2e/api/goal-metadata-hierarchy.api-e2e.spec.ts`, `tests/browser/journeys/ui/goal-metadata.journey.spec.ts`.
 
 ## 1. Problem & tenet
 
@@ -508,7 +510,7 @@ unit tests.
 
 ### 8.1 Unit (node `*.test.ts`, unit phase)
 
-`tests/goal-metadata.test.ts` (new):
+`tests/unit/core/goal-metadata.unit.test.ts` (new):
 - `resolveGoalMetadata` ancestry deep-merge: descendant overrides scalar; child
   array replaces parent array; nested object merges (child flips one sub-key);
   missing parent ref stops cleanly; deep chain (root→A→B→leaf); cycle guard /

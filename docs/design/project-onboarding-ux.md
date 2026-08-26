@@ -1,5 +1,7 @@
 # Project onboarding UX — decision record
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 Status: shipped. V2 Add Project dialog is the default; legacy in-dialog browser
 removed.
 
@@ -12,7 +14,7 @@ Companion artefacts:
 - Add Project dialog: [`src/app/dialogs.ts::showProjectDialog`](../../src/app/dialogs.ts)
 - Auto-prompt formatter: [`src/app/project-assistant-autoprompt.ts`](../../src/app/project-assistant-autoprompt.ts)
 - Server-side first-turn contract: [`src/server/agent/project-assistant.ts`](../../src/server/agent/project-assistant.ts)
-- Pinning tests: [`tests/project-assistant-autoprompt.test.ts`](../../tests/project-assistant-autoprompt.test.ts), [`tests/e2e/ui/add-project-*.spec.ts`](../../tests/e2e/ui/)
+- Pinning tests: [`tests/unit/core/project-assistant-autoprompt.unit.test.ts`](../../tests/unit/core/project-assistant-autoprompt.unit.test.ts), [`tests/e2e/ui/add-project-*.spec.ts`](../../tests/e2e/ui/)
 
 This document records the **decisions** that survived implementation — not a
 spec, not an implementation rehash. Read the linked source for "how"; read this
@@ -98,7 +100,7 @@ Status-line and preflight regions are **reserved slots** (`min-h-[20px]`,
 internal `overflow-y-auto`), not content-sized panes. Suggestions are
 absolutely positioned by `DirectoryPicker` so they overlay rather than push.
 
-This is pinned by [`add-project-footer-stability.spec.ts`](../../tests/e2e/ui/add-project-footer-stability.spec.ts),
+This is pinned by [`add-project-footer-stability.spec.ts`](../../tests/browser/fixtures/add-project-footer-stability.fixture.spec.ts),
 which captures the footer bounding box before and after every transition and
 fails with the offending state + pixel delta. Any future content addition
 that wants to live in the body must use one of the existing reserved slots
@@ -139,7 +141,7 @@ treat `selectedIds` as authoritative for the **first**
   it on reconnect.
 - Two consumers (the English summary and the JSON) share **one** payload,
   removing the format-drift class of bugs.
-- Pinned at two levels: [`tests/project-assistant-autoprompt.test.ts`](../../tests/project-assistant-autoprompt.test.ts)
+- Pinned at two levels: [`tests/unit/core/project-assistant-autoprompt.unit.test.ts`](../../tests/unit/core/project-assistant-autoprompt.unit.test.ts)
   golden-output checks the formatter; [`add-project-multi-repo-subset.spec.ts`](../../tests/e2e/ui/add-project-multi-repo-subset.spec.ts)
   asserts the WebSocket frame the live dialog sends.
 
@@ -274,23 +276,23 @@ the shipped behavior and test references.
 
 Pinning tests (run on every check-in):
 
-- `tests/project-assistant-autoprompt.test.ts` — formatter golden output,
+- `tests/unit/core/project-assistant-autoprompt.unit.test.ts` — formatter golden output,
   selected/unselected ordering, scaffolding/edit/new modes.
-- `tests/e2e/ui/add-project-typeahead.spec.ts` — prefix suggestions,
+- `tests/browser/journeys/ui/add-project-typeahead.journey.spec.ts` — prefix suggestions,
   completed-path suppression, explicit trailing-separator child suggestions,
   keyboard behavior, Windows drive-root lookup, and blur invalidation.
-- `tests/e2e/ui/add-project-browse-modal.spec.ts` — modal open/close, select
+- `tests/browser/journeys/ui/add-project-browse-modal.journey.spec.ts` — modal open/close, select
   current, focus return, and no child suggestions after browse selection.
-- `tests/e2e/ui/add-project-footer-stability.spec.ts` — bounding-box
+- `tests/browser/fixtures/add-project-footer-stability.fixture.spec.ts` — bounding-box
   invariant across all state transitions.
 - `tests/e2e/ui/add-project-multi-repo-subset.spec.ts` — WebSocket frame
   contains the derived bullet summary + JSON payload.
 - `tests/e2e/ui/add-project-select-all.spec.ts` — select/deselect-all,
   Continue disabled when count = 0.
-- `tests/e2e/ui/add-project-flow.spec.ts` — typed directory creation happy
+- `tests/browser/fixtures/add-project-flow.fixture.spec.ts` — typed directory creation happy
   path, scaffolding handoff, reload cleanup, recoverable `already_exists`, and
   structured create-error rendering.
-- `tests/e2e/project-detect-browse.spec.ts` — create-directory API success and
+- `tests/integration/gateway/project-detect-browse.gateway.test.ts` — create-directory API success and
   structured error codes; browse-directory prefix/limit/truncation behavior.
 - Preserved: `add-project-preflight.spec.ts`, `add-project-post-archive.spec.ts`,
   and `add-project-symlink.spec.ts`.

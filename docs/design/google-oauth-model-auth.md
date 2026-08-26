@@ -1,5 +1,7 @@
 # Google OAuth for Gemini models
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Archived design artifact — superseded.** This document preserves the pre-implementation
 > proposal for historical rationale only. It is not an authoritative description of current
 > behavior or an exact implementation plan. All future-tense requirements below belong to that

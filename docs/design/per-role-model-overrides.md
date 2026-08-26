@@ -1,5 +1,7 @@
 # Per-Role Model & Thinking Level Overrides — Historical Design
 
+> **Historical test-layout note:** Remaining non-canonical test paths in this record describe proposed, retired, or pre-migration locations; they are not current placement or execution guidance. Current pinning tests that still exist are named at canonical paths.
+
 > **Historical implementation plan:** The role-override feature described here remains shipped, including its role-over-global precedence and its separation from the naming model. However, the source references and implementation pseudocode below predate the authoritative-metadata retirement and are not current implementation guidance. Use [Per-role model and thinking-level overrides](../internals.md#per-role-model--thinking-level-overrides) for the current feature mechanics, [Live-state metadata](../thinking-levels.md#live-state-metadata) for state authority, and [Spawn-time model pinning](../internals.md#spawn-time-model-pinning) for final selection and verification.
 
 The design goal was to add two optional fields — `model` and `thinkingLevel` — to every Role,
@@ -467,7 +469,7 @@ regular sessions.
 
 ## 5. Tests
 
-### 5.1 Unit — `tests/role-store.test.ts`
+### 5.1 Unit — `tests/unit/core/role-store.unit.test.ts`
 
 If the file does not exist, create it. Tests:
 
@@ -476,13 +478,13 @@ If the file does not exist, create it. Tests:
 3. `parseRole` drops malformed `model: "no-slash"` and `thinkingLevel: "invalid"` (silently → `undefined`).
 4. `parseRole` treats empty string `""` the same as missing.
 
-### 5.2 Cascade — `tests/config-cascade.test.ts` (new test inside existing file if present, otherwise create)
+### 5.2 Cascade — `tests/unit/core/config-cascade.unit.test.ts` (new test inside existing file if present, otherwise create)
 
 1. Builtin role has `model: undefined`. Server override sets `model: "x/y"`. Project override sets `model: "a/b"`. `resolveRoles(projectId)` returns `model: "a/b"`, `origin: "project"`, `overrides: "server"`.
 2. Same shape for `thinkingLevel`.
 3. Project override sets `model` only — server override's `thinkingLevel` is also lost (the cascade replaces the whole `Role`, not field-by-field; this is the documented merge semantics — confirm the test asserts that explicitly so future "field-level merge" temptation is gated).
 
-### 5.3 API E2E — `tests/e2e/role-manager-api.spec.ts` (new) or extend existing role API spec
+### 5.3 API E2E — `tests/integration/gateway/role-manager-api.gateway.test.ts` (new) or extend existing role API spec
 
 1. `PUT /api/roles/coder` with body `{ label, promptTemplate, accessory, model: "anthropic/claude-opus-4-1", thinkingLevel: "high" }` → 200.
 2. `GET /api/roles` → resolved cascade includes the role with both fields populated.
@@ -541,9 +543,9 @@ model under a different id" class of bug.
 | `src/app/api.ts` | `RoleData` interface +2 fields; `updateRole` body forwards them. |
 | `src/app/role-manager-page.ts` | `editTab` union; module state for two new fields; `renderModelTab`; tab-bar button; `handleSave` body; dirty detection. |
 | `src/app/settings-page.ts` | Export `renderModelRow` and `formatModelPref`; add optional `fallbackLabel` param. |
-| `tests/role-store.test.ts` | New / extended unit tests. |
-| `tests/config-cascade.test.ts` | Cascade tests for both fields. |
-| `tests/e2e/role-manager-api.spec.ts` | API E2E. |
+| `tests/unit/core/role-store.unit.test.ts` | New / extended unit tests. |
+| `tests/unit/core/config-cascade.unit.test.ts` | Cascade tests for both fields. |
+| `tests/integration/gateway/role-manager-api.gateway.test.ts` | API E2E. |
 | `tests/e2e/ui/role-manager-model-tab.spec.ts` | Browser E2E. |
 | `tests/manual-integration/role-model-override.test.ts` | Manual binding-verification test. |
 | `AGENTS.md` | Add a Recipes bullet: **"Per-role model override"** → role yaml `model:`/`thinkingLevel:`; bound at session start by `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` (`session-manager.ts:2814`); reviewer/QA path in `verification-harness.ts` 3 sites. |
