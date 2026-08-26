@@ -25,8 +25,108 @@ import {
 	handoffRemoteStateRouteRunner,
 } from "../../support/harnesses/integration/remote-state-routes-fixture.js";
 
+interface OuterCleanupForceTrace {
+	predecessor: unknown;
+	successor: unknown;
+	authReads: number;
+	freshReads: number;
+}
+let outerCleanupForceTrace: OuterCleanupForceTrace | undefined;
+
+function forceLifecycleRunner(
+	ownedCwd: string,
+	mode: "auth" | "fresh",
+	onPrRead: () => void,
+) {
+	return async (file: string, args: readonly string[], options?: any) => {
+		if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+			return { stdout: "https://github.com/acme/outer-cleanup-clock.git\n", stderr: "" };
+		}
+		if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
+			onPrRead();
+			if (mode === "auth") throw new Error("fixture auth rejection");
+			return { stdout: JSON.stringify([{
+				number: 72,
+				url: "https://github.com/acme/outer-cleanup-clock/pull/72",
+				title: "fresh during outer cleanup",
+				state: "OPEN",
+				mergeable: "MERGEABLE",
+				headRefName: "fixture/outer-cleanup-clock",
+				baseRefName: "main",
+				...ownedHeadEvidence("acme", "outer-cleanup-clock"),
+			}]), stderr: "" };
+		}
+		const probe = standardSingleRepositoryProbe(file, args, ownedCwd);
+		if (probe) return probe;
+		return unexpectedRunnerCommand(file, args, options);
+	};
+}
+
 test.describe("remote-state coordinator routes", () => {
 	installRemoteStateRouteHooks();
+
+	test("keeps the force clock authoritative through normal outer cleanup", async ({ gateway }) => {
+		outerCleanupForceTrace = undefined;
+		const ownedCwd = gitCwd();
+		const goal = await createGoal({
+			title: "outer cleanup force-clock predecessor",
+			cwd: ownedCwd,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = String(goal.id);
+		if (typeof goal.projectId !== "string") throw new Error("fixture goal project unavailable");
+		gateway.sessionManager.getGoalStoreForProject(goal.projectId).update(goalId, {
+			cwd: ownedCwd,
+			repoPath: ownedCwd,
+			worktreePath: ownedCwd,
+			branch: "fixture/outer-cleanup-clock",
+			setupStatus: "ready",
+		});
+
+		const runner = gateway.sessionManager.commandRunner;
+		const originalExecFile = runner.execFile;
+		const originalGatewayApi = gateway.api;
+		let authReads = 0;
+		let freshReads = 0;
+		const cleanupPath = `/api/goals/${goalId}?cascade=true`;
+		gateway.api = async (path: string, init?: RequestInit) => {
+			if (path !== cleanupPath || init?.method !== "DELETE") return originalGatewayApi(path, init);
+			try {
+				runner.execFile = forceLifecycleRunner(ownedCwd, "auth", () => { authReads += 1; });
+				const predecessorResponse = await originalGatewayApi(`/api/goals/${goalId}/pr-status?intent=explicit`);
+				const predecessor = await predecessorResponse.json();
+				crossForceCoalescingWindow();
+				runner.execFile = forceLifecycleRunner(ownedCwd, "fresh", () => { freshReads += 1; });
+				const successorResponse = await originalGatewayApi(`/api/goals/${goalId}/pr-status?intent=explicit`);
+				outerCleanupForceTrace = {
+					predecessor,
+					successor: await successorResponse.json(),
+					authReads,
+					freshReads,
+				};
+			} finally {
+				runner.execFile = originalExecFile;
+				gateway.api = originalGatewayApi;
+			}
+			return originalGatewayApi(path, init);
+		};
+		// Deliberately leave the tracked goal and the scoped API interception to the
+		// compatibility harness. Its outer afterEach drives the lifecycle trace and
+		// restores both mutable seams before deleting the entity.
+	});
+
+	test("observes a fresh replacement-owned read from the preceding outer cleanup", () => {
+		expect(outerCleanupForceTrace).toMatchObject({
+			predecessor: { stale: true, lastError: "auth" },
+			successor: {
+				stale: false,
+				data: { number: 72, title: "fresh during outer cleanup" },
+			},
+			authReads: 1,
+			freshReads: 1,
+		});
+	});
 
 	test("seals the drained predecessor force epoch before installing the asserted PR runner", async ({ gateway }) => {
 		const ownedCwd = gitCwd();
