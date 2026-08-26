@@ -45,7 +45,8 @@ export const HOST_API_VERSION = 1 as const;
 // v4 (additive): added generic host.channels data contracts.
 // v5 (additive): added canonical scoped session/project notification contracts.
 // v6 (additive): added host.ui.createBobbitSprite and its presentation contracts.
-export const HOST_CONTRACT_VERSION = 6 as const;
+// v7 (additive): added authenticated, on-demand current-project reads.
+export const HOST_CONTRACT_VERSION = 7 as const;
 
 import type {
 	HostNotification,
@@ -169,6 +170,8 @@ export interface HostCapabilities {
 	readonly sessionNotifications?: boolean;
 	/** Canonical facts bound to the current session's server-resolved project. */
 	readonly projectNotifications?: boolean;
+	/** Typed on-demand reads bound to an authenticated pack-owned project surface. */
+	readonly projectReads?: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -224,6 +227,150 @@ export interface HostSessionApi {
 export interface HostProjectApi {
 	/** Privacy-bounded committed facts for the host's server-resolved project. */
 	readonly notifications: HostNotificationSubscriptionApi<ProjectNotificationName>;
+	/** Read staff in the host-bound project. */
+	readStaff(selector?: HostProjectSelector): Promise<HostProjectRead<HostStaffSummary>>;
+	/** Read live and archived sessions in the host-bound project. */
+	readSessions(selector?: HostProjectSelector): Promise<HostProjectRead<HostSessionSummary>>;
+	/** Read live and archived goals in the host-bound project. */
+	readGoals(selector?: HostProjectSelector): Promise<HostProjectRead<HostGoalSummary>>;
+	/** Read tasks after authorizing their parent goal. */
+	readGoalTasks(goalId: string, selector?: HostProjectSelector): Promise<HostProjectRead<HostTaskSummary> | HostGoalReadError>;
+	/** Read gate status after authorizing its parent goal. */
+	readGoalGates(goalId: string, selector?: HostProjectSelector): Promise<HostProjectRead<HostGateSummary> | HostGoalReadError>;
+	/** Read cached pull-request status after authorizing its parent goal. */
+	readGoalPullRequest(goalId: string): Promise<HostLookupResult<HostPullRequestSummary | null>>;
+}
+
+export type HostProjectPageSelector = { mode?: "page"; cursor?: number; limit?: number };
+export type HostProjectIdsSelector = { mode: "ids"; ids: readonly string[] };
+export type HostProjectSelector = HostProjectPageSelector | HostProjectIdsSelector;
+
+export interface HostProjectPage<T> {
+	mode: "page";
+	items: T[];
+	page: {
+		cursor: number;
+		limit: number;
+		total: number;
+		hasMore: boolean;
+		nextCursor?: number;
+	};
+}
+
+export interface HostProjectLookup<T> {
+	mode: "ids";
+	results: HostLookupResult<T>[];
+}
+
+export type HostProjectRead<T> = HostProjectPage<T> | HostProjectLookup<T>;
+
+export type HostLookupResult<T> =
+	| { id: string; status: "found"; value: T }
+	| { id: string; status: "not-found" }
+	| { id: string; status: "unauthorized" };
+
+export type HostGoalReadError = {
+	goalId: string;
+	status: "not-found" | "unauthorized";
+};
+
+export type HostStaffState = "active" | "paused" | "retired";
+export interface HostStaffSummary {
+	id: string;
+	name: string;
+	state: HostStaffState;
+	accessory: string;
+	createdAt: number;
+	updatedAt: number;
+	roleId?: string;
+	currentSessionId?: string;
+	lastWakeAt?: number;
+}
+
+export type HostSessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated" | "archived";
+export interface HostSessionSummary {
+	id: string;
+	title: string;
+	status: HostSessionStatus;
+	createdAt: number;
+	lastActivity: number;
+	archived: boolean;
+	archivedAt?: number;
+	goalId?: string;
+	teamGoalId?: string;
+	taskId?: string;
+	staffId?: string;
+	delegateOf?: string;
+	parentSessionId?: string;
+	childKind?: string;
+	teamLeadSessionId?: string;
+	role?: string;
+	readOnly?: boolean;
+	hasUnansweredQuestion?: boolean;
+}
+
+export type HostGoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
+export type HostGoalSetupStatus = "ready" | "preparing" | "retrying" | "error";
+export interface HostGoalSummary {
+	id: string;
+	title: string;
+	state: HostGoalState;
+	createdAt: number;
+	updatedAt: number;
+	team: boolean;
+	archived: boolean;
+	archivedAt?: number;
+	workflowId?: string;
+	parentGoalId?: string;
+	rootGoalId?: string;
+	teamLeadSessionId?: string;
+	setupStatus?: HostGoalSetupStatus;
+	paused?: boolean;
+	mergeConflict?: boolean;
+}
+
+export type HostTaskState = "todo" | "in-progress" | "blocked" | "complete" | "skipped";
+export interface HostTaskSummary {
+	id: string;
+	goalId: string;
+	title: string;
+	type: string;
+	state: HostTaskState;
+	createdAt: number;
+	updatedAt: number;
+	dependsOn: string[];
+	parentTaskId?: string;
+	assignedSessionId?: string;
+	completedAt?: number;
+	workflowGateId?: string;
+}
+
+export type HostGateStatus = "pending" | "passed" | "failed" | "bypassed";
+export type HostGateEffectiveStatus = HostGateStatus | "running";
+export interface HostGateSummary {
+	gateId: string;
+	status: HostGateStatus;
+	effectiveStatus: HostGateEffectiveStatus;
+	running: boolean;
+	awaitingSignoffCount: number;
+	dependsOn: string[];
+	signalCount: number;
+	name?: string;
+	updatedAt?: number;
+}
+
+export type HostPullRequestState = "OPEN" | "CLOSED" | "MERGED";
+export type HostPullRequestReviewDecision = "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED";
+export type HostPullRequestMergeability = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+export interface HostPullRequestSummary {
+	goalId: string;
+	state: HostPullRequestState;
+	number?: number;
+	title?: string;
+	url?: string;
+	updatedAt?: string;
+	reviewDecision?: HostPullRequestReviewDecision;
+	mergeability?: HostPullRequestMergeability;
 }
 
 export type HostBobbitState = "active" | "idle" | "paused";
