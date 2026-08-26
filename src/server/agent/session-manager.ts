@@ -81,6 +81,8 @@ import {
 	appendSkillSidecarTranscriptBinding,
 	projectPromptDisplayMessage,
 	projectPromptDisplayMessagesForSession,
+	readSkillSidecarEntries,
+	type SkillSidecarEntry,
 } from "../skills/skill-sidecar.js";
 import {
 	sanitizeAttachmentDisplayMetadata,
@@ -1347,6 +1349,9 @@ interface PendingSkillSidecarEnvelope {
 	fileMentions?: FileMention[];
 	attachments?: AttachmentDisplayMetadata[];
 	recordId?: string;
+	/** Durable accepted occurrence identity persisted with modern envelopes. */
+	intentId?: string;
+	/** Current author-sidecar dispatch key; legacy attempts may be rebound. */
 	promptId?: string;
 }
 
@@ -1614,7 +1619,9 @@ function cancelPromptAuthorBinding(
 		}
 	}
 	for (const envelope of session.pendingSkillExpansions ?? []) {
-		if (envelope.promptId === pending.promptId) envelope.promptId = undefined;
+		if (envelope.promptId === pending.promptId && envelope.intentId === undefined) {
+			envelope.promptId = undefined;
+		}
 	}
 	retainPromptAuthorAmbiguityFence(session, pending);
 	cancelSessionPromptActivity(
@@ -2226,8 +2233,67 @@ function commitCorrelatedPromptActivity(
 	);
 }
 
+/**
+ * Rebuild modern display envelopes from their accepted occurrence identity.
+ * Cancelled terminal occurrences are excluded unless the durable queue/ledger
+ * proves that the same accepted occurrence still owns a retry. Duplicate
+ * display rows fail closed rather than falling back to body text.
+ */
+export function restorePromptDisplayEnvelopes(
+	session: SessionInfo,
+	authorEntries: PromptAuthorBinding[],
+	displayEntries: SkillSidecarEntry[] = readSkillSidecarEntries(session.id),
+): number {
+	const groups = new Map<string, SkillSidecarEntry[]>();
+	for (const entry of displayEntries) {
+		if (entry.schemaVersion !== 1 || !entry.recordId || !entry.intentId) continue;
+		const group = groups.get(entry.intentId) ?? [];
+		group.push(entry);
+		groups.set(entry.intentId, group);
+	}
+	const durableIntentIds = new Set<string>();
+	for (const row of session.promptQueue?.toArray?.() ?? []) durableIntentIds.add(row.id);
+	for (const row of session.inFlightSteerTexts ?? []) {
+		if (row.intentId) durableIntentIds.add(row.intentId);
+	}
+	const restored: PendingSkillSidecarEnvelope[] = [];
+	for (const [intentId, group] of groups) {
+		if (group.length !== 1) continue;
+		const author = selectLatestPromptAuthorBinding(
+			authorEntries,
+			(candidate) => candidate.intentId === intentId,
+		);
+		if (!author) continue;
+		if (author.settlement?.outcome === "cancelled" && !durableIntentIds.has(intentId)) continue;
+		const entry = group[0];
+		if (typeof author.modelText === "string") {
+			const baseModelText = author.modelPrefix && author.modelText.startsWith(author.modelPrefix)
+				? author.modelText.slice(author.modelPrefix.length)
+				: author.modelText;
+			if (baseModelText !== entry.modelText) continue;
+		}
+		const existing = session.pendingSkillExpansions?.find((candidate) =>
+			candidate.recordId === entry.recordId && candidate.intentId === intentId);
+		restored.push(existing ?? {
+			modelText: entry.modelText,
+			originalText: entry.originalText,
+			skillExpansions: entry.skillExpansions ?? [],
+			...(entry.fileMentions?.length ? { fileMentions: entry.fileMentions } : {}),
+			...(entry.attachments?.length ? { attachments: entry.attachments } : {}),
+			recordId: entry.recordId,
+			intentId,
+			promptId: author.promptId,
+		});
+	}
+	const unpersisted = (session.pendingSkillExpansions ?? []).filter((entry) =>
+		entry.intentId === undefined || entry.recordId === undefined);
+	session.pendingSkillExpansions = [...unpersisted, ...restored];
+	return restored.length;
+}
+
 /** Rebuild live correlation state before switch_session replays transcript events. */
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
+	restorePromptDisplayEnvelopes(session, entries);
 	session.pendingPromptAuthors = entries
 		.filter((entry) => entry.settlement === undefined)
 		.map(({ promptId, intentId, attemptId, dispatchEpoch, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
@@ -7878,6 +7944,7 @@ export class SessionManager {
 			attachments?: unknown[];
 			intentId?: string;
 		} | undefined,
+		acceptedIntentId: string | undefined = opts?.intentId,
 	): PendingSkillSidecarEnvelope | undefined {
 		const attachments = sanitizeAttachmentDisplayMetadata(opts?.attachments);
 		const hasSkillExpansions = !!opts?.skillExpansions?.length;
@@ -7889,6 +7956,7 @@ export class SessionManager {
 			ts: this.clock.now(),
 			modelText: dispatchText,
 			originalText: text,
+			...(acceptedIntentId ? { intentId: acceptedIntentId } : {}),
 			skillExpansions: opts?.skillExpansions ?? [],
 			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 			...(attachments?.length ? { attachments } : {}),
@@ -7900,7 +7968,7 @@ export class SessionManager {
 			...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 			...(attachments?.length ? { attachments } : {}),
 			...(recordId ? { recordId } : {}),
-			...(opts?.intentId ? { promptId: opts.intentId } : {}),
+			...(acceptedIntentId ? { intentId: acceptedIntentId, promptId: acceptedIntentId } : {}),
 		};
 		if (!session.pendingSkillExpansions) session.pendingSkillExpansions = [];
 		session.pendingSkillExpansions.push(envelope);
@@ -8035,7 +8103,7 @@ export class SessionManager {
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-		this.appendPromptDisplayEnvelope(session, text, dispatchText, opts);
+		this.appendPromptDisplayEnvelope(session, text, dispatchText, opts, reliableIntentId);
 		// Server-generated work entered the occurrence lifecycle before any sidecar
 		// persistence above; now persist the delivery carrier itself.
 		if (reliableIntentId) {
@@ -8408,6 +8476,7 @@ export class SessionManager {
 			text,
 			this.promptDisplayModelTextAtAdmission(session, dispatchText),
 			opts,
+			reliableIntentId,
 		);
 
 		// Stable-ID admission has one durable boundary: persist the exact occurrence

@@ -32,12 +32,21 @@ import {
 } from "../agent/attachment-display.js";
 
 const SKILL_RECORD_ID_PREFIX = "skill:v1:";
+const MAX_OCCURRENCE_ID_LENGTH = 256;
+
+function isOccurrenceId(value: unknown): value is string {
+	return typeof value === "string"
+		&& value.trim().length > 0
+		&& value.length <= MAX_OCCURRENCE_ID_LENGTH;
+}
 
 export interface SkillSidecarEntry {
 	/** Additive schema marker. Legacy records without it remain readable. */
 	schemaVersion?: 1;
 	/** Bobbit-local identity. It is deliberately distinct from Pi's transcript id. */
 	recordId?: string;
+	/** Durable accepted prompt occurrence. Modern records never fall back to text matching. */
+	intentId?: string;
 	/** Authoritative Pi message-entry identity, projected only from a unique settlement binding. */
 	transcriptEntryId?: string;
 	/** Unix epoch (ms) at the moment the user message was persisted. */
@@ -109,6 +118,7 @@ function sidecarPath(sessionId: string): string | undefined {
 export function appendSkillSidecarEntry(sessionId: string, entry: SkillSidecarEntry): boolean {
 	const file = sidecarPath(sessionId);
 	if (!file) return false;
+	if (entry.intentId !== undefined && !isOccurrenceId(entry.intentId)) return false;
 	const attachments = entry.attachments === undefined
 		? undefined
 		: sanitizeAttachmentDisplayMetadata(entry.attachments);
@@ -199,16 +209,19 @@ export function readSkillSidecarEntries(sessionId: string): SkillSidecarEntry[] 
 				) {
 					const {
 						recordId: candidateRecordId,
+						intentId: candidateIntentId,
 						attachments: _untrustedAttachments,
-						// Inline identity is project-visible, untrusted metadata. Only a
-						// separate append-only binding may project it onto the entry.
+						// Inline transcript identity is project-visible, untrusted metadata.
+						// Only a separate append-only binding may project it onto the entry.
 						transcriptEntryId: _untrustedTranscriptEntryId,
 						...legacyFields
 					} = entry;
+					if (candidateIntentId !== undefined && !isOccurrenceId(candidateIntentId)) continue;
 					const normalized: SkillSidecarEntry = {
 						...legacyFields,
 						...(attachments ? { attachments } : {}),
 						...(isSkillRecordId(candidateRecordId) ? { recordId: candidateRecordId } : {}),
+						...(isOccurrenceId(candidateIntentId) ? { intentId: candidateIntentId } : {}),
 					};
 					out.push(normalized);
 					if (normalized.recordId) {
@@ -354,18 +367,30 @@ export function mergeSidecarEntriesIntoMessages(
 		unidentifiedBodyCounts.set(body, (unidentifiedBodyCounts.get(body) ?? 0) + 1);
 	}
 
+	const occurrenceGroups = new Map<string, SkillSidecarEntry[]>();
 	const boundGroups = new Map<string, SkillSidecarEntry[]>();
 	const boundTextGroups = new Map<string, SkillSidecarEntry[]>();
 	const legacyQueues = new Map<string, SkillSidecarEntry[]>();
 	for (const entry of entries) {
+		const occurrenceId = isOccurrenceId(entry.intentId) ? entry.intentId : undefined;
+		const hasOccurrence = occurrenceId !== undefined;
+		if (occurrenceId) {
+			const group = occurrenceGroups.get(occurrenceId) ?? [];
+			group.push(entry);
+			occurrenceGroups.set(occurrenceId, group);
+		}
 		if (isPiTranscriptEntryId(entry.transcriptEntryId)) {
 			const group = boundGroups.get(entry.transcriptEntryId) ?? [];
 			group.push(entry);
 			boundGroups.set(entry.transcriptEntryId, group);
-			const textGroup = boundTextGroups.get(entry.modelText) ?? [];
-			textGroup.push(entry);
-			boundTextGroups.set(entry.modelText, textGroup);
-		} else {
+			if (!hasOccurrence) {
+				const textGroup = boundTextGroups.get(entry.modelText) ?? [];
+				textGroup.push(entry);
+				boundTextGroups.set(entry.modelText, textGroup);
+			}
+		} else if (!hasOccurrence) {
+			// Text FIFO is compatibility-only. A modern identified record that has
+			// not yet acquired stronger transcript proof must fail closed.
 			const queue = legacyQueues.get(entry.modelText) ?? [];
 			queue.push(entry);
 			legacyQueues.set(entry.modelText, queue);
@@ -387,20 +412,26 @@ export function mergeSidecarEntriesIntoMessages(
 	const out = messages.map((msg: any) => {
 		if (!msg || (msg.role !== "user" && msg.role !== "user-with-attachments")) return msg;
 		const body = messageBody(msg);
-		const hasIdentity = isPiTranscriptEntryId(msg.entryId);
+		const transcriptIdentity = isPiTranscriptEntryId(msg.entryId);
+		const occurrenceIdentity = isOccurrenceId(msg.deliveryIntentId);
 		let envelope: SkillSidecarEntry | undefined;
-		if (hasIdentity) {
+		if (occurrenceIdentity) {
+			const exact = occurrenceGroups.get(msg.deliveryIntentId);
+			// Duplicate/conflicting occurrence records fail closed. Raw text can
+			// confirm an identity match but can never choose between occurrences.
+			if (exact?.length === 1 && exact[0].modelText === body) envelope = exact[0];
+		} else if (transcriptIdentity) {
 			const exact = boundGroups.get(msg.entryId);
-			// Duplicate/conflicting occurrence bindings fail closed.
 			if (exact?.length === 1 && exact[0].modelText === body) envelope = exact[0];
 		}
 		if (!envelope) {
-			// Preserve old unbound sidecars' FIFO compatibility even when a modern
-			// transcript projection happens to carry an entry id.
+			// Preserve old unbound sidecars' FIFO compatibility even when the newer
+			// author projection supplies an occurrence or transcript identity. Only
+			// the sidecar record's lack of modern identity authorizes this fallback.
 			const queue = legacyQueues.get(body);
 			envelope = queue?.shift();
 		}
-		if (!envelope && !hasIdentity) {
+		if (!envelope && !occurrenceIdentity && !transcriptIdentity) {
 			envelope = uniqueBoundFallbacks.get(body);
 			if (envelope) uniqueBoundFallbacks.delete(body);
 		}
