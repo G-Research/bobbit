@@ -203,7 +203,7 @@ These cues are scoped to **human attention**: standalone sessions notify on idle
 
 ## Model routing and authentication
 
-Bobbit can source models from built-in providers, local custom providers, or one configured AI Gateway. AI Gateway discovery is well-known-first so each upstream retains its native Responses, Bedrock Converse, or chat-completions route; the legacy model-list path remains available for older gateways. See [AI Gateway routing](ai-gateway-routing.md) for setup, operator controls, security boundaries, model-ID migration, and refresh behavior.
+Bobbit can source models from built-in providers, local custom providers, or one configured AI Gateway. AI Gateway discovery is well-known-first so each upstream retains its native Responses, Bedrock Converse, or chat-completions route; the legacy model-list path remains available for older gateways. See [AI Gateway routing](ai-gateway-routing.md) for setup, operator controls, security boundaries, model-ID migration, `models.json` publication ownership (including adoption of pre-v0.17.0 blocks), and refresh behavior.
 
 Models become usable either through the configured AI Gateway, via an **account OAuth login** (Settings → Account), or with a **provider API key** (Settings → Models → Provider API Keys). OAuth credentials are provider-partitioned in `auth.json` and are propagated into agent sandboxes through the same sanitized path for every provider. Text-session model fallback is opt-in via `allowSessionModelFallback`; see [Controlled session model fallback](session-model-fallback.md).
 

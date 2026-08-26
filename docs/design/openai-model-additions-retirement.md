@@ -43,6 +43,8 @@ The publication contract is:
 
 Writes use localized JSONC edits and atomic replacement. This keeps provenance with the only block Bobbit owns while avoiding a migration sidecar or a second metadata state owner.
 
+> **Amended after this design.** The marker shipped in v0.17.0, so blocks published by v0.16.3 and earlier are unmarked Bobbit output and were frozen out of discovery and provenance forever. Bobbit now adopts such a block — marker only, nothing else rewritten — when it matches an exact signature of Bobbit's own deterministic generated shape *and* the configured gateway URL. Content resemblance alone is still not enough, and everything failing that signature stays user-owned and byte-identical. See [AI Gateway routing — Adopting a pre-v0.17.0 publication](../ai-gateway-routing.md#adopting-a-pre-v0170-publication).
+
 ## Live state and thinking
 
 Live and rehydrated model state resolves from the last exact assembled registry row, then an exact direct Pi row. Unknown tuples remain unavailable rather than receiving default context, modality, reasoning, or thinking metadata.
@@ -71,7 +73,7 @@ Malformed, unavailable, fabricated, or cross-provider effective tuples fail befo
 - Direct Pi and composed user/custom metadata pass through exactly.
 - Well-known translation never calls legacy model-family inference.
 - Legacy inference is confined to the `/v1/models` compatibility boundary.
-- Historical rows and unmarked provider blocks are never claimed from content alone.
+- Historical rows and unmarked provider blocks are never claimed from content alone. (An unmarked `providers.aigw` block may be adopted only when its full generated signature *and* the configured gateway URL match — see the amendment above.)
 - No removed Pi row is reintroduced by Bobbit production code.
 - Requested identity remains available for diagnosis even when an explicit fallback produces a different effective identity.
 - Host, sandbox, and recovery paths validate the same canonical tuple before spawn.

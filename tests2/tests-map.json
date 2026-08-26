@@ -1680,6 +1680,15 @@
       }
     },
     {
+      "path": "tests2/core/aigw-legacy-block-adoption.test.ts",
+      "reason": "Reproducer pinning that an unmarked pre-0.17.0 Bobbit providers.aigw publication is adopted on the model-registry read path, restoring live discovery, upstreamProvider provenance, and the persisted managed marker.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/aigw-retained-catalog-on-discovery-failure.test.ts",
       "reason": "Focused AIGW catalog regression proving transient discovery failures retain only matching persisted routing metadata while successful discovery omissions remain authoritative.",
       "execution": {

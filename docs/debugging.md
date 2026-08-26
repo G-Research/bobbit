@@ -89,6 +89,19 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **First look**: the failure tail now contains either `test timed out after <n>ms` (with `test at <file>:<line>`) or `[run-unit] HUNG FILE: <path>`. Do not just raise the timeout — read the named file/test.
 - **Pinning tests**: `tests/run-unit-wrapper.test.ts`, `tests/hung-test-reporter.test.ts`, `tests/run-unit-heartbeat-diagnostics.test.ts`, `tests/run-unit-hung-test-integration.test.ts`.
 
+## `test:unit` reports "Worker exited unexpectedly" with zero failing tests
+
+- **Symptom**: `npm run test:unit` ends with many unhandled errors — `Worker exited unexpectedly`, `Worker forks emitted error` — while the summary reports no failing tests, and some test files never report at all. Re-running moves which files disappear.
+- **Cause**: a stale compiled native module in *that worktree*. A worker process crashes inside the addon before Vitest can attribute anything to a test, so the report has no failure to point at. The observed instance: `Assertion failed: (env) != nullptr` → `node::RemoveEnvironmentCleanupHook` → `Statement::~Statement()` in `node_modules/better-sqlite3`, because the worktree still had `better-sqlite3` 12.11.1 installed while `package.json` (merged from the primary branch) required 13.0.3.
+- **Diagnostic**: check the installed version against the manifest, for the addon named in the crash trace:
+
+  ```bash
+  node -p "require('better-sqlite3/package.json').version"
+  ```
+
+  A native crash trace with no failing test is the tell. Do not start by bisecting tests — confirm the install first.
+- **Fix**: `npm ci` in that worktree, then re-check the version and re-run. Generalise: each worktree has its own `node_modules`, so **any native dependency bump merged from the primary branch needs a reinstall in every existing worktree**. Never share or link `node_modules` between worktrees to avoid this — see [node_modules corruption RCA](testing-v2/node-modules-corruption-rca.md).
+
 ## Tier-1 credential-lock test consumes its file budget
 
 - **Symptom**: `anthropic-oauth-credential-store.test.ts` passes on a retry or exceeds its per-file budget, usually in the tests that hold a Bobbit or Pi lock while fake timers are active.
@@ -1256,7 +1269,7 @@ Symptom: configure, refresh, or startup discovers models but does not update the
 Check `providers.aigw` in the active agent directory:
 
 - Bobbit may insert an absent block or refresh one marked with `"x-bobbit-managed": {"kind":"aigw-publication","version":1}`.
-- An unmarked block is user-owned, including historical generated-looking output. Bobbit does not adopt, rewrite, or remove it. While configured, `/api/models` uses Pi's exact composition of that target realm rather than bypassing it with discovery.
+- An unmarked block is user-owned **unless** it is recognisably one of Bobbit's own pre-v0.17.0 publications, in which case it is adopted (marked in place) and managed from then on. A block that is not recognisable is never adopted, rewritten, or removed. While configured, `/api/models` uses Pi's exact composition of that target realm rather than bypassing it with discovery. See [Default Models rows show bare ids](#default-models-rows-show-bare-ids-and-new-gateway-models-never-appear).
 - Malformed JSONC, duplicate `providers`/`providers.aigw` keys, or duplicate managed fields is ambiguous and fails closed. The file and new preference remain unchanged.
 - Valid JSONC comments and unknown fields are supported. Localized refresh edits only managed values and preserves unrelated bytes.
 
@@ -1265,6 +1278,26 @@ If the log instead reports an unreachable gateway, discovery failed before publi
 `BOBBIT_SKIP_AIGW_DISCOVERY=1` skips only startup discovery. It still applies Bedrock environment variables and leaves the current `models.json` active.
 
 See [AI Gateway routing — Publication ownership](ai-gateway-routing.md#publication-ownership-caches-and-containers).
+
+## Default Models rows show bare ids and new gateway models never appear
+
+- **Symptom**: Settings → Default Models renders bare model ids (`openai.gpt-5.6-sol`, `us.anthropic.claude-opus-5`) with no `[openai]` / `[aws]` provider tag, and the model picker shows `aigw` instead of the upstream provider. Models the gateway has since added never appear, and **Refresh Models** changes nothing. The same gateway viewed from another install shows the tags.
+- **Cause**: the active agent directory's `models.json` has a `providers.aigw` block with no `x-bobbit-managed` marker that Bobbit does not recognise as one of its own publications. That is the `unmarked-user` realm: the block is authoritative, live discovery is skipped, and `upstreamProvider` provenance is not composed — which is exactly what removes the tags. Publication also fails closed, so Refresh Models cannot repair it. Exact publications from the supported pre-marker releases (v0.12.0 through v0.16.3, excluding unshipped version numbers) are adopted automatically now, so reaching this state means the block was hand-edited, has an unsupported User-Agent, or its `baseUrl` no longer matches the configured `aigw.url`.
+- **First look**: the model registry logs one warning naming the file and the remedy (`providers.aigw in … is user-owned`). If that line is absent, the block is managed and the problem lies elsewhere — check discovery instead.
+- **Diagnostic** — print the marker, the block's key set, and its headers (adjust the path if `BOBBIT_AGENT_DIR` or the agent-directory setting moved it):
+
+  ```bash
+  f=.bobbit/headquarters/agent/models.json   # per-project default; a global install uses ~/.bobbit/headquarters/agent/
+  grep -n x-bobbit-managed "$f"          # marker present?
+  node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1],"utf-8")).providers?.aigw;
+    console.log({keys:p&&Object.keys(p),api:p?.api,apiKey:p?.apiKey,baseUrl:p?.baseUrl,headers:p?.headers})' "$f"
+  ```
+
+  `JSON.parse` throws if the file uses JSONC comments or trailing commas. A comment or trailing comma *inside* the `providers.aigw` value is itself disqualifying; one elsewhere in the file is harmless, so strip it before re-running the check.
+
+  Compare the output against what Bobbit generates: keys exactly `baseUrl`, `apiKey`, `api`, `headers`, `models`; `apiKey` `"none"`; `api` `"openai-completions"`; exactly two headers (a User-Agent from a published supported release — v0.12.0, v0.13.0, v0.13.1, v0.14.0, v0.14.1, v0.14.2, v0.15.0, v0.15.1, v0.16.1, v0.16.2, or v0.16.3 — and the `x-opencode-session` `!node -e …` literal); `baseUrl` equal to the saved `aigw.url` ignoring trailing slash and host case.
+- **Fix**: either correct the deviation so the block is adopted on the next model read (usually the `baseUrl`), or delete the whole `providers.aigw` block and restart so Bobbit republishes it marked. Both restore live discovery and the provider tags. Do not hand-add the marker to a block you actually maintain — that hands the block to Bobbit, which will then overwrite its models on every refresh.
+- **Reference**: [AI Gateway routing — Adopting a pre-v0.17.0 publication](ai-gateway-routing.md#adopting-a-pre-v0170-publication) and [AI Gateway internals — Publication ownership and legacy block adoption](internals.md#publication-ownership-and-legacy-block-adoption). Pinned by `tests2/core/aigw-legacy-block-adoption.test.ts`.
 
 ## Review/naming model mismatch under AI Gateway
 
