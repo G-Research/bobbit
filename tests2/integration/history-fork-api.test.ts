@@ -933,7 +933,8 @@ test.describe("history fork API", () => {
 	});
 
 	test("publishes, rebases, and rehydrates a sandbox history transcript using canonical container coordinates", async ({ gateway }) => {
-		const sourceId = await createTrackedSession();
+		const project = await registerUntrackedFixtureProject(gateway, "container-coordinate-project");
+		const sourceId = await createTrackedSession(project.rootPath, project.id);
 		const sourceCoordinates = configureSandboxOwner(gateway, sourceId, `container-coordinate-${randomUUID()}`);
 		const seeded = seedTranscript(gateway, sourceId, ordinaryHistory());
 		const manager = gateway.sessionManager;
