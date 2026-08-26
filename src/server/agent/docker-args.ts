@@ -167,13 +167,13 @@ export interface DockerRunConfig {
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
-	 * - Per-session containers (sessionId set, projectId unset): the host
-	 *   directory `<stateDir>/preview/<sessionId>` is bind-mounted at
-	 *   `/bobbit/preview` so the agent can read back its own preview tree.
-	 * - Per-project containers (projectId set): `<stateDir>/preview/` is
-	 *   bind-mounted at `/bobbit/preview-root` so every session sharing the
-	 *   long-lived container can resolve its own subtree by
-	 *   `BOBBIT_SESSION_ID`.
+	 * - Per-session containers (sessionId set, including project-backed session
+	 *   runtimes): the host directory `<stateDir>/preview/<sessionId>` is
+	 *   bind-mounted at `/bobbit/preview` so the agent can read back only its own
+	 *   preview tree.
+	 * - Per-project control containers (projectId set and sessionId absent):
+	 *   `<stateDir>/preview/` is bind-mounted at `/bobbit/preview-root` so the
+	 *   long-lived control container retains its shared preview behavior.
 	 *
 	 * Note: the gateway runs the actual writes (via `mount.writeInline` /
 	 * `mount.mountFile`) — the bind-mount mainly exists for symmetry, so
@@ -334,17 +334,17 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// mount.mountFile. Bind it into the container so the agent (and any
 	// in-container tooling) can read back the same bytes. Replaces the
 	// old BOBBIT_HOST_CWD path-translation dance.
-	if (stateDir && projectId) {
-		// Per-project (long-lived) container: bind the parent so every
-		// session sharing the container resolves its own subtree.
-		const previewRoot = path.join(stateDir, "preview");
-		fs.mkdirSync(previewRoot, { recursive: true });
-		args.push("-v", `${toDockerPath(previewRoot)}:/bobbit/preview-root`);
-	} else if (stateDir && sessionId) {
-		// Per-session container: bind only this session's mount.
+	if (stateDir && sessionId) {
+		// A session identity always narrows the bind, including runtimes which
+		// also share the project's named workspace volumes.
 		const previewMount = path.join(stateDir, "preview", sessionId);
 		fs.mkdirSync(previewMount, { recursive: true });
 		args.push("-v", `${toDockerPath(previewMount)}:/bobbit/preview`);
+	} else if (stateDir && projectId) {
+		// Only the long-lived project control container may bind the shared root.
+		const previewRoot = path.join(stateDir, "preview");
+		fs.mkdirSync(previewRoot, { recursive: true });
+		args.push("-v", `${toDockerPath(previewRoot)}:/bobbit/preview-root`);
 	}
 
 	// Bind mount ONLY specific state subdirectories — never the full state dir,

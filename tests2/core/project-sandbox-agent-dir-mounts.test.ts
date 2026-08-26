@@ -14,15 +14,17 @@ import {
 	getAgentDirMountStaleness,
 	getModelsJsonContentStaleness,
 	getPackLocalDataMountStaleness,
+	getSessionPreviewMountStaleness,
 	getStateDirMountStaleness,
 } from "../../src/server/agent/project-sandbox.js";
 import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../src/server/agent/docker-args.js";
+import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
 
-function mount(source: string, destination: string, rw = true, mode = ""): { Source: string; Destination: string; RW: boolean; Mode: string } {
-	return { Source: source, Destination: destination, RW: rw, Mode: mode };
+function mount(source: string, destination: string, rw = true, mode = ""): { Type: string; Source: string; Destination: string; RW: boolean; Mode: string } {
+	return { Type: "bind", Source: source, Destination: destination, RW: rw, Mode: mode };
 }
 
 function makeSandbox(resolvePackLocalDataMounts?: () => readonly PackLocalDataMountPlan[]): ProjectSandbox {
@@ -397,7 +399,7 @@ type RuntimeInspection = {
 	State: { Running: boolean };
 	Config: { Image: string; Labels: Record<string, string>; Env: string[] };
 	HostConfig: { PidMode: string; NetworkMode: string; ExtraHosts: string[]; Privileged: boolean; Memory: number; NanoCpus: number; PidsLimit: number; RestartPolicy: { Name: string } };
-	Mounts: Array<{ Type: string; Name: string; Destination: string; RW: boolean }>;
+	Mounts: Array<{ Type: string; Name?: string; Source?: string; Destination: string; RW: boolean; Mode?: string }>;
 };
 
 function makeRuntimeSandbox(): ProjectSandbox {
@@ -447,13 +449,14 @@ function runtimeInspection(containerId: string, sessionId: string): RuntimeInspe
 		Mounts: [
 			{ Type: "volume", Name: volumes.workspace, Destination: "/workspace", RW: true },
 			{ Type: "volume", Name: volumes.worktrees, Destination: "/workspace-wt", RW: true },
+			mount(path.resolve("/project/.bobbit/state/preview", sessionId), "/bobbit/preview"),
 		],
 	};
 }
 
-function stubRuntimeInspection(sandbox: ProjectSandbox, inspections: Map<string, RuntimeInspection>): void {
+function stubRuntimeInspection(sandbox: ProjectSandbox, inspections: Map<string, RuntimeInspection>, stubMountChecks = true): void {
 	(sandbox as any)._inspectContainer = async (containerId: string) => inspections.get(containerId) ?? null;
-	(sandbox as any)._sessionRuntimeMountsAreCurrent = async () => true;
+	if (stubMountChecks) (sandbox as any)._sessionRuntimeMountsAreCurrent = async () => true;
 	(sandbox as any).execDocker = async (args: string[]) => {
 		if (args[0] === "inspect" && args.at(-1) === "runtime-image:latest") return { stdout: "sha256:runtime-image\n", stderr: "" };
 		throw new Error(`unexpected docker call: ${args.join(" ")}`);
@@ -461,6 +464,77 @@ function stubRuntimeInspection(sandbox: ProjectSandbox, inspections: Map<string,
 }
 
 describe("ProjectSandbox session execution runtimes", () => {
+	it("requires exactly one writable session preview bind and rejects shared, sibling, duplicate, and hidden preview exposure", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const previewRoot = path.join(stateDir, "preview");
+		const ownPreview = path.join(previewRoot, "session-a");
+		const siblingPreview = path.join(previewRoot, "session-b");
+		const expected = { stateDir, sessionId: "session-a" };
+		const ownMount = mount(ownPreview, "/bobbit/preview");
+
+		assert.equal(getSessionPreviewMountStaleness([ownMount], expected).stale, false);
+		assert.equal(getSessionPreviewMountStaleness([
+			mount(`/run/desktop/mnt/host${toDockerPath(ownPreview)}`, "/bobbit/preview"),
+		], expected).stale, false, "Docker Desktop host paths must normalize to the same session source");
+		for (const [label, mounts] of [
+			["old shared root", [mount(previewRoot, "/bobbit/preview-root")]],
+			["sibling source", [mount(siblingPreview, "/bobbit/preview")]],
+			["duplicate destination", [ownMount, mount(siblingPreview, "/bobbit/preview")]],
+			["read-only session bind", [mount(ownPreview, "/bobbit/preview", false, "ro")]],
+			["hidden sibling bind", [ownMount, mount(`/host_mnt${toDockerPath(siblingPreview)}`, "/tmp/sibling-preview")]],
+		] as const) {
+			const result = getSessionPreviewMountStaleness(mounts, expected);
+			assert.equal(result.stale, true, `${label}: ${result.reason ?? "unexpected valid result"}`);
+		}
+	});
+
+	it("fails runtime attestation for every legacy or forged preview mount layout", async () => {
+		const sandbox = makeRuntimeSandbox();
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const previewRoot = path.join(stateDir, "preview");
+		const ownPreview = path.join(previewRoot, "session-a");
+		const siblingPreview = path.join(previewRoot, "session-b");
+		const layouts = [
+			[mount(previewRoot, "/bobbit/preview-root")],
+			[mount(siblingPreview, "/bobbit/preview")],
+			[mount(ownPreview, "/bobbit/preview"), mount(siblingPreview, "/bobbit/preview")],
+			[mount(ownPreview, "/bobbit/preview", false, "ro")],
+			[mount(ownPreview, "/bobbit/preview"), mount(siblingPreview, "/tmp/sibling-preview")],
+		];
+		const inspections = new Map<string, RuntimeInspection>();
+		for (const [index, previewMounts] of layouts.entries()) {
+			const inspection = runtimeInspection(`runtime-preview-forged-${index}`, "session-a");
+			inspection.Mounts = inspection.Mounts.filter((entry) => entry.Destination !== "/bobbit/preview");
+			inspection.Mounts.push(...previewMounts);
+			inspections.set(inspection.Id, inspection);
+		}
+		stubRuntimeInspection(sandbox, inspections, false);
+
+		for (const containerId of inspections.keys()) {
+			(sandbox as any)._sessionRuntimes.set("session-a", containerId);
+			assert.equal(await sandbox.isSessionRuntimeIsolated("session-a", containerId), false, containerId);
+		}
+	});
+
+	it("removes and recreates a discovered runtime made stale by the old shared preview rule", async () => {
+		const sandbox = makeRuntimeSandbox();
+		const old = runtimeInspection("runtime-old-shared-preview", "session-a");
+		old.Mounts = old.Mounts.filter((entry) => entry.Destination !== "/bobbit/preview");
+		old.Mounts.push(mount(path.resolve("/project/.bobbit/state/preview"), "/bobbit/preview-root"));
+		stubRuntimeInspection(sandbox, new Map([[old.Id, old]]), false);
+		(sandbox as any)._findSessionRuntimeContainerIds = async () => [old.Id];
+		(sandbox as any)._isOwnedSessionRuntime = async (_sessionId: string, containerId: string) => containerId === old.Id;
+		const removed: string[] = [];
+		(sandbox as any)._removeContainer = async (containerId: string) => { removed.push(containerId); };
+		(sandbox as any)._createSessionRuntime = async () => "runtime-recreated";
+		const validate = (sandbox as any)._isSessionRuntimeCandidateValid.bind(sandbox);
+		(sandbox as any)._isSessionRuntimeCandidateValid = async (sessionId: string, containerId: string) =>
+			containerId === "runtime-recreated" || await validate(sessionId, containerId);
+
+		assert.equal(await sandbox.ensureSessionRuntime("session-a"), "runtime-recreated");
+		assert.deepEqual(removed, [old.Id]);
+	});
+
 	it("attests only the exact live private runtime and denies dead, forged, control, and PID1-secret containers", async () => {
 		const sandbox = makeRuntimeSandbox();
 		const valid = runtimeInspection("runtime-valid", "session-a");

@@ -115,6 +115,33 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test" }, NOOP_COMMAND_RUNNER).includes("--restart=unless-stopped"));
 	});
 
+	it("gives a session preview bind precedence when both project and session identities are present", () => {
+		const stateDir = fixtureDir("session-preview-precedence");
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: "",
+			projectId: "runtime-project",
+			sessionId: "runtime-session",
+			stateDir,
+		}, NOOP_COMMAND_RUNNER);
+
+		assert.ok(args.includes(`${toDockerPath(path.join(stateDir, "preview", "runtime-session"))}:/bobbit/preview`));
+		assert.ok(!args.some((arg) => arg.endsWith(":/bobbit/preview-root")));
+	});
+
+	it("retains the shared preview root for a project control container without a session identity", () => {
+		const stateDir = fixtureDir("project-preview-root");
+		const args = buildDockerRunArgs({
+			image: "test",
+			workspaceDir: "",
+			projectId: "runtime-project",
+			stateDir,
+		}, NOOP_COMMAND_RUNNER);
+
+		assert.ok(args.includes(`${toDockerPath(path.join(stateDir, "preview"))}:/bobbit/preview-root`));
+		assert.ok(!args.some((arg) => arg.endsWith(":/bobbit/preview")));
+	});
+
 	it("builds session runtimes from the project mount plan without PID1 secrets or a control label", async () => {
 		const projectId = "runtime-project";
 		const sessionId = "runtime-session";
@@ -129,9 +156,10 @@ describe("buildDockerRunArgs", () => {
 			},
 			execFileSync() { return ""; },
 		};
+		const projectDir = fixtureDir("session-runtime-args");
 		const sandbox = new ProjectSandbox({
 			projectId,
-			projectDir: fixtureDir("session-runtime-args"),
+			projectDir,
 			repoUrl: "https://example.test/repo.git",
 			image: "runtime-image:latest",
 			sandboxNetwork: "bobbit-sandbox-net",
@@ -152,6 +180,8 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_ROLE_LABEL}=${SESSION_RUNTIME_ROLE_VERSION}`));
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_PROJECT_LABEL}=${projectId}`));
 		assert.ok(runArgs.includes(`${SESSION_RUNTIME_SESSION_LABEL}=${sessionId}`));
+		assert.ok(runArgs.includes(`${toDockerPath(path.join(projectDir, ".bobbit", "state", "preview", sessionId))}:/bobbit/preview`));
+		assert.ok(!runArgs.some((arg) => arg.endsWith(":/bobbit/preview-root")));
 		assert.ok(!runArgs.some((arg) => arg.startsWith("bobbit-project=")), "runtime must not be discoverable as the project control container");
 		assert.ok(!runArgs.includes("OPENAI_API_KEY"));
 		assert.ok(!runArgs.some((arg) => arg.includes("pid1-secret")));

@@ -112,6 +112,10 @@ export interface StateDirMountExpectation {
 	stateDir: string;
 }
 
+export interface SessionPreviewMountExpectation extends StateDirMountExpectation {
+	sessionId: string;
+}
+
 /** Live project-aware resolver; callers must not snapshot winning pack mounts. */
 export type PackLocalDataMountPlanResolver = (
 	projectId: string,
@@ -182,6 +186,15 @@ function mountSourceMatches(source: string | undefined, expectedHostPath: string
 	return hostPathMountCandidates(expectedHostPath).has(comparableMountPath(source));
 }
 
+function mountSourceIsWithin(source: string | undefined, expectedHostRoot: string): boolean {
+	if (!source) return false;
+	const candidate = comparableMountPath(source);
+	for (const root of hostPathMountCandidates(expectedHostRoot)) {
+		if (candidate === root || candidate.startsWith(`${root}/`)) return true;
+	}
+	return false;
+}
+
 function isMountReadOnly(mount: DockerMountInfo): boolean {
 	if (mount.RW === false) return true;
 	return typeof mount.Mode === "string" && mount.Mode.split(",").includes("ro");
@@ -228,6 +241,42 @@ export function getStateDirMountStaleness(
 		if (!compatible) {
 			const mode = readOnly ? "read-only" : "writable";
 			return { stale: true, reason: `state mount ${destination} does not match the active ${mode} state directory` };
+		}
+	}
+	return { stale: false };
+}
+
+/** Require one writable, session-specific preview bind and no other preview-tree exposure. */
+export function getSessionPreviewMountStaleness(
+	mounts: DockerMountInfo[] | unknown,
+	expected: SessionPreviewMountExpectation,
+): AgentDirMountStalenessResult {
+	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	const previewRoot = path.join(expected.stateDir, "preview");
+	const expectedSource = path.join(previewRoot, expected.sessionId);
+	const sessionMounts = mounts.filter((mount) =>
+		normalizeContainerMountDestination(mount?.Destination) === "/bobbit/preview");
+	if (sessionMounts.length !== 1) {
+		return { stale: true, reason: sessionMounts.length === 0
+			? "missing required session preview mount"
+			: "duplicate session preview mounts" };
+	}
+	const sessionMount = sessionMounts[0];
+	if (sessionMount.Type !== "bind" || !mountSourceMatches(sessionMount.Source, expectedSource)) {
+		return { stale: true, reason: "session preview mount source does not match this session" };
+	}
+	if (sessionMount.RW !== true || isMountReadOnly(sessionMount)) {
+		return { stale: true, reason: "session preview mount is not writable" };
+	}
+
+	for (const mount of mounts) {
+		if (mount === sessionMount) continue;
+		const destination = normalizeContainerMountDestination(mount?.Destination);
+		if (destination === "/bobbit/preview-root") {
+			return { stale: true, reason: "session runtime exposes the shared preview root" };
+		}
+		if (mountSourceIsWithin(mount?.Source, previewRoot)) {
+			return { stale: true, reason: "session runtime has an additional project or sibling preview bind" };
 		}
 	}
 	return { stale: false };
@@ -1941,7 +1990,11 @@ export class ProjectSandbox {
 		});
 	}
 
-	private async _sessionRuntimeMountsAreCurrent(inspection: DockerContainerInspection, containerId: string): Promise<boolean> {
+	private async _sessionRuntimeMountsAreCurrent(inspection: DockerContainerInspection, containerId: string, sessionId: string): Promise<boolean> {
+		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
+		// Check the isolation-critical preview bind before optional content reads.
+		// Old/shared runtimes must fail closed even if another mount is stale too.
+		if (getSessionPreviewMountStaleness(inspection.Mounts, { stateDir, sessionId }).stale) return false;
 		const activeAgentDir = globalAgentDir();
 		const modelsJson = path.join(activeAgentDir, "models.json");
 		let modelsJsonExists = false;
@@ -1951,9 +2004,7 @@ export class ProjectSandbox {
 			modelsJson,
 			modelsJsonExists,
 		}).stale) return false;
-		if (getStateDirMountStaleness(inspection.Mounts, {
-			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
-		}).stale) return false;
+		if (getStateDirMountStaleness(inspection.Mounts, { stateDir }).stale) return false;
 		if (this.options.resolvePackLocalDataMounts) {
 			const expected = await this._resolvePackLocalDataMounts();
 			if (getPackLocalDataMountStaleness(inspection.Mounts, expected).stale) return false;
@@ -1994,7 +2045,7 @@ export class ProjectSandbox {
 				"inspect", "--format", "{{.Id}}", this.options.image,
 			], { timeout: 5_000, env: DOCKER_ENV });
 			if (!inspection.Image || inspection.Image !== currentImageId.trim()) return false;
-			if (!(await this._sessionRuntimeMountsAreCurrent(inspection, containerId))) return false;
+			if (!(await this._sessionRuntimeMountsAreCurrent(inspection, containerId, sessionId))) return false;
 			return true;
 		} catch {
 			return false;
