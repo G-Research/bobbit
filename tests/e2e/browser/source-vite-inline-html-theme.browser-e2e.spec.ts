@@ -464,8 +464,9 @@ test.describe("source Vite inline HTML theme runtime", () => {
 	});
 
 	test("source-runtime cleanup contains no synchronous Windows process-tree utility", async () => {
-		const source = await readFile(new URL("./source-vite-runtime-helpers.ts", import.meta.url), "utf8");
+		const source = await readFile(new URL("./_helpers/source-vite-runtime-helpers.ts", import.meta.url), "utf8");
 		expect(source).not.toMatch(/spawnSync|taskkill/i);
+		expect(source).toContain('from "../../../../src/server/agent/spawn-tree.js"');
 		expect(source).toContain("spawnTracked(file, args, options)");
 		expect(source.match(/return startOwnedSourceProcess\(/g)).toHaveLength(2);
 		expect(source).toContain('process.platform === "win32"');
