@@ -221,17 +221,17 @@ npx playwright test --config playwright-manual.config.ts --list
 
 The semantic file counts were produced by filtering `git ls-files -z` with the exact directory/suffix pairs exported by `scripts/testing/layout-policy.mjs`. The sum and pairwise-disjointness check used normalized repository-relative paths.
 
-### Retry-free execution timing
+### Earlier retry-free diagnostic attempts
 
-All rows are single local observations with `BOBBIT_V2_RETRY_FREE=1`; no retry occurred. Median and p95 are not reported from a sample of one. The browser and E2E rows are complete-lane attempts, not successful qualification: recording their failures prevents a failed run from being misrepresented as timing evidence for a pass.
+These rows are single local observations with `BOBBIT_V2_RETRY_FREE=1`; no retry occurred. Median and p95 are not reported from a sample of one. The browser and aggregate E2E attempts failed, so they are retained as diagnostic timing—not represented as successful qualification.
 
 | Scope | Result | Runner wall | Outer wall | Notes |
 |---|---|---:|---:|---|
-| Complete unit lane | 1,190 passed + 3 skipped files; 11,418 passed + 19 skipped tests | **355.18 s** | **376.421 s** | Clean pass; fixed three-worker cap |
-| Complete normal-browser lane | 1,130 passed, 8 skipped, 2 failed, 1 did not run; 1,141 tests / 281 files discovered | **1,072.8 s** | **1,078.070 s** | Failed in `bg-process-persistence` and `stories-resilience`; zero retries |
+| Complete unit lane | 1,190 passed + 3 skipped files; 11,418 passed + 19 skipped tests | **355.18 s** | **376.421 s** | Clean retry-free pass; fixed three-worker cap |
+| Complete normal-browser lane | 1,130 passed, 8 skipped, 2 failed, 1 did not run; 1,141 total | **1,072.8 s** | **1,078.070 s** | `bg-process-persistence` and `stories-resilience` failed; zero retries |
 | Complete E2E Groups A–D | A pass, B pass, C fail, D pass; 92 files discovered | **587.934 s** | not separately captured | A 28.1 s; B 293.3 s; C 203.9 s; D 62.1 s; Groups overlap by design |
 
-The E2E report recorded 23.637 CPU-minutes, a peak of 35 processes, and `dockerCapability: "daemon-unavailable"`. Docker-owned behavior therefore remained explicitly capability-gated on this host. The complete E2E result is a failure because Group C returned code 1; passing groups do not convert it into a partial pass.
+The retry-free E2E report recorded 23.637 CPU-minutes, a peak of 35 processes, and `dockerCapability: "daemon-unavailable"`. Docker-owned behavior therefore remained explicitly capability-gated on this host. The A, B, and D subgroup passes remain first-attempt evidence; Group C's failure makes the aggregate attempt a failure.
 
 Commands:
 
@@ -241,7 +241,24 @@ BOBBIT_V2_RETRY_FREE=1 npm run test:browser
 BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
 ```
 
-These local observations are not cross-platform acceptance. The build/unit workflow owns Linux, Windows, and macOS complete-lane qualification; the browser and E2E failures above require a later passing workflow run before merge. The baseline did not contain complete browser or E2E execution, so there is no honest like-for-like runtime delta for those lanes. The unit lane grew from 1,177 to 1,193 files and this host's single observed retry-free wall changed from 298.13 to 355.18 seconds; different revisions and test inventories make that a capacity observation, not a controlled performance regression.
+### Final integrated passing workflow
+
+Signal 36 ran every implementation command at the same integrated revision, `2a5a268f527a949e83e7e0aca5577e58e2da7fa0`, and passed. This workflow used the ordinary configured retry policy; it is aggregate gate evidence, not a claim of first-attempt stability.
+
+| Command/lane | Result | Duration | Qualification note |
+|---|---|---:|---|
+| Check | Passed | **37.018 s** | Layout and type-check command passed |
+| Unit | 1,190 files passed + 3 skipped; 11,419 tests passed + 18 skipped | **266.616 s** | Complete lane passed under ordinary settings |
+| Browser | 1,128 passed + 11 skipped + 2 flaky = 1,141 total | **776.056 s** | Complete lane passed; the two formerly failing cases used retry margin |
+| E2E Groups A–D | Aggregate passed | **631.571 s** | Complete four-group command passed; no aggregate test count is inferred |
+
+The browser budget artifact recorded **770.1 s** across **281 specs**, with zero 60-second per-spec violations. The two flaky cases were `bg-process-persistence` and `stories-resilience`; because they passed only within the configured retry margin, this browser result must not be called retry-free.
+
+Retained E2E output reports **160 API tests passed + 3 skipped** in 5.0 minutes and **106 browser-fidelity tests passed + 12 skipped** in 3.7 minutes. Those subgroup counts are not summed into an E2E aggregate because the retained evidence does not provide comparable counts for every runner group. The aggregate fact supported by Signal 36 is only that Groups A–D passed in 631.571 seconds.
+
+The ordinary-policy workflow followed the earlier retry-free diagnostics: it establishes the final integrated pass, while the clean retry-free unit run and successful retry-free A/B/D cohorts remain the bounded first-attempt evidence. No later passing workflow is outstanding in this record.
+
+The pre-migration capture did not contain complete browser or E2E execution, so there is no honest like-for-like runtime delta for those lanes. The unit lane grew from 1,177 to 1,193 files; different revisions, inventories, and retry modes make the observed timings capacity evidence rather than a controlled performance regression comparison.
 
 ### Removed maintenance footprint
 
