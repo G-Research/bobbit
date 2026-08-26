@@ -88,7 +88,12 @@ beforeAll(() => {
 	manager = new SessionManager({ clock, skipTitleGeneration: true });
 	clock.clearInterval(manager._statusHeartbeatTimer);
 	manager._statusHeartbeatTimer = null;
-	manager._testStore = { get: vi.fn(() => undefined), update: vi.fn(), getAll: vi.fn(() => []) };
+	manager._testStore = {
+		get: vi.fn(() => undefined),
+		update: vi.fn(),
+		getAll: vi.fn(() => []),
+		flushAsync: vi.fn(async () => {}),
+	};
 });
 
 afterEach(() => manager.sessions.clear());

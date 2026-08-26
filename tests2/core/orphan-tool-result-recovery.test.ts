@@ -724,9 +724,12 @@ describe("SessionManager poisoned-history recovery", () => {
 		vi.spyOn(console, "info").mockImplementation(() => {});
 		let rejectReplacement!: (error: Error) => void;
 		const replacement = new Promise<void>((_resolve, reject) => { rejectReplacement = reject; });
+		let replacementEnteredResolve!: () => void;
+		const replacementEntered = new Promise<void>((resolve) => { replacementEnteredResolve = resolve; });
 		let respawns = 0;
 		h.manager._respawnAgentInPlaceOwned = async () => {
 			respawns++;
+			replacementEnteredResolve();
 			await replacement;
 		};
 
@@ -735,6 +738,7 @@ describe("SessionManager poisoned-history recovery", () => {
 			modelText: "expanded second follow-up",
 			source: "agent",
 		});
+		await replacementEntered;
 		rejectReplacement(new Error("fixture shared replacement failed"));
 
 		const results = await Promise.allSettled([first, second]);
