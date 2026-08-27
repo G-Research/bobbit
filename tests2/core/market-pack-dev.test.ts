@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import {
 	notifyVite,
 	parseArgs,
 	resolvePackBuild,
+	runWatcher,
 	servingTargets,
 } from "../../scripts/build-market-packs.mjs";
 
@@ -102,7 +103,7 @@ describe("market pack serving target resolution", () => {
 		await createPackRoot(root, "dist/other-discovery/fixture");
 		await createPackRoot(root, "market-packs/stale/lib/fixture");
 
-		expect(await servingTargets(declared, [], { projectRoot: root })).toEqual([expected]);
+		expect(await servingTargets(declared, [], { projectRoot: root })).toEqual([await realpath(expected)]);
 	});
 
 	it("fails deterministically when the default is missing or has the wrong manifest", async () => {
@@ -140,7 +141,7 @@ describe("market pack serving target resolution", () => {
 		expect(await servingTargets(declared, ["served/zulu", "served/alpha", "served/alpha"], {
 			projectRoot: root,
 			caseInsensitive: true,
-		})).toEqual([alpha, zulu]);
+		})).toEqual([await realpath(alpha), await realpath(zulu)]);
 	});
 
 	it("rejects a symlink alias of the authored root", async () => {
@@ -208,8 +209,41 @@ describe("selected pack build and mirror", () => {
 });
 
 describe("serialized pack rebuilds", () => {
-	it("does not mirror or notify after a failed build and remains usable", async () => {
-		let shouldFail = true;
+	it("rejects and cleans up an initial failed cycle before reporting readiness", async () => {
+		const root = await fixtureRoot();
+		const declared = resolvePackBuild("file-explorer");
+		await createPackRoot(root, declared.authorRoot, declared.pack);
+		await mkdir(path.join(root, declared.authorRoot, "src"), { recursive: true });
+		await createPackRoot(root, declared.defaultServingRoot, declared.pack);
+		const signals = new EventEmitter();
+		const watcher = { close: vi.fn() };
+		const watch = vi.fn(() => watcher);
+		const mirror = vi.fn(async () => {});
+		const notify = vi.fn(async () => {});
+		const log = vi.fn();
+
+		await expect(runWatcher(parseArgs(["--watch", declared.pack]), {
+			projectRoot: root,
+			watch,
+			build: async () => { throw new Error("initial compile failed"); },
+			mirror,
+			notify,
+			signalSource: signals,
+			onError() {},
+			log,
+		})).rejects.toThrow("initial compile failed");
+
+		expect(watch).toHaveBeenCalledOnce();
+		expect(mirror).not.toHaveBeenCalled();
+		expect(notify).not.toHaveBeenCalled();
+		expect(log).not.toHaveBeenCalled();
+		expect(watcher.close).toHaveBeenCalledOnce();
+		expect(signals.listenerCount("SIGINT")).toBe(0);
+		expect(signals.listenerCount("SIGTERM")).toBe(0);
+	});
+
+	it("does not mirror or notify after a later failed build and remains usable", async () => {
+		let shouldFail = false;
 		const mirror = vi.fn(async () => {});
 		const notify = vi.fn(async () => {});
 		const rebuilder = createSerializedRebuilder({
@@ -221,13 +255,20 @@ describe("serialized pack rebuilds", () => {
 		});
 		rebuilder.schedule(true);
 		await rebuilder.flush();
+		mirror.mockClear();
+		notify.mockClear();
+
+		shouldFail = true;
+		rebuilder.schedule(true);
+		await rebuilder.flush();
 		expect(mirror).not.toHaveBeenCalled();
 		expect(notify).not.toHaveBeenCalled();
+
 		shouldFail = false;
 		rebuilder.schedule(true);
 		await rebuilder.flush();
 		expect(mirror).toHaveBeenCalledOnce();
-		expect(notify).toHaveBeenCalledWith({ pack: "fixture", reloadToken: 1 });
+		expect(notify).toHaveBeenCalledWith({ pack: "fixture", reloadToken: 2 });
 	});
 
 	it("publishes once per pack-level cycle and coalesces concurrent events into one trailing cycle", async () => {
