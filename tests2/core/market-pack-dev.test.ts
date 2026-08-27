@@ -223,6 +223,64 @@ describe("selected pack build and mirror", () => {
 		await expect(readFile(path.join(target, "lib", "stale.js"))).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
+	it.each(["EPERM", "EEXIST"])("replaces an existing Windows output after an eligible %s collision", async (code) => {
+		const root = await fixtureRoot();
+		const declared = { ...declaration(), entries: [{ in: "panel.ts", out: "lib/nested/panel.js" }] };
+		await createBuiltOutputs(root, declared);
+		const target = await createPackRoot(root, "served/fixture");
+		const destination = path.join(target, "lib", "nested", "panel.js");
+		await mkdir(path.dirname(destination), { recursive: true });
+		await writeFile(destination, "panel-old");
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		const realFs = { copyFile, lstat, mkdir, realpath, rename, unlink };
+		let renameCalls = 0;
+		const fs = {
+			...realFs,
+			async rename(from: string, to: string) {
+				renameCalls += 1;
+				if (renameCalls === 1) throw Object.assign(new Error(`injected ${code}`), { code });
+				await rename(from, to);
+			},
+		};
+		vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+		await mirrorDeclaredOutputs(declared, targets, { projectRoot: root, fs });
+
+		expect(renameCalls).toBe(2);
+		expect(await readFile(destination, "utf8")).toBe("panel-current");
+	});
+
+	it.each(["EACCES", "EBUSY", "EIO"])("preserves an existing Windows output after an unrelated %s rename failure", async (code) => {
+		const root = await fixtureRoot();
+		const declared = { ...declaration(), entries: [{ in: "panel.ts", out: "lib/nested/panel.js" }] };
+		await createBuiltOutputs(root, declared);
+		const target = await createPackRoot(root, "served/fixture");
+		const destination = path.join(target, "lib", "nested", "panel.js");
+		await mkdir(path.dirname(destination), { recursive: true });
+		await writeFile(destination, "panel-old");
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		const realFs = { copyFile, lstat, mkdir, realpath, rename, unlink };
+		const renameFailure = Object.assign(new Error(`injected ${code}`), { code });
+		let tempPath: string | undefined;
+		let renameCalls = 0;
+		const fs = {
+			...realFs,
+			async rename(from: string, _to: string) {
+				renameCalls += 1;
+				tempPath = from;
+				throw renameFailure;
+			},
+		};
+		vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+		await expect(mirrorDeclaredOutputs(declared, targets, { projectRoot: root, fs })).rejects.toBe(renameFailure);
+
+		expect(renameCalls).toBe(1);
+		expect(await readFile(destination, "utf8")).toBe("panel-old");
+		expect(tempPath).toBeDefined();
+		await expect(lstat(tempPath!)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
 	it("rejects a declared output parent symlink or junction without writing outside the target", async () => {
 		const root = await fixtureRoot();
 		const declared = declaration();

@@ -400,6 +400,10 @@ async function cleanupOwnedTemporary(tempPath, tempStats, fsImpl) {
 	}
 }
 
+function isWindowsReplacementCollision(error) {
+	return process.platform === "win32" && (error?.code === "EPERM" || error?.code === "EEXIST");
+}
+
 async function publishDeclaredOutput(source, destination, target, claims, fsImpl) {
 	const expectedDestination = await captureDestinationFile(destination, target, claims, fsImpl);
 	const tempPath = path.join(path.dirname(destination), `.bobbit-pack-publish-${randomUUID()}`);
@@ -424,10 +428,9 @@ async function publishDeclaredOutput(source, destination, target, claims, fsImpl
 		try {
 			await fsImpl.rename(tempPath, destination);
 		} catch (error) {
-			// Windows rename does not replace an existing file. Remove only the exact
-			// regular file claimed above, then publish by a same-parent rename. A raced
-			// replacement makes rename fail closed rather than following it.
-			if (process.platform !== "win32" || expectedDestination === undefined) throw error;
+			// Windows rename can report EPERM or EEXIST when it cannot replace an
+			// existing file. Never remove the previous output for unrelated failures.
+			if (expectedDestination === undefined || !isWindowsReplacementCollision(error)) throw error;
 			await assertDestinationUnchanged(destination, expectedDestination, target, claims, fsImpl);
 			await fsImpl.unlink(destination);
 			if (await lstatIfPresent(destination, fsImpl) !== undefined) throw staleTargetError(destination);
