@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
@@ -78,14 +77,14 @@ async function responseText(response: Response): Promise<string> {
 	return response.clone().text().catch(() => "");
 }
 
-async function addFixtureSource(): Promise<string> {
+async function addFixtureSource(sourceRoot: string): Promise<string> {
 	const response = await apiFetch("/api/marketplace/sources", {
 		method: "POST",
-		body: JSON.stringify({ url: SOURCE_DIR }),
+		body: JSON.stringify({ url: sourceRoot }),
 	});
 	if (response.status === 409) {
 		const list = await apiFetch("/api/marketplace/sources");
-		const source = ((await list.json()).sources ?? []).find((item: { id: string; url: string }) => item.url === SOURCE_DIR);
+		const source = ((await list.json()).sources ?? []).find((item: { id: string; url: string }) => item.url === sourceRoot);
 		expect(source, "the existing hot-reload fixture source should be discoverable").toBeTruthy();
 		return source.id;
 	}
@@ -99,6 +98,14 @@ async function installFixturePack(sourceId: string, projectId: string): Promise<
 		body: JSON.stringify({ sourceId, dirName: PACK_NAME, scope: "project", projectId }),
 	});
 	expect(response.status, `fixture pack installation failed: ${await responseText(response)}`).toBe(201);
+}
+
+async function updateFixturePack(projectId: string): Promise<void> {
+	const response = await apiFetch("/api/marketplace/update", {
+		method: "POST",
+		body: JSON.stringify({ scope: "project", packName: PACK_NAME, projectId }),
+	});
+	expect(response.status, `fixture pack update failed: ${await responseText(response)}`).toBe(200);
 }
 
 async function uninstallFixturePack(projectId: string): Promise<void> {
@@ -184,7 +191,13 @@ function isPanelRequest(raw: string): boolean {
 test.describe("Journey: marketplace-pack development hot reload", () => {
 	test("repaints nested renderer and parameterized panel while preserving page and workspace identity", async ({ page, gateway }) => {
 		test.setTimeout(150_000);
-		const projectRoot = mkdtempSync(join(tmpdir(), "bobbit-pack-hot-reload-"));
+		const runRoot = process.env.BOBBIT_E2E_TMP_ROOT;
+		if (!runRoot) throw new Error("BOBBIT_E2E_TMP_ROOT must identify the browser run root");
+		const tempRoot = mkdtempSync(join(runRoot, "pack-hot-reload-"));
+		const projectRoot = join(tempRoot, "project");
+		const marketplaceSourceRoot = join(tempRoot, "marketplace-source");
+		mkdirSync(projectRoot, { recursive: true });
+		cpSync(SOURCE_DIR, marketplaceSourceRoot, { recursive: true });
 		let projectId: string | undefined;
 		let sessionId: string | undefined;
 		let sourceId: string | undefined;
@@ -198,7 +211,7 @@ test.describe("Journey: marketplace-pack development hot reload", () => {
 				rootPath: projectRoot,
 				seedWorkflows: false,
 			})).id;
-			sourceId = await addFixtureSource();
+			sourceId = await addFixtureSource(marketplaceSourceRoot);
 			await installFixturePack(sourceId, projectId);
 			sessionId = await createSession({ projectId, cwd: projectRoot });
 			await waitForSessionStatus(sessionId, "idle", 30_000);
@@ -247,9 +260,10 @@ test.describe("Journey: marketplace-pack development hot reload", () => {
 				stateParams: { artifactId: "artifact-42", marker: "stable-marker" },
 			});
 
-			const installedPackRoot = join(projectRoot, ".bobbit", "config", "market-packs", PACK_NAME);
-			writeFileSync(join(installedPackRoot, "lib", "nested", "hot-reload", "renderer.js"), rendererBundle("v2"), "utf8");
-			writeFileSync(join(installedPackRoot, "lib", "nested", "hot-reload", "panel.js"), panelBundle("v2"), "utf8");
+			const authoredPackRoot = join(marketplaceSourceRoot, PACK_NAME);
+			writeFileSync(join(authoredPackRoot, "lib", "nested", "hot-reload", "renderer.js"), rendererBundle("v2"), "utf8");
+			writeFileSync(join(authoredPackRoot, "lib", "nested", "hot-reload", "panel.js"), panelBundle("v2"), "utf8");
+			await updateFixturePack(projectId);
 
 			const rebuilt = await fetch(`${viteBaseUrl}/__bobbit_dev/pack-rebuilt`, {
 				method: "POST",
@@ -293,7 +307,7 @@ test.describe("Journey: marketplace-pack development hot reload", () => {
 			if (projectId) await uninstallFixturePack(projectId).catch((error) => cleanupFailures.push(error));
 			if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch((error) => cleanupFailures.push(error));
 			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch((error) => cleanupFailures.push(error));
-			try { rmSync(projectRoot, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
+			try { rmSync(tempRoot, { recursive: true, force: true }); } catch (error) { cleanupFailures.push(error); }
 			if (cleanupFailures.length > 0) throw new AggregateError(cleanupFailures, "hot-reload journey cleanup failed");
 		}
 	});
