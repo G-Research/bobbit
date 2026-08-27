@@ -40,6 +40,7 @@ const BASE_FILES: Record<string, string> = {
 	"scripts/copy-defaults.mjs": "// copy defaults\n",
 	"scripts/copy-builtin-packs.mjs": "// copy builtin packs\n",
 	"scripts/build-market-packs.mjs": "// build packs\n",
+	"scripts/pack-native-assets.mjs": "// materialize native assets\n",
 };
 
 function writeRepoFile(root: string, relativeFile: string, content: string): void {
@@ -354,6 +355,7 @@ describe.sequential("dist build cache key", () => {
 				["tsconfig.server.json", '{"compilerOptions":{}}\n'],
 				["package-lock.json", '{"lockfileVersion":3}\n'],
 				["scripts/copy-defaults.mjs", "// copy defaults v2\n"],
+				["scripts/pack-native-assets.mjs", "// materialize native assets v2\n"],
 			];
 			for (const [relativeFile, content] of changedInputs) {
 				writeRepoFile(repoRoot, relativeFile, content);
