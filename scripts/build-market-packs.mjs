@@ -480,7 +480,10 @@ export async function notifyVite(viteUrl, payload, options = {}) {
 		const endpoint = new URL(DEV_RELOAD_PATH, viteUrl);
 		const response = await (options.fetch ?? fetch)(endpoint, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
+			headers: {
+				"content-type": "application/json",
+				"X-Bobbit-Pack-Reload": "1",
+			},
 			body: JSON.stringify(payload),
 			signal: controller.signal,
 		});

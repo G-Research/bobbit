@@ -564,7 +564,14 @@ describe("Vite notification", () => {
 		expect(fetchMock).toHaveBeenCalledOnce();
 		const [url, init] = fetchMock.mock.calls[0];
 		expect(String(url)).toBe("http://127.0.0.1:5173/__bobbit_dev/pack-rebuilt");
-		expect(init).toMatchObject({ method: "POST", body: '{"pack":"fixture","reloadToken":7}' });
+		expect(init).toMatchObject({
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"X-Bobbit-Pack-Reload": "1",
+			},
+			body: '{"pack":"fixture","reloadToken":7}',
+		});
 		await expect(notifyVite("http://127.0.0.1:5173", { pack: "fixture", reloadToken: 8 }, {
 			fetch: async () => ({ status: 200 }),
 		})).rejects.toThrow("HTTP 200");
