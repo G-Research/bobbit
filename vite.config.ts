@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { defineConfig, type Plugin } from "vite";
@@ -311,6 +312,145 @@ function tailwindcssWithBundledDevGuard(): Plugin[] {
 	return plugins;
 }
 
+const PACK_DEV_REBUILT_PATH = "/__bobbit_dev/pack-rebuilt";
+const PACK_DEV_REBUILT_MAX_BODY = 8 * 1024;
+const SAFE_PACK_ID = /^[a-z0-9][a-z0-9-]*$/;
+
+type NetworkInterfaces = ReturnType<typeof os.networkInterfaces>;
+
+function normalizedPeerAddress(address: string): string {
+	const withoutScope = address.trim().toLowerCase().replace(/%.+$/, "");
+	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(withoutScope);
+	return mapped?.[1] ?? withoutScope;
+}
+
+function sameIpAddress(left: string, right: string): boolean {
+	const family = net.isIP(left);
+	if (family === 0 || net.isIP(right) !== family) return false;
+	const type = family === 4 ? "ipv4" : "ipv6";
+	try {
+		const addresses = new net.BlockList();
+		addresses.addAddress(left, type);
+		return addresses.check(right, type);
+	} catch {
+		return false;
+	}
+}
+
+/** True only for a loopback peer or an address assigned to this machine. */
+export function isLocalVitePeer(remoteAddress: string | undefined, interfaces: NetworkInterfaces = os.networkInterfaces()): boolean {
+	if (!remoteAddress) return false;
+	const peer = normalizedPeerAddress(remoteAddress);
+	if ((net.isIP(peer) === 4 && peer.startsWith("127.")) || sameIpAddress(peer, "::1")) return true;
+	if (net.isIP(peer) === 0) return false;
+
+	for (const addresses of Object.values(interfaces)) {
+		for (const address of addresses ?? []) {
+			if (sameIpAddress(peer, normalizedPeerAddress(address.address))) return true;
+		}
+	}
+	return false;
+}
+
+function validPackReloadPayload(value: unknown): value is { pack: string; reloadToken: number } {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return Object.keys(record).length === 2
+		&& typeof record.pack === "string"
+		&& SAFE_PACK_ID.test(record.pack)
+		&& typeof record.reloadToken === "number"
+		&& Number.isSafeInteger(record.reloadToken)
+		&& record.reloadToken > 0;
+}
+
+/**
+ * Development-only bridge from the authored-pack watcher to Vite's existing
+ * HMR channel. The gateway and production build expose no corresponding API.
+ */
+export function packDevHotReload(): Plugin {
+	return {
+		name: "bobbit-pack-dev-hot-reload",
+		apply: "serve",
+		configureServer(server) {
+			server.middlewares.use((req, res, next) => {
+				let pathname: string;
+				try {
+					pathname = new URL(req.url || "/", "http://vite.invalid").pathname;
+				} catch {
+					return next();
+				}
+				if (pathname !== PACK_DEV_REBUILT_PATH) return next();
+				if (req.method !== "POST") {
+					res.writeHead(405, { Allow: "POST", "Content-Type": "text/plain; charset=utf-8" });
+					res.end("Method Not Allowed");
+					return;
+				}
+				if (!isLocalVitePeer(req.socket.remoteAddress)) {
+					res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+					res.end("Forbidden");
+					return;
+				}
+
+				const declaredLength = req.headers["content-length"];
+				if (declaredLength !== undefined) {
+					const rawLength = Array.isArray(declaredLength) ? declaredLength[0] : declaredLength;
+					const isNumericLength = typeof rawLength === "string" && /^\d+$/.test(rawLength);
+					if (!isNumericLength || Number(rawLength) > PACK_DEV_REBUILT_MAX_BODY) {
+						res.writeHead(isNumericLength ? 413 : 400, { "Content-Type": "text/plain; charset=utf-8" });
+						res.end(isNumericLength ? "Payload Too Large" : "Bad Request");
+						req.resume();
+						return;
+					}
+				}
+
+				let size = 0;
+				let complete = false;
+				const chunks: Buffer[] = [];
+				const reject = (status: number, message: string) => {
+					if (complete) return;
+					complete = true;
+					res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+					res.end(message);
+				};
+				req.on("data", (chunk: Buffer | string) => {
+					if (complete) return;
+					const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+					size += bytes.byteLength;
+					if (size > PACK_DEV_REBUILT_MAX_BODY) {
+						reject(413, "Payload Too Large");
+						return;
+					}
+					chunks.push(bytes);
+				});
+				req.on("error", () => reject(400, "Bad Request"));
+				req.on("aborted", () => reject(400, "Bad Request"));
+				req.on("end", () => {
+					if (complete) return;
+					let payload: unknown;
+					try {
+						payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+					} catch {
+						reject(400, "Bad Request");
+						return;
+					}
+					if (!validPackReloadPayload(payload)) {
+						reject(400, "Bad Request");
+						return;
+					}
+					complete = true;
+					server.ws.send({
+						type: "custom",
+						event: "bobbit:pack-rebuilt",
+						data: payload,
+					});
+					res.writeHead(204);
+					res.end();
+				});
+			});
+		},
+	};
+}
+
 /**
  * Defense-in-depth: Reject requests from non-localhost IPs when Vite is
  * bound to localhost, and block Docker bridge subnet IPs in all modes.
@@ -616,6 +756,7 @@ export default defineConfig(({ command, mode }) => ({
 		tailwindcssWithBundledDevGuard(),
 		blockDangerousGlobs(),
 		localhostGuard(),
+		packDevHotReload(),
 		bobbitSwVersion(),
 		dynamicGatewayProxy(),
 	],
