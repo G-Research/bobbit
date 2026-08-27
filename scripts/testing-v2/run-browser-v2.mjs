@@ -53,14 +53,18 @@ export function createBrowserRunEnvironment(paths, inheritedEnv = process.env, p
 	}, platform);
 }
 
-/** Preserve every caller-provided Playwright flag, including npm's `--retry=0`. */
+/**
+ * Preserve caller arguments ahead of the configured project. Playwright's
+ * `--project` option is variadic, so positional filters after it are parsed as
+ * additional project names instead of test-file filters.
+ */
 export function playwrightCommandArgs(forwardedArgs = []) {
 	return [
 		join(REPO_ROOT, "node_modules", "playwright", "cli.js"),
 		"test",
 		"--config", "playwright-v2.config.ts",
-		"--project", "browser-v2",
 		...forwardedArgs,
+		"--project", "browser-v2",
 	];
 }
 
