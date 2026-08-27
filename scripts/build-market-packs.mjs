@@ -76,18 +76,6 @@ export const PACKS = [
 			{ in: "performance-routes.ts", out: "lib/performance-routes.mjs", platform: "node" },
 			{ in: "performance-tool-extension.ts", out: "tools/performance-optimisation/extension.js", platform: "node" },
 		],
-		nativeAssets: [
-			...[
-				"darwin-arm64", "darwin-x64",
-				"linux-arm64", "linux-x64",
-				"linuxmusl-arm64", "linuxmusl-x64",
-				"win32-arm64", "win32-x64",
-			].map(target => ({
-				package: "better-sqlite3",
-				fromEntry: `../prebuilds/${target}.node`,
-				out: `lib/native/${target}.node`,
-			})),
-		],
 	},
 	{
 		pack: "file-explorer",

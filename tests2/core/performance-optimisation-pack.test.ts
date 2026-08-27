@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -191,7 +191,9 @@ describe("performance optimisation first-party pack", () => {
 			"linuxmusl-arm64", "linuxmusl-x64",
 			"win32-arm64", "win32-x64",
 		];
-		for (const target of nativeTargets) expect(BUILD_SOURCE).toContain(`"${target}"`);
+		for (const target of nativeTargets) {
+			expect(existsSync(new URL(`../../market-packs/performance-optimisation/lib/native/${target}.node`, import.meta.url))).toBe(true);
+		}
 		expect(DATABASE_SOURCE).toContain('platform = "linuxmusl"');
 		expect(DATABASE_SOURCE).toContain("`./native/${target}.node`");
 		expect(DATABASE_SOURCE).not.toContain('"./better_sqlite3.node"');
