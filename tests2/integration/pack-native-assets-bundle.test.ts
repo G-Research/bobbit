@@ -79,7 +79,12 @@ const TARGET_RUNTIMES: ReadonlyArray<[CanonicalTarget, NativeAssetRuntime]> = [
 	["win32-x64", { platform: "win32", arch: "x64" }],
 ];
 
+// Full E2E shares Windows process capacity with the browser lanes: a valid
+// release attempt crossed 120 seconds under contention, while focused runs are
+// normally far shorter. Keep bounded headroom without retrying torn-down work.
+const REAL_PROCESS_TEST_TIMEOUT_MS = 180_000;
 const temporaryRoots = new Set<string>();
+const outstandingBuilds = new Set<Promise<Awaited<ReturnType<typeof build>>>>();
 
 async function loadBuildApi(): Promise<BuildApi> {
 	return await import(/* @vite-ignore */ BUILD_MODULE) as unknown as BuildApi;
@@ -136,7 +141,7 @@ function assertSelfContainedBundle(result: Awaited<ReturnType<typeof build>>, bu
 
 async function buildResolver(api: BuildApi, packRoot: string, sourceFile: string): Promise<string> {
 	const outfile = path.join(packRoot, "lib", "resolver.mjs");
-	const result = await build({
+	const buildPromise = build({
 		absWorkingDir: packRoot,
 		entryPoints: [sourceFile],
 		outfile,
@@ -151,6 +156,13 @@ async function buildResolver(api: BuildApi, packRoot: string, sourceFile: string
 		splitting: false,
 		plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "node" })],
 	});
+	outstandingBuilds.add(buildPromise);
+	let result: Awaited<typeof buildPromise>;
+	try {
+		result = await buildPromise;
+	} finally {
+		outstandingBuilds.delete(buildPromise);
+	}
 	assert.ok(result.outputFiles);
 	assert.equal(result.outputFiles.length, 1);
 	const bundle = result.outputFiles[0].text;
@@ -241,13 +253,17 @@ async function runNpm(cwd: string, argv: string[]): Promise<{ stdout: string; st
 	}
 }
 
-afterEach(() => {
+afterEach(async () => {
+	// esbuild's build API has no cancellation handle, and a Vitest timeout does
+	// not stop the pending promise. Keep fixture sources alive until every real
+	// build settles so teardown and retries cannot race the same build lifecycle.
+	await Promise.allSettled([...outstandingBuilds]);
 	for (const root of temporaryRoots) {
 		restoreWritable(root);
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 	temporaryRoots.clear();
-});
+}, REAL_PROCESS_TEST_TIMEOUT_MS);
 
 describe("bobbit:pack-native-assets build-only alias", () => {
 	it("inlines the Node helper and runs from an installed read-only pack without runtime host edges", async () => {
@@ -270,7 +286,7 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 		});
 		assert.equal(resolved, path.join(installedFamily, "linux-musl-arm64.node"));
 		assert.equal(path.relative(installedPack, resolved).startsWith(".."), false);
-	}, 60_000);
+	}, REAL_PROCESS_TEST_TIMEOUT_MS);
 
 	it("materializes, bundles, copies, packs, installs, and selects all eight assets read-only", async () => {
 		const root = makeTmpDir("pack-native-assets-release-");
@@ -407,7 +423,7 @@ describe("bobbit:pack-native-assets build-only alias", () => {
 			expect(fs.readFileSync(resolved)).toEqual(fs.readFileSync(path.join(family, `${target}.node`)));
 		}
 		expect(fs.readFileSync(resolverFile)).toEqual(resolverBefore);
-	}, 120_000);
+	}, REAL_PROCESS_TEST_TIMEOUT_MS);
 
 	it("rejects the helper alias in browser bundles and rejects unknown bobbit aliases", async () => {
 		const fixture = createBundleFixture();
