@@ -152,8 +152,12 @@ jobs:
       - name: Build sandbox image
         if: runner.os == 'Linux'
         run: |
+          HOST_UID=$(id -u)
           PI_AGENT_VERSION=$(node -p "require('./package.json').dependencies['@earendil-works/pi-coding-agent']")
-          docker build --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" -t bobbit-agent docker/
+          docker build \
+            --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" \
+            --build-arg "SANDBOX_USER_UID=$HOST_UID" \
+            -t bobbit-agent docker/
 
       - name: E2E gate
         run: npm run test:e2e

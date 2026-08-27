@@ -74,6 +74,7 @@ type CodeQlWorkflow = {
 
 const BUILD_UNIT_GATE_WORKFLOW_PATH = new URL("../../../.github/workflows/build-unit-gate.yml", import.meta.url);
 const CODEQL_WORKFLOW_PATH = new URL("../../../.github/workflows/codeql.yml", import.meta.url);
+const SANDBOX_DOCKERFILE_PATH = new URL("../../../docker/Dockerfile", import.meta.url);
 
 function workflowSource(path: URL): string {
 	return readFileSync(path, "utf8");
@@ -205,7 +206,7 @@ describe("native CI qualification workflows", () => {
 		}, "hosted Windows must serialize only API/process E2E while Linux and macOS retain two workers");
 	});
 
-	it("builds the version-matched sandbox image only for Linux E2E coverage", () => {
+	it("builds the version-matched, host-UID-aligned sandbox image only for Linux E2E coverage", () => {
 		const e2eSteps = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs.e2e.steps;
 		const sandboxBuild = stepByName(e2eSteps, "Build sandbox image");
 		const e2eGateIndex = e2eSteps.findIndex((step) => step.name === "E2E gate");
@@ -217,12 +218,36 @@ describe("native CI qualification workflows", () => {
 		assert.equal(
 			sandboxBuild.run?.trim(),
 			[
+				"HOST_UID=$(id -u)",
 				"PI_AGENT_VERSION=$(node -p \"require('./package.json').dependencies['@earendil-works/pi-coding-agent']\")",
-				'docker build --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" -t bobbit-agent docker/',
+				"docker build \\",
+				'  --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" \\',
+				'  --build-arg "SANDBOX_USER_UID=$HOST_UID" \\',
+				"  -t bobbit-agent docker/",
 			].join("\n"),
-			"the Linux image must use the repository's exact Pi agent dependency version",
+			"the Linux image must use the repository's exact Pi agent version and the local runner uid",
 		);
+		assert.doesNotMatch(sandboxBuild.run ?? "", /\bexport\s+HOST_UID\b/, "the host uid must remain local to the image-build step");
 		assert.ok(e2eSteps.indexOf(sandboxBuild) < e2eGateIndex, "the image must exist before image-backed E2E cases run");
+	});
+
+	it("keeps sandbox UID alignment non-root and fail-closed", () => {
+		const dockerfile = workflowSource(SANDBOX_DOCKERFILE_PATH);
+		const uidArgIndex = dockerfile.indexOf("ARG SANDBOX_USER_UID=1000");
+		const validationIndex = dockerfile.indexOf("case \"$SANDBOX_USER_UID\" in");
+		const positiveUidIndex = dockerfile.indexOf("[ \"$SANDBOX_USER_UID\" -gt 0 ]");
+		const remapIndex = dockerfile.indexOf('usermod --uid "$SANDBOX_USER_UID" node');
+		const reownershipIndex = dockerfile.indexOf("chown -R node /home/node");
+		const nonRootUserIndex = dockerfile.indexOf("\nUSER node\n");
+
+		assert.ok(uidArgIndex >= 0, "manual image builds must retain the base image's uid 1000 default");
+		assert.ok(validationIndex > uidArgIndex, "the uid must be validated before it is used");
+		assert.ok(positiveUidIndex > validationIndex, "uid zero must fail validation");
+		assert.ok(remapIndex > positiveUidIndex, "the existing node user may only be remapped after validation");
+		assert.ok(reownershipIndex > remapIndex, "the remapped user must retain ownership of its private home");
+		assert.ok(nonRootUserIndex > reownershipIndex, "all later image setup must run as the non-root node user");
+		assert.doesNotMatch(dockerfile, /\b(?:groupmod|USER\s+root)\b/, "UID alignment must not change the group or run the agent as root");
+		assert.doesNotMatch(dockerfile, /\bchmod\b[^\n]*(?:777|a\+rwx|o\+w)/, "UID alignment must not make private trees world-writable");
 	});
 
 	it("preserves normal retry and failure policy in Browser and E2E PR checks", () => {
