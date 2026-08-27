@@ -61,9 +61,23 @@ LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
 RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 
-# Run as non-root user. node:22-slim includes a 'node' user (uid=1000).
-# This ensures files created in /workspace via bind mount are owned by uid=1000
-# on the host, matching typical developer user IDs.
+# Align the non-root sandbox user with the host runner so private (0700) bind
+# roots remain accessible without weakening their permissions. Manual builds
+# retain the node base image's uid=1000 by default.
+ARG SANDBOX_USER_UID=1000
+RUN set -eu; \
+    case "$SANDBOX_USER_UID" in \
+      ''|*[!0-9]*) echo "SANDBOX_USER_UID must be a non-zero decimal uid" >&2; exit 1 ;; \
+    esac; \
+    if ! [ "$SANDBOX_USER_UID" -gt 0 ]; then \
+      echo "SANDBOX_USER_UID must be a non-zero decimal uid" >&2; exit 1; \
+    fi; \
+    if [ "$(id -u node)" != "$SANDBOX_USER_UID" ]; then \
+      usermod --uid "$SANDBOX_USER_UID" node; \
+      chown -R node /home/node; \
+    fi
+
+# The sandbox agent always runs as the non-root node user.
 USER node
 
 # Configure git for Windows host compatibility (CRLF line endings).

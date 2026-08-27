@@ -254,6 +254,14 @@ async function runOrdinaryWrite(sessionId: string, file: string): Promise<void> 
 	}
 }
 
+function runContainerUid(containerId: string): number {
+	const result = spawnSync("docker", ["exec", containerId, "id", "-u"], { encoding: "utf8" });
+	expect(result.status, result.stderr || result.stdout).toBe(0);
+	const uid = Number(result.stdout.trim());
+	expect(Number.isSafeInteger(uid), `container returned invalid uid: ${result.stdout}`).toBe(true);
+	return uid;
+}
+
 function runContainerMarker(
 	containerId: string,
 	bindingJson: string,
@@ -544,6 +552,14 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	const runtimeEnvironment = runtimeOptions.env ?? {};
 	const runtimeContainerId = runtimeOptions.containerId;
 	expect(runtimeContainerId, "the sandbox session must own a Docker runtime").toBeTruthy();
+	expect(runtimeContainerId, "the session runtime must match its public ready sandbox").toBe(readySandbox.containerId);
+	if (typeof process.getuid === "function") {
+		const hostUid = process.getuid();
+		const runtimeUid = runContainerUid(runtimeContainerId);
+		expect(hostUid, "the POSIX E2E host must not run as root").toBeGreaterThan(0);
+		expect(runtimeUid, "the sandbox agent must not run as root").toBeGreaterThan(0);
+		expect(runtimeUid, "the sandbox agent uid must match its private host session roots").toBe(hostUid);
+	}
 	expect(JSON.parse(runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({ [PACK]: expectedContainerDirectory });
 
 	const containerWrite = runContainerMarker(runtimeContainerId, runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON, {
