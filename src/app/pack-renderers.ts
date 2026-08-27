@@ -52,8 +52,29 @@ let packRegistered = new Set<string>();
  *  must resolve within its OWN pack; {@link packIdForTool} supplies that packId to
  *  the surface ref the tool renderer binds (see Messages.ts / ToolGroup.ts). */
 let toolPackIds = new Map<string, string>();
+/** Latest applied registration scope for each pack-renderer tool. Hot reload
+ *  replaces only the lazy loader, so it must retain the same project that
+ *  selected the winning renderer bytes. Rebuilt alongside {@link toolPackIds}. */
+let packRendererProjects = new Map<string, string | undefined>();
 /** Tool names whose current winning pack declares project local data. */
 let localDataTools = new Set<string>();
+
+function createPackRendererLoader(toolName: string, projectId?: string, devReload?: number) {
+	return async () => {
+		const params = new URLSearchParams();
+		if (projectId) params.set("projectId", projectId);
+		if (devReload !== undefined) params.set("devReload", String(devReload));
+		const query = params.toString();
+		const url = `/api/tools/${encodeURIComponent(toolName)}/renderer${query ? `?${query}` : ""}`;
+		const resp = await gatewayFetch(url); // authed (admin bearer); no session binding needed
+		if (!resp.ok) throw new Error(`renderer ${toolName} HTTP ${resp.status}`);
+		const blob = await resp.blob();
+		const mod = await importJavaScriptModuleBlob(blob);
+		const factory = (mod as any).default ?? (mod as any).createRenderer;
+		if (typeof factory !== "function") throw new Error("renderer module has no factory export");
+		return factory(HOST_TOOLKIT); // → ToolRenderer
+	};
+}
 
 /** The structural `packId` that contributed `toolName` (a pack renderer tool), or
  *  `undefined` for a built-in / unknown tool. Used to bind the tool renderer's
@@ -86,27 +107,15 @@ export function registerPackRenderers(
 ): void {
 	const next = new Set<string>();
 	const nextPackIds = new Map<string, string>();
+	const nextProjects = new Map<string, string | undefined>();
 	const nextLocalDataTools = new Set<string>();
 	for (const t of tools) {
 		if (t.rendererKind !== "pack") continue;
 		next.add(t.name);
 		if (typeof t.packId === "string" && t.packId) nextPackIds.set(t.name, t.packId);
+		nextProjects.set(t.name, projectId);
 		if (t.hasLocalData === true) nextLocalDataTools.add(t.name);
-		const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-		registerLazyToolRenderer(
-			t.name,
-			async () => {
-				const url = `/api/tools/${encodeURIComponent(t.name)}/renderer${qs}`;
-				const resp = await gatewayFetch(url); // authed (admin bearer); no session binding needed
-				if (!resp.ok) throw new Error(`renderer ${t.name} HTTP ${resp.status}`);
-				const blob = await resp.blob();
-				const mod = await importJavaScriptModuleBlob(blob);
-				const factory = (mod as any).default ?? (mod as any).createRenderer;
-				if (typeof factory !== "function") throw new Error("renderer module has no factory export");
-				return factory(HOST_TOOLKIT); // → ToolRenderer
-			},
-			{ override: true },
-		);
+		registerLazyToolRenderer(t.name, createPackRendererLoader(t.name, projectId), { override: true });
 	}
 	// RECONCILE: any name we previously registered as a pack renderer but that is
 	// no longer pack-owned in the fresh metadata (uninstall / precedence change)
@@ -119,7 +128,27 @@ export function registerPackRenderers(
 	// Rebuild the tool→packId map from the fresh metadata (drops uninstalled tools'
 	// entries) so `packIdForTool` always reflects the current winning providers.
 	toolPackIds = nextPackIds;
+	packRendererProjects = nextProjects;
 	localDataTools = nextLocalDataTools;
+}
+
+/**
+ * Replace the lazy loaders owned by one pack after a successful development
+ * rebuild. Re-registering through the renderer registry's existing override
+ * chokepoint invalidates loaded and in-flight modules while preserving displaced
+ * built-ins. Ownership maps and project scope remain unchanged.
+ *
+ * @returns the affected tool names for the caller to repaint.
+ */
+export function invalidatePackRendererModules(packId: string, reloadToken: number): string[] {
+	const affected: string[] = [];
+	for (const [toolName, ownerPackId] of toolPackIds) {
+		if (ownerPackId !== packId) continue;
+		const projectId = packRendererProjects.get(toolName);
+		registerLazyToolRenderer(toolName, createPackRendererLoader(toolName, projectId, reloadToken), { override: true });
+		affected.push(toolName);
+	}
+	return affected;
 }
 
 /** Sentinel: no reconcile has run yet. Distinct from `undefined` (reconciled
