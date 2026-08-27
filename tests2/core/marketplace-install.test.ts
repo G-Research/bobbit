@@ -51,6 +51,11 @@ function w(file: string, content: string) {
 	fs.writeFileSync(file, content, "utf-8");
 }
 
+function wb(file: string, content: Uint8Array) {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, content);
+}
+
 function parseFlatYamlScalars(file: string): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const line of fs.readFileSync(file, "utf-8").split(/\r?\n/)) {
@@ -432,6 +437,45 @@ describe("#7 install / uninstall / update", () => {
 		assert.equal(fs.readdirSync(marketPacksRoot).some((n) => n.startsWith(".tmp-")), false);
 		// pack_order appended for the server scope
 		assert.deepEqual(packOrder.getPackOrder("server"), ["qa-pack"]);
+	});
+
+	it("install, update, and uninstall preserve pack-local native assets byte-for-byte without staging remnants", () => {
+		const sourceFamily = path.join(repo, "qa-pack", "lib", "native", "database-driver");
+		const sourceManifest = path.join(sourceFamily, "manifest.json");
+		const sourceCurrent = path.join(sourceFamily, "linux-glibc-x64.node");
+		const sourceStale = path.join(sourceFamily, "darwin-arm64.node");
+		const manifestV1 = '{"schema":1,"package":"fixture-db","version":"1.0.0"}\n';
+		const currentV1 = Buffer.from([0x00, 0x7f, 0x80, 0xff, 0x01]);
+		const staleV1 = Buffer.from([0xca, 0xfe, 0xba, 0xbe]);
+		w(sourceManifest, manifestV1);
+		wb(sourceCurrent, currentV1);
+		wb(sourceStale, staleV1);
+
+		inst.installPack({ sourceId: sourceId(), dirName: "qa-pack", scope: "server", packOrderStore: packOrder });
+		const { marketPacksRoot } = scopePaths("server", root);
+		const dest = path.join(marketPacksRoot, "qa-pack");
+		const destFamily = path.join(dest, "lib", "native", "database-driver");
+		assert.deepEqual(fs.readFileSync(path.join(destFamily, "linux-glibc-x64.node")), currentV1);
+		assert.deepEqual(fs.readFileSync(path.join(destFamily, "darwin-arm64.node")), staleV1);
+		assert.equal(fs.readFileSync(path.join(destFamily, "manifest.json"), "utf8"), manifestV1);
+		assert.equal(fs.readdirSync(marketPacksRoot).some((name) => name.startsWith(".tmp")), false);
+
+		const manifestV2 = '{"schema":1,"package":"fixture-db","version":"2.0.0"}\n';
+		const currentV2 = Buffer.from([0xff, 0x00, 0x13, 0x37, 0x80, 0x00]);
+		w(sourceManifest, manifestV2);
+		wb(sourceCurrent, currentV2);
+		fs.rmSync(sourceStale);
+		inst.updatePack({ packName: "qa-pack", scope: "server", packOrderStore: packOrder });
+
+		assert.deepEqual(fs.readFileSync(path.join(destFamily, "linux-glibc-x64.node")), currentV2);
+		assert.equal(fs.readFileSync(path.join(destFamily, "manifest.json"), "utf8"), manifestV2);
+		assert.equal(fs.existsSync(path.join(destFamily, "darwin-arm64.node")), false, "atomic update removes native files absent upstream");
+		assert.equal(fs.readdirSync(marketPacksRoot).some((name) => name.startsWith(".tmp")), false);
+
+		inst.uninstallPack({ packName: "qa-pack", scope: "server", packOrderStore: packOrder });
+		assert.equal(fs.existsSync(dest), false);
+		assert.equal(fs.readdirSync(marketPacksRoot).some((name) => name.includes("qa-pack")), false, "uninstall leaves no native or staging tree");
+		assert.deepEqual(packOrder.getPackOrder("server"), []);
 	});
 
 	it("install rejects an already-installed pack (409)", () => {
