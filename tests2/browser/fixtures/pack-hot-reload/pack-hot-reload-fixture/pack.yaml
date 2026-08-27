@@ -1,0 +1,9 @@
+name: pack-hot-reload-fixture
+schema: 2
+description: Browser journey fixture for generic marketplace-pack development hot reload.
+version: 1.0.0
+contents:
+  roles: []
+  tools: [hot-reload]
+  skills: []
+  entrypoints: []

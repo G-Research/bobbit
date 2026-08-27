@@ -2,13 +2,13 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1146,
+  "censusTotal": 1143,
   "buckets": {
     "daily": 68,
-    "v2-browser": 217,
-    "v2-core": 513,
+    "v2-browser": 216,
+    "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 204
+    "v2-integration": 203
   },
   "methods": {
     "adapter": 276,
@@ -20,6 +20,15 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/browser/journeys/pack-hot-reload.journey.spec.ts",
+      "reason": "Real source-Vite browser journey proving nested marketplace renderer and parameterized-panel bytes repaint through the development bridge without page or workspace identity loss, survive ordinary reload, and clean all fixture state.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
     {
       "path": "tests2/core/market-pack-dev.test.ts",
       "reason": "Focused core coverage for strict generic pack-watch parsing and resolution, deterministic declared-output mirroring, serialized rebuild publication and failure recovery, bounded Vite notification, and cleanup.",
