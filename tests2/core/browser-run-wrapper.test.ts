@@ -94,11 +94,11 @@ describe("browser-v2 coordinator wrapper", () => {
   });
 
   it("does not inject a retry policy while preserving an explicit caller policy", () => {
-    expect(playwrightCommandArgs().filter((arg) => arg.startsWith("--retries"))).toEqual([]);
+    expect(playwrightCommandArgs().filter((arg: string) => arg.startsWith("--retries"))).toEqual([]);
 
     const forwarded = ["--retries=0", "--workers=2"];
     const args = playwrightCommandArgs(forwarded);
-    expect(args.filter((arg) => arg.startsWith("--retries"))).toEqual(["--retries=0"]);
+    expect(args.filter((arg: string) => arg.startsWith("--retries"))).toEqual(["--retries=0"]);
     expect(args.slice(4, -2)).toEqual(forwarded);
   });
 });
