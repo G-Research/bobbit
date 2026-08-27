@@ -24,6 +24,22 @@ const fixtureSourceRoots: string[] = [];
 const fixtureInstalls: Array<{ packName: string; scope: "server" | "project"; projectId?: string }> = [];
 const sessionIds: string[] = [];
 let sandboxConfigured = false;
+let fixtureGitProjectRoot: string | undefined;
+
+function initializeFixtureGitRepository(projectRoot: string): void {
+	expect(fs.existsSync(path.join(projectRoot, ".git")), "the fixture must own the default project's Git lifecycle").toBe(false);
+	fixtureGitProjectRoot = projectRoot;
+	const marker = path.join(projectRoot, ".pack-local-data-git-fixture");
+	fs.writeFileSync(marker, "Git-backed Pack Local Data sandbox fixture\n", "utf8");
+	for (const args of [
+		["init", "--quiet"],
+		["add", path.basename(marker)],
+		["-c", "user.name=Bobbit E2E", "-c", "user.email=bobbit-e2e@example.test", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Initialize Pack Local Data sandbox fixture"],
+	]) {
+		const result = spawnSync("git", args, { cwd: projectRoot, encoding: "utf8" });
+		expect(result.status, result.stderr || result.stdout).toBe(0);
+	}
+}
 
 interface FixturePackOptions {
 	packName: string;
@@ -303,6 +319,11 @@ test.afterEach(async () => {
 			fs.rmSync(path.join(project.rootPath, directory), { recursive: true, force: true });
 		}
 	}
+	if (fixtureGitProjectRoot) {
+		fs.rmSync(path.join(fixtureGitProjectRoot, ".git"), { recursive: true, force: true });
+		fs.rmSync(path.join(fixtureGitProjectRoot, ".pack-local-data-git-fixture"), { force: true });
+		fixtureGitProjectRoot = undefined;
+	}
 });
 
 test("default-disabled installed local data stays inert until enabled and preserves data after the override is cleared", async ({ gateway }) => {
@@ -489,6 +510,11 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	};
 	test.skip(docker.info.status !== 0 || docker.image.status !== 0, "Docker and the bobbit-agent image are required for the writable bind-mount round trip");
 
+	initializeFixtureGitRepository(project.rootPath);
+	const gitProbe = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: project.rootPath, encoding: "utf8" });
+	expect(gitProbe.status, gitProbe.stderr || gitProbe.stdout).toBe(0);
+	expect(gitProbe.stdout.trim(), "the sandbox project precondition must be a real Git worktree").toBe("true");
+
 	const setSandbox = await apiFetch(`/api/projects/${project.id}/config`, {
 		method: "PUT",
 		body: JSON.stringify({ sandbox: "docker" }),
@@ -497,8 +523,16 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	expect(setSandbox.status, configText).toBe(200);
 	sandboxConfigured = true;
 
-	const sessionId = await createSession({ projectId: project.id, sandboxed: true });
+	const sessionId = await createSession({ projectId: project.id, cwd: project.rootPath, sandboxed: true });
 	sessionIds.push(sessionId);
+	const readyResponse = await apiFetch("/api/sandbox-pool");
+	expect(readyResponse.status).toBe(200);
+	const readySandbox = ((await readyResponse.json()).containers ?? [])
+		.find((container: any) => container.projectId === project.id);
+	expect(readySandbox, "public sandboxed session creation must initialize the project sandbox").toMatchObject({
+		projectId: project.id,
+		status: "ready",
+	});
 	expect(gateway.sessionManager.getSession(sessionId)?.sandboxed, "the mount round trip must run in the requested sandbox realm").toBe(true);
 	const declaredHostDirectory = path.join(project.rootPath, ".pack-local-data-fixture");
 	expect(fs.existsSync(declaredHostDirectory), "sandbox activation must materialize the host directory before mounting it").toBe(true);
