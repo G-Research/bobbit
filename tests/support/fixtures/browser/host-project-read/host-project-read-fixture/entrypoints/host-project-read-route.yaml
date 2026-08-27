@@ -1,0 +1,6 @@
+id: host-project-read.route
+kind: route
+routeId: host-project-read-fixture
+target:
+  panelId: host-project-read.panel
+paramKeys: [goalId, foreignGoalId, foreignSessionId, missingGoalId, missingSessionId]

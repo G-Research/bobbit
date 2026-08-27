@@ -146,7 +146,7 @@ describe("canonical Extension Host notification bus", () => {
 });
 
 describe("additive scoped Host API", () => {
-	it("exposes contract v5 flags and server-bound session/project namespaces", async () => {
+	it("retains v5 notification invalidations alongside the closed v7 project-read namespace", async () => {
 		const host = getHostApi("session-1", undefined, {
 			kind: "pack",
 			packId: "fixture",
@@ -154,11 +154,22 @@ describe("additive scoped Host API", () => {
 			contributionId: "fixture-panel",
 		});
 		expect(host.version).toBe(1);
-		expect(host.contractVersion).toBe(6);
+		expect(host.contractVersion).toBe(7);
 		expect(host.capabilities.sessionNotifications).toBe(true);
 		expect(host.capabilities.projectNotifications).toBe(true);
+		expect(host.capabilities.projectReads).toBe(true);
 		expect(host.capabilities.has("sessionNotifications")).toBe(true);
 		expect(host.capabilities.has("projectNotifications")).toBe(true);
+		expect(host.capabilities.has("projectReads")).toBe(true);
+		expect(Object.keys(host.project).sort()).toEqual([
+			"notifications",
+			"readGoalGates",
+			"readGoalPullRequest",
+			"readGoalTasks",
+			"readGoals",
+			"readSessions",
+			"readStaff",
+		]);
 
 		const session = vi.fn();
 		const project = vi.fn();

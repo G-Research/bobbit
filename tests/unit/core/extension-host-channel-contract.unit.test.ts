@@ -27,8 +27,8 @@ import { createServerHostApi } from "../../../src/server/extension-host/server-h
 
 const hostApiSource = () => fs.readFileSync(path.join(process.cwd(), "src", "shared", "extension-host", "host-api.ts"), "utf-8");
 
-describe("host.ui.createBobbitSprite — public Host API contract", () => {
-	it("pins the exact required sprite types and method signature", () => {
+describe("host.ui.createBobbitSprite — retained v6 public Host API contract", () => {
+	it("pins the exact required v6 sprite types and method signature", () => {
 		expectTypeOf<HostBobbitState>().toEqualTypeOf<"active" | "idle" | "paused">();
 		expectTypeOf<HostBobbitSubject>().toEqualTypeOf<
 			| { kind: "session"; id: string }
@@ -47,15 +47,31 @@ describe("host.ui.createBobbitSprite — public Host API contract", () => {
 		>();
 	});
 
-	it("does not add appearance data to the project contract", () => {
-		expectTypeOf<keyof HostProjectApi>().toEqualTypeOf<"notifications">();
+	it("keeps appearance data out of the closed v7 project-read namespace", () => {
+		expectTypeOf<keyof HostProjectApi>().toEqualTypeOf<
+			| "notifications"
+			| "readStaff"
+			| "readSessions"
+			| "readGoals"
+			| "readGoalTasks"
+			| "readGoalGates"
+			| "readGoalPullRequest"
+		>();
+		expectTypeOf<Exclude<keyof HostProjectApi, "notifications">>().toEqualTypeOf<
+			| "readStaff"
+			| "readSessions"
+			| "readGoals"
+			| "readGoalTasks"
+			| "readGoalGates"
+			| "readGoalPullRequest"
+		>();
 	});
 });
 
 describe("host.channels — public Host API contract", () => {
-	it("keeps the Host API version stable and bumps only the owned contract version", () => {
-		assert.equal(HOST_API_VERSION, 1, "host.ui.createBobbitSprite is additive; HOST_API_VERSION must remain v1");
-		assert.equal(HOST_CONTRACT_VERSION, 6, "host.ui.createBobbitSprite is additive; HOST_CONTRACT_VERSION must be 6");
+	it("keeps Host API v1 while advancing the additive contract through notifications v5, Sprite v6, and project reads v7", () => {
+		assert.equal(HOST_API_VERSION, 1, "additive contracts must not change the frozen Host API version");
+		assert.equal(HOST_CONTRACT_VERSION, 7, "on-demand project reads own Host contract v7");
 	});
 
 	it("declares a generic text/json channel API with no terminal-specific core method", () => {

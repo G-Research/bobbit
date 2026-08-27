@@ -6,10 +6,11 @@ argument-hint: [major|minor|patch|<explicit-version>]
 
 Drive an end-to-end release of Bobbit. The human's job is the **release PR**:
 version bump + release notes, reviewed and squash-merged. Merging it is what
-releases — `.github/workflows/release-publish.yml` builds and tests an immutable
-tarball without publish authority, publishes that exact tarball to npm
-(trusted publishing / OIDC, with provenance), creates the tag, and creates the
-GitHub release. **Never** create the release tag, run a root `npm publish`, or
+releases — the release PR's required GitHub checks run the test suites, then
+`.github/workflows/release-publish.yml` validates, builds, type-checks, and packs
+an immutable tarball without publish authority, publishes that exact tarball to
+npm (trusted publishing / OIDC, with provenance), creates the tag, and creates
+the GitHub release. **Never** create the release tag, run a root `npm publish`, or
 create the GitHub release by hand. `npm login` / OTP is needed **only when
 republishing binary sub-packages** — pause and ask when the flow needs it.
 
@@ -26,8 +27,7 @@ dedicated **detached-HEAD worktree off `origin/main`** (a sibling of the
 primary, *not* under `*-wt/`), and every mutating step runs there. The release
 commit is pushed to a `release/v<version>` branch and squash-merged through the
 repository's required PR flow (§6–§8); the resulting merge commit is what gets
-tagged. The E2E harness binds port 0 and uses ephemeral `BOBBIT_DIR`s, so
-`test:e2e` won't collide with the running dev server.
+tagged.
 
 ## 0. Sanity check the environment
 
@@ -94,24 +94,22 @@ lands on this detached HEAD, is pushed to a release branch in §6, and reaches
 
 ## 2. Pre-flight quality gates
 
-Run, in this order, and **stop on any failure**:
+Run only the local install, build, and type-check, in this order, and **stop on
+any failure**:
 
 ```bash
 npm ci                          # clean install, lockfile authoritative
 npm run build                   # full build; emits declarations used by test type-checks
 npm run check                   # type-check server + web + tests against fresh dist
-npm run test:unit               # fast unit suite
-npm run test:browser            # Playwright browser journeys
-npm run test:e2e                # API + worktree/Docker/MCP/restart E2E
 ```
 
 Rules:
 - Runtime registry audits are deliberately outside the release process. Do not run `npm audit` or `audit:packed-consumer` as release gates; mutable advisory data must not change eligibility for an unchanged commit.
-- Don't skip browser or E2E tests "because they're slow" — releases are the one place flakes bite users.
+- Do not run `test:unit`, `test:browser`, or `test:e2e` locally as release pre-flight. The release PR's required GitHub checks own all three complete canonical lanes across the supported runner matrix.
 - Build must precede `check` because `tsconfig.tests.json` follows intentional imports of emitted `dist/server/*.js` declarations.
-- If any test fails, the failure is the bug. Fix it or abort the release; do not retry hoping it's flaky.
+- If a local pre-flight step or required GitHub check fails, fix the failure or abort the release; do not retry hoping it is flaky.
 
-Long-running steps (`build`, `test:browser`, `test:e2e`) should use `bash_bg` so output stays inspectable.
+Use `bash_bg` for the build if it may run long so output stays inspectable.
 
 ## 3. Decide whether to bump the binary sub-packages
 
@@ -224,14 +222,29 @@ PR_URL=$(gh pr create \
 PR=$(gh pr view "$PR_URL" --json number -q .number)
 ```
 
-The PR body must summarize the version, release notes, and gate results, and
-must end with the standard Bobbit footer. Wait for every required check and
-review before publishing:
+The PR body must summarize the version, release notes, and local pre-flight
+results, and must end with the standard Bobbit footer. GitHub owns the unit,
+browser, and E2E results. Wait for every required check and review before
+publishing:
 
 ```bash
 gh pr checks "$PR" --watch
 gh pr view "$PR" --json mergeStateStatus,reviewDecision,statusCheckRollup
 ```
+
+If GitHub does not attach a `Build & Unit Gate` run to the latest PR head, use
+the workflow's read-only exact-head fallback and watch that specific run:
+
+```bash
+gh workflow run build-unit-gate.yml --ref "$RELBRANCH"
+HEAD_SHA=$(git rev-parse HEAD)
+RUN_ID=$(gh run list --workflow build-unit-gate.yml --commit "$HEAD_SHA" --event workflow_dispatch --limit 1 --json databaseId -q '.[0].databaseId')
+gh run watch "$RUN_ID" --exit-status
+```
+
+This no-input dispatch runs the same unit, browser, and E2E matrices but has no
+publish or repository-write authority. The PR-only `Release contract` check
+must also have passed after the release fields last changed.
 
 The PR must be ready to merge, but **do not merge it yet**. Publishing remains
 the last irreversible step before the source and tag become public. Do not
@@ -391,4 +404,4 @@ Report to the user:
 - **Use the required squash-merge PR flow.** Merging the release PR is what publishes; verify the merged commit carries the intended version and release files.
 - **One release at a time.** Never merge a second release PR while the previous release run is still going: publish jobs serialise on `release-publish-root`, and GitHub keeps at most one pending job per group. After taking the lock, the job requires the npm dist-tag to match the state verification approved; tagging happens only after publication. Wait for the run to finish.
 - **An already-published version fails closed.** It proceeds only when npm's verified provenance identifies this workflow and commit. Otherwise confirm what was published and release the next version.
-- **Stop on any test, audit, or check failure.** Releases amplify bugs — the cost of waiting a day is tiny; the cost of a bad publish is days of cleanup.
+- **Stop on any local pre-flight or required GitHub check failure.** Releases amplify bugs — the cost of waiting a day is tiny; the cost of a bad publish is days of cleanup.

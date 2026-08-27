@@ -228,7 +228,10 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			await retryButton.click();
 
 			await expect.poll(
-				() => sessionManager.getSession(sessionId)?.rpcClient !== retryRpc,
+				() => {
+					const current = sessionManager.getSession(sessionId);
+					return current ? current.rpcClient !== retryRpc : false;
+				},
 				{ timeout: 20_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: Retry must respawn poisoned history in place" },
 			).toBe(true);
 			await expect.poll(() => orphanIdsIn(transcriptFile), { timeout: 20_000 }).toEqual([]);
@@ -252,11 +255,14 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			await editor.fill(FOLLOW_UP_INTENT);
 			await editor.press("Enter");
 			await expect.poll(
-				() => ({
-					replaced: sessionManager.getSession(sessionId)?.rpcClient !== followUpRpc,
-					sanitized: orphanIdsIn(transcriptFile).length === 0,
-					oldBridgeStopped: followUpRpc.running === false,
-				}),
+				() => {
+					const current = sessionManager.getSession(sessionId);
+					return {
+						replaced: current ? current.rpcClient !== followUpRpc : false,
+						sanitized: orphanIdsIn(transcriptFile).length === 0,
+						oldBridgeStopped: followUpRpc.running === false,
+					};
+				},
 				{ timeout: 20_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: stable-ID capped follow-up must sanitize, stop the poisoned bridge, and respawn before dispatch" },
 			).toEqual({ replaced: true, sanitized: true, oldBridgeStopped: true });
 			await expect.poll(

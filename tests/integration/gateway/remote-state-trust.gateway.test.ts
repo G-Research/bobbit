@@ -495,17 +495,9 @@ test.describe("remote-state coordinator routes", () => {
 				"repo", "view", "--repo", `${host}/acme/widget`, "--json", "viewerPermission",
 			]);
 		} finally {
-			// Keep releasing helper trees until every route has settled. A failed
-			// precondition can occur before the first tree is created; a fixed number
-			// of drain turns would then await an unreleased late tree and contaminate
-			// the retry with this test's runner overrides.
-			let routesSettled = false;
-			const settlingRoutes = Promise.allSettled(routeRequests).then(() => { routesSettled = true; });
-			while (!routesSettled) {
-				for (const probe of probes) probe.complete(false);
-				await new Promise<void>(resolve => setTimeout(resolve, 1));
-			}
-			await settlingRoutes;
+			// Restore shared runner state before any cleanup await. A stale helper may
+			// schedule a serialized successor in a microtask; that successor must use
+			// the normal fenced runner rather than leaking this fixture into later tests.
 			runner.execFile = originalExecFile;
 			runner.spawn = originalSpawn;
 			if (originalOwnedTreeCapability === undefined) delete runner.supportsOwnedTreeSpawn;
@@ -514,6 +506,16 @@ test.describe("remote-state coordinator routes", () => {
 				if (value === undefined) delete process.env[name];
 				else process.env[name] = value;
 			}
+			// Keep releasing fixture-owned helper trees until every route settles. A
+			// failed precondition can occur before the first tree is created, so a fixed
+			// number of drain turns could leave a late request pending.
+			let routesSettled = false;
+			const settlingRoutes = Promise.allSettled(routeRequests).then(() => { routesSettled = true; });
+			while (!routesSettled) {
+				for (const probe of probes) probe.complete(false);
+				await new Promise<void>(resolve => setTimeout(resolve, 1));
+			}
+			await settlingRoutes;
 			gateway.clock.advance(60_000);
 			try {
 				if (sessionId) await deleteSession(sessionId);

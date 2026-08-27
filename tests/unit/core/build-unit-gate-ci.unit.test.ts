@@ -138,20 +138,20 @@ describe("native CI qualification workflows", () => {
 		);
 	});
 
-	it("runs complete Browser and E2E suites as PR-only native matrices", () => {
+	it("runs complete Browser and E2E suites for PRs and exact-head manual qualification", () => {
 		const jobs = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH).jobs;
 		const expectedOs = ["ubuntu-latest", "windows-latest", "macos-latest"];
 		const expectedCheckout = "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd";
 		const expectedSetupNode = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020";
 
-		for (const [jobId, job, expectedName, gateName, command] of [
-			["browser", jobs.browser, "Browser (${{ matrix.os }}, Node 22.19.0)", "Browser gate", "npm run test:browser"],
-			["e2e", jobs.e2e, "E2E (${{ matrix.os }}, Node 22.19.0)", "E2E gate", "npm run test:e2e"],
+		for (const [jobId, job, expectedName, gateName, command, timeoutMinutes] of [
+			["browser", jobs.browser, "Browser (${{ matrix.os }}, Node 22.19.0)", "Browser gate", "npm run test:browser", 40],
+			["e2e", jobs.e2e, "E2E (${{ matrix.os }}, Node 22.19.0)", "E2E gate", "npm run test:e2e", 50],
 		] as const) {
 			assert.equal(job.name, expectedName, `${jobId} check name must identify the runner and exact Node version`);
-			assert.equal(job.if, "github.event_name == 'pull_request'", `${jobId} must not run on push or manual dispatch`);
+			assert.equal(job.if, "github.event_name != 'push'", `${jobId} must run for PRs and exact-head dispatch, but not duplicate push checks`);
 			assert.equal(job["runs-on"], "${{ matrix.os }}");
-			assert.equal(job["timeout-minutes"], 40);
+			assert.equal(job["timeout-minutes"], timeoutMinutes);
 			assert.equal(job.strategy["fail-fast"], false);
 			assert.deepEqual(job.strategy.matrix.os, expectedOs);
 			assert.equal(stepByName(job.steps, "Checkout").uses, expectedCheckout);

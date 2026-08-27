@@ -41,11 +41,13 @@ function caps() {
 		store: h.capabilities.store,
 		sessionNotifications: h.capabilities.sessionNotifications,
 		projectNotifications: h.capabilities.projectNotifications,
+		projectReads: h.capabilities.projectReads,
 		localData: h.capabilities.localData,
 		hasLocalDataMember: Object.prototype.hasOwnProperty.call(h, "localData"),
 		localDataDirectory: h.localData ? typeof h.localData.directory : "missing",
 		hasInvokeAction: h.capabilities.has("invokeAction"),
 		hasCallRoute: h.capabilities.has("callRoute"),
+		hasProjectReads: h.capabilities.has("projectReads"),
 		hasLocalData: h.capabilities.has("localData"),
 		hasUnknown: h.capabilities.has("nope"),
 		hasGatewayMember: (h as unknown as Record<string, unknown>).gateway !== undefined,
@@ -354,11 +356,72 @@ async function channelOpenRemintsStaleSurfaceToken() {
 	}
 }
 
+function projectReadCapabilities() {
+	const pack = getHostApi("sess-pack", undefined, {
+		kind: "pack", packId: "fixture", contributionKind: "panel", contributionId: "dashboard",
+	});
+	const packTool = getHostApi("sess-tool", "tu-tool", { kind: "tool", tool: "fixture.read", packId: "fixture" });
+	const builtInTool = getHostApi("sess-built-in", "tu-built-in", { kind: "tool", tool: "read" });
+	const unbound = getHostApi("sess-unbound", undefined);
+	return {
+		pack: [pack.capabilities.projectReads, pack.capabilities.has("projectReads")],
+		packTool: [packTool.capabilities.projectReads, packTool.capabilities.has("projectReads")],
+		builtInTool: [builtInTool.capabilities.projectReads, builtInTool.capabilities.has("projectReads")],
+		unbound: [unbound.capabilities.projectReads, unbound.capabilities.has("projectReads")],
+	};
+}
+
+async function clientProjectReads() {
+	const originalFetch = window.fetch;
+	let mintCount = 0;
+	const requests: Array<{ path: string; method?: string; sessionHeader: string | null; body: Record<string, unknown> }> = [];
+	window.fetch = (async (input: any, init?: any) => {
+		const path = new URL(String(input), window.location.href).pathname;
+		if (path === "/api/ext/surface-token") {
+			mintCount += 1;
+			return new Response(JSON.stringify({
+				token: mintCount === 1 ? "stale-project-token" : "fresh-project-token",
+			}), { status: 200, headers: { "content-type": "application/json" } });
+		}
+		if (path !== "/api/ext/project/read") return new Response("not found", { status: 404 });
+		const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+		requests.push({
+			path,
+			method: init?.method,
+			sessionHeader: new Headers(init?.headers).get("x-bobbit-session-id"),
+			body,
+		});
+		if (body.operation === "staff" && body.surfaceToken === "stale-project-token") {
+			return new Response("stale token", { status: 403 });
+		}
+		return new Response(JSON.stringify({ operation: body.operation }), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+	}) as any;
+	try {
+		const host = getHostApi("sess-project", "tool-use-project", {
+			kind: "tool", tool: "fixture.read", packId: "fixture",
+		});
+		const results = [
+			await host.project.readStaff({ limit: 2 }),
+			await host.project.readSessions({ mode: "ids", ids: ["session-2", "session-1"] }),
+			await host.project.readGoals(),
+			await host.project.readGoalTasks("goal-1", { cursor: 10, limit: 5 }),
+			await host.project.readGoalGates("goal-1", { mode: "ids", ids: ["gate-2"] }),
+			await host.project.readGoalPullRequest("goal-1"),
+		];
+		return { mintCount, requests, results };
+	} finally {
+		window.fetch = originalFetch;
+	}
+}
+
 describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 	it("capabilities reports Phase-1 caps true, Phase-2 caps false; no gateway member", () => {
 		const c = caps();
 		expect(c.version).toBe(1);
-		expect(c.contractVersion).toBe(6);
+		expect(c.contractVersion).toBe(7);
 		expect(c.invokeAction).toBe(true);
 		expect(c.requestRender).toBe(true);
 		expect(c.hasInvokeAction).toBe(true);
@@ -368,6 +431,8 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 		expect(c.store).toBe(true);
 		expect(c.sessionNotifications).toBe(true);
 		expect(c.projectNotifications).toBe(true);
+		expect(c.projectReads).toBeUndefined();
+		expect(c.hasProjectReads).toBe(false);
 		expect(c.localData).toBeUndefined();
 		expect(c.hasLocalDataMember).toBe(false);
 		expect(c.localDataDirectory).toBe("missing");
@@ -375,6 +440,70 @@ describe("getHostApi — durable v1 capabilities (extension-host §3)", () => {
 		expect(c.hasLocalData).toBe(false);
 		expect(c.hasUnknown).toBe(false);
 		expect(c.hasGatewayMember).toBe(false);
+	});
+
+	it("keeps the required v6 Bobbit Sprite surface in the v7 contract", () => {
+		const host = getHostApi("sess-sprite", undefined);
+		expect(host.contractVersion).toBe(7);
+		expect(typeof host.ui.createBobbitSprite).toBe("function");
+	});
+
+	it("automatically advertises project reads only for pack-owned surfaces", () => {
+		expect(projectReadCapabilities()).toEqual({
+			pack: [true, true],
+			packTool: [true, true],
+			builtInTool: [undefined, false],
+			unbound: [undefined, false],
+		});
+	});
+
+	it("uses six fixed project-read operations with closure-bound session identity and one stale-token remint", async () => {
+		const result = await clientProjectReads();
+		expect(result.mintCount).toBe(2);
+		expect(result.results).toEqual([
+			{ operation: "staff" },
+			{ operation: "sessions" },
+			{ operation: "goals" },
+			{ operation: "goal-tasks" },
+			{ operation: "goal-gates" },
+			{ operation: "goal-pull-request" },
+		]);
+		expect(result.requests).toEqual([
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "staff", surfaceToken: "stale-project-token", selector: { limit: 2 } },
+			},
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "staff", surfaceToken: "fresh-project-token", selector: { limit: 2 } },
+			},
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "sessions", surfaceToken: "fresh-project-token", selector: { mode: "ids", ids: ["session-2", "session-1"] } },
+			},
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "goals", surfaceToken: "fresh-project-token" },
+			},
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "goal-tasks", surfaceToken: "fresh-project-token", goalId: "goal-1", selector: { cursor: 10, limit: 5 } },
+			},
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "goal-gates", surfaceToken: "fresh-project-token", goalId: "goal-1", selector: { mode: "ids", ids: ["gate-2"] } },
+			},
+			{
+				path: "/api/ext/project/read", method: "POST", sessionHeader: "sess-project",
+				body: { sessionId: "sess-project", operation: "goal-pull-request", surfaceToken: "fresh-project-token", goalId: "goal-1" },
+			},
+		]);
+		for (const { body } of result.requests) {
+			expect(body).not.toHaveProperty("projectId");
+			expect(body.sessionId).toBe("sess-project");
+			expect(body).not.toHaveProperty("toolUseId");
+			expect(body).not.toHaveProperty("url");
+		}
 	});
 
 	it("host.store exposes scoped persistence methods", () => {

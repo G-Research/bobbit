@@ -25,21 +25,20 @@ For a release commit, `verify` then enforces the whole contract, in [`scripts/re
 
 Only then does the run build and type-check the commit, and pack the resulting files into an immutable workflow artifact. The serialized publishing job publishes that exact tarball with provenance, the tag job then creates `v<version>`, and the GitHub release follows. Pre-release versions (`0.16.0-rc.1`) go to the `next` dist-tag and are marked as prereleases; stable versions go to `latest`.
 
-The post-merge build is deliberate because it produces the exact tarball that ships. The unit suite is not repeated after publication approval: the release PR's required unit matrix already tested the mergeable tree, and the release preflight ran the full unit, browser, and E2E suites before the PR opened.
+The post-merge build is deliberate because it produces the exact tarball that ships. The test suites are not repeated after publication approval: the release PR's required GitHub checks already ran the full unit, browser, and E2E matrices against the mergeable tree. The local release pre-flight installs dependencies, builds, and type-checks so basic failures are caught before the PR opens without duplicating the hosted suites.
 
 **The same contract also runs before the merge.** `build-unit-gate.yml` runs `validate-release-commit.mjs --mode pre-merge` on every pull request. It decides whether a PR is a release the same way `detect` does — by comparing `package.json` against the base — and exits immediately when the version is unchanged. Every content rule then runs against that base, including the append-only changelog check and the version-increase check, so a wrong branch name, title, lockfile, changelog entry, backwards version or unpublished binary pin fails while it still costs one push — rather than after the merge, when the version is on `main` and the number is spent. The post-merge run is the authority; the pre-merge run is there so the authority rarely has to say no.
 
-### Release PR test ownership
+### Release test ownership
 
-The release preflight runs the complete unit, browser, and E2E lanes locally before it creates the release commit. The release PR then receives the same hosted coverage as every pull request through `build-unit-gate.yml`:
+The release PR's required [`build-unit-gate.yml`](../.github/workflows/build-unit-gate.yml) checks own the full test qualification:
 
-- layout validation, build, type-check, and the complete unit lane run on Linux, Windows, and macOS, with an additional Linux run on the newer supported Node line;
-- the complete browser lane runs on Linux, Windows, and macOS with platform-specific worker limits;
-- the complete E2E lane runs on Linux, Windows, and macOS, including real Git/worktree/process/restart/MCP coverage;
-- Linux builds the version-matched sandbox image before E2E so Docker-owned cases run there, while Windows and macOS retain the non-Docker E2E coverage;
+- **unit** runs the complete canonical unit lane with the build and type-check matrix on Linux, Windows, and macOS, including the supported Node floor and the forward Node lane;
+- **browser** runs the complete canonical Playwright browser lane on Linux, Windows, and macOS with runner-specific worker limits;
+- **E2E** runs the complete canonical real Git/worktree/process/restart/MCP lane on Linux, Windows, and macOS; Linux also builds the version-matched Docker sandbox image so Docker-owned cases run there;
 - the release-contract job validates the version, branch, title, lockfile, changelog, binary pins, and registry state before merge.
 
-This split keeps publication authority narrow without weakening release qualification. Browser and E2E need Chromium, real worktrees, process control, and, on Linux, Docker; the pull-request workflow owns that runner setup. The post-merge `release-publish.yml` workflow instead revalidates the merged release commit, installs dependencies, rebuilds, type-checks, and packs the exact tarball that receives npm provenance. It does not repeat the test matrix because the required release PR checks already tested the mergeable tree and the local release preflight already ran every complete lane.
+The release skill therefore does not repeat those suites locally. Its pre-flight is limited to `npm ci`, `npm run build`, and `npm run check`, then it waits for every required GitHub check on the release PR. The same read-only matrices can be run through the no-input `workflow_dispatch` trigger for exact-head qualification when GitHub does not attach a PR-event run; ordinary pushes still avoid duplicating Browser and E2E. This test workflow has no publish or repository-write authority. The post-merge release workflow validates the release contract and rebuilds and type-checks the exact package tarball without duplicating the PR test matrices.
 
 Publish, tag and release are separate jobs so each holds only the permissions it needs: `id-token: write` to publish, `contents: write` to tag, `contents: write` to create the release. None checks out the repository, installs dependencies, or runs package lifecycle scripts. Before the publishable artifact enters the OIDC-enabled job, that job uses a small inline registry check to confirm the dist-tag still has the value recorded by verification. It then downloads and publishes the verified tarball with `--ignore-scripts`; the release job downloads the reviewed notes from the same immutable artifact. Dependency lifecycle code therefore never receives publish or repository-write authority, and the tarball produced after all gates is the tarball sent to npm.
 
