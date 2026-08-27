@@ -266,6 +266,28 @@ describe("first-party pack native asset materialization", () => {
 		assert.deepEqual(fs.readFileSync(path.join(family, `${changedTarget}.node`)), replacement);
 	});
 
+	it("removes generated families that are no longer declared or whose metadata was removed", async () => {
+		const fixture = createFixture();
+		const second = structuredClone(fixture.metadata.nativeAssets[0]);
+		second.id = "second-driver";
+		fixture.metadata.nativeAssets.push(second);
+		writeJson(path.join(fixture.packRoot, "pack.build.json"), fixture.metadata);
+		await materialize(fixture);
+		const nativeRoot = path.join(fixture.packRoot, "lib", "native");
+		assert.equal(fs.existsSync(path.join(nativeRoot, "database-driver")), true);
+		assert.equal(fs.existsSync(path.join(nativeRoot, "second-driver")), true);
+
+		fixture.metadata.nativeAssets.pop();
+		writeJson(path.join(fixture.packRoot, "pack.build.json"), fixture.metadata);
+		await materialize(fixture);
+		assert.equal(fs.existsSync(path.join(nativeRoot, "database-driver")), true);
+		assert.equal(fs.existsSync(path.join(nativeRoot, "second-driver")), false);
+
+		fs.rmSync(path.join(fixture.packRoot, "pack.build.json"));
+		await materialize(fixture);
+		assert.equal(fs.existsSync(path.join(nativeRoot, "database-driver")), false);
+	});
+
 	it("validates every source before mutation and preserves the previous family on failure", async () => {
 		const fixture = createFixture();
 		await materialize(fixture);

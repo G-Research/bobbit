@@ -161,6 +161,40 @@ function replaceFamilyAtomically(destination, staging) {
 	if (hadDestination) fs.rmSync(backup, { recursive: true, force: true });
 }
 
+function isGeneratedFamily(directory, id) {
+	if (!SAFE_ID.test(id)) return false;
+	try {
+		const directoryStats = fs.lstatSync(directory);
+		if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) return false;
+		const manifestPath = path.join(directory, "manifest.json");
+		const manifestStats = fs.lstatSync(manifestPath);
+		if (!manifestStats.isFile() || manifestStats.isSymbolicLink()) return false;
+		const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+		if (!isPlainObject(manifest) || Object.keys(manifest).sort().join(",") !== "package,schema,targets,version"
+			|| manifest.schema !== 1 || typeof manifest.package !== "string" || manifest.package.length === 0
+			|| typeof manifest.version !== "string" || manifest.version.length === 0 || !isPlainObject(manifest.targets)
+			|| Object.keys(manifest.targets).length !== NATIVE_ASSET_TARGETS.length) return false;
+		for (const target of NATIVE_ASSET_TARGETS) {
+			const record = manifest.targets[target];
+			if (!isPlainObject(record) || Object.keys(record).sort().join(",") !== "file,sha256,size"
+				|| record.file !== `${target}.node` || !Number.isSafeInteger(record.size) || record.size < 0
+				|| typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.sha256)) return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function removeStaleGeneratedFamilies(nativeRoot, currentIds) {
+	if (!fs.existsSync(nativeRoot)) return;
+	for (const entry of fs.readdirSync(nativeRoot, { withFileTypes: true })) {
+		if (currentIds.has(entry.name)) continue;
+		const directory = path.join(nativeRoot, entry.name);
+		if (isGeneratedFamily(directory, entry.name)) fs.rmSync(directory, { recursive: true });
+	}
+}
+
 /**
  * Materialize every declared native family beneath packRoot/lib/native.
  * All declarations and source bytes are validated before any existing family is changed.
@@ -169,7 +203,11 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 	const resolvedProjectRoot = path.resolve(projectRoot);
 	const resolvedPackRoot = path.resolve(packRoot);
 	const metadata = readPackBuildMetadata(resolvedPackRoot);
-	if (metadata === null) return [];
+	const nativeRoot = path.join(resolvedPackRoot, "lib", "native");
+	if (metadata === null) {
+		removeStaleGeneratedFamilies(nativeRoot, new Set());
+		return [];
+	}
 
 	const projectManifest = readJsonFile(path.join(resolvedProjectRoot, "package.json"), `could not read project package.json for ${resolvedPackRoot}`);
 	if (!isPlainObject(projectManifest.dependencies)) fail(`project package.json must declare production dependencies for ${resolvedPackRoot}`);
@@ -247,7 +285,6 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 		});
 	}
 
-	const nativeRoot = path.join(resolvedPackRoot, "lib", "native");
 	fs.mkdirSync(nativeRoot, { recursive: true });
 	for (const family of preparedFamilies) {
 		const destination = path.join(nativeRoot, family.id);
@@ -262,6 +299,7 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 			fail(`could not materialize native asset ${family.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	removeStaleGeneratedFamilies(nativeRoot, new Set(preparedFamilies.map((family) => family.id)));
 	return preparedFamilies.map((family) => path.join(nativeRoot, family.id));
 }
 
