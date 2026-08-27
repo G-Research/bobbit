@@ -1,0 +1,5 @@
+name: pack_hot_reload_probe
+description: Browser fixture tool whose nested renderer opens the parameterized hot-reload panel.
+group: Test Fixtures
+summary: Exercises development-only marketplace-pack module reconciliation.
+renderer: ../../lib/nested/hot-reload/renderer.js

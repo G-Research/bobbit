@@ -181,6 +181,11 @@ const loadedPanels = new Map<string, PackPanel>();
 /** key → in-flight load promise (so concurrent opens share one fetch). */
 const inFlight = new Map<string, Promise<PackPanel | undefined>>();
 
+/** Development-only successful rebuild token for a registered panel key. The
+ *  token is appended only to the authenticated module-byte request; it does not
+ *  participate in contribution or workspace identity. */
+const developmentReloadTokens = new Map<string, number>();
+
 /** Per-panel load-generation token. Bumped by {@link invalidatePanel} whenever a
  *  registration supersedes prior intent for the key (uninstall, or a project
  *  change that must re-fetch under the new scope). A load captures the generation
@@ -196,6 +201,22 @@ function invalidatePanel(key: string): void {
 	loadGeneration.set(key, (loadGeneration.get(key) ?? 0) + 1);
 	loadedPanels.delete(key);
 	inFlight.delete(key);
+}
+
+/** Invalidate the fetched panel modules owned by one rebuilt pack without
+ *  touching registrations or the durable side-panel workspace. Existing tab
+ *  ids, instance keys, params, order, and selection therefore remain unchanged;
+ *  mounted panels repaint through the normal render path while inactive panels
+ *  reload lazily when next selected. */
+export function invalidatePackPanelModules(packId: string, reloadToken: number): number {
+	let invalidated = 0;
+	for (const [key, panel] of panels) {
+		if (panel.packId !== packId) continue;
+		developmentReloadTokens.set(key, reloadToken);
+		invalidatePanel(key);
+		invalidated += 1;
+	}
+	return invalidated;
 }
 
 /**
@@ -235,6 +256,7 @@ export function registerPackPanels(
 		if (!incoming) {
 			// Uninstall / precedence change → invalidate + drop its tab.
 			invalidatePanel(key);
+			developmentReloadTokens.delete(key);
 			removePackPanelTab(prev.packId, prev.panelId);
 		} else if (incoming.projectId !== prev.projectId || opts?.invalidateLoaded) {
 			// Project change OR a forced pack-mutation re-register (update/reinstall):
@@ -321,7 +343,11 @@ function loadPanelModule(key: string, reg: RegisteredPanel): Promise<PackPanel |
 	if (existing) return existing;
 	if (loadedPanels.has(key)) return Promise.resolve(loadedPanels.get(key));
 	const gen = loadGeneration.get(key) ?? 0;
-	const qs = reg.projectId ? `?projectId=${encodeURIComponent(reg.projectId)}` : "";
+	const params = new URLSearchParams();
+	if (reg.projectId) params.set("projectId", reg.projectId);
+	const developmentReloadToken = developmentReloadTokens.get(key);
+	if (developmentReloadToken !== undefined) params.set("devReload", String(developmentReloadToken));
+	const qs = params.size > 0 ? `?${params.toString()}` : "";
 	const p: Promise<PackPanel | undefined> = (async () => {
 		const url = `/api/ext/packs/${encodeURIComponent(reg.packId)}/panels/${encodeURIComponent(reg.panelId)}${qs}`;
 		const resp = await gatewayFetch(url); // authed (admin bearer); static-asset-equivalent

@@ -1,0 +1,5 @@
+id: hot-reload-fixture.detail
+title: Hot Reload Fixture
+entry: ../lib/nested/hot-reload/panel.js
+instanceMode: parameterized
+instanceParam: artifactId

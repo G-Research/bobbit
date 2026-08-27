@@ -1167,4 +1167,55 @@ if (import.meta.hot) {
 		// Flush any pending draft so the message editor content survives the reload
 		flushPendingDraft();
 	});
+
+	// Pack rebuilds arrive independently of Vite's module graph: the gateway serves
+	// their bytes and the client imports them through fresh Blob URLs. Serialize the
+	// invalidations so a slower event cannot repaint over a newer one, and recover the
+	// chain after every failure so one bad module never poisons later rebuilds.
+	let packReloadChain = Promise.resolve();
+	import.meta.hot.on("bobbit:pack-rebuilt", (payload: unknown) => {
+		packReloadChain = packReloadChain
+			.catch((error) => {
+				console.error("Pack hot reload failed", error);
+			})
+			.then(async () => {
+				const data = payload && typeof payload === "object" && !Array.isArray(payload)
+					? payload as Record<string, unknown>
+					: undefined;
+				const keys = data ? Object.keys(data) : [];
+				if (
+					!data ||
+					keys.length !== 2 ||
+					!keys.includes("pack") ||
+					!keys.includes("reloadToken") ||
+					typeof data.pack !== "string" ||
+					!/^[a-z0-9][a-z0-9-]*$/.test(data.pack) ||
+					typeof data.reloadToken !== "number" ||
+					!Number.isSafeInteger(data.reloadToken) ||
+					data.reloadToken <= 0
+				) {
+					throw new Error("Invalid bobbit:pack-rebuilt payload");
+				}
+
+				const [rendererModule, panelModule, registryModule] = await Promise.all([
+					import("./pack-renderers.js"),
+					import("./pack-panels.js"),
+					import("../ui/tools/renderer-registry.js"),
+				]);
+				const { invalidatePackRendererModules } = rendererModule as unknown as {
+					invalidatePackRendererModules(packId: string, reloadToken: number): string[];
+				};
+				const { invalidatePackPanelModules } = panelModule as unknown as {
+					invalidatePackPanelModules(packId: string, reloadToken: number): number;
+				};
+
+				const rendererNames = invalidatePackRendererModules(data.pack, data.reloadToken);
+				invalidatePackPanelModules(data.pack, data.reloadToken);
+				if (rendererNames.length > 0) registryModule.requestToolRender();
+				renderApp();
+			})
+			.catch((error) => {
+				console.error("Pack hot reload failed", error);
+			});
+	});
 }
