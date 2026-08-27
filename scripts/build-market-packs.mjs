@@ -7,8 +7,9 @@
  * declaration, mirrors only its declared outputs, and notifies the local Vite
  * server after a complete successful publish.
  */
-import { watch as watchFs } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { constants as fsConstants, watch as watchFs } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { copyFile, lstat, mkdir, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { build } from "esbuild";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -163,6 +164,47 @@ function isWithin(root, candidate) {
 	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function stableIdentity(stats) {
+	if (stats.dev === undefined || stats.ino === undefined || String(stats.ino) === "0") return undefined;
+	return `${String(stats.dev)}:${String(stats.ino)}`;
+}
+
+function sameStableIdentity(expected, current) {
+	const expectedIdentity = stableIdentity(expected);
+	return expectedIdentity !== undefined && expectedIdentity === stableIdentity(current);
+}
+
+function staleTargetError(targetPath) {
+	const error = new Error(`Serving target changed or is unsafe: ${targetPath}`);
+	error.code = "ESTALE";
+	return error;
+}
+
+function assertStableDirectory(stats, targetPath) {
+	if (!stats.isDirectory() || stats.isSymbolicLink() || stableIdentity(stats) === undefined) {
+		throw staleTargetError(targetPath);
+	}
+}
+
+async function assertDirectoryClaimCurrent(claim, fsImpl) {
+	const current = await fsImpl.lstat(claim.path);
+	assertStableDirectory(current, claim.path);
+	if (claim.identity !== stableIdentity(current)) throw staleTargetError(claim.path);
+}
+
+async function captureDirectoryClaim(directoryPath, canonicalRoot, fsImpl) {
+	const stats = await fsImpl.lstat(directoryPath);
+	assertStableDirectory(stats, directoryPath);
+	const canonical = await fsImpl.realpath(directoryPath);
+	if (!isWithin(canonicalRoot, canonical)) throw new Error(`Mirror destination escapes its serving target: ${directoryPath}`);
+	const canonicalStats = await fsImpl.lstat(canonical);
+	assertStableDirectory(canonicalStats, canonical);
+	if (!sameStableIdentity(stats, canonicalStats)) throw staleTargetError(directoryPath);
+	return { path: directoryPath, identity: stableIdentity(stats) };
+}
+
+const realMirrorFs = { copyFile, lstat, mkdir, realpath, rename, unlink };
+
 /** Resolve, validate and deterministically order already-existing served pack roots. */
 export async function servingTargets(declaration, explicitTargets = [], options = {}) {
 	const validated = validateDeclaration(declaration);
@@ -176,10 +218,9 @@ export async function servingTargets(declaration, explicitTargets = [], options 
 	for (const supplied of requested) {
 		const relative = normalizeRepoRelative(supplied, "Serving target");
 		const lexical = path.resolve(root, relative);
-		let stats;
 		let canonical;
+		let stats;
 		try {
-			await lstat(lexical);
 			canonical = await realpath(lexical);
 			stats = await lstat(canonical);
 		} catch {
@@ -189,23 +230,30 @@ export async function servingTargets(declaration, explicitTargets = [], options 
 			throw new Error(`Serving target "${relative}" does not exist`);
 		}
 		if (!stats.isDirectory()) throw new Error(`Serving target "${relative}" is not a directory`);
+		if (stats.isSymbolicLink() || stableIdentity(stats) === undefined) {
+			throw new Error(`Serving target "${relative}" is not a stable directory`);
+		}
 		if (!isWithin(canonicalRoot, canonical)) throw new Error(`Serving target "${relative}" escapes the repository root`);
 		if (canonical === canonicalAuthor) throw new Error(`Serving target "${relative}" aliases the authored pack root`);
+		const claim = Object.freeze({ path: canonical, canonicalPath: canonical, identity: stableIdentity(stats) });
 		let manifest;
 		try {
+			await assertDirectoryClaimCurrent(claim, realMirrorFs);
 			manifest = parseYaml(await readFile(path.join(canonical, "pack.yaml"), "utf8"));
-		} catch {
+			await assertDirectoryClaimCurrent(claim, realMirrorFs);
+		} catch (error) {
+			if (error?.code === "ESTALE") throw error;
 			throw new Error(`Serving target "${relative}" has no readable pack.yaml`);
 		}
 		if (!manifest || manifest.name !== validated.pack) {
 			throw new Error(`Serving target "${relative}" manifest name must be "${validated.pack}"`);
 		}
-		targets.push(canonical);
+		targets.push(claim);
 	}
 	const caseInsensitive = options.caseInsensitive ?? process.platform === "win32";
 	const unique = new Map();
-	for (const target of targets) unique.set(caseInsensitive ? target.toLowerCase() : target, target);
-	return [...unique.values()].sort((left, right) => left.localeCompare(right));
+	for (const target of targets) unique.set(caseInsensitive ? target.path.toLowerCase() : target.path, target);
+	return [...unique.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function resolveDep(spec) {
@@ -271,16 +319,148 @@ export async function buildSelectedPack(declaration, options = {}) {
 	}
 }
 
+function isMissing(error) {
+	return error?.code === "ENOENT";
+}
+
+async function lstatIfPresent(filePath, fsImpl) {
+	try {
+		return await fsImpl.lstat(filePath);
+	} catch (error) {
+		if (isMissing(error)) return undefined;
+		throw error;
+	}
+}
+
+async function assertClaimsCurrent(claims, fsImpl) {
+	for (const claim of claims) await assertDirectoryClaimCurrent(claim, fsImpl);
+}
+
+async function prepareDestinationParent(target, output, fsImpl) {
+	if (!target || typeof target.path !== "string" || typeof target.canonicalPath !== "string" || typeof target.identity !== "string") {
+		throw new Error("Mirror target must be a validated serving target claim");
+	}
+	const rootClaim = { path: target.path, identity: target.identity };
+	await assertDirectoryClaimCurrent(rootClaim, fsImpl);
+	const claims = [rootClaim];
+	const parentSegments = path.posix.dirname(output) === "." ? [] : path.posix.dirname(output).split("/");
+	let currentPath = target.path;
+	for (const segment of parentSegments) {
+		currentPath = path.join(currentPath, segment);
+		await assertClaimsCurrent(claims, fsImpl);
+		let stats = await lstatIfPresent(currentPath, fsImpl);
+		if (stats === undefined) {
+			await fsImpl.mkdir(currentPath, { recursive: false });
+			stats = await fsImpl.lstat(currentPath);
+		}
+		assertStableDirectory(stats, currentPath);
+		const claim = await captureDirectoryClaim(currentPath, target.canonicalPath, fsImpl);
+		claims.push(claim);
+		await assertClaimsCurrent(claims, fsImpl);
+	}
+	return claims;
+}
+
+async function captureDestinationFile(destination, target, claims, fsImpl) {
+	await assertClaimsCurrent(claims, fsImpl);
+	const stats = await lstatIfPresent(destination, fsImpl);
+	if (stats === undefined) return undefined;
+	if (!stats.isFile() || stats.isSymbolicLink() || stableIdentity(stats) === undefined) {
+		throw new Error(`Mirror destination is not a stable regular file: ${destination}`);
+	}
+	const canonical = await fsImpl.realpath(destination);
+	if (!isWithin(target.canonicalPath, canonical)) {
+		throw new Error(`Mirror destination escapes its serving target: ${destination}`);
+	}
+	const canonicalStats = await fsImpl.lstat(canonical);
+	if (!canonicalStats.isFile() || canonicalStats.isSymbolicLink() || !sameStableIdentity(stats, canonicalStats)) {
+		throw staleTargetError(destination);
+	}
+	await assertClaimsCurrent(claims, fsImpl);
+	return stats;
+}
+
+async function assertDestinationUnchanged(destination, expected, target, claims, fsImpl) {
+	const current = await captureDestinationFile(destination, target, claims, fsImpl);
+	if (expected === undefined) {
+		if (current !== undefined) throw staleTargetError(destination);
+		return;
+	}
+	if (current === undefined || !sameStableIdentity(expected, current)) throw staleTargetError(destination);
+}
+
+async function cleanupOwnedTemporary(tempPath, tempStats, fsImpl) {
+	try {
+		const current = await fsImpl.lstat(tempPath);
+		if (current.isFile() && !current.isSymbolicLink() && sameStableIdentity(tempStats, current)) {
+			await fsImpl.unlink(tempPath);
+		}
+	} catch {
+		// Preserve the publication error. Never unlink an identity we do not own.
+	}
+}
+
+async function publishDeclaredOutput(source, destination, target, claims, fsImpl) {
+	const expectedDestination = await captureDestinationFile(destination, target, claims, fsImpl);
+	const tempPath = path.join(path.dirname(destination), `.bobbit-pack-publish-${randomUUID()}`);
+	let tempStats;
+	try {
+		await assertClaimsCurrent(claims, fsImpl);
+		await fsImpl.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
+		tempStats = await fsImpl.lstat(tempPath);
+		if (!tempStats.isFile() || tempStats.isSymbolicLink() || stableIdentity(tempStats) === undefined) {
+			throw new Error(`Mirror temporary output is not a stable regular file: ${tempPath}`);
+		}
+		const canonicalTemp = await fsImpl.realpath(tempPath);
+		if (!isWithin(target.canonicalPath, canonicalTemp)) {
+			throw new Error(`Mirror temporary output escapes its serving target: ${tempPath}`);
+		}
+		const canonicalTempStats = await fsImpl.lstat(canonicalTemp);
+		if (!canonicalTempStats.isFile() || !sameStableIdentity(tempStats, canonicalTempStats)) {
+			throw staleTargetError(tempPath);
+		}
+		await assertClaimsCurrent(claims, fsImpl);
+		await assertDestinationUnchanged(destination, expectedDestination, target, claims, fsImpl);
+		try {
+			await fsImpl.rename(tempPath, destination);
+		} catch (error) {
+			// Windows rename does not replace an existing file. Remove only the exact
+			// regular file claimed above, then publish by a same-parent rename. A raced
+			// replacement makes rename fail closed rather than following it.
+			if (process.platform !== "win32" || expectedDestination === undefined) throw error;
+			await assertDestinationUnchanged(destination, expectedDestination, target, claims, fsImpl);
+			await fsImpl.unlink(destination);
+			if (await lstatIfPresent(destination, fsImpl) !== undefined) throw staleTargetError(destination);
+			await assertClaimsCurrent(claims, fsImpl);
+			await fsImpl.rename(tempPath, destination);
+		}
+		const published = await fsImpl.lstat(destination);
+		if (!published.isFile() || published.isSymbolicLink() || !sameStableIdentity(tempStats, published)) {
+			throw staleTargetError(destination);
+		}
+		const canonicalPublished = await fsImpl.realpath(destination);
+		if (!isWithin(target.canonicalPath, canonicalPublished)) throw staleTargetError(destination);
+		const canonicalPublishedStats = await fsImpl.lstat(canonicalPublished);
+		if (!sameStableIdentity(tempStats, canonicalPublishedStats)) throw staleTargetError(destination);
+		await assertClaimsCurrent(claims, fsImpl);
+		tempStats = undefined;
+	} catch (error) {
+		if (tempStats) await cleanupOwnedTemporary(tempPath, tempStats, fsImpl);
+		throw error;
+	}
+}
+
 /** Mirror only declared outputs, retaining their pack-relative nested paths. */
 export async function mirrorDeclaredOutputs(declaration, targets, options = {}) {
 	const validated = validateDeclaration(declaration);
 	const root = path.resolve(options.projectRoot ?? projectRoot);
+	const fsImpl = options.fs ?? realMirrorFs;
 	for (const target of targets) {
 		for (const entry of validated.entries) {
 			const source = path.join(root, validated.authorRoot, entry.out);
-			const destination = path.join(target, entry.out);
-			await mkdir(path.dirname(destination), { recursive: true });
-			await copyFile(source, destination);
+			const destination = path.join(target.path, ...entry.out.split("/"));
+			const claims = await prepareDestinationParent(target, entry.out, fsImpl);
+			await publishDeclaredOutput(source, destination, target, claims, fsImpl);
 		}
 	}
 }

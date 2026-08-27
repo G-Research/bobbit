@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +40,18 @@ async function createPackRoot(root: string, relative: string, name = "fixture") 
 	await mkdir(target, { recursive: true });
 	await writeFile(path.join(target, "pack.yaml"), `schema: 2\nname: ${name}\n`);
 	return target;
+}
+
+async function createBuiltOutputs(root: string, declared = declaration()) {
+	const author = await createPackRoot(root, declared.authorRoot, declared.pack);
+	await mkdir(path.join(author, "lib", "nested"), { recursive: true });
+	await writeFile(path.join(author, "lib", "nested", "panel.js"), "panel-current");
+	await writeFile(path.join(author, "lib", "route.mjs"), "route-current");
+	return author;
+}
+
+async function createDirectoryLink(target: string, linkPath: string) {
+	await symlink(target, linkPath, process.platform === "win32" ? "junction" : "dir");
 }
 
 afterEach(async () => {
@@ -103,7 +115,9 @@ describe("market pack serving target resolution", () => {
 		await createPackRoot(root, "dist/other-discovery/fixture");
 		await createPackRoot(root, "market-packs/stale/lib/fixture");
 
-		expect(await servingTargets(declared, [], { projectRoot: root })).toEqual([await realpath(expected)]);
+		const targets = await servingTargets(declared, [], { projectRoot: root });
+		expect(targets.map((target: { path: string }) => target.path)).toEqual([await realpath(expected)]);
+		expect(targets[0]?.identity).toMatch(/^.+:.+$/);
 	});
 
 	it("fails deterministically when the default is missing or has the wrong manifest", async () => {
@@ -138,10 +152,11 @@ describe("market pack serving target resolution", () => {
 		await createPackRoot(root, declared.authorRoot);
 		const alpha = await createPackRoot(root, "served/alpha");
 		const zulu = await createPackRoot(root, "served/zulu");
-		expect(await servingTargets(declared, ["served/zulu", "served/alpha", "served/alpha"], {
+		const targets = await servingTargets(declared, ["served/zulu", "served/alpha", "served/alpha"], {
 			projectRoot: root,
 			caseInsensitive: true,
-		})).toEqual([await realpath(alpha), await realpath(zulu)]);
+		});
+		expect(targets.map((target: { path: string }) => target.path)).toEqual([await realpath(alpha), await realpath(zulu)]);
 	});
 
 	it("rejects a symlink alias of the authored root", async () => {
@@ -194,17 +209,102 @@ describe("selected pack build and mirror", () => {
 	it("mirrors declared nested output paths without flattening or discovery", async () => {
 		const root = await fixtureRoot();
 		const declared = declaration();
-		const author = path.join(root, declared.authorRoot);
+		const author = await createBuiltOutputs(root, declared);
 		const target = await createPackRoot(root, "served/fixture");
-		await mkdir(path.join(author, "lib", "nested"), { recursive: true });
-		await writeFile(path.join(author, "lib", "nested", "panel.js"), "panel-current");
-		await writeFile(path.join(author, "lib", "route.mjs"), "route-current");
+		await mkdir(path.join(target, "lib", "nested"), { recursive: true });
+		await writeFile(path.join(target, "lib", "nested", "panel.js"), "panel-old");
+		await writeFile(path.join(target, "lib", "route.mjs"), "route-old");
 		await writeFile(path.join(author, "lib", "stale.js"), "must-not-mirror");
 
-		await mirrorDeclaredOutputs(declared, [target], { projectRoot: root });
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		await mirrorDeclaredOutputs(declared, targets, { projectRoot: root });
 		expect(await readFile(path.join(target, "lib", "nested", "panel.js"), "utf8")).toBe("panel-current");
 		expect(await readFile(path.join(target, "lib", "route.mjs"), "utf8")).toBe("route-current");
 		await expect(readFile(path.join(target, "lib", "stale.js"))).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("rejects a declared output parent symlink or junction without writing outside the target", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		await createBuiltOutputs(root, declared);
+		await createPackRoot(root, "served/fixture");
+		const outside = path.join(root, "outside-parent");
+		await mkdir(outside);
+		await createDirectoryLink(outside, path.join(root, "served/fixture/lib"));
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+
+		await expect(mirrorDeclaredOutputs(declared, targets, { projectRoot: root })).rejects.toThrow(
+			"changed or is unsafe",
+		);
+		await expect(readFile(path.join(outside, "nested", "panel.js"))).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("rejects a final output symlink and leaves its external sentinel unchanged", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		await createBuiltOutputs(root, declared);
+		const target = await createPackRoot(root, "served/fixture");
+		const parent = path.join(target, "lib", "nested");
+		await mkdir(parent, { recursive: true });
+		const sentinel = path.join(root, "outside-sentinel.js");
+		const destination = path.join(parent, "panel.js");
+		await writeFile(sentinel, "sentinel-original");
+		let fileLinkAvailable = true;
+		try {
+			await symlink(sentinel, destination, "file");
+		} catch (error) {
+			if (!["EPERM", "EACCES", "ENOTSUP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+			fileLinkAvailable = false;
+			await writeFile(destination, "existing-output");
+		}
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		const realFs = { copyFile, lstat, mkdir, realpath, rename, unlink };
+		const fs = fileLinkAvailable ? realFs : {
+			...realFs,
+			async lstat(filePath: string) {
+				const stats = await lstat(filePath);
+				if (filePath !== destination) return stats;
+				return { ...stats, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => true };
+			},
+		};
+
+		await expect(mirrorDeclaredOutputs(declared, targets, { projectRoot: root, fs })).rejects.toThrow(
+			"not a stable regular file",
+		);
+		expect(await readFile(sentinel, "utf8")).toBe("sentinel-original");
+	});
+
+	it("rejects a serving root identity replaced after validation without writing into the replacement", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		await createBuiltOutputs(root, declared);
+		const target = await createPackRoot(root, "served/fixture");
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		const displaced = path.join(root, "served/fixture-displaced");
+		await rename(target, displaced);
+		await mkdir(target);
+
+		await expect(mirrorDeclaredOutputs(declared, targets, { projectRoot: root })).rejects.toMatchObject({ code: "ESTALE" });
+		await expect(readFile(path.join(target, "lib", "nested", "panel.js"))).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	it("rejects an output parent replaced after validation without mutating an outside sentinel", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		await createBuiltOutputs(root, declared);
+		const target = await createPackRoot(root, "served/fixture");
+		const parent = path.join(target, "lib");
+		await mkdir(parent);
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		await rename(parent, path.join(target, "lib-displaced"));
+		const outside = path.join(root, "outside-parent-replacement");
+		await mkdir(outside);
+		await writeFile(path.join(outside, "sentinel"), "unchanged");
+		await createDirectoryLink(outside, parent);
+
+		await expect(mirrorDeclaredOutputs(declared, targets, { projectRoot: root })).rejects.toMatchObject({ code: "ESTALE" });
+		expect(await readFile(path.join(outside, "sentinel"), "utf8")).toBe("unchanged");
+		await expect(readFile(path.join(outside, "nested", "panel.js"))).rejects.toMatchObject({ code: "ENOENT" });
 	});
 });
 
@@ -269,6 +369,39 @@ describe("serialized pack rebuilds", () => {
 		await rebuilder.flush();
 		expect(mirror).toHaveBeenCalledOnce();
 		expect(notify).toHaveBeenCalledWith({ pack: "fixture", reloadToken: 2 });
+	});
+
+	it("does not notify for an unsafe mirror and recovers after the target is repaired", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		await createBuiltOutputs(root, declared);
+		const target = await createPackRoot(root, "served/fixture");
+		const outside = path.join(root, "outside-rebuilder");
+		await mkdir(outside);
+		const unsafeParent = path.join(target, "lib");
+		await createDirectoryLink(outside, unsafeParent);
+		const targets = await servingTargets(declared, ["served/fixture"], { projectRoot: root });
+		const notify = vi.fn(async () => {});
+		const rebuilder = createSerializedRebuilder({
+			pack: "fixture",
+			build: async () => {},
+			mirror: () => mirrorDeclaredOutputs(declared, targets, { projectRoot: root }),
+			notify,
+			onError() {},
+		});
+
+		rebuilder.schedule(true);
+		await rebuilder.flush();
+		expect(notify).not.toHaveBeenCalled();
+		await expect(readFile(path.join(outside, "nested", "panel.js"))).rejects.toMatchObject({ code: "ENOENT" });
+
+		await unlink(unsafeParent);
+		await mkdir(unsafeParent);
+		rebuilder.schedule(true);
+		await rebuilder.flush();
+		expect(await readFile(path.join(target, "lib", "nested", "panel.js"), "utf8")).toBe("panel-current");
+		expect(notify).toHaveBeenCalledOnce();
+		expect(notify).toHaveBeenCalledWith({ pack: "fixture", reloadToken: 1 });
 	});
 
 	it("publishes once per pack-level cycle and coalesces concurrent events into one trailing cycle", async () => {
