@@ -179,6 +179,7 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 		if (!Object.prototype.hasOwnProperty.call(projectManifest.dependencies, asset.package)) {
 			fail(`native asset ${asset.id} package=${asset.package} is not a direct production dependency`);
 		}
+		const declaredVersion = projectManifest.dependencies[asset.package];
 
 		let packageRoot;
 		try {
@@ -202,6 +203,9 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 		}
 		if (typeof installedManifest.version !== "string" || installedManifest.version.length === 0) {
 			fail(`native asset ${asset.id} package=${asset.package} has invalid installed version ${JSON.stringify(installedManifest.version)}`);
+		}
+		if (installedManifest.version !== declaredVersion) {
+			fail(`native asset ${asset.id} package=${asset.package} version mismatch: direct production dependency declares ${JSON.stringify(declaredVersion)}, installed package is ${installedManifest.version}`);
 		}
 
 		const targets = {};
