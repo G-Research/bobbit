@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -236,6 +237,33 @@ async function runOrdinaryWrite(sessionId: string, file: string): Promise<void> 
 	}
 }
 
+function runContainerMarker(
+	containerId: string,
+	bindingJson: string,
+	input: { operation: "read" | "write"; name: string; content?: string },
+): { directory: string; name: string; content: string } {
+	const script = `
+const fs = require("node:fs");
+const path = require("node:path");
+const [operation, name, content] = process.argv.slice(1);
+const directory = JSON.parse(process.env.BOBBIT_PACK_LOCAL_DATA_JSON)[${JSON.stringify(PACK)}];
+const file = path.join(directory, name);
+const result = operation === "read"
+  ? { directory, name, content: fs.readFileSync(file, "utf8") }
+  : (fs.writeFileSync(file, content, "utf8"), { directory, name, content });
+process.stdout.write(JSON.stringify(result));
+`;
+	const result = spawnSync("docker", [
+		"exec",
+		"-e", `BOBBIT_PACK_LOCAL_DATA_JSON=${bindingJson}`,
+		containerId,
+		"node", "-e", script,
+		input.operation, input.name, input.content ?? "",
+	], { encoding: "utf8" });
+	expect(result.status, result.stderr || result.stdout).toBe(0);
+	return JSON.parse(result.stdout);
+}
+
 async function packIsContributed(projectId?: string): Promise<boolean> {
 	const suffix = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 	const response = await apiFetch(`/api/ext/contributions${suffix}`);
@@ -455,7 +483,6 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	await installAndEnable();
 	await waitForPiTool();
 
-	const { spawnSync } = await import("node:child_process");
 	const docker = {
 		info: spawnSync("docker", ["info"], { stdio: "ignore" }),
 		image: spawnSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "ignore" }),
@@ -470,21 +497,32 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	expect(setSandbox.status, configText).toBe(200);
 	sandboxConfigured = true;
 
-	const sessionId = await createSession({ projectId: project.id });
+	const sessionId = await createSession({ projectId: project.id, sandboxed: true });
 	sessionIds.push(sessionId);
+	expect(gateway.sessionManager.getSession(sessionId)?.sandboxed, "the mount round trip must run in the requested sandbox realm").toBe(true);
 	const declaredHostDirectory = path.join(project.rootPath, ".pack-local-data-fixture");
 	expect(fs.existsSync(declaredHostDirectory), "sandbox activation must materialize the host directory before mounting it").toBe(true);
 	const expectedHostDirectory = fs.realpathSync(declaredHostDirectory);
 	const expectedContainerDirectory = "/bobbit/local-data/pack-local-data";
-	const runtimeEnvironment = gateway.sessionManager.getSession(sessionId)?.rpcClient?.options?.env ?? {};
+	const runtimeOptions = gateway.sessionManager.getSession(sessionId)?.rpcClient?.options ?? {};
+	const runtimeEnvironment = runtimeOptions.env ?? {};
+	const runtimeContainerId = runtimeOptions.containerId;
+	expect(runtimeContainerId, "the sandbox session must own a Docker runtime").toBeTruthy();
 	expect(JSON.parse(runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({ [PACK]: expectedContainerDirectory });
 
-	const containerWrite = await runPiTool(sessionId, { operation: "write", name: "container-marker.txt", content: "written-in-container" });
+	const containerWrite = runContainerMarker(runtimeContainerId, runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON, {
+		operation: "write",
+		name: "container-marker.txt",
+		content: "written-in-container",
+	});
 	expect(containerWrite.directory).toBe(expectedContainerDirectory);
 	expect(fs.readFileSync(path.join(expectedHostDirectory, "container-marker.txt"), "utf8")).toBe("written-in-container");
 
 	fs.writeFileSync(path.join(expectedHostDirectory, "host-marker.txt"), "written-on-host", "utf8");
-	const containerRead = await runPiTool(sessionId, { operation: "read", name: "host-marker.txt" });
+	const containerRead = runContainerMarker(runtimeContainerId, runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON, {
+		operation: "read",
+		name: "host-marker.txt",
+	});
 	expect(containerRead).toMatchObject({ directory: expectedContainerDirectory, content: "written-on-host" });
 	const markerBytes = fs.readFileSync(path.join(expectedHostDirectory, "container-marker.txt"));
 

@@ -264,7 +264,9 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 		// the Node subprocess + JSONL serialization entirely.
 		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
 		registerRpcBridgeFactory((opts: any) => {
-			if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
+			// Container-backed sessions must retain the production Docker bridge:
+			// the host-only mock cannot observe container paths or bind mounts.
+			if (!opts.containerId && shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
 			return null;
 		});
 

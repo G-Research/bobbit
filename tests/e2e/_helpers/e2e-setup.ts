@@ -1087,7 +1087,7 @@ async function defaultExecutionCwdForProject(projectId: string | undefined): Pro
  * load even though the harness + scaffolder both created it. Real product
  * failures still surface via the second attempt.
  */
-export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string }): Promise<string> {
+export async function createSession(opts?: { cwd?: string; goalId?: string; projectId?: string; sandboxed?: boolean }): Promise<string> {
 	const projectId = opts?.projectId || (await defaultProjectId());
 	const body: Record<string, unknown> = {
 		cwd: opts?.cwd || await defaultExecutionCwdForProject(projectId),
@@ -1095,6 +1095,9 @@ export async function createSession(opts?: { cwd?: string; goalId?: string; proj
 	};
 	if (projectId) {
 		body.projectId = projectId;
+	}
+	if (opts?.sandboxed !== undefined) {
+		body.sandboxed = opts.sandboxed;
 	}
 	// Retry on transient server 500s. Under heavy parallel test load the
 	// server occasionally fails session creation with a 500 (e.g. worktree
