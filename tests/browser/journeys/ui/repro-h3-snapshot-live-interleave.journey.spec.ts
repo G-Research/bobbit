@@ -54,27 +54,18 @@ async function readTranscript(page: import("@playwright/test").Page): Promise<{
 	});
 }
 
-/** Count assistant 'OK' rows. */
-async function countOkRows(page: import("@playwright/test").Page): Promise<number> {
-	return await page.evaluate(() => {
-		const ra = (window as any).__bobbitState?.remoteAgent;
-		if (!ra) return -1;
-		const msgs = ra._state.messages as any[];
-		let n = 0;
-		for (const m of msgs) {
-			if (m.role !== "assistant") continue;
-			let text = "";
-			if (typeof m.content === "string") text = m.content;
-			else if (Array.isArray(m.content)) {
-				text = m.content
-					.filter((c: any) => c?.type === "text")
-					.map((c: any) => c.text || "")
-					.join(" ");
-			}
-			if (/(^|\s)OK(\s|$)/.test(text.trim())) n++;
-		}
-		return n;
-	});
+async function readSessionLifecycle(sessionId: string): Promise<{
+	status: string;
+	completedTurnCount: number;
+}> {
+	const resp = await apiFetch(`/api/sessions/${sessionId}`);
+	const bodyText = await resp.text();
+	if (!resp.ok) throw new Error(`read session lifecycle (${resp.status}): ${bodyText}`);
+	const body = JSON.parse(bodyText) as { status?: unknown; completedTurnCount?: unknown };
+	return {
+		status: typeof body.status === "string" ? body.status : "unknown",
+		completedTurnCount: typeof body.completedTurnCount === "number" ? body.completedTurnCount : -1,
+	};
 }
 
 async function createSessionViaApi(page: import("@playwright/test").Page): Promise<string> {
@@ -233,14 +224,18 @@ test.describe("H3 â€” snapshot â†” live interleave race", () => {
 
 	test("(B) rapid plain-text prompts with mid-burst resync â€” every reply present", async ({ page }) => {
 		await openApp(page);
-		await createSessionViaApi(page);
+		const sessionId = await createSessionViaApi(page);
 		await waitForRemoteAgentConnected(page);
 
 		const failures: string[] = [];
+		const N = 8;
 
 		for (let outer = 0; outer < ITER; outer++) {
-			const before = await countOkRows(page);
-			const N = 8;
+			const before = await readSessionLifecycle(sessionId);
+			expect(before.status, `outer ${outer} should start from an idle session`).toBe("idle");
+			const identities = Array.from({ length: N }, (_, k) => `h3-${outer}-${k}`);
+			const expectedPrompts = identities.map((identity, k) => `tiny ${outer}-${k} H3_REPLY:${identity}`);
+			const expectedReplies = identities.map((identity) => `OK H3_REPLY:${identity}`);
 
 			// Fire the resyncs concurrently with the prompts.
 			await page.evaluate(() => {
@@ -250,27 +245,44 @@ test.describe("H3 â€” snapshot â†” live interleave race", () => {
 				}
 			});
 
-			for (let k = 0; k < N; k++) {
-				await sendMessage(page, `tiny ${outer}-${k}`);
+			for (const prompt of expectedPrompts) {
+				await sendMessage(page, prompt);
 				// Don't wait for idle â€” this is the point. Just yield one frame.
 				await yieldToClient(page);
 			}
 
-			// Now wait for every prompt to settle.
-			await page.waitForFunction(
-				() => (window as any).__bobbitState.remoteAgent.state.isStreaming === false,
-				undefined,
-				{ timeout: 60_000 },
-			).catch(() => {});
-			// Final resync to make sure server view is reflected.
+			// Client `isStreaming === false` is observable between queued turns, so it
+			// cannot prove that this burst drained. The server's monotonic completed-turn
+			// count advances only at each terminal agent_end; requiring +N and idle is the
+			// authoritative per-burst lifecycle boundary, without sleeps or retries.
+			await expect.poll(
+				() => readSessionLifecycle(sessionId),
+				{
+					timeout: 60_000,
+					message: `outer ${outer} should complete all ${N} accepted prompt turns`,
+				},
+			).toEqual({ status: "idle", completedTurnCount: before.completedTurnCount + N });
+
+			// Final resync to prove the authoritative server transcript converges into
+			// the client after the deliberately interleaved live snapshots.
 			await requestMessagesAndWaitForSnapshot(page);
 
-			const after = await countOkRows(page);
-			const delta = after - before;
-			if (delta !== N) {
-				const tr = await readTranscript(page);
+			const tr = await readTranscript(page);
+			const actualPrompts = tr.rows
+				.filter((row) => row.role === "user" && row.text.includes(`H3_REPLY:h3-${outer}-`))
+				.map((row) => row.text);
+			const actualReplies = tr.rows
+				.filter((row) => row.role === "assistant" && row.text.startsWith(`OK H3_REPLY:h3-${outer}-`))
+				.map((row) => row.text);
+
+			if (JSON.stringify(actualPrompts) !== JSON.stringify(expectedPrompts)) {
 				failures.push(
-					`outer ${outer}: expected +${N} OK rows, got +${delta} (before=${before} after=${after}, total rows=${tr.count})`,
+					`outer ${outer}: exact prompt identities diverged; expected=${JSON.stringify(expectedPrompts)} actual=${JSON.stringify(actualPrompts)} (total rows=${tr.count})`,
+				);
+			}
+			if (JSON.stringify(actualReplies) !== JSON.stringify(expectedReplies)) {
+				failures.push(
+					`outer ${outer}: exact reply identities diverged; expected=${JSON.stringify(expectedReplies)} actual=${JSON.stringify(actualReplies)} (total rows=${tr.count})`,
 				);
 			}
 		}

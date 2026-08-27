@@ -396,6 +396,12 @@ export class MockAgentCore {
 	static respondToPrompt(text) {
 		const lower = text.toLowerCase();
 
+		// H3 browser convergence fixture: return one uniquely addressable plain-text
+		// reply for each rapid prompt so the journey can prove per-occurrence
+		// coverage instead of inferring it from a cumulative count of identical OKs.
+		const h3ReplyMatch = text.match(/(?:^|\s)H3_REPLY:([A-Za-z0-9_-]+)(?:\s|$)/);
+		if (h3ReplyMatch) return { text: `OK H3_REPLY:${h3ReplyMatch[1]}` };
+
 		const markdownLocalImageMatch = text.match(/MARKDOWN_LOCAL_IMAGE:(\S+)/);
 		if (markdownLocalImageMatch) {
 			return { text: `Local image follows:\n\n![Session local screenshot](${markdownLocalImageMatch[1]})` };
