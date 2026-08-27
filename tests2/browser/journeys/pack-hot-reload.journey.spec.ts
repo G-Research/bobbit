@@ -267,7 +267,10 @@ test.describe("Journey: marketplace-pack development hot reload", () => {
 
 			const rebuilt = await fetch(`${viteBaseUrl}/__bobbit_dev/pack-rebuilt`, {
 				method: "POST",
-				headers: { "Content-Type": "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					"X-Bobbit-Pack-Reload": "1",
+				},
 				body: JSON.stringify({ pack: PACK_NAME, reloadToken: RELOAD_TOKEN }),
 			});
 			expect(rebuilt.status, `Vite pack rebuild bridge failed: ${await rebuilt.clone().text()}`).toBe(204);
