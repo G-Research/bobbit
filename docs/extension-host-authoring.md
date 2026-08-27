@@ -2427,12 +2427,15 @@ gateway restart or full-page reload for renderer and panel edits.
 The watcher is an addition to the normal development stack, not an installer or server launcher:
 
 1. Add the pack to the `PACKS` declarations in `scripts/build-market-packs.mjs` as described
-   below. A directory or committed bundle alone does not make a pack watchable.
+   below. A declaration makes the pack watchable but does not create its serving target; a directory
+   or committed bundle alone does not make a pack watchable either.
 2. Install and activate the pack in the scope you are testing, if it is not a shipped first-party
    pack. The open client must already have resolved that pack as the winning contribution.
-3. Start `npm run dev:harness` in one terminal. Its initial server build creates the declared
-   default serving roots and it runs the Vite development server. If using another development
-   launcher, run `npm run build:server` once before watching and ensure Vite is running.
+3. Start `npm run dev:harness` in one terminal so Vite and the gateway are running. Its initial
+   `npm run build:server` creates a default serving root only for a pack copied by the explicit
+   first-party allowlist in `scripts/copy-builtin-packs.mjs`. For any other declared pack, create or
+   install an existing repository-relative served pack root with a matching `pack.yaml`, then pass
+   that root with `--target`.
 4. Start the watcher in another terminal:
 
 ```bash
@@ -2494,11 +2497,14 @@ A serving target must already:
 - expose a stable, non-zero filesystem identity. Every traversed output directory and existing
   output file must expose the same kind of identity.
 
-The default target is not discovered or created. If it is missing, the command directs you to run
-`npm run build:server` or pass an explicit `--target`. Explicit targets are canonicalized,
-deduplicated, and processed in deterministic order. Parent directories for declared output files
-are created only after all targets pass validation. Static symlinks or junctions in an output path,
-output-file symlinks, and entries replaced after validation are rejected.
+The watcher never discovers or creates a serving target. `npm run build:server` creates the
+`defaultServingRoot` only when `scripts/copy-builtin-packs.mjs` copies that pack through its explicit
+first-party allowlist; a `PACKS` declaration alone does not create one. A non-allowlisted declared
+pack therefore needs an existing repository-relative, matching-manifest `--target`. Explicit targets
+are canonicalized, deduplicated, and processed in deterministic order. Parent directories for
+declared output files are created only after all targets pass validation. Static symlinks or
+junctions in an output path, output-file symlinks, and entries replaced after validation are
+rejected.
 
 Run the watcher unprivileged and only against serving trees controlled by the same trusted
 developer. Its pathname and identity checks reduce accidental or racy redirection, but are not a
