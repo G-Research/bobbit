@@ -12,7 +12,6 @@ export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
 	"tests2/core/marketplace-install.test.ts",
 	"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
 	"tests2/core/team-manager.test.ts",
-	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
 	"tests2/integration/benchmark-bobbit-journeys.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",

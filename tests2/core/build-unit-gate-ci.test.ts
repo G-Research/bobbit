@@ -131,11 +131,6 @@ describe("native CI qualification workflows", () => {
 			{ VITEST_MAX_WORKERS: "${{ runner.os == 'Windows' && '2' || '' }}" },
 			"hosted Windows must use two Vitest workers while an empty non-Windows override retains the normal fixed cap",
 		);
-		assert.equal(
-			steps.some((step) => step.run?.includes("test:affected")),
-			false,
-			"affected feedback must not replace the authoritative full-suite job",
-		);
 	});
 
 	it("runs complete Browser and E2E suites for PRs and exact-head manual qualification", () => {
@@ -229,11 +224,6 @@ describe("native CI qualification workflows", () => {
 		assert.doesNotMatch(source, /continue-on-error/, "every Browser and E2E matrix failure must fail its check");
 	});
 
-	it("keeps affected testing out of CI", () => {
-		const workflow = readWorkflow<BuildUnitGateWorkflow>(BUILD_UNIT_GATE_WORKFLOW_PATH);
-		assert.equal("affected-feedback" in workflow.jobs, false);
-		assert.doesNotMatch(workflowSource(BUILD_UNIT_GATE_WORKFLOW_PATH), /test:affected/);
-	});
 
 	it("retains CodeQL branch and scheduled triggers while permitting no-input exact-head dispatch", () => {
 		const workflow = readWorkflow<CodeQlWorkflow>(CODEQL_WORKFLOW_PATH);

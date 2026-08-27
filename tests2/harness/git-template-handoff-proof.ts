@@ -158,7 +158,7 @@ function canonicalTestPath(path: string): string | undefined {
 
 /**
  * Certification is meaningful only for the exact registered Tier-1 inventory.
- * Focused, changed, and affected invocations are valid subsets and must neither
+ * Focused or otherwise partial invocations are valid subsets and must neither
  * certify incomplete evidence nor require unrelated companion modules.
  */
 export function isCompleteCanonicalUnitInvocation(
