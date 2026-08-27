@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { test, expect } from "./_helpers/e2e/in-process-harness.js";
 import { apiFetch, rawApiFetch, registerProject, deleteSession } from "./_helpers/e2e/e2e-setup.js";
 import { copyGitTemplate } from "../../support/harnesses/shared/git-template.js";
@@ -14,22 +14,40 @@ type StaffCreateResult = {
 	json: any;
 };
 
-function canonical(path: string): string {
-	try { return realpathSync(path); } catch { return path; }
+function canonical(path: string, nativeRealpath: typeof realpathSync.native = realpathSync.native): string {
+	const lexical = resolve(path);
+	let existingPrefix = lexical;
+	let identity = lexical;
+	while (true) {
+		try {
+			// Worktree coordinates can be returned before their final directories
+			// exist. Resolve the longest existing prefix so Windows expands an 8.3
+			// spelling such as RUNNER~1 without discarding the missing suffix.
+			identity = resolve(nativeRealpath(existingPrefix), relative(existingPrefix, lexical));
+			break;
+		} catch {
+			const parent = dirname(existingPrefix);
+			if (parent === existingPrefix) break;
+			existingPrefix = parent;
+		}
+	}
+	return process.platform === "win32" ? identity.toLowerCase() : identity;
 }
 
 function normalisePath(path: string): string {
 	let value = canonical(path).replace(/\\/g, "/");
 	if (value.startsWith("/private/")) value = value.slice("/private".length);
-	if (process.platform === "win32") value = value.toLowerCase();
 	return value.replace(/\/+$/, "");
 }
 
-function isSameOrUnder(child: string | undefined, parent: string | undefined): boolean {
+function isSameOrUnder(
+	child: string | undefined,
+	parent: string | undefined,
+	pathIdentity: (path: string) => string = canonical,
+): boolean {
 	if (!child || !parent) return false;
-	const c = normalisePath(child);
-	const p = normalisePath(parent);
-	return c === p || c.startsWith(`${p}/`);
+	const offset = relative(pathIdentity(parent), pathIdentity(child));
+	return offset === "" || (!isAbsolute(offset) && offset !== ".." && !offset.startsWith(`..${sep}`));
 }
 
 let fixtureRoot = "";
@@ -200,6 +218,36 @@ test.describe("staff cwd parity regressions", () => {
 		// Project/session stores can still flush after their REST deletion. Keep
 		// their run-owned roots until the coordinator removes the whole run tree.
 		cleanupDirs.splice(0);
+	});
+
+	test("path containment resolves a Windows short-path identity without admitting a sibling", () => {
+		const root = makeTempRoot("path-identity");
+		cleanupDirs.push(root);
+		let identityRoot = root;
+		let alternateRoot = root;
+		let pathIdentity = canonical;
+
+		if (process.platform === "win32") {
+			identityRoot = join(root, "runneradmin");
+			alternateRoot = join(root, "RUNNER~1");
+			const nativeRealpath = ((candidate: string) => {
+				if (candidate.toLowerCase() === identityRoot.toLowerCase()) return identityRoot;
+				if (candidate.toLowerCase() === alternateRoot.toLowerCase()) return identityRoot;
+				throw Object.assign(new Error(`missing path: ${candidate}`), { code: "ENOENT" });
+			}) as typeof realpathSync.native;
+			pathIdentity = path => canonical(path, nativeRealpath);
+			alternateRoot = alternateRoot.toUpperCase();
+		}
+
+		const parent = join(alternateRoot, "project-repo-wt");
+		expect(
+			isSameOrUnder(join(identityRoot, "project-repo-wt", "staff-branch"), parent, pathIdentity),
+			"STAFF_CWD_PARITY_PATH_IDENTITY: missing worktree descendants must compare by their filesystem-authoritative parent identity",
+		).toBe(true);
+		expect(
+			isSameOrUnder(join(identityRoot, "project-repo-wt-sibling", "staff-branch"), parent, pathIdentity),
+			"STAFF_CWD_PARITY_PATH_IDENTITY: a sibling sharing the worktree-root prefix must remain outside containment",
+		).toBe(false);
 	});
 
 	for (const cwdCase of [
