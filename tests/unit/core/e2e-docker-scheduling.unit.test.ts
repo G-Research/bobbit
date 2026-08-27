@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	detectDockerSandboxCapability,
+	resolveE2eApiPlaywrightWorkers,
 	resolveE2ePlaywrightWorkers,
 	resolveE2ERetryCount,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
@@ -60,6 +61,25 @@ describe("E2E Docker capability and scheduling", () => {
 		expect(resolveE2ERetryCount({})).toBe(3);
 		expect(resolveE2ePlaywrightWorkers({})).toBe(2);
 		expect(resolveE2ePlaywrightWorkers({ E2E_V2_PW_WORKERS: "4" })).toBe(4);
+	});
+
+	it("resolves API workers independently and keeps browser-fidelity on the common resolver", () => {
+		expect(resolveE2eApiPlaywrightWorkers({})).toBe(2);
+		expect(resolveE2eApiPlaywrightWorkers({ E2E_V2_PW_WORKERS: "3" })).toBe(3);
+		expect(resolveE2eApiPlaywrightWorkers({ E2E_V2_API_PW_WORKERS: "1", E2E_V2_PW_WORKERS: "3" })).toBe(1);
+		expect(resolveE2eApiPlaywrightWorkers({ E2E_V2_API_PW_WORKERS: "9", E2E_V2_PW_WORKERS: "3" })).toBe(4);
+		expect(resolveE2ePlaywrightWorkers({ E2E_V2_API_PW_WORKERS: "1" })).toBe(2);
+		for (const invalid of ["", "0", "-1", "1.5", "not-a-number"]) {
+			expect(resolveE2eApiPlaywrightWorkers({ E2E_V2_API_PW_WORKERS: invalid, E2E_V2_PW_WORKERS: "3" })).toBe(3);
+		}
+
+		const source = readFileSync("scripts/testing-v2/run-e2e-v2.mjs", "utf8");
+		const groupB = source.slice(source.indexOf("async function runGroupB"), source.indexOf("async function runGroupC"));
+		const groupC = source.slice(source.indexOf("async function runGroupC"), source.indexOf("export function groupDVitestArgs"));
+		expect(groupB).toContain("resolveE2eApiPlaywrightWorkers()");
+		expect(groupB).not.toContain("resolveE2ePlaywrightWorkers()");
+		expect(groupC).toContain("resolveE2ePlaywrightWorkers()");
+		expect(groupC).not.toContain("resolveE2eApiPlaywrightWorkers()");
 	});
 
 	it("gates only image-backed sandbox cases and retains non-Docker coverage", () => {

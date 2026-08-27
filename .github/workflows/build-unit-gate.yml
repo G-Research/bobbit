@@ -157,6 +157,8 @@ jobs:
 
       - name: E2E gate
         run: npm run test:e2e
+        env:
+          E2E_V2_API_PW_WORKERS: ${{ runner.os == 'Windows' && '1' || '2' }}
 
   release-contract:
     name: Release contract

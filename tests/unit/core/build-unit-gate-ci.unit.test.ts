@@ -200,7 +200,9 @@ describe("native CI qualification workflows", () => {
 			BOBBIT_V2_PLAYWRIGHT_WORKERS: "${{ matrix.workers }}",
 		});
 		assert.deepEqual(jobs.e2e.strategy.matrix, { os: expectedOs }, "the Browser pressure bound must not alter E2E");
-		assert.equal(stepByName(jobs.e2e.steps, "E2E gate").env, undefined);
+		assert.deepEqual(stepByName(jobs.e2e.steps, "E2E gate").env, {
+			E2E_V2_API_PW_WORKERS: "${{ runner.os == 'Windows' && '1' || '2' }}",
+		}, "hosted Windows must serialize only API/process E2E while Linux and macOS retain two workers");
 	});
 
 	it("builds the version-matched sandbox image only for Linux E2E coverage", () => {

@@ -182,13 +182,22 @@ export function createPlaywrightE2EInvocation({ project, specs, workers, retries
 	};
 }
 
-// The E2E runner intentionally defaults Groups B/C to two workers. It is a
-// conservative cross-platform baseline; workflow callers can opt into more
+// The E2E runner intentionally defaults Playwright groups to two workers. It
+// is a conservative cross-platform baseline; workflow callers can opt into more
 // parallelism with E2E_V2_PW_WORKERS=1..4 (Git Bash supports the same prefix on
 // Windows). Keep the bound aligned with the global browser-render lease cap.
 export function resolveE2ePlaywrightWorkers(env = process.env) {
 	const requested = Number(env.E2E_V2_PW_WORKERS);
 	if (!Number.isInteger(requested) || requested < 1) return 2;
+	return Math.min(4, requested);
+}
+
+// API/process specs can be serialized independently when resource-heavy setup
+// would otherwise starve worker-scoped gateways. Browser-fidelity specs retain
+// the common Playwright worker setting.
+export function resolveE2eApiPlaywrightWorkers(env = process.env) {
+	const requested = Number(env.E2E_V2_API_PW_WORKERS);
+	if (!Number.isInteger(requested) || requested < 1) return resolveE2ePlaywrightWorkers(env);
 	return Math.min(4, requested);
 }
 
@@ -279,7 +288,7 @@ async function runGroupB(specs, coordinatorEnv) {
 	const retries = resolveE2ERetryCount(coordinatorEnv);
 	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
 	// explicitly passes 0 so no first-attempt failure can be hidden.
-	const pwWorkers = resolveE2ePlaywrightWorkers();
+	const pwWorkers = resolveE2eApiPlaywrightWorkers();
 	const invocation = createPlaywrightE2EInvocation({ project: "api", specs, workers: pwWorkers, retries });
 	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
