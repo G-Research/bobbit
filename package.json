@@ -34,6 +34,7 @@
     "build": "npm run build:packs && npm run build:server && npm run build:ui",
     "audit:packed-consumer": "node scripts/release-packed-consumer-audit.mjs",
     "dev": "concurrently -n gw,ui -c blue,green \"node dist/server/cli.js --cwd . --no-ui\" \"node scripts/dev-vite.mjs\"",
+    "dev:pack": "node scripts/build-market-packs.mjs --watch",
     "dev:harness": "node src/server/harness-deps.ts && node scripts/harness-bootstrap.mjs recover && npm run build:server && concurrently -n harness,ui -c yellow,green \"node scripts/harness-bootstrap.mjs harness -- --cwd . --no-ui\" \"node scripts/dev-vite.mjs\"",
     "dev:nord": "node src/server/harness-deps.ts && node scripts/harness-bootstrap.mjs recover && npm run build:server && node scripts/dev-nord.mjs",
     "dev:watchdog": "node src/server/harness-deps.ts && node scripts/harness-bootstrap.mjs recover && npm run build:server && concurrently -n watchdog,ui -c red,green \"node scripts/harness-bootstrap.mjs watchdog -- --cwd . --no-ui\" \"node scripts/dev-vite.mjs\"",

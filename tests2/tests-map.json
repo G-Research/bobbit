@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/market-pack-dev.test.ts",
+      "reason": "Focused core coverage for strict generic pack-watch parsing and resolution, deterministic declared-output mirroring, serialized rebuild publication and failure recovery, bounded Vite notification, and cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-transcript-roots.test.ts",
       "reason": "Focused security coverage for deterministic owner roots, exact session/control mounts, mount attestation, and owner-aware transcript publication and translation.",
       "execution": {
