@@ -10,6 +10,7 @@ import {
 	createSession,
 	defaultProject,
 	deleteSession,
+	waitForSessionStatus,
 } from "../_helpers/e2e-setup.js";
 
 const PACK = "pack-local-data";
@@ -525,6 +526,7 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 
 	const sessionId = await createSession({ projectId: project.id, cwd: project.rootPath, sandboxed: true });
 	sessionIds.push(sessionId);
+	await waitForSessionStatus(sessionId, "idle");
 	const readyResponse = await apiFetch("/api/sandbox-pool");
 	expect(readyResponse.status).toBe(200);
 	const readySandbox = ((await readyResponse.json()).containers ?? [])
