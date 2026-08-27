@@ -869,15 +869,6 @@
       }
     },
     {
-      "path": "tests2/core/affected-test-runner.test.ts",
-      "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
       "path": "tests2/core/worktree-pool-graceful-shutdown.test.ts",
       "reason": "Pins graceful current-instance pool draining: every pool stops before cleanup, failures remain isolated, claimed entries survive, and single- and multi-repository cleanup is local-only.",
       "execution": {
@@ -889,78 +880,6 @@
     {
       "path": "tests2/core/worktree-pool-startup-ownership.test.ts",
       "reason": "Pins fail-closed pool startup discovery: pool-shaped Git/filesystem worktrees are not adopted or claimed without in-memory ownership, while explicit current-instance entries remain claimable.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-reader-inventory.test.ts",
-      "reason": "Budgeted partition of the exhaustive indirect, unresolved, canary, and direct role-reader tables, validation, selection, and cache-hash audit.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-test-classification.test.ts",
-      "reason": "Pins semantic package and test-map classification, known broad-trigger precedence, fail-closed fallbacks, path normalization, and true documentation skip-all behavior.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-doc-classification.test.ts",
-      "reason": "Pins nested established-document basenames as skip-all while preserving graph-owned prompt, skill, and marketplace Markdown as bounded nonzero selections, including rename classification.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-runner-cli.test.ts",
-      "reason": "In-process runner coverage for RUN-ALL and cache policy, explicit PASS certification, transitive Vitest inputs, mutation fences, execution-boundary fingerprints, and Windows batching without subprocesses.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-runner-git-cli.test.ts",
-      "reason": "In-process injected change-collection coverage for rich before/after bytes, path normalization, rename/delete tombstones, and graph-owned Markdown attribution without Git or CLI subprocesses.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-runner-no-escape.test.ts",
-      "reason": "Static source guard deriving the registered affected runner matrices and their owned helpers from this map, rejecting subprocess, worker, dynamic-import, and embedded-script escapes.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/affected-runner-boundary.test.ts",
-      "reason": "Canonical E2E owner for the affected CLI argv/JSON/exit smoke and run-owned real-Git collection of committed, staged, unstaged, untracked, renamed, and deleted changes plus invalid-base failure.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
-      }
-    },
-    {
-      "path": "tests2/core/affected-correctness-harness.test.ts",
-      "reason": "Fast qualification coverage for selection evidence containment, auditable report shape, bounded-only averages, immutable sample coverage, sanitized harness-owned roots, and reliable success/failure cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2392,7 +2311,7 @@
     },
     {
       "path": "tests2/core/unit-lanes-scheduling.test.ts",
-      "reason": "Pins the direct Vitest unit stage, fixed three-worker cap with valid 1/2-worker lowering, shared process-scoped transform cache, project isolation, retry controls, and invocation-aware Git-template handoff certification: focused/affected subsets never certify while the exact canonical inventory uses the resolved 1/2/default-3 identity expectation.",
+      "reason": "Pins the direct Vitest unit stage, fixed three-worker cap with valid 1/2-worker lowering, shared process-scoped transform cache, project isolation, retry controls, and invocation-aware Git-template handoff certification: partial invocations never certify while the exact canonical inventory uses the resolved 1/2/default-3 identity expectation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3293,7 +3212,7 @@
     },
     {
       "path": "tests2/core/build-unit-gate-ci.test.ts",
-      "reason": "Structural CI qualification pin: validates YAML syntax, main-scoped build/unit and CodeQL triggers, PR-only Ubuntu/Windows/macOS Browser and E2E matrices on exact Node 22.19.0 with Chromium, unskippable standard gate commands, retry and failure policy, one Browser worker on Windows and two on Ubuntu/macOS, Linux-only version-matched sandbox image construction, and the temporary exclusion of affected testing from CI.",
+      "reason": "Structural CI qualification pin: validates YAML syntax, main-scoped build/unit and CodeQL triggers, PR-only Ubuntu/Windows/macOS Browser and E2E matrices on exact Node 22.19.0 with Chromium, unskippable complete-lane commands, retry and failure policy, one Browser worker on Windows and two on Ubuntu/macOS, and Linux-only version-matched sandbox image construction.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -4027,6 +3946,15 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/full-test-lane-entrypoints.test.ts",
+      "reason": "Removal regression proving the retired selective-test machinery and package entrypoints stay absent while the canonical unit, Browser, E2E, manual, and aggregate commands remain exact complete-lane dispatchers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],
