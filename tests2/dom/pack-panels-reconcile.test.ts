@@ -12,15 +12,8 @@ __syncBeforeAll(() => __syncCE());
 //
 // Module-level reconcile dedupe state persists across tests in a fork (the
 // legacy suite got a fresh page per test), so each test uses UNIQUE project ids.
-//
-// PUNTED (not ported here): the legacy "pack update invalidates the cached panel
-// module — a forced re-register re-imports fresh bytes" test. Its assertions turn
-// on `loadedPanels` caching, which only populates after a SUCCESSFUL dynamic
-// `import()` of the panel module from a Blob URL. happy-dom + vite-node cannot
-// resolve/execute a `blob:` (or `data:`) ESM URL at runtime (only a real browser
-// module loader can), so the module never caches and the fetch-count deltas the
-// test observes cannot be reproduced headlessly. That behaviour must stay a
-// browser E2E.
+// The shared module importer uses source-derived data URLs under Vitest, which
+// lets this suite exercise successful module evaluation and generation fencing.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // pack-panels ⇄ host-api ⇄ ToolGroup form a module-init cycle (setPanelHostFactory
@@ -28,6 +21,9 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 // session-manager owns the canonical import order; importing it FIRST in beforeAll
 // breaks the TDZ, then the real functions are bound from the settled modules.
 let reconcilePackPanelsForProject: typeof import("../../src/app/pack-panels.js").reconcilePackPanelsForProject;
+let registerPackPanels: typeof import("../../src/app/pack-panels.js").registerPackPanels;
+let invalidatePackPanelModules: typeof import("../../src/app/pack-panels.js").invalidatePackPanelModules;
+let renderPackPanelContent: typeof import("../../src/app/pack-panels.js").renderPackPanelContent;
 let openPackPanel: typeof import("../../src/app/pack-panels.js").openPackPanel;
 let setSessionSwitcher: typeof import("../../src/app/pack-panels.js").setSessionSwitcher;
 let state: typeof import("../../src/app/state.js").state;
@@ -35,13 +31,16 @@ let panelTabsForSession: typeof import("../../src/app/panel-workspace.js").panel
 let activePanelTabIdForSession: typeof import("../../src/app/panel-workspace.js").activePanelTabIdForSession;
 let HOST_CONTRACT_VERSION: number;
 
-type PackWire = { packId: string; packName: string; panels: Array<{ id: string; title?: string }>; entrypoints: unknown[]; routeNames: string[] };
+type PackWire = { packId: string; packName: string; panels: Array<{ id: string; title?: string; instanceMode?: "singleton" | "parameterized"; instanceParam?: string }>; entrypoints: unknown[]; routeNames: string[] };
 
 let fetchCalls: string[];
 let contributions: PackWire[];
+let panelModuleSource: string;
+let panelRequest: ((url: string) => Response | Promise<Response>) | undefined;
 const contribDelayByProject = new Map<string, number>();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const PANEL_MODULE = "export default function(){ return { render(){ return ''; } }; }";
+const panelModule = (label: string) => `export default function(){ return { render(params){ return ${JSON.stringify(label)} + ":" + String(params?.artifactId ?? ""); } }; }`;
+const PANEL_MODULE = panelModule("default");
 
 const DEMO: PackWire = { packId: "demo_pack", packName: "demo_pack", panels: [{ id: "demo.panel", title: "Demo" }], entrypoints: [], routeNames: [] };
 
@@ -49,7 +48,7 @@ beforeAll(async () => {
 	(window as any).happyDOM?.setURL?.("file:///test.html");
 	localStorage.setItem("gateway.url", "http://localhost");
 	await import("../../src/app/session-manager.js");
-	({ reconcilePackPanelsForProject, openPackPanel, setSessionSwitcher } = await import("../../src/app/pack-panels.js"));
+	({ reconcilePackPanelsForProject, registerPackPanels, invalidatePackPanelModules, renderPackPanelContent, openPackPanel, setSessionSwitcher } = await import("../../src/app/pack-panels.js"));
 	({ state } = await import("../../src/app/state.js"));
 	({ panelTabsForSession, activePanelTabIdForSession } = await import("../../src/app/panel-workspace.js"));
 	({ HOST_CONTRACT_VERSION } = await import("../../src/shared/extension-host/host-api.js"));
@@ -59,6 +58,8 @@ beforeAll(async () => {
 beforeEach(() => {
 	fetchCalls = [];
 	contributions = [structuredClone(DEMO)];
+	panelModuleSource = PANEL_MODULE;
+	panelRequest = undefined;
 	contribDelayByProject.clear();
 	vi.stubGlobal("fetch", async (input: any): Promise<Response> => {
 		const url = typeof input === "string" ? input : (input && input.url) || String(input);
@@ -70,7 +71,8 @@ beforeEach(() => {
 			return new Response(JSON.stringify({ version: 1, tabs: [], activeTabId: "", sizeMode: "split" }), { status: 200, headers: { "Content-Type": "application/json" } });
 		}
 		if (String(url).includes("/panels/")) {
-			return new Response(PANEL_MODULE, { status: 200, headers: { "Content-Type": "text/javascript" } });
+			if (panelRequest) return panelRequest(String(url));
+			return new Response(panelModuleSource, { status: 200, headers: { "Content-Type": "text/javascript" } });
 		}
 		if (String(url).includes("/api/ext/contributions")) {
 			const m = /[?&]projectId=([^&]*)/.exec(String(url));
@@ -104,6 +106,8 @@ const openInSession = (panelId: string, sessionId: string, packId?: string) => {
 const tabIdsForSession = (sid: string | undefined): string[] => panelTabsForSession(state, sid).map((t: any) => t?.id);
 const activeTabIdForSession = (sid: string | undefined): string => activePanelTabIdForSession(state, sid);
 const flush = async () => { await new Promise((r) => setTimeout(r, 30)); };
+const panelRequestUrls = () => calls().filter((url) => url.includes("/panels/"));
+const renderedPanel = (packId: string, panelId: string, params?: Record<string, unknown>) => renderPackPanelContent(packId, panelId, params);
 
 describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 	it("re-drives registration scoped to the active project; dedupes unchanged; swaps the loader on project change", async () => {
@@ -236,5 +240,131 @@ describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 		expect(ids).toContain("pack:demo_pack:demo.panel:artifact-a");
 		expect(ids).toContain("pack:demo_pack:demo.panel:artifact-b");
 		expect(ids).toContain("pack:demo_pack:demo.panel:explicit-key");
+	});
+
+	it("hot-invalidates fresh module bytes by token without changing tab identity, params, order, or selection", async () => {
+		contributions = [{
+			packId: "hot_identity",
+			packName: "hot_identity",
+			panels: [{ id: "viewer", title: "Hot viewer", instanceMode: "parameterized", instanceParam: "artifactId" }],
+			entrypoints: [],
+			routeNames: [],
+		}];
+		panelModuleSource = panelModule("v1");
+		await reconcile("P9-hot-identity");
+		(state as any).selectedSessionId = "hot-session";
+		openPackPanel({ panelId: "viewer", params: { artifactId: "artifact-a", stable: true } }, "hot_identity");
+		openPackPanel({ panelId: "viewer", params: { artifactId: "artifact-b", stable: true } }, "hot_identity");
+		await vi.waitFor(() => expect(renderedPanel("hot_identity", "viewer", { artifactId: "artifact-a" })).toBe("v1:artifact-a"));
+
+		const workspaceBefore = structuredClone({
+			selectedSessionId: (state as any).selectedSessionId,
+			panelTabsBySession: state.panelTabsBySession,
+			panelWorkspaceActiveBySession: state.panelWorkspaceActiveBySession,
+		});
+
+		clearCalls();
+		panelModuleSource = panelModule("v2");
+		expect(invalidatePackPanelModules("hot_identity", 101)).toBe(1);
+		expect({
+			selectedSessionId: (state as any).selectedSessionId,
+			panelTabsBySession: state.panelTabsBySession,
+			panelWorkspaceActiveBySession: state.panelWorkspaceActiveBySession,
+		}).toEqual(workspaceBefore);
+		await vi.waitFor(() => expect(renderedPanel("hot_identity", "viewer", { artifactId: "artifact-a" })).toBe("v2:artifact-a"));
+		expect(panelRequestUrls()).toEqual([
+			"http://localhost/api/ext/packs/hot_identity/panels/viewer?projectId=P9-hot-identity&devReload=101",
+		]);
+		expect({
+			selectedSessionId: (state as any).selectedSessionId,
+			panelTabsBySession: state.panelTabsBySession,
+			panelWorkspaceActiveBySession: state.panelWorkspaceActiveBySession,
+		}).toEqual(workspaceBefore);
+
+		clearCalls();
+		panelModuleSource = panelModule("v3");
+		expect(invalidatePackPanelModules("hot_identity", 102)).toBe(1);
+		await vi.waitFor(() => expect(renderedPanel("hot_identity", "viewer", { artifactId: "artifact-b" })).toBe("v3:artifact-b"));
+		expect(panelRequestUrls()).toEqual([
+			"http://localhost/api/ext/packs/hot_identity/panels/viewer?projectId=P9-hot-identity&devReload=102",
+		]);
+		expect({
+			selectedSessionId: (state as any).selectedSessionId,
+			panelTabsBySession: state.panelTabsBySession,
+			panelWorkspaceActiveBySession: state.panelWorkspaceActiveBySession,
+		}).toEqual(workspaceBefore);
+	});
+
+	it("invalidating one pack leaves another pack's evaluated panel cached", async () => {
+		registerPackPanels([
+			{ packId: "hot_pack_a", panelId: "viewer" },
+			{ packId: "hot_pack_b", panelId: "viewer" },
+		], "P10-pack-isolation");
+		let sourceA = panelModule("a-v1");
+		let sourceB = panelModule("b-v1");
+		panelRequest = (url) => new Response(url.includes("/hot_pack_a/") ? sourceA : sourceB, {
+			status: 200,
+			headers: { "Content-Type": "text/javascript" },
+		});
+		await vi.waitFor(() => expect(renderedPanel("hot_pack_a", "viewer")).toBe("a-v1:"));
+		await vi.waitFor(() => expect(renderedPanel("hot_pack_b", "viewer")).toBe("b-v1:"));
+
+		clearCalls();
+		sourceA = panelModule("a-v2");
+		sourceB = panelModule("b-v2");
+		expect(invalidatePackPanelModules("hot_pack_a", 201)).toBe(1);
+		expect(renderedPanel("hot_pack_b", "viewer")).toBe("b-v1:");
+		await vi.waitFor(() => expect(renderedPanel("hot_pack_a", "viewer")).toBe("a-v2:"));
+		expect(panelRequestUrls()).toEqual([
+			"http://localhost/api/ext/packs/hot_pack_a/panels/viewer?projectId=P10-pack-isolation&devReload=201",
+		]);
+		expect(renderedPanel("hot_pack_b", "viewer")).toBe("b-v1:");
+	});
+
+	it("a stale in-flight module cannot resurrect after tokenized invalidation", async () => {
+		registerPackPanels([{ packId: "hot_stale", panelId: "viewer" }], "P11-stale");
+		let resolveStale!: (response: Response) => void;
+		let requestCount = 0;
+		panelRequest = () => {
+			requestCount += 1;
+			if (requestCount === 1) return new Promise<Response>((resolve) => { resolveStale = resolve; });
+			return new Response(panelModule("new"), { status: 200, headers: { "Content-Type": "text/javascript" } });
+		};
+
+		renderedPanel("hot_stale", "viewer");
+		await vi.waitFor(() => expect(requestCount).toBe(1));
+		expect(invalidatePackPanelModules("hot_stale", 301)).toBe(1);
+		await vi.waitFor(() => expect(renderedPanel("hot_stale", "viewer")).toBe("new:"));
+		resolveStale(new Response(panelModule("stale"), { status: 200, headers: { "Content-Type": "text/javascript" } }));
+		await flush();
+
+		expect(renderedPanel("hot_stale", "viewer")).toBe("new:");
+		expect(panelRequestUrls()).toEqual([
+			"http://localhost/api/ext/packs/hot_stale/panels/viewer?projectId=P11-stale",
+			"http://localhost/api/ext/packs/hot_stale/panels/viewer?projectId=P11-stale&devReload=301",
+		]);
+	});
+
+	it("a later rebuild event recovers a panel after a failed tokenized load", async () => {
+		registerPackPanels([{ packId: "hot_recovery", panelId: "viewer" }], "P12-recovery");
+		panelModuleSource = panelModule("before");
+		await vi.waitFor(() => expect(renderedPanel("hot_recovery", "viewer")).toBe("before:"));
+		clearCalls();
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		panelRequest = (url) => {
+			const token = new URL(url).searchParams.get("devReload");
+			if (token === "401") return new Response("failed", { status: 500 });
+			return new Response(panelModule("recovered"), { status: 200, headers: { "Content-Type": "text/javascript" } });
+		};
+
+		expect(invalidatePackPanelModules("hot_recovery", 401)).toBe(1);
+		renderedPanel("hot_recovery", "viewer");
+		await vi.waitFor(() => expect(panelRequestUrls().some((url) => new URL(url).searchParams.get("devReload") === "401")).toBe(true));
+		await flush();
+		expect(invalidatePackPanelModules("hot_recovery", 402)).toBe(1);
+		await vi.waitFor(() => expect(renderedPanel("hot_recovery", "viewer")).toBe("recovered:"));
+
+		expect(panelRequestUrls().map((url) => new URL(url).searchParams.get("devReload"))).toEqual(["401", "402"]);
+		error.mockRestore();
 	});
 });
