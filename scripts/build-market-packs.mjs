@@ -324,6 +324,8 @@ export function createSerializedRebuilder(options) {
 	let watcher = null;
 	let nextReloadToken = 1;
 	let lastError = null;
+	let lastFailure = null;
+	let failureCount = 0;
 	const signalSource = options.signalSource ?? process;
 
 	const cycle = async () => {
@@ -344,6 +346,8 @@ export function createSerializedRebuilder(options) {
 					lastError = null;
 				} catch (error) {
 					lastError = error;
+					lastFailure = error;
+					failureCount += 1;
 					reportError(error);
 				}
 			}
@@ -354,13 +358,15 @@ export function createSerializedRebuilder(options) {
 		return running;
 	};
 
-	const flush = async () => {
+	const flush = async ({ throwOnError = false } = {}) => {
+		const startingFailureCount = failureCount;
 		if (debounceTimer) {
 			clearTimeout(debounceTimer);
 			debounceTimer = null;
 		}
 		if (dirty && !running) drain();
 		while (running) await running;
+		if (throwOnError && failureCount > startingFailureCount) throw lastFailure;
 	};
 
 	const schedule = (immediate = false) => {
@@ -418,22 +424,30 @@ async function buildAllPacks() {
 	for (const declaration of PACKS) await buildSelectedPack(declaration, { plugin });
 }
 
-async function runWatcher(parsed) {
+export async function runWatcher(parsed, options = {}) {
+	const root = path.resolve(options.projectRoot ?? projectRoot);
 	const declaration = resolvePackBuild(parsed.pack);
-	const targets = await servingTargets(declaration, parsed.targets);
-	const plugin = pdfWorkerPlugin(await bundlePdfWorker());
+	const targets = await servingTargets(declaration, parsed.targets, { projectRoot: root });
+	const plugin = options.plugin ?? (options.build ? undefined : pdfWorkerPlugin(await bundlePdfWorker()));
 	const rebuilder = createSerializedRebuilder({
 		pack: declaration.pack,
-		build: () => buildSelectedPack(declaration, { plugin }),
-		mirror: () => mirrorDeclaredOutputs(declaration, targets),
-		notify: (payload) => notifyVite(parsed.viteUrl, payload),
+		build: options.build ?? (() => buildSelectedPack(declaration, { projectRoot: root, plugin })),
+		mirror: options.mirror ?? (() => mirrorDeclaredOutputs(declaration, targets, { projectRoot: root })),
+		notify: options.notify ?? ((payload) => notifyVite(parsed.viteUrl, payload)),
+		signalSource: options.signalSource,
+		onError: options.onError,
 	});
-	const sourceRoot = path.join(projectRoot, declaration.authorRoot, "src");
-	const watcher = watchFs(sourceRoot, { recursive: true }, () => rebuilder.schedule());
+	const sourceRoot = path.join(root, declaration.authorRoot, "src");
+	const watcher = (options.watch ?? watchFs)(sourceRoot, { recursive: true }, () => rebuilder.schedule());
 	rebuilder.attachWatcher(watcher);
-	rebuilder.schedule(true);
-	await rebuilder.flush();
-	console.log(`[dev:pack] watching ${declaration.pack} at ${sourceRoot}`);
+	try {
+		rebuilder.schedule(true);
+		await rebuilder.flush({ throwOnError: true });
+	} catch (error) {
+		await rebuilder.dispose();
+		throw error;
+	}
+	(options.log ?? console.log)(`[dev:pack] watching ${declaration.pack} at ${sourceRoot}`);
 	return rebuilder;
 }
 
