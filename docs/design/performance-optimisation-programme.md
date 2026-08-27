@@ -59,9 +59,9 @@ The programme uses existing Bobbit capabilities:
 - Pack routes expose bounded SQLite projections to the browser panel.
 - The pack uses Bobbit's shared `better-sqlite3` runtime dependency, matching the goal and gate stores while retaining its own isolated project-local database.
 
-No new broad core subsystem is required. The bounded panel-only `host.project.snapshot()` implementation carried by the reconciled performance branch must accompany the usable product slice.
+No new broad core subsystem is required. The panel uses the landed contract-v7 on-demand `host.project` reads from its authenticated pack-owned surface.
 
-Goal metadata projection and core navigation are not MVP dependencies. SQLite stores the created `hypothesisId → goalId` link, and the panel joins that link to the bounded project snapshot by goal ID.
+Goal metadata projection and core navigation are not MVP dependencies. SQLite stores the created `hypothesisId → goalId` link, and the panel requests the linked goal and its bounded task, gate, session, and cached PR summaries by goal ID.
 
 ## 4. Actors
 
@@ -287,7 +287,7 @@ Goal creation is reconciliation-based:
 5. After an interrupted or uncertain create call, the Director reads full project goals and matches metadata before retrying. A match is linked; a claim is released to `open` only after no correlated goal exists.
 6. Titles and specs remain descriptive only and are never used as correlation keys.
 
-The panel does not need goal metadata. It reads the SQLite goal link and joins it to `host.project.snapshot()` by goal ID.
+The panel does not need goal metadata. It reads the SQLite goal link, then requests that goal through `host.project.readGoals({ mode: "ids", ids })` and its related detail methods.
 
 ## 9. Benchmarks and tests
 
@@ -467,13 +467,13 @@ Data flow:
 
 ```text
 Panel
-  ├─ host.project.snapshot()
-  │    └─ Bobbit staff/session/goal/task/gate/PR summaries
-  └─ host.callRoute("performance-snapshot")
-       └─ bounded SQLite projection and pack revision
+  ├─ host.callRoute("performance-snapshot")
+  │    └─ bounded SQLite projection, staff IDs, goal links, and pack revision
+  └─ host.project.readStaff/readSessions/readGoals/readGoalTasks/readGoalGates/readGoalPullRequest
+       └─ related Bobbit staff/session/goal/task/gate/PR summaries
 ```
 
-The panel subscribes to canonical project notifications and `onRefreshRequired`. Relevant events trigger a coalesced reread of both authoritative snapshots. Scanner/Director activity also causes SQLite rereads after their sessions settle. Browser code never opens SQLite or constructs Bobbit internal hashes.
+The panel subscribes to canonical project notifications and `onRefreshRequired`. Relevant events trigger a coalesced route-first reread followed by correlated on-demand Host reads. Scanner/Director activity also causes SQLite rereads after their sessions settle. Browser code never opens SQLite or constructs Bobbit internal hashes.
 
 The normal state is honest and empty until the programme is installed and runs. Development fixture data remains explicitly labelled and cannot be mistaken for project state. Activity is newest-first and capped at 50 rows.
 

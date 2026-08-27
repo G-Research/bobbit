@@ -1,29 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 import createPerformancePanel from "../../market-packs/performance-optimisation/src/performance-panel.ts";
 
-function projectSnapshot() {
+function hostRecords() {
 	return {
-		version: 1 as const,
-		generatedAt: Date.now(),
-		project: { id: "project-1", name: "Live project" },
 		staff: [
-			{ id: "scanner-staff", name: "Optimisation Scanner", state: "active", roleId: "performance-scanner", currentSessionId: "scanner-session", createdAt: 1, updatedAt: 2 },
-			{ id: "director-staff", name: "Optimisation Director", state: "active", roleId: "optimisation-director", currentSessionId: "director-session", createdAt: 1, updatedAt: 2 },
+			{ id: "scanner-staff", name: "Optimisation Scanner", state: "active", accessory: "none", roleId: "performance-scanner", currentSessionId: "scanner-session", createdAt: 1, updatedAt: 2 },
+			{ id: "director-staff", name: "Optimisation Director", state: "active", accessory: "none", roleId: "optimisation-director", currentSessionId: "director-session", createdAt: 1, updatedAt: 2 },
 		],
 		sessions: [
-			{ id: "goal-session", title: "Goal team", status: "streaming", createdAt: 1, lastActivity: 20, goalId: "goal-1" },
-			{ id: "scanner-session", title: "Optimisation Scanner", status: "streaming", createdAt: 1, lastActivity: 22, staffId: "scanner-staff" },
-			{ id: "director-session", title: "Optimisation Director", status: "idle", createdAt: 1, lastActivity: 21, staffId: "director-staff" },
+			{ id: "goal-session", title: "Goal team", status: "streaming", archived: false, createdAt: 1, lastActivity: 20, goalId: "goal-1" },
+			{ id: "scanner-session", title: "Optimisation Scanner", status: "streaming", archived: false, createdAt: 1, lastActivity: 22, staffId: "scanner-staff" },
+			{ id: "director-session", title: "Optimisation Director", status: "idle", archived: false, createdAt: 1, lastActivity: 21, staffId: "director-staff" },
+			{ id: "director-delegate", title: "Benchmark delegate", status: "streaming", archived: false, createdAt: 1, lastActivity: 23, delegateOf: "director-session", goalId: "goal-1" },
 		],
 		goals: [
-			{ id: "goal-1", title: "Live performance goal", state: "in-progress", createdAt: 1, updatedAt: 2 },
-			{ id: "goal-unrelated", title: "Unrelated project goal", state: "in-progress", createdAt: 1, updatedAt: 2 },
+			{ id: "goal-1", title: "Live performance goal", state: "in-progress", team: true, archived: false, createdAt: 1, updatedAt: 2 },
+			{ id: "goal-unrelated", title: "Unrelated project goal", state: "in-progress", team: true, archived: false, createdAt: 1, updatedAt: 2 },
 		],
-		tasks: [{ id: "task-1", goalId: "goal-1", title: "Measure", type: "implementation", state: "blocked", createdAt: 1, updatedAt: 2 }],
-		gates: [{ gateId: "gate-1", goalId: "goal-1", name: "Measure", status: "failed", signalCount: 1, updatedAt: 2 }],
-		pullRequests: [{ goalId: "goal-1", number: 42, title: "Measured improvement", state: "OPEN", reviewDecision: "REVIEW_REQUIRED", mergeable: "MERGEABLE" }],
-		truncated: { staff: false, sessions: false, goals: false, tasks: false, gates: false, pullRequests: false },
+		tasks: [{ id: "task-1", goalId: "goal-1", title: "Measure", type: "implementation", state: "blocked", dependsOn: [], createdAt: 1, updatedAt: 2 }],
+		gates: [{ gateId: "gate-1", name: "Measure", status: "failed", effectiveStatus: "failed", running: false, awaitingSignoffCount: 0, dependsOn: [], signalCount: 1, updatedAt: 2 }],
+		pullRequest: { goalId: "goal-1", number: 42, title: "Measured improvement", state: "OPEN", reviewDecision: "REVIEW_REQUIRED", mergeability: "MERGEABLE" },
 	};
+}
+
+function pageResult<T>(items: T[], selector?: { mode?: string; cursor?: number; limit?: number; ids?: string[] }, idOf: (item: T) => string = (item) => (item as { id: string }).id) {
+	if (selector?.mode === "ids") return {
+		mode: "ids",
+		results: selector.ids!.map((id) => {
+			const value = items.find((item) => idOf(item) === id);
+			return value ? { id, status: "found", value } : { id, status: "not-found" };
+		}),
+	};
+	const cursor = selector?.cursor ?? 0;
+	const limit = selector?.limit ?? 50;
+	const pageItems = items.slice(cursor, cursor + limit);
+	const hasMore = cursor + limit < items.length;
+	return { mode: "page", items: pageItems, page: { cursor, limit, total: items.length, hasMore, ...(hasMore ? { nextCursor: cursor + limit } : {}) } };
 }
 
 function fakeHost() {
@@ -64,19 +76,67 @@ function fakeHost() {
 			],
 		},
 	}));
+	const records = hostRecords();
+	const loadOrder: string[] = [];
+	callRoute.mockImplementation(async () => {
+		loadOrder.push("route");
+		return (await callRoute.getMockImplementation()!()) as never;
+	});
+	// Restore a non-recursive implementation while retaining explicit load order.
+	callRoute.mockReset().mockImplementation(async () => {
+		loadOrder.push("route");
+		return {
+			ok: true,
+			value: {
+				version: 1,
+				revision: 7,
+				updatedAt: 1_700_000_000_000,
+				scannerStaffId: "scanner-staff",
+				directorStaffId: "director-staff",
+				registry: [{ id: "hyp-1", title: "Avoid repeated parsing", status: "active", confidence: 0.9, sessionId: "scanner-session" }],
+				goals: [
+					{ id: "goal-1", label: "Stored title", detail: "active" },
+					{ id: "goal-no-longer-live", label: "Concluded linked goal", detail: "concluded" },
+				],
+				coverage: [
+					{ id: "unit-1", label: "src/server", kind: "Structural", state: "scanned", covered: 2, total: 2, children: [] },
+					{ id: "unit-2", label: "src/app", kind: "Structural", state: "stale", covered: 0, total: 3, children: [] },
+				],
+				benchmarks: [{ id: "bench-1", name: "Session startup", component: "server", commandName: "benchmark:startup", metric: "p95", unit: "ms", direction: "lower", scanUnitIds: ["unit-1"], fileGlobs: ["src/server/**"], tags: ["startup"], warmup: 2, repetitions: 10 }],
+				benchmarkRuns: [{ id: "run-1", hypothesisId: "hyp-1", benchmarkId: "bench-1", kind: "candidate", commit: "abc123", metrics: { p95: 640, operationsPerSecond: 1_000 }, variability: { sd: 11 }, interpretation: "Repeatable improvement", createdAt: "2024-02-01T00:00:00Z" }],
+				outcomes: [{ hypothesisId: "hyp-1", outcome: "Recommend merging", measurementSummary: "p95 improved", recordedAt: "2024-02-02T00:00:00Z" }],
+				activity: [
+					{ id: "old", at: "2024-01-01T00:00:00Z", kind: "info", actor: "Scanner", message: "Older" },
+					{ id: "new", at: "2024-02-01T00:00:00Z", kind: "success", actor: "Scanner", message: "Newer" },
+				],
+			},
+		};
+	});
+	const projectCall = <T extends (...args: any[]) => any>(name: string, implementation: T) => vi.fn((...args: Parameters<T>) => {
+		loadOrder.push(name);
+		return implementation(...args);
+	});
+	const readStaff = projectCall("readStaff", async (selector?: any) => pageResult(records.staff, selector));
+	const readSessions = projectCall("readSessions", async (selector?: any) => pageResult(records.sessions, selector));
+	const readGoals = projectCall("readGoals", async (selector?: any) => pageResult(records.goals, selector));
+	const readGoalTasks = projectCall("readGoalTasks", async (goalId: string, selector?: any) => goalId === "goal-1" ? pageResult(records.tasks, selector) : { goalId, status: "not-found" });
+	const readGoalGates = projectCall("readGoalGates", async (goalId: string, selector?: any) => goalId === "goal-1" ? pageResult(records.gates, selector, (gate) => gate.gateId) : { goalId, status: "not-found" });
+	const readGoalPullRequest = projectCall("readGoalPullRequest", async (goalId: string) => goalId === "goal-1"
+		? { id: goalId, status: "found", value: records.pullRequest }
+		: { id: goalId, status: "not-found" });
 	const openPanel = vi.fn();
 	const navigate = vi.fn();
 	const host = {
 		version: 1,
 		contractVersion: 7,
 		capabilities: {
-			callRoute: true, projectSnapshot: true, projectNotifications: true, store: true,
+			callRoute: true, projectReads: true, projectNotifications: true, store: true,
 			session: false, ui: true, invokeAction: true, requestRender: true,
 			has(name: string) { return Boolean((this as Record<string, unknown>)[name]); },
 		},
 		callRoute,
 		project: {
-			snapshot: vi.fn(async () => projectSnapshot()),
+			readStaff, readSessions, readGoals, readGoalTasks, readGoalGates, readGoalPullRequest,
 			notifications: {
 				subscribe: vi.fn((name: string, handler: () => void) => {
 					const handlers = notificationHandlers.get(name) ?? [];
@@ -94,18 +154,26 @@ function fakeHost() {
 		store: { read, put: vi.fn(async () => undefined) },
 		ui: { createBobbitSprite, openPanel, navigate }, session: {}, requestRender: vi.fn(), invokeAction: vi.fn(),
 	};
-	return { host, callRoute, read, createBobbitSprite, openPanel, navigate, notificationHandlers, refreshHandlers };
+	return { host, records, callRoute, read, createBobbitSprite, openPanel, navigate, notificationHandlers, refreshHandlers, loadOrder, readStaff, readSessions, readGoals, readGoalTasks, readGoalGates, readGoalPullRequest };
 }
 
 describe("Performance panel live data", () => {
 	it("reads the pack route, joins Bobbit state by goal id, and coalesces project notifications", async () => {
 		const fake = fakeHost();
 		const root = createPerformancePanel().render(undefined, fake.host as any);
-		await vi.waitFor(() => expect(fake.callRoute).toHaveBeenCalledTimes(1));
+		await vi.waitFor(() => expect(fake.readGoalPullRequest).toHaveBeenCalledTimes(1));
 		expect(fake.callRoute).toHaveBeenCalledWith("performance-snapshot", {
 			method: "GET",
 			query: { view: "flow", activityLimit: 50 },
 		});
+		expect(fake.loadOrder[0]).toBe("route");
+		for (const method of ["readStaff", "readSessions", "readGoals", "readGoalTasks", "readGoalGates", "readGoalPullRequest"]) expect(fake.loadOrder).toContain(method);
+		expect(fake.readStaff).toHaveBeenCalledWith({ mode: "ids", ids: ["scanner-staff", "director-staff"] });
+		expect(fake.readSessions).toHaveBeenCalledWith({ mode: "page", cursor: 0, limit: 200 });
+		expect(fake.readGoals).toHaveBeenCalledWith({ mode: "ids", ids: ["goal-1", "goal-no-longer-live"] });
+		expect(fake.readGoals).not.toHaveBeenCalledWith(expect.objectContaining({ mode: "page" }));
+		expect(fake.readGoalTasks).toHaveBeenCalledWith("goal-1", { mode: "page", cursor: 0, limit: 200 });
+		expect(fake.readGoalGates).toHaveBeenCalledWith("goal-1", { mode: "page", cursor: 0, limit: 200 });
 		expect(fake.read).toHaveBeenCalledTimes(1);
 		expect(fake.read).toHaveBeenCalledWith("control-pane.ui");
 		expect(root.querySelector('[data-flow-node="goals"] .po-map-metric strong')?.textContent).toBe("1");
@@ -114,7 +182,7 @@ describe("Performance panel live data", () => {
 		root.querySelector<HTMLButtonElement>('[data-flow-node="scanner"] .po-map-action')?.click();
 		expect(fake.openPanel).toHaveBeenCalledWith({ panelId: "performance-optimisation.panel", params: { tab: "flow" }, sessionId: "scanner-session" });
 		root.querySelector<HTMLButtonElement>('[data-flow-node="director"] .po-map-action')?.click();
-		expect(fake.openPanel).toHaveBeenCalledWith({ panelId: "performance-optimisation.panel", params: { tab: "flow" }, sessionId: "director-session" });
+		expect(fake.openPanel).toHaveBeenCalledWith({ panelId: "performance-optimisation.panel", params: { tab: "flow" }, sessionId: "director-delegate" });
 		root.querySelector<HTMLButtonElement>('[data-flow-node="coverage"] .po-map-action')?.click();
 		expect(fake.navigate).toHaveBeenCalledWith({ route: "performance-optimisation", params: { tab: "coverage" } });
 		root.querySelector<HTMLButtonElement>('[data-flow-node="hypotheses"] .po-map-action')?.click();
@@ -145,7 +213,8 @@ describe("Performance panel live data", () => {
 			expect(store.querySelector(".po-map-node-content")).not.toBeNull();
 		}
 		expect(fake.createBobbitSprite).toHaveBeenCalledWith({ subject: { kind: "staff", id: "scanner-staff" }, state: "active", label: "Optimisation Scanner Bobbit avatar", size: 40, animated: true });
-		expect(fake.createBobbitSprite).toHaveBeenCalledWith({ subject: { kind: "staff", id: "director-staff" }, state: "idle", label: "Optimisation Director Bobbit avatar", size: 40, animated: true });
+		expect(fake.createBobbitSprite).toHaveBeenCalledWith({ subject: { kind: "staff", id: "director-staff" }, state: "active", label: "Optimisation Director Bobbit avatar", size: 40, animated: true });
+		expect(root.textContent).toContain("goal:goal-no-longer-live:not-found");
 		expect(root.querySelector('[aria-label="Optimisation Scanner Bobbit avatar"]')).not.toBeNull();
 		expect(root.querySelector('[aria-label="Optimisation Director Bobbit avatar"]')).not.toBeNull();
 		const statusDots = Array.from(root.querySelectorAll<HTMLElement>(".po-map-status"));
@@ -168,17 +237,51 @@ describe("Performance panel live data", () => {
 		await vi.waitFor(() => expect(root.querySelector(".po-map-layout")).not.toBe(routedLayout));
 	});
 
-	it("does not count concluded registry goals as in flight when the host snapshot is unavailable", async () => {
+	it("preserves paused and idle operational staff states", async () => {
 		const fake = fakeHost();
-		fake.host.capabilities.projectSnapshot = false;
+		fake.records.staff[0].state = "paused";
+		fake.records.sessions[1].status = "idle";
+		fake.records.sessions[3].status = "idle";
+		createPerformancePanel().render(undefined, fake.host as any);
+		await vi.waitFor(() => expect(fake.createBobbitSprite).toHaveBeenCalledWith(expect.objectContaining({
+			subject: { kind: "staff", id: "scanner-staff" }, state: "paused",
+		})));
+		expect(fake.createBobbitSprite).toHaveBeenCalledWith(expect.objectContaining({
+			subject: { kind: "staff", id: "director-staff" }, state: "idle",
+		}));
+	});
+
+	it("falls back to valid pack data when on-demand project reads are unavailable", async () => {
+		const fake = fakeHost();
+		fake.host.capabilities.projectReads = false;
 		const root = createPerformancePanel().render(undefined, fake.host as any);
 		await vi.waitFor(() => expect(fake.callRoute).toHaveBeenCalledTimes(1));
-		expect(fake.host.project.snapshot).not.toHaveBeenCalled();
+		expect(fake.readStaff).not.toHaveBeenCalled();
 		expect(root.querySelector('[data-flow-node="goals"] .po-map-metric strong')?.textContent).toBe("1");
 		expect(Array.from(root.querySelectorAll(".po-headline-copy strong")).map(item => item.textContent)).toContain("1");
 	});
 
-	it("renders four working equal tabs and a searchable benchmark store from the live snapshot", async () => {
+	it("preserves pack goal detail when individual Host goal-detail reads fail", async () => {
+		const fake = fakeHost();
+		fake.readGoalTasks.mockRejectedValueOnce(new Error("tasks-offline"));
+		fake.readGoalGates.mockResolvedValueOnce({ goalId: "goal-1", status: "unauthorized" });
+		fake.readGoalPullRequest.mockResolvedValueOnce({ id: "goal-1", status: "unauthorized" });
+		const root = createPerformancePanel().render(undefined, fake.host as any);
+		await vi.waitFor(() => expect(root.textContent).toContain("tasks:goal-1:tasks-offline"));
+		expect(root.querySelector('[data-flow-node="goals"] .po-map-metric strong')?.textContent).toBe("1");
+		expect(root.textContent).toContain("gates:goal-1:unauthorized");
+		expect(root.textContent).toContain("Pack data was preserved");
+	});
+
+	it("accepts has(projectReads) as the capability fallback", async () => {
+		const fake = fakeHost();
+		(fake.host.capabilities as any).projectReads = undefined;
+		fake.host.capabilities.has = (name: string) => name === "projectReads";
+		createPerformancePanel().render(undefined, fake.host as any);
+		await vi.waitFor(() => expect(fake.readGoals).toHaveBeenCalledTimes(1));
+	});
+
+	it("renders four working equal tabs and a searchable benchmark store from the live data", async () => {
 		const fake = fakeHost();
 		const root = createPerformancePanel().render({ tab: "benchmarks" }, fake.host as any);
 		await vi.waitFor(() => expect(root.textContent).toContain("Session startup"));
@@ -217,7 +320,8 @@ describe("Performance panel live data", () => {
 		const recreatedFacade = { ...fake.host, capabilities: { ...fake.host.capabilities } };
 		panel.render({ ...params }, recreatedFacade as any);
 		expect(fake.callRoute).toHaveBeenCalledTimes(1);
-		expect(fake.host.project.snapshot).toHaveBeenCalledTimes(1);
+		expect(fake.readStaff).toHaveBeenCalledTimes(1);
+		expect(fake.readGoals).toHaveBeenCalledTimes(1);
 		expect(fake.host.project.notifications.subscribe).toHaveBeenCalledTimes(subscriptions);
 		expect(root.querySelector(".po-map-layout")).toBe(routedLayout);
 

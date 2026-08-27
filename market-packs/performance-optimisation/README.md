@@ -7,14 +7,14 @@ Opt-in first-party Extension Host pack for autonomous performance discovery and 
 - `/performance` and the session menu open the singleton control pane.
 - `performance-optimisation` is the reload-safe structured route; the panel uses `host.ui.navigate`, never hashes or raw URLs.
 - Tabs are **Flow map**, **Scan coverage**, **Hypothesis registry**, and **Benchmark store**.
-- The panel reads bounded live staff, session, goal, gate, task, and cached PR summaries through panel-only `host.project.snapshot()`.
-- It merges that core state with performance-owned coverage, hypotheses, activity, measurements, outcomes, and goal links read from the pack's `performance-snapshot` route. Only the selected tab remains in the implicit `host.store` as a UI preference.
+- The panel first loads performance-owned coverage, hypotheses, activity, measurements, outcomes, staff IDs, and goal links from the pack's `performance-snapshot` route.
+- It then uses `host.project.readStaff/readSessions/readGoals/readGoalTasks/readGoalGates/readGoalPullRequest` to fetch only correlated Host records. Exact-ID lookups are preferred; bounded pagination is used only for staff-role discovery, related delegate sessions, and children of a known goal. Only the selected tab remains in the implicit `host.store` as a UI preference.
 - Session links use `host.ui.openPanel({ panelId, sessionId })` when the live project or stored snapshot supplies a real session id.
 - The Scanner avatar is built from Bobbit's canonical `BODY_GRID` and `EYE_POSITIONS` data.
 
 The normal panel starts honestly empty. For layout development only, open the contributed route with structured params `{ tab: "flow", demo: "true" }`; the panel labels this state **Development fixture · not live project data**.
 
-## Persistence and snapshot contract
+## Persistence and pack projection contract
 
 The pack owns `<canonical-project-root>/.performance-optimisation/performance.sqlite` through Pack Local Data. Model-facing tools and the server route use Bobbit's shared `better-sqlite3` runtime dependency. The universal pack carries confined-worker prebuilds for supported macOS, Linux/glibc, Linux/musl, and Windows x64/arm64 targets, then selects only the current runtime target. Browser code reads this versioned projection through `host.callRoute("performance-snapshot")`:
 
@@ -103,7 +103,7 @@ npm run dev:pack -- performance-optimisation --target <scope>/.bobbit/config/mar
 
 ## Current boundaries
 
-- Project notifications trigger authoritative rereads; the pack does not add SQLite events or file watchers to Bobbit core.
+- Project notifications trigger coalesced route-first rereads. Lookup outcomes and per-goal detail failures preserve valid pack data rather than manufacturing empty results.
 - Goal correlation uses existing namespaced metadata and an SQLite `hypothesisId → goalId` link; browser metadata projection is unnecessary.
 - Explore Hypothesis is passed as a frozen `workflow` snapshot in the direct `create_goal` body because marketplace workflow declarations are catalogue-only today.
 - Direct goal creation is transactionally claimed in the registry and correlated by namespaced metadata before retry, preventing duplicate goals after interrupted Director turns.

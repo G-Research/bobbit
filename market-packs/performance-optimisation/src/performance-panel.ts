@@ -1,5 +1,17 @@
 import { Database as DatabaseIcon, Lightbulb, Route as RouteIcon, ScanLine } from "lucide";
-import type { HostApi, HostBobbitSubject, HostProjectSnapshot } from "../../../src/shared/extension-host/host-api.ts";
+import type {
+	HostApi,
+	HostBobbitSubject,
+	HostGateSummary,
+	HostGoalReadError,
+	HostGoalSummary,
+	HostLookupResult,
+	HostProjectRead,
+	HostPullRequestSummary,
+	HostSessionSummary,
+	HostStaffSummary,
+	HostTaskSummary,
+} from "../../../src/shared/extension-host/host-api.ts";
 
 type TabId = "flow" | "coverage" | "registry" | "benchmarks";
 type OperationalState = "active" | "idle" | "paused";
@@ -123,6 +135,7 @@ type PaneState = {
 	loading: boolean;
 	storeState: "unknown" | "ready" | "absent" | "unavailable" | "error";
 	storeDiagnostic?: string;
+	projectDiagnostic?: string;
 	initialized: boolean;
 	demo: boolean;
 	liveEvents: FeedEvent[];
@@ -466,21 +479,51 @@ function parseSnapshot(routeResult: unknown): PerformanceSnapshot | null {
 }
 
 const RUNNING_SESSION_STATES = new Set(["running", "streaming", "starting", "initializing", "thinking"]);
+const PROJECT_PAGE_LIMIT = 200;
+const MAX_PROJECT_PAGES = 25;
+const PROJECT_LOOKUP_LIMIT = 100;
 
-function operationalState(staffState: string | undefined, sessions: HostProjectSnapshot["sessions"]): OperationalState {
-	if (staffState === "paused") return "paused";
-	return sessions.some((session) => RUNNING_SESSION_STATES.has(session.status)) ? "active" : "idle";
+type ProjectPageResult<T> = { items: T[]; complete: boolean };
+type GoalChildrenResult<T> = ProjectPageResult<T> | HostGoalReadError;
+type GoalProjectRecord = {
+	goal: HostGoalSummary;
+	tasks?: ProjectPageResult<HostTaskSummary>;
+	gates?: ProjectPageResult<HostGateSummary>;
+	pullRequest?: HostPullRequestSummary | null;
+	pullRequestKnown: boolean;
+};
+type ProjectRecords = {
+	staff: HostStaffSummary[];
+	sessions: HostSessionSummary[];
+	sessionsComplete: boolean;
+	goals: GoalProjectRecord[];
+	diagnostics: string[];
+};
+
+function newestFirst(sessions: HostSessionSummary[]): HostSessionSummary[] {
+	return [...sessions].sort((a, b) => b.lastActivity - a.lastActivity);
 }
 
-function staffSessions(project: HostProjectSnapshot, staffId: string | undefined, currentSessionId: string | undefined) {
+function operationalState(
+	staffState: string | undefined,
+	sessions: HostSessionSummary[],
+	sessionsComplete: boolean,
+	fallback: OperationalState | undefined,
+): OperationalState {
+	if (staffState === "paused") return "paused";
+	if (sessions.some((session) => RUNNING_SESSION_STATES.has(session.status))) return "active";
+	return sessionsComplete ? "idle" : fallback ?? "idle";
+}
+
+function staffSessions(sessions: HostSessionSummary[], staffId: string | undefined, currentSessionId: string | undefined): HostSessionSummary[] {
 	if (!staffId && !currentSessionId) return [];
-	const related = new Set(project.sessions
+	const related = new Set(sessions
 		.filter((session) => session.staffId === staffId || session.id === currentSessionId)
 		.map((session) => session.id));
 	let changed = true;
 	while (changed) {
 		changed = false;
-		for (const session of project.sessions) {
+		for (const session of sessions) {
 			if (related.has(session.id)) continue;
 			if ((session.parentSessionId && related.has(session.parentSessionId)) || (session.delegateOf && related.has(session.delegateOf))) {
 				related.add(session.id);
@@ -488,78 +531,212 @@ function staffSessions(project: HostProjectSnapshot, staffId: string | undefined
 			}
 		}
 	}
-	return project.sessions.filter((session) => related.has(session.id));
+	return sessions.filter((session) => related.has(session.id));
 }
 
-function mergeProjectSnapshot(stored: PerformanceSnapshot | null, project: HostProjectSnapshot): PerformanceSnapshot {
+function isGoalReadError(value: unknown): value is HostGoalReadError {
+	return isObject(value)
+		&& typeof value.goalId === "string"
+		&& (value.status === "not-found" || value.status === "unauthorized");
+}
+
+async function readProjectPages<T>(read: (cursor: number) => Promise<HostProjectRead<T>>): Promise<ProjectPageResult<T>> {
+	const items: T[] = [];
+	let cursor = 0;
+	for (let pageNumber = 0; pageNumber < MAX_PROJECT_PAGES; pageNumber += 1) {
+		const result = await read(cursor);
+		if (result.mode !== "page") throw new Error("unexpected-project-lookup");
+		items.push(...result.items);
+		if (!result.page.hasMore) return { items, complete: true };
+		if (result.page.nextCursor === undefined || result.page.nextCursor <= cursor) throw new Error("invalid-project-page");
+		cursor = result.page.nextCursor;
+	}
+	return { items, complete: false };
+}
+
+async function readGoalChildren<T>(
+	read: (cursor: number) => Promise<HostProjectRead<T> | HostGoalReadError>,
+): Promise<GoalChildrenResult<T>> {
+	const items: T[] = [];
+	let cursor = 0;
+	for (let pageNumber = 0; pageNumber < MAX_PROJECT_PAGES; pageNumber += 1) {
+		const result = await read(cursor);
+		if (isGoalReadError(result)) return result;
+		if (result.mode !== "page") throw new Error("unexpected-project-lookup");
+		items.push(...result.items);
+		if (!result.page.hasMore) return { items, complete: true };
+		if (result.page.nextCursor === undefined || result.page.nextCursor <= cursor) throw new Error("invalid-project-page");
+		cursor = result.page.nextCursor;
+	}
+	return { items, complete: false };
+}
+
+async function readProjectIds<T>(
+	ids: string[],
+	read: (ids: string[]) => Promise<HostProjectRead<T>>,
+): Promise<Array<HostLookupResult<T>>> {
+	const outcomes: Array<HostLookupResult<T>> = [];
+	for (let index = 0; index < ids.length; index += PROJECT_LOOKUP_LIMIT) {
+		const result = await read(ids.slice(index, index + PROJECT_LOOKUP_LIMIT));
+		if (result.mode !== "ids") throw new Error("unexpected-project-page");
+		outcomes.push(...result.results);
+	}
+	return outcomes;
+}
+
+function mergeUniqueById<T extends { id: string }>(...groups: T[][]): T[] {
+	const values = new Map<string, T>();
+	for (const group of groups) for (const value of group) values.set(value.id, value);
+	return [...values.values()];
+}
+
+async function readRelatedProjectRecords(host: HostApi, stored: PerformanceSnapshot | null): Promise<ProjectRecords> {
+	const diagnostics: string[] = [];
+	const configuredStaffIds = [...new Set([stored?.scannerStaffId, stored?.directorStaffId].filter((id): id is string => Boolean(id)))];
+	const staffOutcomes = await readProjectIds(configuredStaffIds, (ids) => host.project.readStaff({ mode: "ids", ids }));
+	let staff = staffOutcomes.flatMap((outcome) => outcome.status === "found" ? [outcome.value] : []);
+	for (const outcome of staffOutcomes) if (outcome.status !== "found") diagnostics.push(`staff:${outcome.id}:${outcome.status}`);
+	const scannerMissing = !staff.some((item) => item.id === stored?.scannerStaffId);
+	const directorMissing = !staff.some((item) => item.id === stored?.directorStaffId);
+	if (!stored?.scannerStaffId || !stored?.directorStaffId || scannerMissing || directorMissing) {
+		const staffPages = await readProjectPages((cursor) => host.project.readStaff({ mode: "page", cursor, limit: PROJECT_PAGE_LIMIT }));
+		staff = mergeUniqueById(staff, staffPages.items);
+		if (!staffPages.complete) diagnostics.push("staff:pagination-limit");
+	}
+	const scannerStaff = staff.find((item) => item.id === stored?.scannerStaffId)
+		?? staff.find((item) => item.roleId === "performance-scanner");
+	const directorStaff = staff.find((item) => item.id === stored?.directorStaffId)
+		?? staff.find((item) => item.roleId === "optimisation-director");
+
+	// Sessions have no relationship selector. Read bounded pages to discover staff
+	// delegates, and exact current IDs so a page cap cannot hide the primary links.
+	const currentSessionIds = [...new Set([scannerStaff?.currentSessionId, directorStaff?.currentSessionId].filter((id): id is string => Boolean(id)))];
+	const [sessionPages, sessionOutcomes] = await Promise.all([
+		readProjectPages((cursor) => host.project.readSessions({ mode: "page", cursor, limit: PROJECT_PAGE_LIMIT })),
+		readProjectIds(currentSessionIds, (ids) => host.project.readSessions({ mode: "ids", ids })),
+	]);
+	const sessions = mergeUniqueById(
+		sessionPages.items,
+		sessionOutcomes.flatMap((outcome) => outcome.status === "found" ? [outcome.value] : []),
+	);
+	if (!sessionPages.complete) diagnostics.push("sessions:pagination-limit");
+	for (const outcome of sessionOutcomes) if (outcome.status !== "found") diagnostics.push(`session:${outcome.id}:${outcome.status}`);
+
+	const directorSessions = staffSessions(sessions, directorStaff?.id, directorStaff?.currentSessionId);
+	const goalIds = new Set(stored?.goals.map((goal) => goal.id) ?? []);
+	for (const hypothesis of stored?.registry ?? []) if (hypothesis.goalId) goalIds.add(hypothesis.goalId);
+	for (const session of directorSessions) {
+		if (session.goalId) goalIds.add(session.goalId);
+		if (session.teamGoalId) goalIds.add(session.teamGoalId);
+	}
+	const goalOutcomes = await readProjectIds([...goalIds], (ids) => host.project.readGoals({ mode: "ids", ids }));
+	for (const outcome of goalOutcomes) if (outcome.status !== "found") diagnostics.push(`goal:${outcome.id}:${outcome.status}`);
+	const goals = await Promise.all(goalOutcomes.flatMap((outcome) => outcome.status === "found" ? [outcome.value] : []).map(async (goal): Promise<GoalProjectRecord> => {
+		const [tasksResult, gatesResult, pullRequestResult] = await Promise.allSettled([
+			readGoalChildren((cursor) => host.project.readGoalTasks(goal.id, { mode: "page", cursor, limit: PROJECT_PAGE_LIMIT })),
+			readGoalChildren((cursor) => host.project.readGoalGates(goal.id, { mode: "page", cursor, limit: PROJECT_PAGE_LIMIT })),
+			host.project.readGoalPullRequest(goal.id),
+		]);
+		const record: GoalProjectRecord = { goal, pullRequestKnown: false };
+		if (tasksResult.status === "rejected") {
+			diagnostics.push(`tasks:${goal.id}:${diagnosticCode(tasksResult.reason)}`);
+		} else if (isGoalReadError(tasksResult.value)) {
+			diagnostics.push(`tasks:${goal.id}:${tasksResult.value.status}`);
+		} else {
+			record.tasks = tasksResult.value;
+			if (!tasksResult.value.complete) diagnostics.push(`tasks:${goal.id}:pagination-limit`);
+		}
+		if (gatesResult.status === "rejected") {
+			diagnostics.push(`gates:${goal.id}:${diagnosticCode(gatesResult.reason)}`);
+		} else if (isGoalReadError(gatesResult.value)) {
+			diagnostics.push(`gates:${goal.id}:${gatesResult.value.status}`);
+		} else {
+			record.gates = gatesResult.value;
+			if (!gatesResult.value.complete) diagnostics.push(`gates:${goal.id}:pagination-limit`);
+		}
+		if (pullRequestResult.status === "fulfilled") {
+			const outcome = pullRequestResult.value;
+			if (outcome.status === "found") {
+				record.pullRequest = outcome.value;
+				record.pullRequestKnown = true;
+			} else diagnostics.push(`pr:${goal.id}:${outcome.status}`);
+		} else diagnostics.push(`pr:${goal.id}:${diagnosticCode(pullRequestResult.reason)}`);
+		return record;
+	}));
+	return { staff, sessions, sessionsComplete: sessionPages.complete, goals, diagnostics };
+}
+
+function mergeProjectRecords(stored: PerformanceSnapshot | null, project: ProjectRecords): PerformanceSnapshot {
 	const scannerStaff = project.staff.find((staff) => staff.id === stored?.scannerStaffId)
 		?? project.staff.find((staff) => staff.roleId === "performance-scanner");
 	const directorStaff = project.staff.find((staff) => staff.id === stored?.directorStaffId)
 		?? project.staff.find((staff) => staff.roleId === "optimisation-director");
-	const scannerSessions = staffSessions(project, scannerStaff?.id, scannerStaff?.currentSessionId);
-	const directorSessions = staffSessions(project, directorStaff?.id, directorStaff?.currentSessionId);
-	const newestFirst = (sessions: HostProjectSnapshot["sessions"]) => [...sessions].sort((a, b) => b.lastActivity - a.lastActivity);
+	const scannerSessions = staffSessions(project.sessions, scannerStaff?.id, scannerStaff?.currentSessionId);
+	const directorSessions = staffSessions(project.sessions, directorStaff?.id, directorStaff?.currentSessionId);
 	const scannerCurrent = project.sessions.find((session) => session.id === scannerStaff?.currentSessionId) ?? newestFirst(scannerSessions)[0];
 	const directorCurrent = project.sessions.find((session) => session.id === directorStaff?.currentSessionId) ?? newestFirst(directorSessions)[0];
-
-	const linkedGoalIds = new Set(stored?.goals.map((goal) => goal.id) ?? []);
-	for (const hypothesis of stored?.registry ?? []) if (hypothesis.goalId) linkedGoalIds.add(hypothesis.goalId);
-	for (const session of directorSessions) if (session.goalId) linkedGoalIds.add(session.goalId);
-	const linkedGoals = project.goals.filter((goal) => linkedGoalIds.has(goal.id));
-	const goals = linkedGoals.map((goal): WorkItem => {
-		const tasks = project.tasks.filter((task) => task.goalId === goal.id);
-		const gates = project.gates.filter((gate) => gate.goalId === goal.id);
-		const activeTasks = tasks.filter((task) => task.state === "in-progress").length;
-		const blockedTasks = tasks.filter((task) => task.state === "blocked").length;
-		const failedGates = gates.filter((gate) => gate.status === "failed").length;
+	const storedGoals = new Map((stored?.goals ?? []).map((goal) => [goal.id, goal]));
+	const goals = project.goals.map(({ goal, tasks, gates }): WorkItem => {
+		const activeTasks = tasks?.complete ? tasks.items.filter((task) => task.state === "in-progress").length : 0;
+		const blockedTasks = tasks?.complete ? tasks.items.filter((task) => task.state === "blocked").length : 0;
+		const failedGates = gates?.complete ? gates.items.filter((gate) => gate.status === "failed").length : 0;
 		const detailParts = [goal.paused ? "paused" : goal.state];
 		if (activeTasks) detailParts.push(`${activeTasks} active task${activeTasks === 1 ? "" : "s"}`);
 		if (blockedTasks) detailParts.push(`${blockedTasks} blocked`);
 		if (failedGates) detailParts.push(`${failedGates} failed gate${failedGates === 1 ? "" : "s"}`);
+		if ((!tasks?.complete || !gates?.complete) && storedGoals.get(goal.id)?.detail) detailParts.push(storedGoals.get(goal.id)!.detail!);
 		return {
 			id: goal.id,
 			label: goal.title,
 			detail: detailParts.join(" · "),
-			sessionId: newestFirst(project.sessions.filter((session) => session.goalId === goal.id))[0]?.id,
+			sessionId: newestFirst(project.sessions.filter((session) => session.goalId === goal.id || session.teamGoalId === goal.id))[0]?.id
+				?? storedGoals.get(goal.id)?.sessionId,
 		};
 	});
-
-	const pullRequests = project.pullRequests
-		.filter((pr) => linkedGoalIds.has(pr.goalId))
-		.map((pr): WorkItem => ({
-			id: pr.number ? `pr-${pr.number}` : `pr-${pr.goalId}`,
-			label: `${pr.number ? `#${pr.number} ` : ""}${pr.title ?? "Pull request"}`,
-			detail: [pr.reviewDecision, pr.mergeable, pr.state].filter(Boolean).join(" · "),
-			sessionId: newestFirst(project.sessions.filter((session) => session.goalId === pr.goalId))[0]?.id,
-		}));
-
+	const livePullRequests = project.goals.flatMap(({ pullRequest }): WorkItem[] => pullRequest ? [{
+		id: pullRequest.number ? `pr-${pullRequest.number}` : `pr-${pullRequest.goalId}`,
+		label: `${pullRequest.number ? `#${pullRequest.number} ` : ""}${pullRequest.title ?? "Pull request"}`,
+		detail: [pullRequest.reviewDecision, pullRequest.mergeability, pullRequest.state].filter(Boolean).join(" · "),
+		sessionId: newestFirst(project.sessions.filter((session) => session.goalId === pullRequest.goalId || session.teamGoalId === pullRequest.goalId))[0]?.id,
+	}] : []);
+	const pullRequests = project.goals.every((goal) => goal.pullRequestKnown)
+		? livePullRequests
+		: mergeUniqueById(stored?.pullRequests ?? [], livePullRequests);
+	const liveDirectorSessions = newestFirst(directorSessions).slice(0, 20).map((session) => ({
+		id: session.id,
+		label: session.title,
+		detail: session.status,
+		sessionId: session.id,
+	}));
+	const mergedDirectorSessions = project.sessionsComplete
+		? liveDirectorSessions
+		: mergeUniqueById(stored?.director?.sessions ?? [], liveDirectorSessions).slice(0, 20);
 	return {
 		version: 1,
 		updatedAt: stored?.updatedAt,
-		projectName: project.project.name,
-		projectGeneratedAt: project.generatedAt,
+		projectName: stored?.projectName,
+		projectGeneratedAt: stored?.projectGeneratedAt,
 		revision: stored?.revision,
-		scannerStaffId: stored?.scannerStaffId,
-		directorStaffId: stored?.directorStaffId,
+		scannerStaffId: scannerStaff?.id ?? stored?.scannerStaffId,
+		directorStaffId: directorStaff?.id ?? stored?.directorStaffId,
 		scanner: scannerStaff ? {
 			...stored?.scanner,
-			state: operationalState(scannerStaff.state, scannerSessions),
-			activeScans: scannerSessions.filter((session) => RUNNING_SESSION_STATES.has(session.status)).length,
+			state: operationalState(scannerStaff.state, scannerSessions, project.sessionsComplete, stored?.scanner?.state),
+			activeScans: project.sessionsComplete
+				? scannerSessions.filter((session) => RUNNING_SESSION_STATES.has(session.status)).length
+				: stored?.scanner?.activeScans,
 			lastActivity: scannerStaff.lastWakeAt ? new Date(scannerStaff.lastWakeAt).toLocaleString() : stored?.scanner?.lastActivity,
-			sessionId: scannerCurrent?.id ?? scannerStaff.currentSessionId,
+			sessionId: scannerCurrent?.id ?? scannerStaff.currentSessionId ?? stored?.scanner?.sessionId,
 		} : stored?.scanner,
 		registry: stored?.registry ?? [],
 		director: directorStaff ? {
 			...stored?.director,
-			state: operationalState(directorStaff.state, directorSessions),
-			activeAgents: directorSessions.filter((session) => RUNNING_SESSION_STATES.has(session.status)).length,
+			state: operationalState(directorStaff.state, directorSessions, project.sessionsComplete, stored?.director?.state),
+			activeAgents: project.sessionsComplete
+				? directorSessions.filter((session) => RUNNING_SESSION_STATES.has(session.status)).length
+				: stored?.director?.activeAgents,
 			detail: directorCurrent?.title ?? stored?.director?.detail,
-			sessions: newestFirst(directorSessions).slice(0, 20).map((session) => ({
-				id: session.id,
-				label: session.title,
-				detail: session.status,
-				sessionId: session.id,
-			})),
+			sessions: mergedDirectorSessions,
 		} : stored?.director,
 		goals,
 		pullRequests,
@@ -1901,6 +2078,7 @@ function renderPane(state: PaneState): void {
 	shell.append(renderTabs(state));
 	if (state.demo) shell.append(node("p", "po-demo-note", "Development fixture · not live project data"));
 	if (state.storeState === "error" && !state.demo) shell.append(node("p", "po-diagnostic", `Live data refresh failed${state.storeDiagnostic ? ` (${state.storeDiagnostic})` : ""}. Existing data was not replaced.`));
+	if (state.projectDiagnostic && !state.demo) shell.append(node("p", "po-diagnostic", `Some live project detail could not be refreshed (${state.projectDiagnostic}). Pack data was preserved.`));
 	const view = state.tab === "coverage" ? renderCoverage(state) : state.tab === "registry" ? renderRegistry(state) : state.tab === "benchmarks" ? renderBenchmarks(state) : renderFlow(state);
 	view.id = `po-view-${state.tab}`;
 	view.setAttribute("role", "tabpanel");
@@ -1956,8 +2134,14 @@ async function refreshSnapshot(state: PaneState): Promise<void> {
 	}
 	const host = state.host;
 	const canReadRoute = host?.capabilities?.callRoute === true;
-	const projectSnapshot = host?.project?.snapshot;
-	const canReadProject = host?.capabilities?.projectSnapshot === true && typeof projectSnapshot === "function";
+	let canReadProject = host?.capabilities?.projectReads === true;
+	if (!canReadProject) {
+		try {
+			canReadProject = host?.capabilities?.has?.("projectReads") === true;
+		} catch {
+			canReadProject = false;
+		}
+	}
 	if (!canReadRoute && !canReadProject) {
 		state.storeState = "unavailable";
 		state.loading = false;
@@ -1967,20 +2151,18 @@ async function refreshSnapshot(state: PaneState): Promise<void> {
 	const generation = ++state.refreshGeneration;
 	state.refreshInFlight = true;
 	state.loading = true;
+	state.projectDiagnostic = undefined;
 	// Keep the current, fully-routed view mounted while fresh data is in flight.
 	// Rendering here and again on completion needlessly replaces the whole map.
 	try {
-		const [routeRead, projectRead] = await Promise.all([
-			canReadRoute
-				? host.callRoute<unknown>(SNAPSHOT_ROUTE, {
-					method: "GET",
-					query: { view: state.tab, activityLimit: 50 },
-				}).then((value) => ({ ok: true as const, value }), (error) => ({ ok: false as const, error }))
-				: Promise.resolve({ ok: false as const, unavailable: true as const }),
-			canReadProject
-				? projectSnapshot!().then((value) => ({ ok: true as const, value }), (error) => ({ ok: false as const, error }))
-				: Promise.resolve({ ok: false as const, unavailable: true as const }),
-		]);
+		// Pack-owned data is authoritative for correlation. It must settle before
+		// any Host reads so those reads can be limited to the returned identities.
+		const routeRead = canReadRoute
+			? await host!.callRoute<unknown>(SNAPSHOT_ROUTE, {
+				method: "GET",
+				query: { view: state.tab, activityLimit: 50 },
+			}).then((value) => ({ ok: true as const, value }), (error) => ({ ok: false as const, error }))
+			: { ok: false as const, unavailable: true as const };
 		if (generation !== state.refreshGeneration || host !== state.host || state.demo) return;
 
 		if (routeRead.ok) {
@@ -1999,12 +2181,24 @@ async function refreshSnapshot(state: PaneState): Promise<void> {
 			state.storeState = "error";
 			state.storeDiagnostic = diagnosticCode(routeRead.error);
 		} else {
-			state.storeState = projectRead.ok ? "absent" : "unavailable";
+			state.storeState = canReadProject ? "absent" : "unavailable";
 			state.storeDiagnostic = undefined;
 		}
 
-		if (projectRead.ok) state.snapshot = mergeProjectSnapshot(state.routeSnapshot, projectRead.value);
-		else state.snapshot = state.routeSnapshot;
+		if (canReadProject) {
+			const projectRead = await readRelatedProjectRecords(host!, state.routeSnapshot)
+				.then((value) => ({ ok: true as const, value }), (error) => ({ ok: false as const, error }));
+			if (generation !== state.refreshGeneration || host !== state.host || state.demo) return;
+			if (projectRead.ok) {
+				state.snapshot = mergeProjectRecords(state.routeSnapshot, projectRead.value);
+				state.projectDiagnostic = projectRead.value.diagnostics.slice(0, 3).join(", ") || undefined;
+			} else if ("error" in projectRead) {
+				state.snapshot = state.routeSnapshot ?? state.snapshot;
+				state.projectDiagnostic = diagnosticCode(projectRead.error);
+			}
+		} else {
+			state.snapshot = state.routeSnapshot ?? state.snapshot;
+		}
 	} finally {
 		if (generation === state.refreshGeneration) {
 			state.refreshInFlight = false;
@@ -2182,7 +2376,7 @@ export default function createPerformancePanel() {
 			// The host creates a fresh facade object on every parent app render. Treat
 			// facades for the same bound session and contract as one logical host;
 			// otherwise every unrelated app render would unsubscribe, spawn a route
-			// worker, open SQLite, fetch a full project snapshot, and rebuild the DOM.
+			// worker, open SQLite, repeat the related project reads, and rebuild the DOM.
 			const boundSessionId = asText(params?.__sessionId, 120);
 			const incomingBindingKey = host && boundSessionId
 				? `${boundSessionId}:${host.contractVersion ?? host.version ?? 1}`
@@ -2222,12 +2416,12 @@ export default function createPerformancePanel() {
 				state.snapshot = demo ? DEMO_SNAPSHOT : null;
 				void refreshSnapshot(state);
 			} else if (hostChanged) {
-				// A newly bound notification stream schedules its own snapshot-first
+				// A newly bound notification stream schedules its own route-first
 				// refresh. Fall back to a direct read only on older hosts.
 				if (!state.projectRefreshSubscribed) void refreshSnapshot(state);
 			} else if (previousTab !== state.tab) {
-				// The route returns a complete snapshot for every tab, so navigation only
-				// changes presentation. Do not refetch or rebuild on unrelated app renders.
+				// The route returns the same complete pack projection for every tab, so
+				// navigation only changes presentation. Do not refetch on app rerenders.
 				renderPane(state);
 			}
 			return root;

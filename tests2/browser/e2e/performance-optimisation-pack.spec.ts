@@ -39,12 +39,12 @@ test.describe("performance optimisation pack", () => {
 		await openApp(page);
 		sessionId = await createSessionViaUI(page);
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers?.());
-		const projectSnapshotResponse = page.waitForResponse((response) => response.url().includes("/api/ext/project-snapshot"));
+		const projectReadResponse = page.waitForResponse((response) => response.url().includes("/api/ext/project/read"));
 		await page.evaluate(() => (window as any).__bobbitRunPackLauncher?.("performance-optimisation.open"));
 
 		const panel = page.locator(PANEL);
 		await expect(panel).toBeVisible({ timeout: 20_000 });
-		expect((await projectSnapshotResponse).ok()).toBe(true);
+		expect((await projectReadResponse).ok()).toBe(true);
 		await expect(panel.getByRole("tab", { name: "Flow map" })).toBeVisible();
 		expect(await panel.locator(".po-shell > :first-child").getAttribute("class")).toContain("po-tabs");
 		await expect(panel.getByText(/live project state$/)).toHaveCount(0);

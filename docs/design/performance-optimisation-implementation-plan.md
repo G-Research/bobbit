@@ -10,7 +10,8 @@ Relevant revisions:
 
 - `f92efd9d5` — Pack Local Data foundation.
 - `ff85b0a6f` — Unified Host Hooks foundation.
-- `ea7855305` — reconciled local performance-pack shell and bounded project-snapshot implementation; use as implementation material, not as the release boundary.
+- `ea7855305` — reconciled local performance-pack shell; use its pack-owned implementation material, not its superseded aggregate project-snapshot boundary.
+- `09d52aea3` — reusable on-demand Host project reads used by the live panel.
 
 The final change should retain the proven panel/build work from `ea7855305`, replace the implicit `host.store` fixture contract with extension-owned SQLite, and add the real Scanner → Registry → Director → Goal loop before merge.
 
@@ -20,15 +21,7 @@ The Director directly creates goals through `bobbit_orchestrate(create_goal)`; p
 
 ### Core Bobbit
 
-Only the already-designed bounded project snapshot is required:
-
-- `src/shared/extension-host/host-api.ts`
-- `src/app/host-api.ts`
-- `src/server/extension-host/project-snapshot-access.ts`
-- `src/server/extension-host/project-snapshot-projection.ts`
-- `src/server/server.ts`
-
-Keep it optional, panel-only, server-bound to the authenticated session project, path-free, privacy-bounded, capped, and additive to notification APIs. Do not add goal metadata projection, SQLite concepts, pack events, or core navigation in this work.
+The reusable on-demand Host project-read API landed independently in `09d52aea3`. The pack consumes its stable, redacted staff/session/goal/task/gate/PR summaries and canonical project notifications; it adds no project-state API, SQLite concept, pack event, or navigation primitive to core.
 
 ### Performance pack
 
@@ -76,7 +69,7 @@ Exact bundle layout should follow the existing market-pack build pipeline; avoid
 
 1. Start from current `main` in a fresh goal branch.
 2. Reapply the relevant files from `ea7855305` rather than merging the static MVP branch wholesale.
-3. Preserve notifications, Pack Local Data, and panel project snapshots together in the Host contract.
+3. Compose notifications and Pack Local Data with the landed on-demand Host project reads.
 4. Keep the pack `defaultDisabled: true`.
 5. Preserve the existing build/watch/mirror support and canonical sprite source.
 6. Remove stale README claims that autonomous operation or Host notifications are unavailable.
@@ -84,15 +77,15 @@ Exact bundle layout should follow the existing market-pack build pipeline; avoid
 ### Tests
 
 - Host contract version and feature-detection tests.
-- Panel-only snapshot access and surface-token authorization tests.
-- Pure snapshot projection caps/privacy tests.
+- Pack-surface on-demand project-read access and surface-token authorization tests.
+- On-demand summary projection caps/privacy tests.
 - Existing performance pack inventory/build tests.
 
 ### Exit criteria
 
 - `npm run check` passes.
 - The opt-in pack installs and opens an honest empty panel.
-- Non-panel surfaces cannot call `host.project.snapshot()`.
+- Unbound and server-only surfaces cannot advertise `projectReads`.
 - No unresolved foundation-era compatibility code remains.
 
 ## 4. Phase 1 — manifest and local-data binding
@@ -470,14 +463,14 @@ Add only narrowly required action routes if the browser needs explicit user oper
 
 ### Panel
 
-Replace `control-pane.snapshot` reads from `host.store` with:
+Replace `control-pane.snapshot` reads from `host.store` with a route-first flow:
 
 ```text
-host.project.snapshot()
 host.callRoute("performance-snapshot")
+host.project.readStaff/readSessions/readGoals/readGoalTasks/readGoalGates/readGoalPullRequest
 ```
 
-Join goal/task/gate/PR records by SQLite `goalId`. Do not parse titles/specs or require goal metadata in the browser.
+Derive staff and goal IDs from the pack projection, then request related Host summaries by exact ID. Use bounded pages only where relationship filtering is unavailable. Join goal/task/gate/PR records by SQLite `goalId`; do not parse titles/specs or require goal metadata in the browser.
 
 Subscribe to canonical project notifications and `onRefreshRequired`; coalesce bursts into authoritative rereads. Refresh the pack snapshot after relevant Scanner/Director sessions settle. Keep an explicit retry control for diagnostics, not as the normal live-update mechanism.
 
@@ -551,11 +544,11 @@ All new automated tests land in `tests2/` and are registered in `tests2/tests-ma
 
 - Manifest, contribution, build, role/tool/workflow contracts.
 - Database, migrations, repositories, matching, ordering, fingerprints, and outcomes.
-- Project snapshot privacy/caps and Host contract.
+- On-demand Host-read correlation, lookup outcomes, pagination, and capability fallback.
 
 ### DOM
 
-- Host snapshot/notification integration.
+- Host on-demand read and notification integration.
 - Panel state joins, coalesced refresh, errors, and tab persistence.
 
 ### Browser

@@ -74,11 +74,17 @@ describe("performance optimisation first-party pack", () => {
 		expect(PANEL_SOURCE).toMatch(/slice\(0, 50\)/);
 		expect(PANEL_SOURCE).toContain("host.ui.navigate({ route: ROUTE_ID");
 		expect(PANEL_SOURCE).toContain("host.ui.openPanel({ panelId: PANEL_ID");
-		expect(PANEL_SOURCE).toContain("projectSnapshot!()");
-		expect(PANEL_SOURCE).toContain("const linkedGoals = project.goals.filter((goal) => linkedGoalIds.has(goal.id))");
-		expect(PANEL_SOURCE).not.toContain("goals.push(goal)");
-		expect(PANEL_SOURCE).not.toContain("pullRequests.push(pr)");
-		expect(PANEL_SOURCE).toContain('host.callRoute<unknown>(SNAPSHOT_ROUTE');
+		expect(PANEL_SOURCE).toContain('host?.capabilities?.projectReads === true');
+		expect(PANEL_SOURCE).toContain('host?.capabilities?.has?.("projectReads") === true');
+		for (const method of ["readStaff", "readSessions", "readGoals", "readGoalTasks", "readGoalGates", "readGoalPullRequest"]) {
+			expect(PANEL_SOURCE).toContain(`host.project.${method}`);
+		}
+		expect(PANEL_SOURCE).toContain("const routeRead = canReadRoute");
+		expect(PANEL_SOURCE).toContain("await readRelatedProjectRecords(host!, state.routeSnapshot)");
+		expect(PANEL_SOURCE).toContain("mode: \"ids\", ids");
+		expect(PANEL_SOURCE).toContain("MAX_PROJECT_PAGES");
+		expect(PANEL_SOURCE).toContain("outcome.status !== \"found\"");
+		expect(PANEL_SOURCE).toContain('host!.callRoute<unknown>(SNAPSHOT_ROUTE');
 		expect(PANEL_SOURCE).toContain("host.project.notifications.subscribe");
 		expect(PANEL_SOURCE).toContain("host.ui.createBobbitSprite");
 		for (const edge of [
