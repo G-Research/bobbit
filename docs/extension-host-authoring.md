@@ -2415,6 +2415,137 @@ Two hard rules keep a bundle loadable by the Blob-URL loader:
 2. **One self-contained file per entry — NO code splitting / dynamic chunks.** A Blob-URL
    module has no resolvable base for `import("./chunk.js")`, so every dep is inlined eagerly.
 
+### Hot-reload an authored pack during development
+
+Use the pack watcher when iterating on a declared bundle. It rebuilds one pack, mirrors only that
+pack's declared outputs into the tree the gateway already serves, and asks Vite to invalidate the
+matching browser modules. This keeps the normal pack build as the source of truth while avoiding a
+gateway restart or full-page reload for renderer and panel edits.
+
+#### Prerequisites and command
+
+The watcher is an addition to the normal development stack, not an installer or server launcher:
+
+1. Add the pack to the `PACKS` declarations in `scripts/build-market-packs.mjs` as described
+   below. A directory or committed bundle alone does not make a pack watchable.
+2. Install and activate the pack in the scope you are testing, if it is not a shipped first-party
+   pack. The open client must already have resolved that pack as the winning contribution.
+3. Start `npm run dev:harness` in one terminal. Its initial server build creates the declared
+   default serving roots and it runs the Vite development server. If using another development
+   launcher, run `npm run build:server` once before watching and ensure Vite is running.
+4. Start the watcher in another terminal:
+
+```bash
+npm run dev:pack -- <pack>
+```
+
+The full syntax is:
+
+```text
+npm run dev:pack -- <pack> [--target <served-pack-root>]... [--vite-url <http(s)-url>]
+```
+
+- `<pack>` is one exact, lower-case structural pack id from `PACKS`.
+- Repeat `--target` to mirror into more than one existing served pack root. Paths are relative to
+  the repository root. With no target, the declaration's `defaultServingRoot` is the only target.
+- `--vite-url` changes the notification origin from `http://127.0.0.1:5173`. Any path on the
+  supplied URL is ignored; the watcher posts to Vite's fixed development endpoint.
+- `npm run dev:pack -- --help` prints the compact usage form.
+
+The watcher starts observing `<authorRoot>/src` recursively and performs one full
+build/mirror/notification cycle before reporting readiness. Each cycle rebuilds every declared
+entry for the selected pack, sequentially. Changes arriving during a build are coalesced into one
+trailing cycle, so builds and publishes never overlap.
+
+#### Build declaration and target mapping
+
+Each watchable pack has one explicit declaration:
+
+```js
+{
+  pack: "sample-pack",
+  authorRoot: "market-packs/sample-pack",
+  defaultServingRoot: "dist/server/builtin-packs/market-packs/sample-pack",
+  entries: [
+    { in: "sample-panel.ts", out: "lib/sample-panel.js" },
+    { in: "sample-routes.ts", out: "lib/sample-routes.mjs", platform: "node" },
+    { in: "sample-renderer.ts", out: "tools/sample/SampleRenderer.js" },
+  ],
+}
+```
+
+For each entry, `in` resolves from `<authorRoot>/src`, while `out` is relative to the pack root.
+The authoritative bundle is written to `<authorRoot>/<out>` and copied to each
+`<served-pack-root>/<out>`. Nested output paths are retained exactly; the watcher never flattens
+paths or discovers outputs from existing files. Omit `platform` for a browser bundle; use
+`platform: "node"` for a Node ESM bundle.
+
+Pack ids, roots, inputs, outputs, and targets are validated as structural repository-relative
+values. Absolute paths, empty or dot segments, traversal, and unsafe ids fail before watching. The
+CLI also rejects a missing or extra pack positional, unknown options, missing option values, and a
+`--vite-url` that is not HTTP(S). Unknown pack ids fail deterministically and print the sorted set
+of declared ids; unrelated pack directories and stale committed output do not affect resolution.
+
+A serving target must already:
+
+- exist as a directory inside the repository;
+- contain a readable `pack.yaml` whose `name` exactly matches the selected pack; and
+- resolve to a location other than `authorRoot`, including through filesystem aliases.
+
+The default target is not discovered or created. If it is missing, the command directs you to run
+`npm run build:server` or pass an explicit `--target`. Explicit targets are canonicalized,
+deduplicated, and processed in deterministic order. Parent directories for declared output files
+are created only after all targets pass validation.
+
+#### Reload lifecycle and preserved identity
+
+After a successful build, the watcher copies the declared outputs and sends a monotonic,
+watcher-local reload token to Vite. Vite forwards one `bobbit:pack-rebuilt` HMR event. The client
+then invalidates only renderer and panel module caches owned by that pack, fetches current bytes
+through the existing authenticated gateway routes, and imports them with fresh module identity.
+Stale in-flight loads cannot overwrite a later generation.
+
+Mounted renderers and the active panel repaint through their normal render paths. An inactive panel
+loads the fresh module when it is next selected. The reload does not recreate the workspace or
+navigate the page: session binding, tab ids, tab order, active selection, panel parameters, and
+parameterized `instanceKey` values remain unchanged. Module-local renderer or panel state does
+reset because the code is evaluated as a new module; persist state that must survive in
+`host.store` or another durable host surface.
+
+The notification bridge exists only in Vite serve mode. It accepts only a local `POST` to
+`/__bobbit_dev/pack-rebuilt`, with an at-most 8 KiB JSON body containing exactly a structural
+`pack` id and positive safe-integer `reloadToken`. Pack code should not call this internal bridge.
+It has no gateway or production counterpart: production builds contain neither the endpoint nor
+the HMR listener, and `npm run build:packs` continues to build all declarations using the normal
+production path.
+
+Stop the watcher with `Ctrl+C` or a normal `SIGTERM`. Cleanup is idempotent: it closes the filesystem
+watcher, clears pending debounce work, removes signal listeners, prevents new cycles, and lets an
+already-running cycle settle.
+
+#### Limitations and failure recovery
+
+- Only changes under the selected `<authorRoot>/src` trigger a cycle. An edit to imported shared
+  source outside that directory needs a touch inside the selected `src/` tree or a watcher restart;
+  restarting runs the initial full cycle again.
+- Only declared `entries[].out` files are mirrored. Hand-authored modules and other pack files are
+  not copied, and YAML, manifests, contribution additions, entrypoints, actions, routes, channels,
+  and providers are not reconciled by this browser hot-reload path. Use their existing marketplace
+  and gateway lifecycle.
+- Copying is deterministic but in-place, not a staged atomic directory swap. A build failure skips
+  all mirroring and notification; a copy failure suppresses notification. A later source event
+  retries a complete cycle.
+- If Vite is unavailable, rejects the POST, or does not answer before the bounded timeout, the new
+  bytes may already be mirrored but no client token is delivered. There is deliberately no idle
+  backoff loop: fix Vite and make another edit (or restart the watcher) to rebuild, mirror, and send
+  a newer token.
+- A client-side module fetch or evaluation failure is logged and does not poison later HMR events.
+  A later successful source edit can recover the renderer or panel.
+- The watcher does not remove outputs when an entry is deleted from a declaration. Clean obsolete
+  authored and served artifacts explicitly.
+- Built bundles remain marketplace production artifacts. Run the normal pack build as needed and
+  commit regenerated outputs; hot reload does not replace that release workflow.
+
 **Web Workers (the pdfjs wrinkle).** A library that spins up a Web Worker can't resolve a
 sibling worker file from a `blob:` URL. Pre-bundle the worker SOURCE to a string and create a
 Blob-URL `workerSrc` at runtime — see `market-packs/artifacts/src/binary-render.ts` + the
