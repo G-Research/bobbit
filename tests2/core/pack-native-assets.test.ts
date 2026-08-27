@@ -199,6 +199,8 @@ function restoreWritable(root: string): void {
 	if (process.platform === "win32" || !fs.existsSync(root)) return;
 	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
 		const absolute = path.join(root, entry.name);
+		// Cleanup must not follow fixture symlinks and mutate their targets.
+		if (entry.isSymbolicLink()) continue;
 		if (entry.isDirectory()) restoreWritable(absolute);
 		try { fs.chmodSync(absolute, entry.isDirectory() ? 0o755 : 0o644); } catch { /* best effort cleanup */ }
 	}
