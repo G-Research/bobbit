@@ -170,6 +170,7 @@ describe("gateway graceful worktree-pool shutdown", () => {
 				await never;
 			},
 		});
+		await pool.initialize();
 		pool.registerExternalEntry("pool/_pool-held", heldPath);
 		const pools = new Map<string, ShutdownPool>([
 			["real", pool],
