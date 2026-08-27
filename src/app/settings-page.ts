@@ -967,10 +967,8 @@ function renderWorktreeSection(
 					@input=${(e: Event) => {
 						pendingChanges.base_ref = (e.target as HTMLInputElement).value;
 						// Clear stale inline error as soon as the user edits the field.
-						if (_baseRefErrors.has(projectId)) {
-							_baseRefErrors.delete(projectId);
-							renderApp();
-						}
+						if (_baseRefErrors.has(projectId)) _baseRefErrors.delete(projectId);
+						renderApp();
 					}}
 				/>
 			</div>

@@ -48,12 +48,40 @@ async function createProject(name: string, rootPath: string, components?: Array<
 	return { id: proj.id, name };
 }
 
-async function openBaseRefSettings(page: BrowserPage, project: { id: string; name: string }) {
-	await navigateToHash(page, `#/settings/${project.id}/general`);
+async function openBaseRefSettings(
+	page: BrowserPage,
+	project: { id: string; name: string },
+	open: () => Promise<unknown> = () => navigateToHash(page, `#/settings/${project.id}/general`),
+) {
+	const projectPath = `/api/projects/${project.id}`;
+	const waitForProjectRead = (path: string, search?: string) => page.waitForResponse(response => {
+		const url = new URL(response.url());
+		return response.request().method() === "GET"
+			&& response.status() === 200
+			&& url.pathname === path
+			&& (search === undefined || url.searchParams.get("projectId") === search);
+	});
+	// Arm every project-owned General-tab read before navigation. Waiting for
+	// their rendered states below ensures none can incidentally materialize Save
+	// after the base-ref edit; the input event must own that transition.
+	const reads = Promise.all([
+		waitForProjectRead(`${projectPath}/config`),
+		waitForProjectRead(`${projectPath}/config/resolved`),
+		waitForProjectRead(`${projectPath}/base-ref/detect`),
+		waitForProjectRead("/api/worktree-pool", project.id),
+		waitForProjectRead("/api/sandbox-status", project.id),
+	]);
+	await open();
+	await reads;
+
 	// The base-ref input is shared by every project settings page. Wait for the
-	// project-specific heading so fills/saves cannot race against the previous
-	// settings render after only the hash has changed.
+	// project-specific heading and config-backed control so fills/saves cannot
+	// race the previous project or an unfinished config render.
 	await expect(page.locator("h3").filter({ hasText: project.name }).first()).toBeVisible({ timeout: 10_000 });
+	await expect(page.getByTestId("project-play-finish-sound")).toBeEnabled();
+	await expect(page.getByText("Checking...", { exact: true })).toHaveCount(0);
+	await expect(page.getByText("Detecting...", { exact: true })).toHaveCount(0);
+	await expect(page.getByText("Loading...", { exact: true })).toHaveCount(0);
 	const input = page.locator("[data-testid='base-ref-input']");
 	await expect(input).toBeVisible({ timeout: 10_000 });
 	return input;
@@ -99,15 +127,14 @@ test.describe("Settings → Base Ref field", () => {
 
 			await openApp(page);
 			const input = await openBaseRefSettings(page, project);
+			const saveButton = page.getByRole("button", { name: "Save", exact: true });
+			await expect(saveButton).toHaveCount(0);
 			await input.fill("origin/develop");
+			await expect(saveButton).toBeVisible();
 			await saveBaseRef(page, project.id, 200);
 
 			// Reload — value should persist.
-			await page.reload();
-			await expect(
-				page.locator("button").filter({ hasText: "Settings" }).first(),
-			).toBeVisible({ timeout: 15_000 });
-			const inputAfter = await openBaseRefSettings(page, project);
+			const inputAfter = await openBaseRefSettings(page, project, () => page.reload());
 			await expect(inputAfter).toHaveValue("origin/develop");
 		} finally {
 			await deleteProjects(projectIds);
