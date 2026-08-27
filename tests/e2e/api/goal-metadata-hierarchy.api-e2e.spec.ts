@@ -105,6 +105,36 @@ async function waitForSetup(goalId: string, timeoutMs = 30_000): Promise<Record<
 	return detail;
 }
 
+function canonicalExistingPath(
+	value: string,
+	nativeRealpath: typeof fs.realpathSync.native = fs.realpathSync.native,
+): string {
+	return nativeRealpath(path.resolve(value));
+}
+
+function filesystemPathIdentity(
+	value: string,
+	nativeRealpath: typeof fs.realpathSync.native = fs.realpathSync.native,
+): string {
+	const canonical = canonicalExistingPath(value, nativeRealpath);
+	return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+/**
+ * This fixture registers the repository root itself, so its provisioned cwd and
+ * worktree root must be the same exact coordinate. Keeping this strict catches a
+ * short/long Windows spelling being misread as a project subdirectory offset.
+ */
+function strictGoalWorktree(detail: Record<string, any>): string {
+	expect(detail.worktreePath, "goal detail must publish its worktree root").toEqual(expect.any(String));
+	expect(detail.cwd, "project-root goal cwd must equal its worktree root exactly").toBe(detail.worktreePath);
+	expect(
+		filesystemPathIdentity(detail.cwd),
+		"goal cwd and worktree root must resolve to one filesystem identity",
+	).toBe(filesystemPathIdentity(detail.worktreePath));
+	return detail.cwd;
+}
+
 function readMarker(worktreeDir: string): Record<string, any> | undefined {
 	const p = path.join(worktreeDir, MARKER_FILE);
 	if (!fs.existsSync(p)) return undefined;
@@ -343,9 +373,14 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 	const goals: string[] = [];
 
 	test.beforeAll(async () => {
-		const rootDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "goal-meta-fs-")));
-		repoPath = path.join(rootDir, "repo");
-		gitInit(repoPath);
+		const requestedRoot = fs.mkdtempSync(path.join(os.tmpdir(), "goal-meta-fs-"));
+		const requestedRepoPath = path.join(requestedRoot, "repo");
+		gitInit(requestedRepoPath);
+		// `os.tmpdir()` can carry an 8.3 spelling on Windows (RUNNER~1), while
+		// Git and project preflight return the long spelling (runneradmin). Anchor
+		// every subsequent cwd to the existing repository's native identity before
+		// GoalManager derives a worktree subdirectory offset.
+		repoPath = canonicalExistingPath(requestedRepoPath);
 
 		sourceId = await installPack();
 		// Enable the provider + invalidate the worker's registry cache.
@@ -356,7 +391,16 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 			body: JSON.stringify({ name: `goal-meta-fs-${Date.now()}`, rootPath: repoPath }),
 		});
 		expect(reg.status).toBe(201);
-		projectId = (await reg.json()).id;
+		const registered = await reg.json();
+		expect(registered.rootPath, "registered project must publish its authoritative root").toEqual(expect.any(String));
+		expect(
+			filesystemPathIdentity(registered.rootPath),
+			"registered project root must retain the requested repository identity",
+		).toBe(filesystemPathIdentity(repoPath));
+		projectId = registered.id;
+		// Use the registry's exact spelling for every goal request. This prevents
+		// mixing an accepted alias with the canonical repoPath returned by Git.
+		repoPath = registered.rootPath;
 	});
 
 	test.afterAll(async () => {
@@ -369,6 +413,35 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 		if (sourceId) await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
 	});
 
+	test("filesystem identity expands a Windows short root without inventing a subdirectory offset", () => {
+		let shortRoot = repoPath;
+		let longRoot = repoPath;
+		let nativeRealpath: typeof fs.realpathSync.native = fs.realpathSync.native;
+
+		if (process.platform === "win32") {
+			const drive = path.parse(repoPath).root;
+			shortRoot = path.join(drive, "Users", "RUNNER~1", "AppData", "Local", "Temp", "goal-meta", "repo");
+			longRoot = path.join(drive, "Users", "runneradmin", "AppData", "Local", "Temp", "goal-meta", "repo");
+			nativeRealpath = ((candidate: fs.PathLike) => {
+				const resolved = path.resolve(String(candidate)).toLowerCase();
+				if (resolved === path.resolve(shortRoot).toLowerCase() || resolved === path.resolve(longRoot).toLowerCase()) {
+					return longRoot;
+				}
+				throw Object.assign(new Error(`missing path: ${candidate}`), { code: "ENOENT" });
+			}) as typeof fs.realpathSync.native;
+		}
+
+		const canonical = canonicalExistingPath(shortRoot, nativeRealpath);
+		expect(
+			filesystemPathIdentity(shortRoot, nativeRealpath),
+			"short and long spellings must resolve to one filesystem identity",
+		).toBe(filesystemPathIdentity(longRoot, nativeRealpath));
+		expect(
+			path.relative(longRoot, canonical),
+			"canonical repository coordinate must stay at the strict project root",
+		).toBe("");
+	});
+
 	test("marker lands on the goal worktree with the resolved metadata", async () => {
 		const metadata = { "experiment": { arm: "A" }, "feature.flag": true };
 		const goal = await createGoalRaw({ title: "fs-root", cwd: repoPath, projectId, worktree: true, metadata });
@@ -377,10 +450,11 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 		const detail = await waitForSetup(goal.id);
 		expect(detail.setupStatus).toBe("ready");
 
-		const worktree = detail.cwd ?? detail.worktreePath;
+		const worktree = strictGoalWorktree(detail);
 		const marker = readMarker(worktree);
 		expect(marker, `marker must exist on goal worktree ${worktree}`).toBeTruthy();
 		expect(marker!.goalId).toBe(goal.id);
+		expect(marker!.worktreePath).toBe(detail.worktreePath);
 		expect(marker!.metadata).toEqual(metadata);
 
 		// Hook fired exactly once for this (single) worktree provisioning — proves
@@ -405,10 +479,11 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 		const childDetail = await waitForSetup(child.id);
 		expect(childDetail.setupStatus).toBe("ready");
 
-		const childWorktree = childDetail.cwd ?? childDetail.worktreePath;
+		const childWorktree = strictGoalWorktree(childDetail);
 		const marker = readMarker(childWorktree);
 		expect(marker, `nested sub-goal worktree must carry a marker (${childWorktree})`).toBeTruthy();
 		expect(marker!.goalId).toBe(child.id);
+		expect(marker!.worktreePath).toBe(childDetail.worktreePath);
 		// Deep-merged: array kept from child? child only set experiment.seed, so
 		// disabledTools is inherited; experiment.arm inherited, seed overridden.
 		expect(marker!.metadata).toEqual({
@@ -425,14 +500,18 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 		goals.push(treated.id);
 		const treatedDetail = await waitForSetup(treated.id);
 		expect(treatedDetail.setupStatus).toBe("ready");
-		const treatedWorktree = treatedDetail.cwd ?? treatedDetail.worktreePath;
+		const treatedWorktree = strictGoalWorktree(treatedDetail);
 		expect(readMarker(treatedWorktree), "disabled provider must NOT write a marker").toBeUndefined();
 
 		// Control sibling (no disabledProviders) still gets the marker.
 		const control = await createGoalRaw({ title: "fs-control", cwd: repoPath, projectId, worktree: true });
 		goals.push(control.id);
 		const controlDetail = await waitForSetup(control.id);
-		const controlWorktree = controlDetail.cwd ?? controlDetail.worktreePath;
-		expect(readMarker(controlWorktree), "enabled provider must write a marker on the sibling").toBeTruthy();
+		const controlWorktree = strictGoalWorktree(controlDetail);
+		const controlMarker = readMarker(controlWorktree);
+		expect(controlMarker, "enabled provider must write a marker on the sibling").toBeTruthy();
+		expect(controlMarker!.goalId).toBe(control.id);
+		expect(controlMarker!.worktreePath).toBe(controlDetail.worktreePath);
+		expect(controlMarker!.metadata).toEqual({});
 	});
 });
