@@ -2489,13 +2489,21 @@ of declared ids; unrelated pack directories and stale committed output do not af
 A serving target must already:
 
 - exist as a directory inside the repository;
-- contain a readable `pack.yaml` whose `name` exactly matches the selected pack; and
-- resolve to a location other than `authorRoot`, including through filesystem aliases.
+- contain a readable `pack.yaml` whose `name` exactly matches the selected pack;
+- resolve to a location other than `authorRoot`, including through filesystem aliases; and
+- expose a stable, non-zero filesystem identity. Every traversed output directory and existing
+  output file must expose the same kind of identity.
 
 The default target is not discovered or created. If it is missing, the command directs you to run
 `npm run build:server` or pass an explicit `--target`. Explicit targets are canonicalized,
 deduplicated, and processed in deterministic order. Parent directories for declared output files
-are created only after all targets pass validation.
+are created only after all targets pass validation. Static symlinks or junctions in an output path,
+output-file symlinks, and entries replaced after validation are rejected.
+
+Run the watcher unprivileged and only against serving trees controlled by the same trusted
+developer. Its pathname and identity checks reduce accidental or racy redirection, but are not a
+security boundary against a hostile concurrent local principal: portable Node does not provide
+descriptor-relative publication for this workflow.
 
 #### Reload lifecycle and preserved identity
 
@@ -2512,12 +2520,11 @@ parameterized `instanceKey` values remain unchanged. Module-local renderer or pa
 reset because the code is evaluated as a new module; persist state that must survive in
 `host.store` or another durable host surface.
 
-The notification bridge exists only in Vite serve mode. It accepts only a local `POST` to
-`/__bobbit_dev/pack-rebuilt`, with an at-most 8 KiB JSON body containing exactly a structural
-`pack` id and positive safe-integer `reloadToken`. Pack code should not call this internal bridge.
-It has no gateway or production counterpart: production builds contain neither the endpoint nor
-the HMR listener, and `npm run build:packs` continues to build all declarations using the normal
-production path.
+The notification bridge exists only in Vite serve mode. The watcher supplies its required internal,
+non-simple `X-Bobbit-Pack-Reload: 1` header when posting the bounded reload payload; pack code and
+other callers should not use this bridge directly. It has no gateway or production counterpart:
+production builds contain neither the endpoint nor the HMR listener, and `npm run build:packs`
+continues to build all declarations using the normal production path.
 
 Stop the watcher with `Ctrl+C` or a normal `SIGTERM`. Cleanup is idempotent: it closes the filesystem
 watcher, clears pending debounce work, removes signal listeners, prevents new cycles, and lets an
