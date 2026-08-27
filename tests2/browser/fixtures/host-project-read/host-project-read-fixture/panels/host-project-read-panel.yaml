@@ -1,0 +1,4 @@
+id: host-project-read.panel
+title: Host Project Read Fixture
+entry: ../lib/panel.js
+instanceMode: singleton

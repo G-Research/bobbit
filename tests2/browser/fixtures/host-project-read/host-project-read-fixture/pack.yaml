@@ -1,0 +1,12 @@
+name: host-project-read-fixture
+schema: 2
+description: Extension-neutral browser fixture for granular on-demand Host project reads.
+version: 1.0.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: [host-project-read-route]
+routes:
+  module: lib/routes.mjs
+  names: [panel-data]

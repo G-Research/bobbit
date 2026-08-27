@@ -2,6 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
+import { sanitizePullRequestUrl } from "../../shared/pr-url-safety.js";
+import type {
+	HostPullRequestMergeability,
+	HostPullRequestReviewDecision,
+	HostPullRequestState,
+	HostPullRequestSummary,
+} from "../../shared/extension-host/host-api.js";
 
 export interface PrStatusEntry {
 	state: string;
@@ -43,6 +50,18 @@ export class PrStatusPersistenceError extends Error {
 
 const MAX_GOAL_ID_LENGTH = 128;
 const MAX_STATUS_IDENTIFIER_LENGTH = 64;
+const HOST_PULL_REQUEST_STATES = new Set<HostPullRequestState>(["OPEN", "CLOSED", "MERGED"]);
+const HOST_PULL_REQUEST_REVIEW_DECISIONS = new Set<HostPullRequestReviewDecision>([
+	"APPROVED",
+	"CHANGES_REQUESTED",
+	"REVIEW_REQUIRED",
+]);
+const HOST_PULL_REQUEST_MERGEABILITIES = new Set<HostPullRequestMergeability>([
+	"MERGEABLE",
+	"CONFLICTING",
+	"UNKNOWN",
+]);
+const ISO_UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
 function boundedIdentifier(value: unknown, maxLength: number): string | undefined {
 	return typeof value === "string" && value.length > 0 && value.length <= maxLength
@@ -69,6 +88,48 @@ function safeStatusProjection(goalId: string, entry: PrStatusEntry): Readonly<Pr
 	});
 }
 
+/**
+ * Adapt one persisted cache entry to the closed Host project-read contract.
+ * Invalid enum values fail closed; optional cache fields are copied only after
+ * validation, and privileged/provider fields are never inspected or spread.
+ */
+export function projectHostPullRequestSummary(
+	goalId: string,
+	entry: PrStatusEntry,
+): HostPullRequestSummary | undefined {
+	if (!boundedIdentifier(goalId, MAX_GOAL_ID_LENGTH)
+		|| !HOST_PULL_REQUEST_STATES.has(entry.state as HostPullRequestState)) return undefined;
+	if (entry.reviewDecision !== undefined && entry.reviewDecision !== null
+		&& !HOST_PULL_REQUEST_REVIEW_DECISIONS.has(entry.reviewDecision as HostPullRequestReviewDecision)) return undefined;
+	if (entry.mergeable !== undefined
+		&& !HOST_PULL_REQUEST_MERGEABILITIES.has(entry.mergeable as HostPullRequestMergeability)) return undefined;
+
+	const url = sanitizePullRequestUrl(entry.url);
+	const updatedAt = typeof entry.updatedAt === "string"
+		&& entry.updatedAt.length <= 64
+		&& ISO_UTC_TIMESTAMP.test(entry.updatedAt)
+		&& Number.isFinite(Date.parse(entry.updatedAt))
+		? entry.updatedAt
+		: undefined;
+	const number = Number.isSafeInteger(entry.number) && (entry.number as number) > 0
+		? entry.number
+		: undefined;
+	return {
+		goalId,
+		state: entry.state as HostPullRequestState,
+		...(number === undefined ? {} : { number }),
+		...(typeof entry.title === "string" ? { title: entry.title } : {}),
+		...(url === undefined ? {} : { url }),
+		...(updatedAt === undefined ? {} : { updatedAt }),
+		...(entry.reviewDecision === undefined || entry.reviewDecision === null
+			? {}
+			: { reviewDecision: entry.reviewDecision as HostPullRequestReviewDecision }),
+		...(entry.mergeable === undefined
+			? {}
+			: { mergeability: entry.mergeable as HostPullRequestMergeability }),
+	};
+}
+
 function sameSafeProjection(
 	left: Readonly<PrStatusChangedPayload> | undefined,
 	right: Readonly<PrStatusChangedPayload> | undefined,
@@ -81,7 +142,7 @@ function safeRevision(entry: PrStatusEntry, payload: Readonly<PrStatusChangedPay
 	// become public revision metadata when it is not a provider timestamp.
 	if (typeof entry.updatedAt === "string"
 		&& entry.updatedAt.length <= 64
-		&& /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(entry.updatedAt)
+		&& ISO_UTC_TIMESTAMP.test(entry.updatedAt)
 		&& Number.isFinite(Date.parse(entry.updatedAt))) {
 		return entry.updatedAt;
 	}

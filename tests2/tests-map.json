@@ -2,13 +2,13 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1143,
+  "censusTotal": 1146,
   "buckets": {
     "daily": 68,
-    "v2-browser": 216,
-    "v2-core": 512,
+    "v2-browser": 217,
+    "v2-core": 513,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 204
   },
   "methods": {
     "adapter": 276,
@@ -3906,6 +3906,33 @@
     {
       "path": "tests2/browser/journeys/host-notifications.journey.spec.ts",
       "reason": "Browser journey for scoped session/project Host notifications, authoritative refresh after load/reload/gaps, clean unsubscribe, and project isolation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-host-project-read.test.ts",
+      "reason": "Core coverage for the v7 granular Host project-read selectors, stable allowlisted summaries, pagination, ordered exact-ID outcomes, parent authorization, and redaction.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-host-project-read.test.ts",
+      "reason": "Integration coverage for authenticated project-scoped Host reads across real stores, reload, stale and cross-scope denial, redaction, and teardown.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/host-project-read.journey.spec.ts",
+      "reason": "Extension-neutral pack-panel journey for automatic granular v7 project reads, route-first relevant-record loading, ID and page reads, targeted invalidation, gap refresh, reload, isolation, and cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
