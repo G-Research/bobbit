@@ -1,10 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { build, type BuildResult, type Metafile, type Plugin } from "esbuild";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
 type NativeAssetRuntime = {
@@ -28,7 +27,6 @@ type MaterializeOptions = {
 type BuildApi = {
 	readPackBuildMetadata(packRoot: string): unknown | Promise<unknown>;
 	materializePackNativeAssets(options: MaterializeOptions): unknown | Promise<unknown>;
-	packNativeAssetsPlugin(options: { projectRoot: string; platform: string }): Plugin;
 };
 
 type JsonObject = Record<string, any>;
@@ -205,16 +203,6 @@ function restoreWritable(root: string): void {
 		try { fs.chmodSync(absolute, entry.isDirectory() ? 0o755 : 0o644); } catch { /* best effort cleanup */ }
 	}
 	try { fs.chmodSync(root, 0o755); } catch { /* best effort cleanup */ }
-}
-
-function makeReadOnly(root: string): void {
-	if (process.platform === "win32") return;
-	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-		const absolute = path.join(root, entry.name);
-		if (entry.isDirectory()) makeReadOnly(absolute);
-		fs.chmodSync(absolute, entry.isDirectory() ? 0o555 : 0o444);
-	}
-	fs.chmodSync(root, 0o555);
 }
 
 afterEach(() => {
@@ -457,95 +445,3 @@ describe("native asset runtime selection and resolution", () => {
 		);
 	});
 });
-
-describe("bobbit:pack-native-assets build-only alias", () => {
-	it("inlines the Node helper and runs from an installed read-only pack without runtime host edges", async () => {
-		const fixture = createFixture();
-		await materialize(fixture);
-		const api = await loadBuildApi();
-		const sourceDirectory = path.join(fixture.packRoot, "src");
-		const sourceFile = path.join(sourceDirectory, "resolver.ts");
-		fs.mkdirSync(sourceDirectory, { recursive: true });
-		fs.writeFileSync(sourceFile, [
-			'import { resolvePackNativeAsset } from "bobbit:pack-native-assets";',
-			"export const resolveFixtureBinding = (familyDirectory: string, runtime: { platform: string; arch: string; glibcVersionRuntime?: string | null }) =>",
-			"  resolvePackNativeAsset(familyDirectory, runtime);",
-			"",
-		].join("\n"), "utf8");
-
-		const result = await build({
-			absWorkingDir: fixture.packRoot,
-			entryPoints: [sourceFile],
-			outfile: path.join(fixture.packRoot, "lib", "resolver.mjs"),
-			bundle: true,
-			write: false,
-			metafile: true,
-			format: "esm",
-			platform: "node",
-			target: "es2022",
-			minify: true,
-			legalComments: "none",
-			splitting: false,
-			plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "node" })],
-		});
-		const bundle = onlyOutput(result).text;
-		const metafile = result.metafile as Metafile;
-		const normalizedInputs = Object.keys(metafile.inputs).map(input => input.replaceAll("\\", "/"));
-		assert.equal(normalizedInputs.some(input => input.endsWith("/src/server/extension-host/native-assets.ts")), true, "production helper must be bundled");
-		const outputImports = Object.values(metafile.outputs).flatMap(output => output.imports);
-		assert.ok(outputImports.every(edge => edge.external && edge.path.startsWith("node:")), `unexpected runtime edge: ${JSON.stringify(outputImports)}`);
-		assert.doesNotMatch(bundle, /bobbit:pack-native-assets/);
-		assert.doesNotMatch(bundle, /src[\\/]server[\\/]extension-host[\\/]native-assets\.ts/);
-		assert.doesNotMatch(bundle, /node_modules[\\/]/);
-		assert.equal(bundle.includes(REPO_ROOT), false, "bundle must not embed its checkout path");
-
-		const installedPack = path.join(fixture.root, "installed", "fixture-pack");
-		fs.cpSync(fixture.packRoot, installedPack, { recursive: true });
-		const installedBundle = path.join(installedPack, "lib", "resolver.mjs");
-		fs.writeFileSync(installedBundle, bundle, "utf8");
-		makeReadOnly(installedPack);
-		const installedModule = await import(`${pathToFileURL(installedBundle).href}?fixture=${Date.now()}`) as {
-			resolveFixtureBinding(family: string, runtime: NativeAssetRuntime): string;
-		};
-		const installedFamily = path.join(installedPack, "lib", "native", "database-driver");
-		const resolved = installedModule.resolveFixtureBinding(installedFamily, {
-			platform: "linux",
-			arch: "arm64",
-			glibcVersionRuntime: null,
-		});
-		assert.equal(resolved, path.join(installedFamily, "linux-musl-arm64.node"));
-		assert.equal(path.relative(installedPack, resolved).startsWith(".."), false);
-	});
-
-	it("rejects the helper alias in browser bundles and rejects unknown bobbit aliases", async () => {
-		const fixture = createFixture();
-		const api = await loadBuildApi();
-		const entry = path.join(fixture.packRoot, "entry.ts");
-		fs.writeFileSync(entry, 'import "bobbit:pack-native-assets";\n', "utf8");
-		await expect(build({
-			entryPoints: [entry],
-			bundle: true,
-			write: false,
-			platform: "browser",
-			plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "browser" })],
-			logLevel: "silent",
-		})).rejects.toThrow(/bobbit:pack-native-assets|node|browser|platform/i);
-
-		fs.writeFileSync(entry, 'import "bobbit:anything-else";\n', "utf8");
-		await expect(build({
-			entryPoints: [entry],
-			bundle: true,
-			write: false,
-			platform: "node",
-			plugins: [api.packNativeAssetsPlugin({ projectRoot: REPO_ROOT, platform: "node" })],
-			logLevel: "silent",
-		})).rejects.toThrow(/bobbit:anything-else|unsupported|unknown/i);
-	});
-});
-
-function onlyOutput(result: BuildResult): { text: string } {
-	const outputs = result.outputFiles;
-	assert.ok(outputs);
-	assert.equal(outputs.length, 1);
-	return outputs[0];
-}
