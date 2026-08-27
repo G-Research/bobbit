@@ -314,6 +314,7 @@ function tailwindcssWithBundledDevGuard(): Plugin[] {
 
 const PACK_DEV_REBUILT_PATH = "/__bobbit_dev/pack-rebuilt";
 const PACK_DEV_REBUILT_MAX_BODY = 8 * 1024;
+const PACK_DEV_RELOAD_HEADER = "x-bobbit-pack-reload";
 const SAFE_PACK_ID = /^[a-z0-9][a-z0-9-]*$/;
 
 type NetworkInterfaces = ReturnType<typeof os.networkInterfaces>;
@@ -386,6 +387,14 @@ export function packDevHotReload(): Plugin {
 					return;
 				}
 				if (!isLocalVitePeer(req.socket.remoteAddress)) {
+					res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+					res.end("Forbidden");
+					return;
+				}
+				// A required non-simple header prevents a hostile browser origin from
+				// issuing an opaque loopback write. This route deliberately emits no
+				// CORS allow headers, so browsers cannot preflight the header.
+				if (req.headers[PACK_DEV_RELOAD_HEADER] !== "1") {
 					res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
 					res.end("Forbidden");
 					return;

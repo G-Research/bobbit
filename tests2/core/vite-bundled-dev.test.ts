@@ -26,6 +26,14 @@ interface BridgeResponse {
 	headers?: Record<string, string>;
 }
 
+const PACK_RELOAD_HEADERS = { "x-bobbit-pack-reload": "1" };
+
+function expectNoCorsAllowHeaders(response: BridgeResponse): void {
+	expect(Object.keys(response.headers ?? {})).not.toEqual(
+		expect.arrayContaining([expect.stringMatching(/^access-control-allow-/i)]),
+	);
+}
+
 async function invokePackBridge(options: {
 	method?: string;
 	url?: string;
@@ -50,7 +58,7 @@ async function invokePackBridge(options: {
 	const request = Readable.from(body ? [Buffer.from(body)] : []) as any;
 	request.method = options.method ?? "POST";
 	request.url = options.url ?? "/__bobbit_dev/pack-rebuilt";
-	request.headers = options.headers ?? {};
+	request.headers = options.headers ?? PACK_RELOAD_HEADERS;
 	request.socket = { remoteAddress: options.remoteAddress ?? "127.0.0.1" };
 
 	return await new Promise<BridgeResponse>((resolve) => {
@@ -93,12 +101,47 @@ describe("Vite pack authoring reload bridge", () => {
 
 		expect(result.status).toBe(204);
 		expect(result.body).toBe("");
+		expectNoCorsAllowHeaders(result);
 		expect(result.send).toHaveBeenCalledTimes(1);
 		expect(result.send).toHaveBeenCalledWith({
 			type: "custom",
 			event: "bobbit:pack-rebuilt",
 			data: { pack: "file-explorer", reloadToken: 7 },
 		});
+	});
+
+	it("rejects an otherwise-valid loopback POST without the bridge header before publication", async () => {
+		const result = await invokePackBridge({
+			body: JSON.stringify({ pack: "file-explorer", reloadToken: 7 }),
+			headers: {},
+		});
+
+		expect(result.status).toBe(403);
+		expect(result.body).toBe("Forbidden");
+		expect(result.send).not.toHaveBeenCalled();
+		expectNoCorsAllowHeaders(result);
+	});
+
+	it("rejects a browser-simple text/plain write without authorizing a CORS preflight", async () => {
+		const result = await invokePackBridge({
+			body: JSON.stringify({ pack: "file-explorer", reloadToken: 7 }),
+			headers: { "content-type": "text/plain" },
+		});
+
+		expect(result.status).toBe(403);
+		expect(result.send).not.toHaveBeenCalled();
+		expectNoCorsAllowHeaders(result);
+	});
+
+	it("rejects an incorrect bridge header value", async () => {
+		const result = await invokePackBridge({
+			body: JSON.stringify({ pack: "file-explorer", reloadToken: 7 }),
+			headers: { "x-bobbit-pack-reload": "true" },
+		});
+
+		expect(result.status).toBe(403);
+		expect(result.send).not.toHaveBeenCalled();
+		expectNoCorsAllowHeaders(result);
 	});
 
 	it("passes unrelated paths through without mutating the HMR channel", async () => {
