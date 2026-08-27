@@ -1,4 +1,4 @@
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -206,6 +206,7 @@ function restoreWritable(root: string): void {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const root of temporaryRoots) {
 		restoreWritable(root);
 		fs.rmSync(root, { recursive: true, force: true });
@@ -305,6 +306,73 @@ describe("first-party pack native asset materialization", () => {
 				&& /binding\.node/i.test(error.message),
 		);
 		assert.deepEqual(snapshotTree(family), beforeFailure);
+	});
+
+	it("rejects a symlink or junction native root without deleting its external generated family", async (context) => {
+		const fixture = createFixture();
+		await materialize(fixture);
+		const nativeRoot = path.join(fixture.packRoot, "lib", "native");
+		const outside = path.join(fixture.root, "outside-native");
+		fs.renameSync(nativeRoot, outside);
+		fs.writeFileSync(path.join(outside, "outside-sentinel"), "unchanged", "utf8");
+		try {
+			fs.symlinkSync(outside, nativeRoot, process.platform === "win32" ? "junction" : "dir");
+		} catch (error: any) {
+			if (["EPERM", "EACCES", "ENOSYS"].includes(error?.code)) {
+				context.skip();
+				return;
+			}
+			throw error;
+		}
+
+		await assert.rejects(() => materialize(fixture), /stable real directory|alias|symlink/i);
+		assert.equal(fs.readFileSync(path.join(outside, "outside-sentinel"), "utf8"), "unchanged");
+		assert.equal(fs.existsSync(path.join(outside, "database-driver", "darwin-arm64.node")), true);
+	});
+
+	it("restores the exact previous family when destination publication rename fails", async () => {
+		const fixture = createFixture();
+		await materialize(fixture);
+		const family = familyDirectory(fixture);
+		const before = snapshotTree(family);
+		const changedSource = path.join(fixture.packageRoot, "prebuilds", "darwin-arm64", "binding.node");
+		fs.writeFileSync(changedSource, "must-not-publish", "utf8");
+		const realRename = fs.renameSync.bind(fs);
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+			if (path.basename(String(from)) === "staging" && String(to) === family) {
+				throw Object.assign(new Error("injected publication rename failure"), { code: "EIO" });
+			}
+			return realRename(from, to);
+		});
+
+		await assert.rejects(() => materialize(fixture), /injected publication rename failure/);
+		renameSpy.mockRestore();
+		assert.deepEqual(snapshotTree(family), before);
+		assert.equal(fs.readdirSync(fixture.packRoot).some((name) => name.includes("native-assets")), false);
+	});
+
+	it("treats destination publication as committed when old-tree cleanup fails", async () => {
+		const fixture = createFixture();
+		await materialize(fixture);
+		const changedTarget = "darwin-arm64";
+		const changedSource = path.join(fixture.packageRoot, "prebuilds", changedTarget, "binding.node");
+		const replacement = Buffer.from("committed-replacement", "utf8");
+		fs.writeFileSync(changedSource, replacement);
+		const realUnlink = fs.unlinkSync.bind(fs);
+		let injected = false;
+		const unlinkSpy = vi.spyOn(fs, "unlinkSync").mockImplementation((file) => {
+			if (!injected && String(file).includes(`${path.sep}backup${path.sep}`)) {
+				injected = true;
+				throw Object.assign(new Error("injected post-commit cleanup failure"), { code: "EIO" });
+			}
+			return realUnlink(file);
+		});
+
+		await materialize(fixture);
+		unlinkSpy.mockRestore();
+		assert.equal(injected, true);
+		assert.deepEqual(fs.readFileSync(path.join(familyDirectory(fixture), `${changedTarget}.node`)), replacement);
+		assert.equal(fs.readdirSync(fixture.packRoot).some((name) => name.includes("stage-") || name.includes("backup-")), false);
 	});
 
 	it.each([

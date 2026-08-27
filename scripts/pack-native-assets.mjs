@@ -140,58 +140,181 @@ function defaultResolvePackageRoot(packageName, projectRoot) {
 	fail(`resolved entry ${entry} for ${packageName} has no matching package manifest`);
 }
 
-function replaceFamilyAtomically(destination, staging) {
-	const parent = path.dirname(destination);
-	const backup = path.join(parent, `.${path.basename(destination)}.backup-${randomUUID()}`);
-	const hadDestination = fs.existsSync(destination);
-	if (hadDestination) fs.renameSync(destination, backup);
-	try {
-		fs.renameSync(staging, destination);
-	} catch (error) {
-		fs.rmSync(staging, { recursive: true, force: true });
-		if (hadDestination) {
-			try {
-				fs.renameSync(backup, destination);
-			} catch (restoreError) {
-				throw new AggregateError([error, restoreError], `failed to install and restore native asset family; previous family remains at ${backup}`);
-			}
-		}
-		throw error;
-	}
-	if (hadDestination) fs.rmSync(backup, { recursive: true, force: true });
+function stableIdentity(stats) {
+	if (stats.dev === undefined || stats.ino === undefined || String(stats.ino) === "0") return undefined;
+	return `${String(stats.dev)}:${String(stats.ino)}`;
 }
 
-function isGeneratedFamily(directory, id) {
-	if (!SAFE_ID.test(id)) return false;
+function assertStableDirectory(stats, directory) {
+	if (!stats.isDirectory() || stats.isSymbolicLink() || stableIdentity(stats) === undefined) {
+		fail(`native asset directory is not a stable real directory: ${directory}`);
+	}
+}
+
+function captureStableDirectory(directory, containmentRoot) {
+	const stats = fs.lstatSync(directory);
+	assertStableDirectory(stats, directory);
+	const canonical = fs.realpathSync(directory);
+	const canonicalStats = fs.lstatSync(canonical);
+	assertStableDirectory(canonicalStats, canonical);
+	if (stableIdentity(stats) !== stableIdentity(canonicalStats)) fail(`native asset directory changed while validating: ${directory}`);
+	if (containmentRoot !== undefined && !isStrictlyInside(containmentRoot, canonical)) {
+		fail(`native asset directory escapes its pack root: ${directory}`);
+	}
+	return { path: directory, canonical, identity: stableIdentity(stats) };
+}
+
+function assertDirectoryClaimCurrent(claim) {
+	const current = fs.lstatSync(claim.path);
+	assertStableDirectory(current, claim.path);
+	if (stableIdentity(current) !== claim.identity) fail(`native asset directory changed while in use: ${claim.path}`);
+}
+
+function openNativeRoot(packRoot, create) {
+	const packClaim = captureStableDirectory(packRoot);
+	const claims = [packClaim];
+	let current = packRoot;
+	for (const segment of ["lib", "native"]) {
+		for (const claim of claims) assertDirectoryClaimCurrent(claim);
+		current = path.join(current, segment);
+		if (!fs.existsSync(current)) {
+			if (!create) return null;
+			fs.mkdirSync(current);
+		}
+		const claim = captureStableDirectory(current, packClaim.canonical);
+		claims.push(claim);
+	}
+	for (const claim of claims) assertDirectoryClaimCurrent(claim);
+	return { path: current, claims };
+}
+
+function inspectGeneratedFamily(directory, id, nativeClaim) {
+	if (!SAFE_ID.test(id)) return null;
 	try {
-		const directoryStats = fs.lstatSync(directory);
-		if (!directoryStats.isDirectory() || directoryStats.isSymbolicLink()) return false;
+		assertDirectoryClaimCurrent(nativeClaim);
+		const familyClaim = captureStableDirectory(directory, nativeClaim.canonical);
 		const manifestPath = path.join(directory, "manifest.json");
 		const manifestStats = fs.lstatSync(manifestPath);
-		if (!manifestStats.isFile() || manifestStats.isSymbolicLink()) return false;
+		if (!manifestStats.isFile() || manifestStats.isSymbolicLink() || stableIdentity(manifestStats) === undefined) return null;
 		const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 		if (!isPlainObject(manifest) || Object.keys(manifest).sort().join(",") !== "package,schema,targets,version"
 			|| manifest.schema !== 1 || typeof manifest.package !== "string" || manifest.package.length === 0
 			|| typeof manifest.version !== "string" || manifest.version.length === 0 || !isPlainObject(manifest.targets)
-			|| Object.keys(manifest.targets).length !== NATIVE_ASSET_TARGETS.length) return false;
+			|| Object.keys(manifest.targets).length !== NATIVE_ASSET_TARGETS.length) return null;
+		const expectedNames = new Set(["manifest.json"]);
 		for (const target of NATIVE_ASSET_TARGETS) {
 			const record = manifest.targets[target];
 			if (!isPlainObject(record) || Object.keys(record).sort().join(",") !== "file,sha256,size"
 				|| record.file !== `${target}.node` || !Number.isSafeInteger(record.size) || record.size < 0
-				|| typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.sha256)) return false;
+				|| typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.sha256)) return null;
+			expectedNames.add(record.file);
 		}
-		return true;
+		const entries = fs.readdirSync(directory, { withFileTypes: true });
+		if (entries.length !== expectedNames.size) return null;
+		for (const entry of entries) {
+			if (!expectedNames.has(entry.name) || !entry.isFile() || entry.isSymbolicLink()) return null;
+			const stats = fs.lstatSync(path.join(directory, entry.name));
+			if (!stats.isFile() || stats.isSymbolicLink() || stableIdentity(stats) === undefined) return null;
+		}
+		assertDirectoryClaimCurrent(familyClaim);
+		assertDirectoryClaimCurrent(nativeClaim);
+		return { ...familyClaim, files: [...expectedNames].sort() };
 	} catch {
-		return false;
+		return null;
 	}
 }
 
-function removeStaleGeneratedFamilies(nativeRoot, currentIds) {
-	if (!fs.existsSync(nativeRoot)) return;
-	for (const entry of fs.readdirSync(nativeRoot, { withFileTypes: true })) {
+function removeFlatDirectory(directory, expectedIdentity, files) {
+	const claim = captureStableDirectory(directory);
+	if (expectedIdentity !== undefined && claim.identity !== expectedIdentity) fail(`refusing to remove replaced native asset directory: ${directory}`);
+	const entries = fs.readdirSync(directory, { withFileTypes: true });
+	const allowed = files === undefined ? null : new Set(files);
+	if (allowed !== null && (entries.length !== allowed.size || entries.some((entry) => !allowed.has(entry.name)))) {
+		fail(`refusing to remove native asset directory with unexpected contents: ${directory}`);
+	}
+	for (const entry of entries) {
+		const file = path.join(directory, entry.name);
+		const stats = fs.lstatSync(file);
+		if (!entry.isFile() || entry.isSymbolicLink() || !stats.isFile() || stats.isSymbolicLink() || stableIdentity(stats) === undefined) {
+			fail(`refusing to remove unsafe native asset output: ${file}`);
+		}
+		assertDirectoryClaimCurrent(claim);
+		fs.unlinkSync(file);
+	}
+	assertDirectoryClaimCurrent(claim);
+	fs.rmdirSync(directory);
+}
+
+function cleanupTransactionDirectory(transactionRoot) {
+	if (!fs.existsSync(transactionRoot)) return;
+	const transactionClaim = captureStableDirectory(transactionRoot);
+	for (const entry of fs.readdirSync(transactionRoot, { withFileTypes: true })) {
+		const child = path.join(transactionRoot, entry.name);
+		if (!entry.isDirectory() || entry.isSymbolicLink()) fail(`unsafe native asset transaction output: ${child}`);
+		removeFlatDirectory(child);
+		assertDirectoryClaimCurrent(transactionClaim);
+	}
+	fs.rmdirSync(transactionRoot);
+}
+
+function cleanupFailedTransaction(transactionRoot) {
+	if (!fs.existsSync(transactionRoot)) return;
+	const transactionClaim = captureStableDirectory(transactionRoot);
+	const staging = path.join(transactionRoot, "staging");
+	if (fs.existsSync(staging)) removeFlatDirectory(staging);
+	assertDirectoryClaimCurrent(transactionClaim);
+	if (fs.readdirSync(transactionRoot).length === 0) fs.rmdirSync(transactionRoot);
+}
+
+function replaceFamilyAtomically(destination, staging, nativeClaim, transactionRoot) {
+	assertDirectoryClaimCurrent(nativeClaim);
+	const stagingClaim = captureStableDirectory(staging);
+	const backup = path.join(transactionRoot, "backup");
+	let previousClaim;
+	if (fs.existsSync(destination)) {
+		previousClaim = captureStableDirectory(destination, nativeClaim.canonical);
+		assertDirectoryClaimCurrent(nativeClaim);
+		fs.renameSync(destination, backup);
+		const moved = captureStableDirectory(backup);
+		if (moved.identity !== previousClaim.identity) {
+			fs.renameSync(backup, destination);
+			fail(`native asset family changed while moving it to transaction storage: ${destination}`);
+		}
+	}
+
+	try {
+		assertDirectoryClaimCurrent(nativeClaim);
+		assertDirectoryClaimCurrent(stagingClaim);
+		fs.renameSync(staging, destination);
+	} catch (error) {
+		try {
+			if (previousClaim) fs.renameSync(backup, destination);
+		} catch (restoreError) {
+			throw new AggregateError([error, restoreError], `failed to install and restore native asset family ${destination}`);
+		}
+		throw error;
+	}
+
+	// The successful destination rename is the commit point. Cleanup cannot
+	// turn that commit into a reported failure or expose the previous bytes.
+	try {
+		if (previousClaim && fs.existsSync(backup)) removeFlatDirectory(backup, previousClaim.identity);
+		cleanupTransactionDirectory(transactionRoot);
+	} catch {
+		// Transaction state is outside the pack tree and is never a runtime input.
+	}
+}
+
+function removeStaleGeneratedFamilies(nativeRootState, currentIds) {
+	if (nativeRootState === null) return;
+	const nativeClaim = nativeRootState.claims.at(-1);
+	assertDirectoryClaimCurrent(nativeClaim);
+	for (const entry of fs.readdirSync(nativeRootState.path, { withFileTypes: true })) {
 		if (currentIds.has(entry.name)) continue;
-		const directory = path.join(nativeRoot, entry.name);
-		if (isGeneratedFamily(directory, entry.name)) fs.rmSync(directory, { recursive: true });
+		const directory = path.join(nativeRootState.path, entry.name);
+		const generated = inspectGeneratedFamily(directory, entry.name, nativeClaim);
+		if (generated !== null) removeFlatDirectory(directory, generated.identity, generated.files);
+		assertDirectoryClaimCurrent(nativeClaim);
 	}
 }
 
@@ -203,9 +326,10 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 	const resolvedProjectRoot = path.resolve(projectRoot);
 	const resolvedPackRoot = path.resolve(packRoot);
 	const metadata = readPackBuildMetadata(resolvedPackRoot);
-	const nativeRoot = path.join(resolvedPackRoot, "lib", "native");
+	if (metadata === null && !fs.existsSync(resolvedPackRoot)) return [];
+	let nativeRootState = openNativeRoot(resolvedPackRoot, false);
 	if (metadata === null) {
-		removeStaleGeneratedFamilies(nativeRoot, new Set());
+		removeStaleGeneratedFamilies(nativeRootState, new Set());
 		return [];
 	}
 
@@ -285,21 +409,25 @@ export function materializePackNativeAssets({ projectRoot, packRoot, resolvePack
 		});
 	}
 
-	fs.mkdirSync(nativeRoot, { recursive: true });
+	nativeRootState = openNativeRoot(resolvedPackRoot, true);
+	const nativeRoot = nativeRootState.path;
+	const nativeClaim = nativeRootState.claims.at(-1);
 	for (const family of preparedFamilies) {
 		const destination = path.join(nativeRoot, family.id);
-		const staging = path.join(nativeRoot, `.${family.id}.stage-${randomUUID()}`);
+		const transactionRoot = path.join(path.dirname(resolvedPackRoot), `.${path.basename(resolvedPackRoot)}.native-assets-${randomUUID()}`);
+		const staging = path.join(transactionRoot, "staging");
 		try {
+			fs.mkdirSync(transactionRoot);
 			fs.mkdirSync(staging);
-			for (const file of family.files) fs.writeFileSync(path.join(staging, file.filename), file.bytes);
-			fs.writeFileSync(path.join(staging, "manifest.json"), `${JSON.stringify(family.manifest, null, 2)}\n`, "utf8");
-			replaceFamilyAtomically(destination, staging);
+			for (const file of family.files) fs.writeFileSync(path.join(staging, file.filename), file.bytes, { flag: "wx" });
+			fs.writeFileSync(path.join(staging, "manifest.json"), `${JSON.stringify(family.manifest, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+			replaceFamilyAtomically(destination, staging, nativeClaim, transactionRoot);
 		} catch (error) {
-			fs.rmSync(staging, { recursive: true, force: true });
+			try { cleanupFailedTransaction(transactionRoot); } catch { /* Preserve the materialization failure and any recoverable backup. */ }
 			fail(`could not materialize native asset ${family.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	removeStaleGeneratedFamilies(nativeRoot, new Set(preparedFamilies.map((family) => family.id)));
+	removeStaleGeneratedFamilies(nativeRootState, new Set(preparedFamilies.map((family) => family.id)));
 	return preparedFamilies.map((family) => path.join(nativeRoot, family.id));
 }
 

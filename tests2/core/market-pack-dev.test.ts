@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { copyFile, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -283,6 +283,84 @@ describe("selected pack build and mirror", () => {
 		expect(withoutFamilies.nativeAssetFamilies).toEqual([]);
 		await expect(lstat(sourceFamily)).rejects.toMatchObject({ code: "ENOENT" });
 		await mirrorDeclaredOutputs(declared, targets, { projectRoot: root, nativeAssetFamilies: [] });
+		for (const served of [alpha, beta]) {
+			await expect(lstat(path.join(served, "lib", "native", "database-driver"))).rejects.toMatchObject({ code: "ENOENT" });
+		}
+	});
+
+	it("rejects corrupt authored native bytes before publishing any family", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		const { author, packageRoot } = await createNativeBuildFixture(root, declared);
+		const alpha = await createPackRoot(root, "served/alpha");
+		const beta = await createPackRoot(root, "served/beta");
+		const build = async (options: Record<string, unknown>) => {
+			const outfile = options.outfile as string;
+			await mkdir(path.dirname(outfile), { recursive: true });
+			await writeFile(outfile, "bundle");
+		};
+		const result = await buildSelectedPack(declared, {
+			projectRoot: root,
+			plugin: { name: "fixture", setup() {} },
+			build,
+			resolvePackageRoot: () => packageRoot,
+			log() {},
+		});
+		await writeFile(path.join(author, "lib", "native", "database-driver", "linux-glibc-x64.node"), "corrupt-after-build");
+		const targets = await servingTargets(declared, ["served/alpha", "served/beta"], { projectRoot: root });
+
+		await expect(mirrorDeclaredOutputs(declared, targets, {
+			projectRoot: root,
+			nativeAssetFamilies: result.nativeAssetFamilies,
+		})).rejects.toThrow(/does not match manifest|linux-glibc-x64/i);
+		for (const served of [alpha, beta]) {
+			await expect(lstat(path.join(served, "lib", "native", "database-driver"))).rejects.toMatchObject({ code: "ENOENT" });
+		}
+	});
+
+	it("rejects an atomic authored-family identity replacement without publishing mixed targets", async () => {
+		const root = await fixtureRoot();
+		const declared = declaration();
+		const { author, packageRoot } = await createNativeBuildFixture(root, declared);
+		const alpha = await createPackRoot(root, "served/alpha");
+		const beta = await createPackRoot(root, "served/beta");
+		const build = async (options: Record<string, unknown>) => {
+			const outfile = options.outfile as string;
+			await mkdir(path.dirname(outfile), { recursive: true });
+			await writeFile(outfile, "bundle");
+		};
+		const result = await buildSelectedPack(declared, {
+			projectRoot: root,
+			plugin: { name: "fixture", setup() {} },
+			build,
+			resolvePackageRoot: () => packageRoot,
+			log() {},
+		});
+		const family = path.join(author, "lib", "native", "database-driver");
+		const replacement = path.join(author, "lib", "native", "replacement");
+		const displaced = path.join(author, "lib", "native", "displaced");
+		await mkdir(replacement);
+		for (const name of await readdir(family)) await writeFile(path.join(replacement, name), await readFile(path.join(family, name)));
+		const targets = await servingTargets(declared, ["served/alpha", "served/beta"], { projectRoot: root });
+		let replaced = false;
+		const fs = {
+			copyFile, lstat, mkdir, readdir, realpath, rename, rmdir, unlink, writeFile,
+			async readFile(filePath: string, ...args: any[]) {
+				if (!replaced && filePath === path.join(family, "darwin-arm64.node")) {
+					replaced = true;
+					await rename(family, displaced);
+					await rename(replacement, family);
+				}
+				return (readFile as any)(filePath, ...args);
+			},
+		};
+
+		await expect(mirrorDeclaredOutputs(declared, targets, {
+			projectRoot: root,
+			nativeAssetFamilies: result.nativeAssetFamilies,
+			fs,
+		})).rejects.toMatchObject({ code: "ESTALE" });
+		expect(replaced).toBe(true);
 		for (const served of [alpha, beta]) {
 			await expect(lstat(path.join(served, "lib", "native", "database-driver"))).rejects.toMatchObject({ code: "ENOENT" });
 		}
@@ -572,12 +650,15 @@ describe("serialized pack rebuilds", () => {
 		registrations[1].callback("rename", "lib");
 		await rebuilder.flush();
 		expect(build).toHaveBeenCalledOnce();
-		registrations[1].callback("change", "pack.build.json");
+		registrations[1].callback("rename", null);
 		await rebuilder.flush();
 		expect(build).toHaveBeenCalledTimes(2);
-		registrations[0].callback("change", "route.ts");
+		registrations[1].callback("change", "pack.build.json");
 		await rebuilder.flush();
 		expect(build).toHaveBeenCalledTimes(3);
+		registrations[0].callback("change", "route.ts");
+		await rebuilder.flush();
+		expect(build).toHaveBeenCalledTimes(4);
 		await rebuilder.dispose();
 		expect(registrations.every((registration) => registration.close.mock.calls.length === 1)).toBe(true);
 	});
