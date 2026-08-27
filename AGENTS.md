@@ -13,28 +13,27 @@ npm run test:e2e       # Real Git/worktree/Docker/MCP/restart fidelity
 npm run test:manual    # Real model/agent/external services; gate-exempt
 ```
 
-UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Run `npm run check` first. Sessions survive restarts via `.bobbit/state/sessions.json`.
+UI changes hot-reload under `npm run dev:harness`; server changes require `npm run restart-server`. Run `npm run check` first. Sessions persist across restarts.
 
 ## Architecture map
 
 Orient here, then `rg` for the symbol.
 
-- **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WS in `src/server/ws/`.
-- **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md) for `bash_bg`.
-- **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Descriptions budget-pinned by `tests/unit/core/tool-description-budget.unit.test.ts`.
+- **Server REST/WS**: `src/server/` — REST routing in `server.ts`, WS in `ws/`.
+- **Agent runtime**: `src/server/agent/` — session lifecycle, store, project context. See [background processes](docs/bg-process-persistence.md).
+- **MCP/tools**: `src/server/mcp/`, `defaults/tools/<group>/`; project overrides in `.bobbit/config/tools/<group>/`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
-- **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
-- **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
-- **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
+- **Pack resolution**: `PackResolver` in `src/server/agent/pack-*.ts`; built-ins in `market-packs/`. See [marketplace](docs/marketplace.md).
+- **UI**: `src/app/` owns shell/state; `src/ui/` owns components and renderers.
 - **Tests**: one convention-owned `tests/` root; placement and lane rules live in [docs/testing-strategy.md](docs/testing-strategy.md), with executable policy in `scripts/testing/layout-policy.mjs`.
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
 
 ## Before editing anything non-trivial
 
-1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — design constraints, rationale, and pinning tests live there. Read the hits before coding.
-2. **Look for a pinning test.** Tests enforce invariants, not prose. If you break one, fix the bug, not the test. If a regression isn't caught by a test, the missing test IS the bug; add it.
-3. **Search for "never reintroduce" / "single source of truth" / "pinned by"** in source comments around what you're touching.
-4. **`docs/debugging.md`** has full diagnostic walkthroughs indexed by symptom — search there before guessing.
+1. Run `rg "<symbol-or-symptom>" docs/ tests/ src/`; read design constraints and pinning tests before coding.
+2. Preserve pinning-test invariants. Fix broken behavior, not the test; add missing regression coverage.
+3. Search nearby comments for `never reintroduce`, `single source of truth`, and `pinned by`.
+4. Search [debugging](docs/debugging.md) by symptom before guessing.
 
 ## Engineering principle
 
@@ -57,23 +56,15 @@ Treat every new branch, state owner, transformation, API, or abstraction as defe
 
 ## Git conventions
 
-Primary branch is **`main`** — verify with `git symbolic-ref refs/remotes/origin/HEAD`; never assume `master` (a stale divergent `origin/master` still exists and gives the wrong base).
+Verify the primary branch with `git symbolic-ref refs/remotes/origin/HEAD`; never infer it from another remote branch.
 
-**Line endings**: LF everywhere except `*.cmd`/`*.bat`/`*.ps1` (CRLF), pinned via `.gitattributes`. Windows: set `git config --global core.autocrlf false`.
+Use LF except for `*.cmd`/`*.bat`/`*.ps1` (CRLF). On Windows, set `core.autocrlf=false`.
 
-**Worktrees**: dev server runs from the **primary worktree** on `main`; sessions use separate worktrees under `<project-root>-wt/<branch>/`. Always edit in your session worktree, never the primary one. For infra files: edit here → commit → push → `cd <primary-worktree> && git pull origin main` (pushing to remote `main` does NOT update the dev server).
-
-**Forks**: open PRs against the fork's default branch (`main`), not the upstream repo.
-
-See [docs/dev-workflow.md](docs/dev-workflow.md).
+Edit only in your session worktree. The dev server uses the primary worktree, which must pull changes after they are pushed. Fork PRs target the fork's default branch. See [dev workflow](docs/dev-workflow.md).
 
 ## Maintaining this file
 
-AGENTS.md is loaded into **every** agent turn. Keep it small and general.
-
-- **No specific recipes or debugging entries.** Symptom→fix lookups belong in `docs/debugging.md`; how-to-do-X in the relevant `docs/<topic>.md`. Agents find them via the "Before editing" search step above.
-- **No invariant prose pretending to prevent regressions.** Write the test that pins it instead.
-- Keep it small; new content usually belongs in `docs/`.
+Every agent turn loads this file. Keep detail in `docs/`, debugging in `docs/debugging.md`, and invariants in tests.
 
 ## Reference docs
 
