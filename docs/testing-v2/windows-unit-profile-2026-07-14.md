@@ -26,7 +26,7 @@ Projects are `v2-core`, `v2-integration`, `v2-dom`, and `v2-isolated`. The repea
 
 ## August 2026 Windows unit I/O reduction
 
-The August work removes process boundaries where the behavior under test is policy rather than process isolation. Affected-runner policy now calls an in-process planner and executor, Hindsight policy calls the provider directly, incidental API fixtures use existing identity seams, and the Vitest coordinator creates the shared Git template once before workers adopt it. Real CLI, Git, worker, network, crash, timeout, and worktree behavior remains at explicit boundary owners.
+At the profiled August 2026 revision, process boundaries were removed where the behavior under test was policy rather than process isolation. The then-current affected-runner policy called an in-process planner and executor, Hindsight policy called the provider directly, incidental API fixtures used existing identity seams, and the Vitest coordinator created the shared Git template once before workers adopted it. Real CLI, Git, worker, network, crash, timeout, and worktree behavior remained at explicit boundary owners.
 
 ### Revisions and method
 
@@ -57,7 +57,7 @@ The affected E2E boundary passed 2/2 tests with `retry=0` in all three rounds. E
 
 ### Reproduction commands and evidence
 
-Set `<r>` to `1`, `2`, or `3`. These commands reproduce the slices measured at after revision `8cc7b01b`; in particular, the three-file one-init command is a historical timing command, not the current certification path:
+Set `<r>` to `1`, `2`, or `3` after checking out revision `8cc7b01b`. These retained commands target files from that revision and do not apply to the current checkout; in particular, the three-file one-init command is a historical timing command, not the current certification path:
 
 ```bash
 BOBBIT_V2_RETRY_FREE=1 npm run test:v2:profile-windows -- --project v2-core --out-dir .profiles/testing-v2/windows-process-profile/after-8cc7b01b-round<r>-affected tests2/core/affected-runner-cli.test.ts tests2/core/affected-runner-git-cli.test.ts

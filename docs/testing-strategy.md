@@ -1,6 +1,6 @@
 # Testing Strategy — Test Suite v2
 
-> **Current operating model.** `npm run test:affected` is the default local unit-feedback command. `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` remain the separate authoritative implementation-gate phases with one shared cross-suite isolation contract. Migration plans and measurements under [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify themselves as current. Start with [cross-OS test authoring](testing-v2/cross-os-test-authoring.md), the [unit-stage reference](testing-v2/unit-gate.md), and the [affected-runner reference](../scripts/affected/README.md).
+> **Current operating model.** `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` execute the complete authoritative implementation-gate phases directly, with one shared cross-suite isolation contract. `npm run test:manual` remains the only gate-exempt lane. Migration plans and measurements under [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify themselves as current. Start with [cross-OS test authoring](testing-v2/cross-os-test-authoring.md) and the [unit-stage reference](testing-v2/unit-gate.md).
 
 ## The phase invariant (read this first)
 
@@ -17,15 +17,11 @@ suite. The commands in `.bobbit/config/project.yaml` route to these canonical ph
 There is no scheduled daily lane. The map's `daily` value is retained as an internal
 real-fidelity taxonomy consumed by `test:e2e:v2`; it is not a `test:daily` command.
 
-### Fast feedback is additive
+### Complete lanes are the feedback model
 
-The affected runner is not a fourth gate phase. It maps the effective Git diff—committed, staged, unstaged, and untracked—to one of three unit plans: known docs `SKIP-ALL`, a cache-eligible bounded closure, or cache-bypassing `RUN-ALL`. Git records are collected before graph construction so declared non-code deletes and rename old sides retain tombstone ownership. Tombstones do not reconstruct old executable import closures: unknown or removed executable inputs fail closed to `RUN-ALL`. Declared shipped Markdown remains graph-owned and cannot become a docs skip; only ordinary unclaimed documentation may skip. Dependency/lockfile and TypeScript/Vitest execution boundaries also run the complete unit inventory. Browser selection is advisory; E2E is not selectively executed.
+Local development and workflow qualification use the same complete lane commands. Direct execution avoids a second dependency model that could drift from the test inventory, while preserving each lane's existing worker, retry, fixture, and isolation behavior.
 
-Affected testing is local developer feedback only and does not run in CI. The cross-platform build, type-check, and full `test:unit` job runs on PRs and pushes to the primary branch. Full browser/E2E workflow gates are unchanged. `.profiles/test-cache/` contains checkout-local PASS optimization state and must never be uploaded, restored, shared between CI jobs, or treated as merge evidence. Any periodic or nightly qualification also uses the full gate commands.
-
-Historical correctness qualification builds each plan from exact revision files, revision-local execution ownership, and that revision's unit inventory. It audits current selector declarations against the old tree: safely absent future declarations are ignored, live unresolved/dynamic unit consumers are quarantined into bounded plans, and unreconcilable graph or ownership drift runs the full historical inventory. Selector or classification errors after graph construction fail qualification rather than being reported as a successful fallback. Changed and baseline full reports must each exactly match their own revision's authoritative unit inventory, while native `--changed` evidence may be a valid subset. Missing, partial, crashed, or contradictory reports fail closed.
-
-See the [affected-runner safety model](../scripts/affected/README.md#plan-and-output-contract) for semantic package rules, non-code dependency ownership, cache invalidation, and proof commands.
+Run `npm run test:unit` for the normal edit loop. Add the complete browser or E2E lane when the change crosses those boundaries, and run every phase required by the workflow before merge. Manual integration remains explicitly opt-in because it uses real LLMs, agents, and Docker.
 
 **Execution membership is the invariant.** Every materialized test has explicit
 runner, tier, and project metadata in `tests2/tests-map.json`. New tests land in
@@ -40,8 +36,8 @@ defaults protect developer and workflow runs; qualification uses the exact
 That flag makes the unit configuration and Browser/E2E Groups B–D retry-free;
 Group A is retryless because its `tsx --test` runner has no retry control. All four
 tier-1 projects install the subprocess guard and enforce a hard 25-second solo file
-budget. See [Unit gate operating model](testing-v2/unit-gate.md) for cache,
-proof-mode, E2E ownership, and audit details.
+budget. See [Unit gate operating model](testing-v2/unit-gate.md) for
+proof-mode, E2E ownership, prebundling, and audit details.
 
 ## Cross-suite reliability foundation
 
@@ -857,16 +853,15 @@ parent, or checkout state is never teardown input.
 
 ### Measurement protocol
 
-Use affected selection for iteration, then the canonical phase commands when validating a change. Qualification must show first-attempt success, not a normal developer retry:
+Use the canonical complete phase commands while iterating and when validating a change. Qualification must show first-attempt success, not a normal developer retry:
 
 ```bash
-npm run test:affected
 BOBBIT_V2_RETRY_FREE=1 npm run test:unit
 BOBBIT_V2_RETRY_FREE=1 npm run test:browser
 BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
 ```
 
-For selector maintenance, `npm run test:affected:proof` is a fast selection-only historical report; it is not correctness evidence. `npm run test:affected:correctness` is the expensive isolated qualification: per pinned sample it installs a detached historical checkout, records Vitest `--changed` observations, runs the complete retry-free unit suite, attributes changed-run failures against a clean baseline when necessary, and fails on under-selection. Over-selection is reported and allowed. Run the multi-sample qualification manually or periodically, while fast unit tests pin comparison, report, environment, and cleanup contracts.
+Run `npm run test:manual` separately only when the workflow calls for real LLM, agent, or Docker integration coverage.
 
 PowerShell qualification uses the same retry-free control:
 
