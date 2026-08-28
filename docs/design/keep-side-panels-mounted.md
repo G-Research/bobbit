@@ -14,10 +14,12 @@ Status: selected. Supersedes the two exploration documents
 | 3 | **Regression introduced by rev 2's widened branch**: no visibility/layout contract when the selected session has no active content tab, or when a retained pack host coexists with an active non-pack tab. An empty `flex-1` host steals width from a non-pack pane; a retained foreign slot made the workspace occupy the split layout (chat at 50%) instead of plain-chat geometry; a persisted `fullscreen` mode with no active tab hid the chat pane behind an empty workspace. | Gap analysis | §3.1a introduces one explicit derived-flag contract (`hasActiveContentTab`, `fullscreen`, `workspaceCollapsed`, `workspaceHidden`, `workspaceOccupiesSplitLayout`, `showPackHost`) used consistently by §3.1–§3.4; the pack host is permanently present but layout-hidden unless the active tab is a pack tab. Acceptance 3a/3b and 5a added. |
 | 4 | **The session-loading frame is a third mode-swapping call site.** `mainArea()` returned a standalone `bobbit-loader` template while `state.connectingSessionId` was set, and on mobile `renderApp`'s *top-level* shell branch is additionally keyed off connectedness (`if (desktop) … else if (connected) … else …`). An ordinary first switch to a not-yet-cached session therefore committed a different template and detached every retained pane — defeating the headline session-switch criterion on both viewports. | Spec-and-regression conformance + integrated implementation review (corroborated) | §3.2a: the retention snapshot is hoisted to `renderApp` scope and computed once **before** the shell branch and the loader gate, and one `panelShell(...)` call site per viewport is shared by the steady state, the connecting frame and the final frame, with the loader rendered in the incoming chat position. |
 | 4 | `workspaceCollapsed` omitted `hasActiveContentTab`, so a tabless session with a stored `collapsed` mode emitted a restore rail that consumed width and could not reveal anything. | Integrated implementation review | §3.1a: `workspaceCollapsed = !fullscreen && hasActiveContentTab && mode === "collapsed"`. |
-| 4 | A cross-project session switch replaces the global pack-panel registry ("last project wins"), so a retained foreign pane is either closed or re-projected with the *other* project's module. | Integrated implementation review | §4.2a: retention keys are project-scoped, so the cross-project case prunes deterministically (identical to pre-feature behaviour) and a foreign project's module can never render into a retained slot. Re-keying the registry itself is explicitly **out of scope** — see §4.2a for the rationale. |
+| 4 | A cross-project session switch replaces the global pack-panel registry ("last project wins"), so a retained foreign pane is either closed or re-projected with the *other* project's module. | Integrated implementation review | §4.2a: cross-project liveness is fenced without changing the `{sessionKey, tabId}` retention key; retaining across projects still requires a registry redesign. |
 | 5 | The §4.2a scope guard required **both** project ids to be truthy, but `GatewaySession.projectId` is optional and an unscoped session's panels register under `headquarters`. So for a legacy/unscoped session the check was skipped entirely, and another project's same-key module could be invoked with that session's params and bound session id — a cross-project data-exposure path that exists only because retention keeps a pane that used to be destroyed. | Security review | §4.2a: the owning session's project is **canonicalised** (`projectId \|\| HEADQUARTERS_PROJECT_ID`, matching the registration path) before the comparison, and any *known* registered scope that differs prunes the pane in the same render. Unknown scope still does not prune. |
 | 6 | **§4.2's teardown premise was factually wrong.** It claimed archive/terminate removes the session from `state.gatewaySessions`; `team-archived-bucket.ts` documents that a terminated session can *remain* there (and appear in both collections). Membership-only liveness therefore kept a terminal session's panel alive — breaching the goal's explicit archive/terminate teardown requirement. | Spec-and-regression conformance | §4.2: liveness now rejects a terminal owner via the app's existing `isArchivedSessionActionSource`. Acceptance 6a added. |
 | 6 | The mobile active track mounts **every** content tab of the selected session, but retention only observed the *active* pack key — so an open-but-inactive pack pane with a live iframe was destroyed on a session switch even well **under** the cap. The feature retained less than the slider already had mounted. | Spec-and-regression conformance | §4.1: `retainedPanePlan` gains an `observedKeys` input, appended after `activeKey` in the given order and granted **no** recency of its own, supplied only for the connected non-transition non-popout mobile active track. Acceptance 12a added. |
+| 7 | The registry-scope check alone could not tear down a cross-project source pane on the first target render because pack reconciliation is asynchronous and the registry could still describe the source project. | Validation review | §4.2a composes a synchronous selected-target project fence with the registry-scope fence. The target fence prunes before first paint; the registry fence continues to protect later registry changes. Same-project switches retain, and Headquarters canonicalization applies to both comparisons. |
+| 7 | Treating the retention limit as a cap on the whole mobile track would hide valid current-session tabs. | Validation review | §3.7/§4.1 distinguish the bounded retained/hidden plan from the active mobile track, which renders every live current-session content tab even beyond the plan limit. |
 
 ### 3.2a The session-loading frame must not swap the shell
 
@@ -251,7 +253,7 @@ Two things must be true for the remaining cases, and **the order matters**:
 1. **Liveness is reconciled exactly once per render, before the shell decides
    which branch to take.** A raw-state `hasRetainedPanes()` predicate would be
    wrong: on the render caused by closing the last retained tab, an uninstall
-   reconcile, or the source session leaving `state.gatewaySessions`, a state-only
+   reconcile, or the source session becoming terminal or disappearing, a state-only
    predicate is still true, the shell enters the workspace branch, and only then
    does pruning empty the host — leaving one frame of empty hidden workspace with
    the split 50% rule still applied to the chat pane. Teardown must be
@@ -395,11 +397,13 @@ pane's ancestor chain intact:
   top padding) keys off the pane element, which is unchanged.
 
 Retention policy is **shared with desktop**: one owner, one `{sessionKey, tabId}`
-key space, one LRU limit (§4). Keys are viewport-independent. A desktop↔mobile
-viewport flip still commits two different top-level templates (`render.ts:3450+`)
-and therefore tears all DOM down — today's behaviour; the shell calls
-`resetPanelPaneRetention()` on the flip so the policy state cannot describe DOM
-that no longer exists.
+key space, one LRU limit (§4). The limit bounds panes carried by the retention
+plan, including hidden foreign tracks; it does **not** truncate the active mobile
+track, which continues to render every live content tab for the selected session.
+Keys are viewport-independent and contain no project component. A desktop↔mobile
+viewport flip still commits different top-level templates and therefore tears all
+DOM down — today's behaviour; the shell calls `resetPanelPaneRetention()` on the
+flip so the policy state cannot describe DOM that no longer exists.
 
 ### 3.8 Popout / deep link
 
@@ -420,7 +424,7 @@ the one genuinely new piece of logic gets its own module drivable from
 `tests2/core` with plain objects.
 
 ```ts
-/** Retained panes including the active one. Active + 2 hidden. */
+/** Maximum retained-plan slots; the active mobile track is outside this bound. */
 export const PANEL_PANE_RETENTION_LIMIT = 3;
 
 /** `${sessionKey}\u0000${tabId}` — sessionKey from panelWorkspaceSessionKey(). */
@@ -435,13 +439,15 @@ export interface RetainedPaneSlot<T> {
 }
 
 /**
- * Resolve → prune dead keys → touch `activeKey` → evict beyond the limit
- * (least-recently-active first, never the active key). Returns the surviving
- * slots in STABLE INSERTION ORDER. The ONLY mutator of retention state, and
- * called at most once per render (§3.4).
+ * Append `activeKey`, then `observedKeys` in caller order; resolve and prune dead
+ * keys; touch only `activeKey`; then evict beyond the limit
+ * (least-recently-active first, never the active key). Returns surviving slots in
+ * STABLE INSERTION ORDER. The ONLY mutator of retention state, called at most
+ * once per render (§3.4).
  */
 export function retainedPanePlan<T>(input: {
   activeKey?: string;
+  observedKeys?: readonly string[];
   resolve: (key: string) => T | undefined;   // liveness + tab lookup; undefined ⇒ evict
   limit?: number;
 }): RetainedPaneSlot<T>[];
@@ -451,8 +457,17 @@ export function resetPanelPaneRetention(): void;   // tests / desktop↔mobile v
 
 Internal state: `order: string[]` (append-only; insertion order = DOM order) and
 `lastActiveAt: Map<string, number>` (recency, used only to choose an eviction
-victim). Evicting a middle entry removes exactly that keyed `repeat` item and does
-not move its siblings.
+victim). `observedKeys` describes panes the caller already mounted — currently the
+inactive pack tabs in the selected mobile track. New observed keys append after
+`activeKey` in the supplied order, but observation never grants recency; only
+activation does. This preserves append-only DOM identity while making an
+observed-but-never-active pane the first eviction candidate. Evicting a middle
+entry removes exactly that keyed `repeat` item and does not move its siblings.
+
+`PANEL_PANE_RETENTION_LIMIT` bounds this plan's retained slots, not all panes in
+the selected mobile track. That track renders all of its live current-session tabs
+for slider correctness; only the subset carried into hidden/foreign retention is
+bounded.
 
 There is deliberately **no** `hasRetainedPanes()` raw-state predicate — callers
 derive `hasLiveRetainedPanes` from `retainedPanePlan(...).length` (§3.4), so
@@ -467,16 +482,29 @@ const resolveLivePackPane = (key: string): UnifiedContentTab | undefined => {
   const { sessionKey, tabId } = parsed;
   const noSession = sessionKey === PANEL_WORKSPACE_NO_SESSION_KEY;
   const ownerSession = noSession ? undefined : state.gatewaySessions.find((s) => s.id === sessionKey);
-  // Membership alone is NOT liveness: a terminated/archived session can REMAIN in
-  // `gatewaySessions` (documented in team-archived-bucket.ts), so a terminal owner
-  // must be rejected explicitly or its panel survives - violating the goal's
-  // archive/terminate teardown requirement. Reuses the application's own terminal
-  // definition, `isArchivedSessionActionSource` (session-actions.ts:132-136:
-  // `archived === true`, `status === "archived"`, `status === "terminated"`),
-  // rather than inventing a second one.
+
+  // A terminal session can remain in gatewaySessions and can also be present in
+  // archivedSessions. Collection membership is therefore not the lifecycle test.
   if (!noSession && (!ownerSession || isArchivedSessionActionSource(ownerSession))) return undefined;
+
   const tab = panelTabsForSession(state, sessionKey).find((t) => t.id === tabId);
-  return tab && tab.kind === "pack" ? (tab as UnifiedContentTab) : undefined;
+  if (!tab || tab.kind !== "pack") return undefined;
+
+  // Project liveness has two independent fences; see §4.2a.
+  const ownerProjectId = ownerSession?.projectId || HEADQUARTERS_PROJECT_ID;
+  const selectedSession = state.selectedSessionId
+    ? state.gatewaySessions.find((s) => s.id === state.selectedSessionId)
+      ?? state.archivedSessions.find((s) => s.id === state.selectedSessionId)
+    : undefined;
+  const selectedProjectId = selectedSession
+    ? selectedSession.projectId || HEADQUARTERS_PROJECT_ID
+    : undefined;
+  if (selectedProjectId !== undefined && selectedProjectId !== ownerProjectId) return undefined;
+
+  const ref = packPanelRefFromTabId(tab.id);
+  const registeredProjectId = ref ? packPanelProjectId(ref.packId, ref.panelId) : undefined;
+  if (registeredProjectId !== undefined && registeredProjectId !== ownerProjectId) return undefined;
+  return tab as UnifiedContentTab;
 };
 ```
 
@@ -488,62 +516,66 @@ no new lifecycle hooks:
 | user closes the tab | `closeSidePanelTab` (`side-panel-workspace.ts:787`) removes it from the server-authoritative workspace | `resolve` → `undefined` → slot pruned in the **same** render, before the branch decision |
 | pack uninstalled / precedence change | `registerPackPanels` reconcile → `invalidatePanel` + `removePackPanelTab` (`pack-panels.ts:225-240`, `:472`) closes the tab in every session | same |
 | pack disabled | marketplace mutation re-drives contributions with `invalidateLoaded`, same reconcile path | same |
-| session archived / terminated | session leaves `state.gatewaySessions` | same |
-| retention cap exceeded | `retainedPanePlan` eviction | `repeat` removes that item — byte-identical to today's teardown |
+| session archived / terminated | `isArchivedSessionActionSource(ownerSession)` rejects `archived: true`, `status: "archived"`, and `status: "terminated"`, even if the record remains in one or both session collections | slot pruned in the same render |
+| retention cap exceeded | `retainedPanePlan` evicts a retained/hidden slot | `repeat` removes that item; the selected mobile track still renders all live current-session tabs |
 | desktop↔mobile viewport flip | `resetPanelPaneRetention()` on the shell flip | all DOM torn down (today's behaviour), policy state cleared |
-| session switched to another **project** | project-scoped retention key (§4.2a) | pruned in the same render — deterministic, and identical to pre-feature behaviour |
+| session switched to another **project** | synchronous selected-target fence plus registered-project scope fence (§4.2a) | source pane pruned on the first target render; a foreign registered module is also rejected later |
 
-### 4.2a Retention is project-scoped (deliberate limitation)
+### 4.2a Cross-project teardown uses two fences (deliberate limitation)
 
-A canonical session switch re-registers pack panels for the target session's project,
-and the registry is a single global "last requested project wins" map
-(`pack-panels.ts` `registerPackPanels`). For A(project A) → B(project B), a
-`{packId,panelId}` absent from B is treated as an uninstall (`invalidatePanel` +
-`removePackPanelTab`, which closes matching tabs in every session), and a
-`{packId,panelId}` present in both has its cached module invalidated — which would let
-B's module render into A's retained hidden slot.
+The retention key remains `${sessionKey}\u0000${tabId}`. Project does **not** belong
+in that key: same-project session switches need to resolve to stable sibling keys,
+and changing the retention identity would obscure rather than enforce the pack
+registry's actual scope.
 
-`resolveLivePackPane` therefore **canonicalises** the owning session's project before
-comparing scopes, using the same rule as the registration path
-(`reconcilePackPanelsForProject` registers under `projectId || HEADQUARTERS_PROJECT_ID`,
-`pack-panels.ts:270/276`, and the server canonicalises identically at `server.ts:1213`):
+The registry is a single global "last requested project wins" map keyed by
+`{packId, panelId}`. A canonical session switch requests registration for the target
+session's project asynchronously. That creates two distinct times at which liveness
+must be safe:
 
-```ts
-const ownerProjectId = ownerSession?.projectId || HEADQUARTERS_PROJECT_ID;
-if (registeredProjectId !== undefined && registeredProjectId !== ownerProjectId) return undefined;
-```
+1. **Selected-target project fence — synchronous selection time.** Session selection
+   updates `state.selectedSessionId` before rendering. Retention resolves that id from
+   the live or archived session collection and compares the known target's effective
+   project with each retained owner. A cross-project source pane is pruned immediately,
+   even while the registry still describes the source project; a same-project source
+   pane passes and remains mounted. If the selected id is not in either collection yet,
+   its project is unknown and this fence does not prune, which avoids treating an
+   incompletely hydrated new or restored session as Headquarters.
+2. **Registry-scope fence — projection time.** If the current registration has a
+   known project, it must match the retained owner's effective project. This blocks
+   a later reconcile, precedence change, or registry replacement from projecting a
+   foreign project's module into an old retained slot.
 
-Canonicalising is load-bearing, not cosmetic: `GatewaySession.projectId` is **optional**
-(`state.ts:91`), and an unscoped/legacy session's panels are registered under
-`headquarters`. A guard that required *both* ids to be truthy would skip the check for
-exactly those sessions, letting another project's same-key module be invoked with the
-unscoped session's params and bound session id — a cross-project data-exposure path that
-only exists *because* retention keeps a pane that used to be destroyed. `||` rather than
-`??` is deliberate, so an empty-string `projectId` maps to Headquarters exactly as the
-registration path does.
+The first fence is necessary because the registry fence alone is temporarily stale:
+on the first render after A(project A) → B(project B), the asynchronous B reconcile
+may not have completed, so A's registration still matches A's pane and cannot prove
+that the selected destination changed. The selected-target fence closes that first-
+render gap. The second fence remains necessary because registry state can change
+after selection and is the authority for the module that would actually be invoked.
 
-Consequences: a cross-project switch tears the pane down deterministically, exactly as it
-did before this feature existed, and a foreign project's module can never be projected into
-a retained slot.
+All comparisons of **known** sessions use the same effective-project rule as
+registration and the server: a missing or empty `projectId` canonicalises to
+`HEADQUARTERS_PROJECT_ID`. That applies to the pane owner and selected target,
+including the sessionless workspace sentinel. Canonicalization is load-bearing:
+raw optional-id comparison would exclude unscoped or legacy Headquarters sessions
+from cross-project teardown.
 
-Retention is deliberately **not** pruned when the panel's scope is simply unknown.
-`packPanelProjectId` returns `undefined` both for "not registered" and for "registered
-globally with no project", so the two are indistinguishable at this call site and
-`registeredProjectId !== undefined` covers both. Pruning on unknown scope would couple
-retention to registration, dropping the active pane during the post-reload window before
-contributions reconcile. The genuine uninstall case is already handled synchronously by the
-existing reconcile path.
+An unknown registered scope does not fail the registry-scope fence because
+`packPanelProjectId()` cannot distinguish an unregistered panel from a global/no-
+project registration. Pruning on that ambiguity would destroy an active pane during
+the post-reload window before contributions reconcile. The synchronous selected-
+target fence still handles known cross-project navigation, while a genuine uninstall
+uses the existing reconcile path to close the tab.
+
+Consequences: same-project session switches retain panes; cross-project switches
+tear source panes down on the first target render; and a foreign project's module
+cannot later project into a retained slot.
 
 **Retaining panes *across* projects is out of scope.** It requires re-keying
 registrations, loaded modules, in-flight loads and generation state by
 `{projectId, packId, panelId}` and threading a bound project through the render path —
-a redesign of the pack-panel registry. Cross-project switching destroyed panels before
-this feature too, so this is a pre-existing limitation the feature does not lift, not a
-regression it introduces. It is recorded here as a follow-up.
-
-Note retention is deliberately **not** pruned merely because a panel is *unregistered* —
-see the paragraph above; that would couple retention to registration and would drop the
-active pane during the post-reload window before contributions reconcile.
+a redesign of the pack-panel registry. Cross-project switching destroyed panels
+before this feature, so this limitation is not introduced by retention.
 
 Second line of defence, already in place: `renderPackPanelContent` returns
 `nothing` when `{packId, panelId}` is not in the registry (`pack-panels.ts:589-590`).
@@ -609,8 +641,9 @@ New:
    unit-testable.
 2. **One transformation** — `retainedPanePlan()` (resolve → prune → touch → evict
    → stable order), called at most once per render.
-3. **One derivation** — `resolveLivePackPane()`, composed from existing
-   `panelTabsForSession` + `state.gatewaySessions`.
+3. **One derivation** — `resolveLivePackPane()`, composed from existing tab state,
+   terminal-session classification, synchronously selected target scope, and pack
+   registration scope.
 4. **One DOM level on desktop** — `.side-panel-pane-host` / `.side-panel-pane-slot`,
    only around pack panes.
 5. **One DOM level on mobile** — per-session track wrappers inside the existing
@@ -696,9 +729,11 @@ Retained from B: the `display:none` relayout risk for heavyweight framed apps
    unload the iframe, but its viewport is 0×0 while hidden and Monaco caches
    measurements. VS Code web uses its own `ResizeObserver`, which should recover on
    reveal; nothing is dispatched into the frame in v1. Verify in the browser spec.
-3. **Memory**: three live VS Code iframes is real memory.
-   `PANEL_PANE_RETENTION_LIMIT = 3` is a tunable single named constant, and eviction
-   must be observable in the browser spec.
+3. **Memory**: retained hidden VS Code iframes consume real memory.
+   `PANEL_PANE_RETENTION_LIMIT` is the tunable bound for retained-plan slots, and
+   eviction must be observable in the browser spec. The active mobile track may
+   exceed that bound because all of its live current-session tabs must remain
+   available to the slider; switching away carries only bounded survivors.
 4. **Mobile slider parity** is the biggest mobile regression risk: per-session
    tracks change the slider's child structure, and the drag handlers now select the
    active track. Existing slider behaviour (drag threshold, snap, transform values)
@@ -737,11 +772,12 @@ Desktop:
    `[data-testid="bobbit-loader"]` as the whole main area.
 3e. A(pack) → B(no panel tabs, stored `sizeMode: "collapsed"`) → A: no
    `[data-testid="side-panel-restore"]` rail, chat at full row width, A's iframe alive.
-3f. Session switched to a different **project**: A's pane is pruned in that render, no
-   stale DOM remains, and B's module is never projected into A's slot (§4.2a). This holds
-   for an **unscoped** owning session too, whose effective project is `headquarters`; a
-   panel whose scope is merely unknown (unregistered, or registered globally) is **not**
-   pruned.
+3f. Session switched to a different **project**: A's pane is pruned on the first
+   target render while B's asynchronous pack reconcile is still pending, no stale DOM
+   remains, and B's module is never projected into A's slot (§4.2a). This holds for an
+   **unscoped** known owner or target, whose effective project is Headquarters. A same-
+   project switch retains the pane. An unknown selected target or unknown panel
+   registration scope does not by itself prune.
 3a. Same as 3 but B's stored size mode is `fullscreen`: identical outcome — chat
    visible and full width, no empty fullscreen workspace, no hidden chat pane.
 3b. Active tab switches from a pack tab to a non-pack tab (preview/review/inbox)
@@ -759,12 +795,13 @@ Desktop:
    active content tab, `[data-panel-pane-host]` and the workspace are present but
    `display:none`.
 6. Teardown, each in a **single** render: `closeSidePanelTab(tabId)` → slot gone;
-   `registerPackPanels([], projectId)` (uninstall) → slot gone; session moved to
-   `state.archivedSessions` → slot gone; opening a 4th pack pane → the
-   least-recently-active slot removed and its iframe detached. In each case, if no live
-   retained pane remains and the selected session has no panel tabs, the shell
-   immediately shows the plain-chat geometry and archived-banner behaviour — no second
-   render required.
+   `registerPackPanels([], projectId)` (uninstall) → slot gone; the owner satisfies
+   `isArchivedSessionActionSource` → slot gone even if its record remains in one or both
+   session collections; adding retained candidates beyond
+   `PANEL_PANE_RETENTION_LIMIT` → the least-recently-active retained slot removed and
+   its iframe detached. In each case, if no live retained pane remains and the selected
+   session has no panel tabs, the shell immediately shows the plain-chat geometry and
+   archived-banner behaviour — no second render required.
 6a. A terminal owner still present in `state.gatewaySessions` also tears down, for each
    of `status: "terminated"`, `status: "archived"` and `archived: true`, and when the
    session is in **both** `gatewaySessions` and `archivedSessions`. A live owner that is
@@ -790,9 +827,10 @@ Mobile (viewport at mobile width):
     unchanged, visual order follows tab order via `order`, slide transform matches
     `unifiedSlideX(visualIndex, count)` for the active track.
 12a. An **open-but-inactive** pack pane in the active track survives a session
-    round-trip while under the cap: same iframe object, still connected in the hidden
-    track, zero `src` mutations — including when the active tab is a *non-pack* tab, so
-    only `observedKeys` can retain it.
+    round-trip when it survives the retained-plan cap: same iframe object, still
+    connected in the hidden track, zero `src` mutations — including when the active tab
+    is a *non-pack* tab, so only `observedKeys` can retain it. The active track itself
+    still shows every live current-session tab when its count exceeds the cap.
 13. Mobile teardown: close, pack disable/uninstall, session archive/terminate, and
     LRU eviction each destroy the slot while its track is hidden.
 

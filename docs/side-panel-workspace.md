@@ -200,9 +200,11 @@ Retention is off entirely on the popout/deep-link route, which renders exactly o
 
 ### Bounded on purpose
 
-Live iframes cost real memory — three VS Code instances is not free — so the number of retained panes is capped by a single named constant, `PANEL_PANE_RETENTION_LIMIT` in `src/app/panel-pane-retention.ts` (currently 3: the active pane plus two hidden ones). When the cap is exceeded the **least-recently-active** pane is evicted and its subtree is destroyed, exactly as it would have been before this feature. The active pane is never the victim, and a pane that is merely *observed* as already-mounted (see [Mobile](#mobile-one-track-per-session) below) gets no recency of its own, so it is evicted before a pane the user has actually visited.
+Live iframes cost real memory, so `PANEL_PANE_RETENTION_LIMIT` in `src/app/panel-pane-retention.ts` bounds the retention plan's mounted slots: the active retained pack pane plus hidden panes kept for a later return. When the plan exceeds the limit, it evicts the **least-recently-active** non-active pane and destroys that subtree, exactly as the pre-retention renderer would have done.
 
-The policy lives in that one module and is pure — no DOM, no app state. Each render passes in the active pane key and a `resolve` callback that reports liveness, and gets back the surviving slots in stable insertion order. It is the only mutator of retention state and it runs at most once per render.
+The limit does not truncate the selected mobile session's live tab track. Mobile deliberately mounts every live content tab for the current session so its existing slider can move among them, even when that track contains more panes than the retention limit. The cap takes effect when panes are carried as retained/hidden slots, such as after switching away from that session.
+
+The policy lives in that one module and is pure — no DOM, no app state. Each render passes `activeKey`, optional `observedKeys`, and a `resolve` callback that reports liveness, then receives surviving slots in stable insertion order. New observed keys are appended after the active key in caller order. Observation records that a mobile pane is already mounted but does not update recency, so an observed-but-never-active pane is evicted before a pane the user visited. `retainedPanePlan()` is the only mutator of retention state and runs at most once per render.
 
 ### Hidden panes are inert
 
@@ -218,9 +220,9 @@ Retention must never resurrect a panel that should be gone, so liveness is *deri
 |---|---|
 | user closes the tab | the tab is gone from the server-authoritative workspace |
 | owning pack uninstalled, disabled, or superseded by precedence | the existing pack-panel reconcile invalidates the panel and closes its tabs in every session |
-| owning session archived or terminated | the app's own terminal-session test is applied to the owner — membership in the live session list is *not* liveness, because a terminated session can remain listed (and can appear in both the live and archived collections) |
-| session switched to a different project | project-scoped retention keys (see below) |
-| retention cap exceeded | least-recently-active eviction |
+| owning session archived or terminated | `isArchivedSessionActionSource` is applied to the owner; collection membership is not liveness because a terminal session can remain in either or both session collections |
+| session switched to a different project | the synchronous selected-target project fence prunes on the first target render; the registry-scope fence independently rejects a module registered for another project (see below) |
+| retention cap exceeded | least-recently-active eviction among retained/hidden slots; the active mobile track still renders all live current-session tabs |
 | desktop⇄mobile viewport flip | the two viewports commit different top-level templates, so all DOM is torn down anyway; the policy state is reset so it cannot describe DOM that no longer exists |
 
 Hidden panes are re-projected on every render rather than frozen. That costs a little render work, but it is what guarantees a hidden pane can never keep displaying content from a pack that has just been uninstalled or rebuilt.
@@ -229,12 +231,14 @@ Hidden panes are re-projected on every render rather than frozen. That costs a l
 
 Switching to a session in a **different project** destroys retained panes. This is deliberate, deterministic, and identical to how the panel behaved before retention existed.
 
-The pack-panel registry is a single global map keyed by `{packId, panelId}`, and each entry carries the project of the *last* registration. A canonical session switch re-registers panels for the target session's project, so after a cross-project switch the module behind a retained pane's key can belong to the other project. Re-projecting the hidden pane would then render one project's module with another project's params and bound session — so instead, a pane whose owning session belongs to a different project than the currently registered panel is pruned.
+The pack-panel registry is a single global map keyed by `{packId, panelId}`, and each entry carries the project of the last registration. Retention keys do **not** include a project; they remain `{sessionKey, tabId}` so same-project session switches can retain the same pane identity.
 
-Two details matter if you touch this:
+Cross-project teardown instead composes two liveness fences:
 
-- The owning session's project is **canonicalised** the same way the registration path does it (a session with no `projectId` counts as Headquarters). Comparing the raw optional field would skip the check entirely for unscoped or legacy sessions, which is exactly the case that would leak another project's module into them.
-- A panel whose scope is merely **unknown** — unregistered, or registered with no project — is *not* pruned. "Not registered" and "registered globally" are indistinguishable at that point, and pruning on unknown scope would drop the active pane during the window after a reload before pack contributions have reconciled. Genuine uninstalls are already handled by the reconcile path above.
+1. The **selected-target project fence** resolves the synchronously selected target id from the live or archived session collection and compares that known target's effective project with each retained pane owner. Session selection updates the id before its first render, so a source-project pane is pruned in that render rather than waiting for asynchronous pack reconciliation. Same-project switches pass this fence and keep their panes. A selected id not yet present in either collection is unknown and does not prune, avoiding a false Headquarters classification during new-session hydration.
+2. The **registry-scope fence** compares the owner's effective project with the project recorded on the current `{packId, panelId}` registration. It prevents a later registry swap, pack reconcile, or reload window from projecting another project's module into a retained slot.
+
+Known session projects canonicalise a missing or empty `projectId` to Headquarters, matching pack registration and server session handling. Comparing raw optional ids would leave legacy or unscoped sessions outside the fence. A panel whose registered scope is unknown is not pruned by the registry fence because "not registered" and "registered globally" are indistinguishable there; the selected-target fence still handles a known cross-project switch synchronously, while genuine uninstall reconciliation closes the tab.
 
 Retaining panes *across* projects requires re-keying the registry, loaded modules and in-flight loads by `{projectId, packId, panelId}` and threading a bound project through the render path. That is a registry redesign and is explicitly out of scope; see [design §4.2a](design/keep-side-panels-mounted.md).
 
@@ -242,7 +246,7 @@ Retaining panes *across* projects requires re-keying the registry, loaded module
 
 The mobile slider keeps **one track per session**, appended to the DOM in first-seen order and never moved, with only the selected session's track visible; the rest carry the same inertness contract as a hidden desktop pane. Within a track, pane DOM order is likewise append-only insertion order and the *visual* order comes from CSS `order`, so a tab reorder or a tab close never moves a node. This shape looks roundabout until you remember the rule it is obeying: moving an iframe reloads it, so nothing is ever moved.
 
-The active track keeps today's geometry — its own pane count, width and slide transform — and drag handlers bind to the visible track only. A hidden foreign track holds only that session's retained pack panes and never the chat pane, because chat is a single element instance that can exist in one place. Because the active track mounts every content tab of the selected session, an open-but-inactive pack pane already has a live iframe; retention observes those keys too, so a session switch does not destroy panes the slider already had mounted.
+The active track keeps today's geometry — its own pane count, width and slide transform — and drag handlers bind to the visible track only. A hidden foreign track holds only that session's retained pack panes and never the chat pane, because chat is a single element instance that can exist in one place. Because the active track mounts every live content tab of the selected session, it may contain more panes than `PANEL_PANE_RETENTION_LIMIT`; the limit governs retained/hidden slots, not the current track. Open-but-inactive pack keys are supplied as `observedKeys` so eligible panes can survive a session switch. They are appended after the active key without receiving recency, and only the bounded survivors appear in the hidden foreign track.
 
 Size mode does not apply on mobile, so collapse and fullscreen play no part here.
 
