@@ -1199,6 +1199,7 @@ function updateSidePanelDividerValue(handle: HTMLElement, percent: number): void
 }
 
 function onSidePanelResizePointerDown(event: PointerEvent): void {
+	if (!event.isPrimary || event.button !== 0) return;
 	event.preventDefault();
 	if (activeSidePanelResizeCancelIfInvalid) return;
 	const handle = event.currentTarget as HTMLElement;
