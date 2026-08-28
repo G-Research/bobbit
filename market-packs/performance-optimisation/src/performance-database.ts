@@ -6,6 +6,8 @@ import Database from "better-sqlite3";
 
 export const PERFORMANCE_SCHEMA_VERSION = 2;
 export const PERFORMANCE_DATABASE_FILE = "performance.sqlite";
+export const PERFORMANCE_GITIGNORE_FILE = ".gitignore";
+export const PERFORMANCE_GITIGNORE_CONTENT = "# Pack-owned runtime data.\n*\n";
 export const PERFORMANCE_ACTIVITY_LIMIT = 50;
 
 const MAX_TEXT = 4_000;
@@ -498,6 +500,11 @@ export class PerformanceDatabase {
 		this.makeId = options.id ?? (prefix => `${prefix}-${randomUUID()}`);
 		try {
 			fs.mkdirSync(directory, { recursive: true });
+			try {
+				fs.writeFileSync(path.join(directory, PERFORMANCE_GITIGNORE_FILE), PERFORMANCE_GITIGNORE_CONTENT, { encoding: "utf8", flag: "wx" });
+			} catch (cause) {
+				if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+			}
 			this.file = path.join(directory, PERFORMANCE_DATABASE_FILE);
 			this.db = new Database(this.file, { timeout: 5_000, ...(options.nativeBinding ? { nativeBinding: options.nativeBinding } : {}) });
 		} catch (cause) {

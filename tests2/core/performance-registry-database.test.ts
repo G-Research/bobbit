@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	PERFORMANCE_ACTIVITY_LIMIT,
 	PERFORMANCE_DATABASE_FILE,
+	PERFORMANCE_GITIGNORE_CONTENT,
+	PERFORMANCE_GITIGNORE_FILE,
 	PerformanceDatabase,
 	PerformanceDatabaseError,
 } from "../../market-packs/performance-optimisation/src/performance-database.ts";
@@ -30,6 +32,20 @@ function deterministicDb(root: string): PerformanceDatabase {
 }
 
 describe("performance registry SQLite kernel", () => {
+	it("keeps pack-owned local data out of Git without overwriting operator rules", () => {
+		const freshRoot = tempRoot();
+		const fresh = deterministicDb(freshRoot);
+		fresh.close();
+		expect(fs.readFileSync(path.join(freshRoot, PERFORMANCE_GITIGNORE_FILE), "utf8")).toBe(PERFORMANCE_GITIGNORE_CONTENT);
+
+		const configuredRoot = tempRoot();
+		const configuredIgnore = "# Operator-owned rules\n*.tmp\n";
+		fs.writeFileSync(path.join(configuredRoot, PERFORMANCE_GITIGNORE_FILE), configuredIgnore, "utf8");
+		const configured = deterministicDb(configuredRoot);
+		configured.close();
+		expect(fs.readFileSync(path.join(configuredRoot, PERFORMANCE_GITIGNORE_FILE), "utf8")).toBe(configuredIgnore);
+	});
+
 	it("creates the complete forward schema with WAL, foreign keys, and durable revision", () => {
 		const root = tempRoot();
 		const db = deterministicDb(root);
