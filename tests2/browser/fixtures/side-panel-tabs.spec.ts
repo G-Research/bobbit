@@ -280,8 +280,17 @@ test.describe("Side-panel tab contract", () => {
 		await page.mouse.move(collapseStartX, collapseY);
 		await page.mouse.down();
 		await page.mouse.move(layoutBox.x + layoutBox.width - 1, collapseY, { steps: 8 });
-		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "collapse");
-		expect(await page.locator(".side-panel-split-layout").evaluate((layout) => getComputedStyle(layout, "::after").content)).toContain("Release to collapse panel");
+		const splitLayout = page.locator(".side-panel-split-layout");
+		await expect(splitLayout).toHaveAttribute("data-resize-intent", "collapse");
+		await expect.poll(() => page.locator(".side-panel-workspace").evaluate((panel) => Number(getComputedStyle(panel).opacity))).toBeLessThan(0.4);
+		const collapseCue = await splitLayout.evaluate((layout) => {
+			const cue = getComputedStyle(layout, "::after");
+			return { content: cue.content, right: cue.right, background: cue.backgroundImage, animation: cue.animationName };
+		});
+		expect(collapseCue.content).not.toContain("Release");
+		expect(collapseCue.right).toBe("0px");
+		expect(collapseCue.background).toContain("linear-gradient");
+		expect(collapseCue.animation).toContain("side-panel-terminal-edge-pulse");
 		await page.mouse.up();
 
 		const restore = page.getByTestId("side-panel-restore");
@@ -302,8 +311,16 @@ test.describe("Side-panel tab contract", () => {
 		await page.mouse.move(expandStartX, expandY);
 		await page.mouse.down();
 		await page.mouse.move(restoredLayoutBox.x + 1, expandY, { steps: 8 });
-		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "fullscreen");
-		expect(await page.locator(".side-panel-split-layout").evaluate((layout) => getComputedStyle(layout, "::after").content)).toContain("Release to expand panel");
+		await expect(splitLayout).toHaveAttribute("data-resize-intent", "fullscreen");
+		await expect.poll(() => page.locator(".side-panel-chat-pane").evaluate((chat) => Number(getComputedStyle(chat).opacity))).toBeLessThan(0.4);
+		const fullscreenCue = await splitLayout.evaluate((layout) => {
+			const cue = getComputedStyle(layout, "::after");
+			return { content: cue.content, left: cue.left, background: cue.backgroundImage, animation: cue.animationName };
+		});
+		expect(fullscreenCue.content).not.toContain("Release");
+		expect(fullscreenCue.left).toBe("0px");
+		expect(fullscreenCue.background).toContain("linear-gradient");
+		expect(fullscreenCue.animation).toContain("side-panel-terminal-edge-pulse");
 		await page.mouse.up();
 
 		await expect(page.locator('[data-side-panel-mode="fullscreen"]'), "dragging the divider fully left should expand the side panel").toBeVisible();
