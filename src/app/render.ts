@@ -1254,14 +1254,29 @@ function resolveLivePackPane(key: string): UnifiedContentTab | undefined {
 	// id. Sessionless panes (the `PANEL_WORKSPACE_NO_SESSION_KEY` sentinel) are
 	// Headquarters-effective for the same reason.
 	//
-	// Only a registration whose scope is KNOWN and DIFFERENT prunes: an
+	// The selected session changes synchronously before its async pack-panel
+	// reconcile settles. Fence against that KNOWN target first so the first render
+	// of A(project A) → B(project B) cannot retain A merely because the registry is
+	// still scoped to A. Unknown targets deliberately do not prune: reload/new-session
+	// hydration may select an id before the canonical session collections contain it.
+	const ownerProjectId = ownerSession?.projectId || HEADQUARTERS_PROJECT_ID;
+	const selectedSession = state.selectedSessionId
+		? state.gatewaySessions.find((session) => session.id === state.selectedSessionId)
+			?? state.archivedSessions.find((session) => session.id === state.selectedSessionId)
+		: undefined;
+	const selectedProjectId = selectedSession
+		? selectedSession.projectId || HEADQUARTERS_PROJECT_ID
+		: undefined;
+	if (selectedProjectId !== undefined && selectedProjectId !== ownerProjectId) return undefined;
+
+	// Keep the registry fence afterward for registry mutation, hot reload, and
+	// uninstall. Only a registration whose scope is KNOWN and DIFFERENT prunes: an
 	// `undefined` registered project means either "not registered" or "registered
 	// for the global/no-project scope", and neither may drop a live pane — that
 	// would destroy the active pane during the post-reload window before
 	// contributions have reconciled.
 	const ref = packPanelRefFromTabId(tab.id);
 	const registeredProjectId = ref ? packPanelProjectId(ref.packId, ref.panelId) : undefined;
-	const ownerProjectId = ownerSession?.projectId || HEADQUARTERS_PROJECT_ID;
 	if (registeredProjectId !== undefined && registeredProjectId !== ownerProjectId) return undefined;
 	return tab as UnifiedContentTab;
 }

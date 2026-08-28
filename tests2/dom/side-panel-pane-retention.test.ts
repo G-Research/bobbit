@@ -64,9 +64,19 @@ let setActivePanelTabIdForSession!: PanelWorkspaceModule["setActivePanelTabIdFor
 let resetPanelPaneRetention!: RetentionModule["resetPanelPaneRetention"];
 let PANEL_PANE_RETENTION_LIMIT!: RetentionModule["PANEL_PANE_RETENTION_LIMIT"];
 let registerPackPanels!: PackPanelsModule["registerPackPanels"];
+let packPanelProjectId!: PackPanelsModule["packPanelProjectId"];
+let connectToSession!: typeof import("../../src/app/session-manager.js")["connectToSession"];
 let HEADQUARTERS_PROJECT_ID!: string;
 
 const DESKTOP_WIDTH = 1280;
+const MOBILE_WIDTH = 390;
+let raceProjectSequence = 0;
+
+function deferred(): { promise: Promise<void>; release: () => void } {
+	let release!: () => void;
+	const promise = new Promise<void>((resolve) => { release = resolve; });
+	return { promise, release };
+}
 
 function setViewportWidth(width: number): void {
 	(window as any).innerWidth = width;
@@ -148,6 +158,13 @@ const slotForSession = (sessionKey: string) =>
 	slotEls().find((slot) => (slot.dataset.panelPaneKey ?? "").startsWith(`${sessionKey}\u0000`)) ?? null;
 const iframeForSession = (sessionKey: string) => slotForSession(sessionKey)?.querySelector<HTMLIFrameElement>("iframe") ?? null;
 const iframeForTab = (tabId: string) => slotForTab(tabId)?.querySelector<HTMLIFrameElement>("iframe") ?? null;
+const mobilePaneForSession = (sessionKey: string, tabId: string) => {
+	const track = document.querySelector<HTMLElement>(`[data-mobile-pane-track][data-mobile-track-session-key="${sessionKey}"]`);
+	return [...(track?.querySelectorAll<HTMLElement>("[data-mobile-pane-key]") ?? [])]
+		.find((pane) => pane.dataset.mobilePaneKey === tabId) ?? null;
+};
+const mobileIframeForSession = (sessionKey: string, tabId: string) =>
+	mobilePaneForSession(sessionKey, tabId)?.querySelector<HTMLIFrameElement>("iframe") ?? null;
 const splitLayoutEl = () => document.querySelector<HTMLElement>(".side-panel-split-layout");
 const restoreButtonEls = () => [...document.querySelectorAll('[data-testid="side-panel-restore"]')];
 
@@ -190,7 +207,10 @@ beforeAll(async () => {
 	setActivePanelTabIdForSession = panelMod.setActivePanelTabIdForSession;
 	resetPanelPaneRetention = retentionMod.resetPanelPaneRetention;
 	PANEL_PANE_RETENTION_LIMIT = retentionMod.PANEL_PANE_RETENTION_LIMIT;
-	registerPackPanels = (await import("../../src/app/pack-panels.js")).registerPackPanels;
+	const packPanelsMod = await import("../../src/app/pack-panels.js");
+	registerPackPanels = packPanelsMod.registerPackPanels;
+	packPanelProjectId = packPanelsMod.packPanelProjectId;
+	connectToSession = (await import("../../src/app/session-manager.js")).connectToSession;
 	HEADQUARTERS_PROJECT_ID = (await import("../../src/app/headquarters.js")).HEADQUARTERS_PROJECT_ID;
 	__syncCE();
 });
@@ -671,6 +691,110 @@ describe("desktop side-panel pane retention", () => {
 		expect(restoreButtonEls()).toHaveLength(1);
 	});
 
+	it.each([
+		{ label: "desktop", width: DESKTOP_WIDTH },
+		{ label: "mobile", width: MOBILE_WIDTH },
+	])("prunes project A on the first real cross-project transition render ($label)", async ({ label, width }) => {
+		const scenarioId = raceProjectSequence++;
+		const projectA = `first-render-A-${label}-${scenarioId}`;
+		const projectB = `first-render-B-${label}-${scenarioId}`;
+		const contributionsGate = deferred();
+		let projectBContributionRequests = 0;
+		const contributionBody = JSON.stringify({
+			packs: [{
+				packId: "demo_pack",
+				packName: "demo_pack",
+				panels: [{ id: "demo.panel", title: "Demo" }],
+				entrypoints: [],
+				routeNames: [],
+			}],
+		});
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.includes("/api/ext/contributions") && url.includes(`projectId=${encodeURIComponent(projectB)}`)) {
+				projectBContributionRequests += 1;
+				await contributionsGate.promise;
+				return new Response(contributionBody, { status: 200, headers: { "Content-Type": "application/json" } });
+			}
+			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+		});
+		class FailingWebSocket {
+			static readonly CONNECTING = 0;
+			static readonly OPEN = 1;
+			static readonly CLOSING = 2;
+			static readonly CLOSED = 3;
+			readyState = FailingWebSocket.CONNECTING;
+			onopen: ((event: Event) => void) | null = null;
+			onmessage: ((event: MessageEvent) => void) | null = null;
+			onerror: ((event: Event) => void) | null = null;
+			onclose: ((event: CloseEvent) => void) | null = null;
+			constructor(_url: string) {
+				queueMicrotask(() => {
+					this.readyState = FailingWebSocket.CLOSED;
+					this.onerror?.(new Event("error"));
+				});
+			}
+			send(): void {}
+			close(): void { this.readyState = FailingWebSocket.CLOSED; }
+		}
+		vi.stubGlobal("WebSocket", FailingWebSocket);
+
+		if (width !== DESKTOP_WIDTH) {
+			setViewportWidth(width);
+			renderOnce(); // settle the deliberate desktop/mobile retention reset
+		}
+		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], projectA);
+		const tabA = packTab("demo_pack", "demo.panel", "sA");
+		const tabB = packTab("demo_pack", "demo.panel", "sB");
+		installSession("sA", [tabA], undefined, "split", projectA);
+		installSession("sB", [tabB], undefined, "split", projectB);
+		selectSession("sA");
+		renderOnce();
+		const frameA = width === DESKTOP_WIDTH
+			? iframeForSession("sA")!
+			: mobileIframeForSession("sA", tabA.id)!;
+		expect(frameA).toBeTruthy();
+		clearProjectionCalls();
+		(state.remoteAgent as any).disconnect = vi.fn();
+
+		// The canonical switch selects B and starts B's real async reconcile before
+		// returning, but B's contributions deliberately remain unresolved.
+		const pendingConnect = connectToSession("sB", true);
+		expect(state.selectedSessionId).toBe("sB");
+		expect(state.connectingSessionId).toBe("sB");
+		expect(projectBContributionRequests).toBeGreaterThan(0);
+		expect(packPanelProjectId("demo_pack", "demo.panel")).toBe(projectA);
+		renderOnce(); // first scheduled transition frame, while the registry is still A
+
+		const paneA = width === DESKTOP_WIDTH
+			? slotForSession("sA")
+			: mobilePaneForSession("sA", tabA.id);
+		const frameB = width === DESKTOP_WIDTH
+			? iframeForSession("sB")
+			: mobileIframeForSession("sB", tabB.id);
+		expect(paneA).toBeNull();
+		expect(frameA.isConnected).toBe(false);
+		expect(frameB).toBeNull();
+		expect(projectionCalls().some((call) => call.boundSessionId === "sA")).toBe(false);
+
+		// Make the deliberately failing socket stale so its async cleanup cannot
+		// replace B's first-render state, then let B's real reconcile apply.
+		state.switchGeneration += 1;
+		contributionsGate.release();
+		await pendingConnect;
+		await vi.waitFor(() => {
+			expect(packPanelProjectId("demo_pack", "demo.panel")).toBe(projectB);
+		});
+		// The socket is deliberately failed to keep this DOM test isolated; project
+		// B's normal connected projection can now render against the reconciled registry.
+		selectSession("sB");
+		renderOnce();
+		expect(width === DESKTOP_WIDTH
+			? iframeForSession("sB")
+			: mobileIframeForSession("sB", tabB.id)).toBeTruthy();
+		registerPackPanels([]);
+	});
+
 	it("prunes a retained pane on a cross-project switch with disjoint panel keys", () => {
 		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], "projA");
 		const tabA = packTab("demo_pack", "demo.panel", "sA");
@@ -716,6 +840,28 @@ describe("desktop side-panel pane retention", () => {
 		expect(slotEls()).toHaveLength(1);
 		expect(slotEls()[0].dataset.panelPaneKey).toContain("sB");
 		expect(frameA.isConnected).toBe(false);
+		registerPackPanels([]);
+	});
+
+	it("canonicalises an unscoped selected target to Headquarters before registry reconciliation", () => {
+		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], "scoped-owner-project");
+		const tabScoped = packTab("demo_pack", "demo.panel", "sScopedOwner");
+		const tabHq = packTab("demo_pack", "demo.panel", "sHqTarget");
+		installSession("sScopedOwner", [tabScoped], undefined, "split", "scoped-owner-project");
+		installSession("sHqTarget", [tabHq]); // no projectId → Headquarters-effective
+		selectSession("sScopedOwner");
+		renderOnce();
+		const scopedFrame = iframeForSession("sScopedOwner")!;
+
+		selectSession("sHqTarget");
+		renderOnce(); // registry is deliberately still scoped to the outgoing project
+		expect(slotForSession("sScopedOwner")).toBeNull();
+		expect(scopedFrame.isConnected).toBe(false);
+		expect(slotForSession("sHqTarget")).toBeNull();
+
+		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], HEADQUARTERS_PROJECT_ID);
+		renderOnce();
+		expect(iframeForSession("sHqTarget")).toBeTruthy();
 		registerPackPanels([]);
 	});
 
@@ -768,7 +914,7 @@ describe("desktop side-panel pane retention", () => {
 		const tabGlobal = packTab("demo_pack", "demo.panel", "sGlobal");
 		const tabOther = packTab("other_pack", "other.panel", "sOther");
 		installSession("sGlobal", [tabGlobal]); // no projectId → Headquarters-effective
-		installSession("sOther", [tabOther], undefined, "split", "projB");
+		installSession("sOther", [tabOther]); // same effective project isolates unknown registry scope
 
 		// 1. Nothing registered at all (cold post-reload window).
 		selectSession("sGlobal");
@@ -776,6 +922,11 @@ describe("desktop side-panel pane retention", () => {
 		const frameGlobal = iframeForSession("sGlobal")!;
 		expect(frameGlobal).toBeTruthy();
 		const watchGlobal = watchSrc(frameGlobal);
+		// A reload/new-session window can select an id before either canonical
+		// session collection contains it. That unknown target must not prune.
+		selectSession("sUnknownTarget");
+		renderOnce();
+		expect(iframeForSession("sGlobal")).toBe(frameGlobal);
 		selectSession("sOther");
 		renderOnce();
 		expect(iframeForSession("sGlobal")).toBe(frameGlobal);
