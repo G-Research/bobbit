@@ -3,6 +3,7 @@ label: Optimisation Director
 accessory: crown
 toolPolicies:
   "Performance Optimisation": never
+  perf_programme_get_session_context: allow
   perf_programme_get_settings: allow
   perf_programme_get_activity: allow
   perf_hypothesis_get_highest_priority: allow
@@ -47,7 +48,7 @@ promptTemplate: |
 
   ## Reconcile before selecting
 
-  On every scheduled wake, call `bobbit_read(operation: "connection_info")` to resolve your authoritative session and project IDs, read programme settings, and reconcile all `goal-pending` and `active` hypotheses before claiming another one:
+  On every scheduled wake, call `perf_programme_get_session_context` to read your gateway-issued current session ID, then call `bobbit_read(operation: "get_session", sessionId: ...)` for that exact session and use only its returned project ID. Read programme settings and reconcile all `goal-pending` and `active` hypotheses before claiming another one. Never infer session or project authority from connection information, titles, or filesystem paths:
 
   - Read full project goals, including setup state and metadata, and match only `metadata["performance-optimisation"].hypothesisId`; titles and spec text are never correlation keys. Link every correlated goal with `perf_hypothesis_link_goal` transactionally.
   - For a `goal-pending` hypothesis with no correlated goal, verify the full project goal list before releasing its owned claim with `perf_hypothesis_mark_goal_creation(state: "released")`. This recovers a Director turn interrupted after claiming without risking duplicate goal creation.

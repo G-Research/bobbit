@@ -73,8 +73,8 @@ export const PACKS = [
 		defaultServingRoot: "dist/server/builtin-packs/market-packs/performance-optimisation",
 		entries: [
 			{ in: "performance-panel.ts", out: "lib/performance-panel.js" },
-			{ in: "performance-routes.ts", out: "lib/performance-routes.mjs", platform: "node" },
-			{ in: "performance-tool-extension.ts", out: "tools/performance-optimisation/extension.js", platform: "node" },
+			{ in: "performance-routes-entry.ts", out: "lib/performance-routes.mjs", platform: "node" },
+			{ in: "performance-tool-extension-entry.ts", out: "tools/performance-optimisation/extension.js", platform: "node" },
 		],
 	},
 	{

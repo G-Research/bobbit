@@ -22,6 +22,7 @@ export type PerformanceToolName =
 	| "perf_benchmark_register"
 	| "perf_benchmark_list"
 	| "perf_benchmark_record_run"
+	| "perf_programme_get_session_context"
 	| "perf_programme_get_settings"
 	| "perf_programme_set_settings"
 	| "perf_programme_get_activity";
@@ -30,6 +31,8 @@ export interface PerformanceToolContext {
 	localDataDirectory?: string;
 	cwd?: string;
 	inventoryDependencies?: CoverageInventoryDependencies;
+	nativeBinding?: string;
+	sessionId?: string;
 }
 
 export interface PerformanceToolDefinition {
@@ -71,6 +74,7 @@ export const PERFORMANCE_TOOL_DEFINITIONS: readonly PerformanceToolDefinition[] 
 	{ name: "perf_benchmark_register", label: "Register Performance Benchmark", description: "Register metadata for one existing named project command. This does not create or execute a shell command.", parameters: benchmark },
 	{ name: "perf_benchmark_list", label: "List Performance Benchmarks", description: "List bounded benchmark references, optionally filtered by hypothesis or scan unit applicability.", parameters: object({ hypothesisId: string("Hypothesis ID.", 100), scanUnitId: string("Scan unit ID.", 100), limit: integer("Maximum benchmarks.", 1, 100) }) },
 	{ name: "perf_benchmark_record_run", label: "Record Performance Benchmark Run", description: "Record a structured baseline or candidate run produced through normal project command tools.", parameters: object({ hypothesisId: string("Hypothesis ID.", 100), benchmarkId: string("Benchmark reference ID.", 100), kind: { type: "string", enum: ["baseline", "candidate"] }, commit: string("Measured commit identity.", 200), environment: string("Bounded environment summary.", 12_000), metrics: { type: "object", minProperties: 1, maxProperties: 50, additionalProperties: { type: "number" } }, variability: { type: "object", maxProperties: 50, additionalProperties: { type: "number" } }, interpretation: string("Repeatability and result interpretation.", 12_000) }, ["hypothesisId", "benchmarkId", "kind", "commit", "environment", "metrics"]) },
+	{ name: "perf_programme_get_session_context", label: "Read Programme Session Context", description: "Return the gateway-issued current session ID so the caller can resolve its authoritative Bobbit project with an exact session read.", parameters: object({}) },
 	{ name: "perf_programme_get_settings", label: "Read Performance Programme", description: "Read programme revision, schedules, concurrency targets, and stable staff IDs.", parameters: object({}) },
 	{ name: "perf_programme_set_settings", label: "Configure Performance Programme", description: "Transactionally configure bounded programme settings and stable Scanner/Director staff IDs.", parameters: object({ scannerSchedule: string("Scanner schedule trigger.", 200), directorSchedule: string("Director schedule trigger.", 200), maxParallelIdeators: integer("Maximum parallel Ideators.", 1, 20), targetActiveGoals: integer("Target concurrent optimisation goals.", 0, 50), scannerStaffId: { anyOf: [string("Scanner staff ID.", 120), { type: "null" }] }, directorStaffId: { anyOf: [string("Director staff ID.", 120), { type: "null" }] } }) },
 	{ name: "perf_programme_get_activity", label: "Read Performance Activity", description: "Read newest-first programme activity, bounded to the retained latest 50 events.", parameters: object({ limit: integer("Maximum activity rows.", 1, 50) }) },
@@ -94,7 +98,7 @@ export function resolvePerformanceLocalDataDirectory(env: NodeJS.ProcessEnv = pr
 export function executePerformanceTool(name: PerformanceToolName, rawInput: unknown = {}, context: PerformanceToolContext = {}): unknown {
 	const input = record(rawInput);
 	const directory = context.localDataDirectory ?? resolvePerformanceLocalDataDirectory();
-	const db = openPerformanceDatabase(directory);
+	const db = openPerformanceDatabase(directory, context.nativeBinding ? { nativeBinding: context.nativeBinding } : undefined);
 	try {
 		switch (name) {
 			case "perf_coverage_refresh": return db.refreshCoverage(inventoryTrackedProductionFiles(context.cwd ?? process.cwd(), context.inventoryDependencies));
@@ -125,6 +129,11 @@ export function executePerformanceTool(name: PerformanceToolName, rawInput: unkn
 			}
 			case "perf_benchmark_list": return db.listBenchmarks({ hypothesisId: input.hypothesisId as string | undefined, scanUnitId: input.scanUnitId as string | undefined, limit: input.limit as number | undefined });
 			case "perf_benchmark_record_run": return db.recordBenchmarkRun(input as unknown as BenchmarkRunInput);
+			case "perf_programme_get_session_context": {
+				const sessionId = context.sessionId ?? process.env.BOBBIT_SESSION_ID;
+				if (!sessionId) throw new PerformanceDatabaseError("INVALID_BINDING", "gateway-issued current session identity is unavailable");
+				return { sessionId };
+			}
 			case "perf_programme_get_settings": return db.programmeStatus();
 			case "perf_programme_set_settings": return db.configureProgramme(input as ProgrammeSettingsInput);
 			case "perf_programme_get_activity": return db.activity(input.limit as number | undefined);

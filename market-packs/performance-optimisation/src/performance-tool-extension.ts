@@ -10,22 +10,24 @@ function toolResult(value: unknown, isError = false) {
 	};
 }
 
-const extension: ExtensionFactory = (pi) => {
-	for (const definition of PERFORMANCE_TOOL_DEFINITIONS) {
-		pi.registerTool({
-			name: definition.name,
-			label: definition.label,
-			description: definition.description,
-			parameters: Type.Unsafe(definition.parameters),
-			async execute(_toolCallId, input) {
-				try {
-					return toolResult(executePerformanceTool(definition.name, input));
-				} catch (error) {
-					return toolResult(formatPerformanceToolError(error), true);
-				}
-			},
-		});
-	}
-};
+export function createPerformanceToolExtension(context: { nativeBinding?: string } = {}): ExtensionFactory {
+	return (pi) => {
+		for (const definition of PERFORMANCE_TOOL_DEFINITIONS) {
+			pi.registerTool({
+				name: definition.name,
+				label: definition.label,
+				description: definition.description,
+				parameters: Type.Unsafe(definition.parameters),
+				async execute(_toolCallId, input) {
+					try {
+						return toolResult(executePerformanceTool(definition.name, input, context));
+					} catch (error) {
+						return toolResult(formatPerformanceToolError(error), true);
+					}
+				},
+			});
+		}
+	};
+}
 
-export default extension;
+export default createPerformanceToolExtension();

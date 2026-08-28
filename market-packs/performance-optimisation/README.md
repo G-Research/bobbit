@@ -16,7 +16,7 @@ The normal panel starts honestly empty. For layout development only, open the co
 
 ## Persistence and pack projection contract
 
-The pack owns `<canonical-project-root>/.performance-optimisation/performance.sqlite` through Pack Local Data. Model-facing tools and the server route use Bobbit's shared `better-sqlite3` runtime dependency. The universal pack carries confined-worker prebuilds for supported macOS, Linux/glibc, Linux/musl, and Windows x64/arm64 targets, then selects only the current runtime target. Browser code reads this versioned projection through `host.callRoute("performance-snapshot")`:
+The pack owns `<canonical-project-root>/.performance-optimisation/performance.sqlite` through Pack Local Data. Model-facing tools and the server route use Bobbit's shared `better-sqlite3` runtime dependency. Adjacent `pack.build.json` metadata materializes the eight supported macOS, Linux/glibc, Linux/musl, and Windows x64/arm64 bindings into the pack. Node bundles inline `bobbit:pack-native-assets`, deterministically select the current runtime target from the generated manifest, and never fall back to an ancestor package path. Browser code reads this versioned projection through `host.callRoute("performance-snapshot")`:
 
 ```ts
 type PerformanceSnapshot = {
@@ -83,7 +83,7 @@ The pack ships two real marketplace roles:
 - `performance-scanner` — read-only evidence discovery.
 - `optimisation-director` — evidence-led planning and coordination.
 
-The pack also ships the ephemeral read-only `performance-ideator` role. After enabling the pack, run `/install-performance-optimisation`; the skill asks for schedules and concurrency, initializes coverage, discovers existing project benchmark commands with documented measurement contracts, idempotently syncs their references, then adopts or creates the two persistent staff through `bobbit_read` and `bobbit_orchestrate(create_staff)`. Ambiguous benchmark candidates are reported and skipped rather than guessed or executed. Rerun the skill after project benchmarks change. Ideators remain temporary. The persistent Director itself claims hypotheses and creates their goals through `bobbit_orchestrate(create_goal)`; it never delegates goal creation or emits proposal drafts.
+The pack also ships the ephemeral read-only `performance-ideator` role. After enabling the pack, run `/install-performance-optimisation`; the skill resolves its gateway-issued session to the authoritative project, asks for schedules and concurrency, initializes coverage, discovers existing project benchmark commands with documented measurement contracts, idempotently syncs their references, then adopts or creates the two persistent staff through `bobbit_read` and `bobbit_orchestrate(create_staff)`. Ambiguous benchmark candidates are reported and skipped rather than guessed or executed. Rerun the skill after project benchmarks change. Ideators remain temporary. The persistent Director itself claims hypotheses and creates their goals through `bobbit_orchestrate(create_goal)`; it never delegates goal creation or emits proposal drafts.
 
 ## Development loop
 
@@ -93,7 +93,7 @@ Run the normal harness, then in another terminal:
 npm run dev:pack -- performance-optimisation
 ```
 
-The watcher rebuilds `src/performance-panel.ts`, mirrors the bundle into the gateway's existing built-in serving copy, and emits a Vite custom HMR event. The client reuses the real marketplace reconciliation path to invalidate and remount the open panel without a gateway restart or full browser reload.
+The watcher rebuilds the declared panel and Node entries, rematerializes `pack.build.json` native families, mirrors all declared outputs into the gateway's existing built-in serving copy, and emits a Vite custom HMR event. The client reuses the real marketplace reconciliation path to invalidate and remount the open panel without a gateway restart or full browser reload.
 
 For a copy-installed pack, pass its serving root:
 

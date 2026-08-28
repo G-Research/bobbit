@@ -1,7 +1,7 @@
 ---
 name: install-performance-optimisation
 description: Configure the performance optimisation programme and idempotently adopt or create its two persistent staff agents.
-allowed-tools: ask_user_choices, bobbit_read, bobbit_orchestrate, read, find, grep, perf_coverage_refresh, perf_benchmark_sync, perf_benchmark_list, perf_programme_get_settings, perf_programme_set_settings
+allowed-tools: ask_user_choices, bobbit_read, bobbit_orchestrate, read, find, grep, perf_coverage_refresh, perf_benchmark_sync, perf_benchmark_list, perf_programme_get_session_context, perf_programme_get_settings, perf_programme_set_settings
 ---
 
 # Install Performance Optimisation
@@ -10,8 +10,8 @@ Install into the current Bobbit project only. Use gateway tools directly; never 
 
 ## 1. Preflight the current project
 
-1. Call `bobbit_read(operation: "connection_info")` to resolve the current session's authoritative `projectId`; do not infer project identity from the filesystem.
-2. Call `bobbit_read(operation: "get_project", projectId: ...)`, `bobbit_read(operation: "list_roles", projectId: ...)`, and `bobbit_read(operation: "list_tools", projectId: ...)` with bounded limits. Stop if the project is missing, the pack is disabled, either `performance-scanner` / `optimisation-director` is unavailable, or the programme configuration tools are unavailable.
+1. Call `perf_programme_get_session_context` to read the gateway-issued current session ID, then call `bobbit_read(operation: "get_session", sessionId: ...)` for that exact session. Use only its returned `projectId`; do not infer project authority from connection information or the filesystem.
+2. Call `bobbit_read(operation: "get_project", projectId: ...)`, `bobbit_read(operation: "list_roles", projectId: ...)`, and `bobbit_read(operation: "list_tools", projectId: ...)` with bounded limits. Stop if the exact session or project is missing, the session does not carry a project ID, the pack is disabled, either `performance-scanner` / `optimisation-director` is unavailable, or the programme configuration tools are unavailable.
 3. Call `perf_programme_get_settings` before changing anything. Retain any recorded Scanner and Director staff IDs for identity reconciliation.
 
 ## 2. Ask for operating settings
@@ -72,7 +72,7 @@ For each create-needed identity, call `bobbit_orchestrate(operation: "create_sta
 - `body.roleId`: `performance-scanner`
 - `body.accessory`: `magnifier`
 - `body.projectId`: the authoritative project ID
-- `body.cwd`: the authoritative project root returned by `get_project`
+- Omit `body.cwd`; the gateway resolves the registered project root from the authoritative project ID.
 - `body.worktree`: `false`
 - `body.triggers`: when the Scanner schedule is `manual`, an empty array; otherwise one enabled schedule trigger with `config: { cron: <scanner cron>, timezone: <timezone> }` and prompt `Refresh performance coverage, reconcile outstanding attempts, and fill available Ideator capacity.`
 
@@ -82,7 +82,7 @@ For each create-needed identity, call `bobbit_orchestrate(operation: "create_sta
 - `body.roleId`: `optimisation-director`
 - `body.accessory`: `crown`
 - `body.projectId`: the authoritative project ID
-- `body.cwd`: the authoritative project root returned by `get_project`
+- Omit `body.cwd`; the gateway resolves the registered project root from the authoritative project ID.
 - `body.worktree`: `false`
 - `body.triggers`: when the Director schedule is `manual`, an empty array; otherwise one enabled schedule trigger with `config: { cron: <director cron>, timezone: <timezone> }` and prompt `Reconcile direct performance goal creation and active goals, then fill available optimisation capacity.`
 

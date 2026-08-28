@@ -450,6 +450,7 @@ The final names may be grouped into one `performance-optimisation` tool contribu
 - `perf_benchmark_register` — register a reference to an existing validated named project command.
 - `perf_benchmark_list` — project-owned benchmark references and applicability.
 - `perf_benchmark_record_run` — baseline/candidate structured result.
+- `perf_programme_get_session_context` — gateway-issued current session identity for an exact Bobbit session read and authoritative project resolution.
 - `perf_programme_get_settings` and `perf_programme_set_settings` — install-time/runtime settings.
 - `perf_programme_get_activity` — newest-first bounded activity.
 

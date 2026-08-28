@@ -46,6 +46,10 @@ describe("performance registry model tools and route", () => {
 		expect(refreshed).toMatchObject({ files: 1, structuralUnits: 1 });
 		const coverage = executePerformanceTool("perf_coverage_get_modules_to_scan", { limit: 10 }, { localDataDirectory: localData }) as { items: Array<{ fileCount: number }> };
 		expect(coverage.items).toEqual([expect.objectContaining({ fileCount: 1 })]);
+		expect(executePerformanceTool("perf_programme_get_session_context", {}, { localDataDirectory: localData, sessionId: "session-authority" }))
+			.toEqual({ sessionId: "session-authority" });
+		expect(() => executePerformanceTool("perf_programme_get_session_context", {}, { localDataDirectory: localData, sessionId: "" }))
+			.toThrow(/session identity is unavailable/i);
 	});
 
 	it("registers bounded schemas for every provider YAML and exposes a panel-compatible snapshot", async () => {

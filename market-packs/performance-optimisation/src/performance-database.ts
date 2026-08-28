@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 export const PERFORMANCE_SCHEMA_VERSION = 2;
@@ -41,6 +40,8 @@ export class PerformanceDatabaseError extends Error {
 export interface PerformanceDatabaseOptions {
 	now?: () => string;
 	id?: (prefix: string) => string;
+	/** Explicit pack-local native binding selected by the build-inlined resolver. */
+	nativeBinding?: string;
 }
 
 export interface ProgrammeSettingsInput {
@@ -483,34 +484,6 @@ SET scheduling_state = 'open', proposal_session_id = NULL, updated_at = CURRENT_
 WHERE scheduling_state = 'proposal-pending';
 `;
 
-function nativeBindingTarget(): string | undefined {
-	const architecture = process.arch === "x64" || process.arch === "arm64" ? process.arch : undefined;
-	if (!architecture) return undefined;
-	let platform: string = process.platform;
-	if (platform === "linux") {
-		const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
-		if (!report?.header?.glibcVersionRuntime) platform = "linuxmusl";
-	}
-	if (platform !== "darwin" && platform !== "linux" && platform !== "linuxmusl" && platform !== "win32") return undefined;
-	return `${platform}-${architecture}`;
-}
-
-function bundledNativeBinding(): string | undefined {
-	// Confined fresh workers cannot load an addon from Bobbit's ancestor
-	// node_modules. Ship every better-sqlite3 prebuild in the universal pack and
-	// select only the current OS/libc/architecture asset. The known relative roots
-	// cover route bundles, tool bundles, and direct source imports used by tests.
-	const target = nativeBindingTarget();
-	if (!target) return undefined;
-	for (const relative of [`./native/${target}.node`, `../lib/native/${target}.node`, `../../lib/native/${target}.node`]) {
-		try {
-			const candidate = fileURLToPath(new URL(relative, import.meta.url));
-			if (fs.existsSync(candidate)) return candidate;
-		} catch { /* try the next known bundle location */ }
-	}
-	return undefined;
-}
-
 export class PerformanceDatabase {
 	readonly file: string;
 	private readonly db: Database.Database;
@@ -526,8 +499,7 @@ export class PerformanceDatabase {
 		try {
 			fs.mkdirSync(directory, { recursive: true });
 			this.file = path.join(directory, PERFORMANCE_DATABASE_FILE);
-			const nativeBinding = bundledNativeBinding();
-			this.db = new Database(this.file, { timeout: 5_000, ...(nativeBinding ? { nativeBinding } : {}) });
+			this.db = new Database(this.file, { timeout: 5_000, ...(options.nativeBinding ? { nativeBinding: options.nativeBinding } : {}) });
 		} catch (cause) {
 			throw new PerformanceDatabaseError("OPEN_FAILED", "performance registry could not be opened", { cause });
 		}

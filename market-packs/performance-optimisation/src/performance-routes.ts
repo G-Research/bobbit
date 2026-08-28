@@ -28,13 +28,13 @@ function safeRouteError(error: unknown): PerformanceSnapshotRouteResult {
 	return { ok: false, error: { code: "PERFORMANCE_SNAPSHOT_FAILED", message: "The performance snapshot is unavailable.", retryable: true } };
 }
 
-export function createPerformanceRoutes() {
+export function createPerformanceRoutes(options: { nativeBinding?: string } = {}) {
 	return {
 		"performance-snapshot": async (ctx: PerformanceRouteContext): Promise<PerformanceSnapshotRouteResult> => {
 			try {
 				if (!ctx?.host?.localData) throw new PerformanceDatabaseError("INVALID_BINDING", "performance local-data capability is unavailable");
 				const directory = await ctx.host.localData.directory();
-				const db = openPerformanceDatabase(directory);
+				const db = openPerformanceDatabase(directory, { nativeBinding: options.nativeBinding });
 				try { return db.snapshot(); }
 				finally { db.close(); }
 			} catch (error) {

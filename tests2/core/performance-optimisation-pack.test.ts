@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -11,6 +11,9 @@ const MARKET_PACKS = fileURLToPath(new URL("../../market-packs", import.meta.url
 const PANEL_SOURCE = readFileSync(new URL("../../market-packs/performance-optimisation/src/performance-panel.ts", import.meta.url), "utf8");
 const PANEL_BUNDLE = readFileSync(new URL("../../market-packs/performance-optimisation/lib/performance-panel.js", import.meta.url), "utf8");
 const DATABASE_SOURCE = readFileSync(new URL("../../market-packs/performance-optimisation/src/performance-database.ts", import.meta.url), "utf8");
+const ROUTES_ENTRY_SOURCE = readFileSync(new URL("../../market-packs/performance-optimisation/src/performance-routes-entry.ts", import.meta.url), "utf8");
+const TOOL_ENTRY_SOURCE = readFileSync(new URL("../../market-packs/performance-optimisation/src/performance-tool-extension-entry.ts", import.meta.url), "utf8");
+const BUILD_METADATA = JSON.parse(readFileSync(new URL("../../market-packs/performance-optimisation/pack.build.json", import.meta.url), "utf8"));
 const SCANNER_ROLE = readFileSync(new URL("../../market-packs/performance-optimisation/roles/performance-scanner.yaml", import.meta.url), "utf8");
 const DIRECTOR_ROLE = readFileSync(new URL("../../market-packs/performance-optimisation/roles/optimisation-director.yaml", import.meta.url), "utf8");
 const INSTALL_SKILL = readFileSync(new URL("../../market-packs/performance-optimisation/skills/install-performance-optimisation/SKILL.md", import.meta.url), "utf8");
@@ -178,6 +181,9 @@ describe("performance optimisation first-party pack", () => {
 		expect(DIRECTOR_ROLE).toContain("autoStartTeam: true");
 		expect(INSTALL_SKILL).toContain("perf_coverage_refresh");
 		expect(INSTALL_SKILL).toContain("perf_benchmark_sync");
+		expect(INSTALL_SKILL).toContain("perf_programme_get_session_context");
+		expect(INSTALL_SKILL).not.toContain('bobbit_read(operation: "connection_info")');
+		expect(INSTALL_SKILL).toContain("Omit `body.cwd`");
 		expect(INSTALL_SKILL).toContain("must not create, edit, or execute benchmark commands");
 		expect(INSTALL_SKILL).toContain("Never guess measurement semantics");
 		expect(INSTALL_SKILL).toContain("commandName` is the script key");
@@ -185,17 +191,28 @@ describe("performance optimisation first-party pack", () => {
 		expect(INSTALL_SKILL).toContain("Manual-only staff receive `triggers: []`");
 		expect(BUILD_SOURCE).toContain('pack: "performance-optimisation"');
 		expect(BUILD_SOURCE).toContain('{ in: "performance-panel.ts", out: "lib/performance-panel.js" }');
+		expect(BUILD_SOURCE).toContain('{ in: "performance-routes-entry.ts", out: "lib/performance-routes.mjs", platform: "node" }');
+		expect(BUILD_SOURCE).toContain('{ in: "performance-tool-extension-entry.ts", out: "tools/performance-optimisation/extension.js", platform: "node" }');
+		expect(BUILD_METADATA).toMatchObject({ schema: 1, nativeAssets: [{ id: "database-driver", package: "better-sqlite3" }] });
 		const nativeTargets = [
 			"darwin-arm64", "darwin-x64",
-			"linux-arm64", "linux-x64",
-			"linuxmusl-arm64", "linuxmusl-x64",
+			"linux-glibc-arm64", "linux-glibc-x64",
+			"linux-musl-arm64", "linux-musl-x64",
 			"win32-arm64", "win32-x64",
 		];
-		for (const target of nativeTargets) {
-			expect(existsSync(new URL(`../../market-packs/performance-optimisation/lib/native/${target}.node`, import.meta.url))).toBe(true);
-		}
-		expect(DATABASE_SOURCE).toContain('platform = "linuxmusl"');
-		expect(DATABASE_SOURCE).toContain("`./native/${target}.node`");
+		expect(Object.keys(BUILD_METADATA.nativeAssets[0].targets).sort()).toEqual([...nativeTargets].sort());
+		expect(BUILD_METADATA.nativeAssets[0].targets).toMatchObject({
+			"linux-glibc-arm64": "prebuilds/linux-arm64.node",
+			"linux-glibc-x64": "prebuilds/linux-x64.node",
+			"linux-musl-arm64": "prebuilds/linuxmusl-arm64.node",
+			"linux-musl-x64": "prebuilds/linuxmusl-x64.node",
+		});
+		expect(ROUTES_ENTRY_SOURCE).toContain('from "bobbit:pack-native-assets"');
+		expect(ROUTES_ENTRY_SOURCE).toContain('new URL("./native/database-driver/", import.meta.url)');
+		expect(TOOL_ENTRY_SOURCE).toContain('from "bobbit:pack-native-assets"');
+		expect(TOOL_ENTRY_SOURCE).toContain('new URL("../../lib/native/database-driver/", import.meta.url)');
+		expect(DATABASE_SOURCE).not.toContain("nativeBindingTarget");
+		expect(DATABASE_SOURCE).not.toContain("bundledNativeBinding");
 		expect(DATABASE_SOURCE).not.toContain('"./better_sqlite3.node"');
 		expect(COPY_SOURCE).toMatch(/FIRST_PARTY_PACKS\s*=\s*\[[^\]]*"performance-optimisation"/);
 		expect(HARNESS_SOURCE).toMatch(/FIRST_PARTY_PACKS\s*=\s*\[[^\]]*"performance-optimisation"/);
