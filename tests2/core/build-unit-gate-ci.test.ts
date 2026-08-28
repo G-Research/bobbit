@@ -128,8 +128,8 @@ describe("native CI qualification workflows", () => {
 		assert.equal(unitGates[0]?.run, "npm run test:unit", "branch checks use the normal Vitest retry policy");
 		assert.deepEqual(
 			unitGates[0]?.env,
-			{ VITEST_MAX_WORKERS: "${{ runner.os == 'Windows' && '2' || '' }}" },
-			"hosted Windows must use two Vitest workers while an empty non-Windows override retains the normal fixed cap",
+			{ VITEST_MAX_WORKERS: "${{ runner.os == 'Windows' && '1' || '' }}" },
+			"hosted Windows must serialize Vitest files while an empty non-Windows override retains the normal fixed cap",
 		);
 	});
 
@@ -141,7 +141,7 @@ describe("native CI qualification workflows", () => {
 
 		for (const [jobId, job, expectedName, gateName, command, timeoutMinutes] of [
 			["browser", jobs.browser, "Browser (${{ matrix.os }}, Node 22.19.0)", "Browser gate", "npm run test:browser", 40],
-			["e2e", jobs.e2e, "E2E (${{ matrix.os }}, Node 22.19.0)", "E2E gate", "npm run test:e2e", 50],
+			["e2e", jobs.e2e, "E2E (${{ matrix.os }}, Node 22.19.0)", "E2E gate", "npm run test:e2e", 60],
 		] as const) {
 			assert.equal(job.name, expectedName, `${jobId} check name must identify the runner and exact Node version`);
 			assert.equal(job.if, "github.event_name != 'push'", `${jobId} must run for PRs and exact-head dispatch, but not duplicate push checks`);
@@ -194,8 +194,10 @@ describe("native CI qualification workflows", () => {
 		assert.deepEqual(stepByName(jobs.browser.steps, "Browser gate").env, {
 			BOBBIT_V2_PLAYWRIGHT_WORKERS: "${{ matrix.workers }}",
 		});
-		assert.deepEqual(jobs.e2e.strategy.matrix, { os: expectedOs }, "the Browser pressure bound must not alter E2E");
-		assert.equal(stepByName(jobs.e2e.steps, "E2E gate").env, undefined);
+		assert.deepEqual(jobs.e2e.strategy.matrix, { os: expectedOs });
+		assert.deepEqual(stepByName(jobs.e2e.steps, "E2E gate").env, {
+			E2E_V2_PW_WORKERS: "${{ runner.os == 'Windows' && '1' || '' }}",
+		}, "hosted Windows must serialize Playwright-backed E2E groups while other runners retain the normal worker count");
 	});
 
 	it("builds the version-matched sandbox image only for Linux E2E coverage", () => {
