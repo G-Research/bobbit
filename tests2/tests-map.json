@@ -2760,6 +2760,15 @@
       }
     },
     {
+      "path": "tests2/core/message-author-lazy-role-lookup.test.ts",
+      "reason": "Core regression coverage proving agent author role metadata is resolved only when staff and title fallbacks are absent, while preserving role and Agent label precedence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/client-message-author.test.ts",
       "reason": "Happy-dom client coverage for preserving server authors through reducer snapshots/live updates, stamping optimistic human rows, and stripping Bobbit-only metadata at Pi model conversion boundaries.",
       "execution": {
