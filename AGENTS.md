@@ -6,7 +6,9 @@
 npm run build          # Build server + UI
 npm run dev:harness    # Gateway + vite dev
 npm run restart-server # Rebuild & restart after server changes
-npm run check          # Type-check server + web
+npm run check          # Layout validation + type-check server/web/tests
+npm run test:layout    # Validate test path, suffix, runner, and ownership
+npm run test:new -- <semantic> <name> # Scaffold a canonical test
 npm run test:unit      # Vitest tier-1, fixed 3-worker cap
 npm run test:browser   # Playwright browser-v2
 npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
@@ -40,13 +42,14 @@ Orient here, then `rg` for the symbol.
 
 Treat every new branch, state owner, transformation, API, or abstraction as defect surface: prefer composing existing well-tested code when its contract, ownership, and lifecycle fit, but do not force reuse or mechanical DRY across unrelated semantics.
 
-## Testing (Test Suite v2)
+## Testing
 
-- **Test ownership**: `tests2/{core,dom,integration}/**/*.test.ts` ⇒ Vitest; `tests2/browser/**/*.spec.ts` ⇒ Playwright; `*.isolated.test.ts` and `*.e2e.*` mark isolation and real fidelity. Gates remain `test:unit` → `test:browser` → `test:e2e`; real agents/LLMs use `test:manual`. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
+- **Test ownership** — create new tests under canonical `tests/{unit,dom,integration,browser,e2e,manual}/` paths with the matching semantic suffix; `tests2/` and legacy patterns are transitional compatibility only. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
+- **Test authoring** — use `npm run test:new -- <semantic> <name>`; `npm run test:layout` enforces canonical placement without a registry step. See [docs/testing-strategy.md](docs/testing-strategy.md#create-a-test).
 - **Test isolation** — every automated coordinator owns its run root; qualify retry-free. See [docs/testing-v2/cross-os-test-authoring.md](docs/testing-v2/cross-os-test-authoring.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - **Never junction/symlink a worktree's `node_modules` into a shared or primary tree.** See [docs/testing-v2/node-modules-corruption-rca.md](docs/testing-v2/node-modules-corruption-rca.md).
-- Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-v2/](docs/testing-v2/).
+- Every user-facing feature needs a canonical browser journey covering navigation, happy path, durable reload, and cleanup. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
 
 ## Git conventions
 
