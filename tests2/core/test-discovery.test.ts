@@ -1,8 +1,9 @@
 // v2-native — focused contract coverage for convention-based test discovery.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import {
 	classifyTestPath,
 	discoverTests,
@@ -11,6 +12,19 @@ import {
 } from "../../scripts/testing-v2/test-discovery.mjs";
 
 const ISOLATED_TEST_CAP = 14;
+const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
+const require = createRequire(import.meta.url);
+const { createFileMatcher } = require("playwright/lib/util") as {
+	createFileMatcher: (patterns: string | RegExp | Array<string | RegExp>) => (file: string) => boolean;
+};
+
+type ResolvedPlaywrightProject = {
+	name: string;
+	testDir: string;
+	testMatch: string | RegExp | Array<string | RegExp>;
+	testIgnore: string | RegExp | Array<string | RegExp>;
+};
+
 let root: string;
 
 beforeEach(() => {
@@ -27,6 +41,50 @@ function materialize(...paths: string[]): void {
 		mkdirSync(dirname(target), { recursive: true });
 		writeFileSync(target, "", "utf8");
 	}
+}
+
+async function resolvedPlaywrightProjects(configFile: string): Promise<ResolvedPlaywrightProject[]> {
+	const originalEnvironment = { ...process.env };
+	try {
+		// Avoid taking a long-lived worker-ledger reservation while evaluating the
+		// committed browser config in this Vitest coordinator.
+		process.env.BOBBIT_V2_PLAYWRIGHT_WORKERS = "1";
+		const { configLoader } = require("playwright/lib/common") as {
+			configLoader: {
+				loadConfigFromFile: (path: string, overrides: object, ignoreDependencies: boolean) => Promise<{
+					projects: Array<{ project: ResolvedPlaywrightProject }>;
+				}>;
+			};
+		};
+		const loaded = await configLoader.loadConfigFromFile(resolve(REPO_ROOT, configFile), {}, true);
+		return loaded.projects.map(({ project }) => project);
+	} finally {
+		for (const key of Object.keys(process.env)) {
+			if (!(key in originalEnvironment)) delete process.env[key];
+		}
+		Object.assign(process.env, originalEnvironment);
+	}
+}
+
+function projectSelectsPath(project: ResolvedPlaywrightProject, repositoryPath: string): boolean {
+	const candidate = resolve(REPO_ROOT, ...normalizeTestPath(repositoryPath).split("/"));
+	const normalizedCandidate = normalizeTestPath(candidate);
+	const normalizedTestDir = normalizeTestPath(resolve(project.testDir));
+	if (normalizedCandidate !== normalizedTestDir && !normalizedCandidate.startsWith(`${normalizedTestDir}/`)) return false;
+	return createFileMatcher(project.testMatch)(candidate) && !createFileMatcher(project.testIgnore)(candidate);
+}
+
+function selectedRepositoryPaths(project: ResolvedPlaywrightProject): string[] {
+	const candidates: string[] = [];
+	const visit = (directory: string): void => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = join(directory, entry.name);
+			if (entry.isDirectory()) visit(path);
+			else if (entry.isFile()) candidates.push(normalizeTestPath(relative(REPO_ROOT, path)));
+		}
+	};
+	visit(project.testDir);
+	return candidates.filter(path => projectSelectsPath(project, path)).sort();
 }
 
 const CLASSIFICATIONS = [
@@ -166,6 +224,52 @@ describe("discoverTests", () => {
 
 		materialize("tests2/integration/one-too-many.isolated.test.ts");
 		expect(() => discoverTests({ repoRoot: root })).toThrow(`maximum is ${ISOLATED_TEST_CAP}`);
+	});
+});
+
+describe("Playwright selector parity", () => {
+	it("keeps live browser and manual project selectors exactly aligned with discovery on POSIX and Windows paths", async () => {
+		const browserProjects = await resolvedPlaywrightProjects("playwright-v2.config.ts");
+		const manualProjects = await resolvedPlaywrightProjects("playwright-manual.config.ts");
+		expect(browserProjects.map(project => project.name)).toEqual(["browser-v2", "browser-v2-e2e"]);
+		expect(manualProjects.map(project => project.name)).toEqual(["manual-integration"]);
+
+		const browser = browserProjects.find(project => project.name === "browser-v2")!;
+		const browserE2E = browserProjects.find(project => project.name === "browser-v2-e2e")!;
+		const manual = manualProjects.find(project => project.name === "manual-integration")!;
+		const discovery = discoverTests();
+		const selected = {
+			browser: selectedRepositoryPaths(browser),
+			browserE2E: selectedRepositoryPaths(browserE2E),
+			manual: selectedRepositoryPaths(manual),
+		};
+
+		expect(selected.browser).toEqual(discovery.browser);
+		expect(selected.browserE2E).toEqual(discovery.browserE2E);
+		expect(selected.manual).toEqual(discovery.manual);
+		expect(selected.browser.some(path => path.startsWith("tests2/browser/e2e/"))).toBe(false);
+		expect(selected.browserE2E.every(path => path.startsWith("tests2/browser/e2e/"))).toBe(true);
+		expect(selected.manual.some(path => path.endsWith(".test.ts"))).toBe(true);
+		expect(selected.manual.some(path => path.endsWith(".spec.ts"))).toBe(true);
+
+		const laneSets = Object.values(selected).map(paths => new Set(paths));
+		for (let left = 0; left < laneSets.length; left += 1) {
+			for (let right = left + 1; right < laneSets.length; right += 1) {
+				expect([...laneSets[left]].filter(path => laneSets[right].has(path))).toEqual([]);
+			}
+		}
+
+		const projects = [...browserProjects, ...manualProjects];
+		for (const [path, owner] of [
+			["tests2/browser/fixtures/representative.spec.ts", "browser-v2"],
+			["tests2/browser/e2e/representative.spec.ts", "browser-v2-e2e"],
+			["tests/manual-integration/representative.test.ts", "manual-integration"],
+			["tests/manual-integration/representative.spec.ts", "manual-integration"],
+		] as const) {
+			for (const pathForm of [path, path.replaceAll("/", "\\")]) {
+				expect(projects.filter(project => projectSelectsPath(project, pathForm)).map(project => project.name)).toEqual([owner]);
+			}
+		}
 	});
 });
 
