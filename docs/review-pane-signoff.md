@@ -277,7 +277,7 @@ Review-source browser payloads are normalized before opening, and only supported
 | Token-aware HTML handling and sanitizer policy | `src/ui/components/review/ReviewDocument.ts` | `tests2/dom/review-document-sanitize.test.ts` |
 | End-to-end multi-review and background-session lifecycle | shared review surface plus gateway/session workspace paths | `tests2/browser/journeys/review-groups.journey.spec.ts` |
 
-For a review change, run `npm run check` and `npm run test:unit`, then the targeted grouped-review browser fixture and journey through the normal `npm run test:browser` workflow. Also rerun the existing mobile commenting, human-signoff, and side-panel workspace journeys when touching their shared routing or chrome. The suite entries and ownership reasons are registered in `tests2/tests-map.json`; use those entries rather than introducing an unregistered ad hoc test path.
+For a review change, run `npm run check` and `npm run test:unit`, then the targeted grouped-review browser fixture and journey through the normal `npm run test:browser` workflow. Also rerun the existing mobile commenting, human-signoff, and side-panel workspace journeys when touching their shared routing or chrome. Place new coverage in the convention-owned core, DOM, integration, or browser path rather than introducing an unsupported ad hoc test location.
 
 Manual browser verification should cover multiple same-session reviews, duplicate titles, one-file row suppression, enough files to overflow at both desktop and narrow widths, keyboard dismissal/focus, close-target geometry, sibling survival after close/decision, reload hydration, and a live background owner open/close while another session remains selected.
 

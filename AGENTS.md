@@ -26,7 +26,7 @@ Orient here, then `rg` for the symbol.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
-- **Tests (v2)**: `tests2/{core,dom,integration}` (vitest), `tests2/browser` (Playwright), `tests2/tests-map.json`; `tests/e2e/` = `e2e:v2`; `tests/manual-integration/` (real agents).
+- **Tests (v2)**: convention-discovered Vitest under `tests2/{core,dom,integration}`, Playwright under `tests2/browser`, real-fidelity E2E under semantic `*.e2e.*` paths, and real agents under `tests/manual-integration/`. See [docs/testing-strategy.md](docs/testing-strategy.md).
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
 
 ## Before editing anything non-trivial
@@ -42,7 +42,7 @@ Treat every new branch, state owner, transformation, API, or abstraction as defe
 
 ## Testing (Test Suite v2)
 
-- **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒Vitest (`core`/`dom`/`integration`, with explicit isolated exceptions); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` → `test:browser` → `test:e2e`; worktree/Docker/MCP/restart coverage belongs to E2E or `test:manual`.
+- **Test placement determines ownership**: `tests2/{core,dom,integration}/**/*.test.ts` ⇒ Vitest; `tests2/browser/**/*.spec.ts` ⇒ Playwright; use the documented `*.isolated.test.ts` or `*.e2e.*` conventions only for exceptional isolation or real fidelity. Three sequential gate phases remain `test:unit` → `test:browser` → `test:e2e`; real-agent/LLM coverage belongs to `test:manual`. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
 - **Test isolation** — every automated coordinator owns its run root; qualify retry-free. See [docs/testing-v2/cross-os-test-authoring.md](docs/testing-v2/cross-os-test-authoring.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - **Never junction/symlink a worktree's `node_modules` into a shared or primary tree.** See [docs/testing-v2/node-modules-corruption-rca.md](docs/testing-v2/node-modules-corruption-rca.md).

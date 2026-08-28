@@ -105,7 +105,7 @@ Hidden navigation shells are inert, excluded from the accessibility tree, and re
 
 ## Regression coverage
 
-All feature tests are registered in `tests2/tests-map.json`.
+Feature tests are discovered from their Test Suite v2 paths and suffixes:
 
 - [`tests2/core/transcript-history.test.ts`](../tests2/core/transcript-history.test.ts) pins strict transcript chronology, trusted author/type classification, mixed rows, bounded excerpts, stable identity, valid and malformed asks, answered/dismissed/failed status, composed search/filter behavior, and nearest-above/newest unanswered selection.
 - [`tests2/dom/transcript-history-popover.test.ts`](../tests2/dom/transcript-history-popover.test.ts) pins dialog semantics, focus, open-to-newest behavior, filters plus search, empty state, live-tail preservation, selection, outside dismissal, and Escape dismissal.
@@ -113,4 +113,4 @@ All feature tests are registered in `tests2/tests-map.json`.
 - [`tests2/browser/journeys/transcript-history-navigation.journey.spec.ts`](../tests2/browser/journeys/transcript-history-navigation.journey.spec.ts) exercises the real segmented controls, chronology, search/filter/empty state, jumping, focus restoration, answered and durably dismissed status, the sidebar question-circle unread indicator, reload derivation, responsive bounds, and cleanup.
 - The existing chat-scroll fixture and broader tail-chat coverage continue to pin prompt geometry, spring landing, mobile header offset, streaming growth, and return-to-tail behavior.
 
-When changing this feature, run the focused core and DOM files first, then the registered browser journey. Run `npm run check` and `npm run test:unit` before completion; broader browser and end-to-end gates remain the regression authority for shared scroll behavior.
+When changing this feature, run the focused core and DOM files first, then the browser journey. Run `npm run check` and `npm run test:unit` before completion; broader browser and end-to-end gates remain the regression authority for shared scroll behavior.

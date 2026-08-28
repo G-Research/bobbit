@@ -1,5 +1,7 @@
 # Consolidation Assertion-Parity Audit — 151 `legacy-pending` browser specs
 
+> **Historical migration audit.** References and instructions concerning the retired `tests2/tests-map.json` record the browser-consolidation workflow at that time; they are not current test-authoring guidance.
+
 **Task:** 92adf324 · **Scope:** every `tests2/tests-map.json` entry with `method: "legacy-pending"`
 (151 legacy browser E2E specs consolidated into smoke journeys). For each legacy spec this audit
 compares its meaningful assertions against the assertions actually present in its replacement
