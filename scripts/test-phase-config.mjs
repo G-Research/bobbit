@@ -3,7 +3,7 @@
  *
  * Consumed by BOTH:
  *   - scripts/run-unit.mjs            — the actual unit runner (gate `unit:`)
- *   - tests/test-phase-invariant.test.ts — the guard that pins the invariant
+ *   - tests/test-phase-invariant.e2e.test.ts — the guard that pins the invariant
  *
  * Keeping the globs here (rather than duplicated in the runner script and the
  * guard) means the guard can never silently drift from what the runner runs:

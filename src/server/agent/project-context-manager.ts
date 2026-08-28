@@ -523,7 +523,7 @@ export class ProjectContextManager {
    * participate in any of these flows; iterating it caused
    * `pool/_pool-*` branches to be allocated in unrelated host repos
    * when the bobbit state dir was nested inside one (see
-   * `tests/system-project-pool-leak.test.ts`).
+   * `tests/system-project-pool-leak.e2e.test.ts`).
    */
   *visible(): IterableIterator<ProjectContext> {
     for (const ctx of this.contexts.values()) {
