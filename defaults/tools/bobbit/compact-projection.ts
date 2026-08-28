@@ -107,7 +107,7 @@ const PROFILE_FIELDS: Readonly<Record<Exclude<ProfileName, "generic" | "identity
 	goal: new Set([
 		"id", "title", "state", "workflowId", "projectId", "branch", "mergeTarget",
 		"setupStatus", "setupError", "paused", "parentGoalId", "rootGoalId", "archived",
-		"archivedAt", "createdAt", "updatedAt", "spec",
+		"archivedAt", "createdAt", "updatedAt", "spec", "metadata",
 	]),
 	session: new Set([
 		"id", "title", "status", "assistantType", "role", "projectId", "goalId",
