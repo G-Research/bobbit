@@ -1,98 +1,159 @@
 [
   {
-    "baseFile": "tests2/core/project-registry-root-paths.test.ts",
-    "baseName": "ProjectRegistry rejects zero or replaced directory fingerprints for sampled evidence",
+    "baseFile": "tests2/core/test-map-execution.test.ts",
+    "baseName": "accepts path-derived core, dom, integration, isolated, and approved E2E ownership",
     "current": [
       {
-        "file": "tests2/core/project-registry-root-paths.test.ts",
-        "name": "ProjectRegistry keeps Windows identity stable across sibling fingerprint churn without caching"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "classifies %s from POSIX and Windows paths"
       },
       {
-        "file": "tests2/core/project-registry-root-paths.test.ts",
-        "name": "ProjectRegistry rejects zero or replaced directory identities for sampled evidence"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "recursively discovers, sorts, and assigns every active convention exactly once"
       }
     ],
-    "rationale": "The original conservative sampled-evidence case was split to distinguish harmless sibling-fingerprint churn from replacement of the sampled directory identity. Together the successors retain zero-identity rejection, no-cache behavior, and conservative replacement handling while pinning stable Windows cwd identity when only sibling metadata changes."
+    "rationale": "The map-backed ownership fixture was replaced by path classification and recursive discovery fixtures. Together they retain every Vitest lane, add the other path-owned lanes, and verify both Windows and POSIX path forms without a registry."
   },
   {
-    "baseFile": "tests2/integration/cross-project-proposals.test.ts",
-    "baseName": "(c) explicit unknown projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff",
+    "baseFile": "tests2/core/test-map-execution.test.ts",
+    "baseName": "rejects cross-tagging %s",
     "current": [
       {
-        "file": "tests2/integration/cross-project-proposals.test.ts",
-        "name": "(c) goal uses canonical PROJECT_NOT_FOUND while other proposal types retain UNKNOWN_PROJECT"
-      }
-    ],
-    "rationale": "The successor retains the explicit unknown-project rejection and no-draft assertions for all four proposal types while updating goal proposals to the canonical goal-creation PROJECT_NOT_FOUND status and preserving UNKNOWN_PROJECT for role, tool, and staff proposals."
-  },
-  {
-    "baseFile": "tests2/integration/cross-project-proposals.test.ts",
-    "baseName": "(c') explicit hidden `system` projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff",
-    "current": [
-      {
-        "file": "tests2/integration/cross-project-proposals.test.ts",
-        "name": "(c') explicit hidden `system` goal uses canonical PROJECT_NOT_VISIBLE"
-      }
-    ],
-    "rationale": "The successor retains explicit hidden-system rejection and no-draft assertions for all four proposal types while updating goal proposals to the canonical goal-creation PROJECT_NOT_VISIBLE status and preserving UNKNOWN_PROJECT for role, tool, and staff proposals."
-  },
-  {
-    "baseFile": "tests2/integration/session-goal-promotion.test.ts",
-    "baseName": "current-session goal promotion API",
-    "current": [
-      {
-        "file": "tests2/integration/session-goal-promotion.test.ts",
-        "name": "current-session goal promotion transaction and lifecycle safety"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "rejects unsupported or ambiguous placement %s actionably"
       },
       {
-        "file": "tests2/integration/session-goal-promotion-recovery.test.ts",
-        "name": "current-session goal promotion recovery and ownership continuity"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "rejects managed-root suffix mismatches found during traversal"
       }
     ],
-    "rationale": "The original promotion suite was split by execution ownership: transaction and lifecycle cases remain in the original file, while recovery, multi-repository ownership, and sandbox continuity cases moved to the focused recovery file. The two suite declarations collectively retain the original promotion API coverage."
+    "rationale": "Execution metadata can no longer be cross-tagged because ownership is derived from path and suffix. The successors reject conflicting semantic suffixes, wrong runner roots, and traversal-time mismatches."
   },
   {
-    "baseFile": "tests2/integration/session-goal-promotion.test.ts",
-    "baseName": "retains the recoverable goal, gates, and lead when reservation release is refused",
+    "baseFile": "tests2/core/test-map-execution.test.ts",
+    "baseName": "rejects %s isolated reasons",
     "current": [
       {
-        "file": "tests2/integration/session-goal-promotion-recovery.test.ts",
-        "name": "retains the recoverable goal, gates, and lead when reservation release is refused"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "classifies %s from POSIX and Windows paths"
+      },
+      {
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "rejects unsupported or ambiguous placement %s actionably"
       }
     ],
-    "rationale": "The unchanged recovery declaration moved to the focused promotion-recovery file and still verifies retained goal, gates, adopted lead, and exact-goal retry behavior after reservation release refusal."
+    "rationale": "Free-form isolated reasons were retired with the map. The isolated suffix is now the semantic declaration, and the successors prove its canonical classification and reject ambiguous or unsupported uses."
   },
   {
-    "baseFile": "tests2/integration/session-goal-promotion.test.ts",
-    "baseName": "keeps a committed lead attached when finalization fails, then finalizes the exact goal on retry",
+    "baseFile": "tests2/core/test-map-execution.test.ts",
+    "baseName": "rejects an isolated reason on a non-isolated project",
     "current": [
       {
-        "file": "tests2/integration/session-goal-promotion-recovery.test.ts",
-        "name": "keeps a committed lead attached when finalization fails, then finalizes the exact goal on retry"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "rejects unsupported or ambiguous placement %s actionably"
       }
     ],
-    "rationale": "The unchanged finalization-retry declaration moved to the focused promotion-recovery file and retains committed lead attachment, single-goal continuity, and exact-goal finalization assertions."
+    "rationale": "A non-isolated project can no longer carry isolated metadata. The replacement classifier rejects isolated semantic suffixes outside the supported core and integration roots and rejects multiple semantic suffixes."
   },
   {
-    "baseFile": "tests2/integration/session-goal-promotion.test.ts",
-    "baseName": "preserves a real two-component worktree set through archive and removes it on final purge",
+    "baseFile": "tests2/core/test-map-execution.test.ts",
+    "baseName": "preserves duplicate ownership and missing physical ownership validation",
     "current": [
       {
-        "file": "tests2/integration/session-goal-promotion-recovery.test.ts",
-        "name": "preserves a real two-component worktree set through archive and removes it on final purge"
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "recursively discovers, sorts, and assigns every active convention exactly once"
+      },
+      {
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "does not follow symlinked directories"
+      },
+      {
+        "file": "tests2/core/test-discovery.test.ts",
+        "name": "rejects managed-root suffix mismatches found during traversal"
       }
     ],
-    "rationale": "The unchanged multi-repository ownership declaration moved to the focused promotion-recovery file and retains component worktree preservation through archive plus removal on final purge."
+    "rationale": "Filesystem discovery eliminates registry entries for missing files. The successors retain exactly-once ownership, deterministic physical traversal, symlink exclusion, and rejection of test-shaped files that do not have one valid owner."
   },
   {
-    "baseFile": "tests2/integration/session-goal-promotion.test.ts",
-    "baseName": "probes a sandbox owner's transcript in its container realm before promotion",
+    "baseFile": "tests2/core/full-test-lane-entrypoints.test.ts",
+    "baseName": "keeps retired package and tests-map entrypoints absent",
     "current": [
       {
-        "file": "tests2/integration/session-goal-promotion-recovery.test.ts",
-        "name": "probes a sandbox owner's transcript in its container realm before promotion"
+        "file": "tests2/core/full-test-lane-entrypoints.test.ts",
+        "name": "keeps retired package, test, and map-only entrypoints absent"
       }
     ],
-    "rationale": "The unchanged sandbox continuity declaration moved to the focused promotion-recovery file and retains container-realm transcript probing, in-place ownership promotion, and no-provisioning assertions."
+    "rationale": "The renamed successor retains the affected-runner package and test absence checks and extends the same assertion to the retired map-only implementation and data files."
+  },
+  {
+    "baseFile": "tests2/core/guard-v2.test.ts",
+    "baseName": "has a v2Native allowlist (guard self-coverage)",
+    "current": [
+      {
+        "file": "tests2/core/guard-v2.test.ts",
+        "name": "discovers every active test exactly once and covers itself"
+      }
+    ],
+    "rationale": "Convention discovery removes the v2Native allowlist entirely. The successor retains self-coverage by proving the guard is automatically discovered in the core lane."
+  },
+  {
+    "baseFile": "tests2/core/guard-v2.test.ts",
+    "baseName": "claims every actual tests2/{core,dom,integration} file (no orphans)",
+    "current": [
+      {
+        "file": "tests2/core/guard-v2.test.ts",
+        "name": "discovers every active test exactly once and covers itself"
+      }
+    ],
+    "rationale": "The successor derives all active files from the filesystem, compares every leaf assignment with the complete discovery union, and rejects duplicate or orphaned active tests without registration."
+  },
+  {
+    "baseFile": "tests2/core/guard-v2.test.ts",
+    "baseName": "resolves every migrated v2Path to an existing file (no dangling references)",
+    "current": [
+      {
+        "file": "tests2/core/guard-v2.test.ts",
+        "name": "discovers every active test exactly once and covers itself"
+      },
+      {
+        "file": "tests2/core/full-test-lane-entrypoints.test.ts",
+        "name": "keeps retired package, test, and map-only entrypoints absent"
+      }
+    ],
+    "rationale": "There are no v2Path references after registry retirement. Physical discovery now owns existence, while the entrypoint guard proves the obsolete registry and map-only consumers stay absent."
+  },
+  {
+    "baseFile": "tests2/core/guard-v2.test.ts",
+    "baseName": "resolves every v2Native path to an existing file",
+    "current": [
+      {
+        "file": "tests2/core/guard-v2.test.ts",
+        "name": "discovers every active test exactly once and covers itself"
+      },
+      {
+        "file": "tests2/core/full-test-lane-entrypoints.test.ts",
+        "name": "keeps retired package, test, and map-only entrypoints absent"
+      }
+    ],
+    "rationale": "There are no v2Native references after registry retirement. Filesystem discovery provides physical existence and self-coverage directly, and the entrypoint guard prevents the retired allowlist from returning."
+  },
+  {
+    "baseFile": "tests2/core/guard-v2.test.ts",
+    "baseName": "keeps migrated flag and v2Path consistent",
+    "current": [
+      {
+        "file": "tests2/core/guard-v2.test.ts",
+        "name": "uses NUL-safe add-only Git path admission so rename destinations cannot hide"
+      },
+      {
+        "file": "tests2/core/guard-v2.test.ts",
+        "name": "admits semantic rename destinations without changing execution discovery"
+      },
+      {
+        "file": "tests2/core/full-test-lane-entrypoints.test.ts",
+        "name": "keeps retired package, test, and map-only entrypoints absent"
+      }
+    ],
+    "rationale": "The migrated flag and v2Path state were deleted rather than translated. The successors keep that registry absent and validate every introduced or renamed destination independently of execution discovery, including NUL-safe Git path handling."
   }
 ]
