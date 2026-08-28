@@ -152,9 +152,67 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 
 /** Specs whose Docker-backed cases require the local sandbox image. */
 const DOCKER_GATED = ["tests/e2e/sandbox-recovery.e2e.spec.ts"];
+const TSX_CLI = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+const PLAYWRIGHT_CLI = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
+const PLAYWRIGHT_E2E_WRAPPER = join(REPO_ROOT, "scripts", "run-playwright-e2e.mjs");
 
-function npmCmd() {
-	return process.platform === "win32" ? "npm.cmd" : "npm";
+function localNodeInvocation(entryPoint, args, dependency, {
+	exists = existsSync,
+	execPath = process.execPath,
+} = {}) {
+	if (!exists(entryPoint)) {
+		throw new Error(`[e2e-v2] ${dependency} is unavailable at ${entryPoint}. Install local dependencies with npm ci.`);
+	}
+	return Object.freeze({ command: execPath, args: Object.freeze([entryPoint, ...args]), shell: false });
+}
+
+/** Build Group A's shell-free local tsx invocation. */
+export function createGroupAInvocation(specs, {
+	nodeConcurrency = "2",
+	tsxCli = TSX_CLI,
+	exists,
+	execPath,
+} = {}) {
+	return localNodeInvocation(tsxCli, ["--test", `--test-concurrency=${nodeConcurrency}`, ...specs], "tsx CLI", { exists, execPath });
+}
+
+/** Build Group B's shell-free invocation of the cache-isolating Playwright wrapper. */
+export function createGroupBInvocation(specs, {
+	workers = 2,
+	retries = 3,
+	wrapper = PLAYWRIGHT_E2E_WRAPPER,
+	exists,
+	execPath,
+} = {}) {
+	return localNodeInvocation(wrapper, [...specs, `--workers=${workers}`, `--retries=${retries}`], "Playwright E2E wrapper", { exists, execPath });
+}
+
+/** Build transitional Group C's shell-free local Playwright invocation. */
+export function createTransitionalGroupCInvocation({
+	workers = 2,
+	retryFree = false,
+	playwrightCli = PLAYWRIGHT_CLI,
+	exists,
+	execPath,
+} = {}) {
+	return localNodeInvocation(playwrightCli, [
+		"test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e",
+		`--workers=${workers}`, ...(retryFree ? ["--retries=0"] : []),
+	], "Playwright CLI", { exists, execPath });
+}
+
+/** Build canonical Group C's shell-free wrapper invocation. */
+export function createCanonicalGroupCInvocation(specs, {
+	workers = 2,
+	retryFree = false,
+	wrapper = PLAYWRIGHT_E2E_WRAPPER,
+	exists,
+	execPath,
+} = {}) {
+	return localNodeInvocation(wrapper, [
+		...specs, "--project=browser-canonical", `--workers=${workers}`,
+		...(retryFree ? ["--retries=0"] : []),
+	], "Playwright E2E wrapper", { exists, execPath });
 }
 
 // The E2E runner intentionally defaults Groups B/C to two workers. It is a
@@ -167,7 +225,7 @@ export function resolveE2ePlaywrightWorkers(env = process.env) {
 	return Math.min(4, requested);
 }
 
-function run(command, args, { env = {}, label, shell } = {}) {
+function run(command, args, { env = {}, label } = {}) {
 	const startWall = performance.now();
 	return new Promise((resolveRun) => {
 		const child = spawn(command, args, {
@@ -176,10 +234,8 @@ function run(command, args, { env = {}, label, shell } = {}) {
 			// Re-merging process.env here would restore deleted credentials/cache roots.
 			env: composeE2EChildEnvironment(env),
 			stdio: "inherit",
-			// Default: shell on Windows (needed for npm.cmd/npx.cmd). Callers that
-			// spawn an absolute exe with spaces (e.g. process.execPath under
-			// "C:\Program Files\…") pass shell:false so the path isn't word-split.
-			shell: shell ?? (process.platform === "win32"),
+			// Discovered paths are always argv data, never shell program text.
+			shell: false,
 		});
 
 		let settled = false;
@@ -235,8 +291,8 @@ async function runGroupA(specs, coordinatorEnv) {
 	// files to cut wall time while keeping gateway-boot load modest (override with
 	// E2E_V2_NODE_CONCURRENCY).
 	const nodeConc = process.env.E2E_V2_NODE_CONCURRENCY || "2";
-	const args = ["--test", `--test-concurrency=${nodeConc}`, ...specs];
-	return run(process.platform === "win32" ? "npx.cmd" : "npx", ["tsx", ...args], {
+	const invocation = createGroupAInvocation(specs, { nodeConcurrency: nodeConc });
+	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(coordinatorEnv, { ...EXTERNAL_FREE_ENV, NODE_ENV: "test" }),
 		label: "A/node-relocate",
 	});
@@ -260,7 +316,8 @@ async function runGroupB(specs, coordinatorEnv) {
 	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
 	// explicitly passes 0 so no first-attempt failure can be hidden.
 	const pwWorkers = resolveE2ePlaywrightWorkers();
-	return run(npmCmd(), ["run", "test:e2e:run", "--", ...specs, `--workers=${pwWorkers}`, `--retries=${retries}`], {
+	const invocation = createGroupBInvocation(specs, { workers: pwWorkers, retries });
+	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 		label: "B/e2e-relocate",
 	});
@@ -281,14 +338,13 @@ async function runGroupC(specs, coordinatorEnv) {
 	if (transitionalSpecs.length > 0) {
 		// Keep the transitional project invocation whole: Playwright's variadic
 		// --project option would otherwise consume positional file filters.
-		const localCli = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
-		const usesLocal = existsSync(localCli);
-		const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
-		const pre = usesLocal ? [localCli] : ["playwright"];
-		const transitional = await run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`, ...retryArgs], {
+		const invocation = createTransitionalGroupCInvocation({
+			workers: pwWorkersC,
+			retryFree: retryArgs.length > 0,
+		});
+		const transitional = await run(invocation.command, invocation.args, {
 			env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
 			label: "C/adapter-browser",
-			shell: usesLocal ? false : (process.platform === "win32"),
 		});
 		wallMs += transitional.wallMs;
 		if (transitional.code !== 0) return { ...transitional, wallMs };
@@ -296,10 +352,11 @@ async function runGroupC(specs, coordinatorEnv) {
 
 	if (canonicalSpecs.length > 0) {
 		const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
-		const canonical = await run(npmCmd(), [
-			"run", "test:e2e:run", "--", ...canonicalSpecs,
-			"--project=browser-canonical", `--workers=${pwWorkersC}`, ...retryArgs,
-		], {
+		const invocation = createCanonicalGroupCInvocation(canonicalSpecs, {
+			workers: pwWorkersC,
+			retryFree: retryArgs.length > 0,
+		});
+		const canonical = await run(invocation.command, invocation.args, {
 			env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
 			label: "C/canonical-browser",
 		});
@@ -330,7 +387,6 @@ async function runGroupD(specs, { coordinatorEnv } = {}) {
 			VITEST_MAX_WORKERS: "1",
 		}),
 		label: "D/vitest-real-fidelity",
-		shell: false,
 	});
 }
 

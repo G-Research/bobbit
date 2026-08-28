@@ -7,20 +7,11 @@
  * orphan) silently lets failures slip onto master; a file claimed by two phases
  * wastes wall time and confuses ownership. Both fail this test.
  *
- * The four membership buckets, derived from the SAME sources the runners use so
- * the guard can never drift from reality:
- *   1. unit · node     — scripts/test-phase-config.mjs NODE_UNIT_GLOBS, run by
- *                        scripts/run-unit.mjs (`tsx --test`).
- *   2. unit · browser  — tests/playwright.config.ts (file:// browser fixtures),
- *                        run by scripts/run-unit.mjs (`playwright test`).
- *   3. e2e             — playwright-e2e.config.ts (union across its projects),
- *                        run by the e2e gate.
- *   4. manual-integration — the path tests/manual-integration/**. This is the
- *                        ONLY gate-exempt path. The guard NEVER consults
- *                        playwright-manual.config.ts: a spec that some other
- *                        config happens to collect but that does not physically
- *                        live under tests/manual-integration/ is treated as an
- *                        orphan, by design (no "fourth bucket" loophole).
+ * Membership is derived from the SAME side-effect-free discovery used by the
+ * current runners. Canonical and transitional convention-owned tests come from
+ * scripts/testing-v2/test-discovery.mjs; legacy unit paths retain their shared
+ * NODE_UNIT_GLOBS and tests/playwright.config.ts checks. Manual integration is
+ * the only gate-exempt lane. Discovery rejects duplicate ownership itself.
  *
  * Also pins the runner-convention purity that keeps the two unit runners
  * separable: *.test.ts ⇒ node:test, *.spec.ts ⇒ Playwright. A *.test.ts must
@@ -32,8 +23,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { NODE_UNIT_GLOBS } from "../scripts/test-phase-config.mjs";
+import { fileURLToPath } from "node:url";
+import { createE2EPhaseSelection, createUnitBrowserPhaseSelection, NODE_UNIT_GLOBS } from "../scripts/test-phase-config.mjs";
+import { runtimeImportedModules } from "../scripts/testing/layout-policy.mjs";
+import { classifyTestPath, discoverTests } from "../scripts/testing-v2/test-discovery.mjs";
 
 const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TESTS_DIR, "..");
@@ -123,23 +116,13 @@ function configRuns(config: any, configDir: string, absFile: string): boolean {
 	return false;
 }
 
-async function importDefault(absPath: string): Promise<any> {
-	// Bound any import-time side effects (e.g. the e2e config's cache bootstrap)
-	// to a throwaway temp cache dir so importing for introspection is inert.
-	if (!process.env.PWTEST_CACHE_DIR) {
-		process.env.PWTEST_CACHE_DIR = join(REPO_ROOT, "node_modules", ".cache", "phase-invariant-pwtest");
-	}
-	const mod = await import(pathToFileURL(absPath).href);
-	return mod.default ?? mod;
-}
-
-test("every test file is claimed by exactly one phase (no orphans, no double-claims)", async () => {
-	const unitConfigPath = join(TESTS_DIR, "playwright.config.ts");
-	const e2eConfigPath = join(REPO_ROOT, "playwright-e2e.config.ts");
-	const unitConfig = await importDefault(unitConfigPath);
-	const e2eConfig = await importDefault(e2eConfigPath);
+test("every test file is claimed by exactly one phase (no orphans, no double-claims)", () => {
+	const unitConfig = createUnitBrowserPhaseSelection();
+	const e2eConfig = { projects: Object.values(createE2EPhaseSelection()) };
 
 	const nodeUnitRes = NODE_UNIT_GLOBS.map((g: string) => globToRegExp(g));
+	const discovery = discoverTests({ repoRoot: REPO_ROOT });
+	const discoveredPaths = new Set(discovery.all);
 
 	const files = collectTestFiles(TESTS_DIR);
 	const problems: string[] = [];
@@ -148,10 +131,21 @@ test("every test file is claimed by exactly one phase (no orphans, no double-cla
 		const repoRel = toPosix(relative(REPO_ROOT, abs));
 		const buckets: string[] = [];
 
-		if (nodeUnitRes.some((re) => re.test(repoRel))) buckets.push("unit·node");
-		if (configRuns(unitConfig, TESTS_DIR, abs)) buckets.push("unit·browser");
-		if (configRuns(e2eConfig, REPO_ROOT, abs)) buckets.push("e2e");
-		if (repoRel.startsWith("tests/manual-integration/")) buckets.push("manual-integration");
+		if (discoveredPaths.has(repoRel)) {
+			// Convention ownership is runner discovery itself, not a second set of
+			// path globs. This branch is exclusive so canonical and transitional
+			// paths are each claimed exactly once during the dual-root migration.
+			const owner = classifyTestPath(repoRel);
+			if (owner?.phase === "unit") buckets.push(`unit·${owner.runner}`);
+			else if (owner?.phase === "browser") buckets.push("unit·browser");
+			else if (owner?.phase === "e2e") buckets.push("e2e");
+			else if (owner?.phase === "manual") buckets.push("manual");
+		} else {
+			if (nodeUnitRes.some((re) => re.test(repoRel))) buckets.push("unit·node");
+			if (configRuns(unitConfig, TESTS_DIR, abs)) buckets.push("unit·browser");
+			if (configRuns(e2eConfig, REPO_ROOT, abs)) buckets.push("e2e");
+			if (repoRel.startsWith("tests/manual-integration/")) buckets.push("manual-integration");
+		}
 
 		if (buckets.length === 0) {
 			problems.push(`ORPHAN: ${repoRel} — runs in no phase. Add it to a unit/e2e config or move it under tests/manual-integration/.`);
@@ -169,26 +163,16 @@ test("every test file is claimed by exactly one phase (no orphans, no double-cla
 
 test("runner-convention purity: .test.ts ⇒ node:test, .spec.ts ⇒ Playwright", () => {
 	const files = collectTestFiles(TESTS_DIR);
-	// Detect an ACTUAL import/require STATEMENT of a module specifier — not a
-	// bare substring. We require the specifier to be immediately preceded by an
-	// import keyword (`import "x"`), a re-export/binding `from`, or `require(`.
-	// A module name appearing as a plain string argument elsewhere in a file
-	// (e.g. this guard passes "@playwright/test" / "node:test" as arguments)
-	// is NOT preceded by any of those, so the guard can — and does — scan itself.
-	const importsModule = (src: string, spec: string): boolean => {
-		const q = spec.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(`(?:\\bfrom|\\bimport|\\brequire\\(\\s*)\\s*["']${q}["']`).test(src);
-	};
-
 	const offenders: string[] = [];
 	for (const abs of files) {
 		const name = abs.split(/[\\/]/).pop()!;
 		const src = readFileSync(abs, "utf8");
 		const repoRel = toPosix(relative(REPO_ROOT, abs));
-		if (name.endsWith(".test.ts") && importsModule(src, "@playwright/test")) {
+		const imports = new Set(runtimeImportedModules(repoRel, src));
+		if (name.endsWith(".test.ts") && imports.has("@playwright/test")) {
 			offenders.push(`${repoRel} — a *.test.ts must use node:test, not @playwright/test (rename to *.spec.ts or switch runner).`);
 		}
-		if (name.endsWith(".spec.ts") && importsModule(src, "node:test")) {
+		if (name.endsWith(".spec.ts") && imports.has("node:test")) {
 			offenders.push(`${repoRel} — a *.spec.ts must use Playwright, not node:test (rename to *.test.ts or switch runner).`);
 		}
 	}

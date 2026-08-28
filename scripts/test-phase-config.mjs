@@ -15,4 +15,71 @@
  * Windows the top-level `tests/*.test.ts` glob alone expands to 340+ paths and
  * blows the ~32k command-line limit (see docs/testing-strategy.md).
  */
+import { TEST_LAYOUT } from "./testing/layout-policy.mjs";
+
 export const NODE_UNIT_GLOBS = ["tests/*.test.ts", "tests/contract/*.test.ts"];
+
+/** Pure Playwright path selection for legacy unit-browser fixtures. */
+export function createUnitBrowserPhaseSelection() {
+	return {
+		testDir: ".",
+		testMatch: "**/*.spec.ts",
+		testIgnore: ["e2e/**", "manual-integration/**"],
+	};
+}
+
+function canonicalMatch(semantic) {
+	const convention = TEST_LAYOUT.find((entry) => entry.semantic === semantic);
+	if (!convention) throw new Error(`Canonical ${semantic} test convention is missing`);
+	return `**/*${convention.suffix}`;
+}
+
+/** Pure Playwright path selection shared by the E2E config and phase invariant. */
+export function createE2EPhaseSelection() {
+	return {
+		api: {
+			name: "api",
+			testDir: "./tests/e2e",
+			testIgnore: [
+				"**/ui/**",
+				"**/session-lifecycle-ui*",
+				"**/mcp-tool-permission*",
+				"**/mcp-integration*",
+				"**/per-project-config-dirs*",
+				"**/port-auto-increment*",
+				"**/api/**",
+				"**/browser/**",
+				"**/node/**",
+				"**/vitest/**",
+				"**/goal-archive-branch-cleanup*",
+			],
+		},
+		apiCanonical: {
+			name: "api-canonical",
+			testDir: "./tests/e2e/api",
+			testMatch: [canonicalMatch("api-e2e")],
+		},
+		browserCanonical: {
+			name: "browser-canonical",
+			testDir: "./tests/e2e/browser",
+			testMatch: [canonicalMatch("browser-e2e")],
+		},
+		apiRealpush: {
+			name: "api-realpush",
+			testDir: "./tests/e2e",
+			testMatch: ["**/goal-archive-branch-cleanup.e2e.spec.ts"],
+		},
+		browser: {
+			name: "browser",
+			testDir: "./tests/e2e",
+			testMatch: [
+				"**/ui/*.spec.ts",
+				"**/session-lifecycle-ui*.spec.ts",
+				"**/mcp-tool-permission*.spec.ts",
+				"**/mcp-integration*.spec.ts",
+				"**/per-project-config-dirs*.spec.ts",
+				"**/port-auto-increment*.spec.ts",
+			],
+		},
+	};
+}

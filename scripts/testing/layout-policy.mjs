@@ -262,6 +262,11 @@ function extractImportedModules(sourceFile) {
 	return modules;
 }
 
+/** Parse source without executing it and return its literal runtime imports. */
+export function runtimeImportedModules(filePath, source) {
+	return Object.freeze([...extractImportedModules(parseTestSource(filePath, source))]);
+}
+
 const API_BROWSER_PRIMITIVES = new Set(["chromium", "firefox", "webkit", "page", "browser", "context"]);
 
 function unwrapExpression(expression) {

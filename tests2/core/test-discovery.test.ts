@@ -12,6 +12,7 @@ import {
 	validateIntroducedTestPaths,
 } from "../../scripts/testing-v2/test-discovery.mjs";
 import { TEST_LAYOUT } from "../../scripts/testing/layout-policy.mjs";
+import { createE2EPhaseSelection } from "../../scripts/test-phase-config.mjs";
 
 const ISOLATED_TEST_CAP = 14;
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
@@ -138,6 +139,28 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 	}
 	const config = objectLiteral(configExpression, `${configFile} default export`);
 	const projects = arrayLiteral(property(config, "projects"), `${configFile} projects`);
+	if (configFile === "playwright-e2e.config.ts") {
+		const selection = createE2EPhaseSelection() as Record<string, {
+			name: string; testDir: string; testMatch?: string[]; testIgnore?: string[];
+		}>;
+		return projects.elements.map((element, index) => {
+			const project = objectLiteral(element, `${configFile} projects[${index}]`);
+			const spread = project.properties.find(ts.isSpreadAssignment);
+			const expression = spread && unwrapExpression(spread.expression);
+			if (!expression || !ts.isPropertyAccessExpression(expression)
+				|| !ts.isIdentifier(expression.expression) || expression.expression.text !== "phaseSelection") {
+				throw new Error(`${configFile} projects[${index}] must spread phaseSelection.<project>`);
+			}
+			const selected = selection[expression.name.text];
+			if (!selected) throw new Error(`${configFile} projects[${index}] references unknown phase selection`);
+			return {
+				name: selected.name,
+				testDir: selected.testDir,
+				testMatch: selected.testMatch ?? [],
+				testIgnore: selected.testIgnore ?? [],
+			};
+		});
+	}
 	return projects.elements.map((element, index) => {
 		const project = objectLiteral(element, `${configFile} projects[${index}]`);
 		const context = `${configFile} projects[${index}]`;
@@ -411,7 +434,8 @@ describe("Playwright selector parity", () => {
 		const coordinator = readFileSync(resolve(REPO_ROOT, "scripts/testing-v2/run-e2e-v2.mjs"), "utf8");
 		const groupC = coordinator.match(/async function runGroupC[\s\S]*?(?=\nexport function groupDVitestArgs)/)?.[0];
 		expect(groupC).toContain('spec.startsWith("tests/e2e/browser/")');
-		expect(groupC).toContain('"--project=browser-canonical"');
+		expect(groupC).toContain("createCanonicalGroupCInvocation(canonicalSpecs");
+		expect(coordinator).toContain('"--project=browser-canonical"');
 	});
 });
 

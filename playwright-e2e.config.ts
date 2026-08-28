@@ -1,11 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
-import { TEST_LAYOUT } from "./scripts/testing/layout-policy.mjs";
+import { createE2EPhaseSelection } from "./scripts/test-phase-config.mjs";
 import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
 
-type TestLayoutConvention = { semantic: string; suffix: string };
-const testLayout = TEST_LAYOUT as readonly TestLayoutConvention[];
+const phaseSelection = createE2EPhaseSelection();
 
 export function resolveE2EOutputDir(runRoot = getRunRoot()): string {
 	return join(runRoot, "playwright-e2e-results");
@@ -66,12 +65,6 @@ function prepareE2ERuntimeCaches(): void {
 
 prepareE2ERuntimeCaches();
 
-function canonicalE2EMatch(semantic: "api-e2e" | "browser-e2e"): string {
-	const convention = testLayout.find((entry) => entry.semantic === semantic);
-	if (!convention) throw new Error(`Canonical ${semantic} test convention is missing`);
-	return `**/*${convention.suffix}`;
-}
-
 // Tier 2.5 video reporter — opt-in via RECORDSCREEN=1. When unset, the
 // reporter file is never loaded → zero overhead. See docs/testing-tier-2-5.md.
 const recordScreenReporters: Array<[string]> = process.env.RECORDSCREEN === "1"
@@ -128,23 +121,7 @@ export default {
 	},
 	projects: [
 		{
-			name: "api",
-			testDir: "./tests/e2e",
-			testIgnore: [
-				"**/ui/**",
-				"**/session-lifecycle-ui*",
-				"**/mcp-tool-permission*",
-				"**/mcp-integration*",
-				"**/per-project-config-dirs*",
-				"**/port-auto-increment*",
-				// Canonical lanes are owned by the dedicated projects below.
-				"**/api/**",
-				"**/browser/**",
-				"**/node/**",
-				"**/vitest/**",
-				// Owned by the api-realpush project (different env).
-				"**/goal-archive-branch-cleanup*",
-			],
+			...phaseSelection.api,
 			// In-process API workers still boot a full gateway and shell out to git in
 			// several specs. On Windows, 4 concurrent gateways under verification load
 			// produced fixture setup retries and 900s broad-suite timeouts; 2 preserves
@@ -152,15 +129,11 @@ export default {
 			workers: 2,
 		},
 		{
-			name: "api-canonical",
-			testDir: "./tests/e2e/api",
-			testMatch: [canonicalE2EMatch("api-e2e")],
+			...phaseSelection.apiCanonical,
 			workers: 2,
 		},
 		{
-			name: "browser-canonical",
-			testDir: "./tests/e2e/browser",
-			testMatch: [canonicalE2EMatch("browser-e2e")],
+			...phaseSelection.browserCanonical,
 			workers: 3,
 			fullyParallel: false,
 		},
@@ -168,23 +141,12 @@ export default {
 			// Real-push variant of the in-process harness — isolated project so it
 			// doesn't share env (BOBBIT_TEST_NO_PUSH) with the main API project.
 			// See tests/e2e/in-process-harness-realpush.ts.
-			name: "api-realpush",
-			testDir: "./tests/e2e",
-			testMatch: ["**/goal-archive-branch-cleanup.e2e.spec.ts"],
+			...phaseSelection.apiRealpush,
 			workers: 1,
 			fullyParallel: false,
 		},
 		{
-			name: "browser",
-			testDir: "./tests/e2e",
-			testMatch: [
-				"**/ui/*.spec.ts",
-				"**/session-lifecycle-ui*.spec.ts",
-				"**/mcp-tool-permission*.spec.ts",
-				"**/mcp-integration*.spec.ts",
-				"**/per-project-config-dirs*.spec.ts",
-				"**/port-auto-increment*.spec.ts",
-			],
+			...phaseSelection.browser,
 			workers: 3,
 			// Serialise browser specs within the project. Each browser worker
 			// is gateway + Chromium + UI static serve — even at workers=3, cross-

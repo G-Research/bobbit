@@ -25,6 +25,7 @@ import { withEnv } from "../harness/with-env.js";
 import {
   createE2ERunPaths,
   createIsolatedE2EEnvironment,
+  createPlaywrightE2EInvocation,
   isE2EAmbientRuntimeEnvKey,
 } from "../../scripts/run-playwright-e2e.mjs";
 import {
@@ -33,8 +34,12 @@ import {
 } from "../../scripts/testing-v2/run-browser-v2.mjs";
 import {
   composeE2EChildEnvironment,
+  createCanonicalGroupCInvocation,
   createE2EV2CoordinatorEnvironment,
+  createGroupAInvocation,
+  createGroupBInvocation,
   createNestedE2EEnvironment,
+  createTransitionalGroupCInvocation,
   groupDVitestArgs,
   resolveE2ERetryCount,
 } from "../../scripts/testing-v2/run-e2e-v2.mjs";
@@ -435,8 +440,52 @@ describe("unit run isolation", () => {
     )?.[0];
     expect(groupA).toBeDefined();
     expect(groupA).not.toContain("--test-force-exit");
-    expect(groupA).toContain('const args = ["--test", `--test-concurrency=${nodeConc}`, ...specs];');
+    expect(groupA).toContain("createGroupAInvocation(specs, { nodeConcurrency: nodeConc })");
     expect(groupA).not.toMatch(/--retr(?:y|ies)(?:=|\b)/);
+  });
+
+  it("keeps discovered E2E paths as shell-free argv values for every local runner", () => {
+    const execPath = "C:\\Program Files\\nodejs\\node.exe";
+    const exists = () => true;
+    const hostile = 'space & pipe| %TEMP% "quote" > marker';
+    const groupAPath = `tests/e2e/node/${hostile}.node-e2e.test.ts`;
+    const groupBPath = `tests/e2e/api/${hostile}.api-e2e.spec.ts`;
+    const groupCPath = `tests/e2e/browser/${hostile}.browser-e2e.spec.ts`;
+    const invocations = [
+      createGroupAInvocation([groupAPath], { execPath, exists }),
+      createGroupBInvocation([groupBPath], { execPath, exists }),
+      createCanonicalGroupCInvocation([groupCPath], { execPath, exists }),
+      createTransitionalGroupCInvocation({ execPath, exists }),
+      createPlaywrightE2EInvocation([groupBPath], { execPath, exists }),
+    ];
+
+    for (const invocation of invocations) {
+      expect(invocation.command).toBe(execPath);
+      expect(invocation.shell).toBe(false);
+      expect(invocation.args.join("\n")).not.toMatch(/npm\.cmd|npx\.cmd|cmd\.exe/i);
+    }
+    expect(invocations[0].args).toContain(groupAPath);
+    expect(invocations[1].args).toContain(groupBPath);
+    expect(invocations[2].args).toContain(groupCPath);
+    expect(invocations[4].args).toContain(groupBPath);
+    for (const [invocation, path] of [
+      [invocations[0], groupAPath],
+      [invocations[1], groupBPath],
+      [invocations[2], groupCPath],
+      [invocations[4], groupBPath],
+    ] as const) {
+      expect(invocation.args.filter((arg: string) => arg === path)).toHaveLength(1);
+    }
+  });
+
+  it("fails closed when a required local E2E CLI is unavailable", () => {
+    const missing = () => false;
+    expect(() => createGroupAInvocation(["tests/e2e/node/example.node-e2e.test.ts"], { exists: missing }))
+      .toThrow(/tsx CLI is unavailable.*npm ci/);
+    expect(() => createTransitionalGroupCInvocation({ exists: missing }))
+      .toThrow(/Playwright CLI is unavailable.*npm ci/);
+    expect(() => createPlaywrightE2EInvocation([], { exists: missing }))
+      .toThrow(/Playwright CLI is unavailable.*npm ci/);
   });
 
   it("uses the retry-free control for E2E Groups B/C/D and both Playwright configs", () => {
@@ -448,8 +497,10 @@ describe("unit run isolation", () => {
     expect(resolveE2ERetryCount({})).toBe(3);
     expect(resolveE2ERetryCount({ BOBBIT_V2_RETRY_FREE: "1" })).toBe(0);
     expect(groupB).toContain("const retries = resolveE2ERetryCount(coordinatorEnv);");
-    expect(groupB).toContain("`--retries=${retries}`");
+    expect(groupB).toContain("createGroupBInvocation(specs, { workers: pwWorkers, retries })");
+    expect(createGroupBInvocation([], { retries: 0 }).args).toContain("--retries=0");
     expect(groupC).toContain('const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];');
+    expect(createCanonicalGroupCInvocation([], { retryFree: true }).args).toContain("--retries=0");
     expect(groupDVitestArgs({})).not.toContain("--retry=0");
     expect(groupDVitestArgs({ BOBBIT_V2_RETRY_FREE: "1" })).toContain("--retry=0");
     for (const config of ["playwright-e2e.config.ts", "playwright-v2.config.ts"])
