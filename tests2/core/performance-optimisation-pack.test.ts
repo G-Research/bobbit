@@ -224,5 +224,6 @@ describe("performance optimisation first-party pack", () => {
 		expect(DATABASE_SOURCE).not.toContain('"./better_sqlite3.node"');
 		expect(COPY_SOURCE).toMatch(/FIRST_PARTY_PACKS\s*=\s*\[[^\]]*"performance-optimisation"/);
 		expect(HARNESS_SOURCE).toMatch(/FIRST_PARTY_PACKS\s*=\s*\[[^\]]*"performance-optimisation"/);
+		expect(HARNESS_SOURCE).toContain('BUILTIN_PACK_SKIP_RELATIVE_DIRS = new Set(["lib/native"])');
 	});
 });
