@@ -1,5 +1,7 @@
 # Session Manager Sidebar Views
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Status:** Approved implementation specification
 
 **Scope:** Desktop and mobile session navigation, filtering, session tags, and Pin / Unpin

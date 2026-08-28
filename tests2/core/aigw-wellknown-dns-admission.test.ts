@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 // AIGW provider DNS admission and active-host lifecycle coverage.
 
 import { describe, it, afterEach } from "vitest";

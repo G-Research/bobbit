@@ -1,5 +1,7 @@
 # Async background cleanup: issue analysis
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Historical issue-analysis artifact.** This document records the production baseline and proposed migration for the earlier **Async Background Cleanup** goal. It is not a current worktree ownership or restart policy. [Preserve user worktrees](preserve-user-worktrees.md) supersedes its worktree sweep, Maintenance eligibility, startup reclaim/adoption, and gateway-shutdown claims: boot discovery is diagnostic-only, stale pool entries are not adopted, and graceful shutdown drains only current-instance ready pool entries. The remaining sections are preserved as implementation history.
 
 Scope at the time: the focused background-sweeper, purge, orphan-cleanup, and preview-artifact slice described by goal **Async Background Cleanup**

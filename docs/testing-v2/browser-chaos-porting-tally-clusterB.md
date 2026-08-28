@@ -5,7 +5,8 @@
 > fix** (corrected in-scope `N = M = 41`; the "~9 held" were canonical-corpus
 > `closed-earlier` hole-closed mutants double-counted) — and the authoritative run
 > live in [`browser-chaos-report.md`](./browser-chaos-report.md). Retained for the
-> per-batch porting audit trail and excluded-tier reasons.
+> per-batch porting audit trail and excluded-tier reasons. Commands and test-map
+> references below are historical audit evidence, not current authoring instructions.
 
 # Browser-chaos porting — Cluster B tally fragment
 

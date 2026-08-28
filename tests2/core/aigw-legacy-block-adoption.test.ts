@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 // Reproducer: a pre-v0.17.0 (unmarked) Bobbit `providers.aigw` publication must be
 // adopted on the ordinary model-registry read path, so live gateway discovery resumes
 // and upstream-provider provenance is restored without any separate refresh call.

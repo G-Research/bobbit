@@ -6,6 +6,7 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
+import { discoverTests } from "../../scripts/testing-v2/test-discovery.mjs";
 import {
 	GitTemplateHandoffReporter,
 	type GitTemplateHandoffCertifier,
@@ -50,6 +51,7 @@ const packageJson = JSON.parse(
 	readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
 ) as { scripts: Record<string, string> };
 const configSource = readFileSync(CONFIG_PATH, "utf8");
+const discoveredTests = discoverTests();
 
 function resolveSourceImport(importer: string, specifier: string): string | undefined {
 	if (!specifier.startsWith(".")) return undefined;
@@ -214,8 +216,8 @@ describe("direct unit-stage scheduling", () => {
 	it("certifies Git handoff only for the complete inventory with the resolved worker count", async () => {
 		assert.match(
 			configSource,
-			/new GitTemplateHandoffReporter\(coordinatorGitTemplate, MAX_WORKERS, execution\.unit\)/,
-			"the coordinator must inject the resolved cap and exact canonical inventory",
+			/new GitTemplateHandoffReporter\(coordinatorGitTemplate, MAX_WORKERS, discovery\.unit\)/,
+			"the coordinator must inject the resolved cap and exact convention-discovered inventory",
 		);
 		assert.doesNotMatch(
 			configSource,
@@ -348,17 +350,7 @@ describe("direct unit-stage scheduling", () => {
 				isolate: true,
 				maxWorkers: 1,
 				retry: 3,
-				include: [
-					"tests2/core/file-mentions-authenticated-boundary.test.ts",
-					"tests2/core/git-lifecycle-no-publication-real-git.test.ts",
-					"tests2/core/marketplace-install.test.ts",
-					"tests2/core/orphan-tool-result-rehydration-boundaries.test.ts",
-					"tests2/core/team-manager.test.ts",
-					"tests2/integration/base-path-cli-entrypoint.test.ts",
-					"tests2/integration/benchmark-bobbit-journeys.test.ts",
-					"tests2/integration/pack-native-assets-bundle.test.ts",
-					"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
-				],
+				include: discoveredTests.vitestE2E,
 				setupFiles: undefined,
 			},
 		);

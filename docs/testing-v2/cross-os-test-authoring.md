@@ -4,7 +4,7 @@
 
 Unit, DOM, integration, browser, and E2E tests may run at the same time on one machine and checkout. The test runtime gives each coordinator a canonical run root so one run cannot discover, overwrite, or clean up another run's state. This makes cross-platform failures reproducible instead of dependent on a developer's shell, home directory, or timing.
 
-See the [cross-suite runtime design](../design/isolate-unit-runtime.md) for the runtime wiring and [Unit gate operating model](unit-gate.md) for tier-1 commands.
+See the [test placement table](../testing-strategy.md#test-placement-and-automatic-discovery) before creating a file, the [cross-suite runtime design](../design/isolate-unit-runtime.md) for runtime wiring, and the [Unit gate operating model](unit-gate.md) for tier-1 commands. Paths and suffixes determine ownership automatically, so moving or renaming a test can change its runner and isolation contract.
 
 ## Ownership contract
 

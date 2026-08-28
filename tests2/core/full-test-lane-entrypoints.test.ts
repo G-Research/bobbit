@@ -3,14 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
-import { APPROVED_E2E_VITEST_PATHS } from "../../scripts/testing-v2/test-map-execution.mjs";
+import { discoverTests } from "../../scripts/testing-v2/test-discovery.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
 	scripts: Record<string, string>;
-};
-const testMap = JSON.parse(readFileSync(new URL("../tests-map.json", import.meta.url), "utf8")) as {
-	v2Native: Array<{ path: string }>;
 };
 
 const RETIRED_IMPLEMENTATION = [
@@ -38,6 +35,15 @@ const RETIRED_TESTS = [
 	"tests2/integration/affected-runner-boundary.test.ts",
 ] as const;
 
+const RETIRED_MAP_FILES = [
+	"scripts/testing-v2/test-map-execution.mjs",
+	"scripts/testing-v2/gen-inventory.mjs",
+	"scripts/testing-v2/codemod.mjs",
+	"scripts/testing-v2/lib-census.mjs",
+	"tests2/tests-map.json",
+	"tests2/codemod-report.json",
+] as const;
+
 function repoPath(...parts: string[]): string {
 	return resolve(REPO_ROOT, ...parts);
 }
@@ -50,14 +56,14 @@ describe("complete test lane entrypoints", () => {
 		}
 	});
 
-	it("keeps retired package and tests-map entrypoints absent", () => {
+	it("keeps retired package, test, and map-only entrypoints absent", () => {
 		assert.deepEqual(
 			Object.keys(packageJson.scripts).filter((name) => /^test:affected(?::|$)/.test(name)),
 			[],
 		);
-		const mapped = new Set(testMap.v2Native.map(({ path }) => path));
-		for (const path of RETIRED_TESTS) assert.equal(mapped.has(path), false, `${path} must stay retired`);
-		assert.equal(APPROVED_E2E_VITEST_PATHS.includes("tests2/integration/affected-runner-boundary.test.ts"), false);
+		const discovered = new Set(discoverTests().all);
+		for (const path of RETIRED_TESTS) assert.equal(discovered.has(path), false, `${path} must stay retired`);
+		for (const path of RETIRED_MAP_FILES) assert.equal(existsSync(repoPath(...path.split("/"))), false, `${path} must stay retired`);
 	});
 
 	it("dispatches the existing complete lanes and aggregate exactly", () => {

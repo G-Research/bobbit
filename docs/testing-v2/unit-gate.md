@@ -1,6 +1,6 @@
 # Unit gate operating model
 
-`npm run test:unit` is Bobbit's authoritative tier-1 gate and the normal local unit-feedback command. It runs the complete map-owned Vitest inventory through one coordinator, so local feedback cannot drift from a separately maintained change-impact model.
+`npm run test:unit` is Bobbit's authoritative tier-1 gate and the normal local unit-feedback command. It runs the complete convention-discovered Vitest inventory through one coordinator, so local feedback cannot drift from a separately maintained registry or change-impact model.
 
 The unit, DOM, and integration projects share the cross-suite isolation foundation with browser and E2E gates, so simultaneous workflow runs do not depend on host HOME, credentials, config, or mutable caches.
 
@@ -34,7 +34,7 @@ The broader reliability proof may run retry-free coordinators from separate work
 
 ## Projects and boundaries
 
-Normal collection contains these explicit projects from `tests2/tests-map.json`:
+Normal collection contains these projects, derived from path and suffix conventions:
 
 | Project | Runtime | Isolation | Purpose |
 |---|---|---|---|
@@ -67,18 +67,26 @@ Fixtures create writable trees under the active run root (or receive explicit fi
 
 The server prebundle is content-addressed and atomically published. Vitest transformed modules use a PID-scoped directory below the coordinator root, allowing one run's projects/workers to share transformed code without concurrent coordinators racing on writable metadata.
 
-Run the inventory audit after changing test ownership or fixtures:
+After adding or moving test-shaped paths, run the placement-admission check:
+
+```bash
+node scripts/testing-v2/check-inventory.mjs
+```
+
+It validates Git-introduced and untracked paths, including rename and copy destinations. Placement admission rejects unsupported new locations but does not select runners.
+
+Separately, run the unit declaration and ownership audit after changing test ownership or fixtures:
 
 ```bash
 npm run test:unit:inventory
 ```
 
-It verifies map ownership and declaration semantics, exact E2E ownership, project scheduling, isolated-project policy, the child-process boundary, and cross-process ownership tokens for writable/cleaned shared-worker fixture paths.
+It verifies convention-based ownership and declaration semantics, exact E2E ownership, project scheduling, isolated-project policy, the child-process boundary, and cross-process ownership tokens for writable or cleaned shared-worker fixture paths.
 
 ## Authoring rule
 
 A new test must synchronize on an exact observable lifecycle event, not elapsed time. Do not add sleeps, polling, retries, skips, `force-exit`, timeout increases, blind reloads, incidental fetch interception, or weaker assertions. Repair fixture ownership, teardown, or the real completion event instead.
 
-Register every new test in `tests2/tests-map.json`. Set its runner, tier, and project metadata accurately so the complete lanes discover it deterministically; do not add a separate path-impact registry.
+Place and name every new test according to the [test placement table](../testing-strategy.md#test-placement-and-automatic-discovery). The path and semantic suffix are its runner, tier, and project metadata; no separate registration or path-impact registry is allowed.
 
 Historical design and qualification evidence remain in [fast-gate design](fast-gate-design.md), [fast-gate progress](fast-gate-progress.md), and [Windows profiling](windows-unit-profile-2026-07-14.md).

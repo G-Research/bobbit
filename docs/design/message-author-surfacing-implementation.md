@@ -1,5 +1,7 @@
 # Message author surfacing: implementation design
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Status:** implementation-ready  
 **Approved visual:** [`message-author-labels-mockup.html` at `0966649`](https://github.com/G-Research/bobbit/blob/09666493652eb4aff7981b4f01d879535375b002/docs/design/message-author-labels-mockup.html)  
 **Builds on:** [Author Identity Metadata](author-identity-metadata.md) and [Message author identity](../message-author-identity.md)

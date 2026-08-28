@@ -1,5 +1,7 @@
 # Multi-repo & Components — Design Doc
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Goal:** [Multi-repo & components](../../). Generalize Bobbit's project model so a project may hold one or more components (apps, libs, services, docs, infra), each pointing at a repo (or repo subdir). Replace runtime workflow YAMLs with bespoke project-authored workflows inlined into `project.yaml`, resolved structurally against components. Fix the worktree pool so goals use it and sessions get pool warmth without persistent placeholder branches. Add a configurable worktree parent.
 
 **Audience:** implementors. This doc is the build plan; the goal spec is the contract.

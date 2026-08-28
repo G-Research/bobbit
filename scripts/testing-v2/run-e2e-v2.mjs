@@ -3,21 +3,20 @@
  * run-e2e-v2.mjs — the v2 "e2e" real-fidelity tier (task 7862db76).
  *
  * This is the per-workflow real-fidelity remainder that stays out of tier-1/2
- * (`test:v2`): the real-fidelity specs from tests2/tests-map.json (carried under
- * the tests-map `daily` bucket string — an internal taxonomy label, NOT a
- * scheduled lane; there is no `test:daily` script), MINUS
+ * (`test:v2`): the convention-owned real-fidelity specs discovered from their
+ * paths and semantic filename suffixes, MINUS
  *   - manual-integration specs (real-agent / real-LLM / real-Docker — that
  *     is the tier-3 `test:manual` lane, never here).
  *
- * Everything else in that bucket normally runs at retries:3 for developer
- * workflow resilience. Set BOBBIT_V2_RETRY_FREE=1 to qualify Groups B/C/D with
- * retries disabled; Group A completes through its owning fixture teardowns and
- * has no retry knob wired here. The groups are derived mechanically from tests-map.json (so this is reusable, not
- * hand-assembled — it tracks the map, not a frozen list):
+ * Everything in the E2E tier normally runs at retries:3 for developer workflow
+ * resilience. Set BOBBIT_V2_RETRY_FREE=1 to qualify Groups B/C/D with retries
+ * disabled; Group A completes through its owning fixture teardowns and has no
+ * retry knob wired here. The groups come from shared filesystem discovery:
  *
- *   Group A — node relocate specs (tests node .test.ts): real git worktree /
- *             sweeper / sandbox-mount / spawn-tree fidelity. Run via `tsx --test`.
- *   Group B — playwright e2e relocate specs (tests/e2e .spec.ts): real
+ *   Group A — node real-fidelity specs (top-level tests/*.e2e.test.ts): real git
+ *             worktree / sweeper / sandbox-mount / spawn-tree fidelity. Run via
+ *             `tsx --test`.
+ *   Group B — playwright e2e specs (tests/e2e/*.e2e.spec.ts): real
  *             worktree pool / MCP subprocess / port / restart. Run via the legacy
  *             playwright-e2e config at retries:3 (or 0 when qualifying).
  *   Group C — adapter browser specs: the geometry/journey specs migrated into
@@ -39,13 +38,14 @@
  *   node scripts/testing-v2/run-e2e-v2.mjs [--group A|B|C|D] [--list] [--json <path>]
  */
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, dirname, resolve, basename } from "node:path";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 import { createCpuSampler } from "./assert-budget.mjs";
 import { coordinatorTempDirectory, createE2ERunPaths, createIsolatedE2EEnvironment } from "../run-playwright-e2e.mjs";
 import { copyEnvironment, deleteEnvironmentValue } from "./environment-policy.mjs";
+import { discoverTests } from "./test-discovery.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
@@ -120,52 +120,17 @@ function parseArgs(argv) {
 	return out;
 }
 
-/** Categorize daily-bucket entries and native real-fidelity owners (excluding manual-integration). */
-function classifyDaily() {
-	const map = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "tests-map.json"), "utf8"));
-	const daily = (map.entries || []).filter((e) => (e.tier || e.bucket) === "daily");
-	const A = []; // node relocate .test.ts
-	const B = []; // playwright e2e relocate .spec.ts
-	const C = []; // adapter browser specs -> tests2/browser/e2e/<basename>
-	const D = []; // isolated Vitest real-fidelity suites
-	const excluded = { manualIntegration: [], missing: [] };
-	for (const e of daily) {
-		const f = e.file;
-		if (f.startsWith("tests/manual-integration/")) {
-			excluded.manualIntegration.push(f);
-			continue;
-		}
-		if (e.method === "vitest-e2e") {
-			const dest = e.v2Path || f;
-			if (existsSync(join(REPO_ROOT, dest))) D.push(dest.replace(/\\/g, "/"));
-			else excluded.missing.push(dest.replace(/\\/g, "/"));
-			continue;
-		}
-		if (e.method === "adapter") {
-			// The physical migrated spec lives in tests2/browser/e2e/<basename>.
-			const dest = join("tests2", "browser", "e2e", basename(f));
-			if (existsSync(join(REPO_ROOT, dest))) C.push(dest.replace(/\\/g, "/"));
-			else excluded.missing.push(dest.replace(/\\/g, "/"));
-			continue;
-		}
-		// relocate
-		if (f.startsWith("tests/e2e/") && f.endsWith(".spec.ts")) B.push(f);
-		else if (f.endsWith(".test.ts")) A.push(f);
-		else excluded.missing.push(f); // unexpected shape
-	}
-	// Native tests do not have legacy daily-bucket records. Their explicit path
-	// and execution ownership place browser/e2e specs in Group C and approved
-	// Vitest real-filesystem suites in Group D.
-	for (const entry of map.v2Native || []) {
-		const dest = String(entry.path || "").replace(/\\/g, "/");
-		if (!dest || !existsSync(join(REPO_ROOT, dest))) {
-			if (dest) excluded.missing.push(dest);
-			continue;
-		}
-		if (dest.startsWith("tests2/browser/e2e/") && entry.execution?.runner === "playwright") C.push(dest);
-		if (entry.execution?.runner === "vitest" && entry.execution?.tier === "e2e" && entry.execution?.project === "e2e") D.push(dest);
-	}
-	return { A: [...new Set(A)], B: [...new Set(B)], C: [...new Set(C)], D: [...new Set(D)], excluded };
+/** Discover convention-owned E2E groups while retaining the list/report shape. */
+function classifyE2E() {
+	const discovery = discoverTests();
+	const { A, B, C, D } = discovery.e2eGroups;
+	return {
+		A,
+		B,
+		C,
+		D,
+		excluded: { manualIntegration: discovery.manual, missing: [] },
+	};
 }
 
 const SANDBOX_IMAGE = "bobbit-agent";
@@ -187,7 +152,7 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 }
 
 /** Specs whose Docker-backed cases require the local sandbox image. */
-const DOCKER_GATED = ["tests/e2e/sandbox-recovery.spec.ts"];
+const DOCKER_GATED = ["tests/e2e/sandbox-recovery.e2e.spec.ts"];
 
 function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
@@ -353,7 +318,7 @@ async function runGroupD(specs, { coordinatorEnv } = {}) {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const { A, B, C, D, excluded } = classifyDaily();
+	const { A, B, C, D, excluded } = classifyE2E();
 
 	if (args.list) {
 		console.log(JSON.stringify({ A, B, C, D, excluded }, null, 2));

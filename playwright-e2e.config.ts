@@ -142,7 +142,7 @@ export default {
 			// See tests/e2e/in-process-harness-realpush.ts.
 			name: "api-realpush",
 			testDir: "./tests/e2e",
-			testMatch: ["**/goal-archive-branch-cleanup.spec.ts"],
+			testMatch: ["**/goal-archive-branch-cleanup.e2e.spec.ts"],
 			workers: 1,
 			fullyParallel: false,
 		},

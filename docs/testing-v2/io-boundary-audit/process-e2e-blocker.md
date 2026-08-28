@@ -1,5 +1,7 @@
 # Verification process E2E blocker
 
+> **Historical audit.** Test-map classifications and inventory instructions below record the stated merge-base investigation, not current test placement or authoring guidance.
+
 Date: 2026-07-15
 
 ## Decision

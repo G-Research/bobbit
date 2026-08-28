@@ -29,7 +29,7 @@ async function flush(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal local mock helpers (copy of the pattern used in team-manager.test.ts,
+// Minimal local mock helpers (copy of the pattern used in team-manager.e2e.test.ts,
 // kept self-contained so we don't touch the existing test file).
 // ---------------------------------------------------------------------------
 

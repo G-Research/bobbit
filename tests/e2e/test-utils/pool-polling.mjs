@@ -6,8 +6,8 @@
 // their own.
 //
 // Imported by:
-//   - tests/e2e/pool-claim-restart-resume.spec.ts
-//   - tests/e2e/multi-repo-pool.spec.ts
+//   - tests/e2e/pool-claim-restart-resume.e2e.spec.ts
+//   - tests/e2e/multi-repo-pool.e2e.spec.ts
 import { apiFetch } from "../e2e-setup.js";
 
 /**

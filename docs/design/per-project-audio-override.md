@@ -1,5 +1,7 @@
 # Per-project agent-finish audio override
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 ## 1. Scope and invariants
 
 Add a project-owned override for the existing agent-finish beep while leaving every non-audio notification unchanged.

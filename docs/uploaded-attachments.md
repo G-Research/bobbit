@@ -138,7 +138,7 @@ Use these boundaries when changing the feature:
 - Snapshot persistence and specialized extraction: the uploaded attachment store and specialized document extractor under `src/server/agent/`.
 - Agent tool and authorization: `src/server/uploaded-attachment-routes.ts` and `defaults/tools/attachments/`.
 
-Pinning coverage lives in the uploaded-attachment core suites, `tests2/dom/attachment-upload.test.ts`, `tests2/dom/uploaded-attachment-binary-text-repro.test.ts`, `tests2/integration/uploaded-attachment-tool.test.ts`, sandbox security integration coverage, and the attachment journey in `tests2/browser/journeys/misc.journey.spec.ts`. Test registration remains authoritative in `tests2/tests-map.json`.
+Pinning coverage lives in the uploaded-attachment core suites, `tests2/dom/attachment-upload.test.ts`, `tests2/dom/uploaded-attachment-binary-text-repro.test.ts`, `tests2/integration/uploaded-attachment-tool.test.ts`, sandbox security integration coverage, and the attachment journey in `tests2/browser/journeys/misc.journey.spec.ts`. Their paths and suffixes determine their Test Suite v2 owners automatically.
 
 ## Related behavior
 

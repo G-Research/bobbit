@@ -3,7 +3,7 @@
  * `in-process-harness.ts` minus the `BOBBIT_TEST_NO_PUSH=1` env line so that
  * `git push --delete` actually executes against the test's local bare-repo
  * origin. Used only by tests that assert real remote-branch lifecycle
- * (e.g. `goal-archive-branch-cleanup.spec.ts`). Registered as its own
+ * (e.g. `goal-archive-branch-cleanup.e2e.spec.ts`). Registered as its own
  * Playwright project in `playwright-e2e.config.ts` for env isolation.
  *
  * KEEP IN SYNC with `in-process-harness.ts` — the only intentional delta is

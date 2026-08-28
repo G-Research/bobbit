@@ -254,7 +254,7 @@ The shared selector already returns ordered distinct validated human IDs, and th
 
 ## Verification map
 
-The authoritative registration and rationale live in `tests2/tests-map.json`.
+The suites below are discovered from their Test Suite v2 paths; the table records the contract rationale.
 
 | Contract | Primary coverage |
 |---|---|

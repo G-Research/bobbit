@@ -18,9 +18,9 @@ The user accepted a budget increase in exchange for rock-solid reliability. The 
 Authoritative inputs:
 
 - Inventory: [`docs/testing-v2/inventory.md`](./inventory.md)
-- Machine map: [`tests2/tests-map.json`](../../tests2/tests-map.json)
+- Retired migration registry: `tests2/tests-map.json` (historical; deleted after convention discovery replaced it)
 - Baseline metrics: [`docs/testing-metrics/`](../testing-metrics/)
-- Validator run during this design pass: `node scripts/testing-v2/check-inventory.mjs` → PASS, 1105/1105 mapped once.
+- Historical validator result from this design pass: `node scripts/testing-v2/check-inventory.mjs` → PASS, 1105/1105 mapped once.
 
 ## 1. GatewayDeps DI seams
 

@@ -32,7 +32,7 @@ For each fs-only store test:
 3. Replace direct `node:fs` writes and assertions with `memfs` operations.
 4. Keep assertions unchanged; only the backing filesystem changes.
 5. Remove `guardProcessEnv()` only when the test no longer mutates `process.env`.
-6. Keep real-disk fidelity cases in `tests2/integration` and register new files in `tests2/tests-map.json`.
+6. Keep ordinary in-process real-disk cases in `tests2/integration/**/*.test.ts`; use `*.e2e.test.ts` only when they require the real-fidelity E2E coordinator. Placement provides automatic discovery.
 
 Do not migrate tests that use temp dirs because they are proving git, Docker, child-process, extension-host, build, symlink, path-guard, or real fs behavior.
 
@@ -149,7 +149,7 @@ Packed-consumer native binding load and write/read/close belong to bundle qualif
 
 ### Session store real filesystem — `tests2/integration/session-store-real-fs.test.ts`
 
-New file (registered in `tests2/tests-map.json`) with three canonical real-fs cases against the default `realFs`:
+This convention-discovered integration file has three canonical real-fs cases against the default `realFs`:
 
 - `saveNow` persists `sessions.json` through real fs and leaves no `.tmp` after the atomic rename.
 - Real `.bak.N` backup rotation, and restore from `.bak.1` after a corrupt primary.
@@ -157,7 +157,7 @@ New file (registered in `tests2/tests-map.json`) with three canonical real-fs ca
 
 ### CostTracker real filesystem — `tests2/integration/cost-tracker-real-fs.test.ts`
 
-`CostTracker`'s default `realFs` persistence now has a dedicated canonical integration test (registered in `tests2/tests-map.json`): it constructs a `CostTracker` against a real temp dir with the default (uninjected) fs and asserts `session-costs.json` is persisted and reloaded through `realFs`. This is the fidelity proof the design plan called for after `cost-tracker.test.ts` moved to memfs.
+`CostTracker`'s default `realFs` persistence now has a dedicated convention-discovered integration test: it constructs a `CostTracker` against a real temp dir with the default (uninjected) fs and asserts `session-costs.json` is persisted and reloaded through `realFs`. This is the fidelity proof the design plan called for after `cost-tracker.test.ts` moved to memfs.
 
 The gateway-backed integration tests `tests2/integration/compact-cost-ws.test.ts` and `tests2/integration/cost-update-cache-hit.test.ts` additionally exercise the default filesystem path end to end via a real gateway. The memfs unit tests in `cost-tracker.test.ts` therefore cover the store logic without duplicating disk fidelity.
 

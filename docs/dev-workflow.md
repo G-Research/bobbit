@@ -405,7 +405,7 @@ npx playwright test --config playwright-e2e.config.ts
 Run the existing complete lanes directly. This keeps local and workflow results aligned without a separate change-selection model:
 
 ```bash
-npm run test:unit      # Complete map-owned Vitest inventory
+npm run test:unit      # Complete convention-discovered Vitest inventory
 npm run test:browser   # Complete Playwright browser fixtures and journeys
 npm run test:e2e       # Complete Git/worktree, Docker, MCP, process, port, and restart lane
 npm run test:manual    # Gate-exempt real LLM, agent, and Docker coverage when required
@@ -420,7 +420,7 @@ BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
 BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
 ```
 
-When changing test ownership, run `npm run test:unit:inventory`. New tests still belong in the existing execution map; do not add a second impact registry or infer execution from changed paths.
+Test paths and filename suffixes determine ownership; there is no registration map. Follow [Test placement and automatic discovery](testing-strategy.md#test-placement-and-automatic-discovery), and run `npm run test:unit:inventory` when changing unit declaration or ownership semantics.
 
 See the [unit gate operating model](testing-v2/unit-gate.md), [testing strategy](testing-strategy.md), and [cross-OS test authoring guide](testing-v2/cross-os-test-authoring.md).
 

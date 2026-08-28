@@ -1,5 +1,7 @@
 # Hook Scope Context — EP-2b
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Goal:** expose a bounded, project-safe snapshot of the session's scope to lifecycle providers without changing lifecycle scheduling, provider activation, or any Host API capability.
 
 ## Contract

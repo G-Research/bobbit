@@ -1,5 +1,7 @@
 # Pi 0.81 upgrade design
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Status:** Implemented historical design. The dependency selection records the `0.81.1` upgrade; the verification sections below reflect the current policy that live advisory checks are release-only.
 
 ## Decision

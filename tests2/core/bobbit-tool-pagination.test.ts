@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Listed in tests-map.json `v2Native`.
+// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
 //
 // Pagination contract: list-style bobbit_read operations return bounded pages by
 // default, preserve ancillary fields, and add normalized pagination metadata even

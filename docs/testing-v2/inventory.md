@@ -1,20 +1,6 @@
 # Test Suite v2 — Legacy Inventory (Gate 1)
 
-Machine-generated classification of every legacy test file into the v2 tier
-buckets, plus the smoke-journey catalogue that consolidates the retired
-browser-E2E specs. This document is the human-readable companion to
-[`tests2/tests-map.json`](../../tests2/tests-map.json).
-
-- **Generator:** `scripts/testing-v2/gen-inventory.mjs` (deterministic — re-run after any test add/remove/rename).
-- **Validator (the gate):** `scripts/testing-v2/check-inventory.mjs` — exits non-zero on any orphan, phantom, duplicate, invalid bucket/method, or retired-without-replacement entry.
-- **Shared census:** `scripts/testing-v2/lib-census.mjs` — enumerates `tests/**/*.{test,spec}.ts` exactly like the phase-invariant guard (`tests/test-phase-invariant.test.ts`): a recursive walk skipping `node_modules`.
-
-Regenerate + validate:
-
-```bash
-node scripts/testing-v2/gen-inventory.mjs
-node scripts/testing-v2/check-inventory.mjs   # must exit 0
-```
+> **Historical migration evidence.** This snapshot records the machine-generated classification used during the Test Suite v2 migration. Its retired `tests2/tests-map.json` registry, generator, validator, buckets, counts, overrides, and registration workflow are not current authoring instructions and must not be regenerated. Current ownership is derived from the filesystem conventions in [Testing strategy](../testing-strategy.md#test-placement-and-automatic-discovery).
 
 ## Census total: 1105 files
 
@@ -123,8 +109,7 @@ and stay in Chromium — it is retained for the consolidated PR-walkthrough smok
 | `journey-review-commenting` | Review pane, inline comments | 1 |
 | `journey-pr-walkthrough` | PR-walkthrough panel and pack | 0 (geometry specs kept in Chromium) |
 
-The exact spec→journey assignment for every retired file lives in each entry's
-`replacement` array in `tests2/tests-map.json`.
+At migration time, the retired registry recorded the exact spec-to-journey assignment in each entry's `replacement` array. That record was migration evidence, not an execution source of truth.
 
 ## Tier-3 daily lane (real fidelity)
 
@@ -202,10 +187,7 @@ pure functions rather than real subprocesses:
   retire into their smoke journeys instead of staying as standalone Chromium
   specs.
 
-To reclassify a file, edit the override maps at the top of
-`scripts/testing-v2/gen-inventory.mjs` (`CLASSIFICATION_OVERRIDES`,
-`DAILY_OVERRIDES`, `CONTRACT_INTEGRATION`, or the `JOURNEY_RULES`) and re-run
-the generator — never hand-edit the JSON.
+The migration once reclassified files through generator override maps. That workflow is retired. For current tests, use a supported path and suffix; the placement guard reports an actionable remedy for unsupported or ambiguous ownership.
 
 ## Baselines
 
