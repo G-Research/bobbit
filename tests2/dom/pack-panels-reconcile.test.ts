@@ -26,6 +26,7 @@ let invalidatePackPanelModules: typeof import("../../src/app/pack-panels.js").in
 let renderPackPanelContent: typeof import("../../src/app/pack-panels.js").renderPackPanelContent;
 let openPackPanel: typeof import("../../src/app/pack-panels.js").openPackPanel;
 let setSessionSwitcher: typeof import("../../src/app/pack-panels.js").setSessionSwitcher;
+let packPanelProjectId: typeof import("../../src/app/pack-panels.js").packPanelProjectId;
 let state: typeof import("../../src/app/state.js").state;
 let panelTabsForSession: typeof import("../../src/app/panel-workspace.js").panelTabsForSession;
 let activePanelTabIdForSession: typeof import("../../src/app/panel-workspace.js").activePanelTabIdForSession;
@@ -48,7 +49,7 @@ beforeAll(async () => {
 	(window as any).happyDOM?.setURL?.("file:///test.html");
 	localStorage.setItem("gateway.url", "http://localhost");
 	await import("../../src/app/session-manager.js");
-	({ reconcilePackPanelsForProject, registerPackPanels, invalidatePackPanelModules, renderPackPanelContent, openPackPanel, setSessionSwitcher } = await import("../../src/app/pack-panels.js"));
+	({ reconcilePackPanelsForProject, registerPackPanels, invalidatePackPanelModules, renderPackPanelContent, openPackPanel, setSessionSwitcher, packPanelProjectId } = await import("../../src/app/pack-panels.js"));
 	({ state } = await import("../../src/app/state.js"));
 	({ panelTabsForSession, activePanelTabIdForSession } = await import("../../src/app/panel-workspace.js"));
 	({ HOST_CONTRACT_VERSION } = await import("../../src/shared/extension-host/host-api.js"));
@@ -240,6 +241,58 @@ describe("reconcilePackPanelsForProject (pack schema V1 §8.1)", () => {
 		expect(ids).toContain("pack:demo_pack:demo.panel:artifact-a");
 		expect(ids).toContain("pack:demo_pack:demo.panel:artifact-b");
 		expect(ids).toContain("pack:demo_pack:demo.panel:explicit-key");
+	});
+
+	// The registered project scope is what side-panel pane RETENTION reads to keep
+	// a retained hidden pane from being re-projected with another project's module
+	// (docs/design/keep-side-panels-mounted.md §4.2). These pin the accessor's
+	// contract against the "last requested project wins" registry.
+	it("a registered panel carries the project of the last registration (cross-project, shared key)", () => {
+		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], "P9a");
+		expect(packPanelProjectId("demo_pack", "demo.panel")).toBe("P9a");
+
+		// Project B exposes the SAME {packId,panelId}: the entry survives, but its
+		// project — and therefore the module behind it — is now B's.
+		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], "P9b");
+		expect(packPanelProjectId("demo_pack", "demo.panel")).toBe("P9b");
+	});
+
+	it("a cross-project registration with disjoint keys unregisters the absent panel and closes its tab", async () => {
+		registerPackPanels([{ packId: "demo_pack", panelId: "demo.panel" }], "P10a");
+		(state as any).selectedSessionId = "sA";
+		open("demo.panel");
+		await flush();
+		expect(tabIdsForSession("sA")).toContain("pack:demo_pack:demo.panel:default");
+
+		registerPackPanels([{ packId: "other_pack", panelId: "other.panel" }], "P10b");
+		await flush();
+
+		// Treated as an uninstall: unregistered, and its tab is closed in EVERY
+		// session (synchronously under the in-memory fixture workspace path).
+		expect(packPanelProjectId("demo_pack", "demo.panel")).toBeUndefined();
+		expect(packPanelProjectId("other_pack", "other.panel")).toBe("P10b");
+		expect(tabIdsForSession("sA")).not.toContain("pack:demo_pack:demo.panel:default");
+	});
+
+	it("a genuine same-project uninstall unregisters only the removed panel", async () => {
+		registerPackPanels([
+			{ packId: "demo_pack", panelId: "demo.panel" },
+			{ packId: "other_pack", panelId: "other.panel" },
+		], "P11");
+		(state as any).selectedSessionId = "sA";
+		open("demo.panel");
+		open("other.panel", "other_pack");
+		await flush();
+		expect(tabIdsForSession("sA")).toContain("pack:demo_pack:demo.panel:default");
+		expect(tabIdsForSession("sA")).toContain("pack:other_pack:other.panel:default");
+
+		registerPackPanels([{ packId: "other_pack", panelId: "other.panel" }], "P11");
+		await flush();
+
+		expect(packPanelProjectId("demo_pack", "demo.panel")).toBeUndefined();
+		expect(packPanelProjectId("other_pack", "other.panel")).toBe("P11");
+		expect(tabIdsForSession("sA")).not.toContain("pack:demo_pack:demo.panel:default");
+		expect(tabIdsForSession("sA")).toContain("pack:other_pack:other.panel:default");
 	});
 
 	it("hot-invalidates fresh module bytes by token without changing tab identity, params, order, or selection", async () => {

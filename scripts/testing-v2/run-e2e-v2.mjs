@@ -249,6 +249,11 @@ function run(command, args, { env = {}, label, shell } = {}) {
 // path, never a network remote) — that is exactly the real-fidelity behaviour
 // this tier exists to cover, and it is still external-free. NO_PUSH would
 // wrongly disable it and mask the very fidelity we want.
+//
+// Git isolation is deliberately NOT repeated here: every group's environment
+// descends from createIsolatedE2EEnvironment(), which sets GIT_CONFIG_NOSYSTEM
+// (see GIT_ISOLATION_ENV in environment-policy.mjs) alongside the redirected
+// HOME. One owner, so the two tiers cannot drift apart.
 const EXTERNAL_FREE_ENV = {
 	BOBBIT_TEST_NO_EXTERNAL: "1",
 	BOBBIT_TEST_NO_REMOTE: "1",

@@ -313,6 +313,42 @@ describe("unit run isolation", () => {
     }
   });
 
+  it("disables the host system gitconfig so a fixture remote cannot be rewritten", () => {
+    const temp = mkdtempSync(join(tmpdir(), "git-isolation-env-"));
+    try {
+      const paths = createE2ERunPaths(temp);
+      // A host with BOTH git config tiers present, plus a stale opt-out that must
+      // not survive: /etc/gitconfig can carry url.<base>.insteadOf, which would
+      // silently rewrite the origin a fixture just wrote to its own bare repo.
+      const hostEnvironment = {
+        PATH: process.env.PATH,
+        HOME: join(temp, "host-home"),
+        TMPDIR: join(temp, "host-tmp"),
+        PLAYWRIGHT_BROWSERS_PATH: join(temp, "browser-registry"),
+        GIT_CONFIG_NOSYSTEM: "0",
+      };
+      const environments = [
+        createIsolatedE2EEnvironment(paths, hostEnvironment, "linux"),
+        createBrowserRunEnvironment(paths, hostEnvironment, "linux"),
+        createE2EV2CoordinatorEnvironment(paths, hostEnvironment, "linux"),
+      ];
+      for (const environment of environments) {
+        expect(environment.GIT_CONFIG_NOSYSTEM).toBe("1");
+        // Only the system tier is disabled: repo-local config still applies and
+        // the global tier stays redirected by the owned HOME, so fixtures that
+        // drive real repositories keep real git behaviour.
+        expect(environment.GIT_CONFIG_SYSTEM).toBeUndefined();
+        expect(environment.GIT_CONFIG_GLOBAL).toBeUndefined();
+        expect(isOwnedRunChild(paths.root, environment.HOME!)).toBe(true);
+      }
+      // Child spawns must not drop it either.
+      expect(composeE2EChildEnvironment(environments[2]).GIT_CONFIG_NOSYSTEM).toBe("1");
+      expect(createNestedE2EEnvironment(environments[2]).GIT_CONFIG_NOSYSTEM).toBe("1");
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
   it("preserves suite controls while canonicalizing Windows-owned environment keys", () => {
     const temp = mkdtempSync(join(tmpdir(), "windows-environment-policy-"));
     try {

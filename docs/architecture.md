@@ -78,9 +78,16 @@ Main modules: `src/shared/side-panel-workspace.ts` defines the shared model,
 `src/server/side-panel-workspace*.ts` canonicalizes and mutates persisted
 workspaces, `src/app/side-panel-workspace.ts` hydrates and mutates the client
 mirror, `src/app/panel-workspace.ts` keeps tab id helpers and fixture fallback,
-and `src/app/render.ts` renders the shared shell. See
+`src/app/render.ts` renders the shared shell, and
+`src/app/panel-pane-retention.ts` decides how long a rendered pane stays alive.
+That last part matters because removing or moving an `<iframe>` re-navigates it:
+a bounded set of pack panel panes is kept mounted but hidden across collapse,
+tab switch and session switch so an embedded app keeps running instead of
+reloading. See
 [Side-panel workspace](side-panel-workspace.md) for the invariant, lifecycle,
-API, popout, and migration rules, and [Embedded HTML preview — architecture](preview-architecture.md)
+API, popout, migration and
+[pane retention](side-panel-workspace.md#pane-retention-hidden-not-destroyed)
+rules, and [Embedded HTML preview — architecture](preview-architecture.md)
 for the preview mount and `contentHash` contract.
 
 ## Build structure

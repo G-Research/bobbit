@@ -89,6 +89,7 @@ import {
 	nextActivePanelTabId,
 	normalizePreviewContentHash,
 	normalizeSidePanelTabs,
+	PANEL_WORKSPACE_NO_SESSION_KEY,
 	panelContentTabs,
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
@@ -105,8 +106,15 @@ import {
 	packPanelRefFromTabId,
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
+import {
+	panePaneKey,
+	parsePanePaneKey,
+	resetPanelPaneRetention,
+	retainedPanePlan,
+	type RetainedPaneSlot,
+} from "./panel-pane-retention.js";
 import { openInboxPanel } from "./inbox-panel.js";
-import { packPanelCanRefresh, packPanelTitle, refreshPackPanel, renderPackPanelContent } from "./pack-panels.js";
+import { packPanelCanRefresh, packPanelProjectId, packPanelTitle, refreshPackPanel, renderPackPanelContent } from "./pack-panels.js";
 import {
 	closeSidePanelTab as closeServerSidePanelTab,
 	getSidePanelWorkspace,
@@ -1186,6 +1194,131 @@ let mountedPreviewTabId = "";
 const previewRestoreInFlight = new Set<string>();
 let mobileSelectedPaneIndex = 0;
 let mobileSelectedSideTabId = "";
+
+// ============================================================================
+// SIDE-PANEL PANE RETENTION (docs/design/keep-side-panels-mounted.md)
+// ----------------------------------------------------------------------------
+// A retained pane must occupy ONE DOM position for its whole lifetime: an
+// <iframe> reloads when it is removed AND when it is moved. Everything below
+// exists to make the ancestor chain stable and the sibling order append-only.
+// ============================================================================
+
+/**
+ * Liveness for one retention key (design §4.2). Never authoritative: the tab
+ * set and the session list are, so a closed tab / uninstalled pack / archived
+ * session is pruned in the SAME render that removed it.
+ *
+ * Reads tabs through `panelTabsForSession` (a pure accessor) and never through
+ * `unifiedPanelTabs()`, which normalises and writes back for the *selected*
+ * session only.
+ */
+function resolveLivePackPane(key: string): UnifiedContentTab | undefined {
+	const parsed = parsePanePaneKey(key);
+	if (!parsed) return undefined;
+	const { sessionKey, tabId } = parsed;
+	const noSession = sessionKey === PANEL_WORKSPACE_NO_SESSION_KEY;
+	const ownerSession = noSession ? undefined : state.gatewaySessions.find((session) => session.id === sessionKey);
+	// Membership in `gatewaySessions` is NOT a liveness test on its own: a
+	// terminated or archived session lingers in that list (see
+	// team-archived-bucket.ts — "a session may appear in both gatewaySessions with
+	// status=terminated AND in archivedSessions"). Reuse the app's own definition of
+	// a terminal session rather than inventing a second one, so a pane hidden behind
+	// another session is destroyed in the SAME render its owner terminates.
+	if (!noSession && (!ownerSession || isArchivedSessionActionSource(ownerSession))) return undefined;
+	const tab = panelTabsForSession(state, sessionKey).find((candidate) => candidate.id === tabId);
+	if (!tab || tab.kind !== "pack") return undefined;
+	// Retention is explicitly PROJECT-SCOPED. `registerPackPanels` keeps ONE global
+	// {packId,panelId} registry whose entries carry the project of the LAST
+	// registration, and a canonical session switch re-registers panels for the
+	// TARGET session's project. So after a CROSS-PROJECT switch the module behind a
+	// retained pane's key can belong to the other project, and re-projecting the
+	// hidden pane would render the WRONG project's module.
+	//
+	// DELIBERATE LIMITATION, not an oversight: rather than re-key the registry,
+	// loaded modules and in-flight loads by {projectId, packId, panelId} (a
+	// pack-panel registry redesign), a pane whose owning session belongs to a
+	// different project than the currently registered panel is PRUNED. A
+	// cross-project switch therefore tears retained panes down exactly as it did
+	// before this feature — cross-project switching already destroyed panels — and
+	// a same-project switch retains them. An UNREGISTERED panel is left alone: it
+	// already renders nothing (`renderPackPanelContent`), and the reconcile that
+	// uninstalled it closes its tab, which prunes it here.
+	//
+	// The owner's project is CANONICALISED the same way the registration path does
+	// it: `reconcilePackPanelsForProject` registers with
+	// `session.projectId || HEADQUARTERS_PROJECT_ID` (`pack-panels.ts`), and the
+	// server maps a session without a `projectId` onto Headquarters too. Comparing
+	// the RAW optional `session.projectId` would therefore skip the check entirely
+	// for an unscoped/legacy (Headquarters-effective) session, letting another
+	// project's module be invoked with THIS session's tab params and bound session
+	// id. Sessionless panes (the `PANEL_WORKSPACE_NO_SESSION_KEY` sentinel) are
+	// Headquarters-effective for the same reason.
+	//
+	// Only a registration whose scope is KNOWN and DIFFERENT prunes: an
+	// `undefined` registered project means either "not registered" or "registered
+	// for the global/no-project scope", and neither may drop a live pane — that
+	// would destroy the active pane during the post-reload window before
+	// contributions have reconciled.
+	const ref = packPanelRefFromTabId(tab.id);
+	const registeredProjectId = ref ? packPanelProjectId(ref.packId, ref.panelId) : undefined;
+	const ownerProjectId = ownerSession?.projectId || HEADQUARTERS_PROJECT_ID;
+	if (registeredProjectId !== undefined && registeredProjectId !== ownerProjectId) return undefined;
+	return tab as UnifiedContentTab;
+}
+
+/**
+ * Non-mutating liveness predicate for ONE tab of one session's track.
+ *
+ * The active mobile track mounts the selected session's tabs directly, not the
+ * retention plan's slots, so without this it re-projects (and keeps connected)
+ * a pack pane whose owner has just gone terminal — the exact pane
+ * `retainedPanePlan` pruned in the same render. Desktop has no such path: its
+ * pack panes render solely from `retainedSlots`.
+ *
+ * Deliberately built on `resolveLivePackPane` so there is ONE definition of a
+ * live pack pane (terminal owner, closed tab, cross-project registration, and
+ * the "unknown scope must not prune" rule all come along unchanged). It reads
+ * state only: retention order and LRU recency stay owned by `retainedPanePlan`,
+ * which remains the sole mutator, called at most once per render.
+ *
+ * Non-pack tabs are never retained (design §3.5) and are always kept.
+ */
+function isLivePanelTabForSession(sessionKey: string, tab: UnifiedPanelTab): boolean {
+	if (tab.kind !== "pack") return true;
+	return resolveLivePackPane(panePaneKey(sessionKey, tab.id)) !== undefined;
+}
+
+// Append-only DOM key order per retained container.
+//
+// `repeat()` honours the order it is handed by MOVING nodes, and moving an
+// <iframe> reloads it. Deriving a container's order from the current visual
+// order (tab order, or session first-seen order inside `retainedSlots`) is not
+// stable: removing one entry can flip two survivors' relative order. So each
+// container's DOM order is kept here — prune to what is still needed, then
+// append newcomers at the tail — and the visual order is expressed with CSS
+// `order` instead, which repaints without moving a node.
+//
+// The desktop pack host does not use this: `retainedPanePlan` already returns
+// survivors in stable insertion order.
+const appendOnlyDomOrder = new Map<string, string[]>();
+
+function stableDomOrder(containerId: string, keys: string[]): string[] {
+	const needed = new Set(keys);
+	const next = (appendOnlyDomOrder.get(containerId) ?? []).filter((key) => needed.has(key));
+	for (const key of keys) if (!next.includes(key)) next.push(key);
+	appendOnlyDomOrder.set(containerId, next);
+	return next;
+}
+
+/** Desktop⇄mobile viewport flips commit different top-level templates, which
+ *  tears every pane down. Clear the policy state so it cannot describe DOM that
+ *  no longer exists (design §3.7). */
+function resetPanelPaneRetentionForViewportFlip(): void {
+	resetPanelPaneRetention();
+	appendOnlyDomOrder.clear();
+}
+
+let lastRenderedDesktopViewport: boolean | undefined;
 // SortableJS instance attached to the unified tab bar inner container. We
 // recreate it whenever the container DOM node changes (which happens when the
 // workspace switches sessions). During a drag, renderApp is suppressed so
@@ -1826,19 +1959,25 @@ function hasUnifiedPanel(): boolean {
 	return hasActiveSidePanel();
 }
 
-function mobileChatPaneTab(): MobilePaneTab {
+function mobileChatPaneTab(sessionKey: string = workspaceSessionId()): MobilePaneTab {
 	return {
 		id: "__mobile_chat_pane__",
 		kind: "chat",
 		title: "Chat",
 		label: "Chat",
 		legacyTab: "chat",
-		source: { type: "chat", sessionId: workspaceSessionId() },
+		source: { type: "chat", sessionId: sessionKey },
 	};
 }
 
+/** Panes of ONE session's mobile track, from explicit inputs (design §3.7).
+ *  Callers pass the tabs they read; this never touches global active state. */
+function mobilePanesForSession(sessionKey: string, tabs: UnifiedPanelTab[]): MobilePaneTab[] {
+	return [mobileChatPaneTab(sessionKey), ...tabs];
+}
+
 function unifiedMobilePanes(): MobilePaneTab[] {
-	return [mobileChatPaneTab(), ...unifiedPanelTabs()];
+	return mobilePanesForSession(workspaceSessionId(), unifiedPanelTabs());
 }
 
 function unifiedMobilePaneIndex(): number {
@@ -1882,7 +2021,7 @@ function setupPreviewSwipe(): void {
 	if ((window as any).__previewSwipeListening) return;
 	(window as any).__previewSwipeListening = true;
 
-	const getTrack = () => document.querySelector(".side-panel-slider__track, .preview-slider__track") as HTMLElement | null;
+	const getTrack = () => document.querySelector('[data-mobile-pane-track][data-mobile-track-active="true"]') as HTMLElement | null;
 
 	// === iframe -> parent: swipe on preview pane ===
 	window.addEventListener("message", (e: MessageEvent) => {
@@ -2343,6 +2482,14 @@ export function doRenderApp(): void {
 	// Authenticated state
 	const desktop = isDesktop();
 	const connected = hasActiveSession();
+
+	// A desktop⇄mobile flip commits a different top-level template, which tears
+	// every pane down. Clear the retention policy state so it cannot describe DOM
+	// that no longer exists (design §3.7).
+	if (lastRenderedDesktopViewport !== undefined && lastRenderedDesktopViewport !== desktop) {
+		resetPanelPaneRetentionForViewportFlip();
+	}
+	lastRenderedDesktopViewport = desktop;
 
 	// Session action buttons (shared between headerLeft mobile and headerRight desktop)
 	const route = getRouteFromHash();
@@ -2835,7 +2982,9 @@ export function doRenderApp(): void {
 	const setSidePanelModeAndRender = (mode: SidePanelSizeMode) => {
 		void setSidePanelSizeMode(mode, workspaceSessionId());
 	};
-	const isSidePanelCollapsed = () => sidePanelSizeMode() === "collapsed";
+	// Collapse/fullscreen behaviour is derived once per render from the single
+	// persisted `sizeMode` enum (design §3.1a/§3.3), so no template can emit a
+	// collapsed-and-fullscreen combination.
 
 	const previewRestoreErrorContent = (tab: UnifiedContentTab) => {
 		const restoreError = previewRestoreError(tab);
@@ -3206,21 +3355,71 @@ export function doRenderApp(): void {
 		return activeTab;
 	};
 
-	const renderSidePanelWorkspace = (mode: SidePanelSizeMode = "split") => {
+	// One stable host for retained pack panes (design §3.1). Emitted whenever
+	// retention is enabled — INCLUDING when it is empty and when the active tab
+	// is not a pack tab — because removing it would detach the retained iframes.
+	// It is hidden instead, so an empty host never participates in flex layout
+	// and never steals width from an active non-pack pane.
+	//
+	// Hiding needs all four (design §5): Tailwind's `flex` (display:flex) beats
+	// the UA `[hidden] { display:none }` rule, so `?hidden` alone does NOT hide
+	// these elements.
+	const retainedPackPaneHost = (slots: RetainedPaneSlot<UnifiedContentTab>[], showPackHost: boolean) => html`
+		<div
+			class="side-panel-pane-host flex-1 flex flex-col min-h-0"
+			data-panel-pane-host="true"
+			style=${showPackHost ? "display:flex" : "display:none"}
+			?hidden=${!showPackHost}
+			?inert=${!showPackHost}
+			aria-hidden=${showPackHost ? nothing : "true"}
+		>
+			${repeat(slots, (slot) => slot.key, (slot) => html`
+				<div
+					class="side-panel-pane-slot flex-1 flex-col min-h-0"
+					data-panel-pane-key=${slot.key}
+					data-panel-tab-id=${slot.tab.id}
+					data-panel-pane-hidden=${slot.hidden ? "true" : "false"}
+					style=${slot.hidden ? "display:none" : "display:flex"}
+					?hidden=${slot.hidden}
+					?inert=${slot.hidden}
+					aria-hidden=${slot.hidden ? "true" : nothing}
+				>${packPanelContent(slot.tab)}</div>
+			`)}
+		</div>
+	`;
+
+	type SidePanelWorkspaceOptions = {
+		/** Keep the subtree mounted but out of layout and out of the a11y tree. */
+		hidden?: boolean;
+		/** Render-local snapshot from `retainedPanePlan` (design §3.4). */
+		retainedSlots?: RetainedPaneSlot<UnifiedContentTab>[];
+		/** Whether the active tab is itself a pack tab. */
+		showPackHost?: boolean;
+		/** Popout / deep-link renders inline with no retention host (design §3.8). */
+		retain?: boolean;
+	};
+
+	const renderSidePanelWorkspace = (mode: SidePanelSizeMode = "split", options: SidePanelWorkspaceOptions = {}) => {
+		const retain = options.retain !== false;
+		const hidden = options.hidden === true;
+		const retainedSlots = retain ? (options.retainedSlots ?? []) : [];
 		const contentTabs = unifiedPanelContentTabs();
 		const activeTab = activeSidePanelContentTab();
-		if (!activeTab) return "";
+		const showPackHost = options.showPackHost ?? (activeTab?.kind === "pack");
 
-		const { visibleTabs, overflowTabs } = partitionPanelTabs(contentTabs, panelTabVisibleCapacity, activeTab.id);
-		const allocatedWidths = allocatedPanelTabWidths(visibleTabs.map((tab) => tab.id), overflowTabs.length > 0);
-
-		return html`
-			<div class="side-panel-workspace goal-preview-panel flex-1 flex flex-col ${mode === "split" ? "border-l border-border" : ""} min-h-0" data-panel-workspace="content" data-side-panel-mode=${mode}>
-				<!-- Chrome-style tab strip: muted bg distinct from the panel below.
-				     Tabs sit flush at the strip's bottom via items-end + no pb.
-				     The active tab's background matches the panel so it visually
-				     bridges the color boundary (curve pseudo-elements in CSS do
-				     the outward-curve flourish at the bottom corners). -->
+		// No early return when there is no active content tab (design §3.4): the
+		// workspace stays mounted so retained panes keep their DOM position. The
+		// caller passes `hidden: true` in exactly that case, and the chrome is
+		// skipped so sidePanelActionButtons/WindowControls never see a null tab.
+		// Chrome-style tab strip: muted bg distinct from the panel below.
+		// Tabs sit flush at the strip's bottom via items-end + no pb.
+		// The active tab's background matches the panel so it visually
+		// bridges the color boundary (curve pseudo-elements in CSS do
+		// the outward-curve flourish at the bottom corners).
+		const workspaceChrome = (activeTab: UnifiedContentTab) => {
+			const { visibleTabs, overflowTabs } = partitionPanelTabs(contentTabs, panelTabVisibleCapacity, activeTab.id);
+			const allocatedWidths = allocatedPanelTabWidths(visibleTabs.map((tab) => tab.id), overflowTabs.length > 0);
+			return html`
 				<div class="flex items-end justify-between px-3 pt-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
 					<div class="flex-1 min-w-0 relative" data-panel-tab-overflow-host="true" data-panel-tab-count=${contentTabs.length} data-active-panel-tab-id=${activeTab.id}>
 						<div class="flex items-end gap-1" data-panel-tab-bar="true">
@@ -3283,8 +3482,26 @@ export function doRenderApp(): void {
 						${sidePanelWindowControls(activeTab, mode)}
 					</div>
 				</div>
-				<!-- Tab content -->
-				${unifiedPanelContent(activeTab)}
+			`;
+		};
+
+		return html`
+			<div
+				class="side-panel-workspace goal-preview-panel flex-1 flex flex-col ${mode === "split" ? "border-l border-border" : ""} min-h-0"
+				data-panel-workspace="content"
+				data-side-panel-mode=${mode}
+				style=${hidden ? "display:none" : nothing}
+				?hidden=${hidden}
+				?inert=${hidden}
+				aria-hidden=${hidden ? "true" : nothing}
+			>
+				${activeTab ? workspaceChrome(activeTab) : ""}
+				<!-- Tab content. Non-pack panes keep exactly today's DOM shape and
+				     position; pack panes live one level down in the retention host. -->
+				${activeTab && activeTab.kind !== "pack" ? unifiedPanelContent(activeTab) : ""}
+				${retain
+					? retainedPackPaneHost(retainedSlots, showPackHost)
+					: (activeTab && showPackHost ? unifiedPanelContent(activeTab) : "")}
 			</div>
 		`;
 	};
@@ -3294,23 +3511,219 @@ export function doRenderApp(): void {
 			${icon(PanelRightOpen, "sm")}
 		</button>
 	`;
-	/** Render individual pane content for mobile slider. */
-	const mobilePaneContent = (tab: MobilePaneTab) => {
-		if (tab.kind === "chat") return html`${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}`;
+	/** Render individual pane content for mobile slider.
+	 *
+	 *  ONE call site per pane kind, used identically by the active track and by a
+	 *  hidden foreign track: two `html` call sites at the same ChildPart would
+	 *  make lit tear the subtree down when a session becomes (in)active.
+	 *
+	 *  `sessionKey` scopes the projection. A foreign track only ever holds pack
+	 *  panes, which `unifiedPanelContent` already routes to the fully tab-scoped
+	 *  `packPanelContent`; the other kinds read global active state and are
+	 *  therefore not retained (design §3.5).
+	 *
+	 *  `chatContent` is what occupies the chat pane: the live chat panel, or the
+	 *  instant loader while a session is being created/connected. */
+	const mobilePaneContent = (tab: MobilePaneTab, chatContent: unknown) => {
+		if (tab.kind === "chat") return chatContent;
 		const content = unifiedPanelContent(tab);
 		return html`<div class="side-panel-pane goal-preview-panel flex-1 flex flex-col min-h-0" data-panel-tab-id=${tab.id}>${content}</div>`;
 	};
 
+	/**
+	 * One mobile slider track per session (design §3.7).
+	 *
+	 * Exactly one track is visible — the selected session's. Every other track is
+	 * kept mounted, out of layout and inert, so its pack panes keep their DOM
+	 * position (and their iframes keep running) across a session round-trip.
+	 *
+	 * Within a track, DOM order is append-only and visual order is CSS `order`,
+	 * so a tab close/reorder repaints without moving a node.
+	 */
+	const mobileSessionTrack = (
+		sessionKey: string,
+		active: boolean,
+		retainedSlots: RetainedPaneSlot<UnifiedContentTab>[],
+		shell: { chatContent: unknown; transition: boolean },
+	) => {
+		// The active track shows the chat pane plus every content tab. A hidden
+		// foreign track holds ONLY its retained pack panes — never the chat pane,
+		// because `state.chatPanel` is a single element instance.
+		//
+		// Mid-transition the incoming session is not connected yet, so its own tab
+		// set must not be projected: its track holds the chat pane (which carries the
+		// loader) plus any pane it ALREADY has retained — dropping those would detach
+		// their live iframes for the connecting frame, which is the whole bug.
+		//
+		// The active track's own tab set is filtered by LIVENESS, not by
+		// `retainedSlots`: the retention plan drops a pack pane whose owner has gone
+		// terminal, and re-projecting it here would leave its <iframe> connected
+		// (goal: "archiving/terminating the session must all still destroy the
+		// panel"). Filtering by `retainedSlots` instead would be wrong — LRU
+		// eviction bounds HIDDEN retention only and must never suppress a live tab
+		// of the current session, so a session with more pack tabs than
+		// PANEL_PANE_RETENTION_LIMIT still shows all of them here.
+		const retainedForSession = retainedSlots.filter((slot) => slot.sessionKey === sessionKey).map((slot) => slot.tab);
+		const panes: MobilePaneTab[] = active
+			? mobilePanesForSession(
+				sessionKey,
+				shell.transition
+					? retainedForSession
+					: unifiedPanelTabs().filter((tab) => isLivePanelTabForSession(sessionKey, tab)),
+			)
+			: retainedForSession;
+		const visualIndexById = new Map(panes.map((pane, index) => [pane.id, index] as const));
+		const domOrder = stableDomOrder(`mobile-track:${sessionKey}`, panes.map((pane) => pane.id));
+		const orderedPanes = domOrder
+			.map((id) => panes.find((pane) => pane.id === id))
+			.filter((pane): pane is MobilePaneTab => pane !== undefined);
+		const count = Math.max(1, panes.length);
+		// `unifiedMobilePaneIndex()` indexes the session's UNFILTERED tab list, so it
+		// can point past the end once a dead pack tab is filtered out. Clamp rather
+		// than re-derive: the selection state keeps its current meaning and the
+		// transform stays valid for every live pane.
+		const curIdx = active && !shell.transition ? Math.max(0, Math.min(unifiedMobilePaneIndex(), panes.length - 1)) : 0;
+		return html`
+			<div
+				class="side-panel-slider__track preview-slider__track"
+				data-mobile-pane-track="true"
+				data-mobile-track-session-key=${sessionKey}
+				data-mobile-track-active=${active ? "true" : "false"}
+				style=${active
+					? `display:flex;width:${count * 100}%;height:100%;transform:translateX(${unifiedSlideX(curIdx, count)}%);transition:transform 0.3s ease-out;will-change:transform;`
+					: "display:none"}
+				?hidden=${!active}
+				?inert=${!active}
+				aria-hidden=${active ? nothing : "true"}
+			>
+				${repeat(orderedPanes, (pane) => pane.id, (pane) => html`
+					<div
+						data-mobile-pane-key=${pane.id}
+						style="width:${100 / count}%;height:100%;min-width:0;display:flex;flex-direction:column;order:${visualIndexById.get(pane.id) ?? 0};"
+					>${mobilePaneContent(pane, shell.chatContent)}</div>
+				`)}
+			</div>
+		`;
+	};
+
 	const mainArea = () => {
+		const route = getRouteFromHash();
+
+		const staffInboxOpenAffordance = () => {
+			const sid = activeSessionId() || "";
+			const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
+			const hasInboxTab = !!sid && getSidePanelWorkspace(sid).tabs.some((tab) => tab.id === "inbox" && tab.kind === "inbox");
+			if (!sess?.staffId || hasInboxTab) return "";
+			return html`
+				<div class="shrink-0 border-b border-border bg-muted/30 px-3 py-2 flex items-center justify-between gap-3" style=${isDesktop() ? "" : "margin-top:var(--mobile-header-height,60px);"} data-testid="staff-inbox-reopen-bar">
+					<span class="text-xs text-muted-foreground">Staff inbox is closed for this session.</span>
+					<button class="text-xs rounded border border-border px-2 py-1 hover:bg-accent" data-testid="staff-inbox-open" @click=${() => openInboxPanel(sid, sess.staffId!)}>Open inbox</button>
+				</div>
+			`;
+		};
+
+		const sessionLoader = () => html`<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+
+		type PanelShellInput = {
+			/** Active content tab of the SELECTED session, or `null` when it has none
+			 *  — including mid-transition, when the shell exists only to keep retained
+			 *  foreign panes mounted. */
+			activeTab: UnifiedContentTab | null;
+			/** Render-local snapshot from `retainedPanePlan` (design §3.4). */
+			retainedSlots: RetainedPaneSlot<UnifiedContentTab>[];
+			/** What occupies the chat position: the live chat panel, or the instant
+			 *  loader while a session is being created/connected. */
+			chatContent: unknown;
+			/** True while creating/connecting: the incoming session's own tabs must not
+			 *  be projected yet, and no banner may claim the outgoing session. */
+			transition: boolean;
+		};
+
+		/**
+		 * THE panel shell — ONE `html` call site per viewport, shared by the steady
+		 * state, the connecting frame and the final frame. lit reuses DOM at a
+		 * ChildPart only for a TemplateResult from the SAME call site, so any
+		 * alternate top-level template (a bare loader, a second layout branch)
+		 * detaches the retention host and re-navigates every live <iframe>.
+		 */
+		const panelShell = ({ activeTab, retainedSlots, chatContent, transition }: PanelShellInput) => {
+			// §3.1a — the visibility/layout contract. Keeping a subtree IN THE DOM and
+			// letting it OCCUPY LAYOUT are separate decisions: a retained foreign slot
+			// keeps the workspace mounted but must never make it visible or
+			// space-occupying for the selected session.
+			const hasActiveContentTab = activeTab !== null;
+			const mode = sidePanelSizeMode();
+			// Fullscreen is meaningful only when the selected session has content.
+			const fullscreen = desktop && hasActiveContentTab && mode === "fullscreen";
+			// `hasActiveContentTab` is load-bearing here too: without it, a tabless
+			// session whose stored mode is "collapsed" emits the restore rail, which
+			// consumes width in the split row (the plain-chat branch has no rail) and
+			// offers a control that cannot reveal any panel for that session.
+			const workspaceCollapsed = !fullscreen && hasActiveContentTab && mode === "collapsed";
+			const workspaceHidden = workspaceCollapsed || !hasActiveContentTab;
+			const workspaceOccupiesSplitLayout = !fullscreen && !workspaceHidden;
+			// The pack host is permanently present; visible only for a pack tab.
+			const showPackHost = activeTab?.kind === "pack";
+			// Pixel parity with the plain-chat branch when the panel only exists to
+			// hold a retained foreign pane. Skipped mid-transition: the incoming
+			// session's lifecycle is not known yet, and today's loader frame has no
+			// banner.
+			const archivedBannerForParity = transition || hasUnifiedPanel() ? "" : renderArchivedBanner();
+			if (desktop) {
+				// Split and fullscreen share ONE top-level template so the workspace
+				// (and every retained pane inside it) keeps its DOM position across the
+				// mode ladder. In fullscreen the panel fills to the bottom edge and the
+				// chat pane — which owns the composer — is hidden; to use the prompt the
+				// user collapses to split (window controls / Ctrl+]).
+				return html`
+					${reconnectBanner()}
+					${archivedBannerForParity}
+					${staffInboxOpenAffordance()}
+					<div class="${fullscreen ? "" : "goal-split-layout side-panel-split-layout"} flex-1 flex min-h-0 overflow-hidden">
+						<div
+							class="${workspaceOccupiesSplitLayout ? "goal-chat-panel side-panel-chat-pane flex-1" : "flex-1"} min-w-0 flex flex-col"
+							style=${fullscreen ? "display:none" : nothing}
+							?hidden=${fullscreen}
+							?inert=${fullscreen}
+							aria-hidden=${fullscreen ? "true" : nothing}
+						>${chatContent}</div>
+						${workspaceCollapsed ? sidePanelRestoreButton() : ""}
+						${renderSidePanelWorkspace(mode, { hidden: workspaceHidden, retainedSlots, showPackHost })}
+					</div>
+				`;
+			}
+			// Mobile: one track per session, append-only, exactly one visible.
+			const activeSessionKey = workspaceSessionId();
+			const trackKeys = stableDomOrder(
+				"mobile-tracks",
+				[activeSessionKey, ...retainedSlots.map((slot) => slot.sessionKey)],
+			);
+			return html`
+				${reconnectBanner()}
+				${archivedBannerForParity}
+				${staffInboxOpenAffordance()}
+				<div class="side-panel-slider preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
+					${repeat(trackKeys, (key) => key, (key) => mobileSessionTrack(key, key === activeSessionKey, retainedSlots, { chatContent, transition }))}
+				</div>
+			`;
+		};
+
 		// Instant-loader gate: show bouncing bobbit immediately when a session
 		// is being created or connected, regardless of current route. This must
 		// be the first check so clicks on session-creation entry points feel
 		// responsive within one render frame.
-		if (state.creatingSession || state.connectingSessionId) {
-			return html`<div class="flex-1 min-h-0" data-testid="bobbit-loader">${bobbitLoadingAnimation()}</div>`;
+		//
+		// With live retained panes the loader CANNOT be the whole main area: that is
+		// a different `html` call site at this ChildPart, so lit would clear the
+		// panel shell and detach every retained (live) <iframe> on an ordinary cold
+		// session switch. Put the loader in the incoming chat position of the SAME
+		// shell instead; with nothing retained, keep today's bare loader exactly.
+		if (sessionTransition) {
+			return hasLiveRetainedPanes
+				? panelShell({ activeTab: null, retainedSlots, chatContent: sessionLoader(), transition: true })
+				: sessionLoader();
 		}
 		// Goal dashboard route
-		const route = getRouteFromHash();
 		if (route.view === "goal-dashboard" && route.goalId) {
 			return lazyPage("goal-dashboard", () => import("./goal-dashboard.js"), "renderGoalDashboard");
 		}
@@ -3362,61 +3775,17 @@ export function doRenderApp(): void {
 				`;
 			}
 			if (workspace.activeTabId !== tab.id) setActivePanelTabIdForSession(state, sid, tab.id);
-			return html`${reconnectBanner()}<div class="flex-1 flex flex-col min-h-0 overflow-hidden" data-testid="side-panel-route-content">${renderSidePanelWorkspace("fullscreen")}</div>`;
+			return html`${reconnectBanner()}<div class="flex-1 flex flex-col min-h-0 overflow-hidden" data-testid="side-panel-route-content">${renderSidePanelWorkspace("fullscreen", { retain: false })}</div>`;
 		}
 
-		const staffInboxOpenAffordance = () => {
-			const sid = activeSessionId() || "";
-			const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
-			const hasInboxTab = !!sid && getSidePanelWorkspace(sid).tabs.some((tab) => tab.id === "inbox" && tab.kind === "inbox");
-			if (!sess?.staffId || hasInboxTab) return "";
-			return html`
-				<div class="shrink-0 border-b border-border bg-muted/30 px-3 py-2 flex items-center justify-between gap-3" style=${isDesktop() ? "" : "margin-top:var(--mobile-header-height,60px);"} data-testid="staff-inbox-reopen-bar">
-					<span class="text-xs text-muted-foreground">Staff inbox is closed for this session.</span>
-					<button class="text-xs rounded border border-border px-2 py-1 hover:bg-accent" data-testid="staff-inbox-open" @click=${() => openInboxPanel(sid, sess.staffId!)}>Open inbox</button>
-				</div>
-			`;
-		};
-
-		if (connected && hasUnifiedPanel()) {
-			const mode = sidePanelSizeMode();
-			if (desktop && mode === "fullscreen") {
-				// Fullscreen: the panel fills to the bottom edge; the composer is hidden.
-				// To use the prompt the user collapses to split (window controls / Ctrl+]).
-				return html`
-					${reconnectBanner()}
-					${staffInboxOpenAffordance()}
-					<div class="flex-1 flex flex-col min-h-0 overflow-hidden">
-						${renderSidePanelWorkspace("fullscreen")}
-					</div>
-				`;
-			}
-			if (desktop) {
-				const collapsed = isSidePanelCollapsed();
-				return html`
-					${reconnectBanner()}
-					${staffInboxOpenAffordance()}
-					<div class="goal-split-layout side-panel-split-layout flex-1 flex min-h-0 overflow-hidden">
-						<div class="${collapsed ? 'flex-1' : 'goal-chat-panel side-panel-chat-pane flex-1'} min-w-0 flex flex-col">${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}</div>
-						${collapsed ? sidePanelRestoreButton() : renderSidePanelWorkspace("split")}
-					</div>
-				`;
-			}
-			const panes = unifiedMobilePanes();
-			const count = panes.length;
-			const curIdx = unifiedMobilePaneIndex();
-			const slideX = unifiedSlideX(curIdx, count);
-			const trackW = count * 100;
-			const paneW = 100 / count;
-			return html`
-				${reconnectBanner()}
-				${staffInboxOpenAffordance()}
-				<div class="side-panel-slider preview-slider flex-1 min-h-0" style="overflow:hidden;position:relative;">
-					<div class="side-panel-slider__track preview-slider__track" style="display:flex;width:${trackW}%;height:100%;transform:translateX(${slideX}%);transition:transform 0.3s ease-out;will-change:transform;">
-						${panes.map(tab => html`<div style="width:${paneW}%;height:100%;min-width:0;display:flex;flex-direction:column;">${mobilePaneContent(tab)}</div>`)}
-					</div>
-				</div>
-			`;
+		const showWorkspace = hasUnifiedPanel() || hasLiveRetainedPanes;
+		if (connected && showWorkspace) {
+			return panelShell({
+				activeTab: retentionActiveTab,
+				retainedSlots,
+				chatContent: html`${renderGoalPausedBannerIfNeeded(activeSession)}${state.chatPanel}`,
+				transition: false,
+			});
 		}
 		if (connected) return html`${reconnectBanner()}${renderArchivedBanner()}${renderGoalPausedBannerIfNeeded(activeSession)}${staffInboxOpenAffordance()}${state.chatPanel}`;
 
@@ -3445,6 +3814,57 @@ export function doRenderApp(): void {
 		}
 		return renderMobileLanding();
 	};
+
+	// §3.4 — reconcile retention liveness EXACTLY ONCE per render, and BEFORE every
+	// branch that decides whether the panel shell exists — including the mobile
+	// top-level shell branch below and the instant-loader gate inside `mainArea`.
+	// A raw-state predicate would be wrong: on the render caused by closing the
+	// last retained tab (or an uninstall reconcile, or a session leaving
+	// gatewaySessions) it would still be true, the shell
+	// would enter the workspace branch, and only then would pruning empty the
+	// host — leaving one frame of empty hidden workspace with the split 50% rule
+	// still applied.
+	//
+	// NOT gated on `connected`: a cold session switch clears `state.remoteAgent`
+	// and `state.chatPanel` BEFORE the target connects, so `hasActiveSession()` is
+	// false for the connecting frame(s). Gating here would drop the OUTGOING
+	// session's slots and destroy their live iframes. Liveness (tab set + session
+	// list + project scope) is what prunes, never connectedness.
+	const sessionTransition = Boolean(state.creatingSession || state.connectingSessionId);
+	// A popout / deep-link route renders one validated tab inline with no
+	// retention host (§3.8), so it must not touch recency either. Mid-transition
+	// the incoming session has no panel of its own yet, and reading the selected
+	// session's tab set would normalise/write back for a session we are not on.
+	const popoutRoute = route.view === "session" && Boolean(route.panelTabId);
+	const retentionActiveTab = connected && !sessionTransition && !popoutRoute && activeSessionId()
+		? activeSidePanelContentTab()
+		: null;
+	const retentionActiveKey = retentionActiveTab?.kind === "pack"
+		? panePaneKey(workspaceSessionId(), retentionActiveTab.id)
+		: undefined;
+	// The MOBILE active track mounts the chat pane plus EVERY content tab of the
+	// selected session, not just the active one, so an open-but-inactive pack tab
+	// already has a live <iframe>. Retention has to observe those keys: a hidden
+	// foreign track projects ONLY this plan's slots, so without them a session
+	// switch destroys panes the slider already had mounted, well below the cap.
+	// Desktop mounts only the active pack pane, so it supplies nothing here and its
+	// active-key/visibility semantics are unchanged. `retentionActiveTab !== null`
+	// carries the connected / non-transition / non-popout gate already applied above.
+	const retentionObservedKeys = !desktop && retentionActiveTab !== null
+		? unifiedPanelContentTabs().flatMap((tab) => (tab.kind === "pack" ? [panePaneKey(workspaceSessionId(), tab.id)] : []))
+		: [];
+	const retainedSlots = retainedPanePlan<UnifiedContentTab>({
+		activeKey: retentionActiveKey,
+		observedKeys: retentionObservedKeys,
+		resolve: resolveLivePackPane,
+	});
+	const hasLiveRetainedPanes = retainedSlots.length > 0;
+
+	/** The mobile shell picks its top-level template by `connected`, which is
+	 *  FALSE for a cold switch's connecting frame. Keep the connected-shaped shell
+	 *  while panes are retained so lit reuses it instead of tearing every live
+	 *  <iframe> out of the document. */
+	const keepShellDuringTransition = sessionTransition && hasLiveRetainedPanes;
 
 	if (desktop) {
 		teardownMobileScrollTracking();
@@ -3501,7 +3921,7 @@ export function doRenderApp(): void {
 				</div>
 			</div>
 		`, app);
-	} else if (connected) {
+	} else if (connected || keepShellDuringTransition) {
 		render(html`
 			<div class="w-full app-shell flex flex-col bg-background text-foreground overflow-hidden relative"
 				data-mobile-header>
@@ -3514,7 +3934,7 @@ export function doRenderApp(): void {
 						${headerLeft()}
 						${headerRight()}
 					</div>
-					${hasUnifiedPanel() ? unifiedTabBar() : ""}
+					${!sessionTransition && hasUnifiedPanel() ? unifiedTabBar() : ""}
 				</div>
 				<div id="app-main" class="flex-1 min-w-0 min-h-0 flex flex-col">${mainArea()}</div>
 			</div>

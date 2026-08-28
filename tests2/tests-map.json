@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/panel-pane-retention.test.ts",
+      "reason": "Pure policy coverage for side-panel pane retention: append-only insertion order, liveness pruning with tail re-add, least-recently-active eviction that never drops the active pane, hidden-flag projection, and state reset.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/pack-hot-reload.journey.spec.ts",
       "reason": "Real source-Vite browser journey proving nested marketplace renderer and parameterized-panel bytes repaint through the development bridge without page or workspace identity loss, survive ordinary reload, and clean all fixture state.",
       "execution": {
@@ -3978,6 +3987,42 @@
     {
       "path": "tests2/browser/e2e/benchmark-bobbit-journeys.spec.ts",
       "reason": "Browser journey covering reduced session-open and event-stream benchmarks through production WebSocket and UI boundaries, metric presence, exact ordering, reload equivalence, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/side-panel-pane-retention.test.ts",
+      "reason": "Desktop side-panel pane retention: collapse/expand, split/fullscreen, session switch and tab switch keep a pack pane's iframe mounted at one DOM position (element identity plus a zero-src-mutation observer), while tab close, pack uninstall, session archive and LRU eviction still destroy it in a single render.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/mobile-pane-retention.test.ts",
+      "reason": "Mobile per-session slider tracks: cross-session pane retention with exactly one visible and inert hidden tracks, append-only DOM order with CSS order carrying visual order across tab switch and reorder, chat-only-track parity for a session with no panel tabs, and teardown on close/uninstall/archive/eviction.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/fixtures/side-panel-pane-retention-mobile.spec.ts",
+      "reason": "Real-browser proof of side-panel pane retention on the MOBILE slider, split out of side-panel-pane-retention.spec.ts so neither file approaches the 60s per-spec browser budget (both share side-panel-pane-retention-helpers.ts). Covers: a mobile session round-trip keeps the same framed document with exactly one active track and inert foreign tracks, and a real teardown still cold-mounts; an open-but-inactive pack pane (mounted by the active track but never the active tab) survives a round-trip under the retention cap, including when the active tab is a non-pack tab so retention derives no active key at all; a cold mobile session switch keeps every retained track mounted outward and on the return leg, with the bare-loader case where nothing is retained; and a SELECTED session going terminal while still listed in gatewaySessions detaches its framed document rather than leaving it mounted and hidden, which is the active-track liveness filter the hidden-foreign-track case cannot reach.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/fixtures/side-panel-pane-retention.spec.ts",
+      "reason": "Real-browser proof of side-panel pane retention on DESKTOP that no other tier can give: a pack panel's framed document loads exactly once across collapse/expand, tab switch, desktop session round-trip and the split/fullscreen ladder (own load counter, parent load beacon and network request count), with stamped element identity; and loads a second time after tab close or retention-cap eviction, so retaining forever also fails. Also covers the COLD session switch (a first visit to a session that is not cached): the fixture reproduces connectToSession's slow-path ordering behind a delay the spec controls, so the connecting loader frame is genuinely observed before the target connects, including on the return leg where the incoming session's own pane must survive its own connecting frame, plus bare-loader parity when nothing is retained and the tabless collapsed-size case. Adds real keyboard-focus and accessibility-tree inertness for hidden panes and a hidden pack host, plus real getBoundingClientRect collapsed/split geometry parity. The mobile-viewport half lives in side-panel-pane-retention-mobile.spec.ts so neither file approaches the 60s per-spec browser budget.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

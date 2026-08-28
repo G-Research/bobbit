@@ -585,6 +585,19 @@ export function packPanelTitle(packId: string, panelId: string): string | undefi
 	return panels.get(panelKey(packId, panelId))?.title;
 }
 
+/** Project scope of a REGISTERED panel, or `undefined` when it is not registered
+ *  (or was registered for the global/no-project scope).
+ *
+ *  Read-only accessor over the existing registry — the registry itself stays
+ *  keyed by `{packId, panelId}` ("last requested project wins"). Side-panel pane
+ *  retention reads this to prune a retained pane whose owning session belongs to
+ *  a different project, so a cross-project switch can never re-project a hidden
+ *  pane with the other project's module
+ *  (docs/design/keep-side-panels-mounted.md §4.2). */
+export function packPanelProjectId(packId: string, panelId: string): string | undefined {
+	return panels.get(panelKey(packId, panelId))?.projectId;
+}
+
 export function renderPackPanelContent(packId: string, panelId: string, params?: Record<string, unknown>, boundSessionId?: string): TemplateResult | unknown {
 	const key = panelKey(packId, panelId);
 	const panel = loadedPanels.get(key);
