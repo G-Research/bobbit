@@ -58,6 +58,7 @@ describe("bobbit compact projections", () => {
 			autoStartTeam: true,
 			generation: 9,
 			colorIndex: 3,
+			metadata: { "example-extension": { correlationId: "LIST_GOAL_METADATA_SENTINEL" } },
 		};
 		const archivedSession = {
 			id: "archived-session-1",
@@ -88,8 +89,9 @@ describe("bobbit compact projections", () => {
 		expect(data.goals).toHaveLength(1);
 		expect(data.goals[0]).toMatchObject({ id: goal.id, title: goal.title, state: goal.state, projectId: goal.projectId,
 			parentGoalId: goal.parentGoalId, workflowId: goal.workflowId, createdAt: goal.createdAt, updatedAt: goal.updatedAt });
-		for (const dropped of ["spec", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
+		for (const dropped of ["spec", "metadata", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
 			"sandboxed", "subgoalsAllowed", "autoStartTeam", "generation", "colorIndex"]) expect(data.goals[0][dropped], dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped).toBeUndefined();
+		expect(JSON.stringify(data.goals[0])).not.toContain("LIST_GOAL_METADATA_SENTINEL");
 		for (const dropped of ["providerMetadata", "filesystemPath", "workflowSnapshot"]) expect(data[dropped]).toBeUndefined();
 		expect(data.archivedSessions).toBeUndefined();
 		expect("archivedSessions" in data).toBe(false);
@@ -103,8 +105,15 @@ describe("bobbit compact projections", () => {
 		});
 	});
 
-	it("gives get_goal untruncated semantic detail and derives workflowId before dropping internals", async () => {
+	it("gives get_goal untruncated semantic detail, including generic persisted metadata, while dropping workflow internals", async () => {
 		const spec = longText("complete goal spec: ");
+		const metadata = {
+			"example-extension": {
+				correlationId: "correlation-1",
+				labels: ["alpha", "beta"],
+				context: { enabled: true, attempt: 2 },
+			},
+		};
 		stubFetch(() => ({
 			body: {
 				id: "goal-detail",
@@ -112,6 +121,7 @@ describe("bobbit compact projections", () => {
 				state: "todo",
 				projectId: "project-1",
 				spec,
+				metadata,
 				workflow: { id: "derived-workflow", gates: [{ id: "implementation", verify: { prompt: "hidden" } }] },
 				cwd: "/hidden",
 			},
@@ -122,10 +132,41 @@ describe("bobbit compact projections", () => {
 			goalId: "goal-detail",
 		}));
 
-		expect(data).toMatchObject({ id: "goal-detail", workflowId: "derived-workflow", spec });
+		expect(data).toMatchObject({ id: "goal-detail", workflowId: "derived-workflow", spec, metadata });
 		expect(data.spec).not.toContain(COMPACT_TRUNCATION_SUFFIX);
+		expect(data.metadata).toEqual(metadata);
 		expect(data.workflow).toBeUndefined();
 		expect(data.cwd).toBeUndefined();
+	});
+
+	it("keeps get_goal summary bounded by omitting metadata, specs, and workflow internals", async () => {
+		stubFetch(() => ({
+			body: {
+				id: "goal-summary",
+				title: "Goal summary",
+				state: "in-progress",
+				projectId: "project-1",
+				spec: "SUMMARY_GOAL_SPEC_SENTINEL",
+				metadata: { "example-extension": { correlationId: "SUMMARY_GOAL_METADATA_SENTINEL" } },
+				workflow: { id: "summary-workflow", gates: [{ id: "design", verify: { prompt: "SUMMARY_WORKFLOW_SENTINEL" } }] },
+			},
+		}));
+
+		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
+			operation: "get_goal",
+			goalId: "goal-summary",
+			view: "summary",
+		}));
+
+		expect(data).toMatchObject({
+			id: "goal-summary",
+			title: "Goal summary",
+			state: "in-progress",
+			projectId: "project-1",
+			workflowId: "summary-workflow",
+		});
+		for (const dropped of ["metadata", "spec", "workflow"]) expect(data[dropped], dropped).toBeUndefined();
+		expect(JSON.stringify(data)).not.toMatch(/SUMMARY_GOAL_(?:METADATA|SPEC)_SENTINEL|SUMMARY_WORKFLOW_SENTINEL/);
 	});
 
 	it("keeps session lists discovery-only with concise error indicators and cursor pagination", async () => {
