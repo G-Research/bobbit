@@ -520,9 +520,17 @@ test.describe("remote-state coordinator routes", () => {
 			complete: (trusted: boolean) => void;
 		}> = [];
 		const routeRequests: Array<Promise<Response>> = [];
+		// Bound each phase-aware wait by wall time: yielding through both the check
+		// phase and the timers phase lets queued I/O progress under full CI load.
+		// Four 2-second ceilings cap aggregate waiting at eight seconds, so these
+		// waits cannot consume the integration file's entire 25-second budget.
+		// Keep the final assertion exact.
 		const waitForCount = async (read: () => number, expected: number) => {
-			for (let attempt = 0; attempt < 100 && read() < expected; attempt++) {
+			const deadline = Date.now() + 2_000;
+			while (read() < expected && Date.now() < deadline) {
 				await new Promise<void>(resolve => setImmediate(resolve));
+				if (read() >= expected) break;
+				await new Promise<void>(resolve => setTimeout(resolve, 0));
 			}
 			expect(read()).toBe(expected);
 		};
