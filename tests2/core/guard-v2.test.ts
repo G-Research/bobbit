@@ -50,10 +50,10 @@ describe("guard-v2: convention inventory", () => {
 		expect(() => validateIntroducedTestPaths(introduced)).toThrow("tests/legacy/renamed.test.ts");
 	});
 
-	it("admits semantic rename destinations without changing execution discovery", () => {
+	it("admits canonical semantic rename destinations without changing execution discovery", () => {
 		const before = discoverTests();
 		const introduced = collectIntroducedPaths((args: string[]) => Buffer.from(
-			args[0] === "diff" ? "tests2/core/example.isolated.test.ts\0" : "",
+			args[0] === "diff" ? "tests/unit/isolated/example.isolated.test.ts\0" : "",
 		), { mergeBase: "0123456789abcdef0123456789abcdef01234567" });
 
 		expect(() => validateIntroducedTestPaths(introduced)).not.toThrow();

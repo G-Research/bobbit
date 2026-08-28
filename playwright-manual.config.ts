@@ -13,6 +13,12 @@
  * Run:  npm run test:manual
  */
 import { defineConfig } from "@playwright/test";
+import { TEST_LAYOUT } from "./scripts/testing/layout-policy.mjs";
+
+const canonicalManual = (TEST_LAYOUT as readonly { semantic: string; suffix: string }[])
+	.find(({ semantic }) => semantic === "manual");
+if (!canonicalManual) throw new Error("Canonical manual test convention is missing");
+const canonicalManualMatch = `**/*${canonicalManual.suffix}`;
 
 // Opt-in per-test video capture. Tier-2.5-style — always-off by default,
 // enable with RECORDVIDEO=1 to get a webm per test under test-results/.
@@ -36,6 +42,11 @@ export default defineConfig({
 			name: "manual-integration",
 			testDir: "./tests/manual-integration",
 			testMatch: ["**/*.{test,spec}.ts"],
+		},
+		{
+			name: "manual",
+			testDir: "./tests/manual",
+			testMatch: [canonicalManualMatch],
 		},
 	],
 });
