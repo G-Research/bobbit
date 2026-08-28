@@ -25,7 +25,7 @@
  * liveness test. The claim is that the framed document is DETACHED, not merely hidden,
  * which needs a held element reference in a live document.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import {
 	RETENTION_LIMIT,
 	beaconCount,
@@ -52,6 +52,35 @@ import {
 
 registerRetentionBundleBuild();
 
+async function dragRetentionDivider(page: Page, rawPercent: number, pointerId: number): Promise<void> {
+	await page.getByRole("separator", { name: "Resize side panel" }).evaluate((element, input) => {
+		const handle = element as HTMLElement;
+		const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+		const panel = layout?.querySelector<HTMLElement>(":scope > .side-panel-workspace");
+		if (!layout || !panel) throw new Error("retention divider has no split geometry");
+		const layoutBox = layout.getBoundingClientRect();
+		const handleBox = handle.getBoundingClientRect();
+		const startX = handleBox.x + handleBox.width / 2;
+		const startY = handleBox.y + Math.max(handleBox.height / 2, 1);
+		const startPercent = panel.getBoundingClientRect().width / layoutBox.width * 100;
+		const clientX = startX + (startPercent - input.rawPercent) * layoutBox.width / 100;
+		const event = (type: "pointerdown" | "pointermove" | "pointerup", x: number, buttons: number) => new PointerEvent(type, {
+			pointerId: input.pointerId,
+			pointerType: "touch",
+			isPrimary: true,
+			clientX: x,
+			clientY: startY,
+			button: type === "pointerdown" || type === "pointerup" ? 0 : -1,
+			buttons,
+			bubbles: true,
+		});
+		handle.dispatchEvent(event("pointerdown", startX, 1));
+		window.dispatchEvent(event("pointermove", clientX, 1));
+		window.dispatchEvent(event("pointerup", clientX, 0));
+	}, { rawPercent, pointerId });
+	await settleRender(page);
+}
+
 test.describe("side-panel pane retention (desktop)", () => {
 	test("a retained pane's framed document loads exactly once across collapse, tab switch, session round-trip and the mode ladder — and cold-mounts after the tab is closed", async ({ page }) => {
 		const requests = await loadFixture(page);
@@ -62,8 +91,13 @@ test.describe("side-panel pane retention (desktop)", () => {
 		await expectFrameLoads(page, "a1", 1, "the pane's framed document should load once on first mount");
 		const probe = await stampFrameProbe(page, "a1");
 
-		// 1. Collapse → expand. The workspace is hidden, never removed.
-		await page.getByTestId("side-panel-collapse").first().click();
+		// 1. Real pointer resize, then pointer-driven collapse → expand. Neither may
+		// detach or re-navigate the retained pack iframe.
+		await dragRetentionDivider(page, 63, 801);
+		await expect(page.getByRole("separator", { name: "Resize side panel" })).toHaveAttribute("aria-valuenow", "63");
+		expect(await frameLoadCount(page, "a1"), "an interior pointer resize must not reload the framed document").toBe(1);
+		expect((await readFrameProbe(page, "a1")).property, "interior resize keeps the same iframe element").toBe(probe);
+		await dragRetentionDivider(page, 24, 802);
 		await expect(page.getByTestId("side-panel-restore")).toBeVisible({ timeout: 5_000 });
 		expect(await inertnessOf(page, '[data-panel-workspace="content"]'), "a collapsed workspace stays mounted but inert")
 			.toMatchObject({ display: "none", hidden: true, inert: true, ariaHidden: "true" });
@@ -89,8 +123,8 @@ test.describe("side-panel pane retention (desktop)", () => {
 		await selectSession(page, sessionA);
 		await expect(frameLocator(page, "a1")).toBeVisible({ timeout: 5_000 });
 
-		// 4. Split → fullscreen → split.
-		await page.getByTestId("side-panel-fullscreen").first().click();
+		// 4. Pointer-driven split → fullscreen → split.
+		await dragRetentionDivider(page, 76, 803);
 		await expect.poll(async () => page.locator('[data-panel-workspace="content"]').first().getAttribute("data-side-panel-mode"), { timeout: 5_000 })
 			.toBe("fullscreen");
 		await expect(page.getByTestId("side-panel-restore"), "fullscreen shows no restore button").toHaveCount(0);
