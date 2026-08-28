@@ -280,6 +280,8 @@ test.describe("Side-panel tab contract", () => {
 		await page.mouse.move(collapseStartX, collapseY);
 		await page.mouse.down();
 		await page.mouse.move(layoutBox.x + layoutBox.width - 1, collapseY, { steps: 8 });
+		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "collapse");
+		expect(await page.locator(".side-panel-split-layout").evaluate((layout) => getComputedStyle(layout, "::after").content)).toContain("Release to collapse panel");
 		await page.mouse.up();
 
 		const restore = page.getByTestId("side-panel-restore");
@@ -289,6 +291,28 @@ test.describe("Side-panel tab contract", () => {
 		await expect(handle).toBeVisible();
 		const restored = await widths();
 		expect(Math.abs(restored.panel - restored.chat), "restoring a drag-collapsed panel should preserve its prior width").toBeLessThan(3);
+
+		const [expandHandleBox, restoredLayoutBox] = await Promise.all([
+			handle.boundingBox(),
+			page.locator(".side-panel-split-layout").boundingBox(),
+		]);
+		if (!expandHandleBox || !restoredLayoutBox) throw new Error("restored split layout has no resize geometry");
+		const expandStartX = expandHandleBox.x + expandHandleBox.width / 2;
+		const expandY = expandHandleBox.y + expandHandleBox.height / 2;
+		await page.mouse.move(expandStartX, expandY);
+		await page.mouse.down();
+		await page.mouse.move(restoredLayoutBox.x + 1, expandY, { steps: 8 });
+		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "fullscreen");
+		expect(await page.locator(".side-panel-split-layout").evaluate((layout) => getComputedStyle(layout, "::after").content)).toContain("Release to expand panel");
+		await page.mouse.up();
+
+		await expect(page.locator('[data-side-panel-mode="fullscreen"]'), "dragging the divider fully left should expand the side panel").toBeVisible();
+		await expect(handle).toHaveCount(0);
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode, { timeout: 10_000 }).toBe("fullscreen");
+		await page.getByTestId("side-panel-collapse").click();
+		await expect(handle).toBeVisible();
+		const splitAfterFullscreen = await widths();
+		expect(Math.abs(splitAfterFullscreen.panel - splitAfterFullscreen.chat), "returning from drag-fullscreen should preserve the prior split width").toBeLessThan(3);
 	});
 
 	test("sequential preview files keep stable artifact routes across tabs and reload", async ({ page }) => {

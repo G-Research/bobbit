@@ -1163,7 +1163,13 @@ export function workspaceSessionId(): string {
 }
 
 type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
-const SIDE_PANEL_COLLAPSE_THRESHOLD = 10;
+type SidePanelDragIntent = "collapse" | "fullscreen" | null;
+
+function sidePanelDragIntent(rawPercent: number): SidePanelDragIntent {
+	if (rawPercent < SIDE_PANEL_WIDTH_MIN) return "collapse";
+	if (rawPercent > SIDE_PANEL_WIDTH_MAX) return "fullscreen";
+	return null;
+}
 
 function renderSidePanelResizeHandle() {
 	return html`
@@ -1213,6 +1219,8 @@ function onSidePanelResizePointerDown(event: PointerEvent): void {
 		window.removeEventListener("pointerup", onUp);
 		window.removeEventListener("pointercancel", onCancel);
 		window.removeEventListener("blur", onBlur);
+		delete layout.dataset.resizeIntent;
+		handle.removeAttribute("aria-valuetext");
 		if (pointerId !== undefined) {
 			try { handle.releasePointerCapture(pointerId); } catch {}
 		}
@@ -1223,14 +1231,23 @@ function onSidePanelResizePointerDown(event: PointerEvent): void {
 		const nextWidth = startPanelWidth - (moveEvent.clientX - startX);
 		lastRawPercent = (nextWidth / layoutWidth) * 100;
 		updateSidePanelDividerValue(handle, lastRawPercent);
+		const intent = sidePanelDragIntent(lastRawPercent);
+		if (intent) {
+			layout.dataset.resizeIntent = intent;
+			handle.setAttribute("aria-valuetext", intent === "collapse" ? "Release to collapse panel" : "Release to expand panel fullscreen");
+		} else {
+			delete layout.dataset.resizeIntent;
+			handle.removeAttribute("aria-valuetext");
+		}
 	};
 	const onUp = (upEvent: PointerEvent) => {
-		const shouldCollapse = lastRawPercent <= SIDE_PANEL_COLLAPSE_THRESHOLD;
+		const intent = sidePanelDragIntent(lastRawPercent);
 		cleanup(upEvent.pointerId);
-		if (shouldCollapse) {
-			// A collapse gesture should not overwrite the width restored on reopen.
+		if (intent) {
+			// A terminal drag gesture should not overwrite the split width restored
+			// when the user returns from collapsed or fullscreen mode.
 			setSidePanelWidthPercent(startPercent);
-			void setSidePanelSizeMode("collapsed", workspaceSessionId());
+			void setSidePanelSizeMode(intent === "collapse" ? "collapsed" : "fullscreen", workspaceSessionId());
 		}
 	};
 	const onCancel = (cancelEvent: PointerEvent) => cleanup(cancelEvent.pointerId);

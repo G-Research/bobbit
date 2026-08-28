@@ -1188,6 +1188,45 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	.side-panel-resize-handle:focus-visible::after {
 		background: color-mix(in oklch, var(--primary) 55%, transparent);
 	}
+	/* Once the pointer passes a terminal threshold, preview the action that
+	   releasing will take instead of leaving the clamped divider ambiguous. */
+	.side-panel-split-layout[data-resize-intent]::after {
+		position: absolute;
+		left: 50%;
+		top: 50%;
+		z-index: 30;
+		transform: translate(-50%, -50%);
+		padding: 6px 10px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--card);
+		color: var(--foreground);
+		box-shadow: 0 4px 14px color-mix(in oklch, var(--foreground) 16%, transparent);
+		font-size: 12px;
+		font-weight: 600;
+		white-space: nowrap;
+		pointer-events: none;
+	}
+	.side-panel-split-layout[data-resize-intent="collapse"]::after {
+		content: "Release to collapse panel";
+		border-color: color-mix(in oklch, var(--warning) 55%, var(--border));
+	}
+	.side-panel-split-layout[data-resize-intent="fullscreen"]::after {
+		content: "Release to expand panel";
+		border-color: color-mix(in oklch, var(--info) 55%, var(--border));
+	}
+	.side-panel-split-layout[data-resize-intent="collapse"] > .side-panel-workspace {
+		box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--warning) 45%, transparent);
+	}
+	.side-panel-split-layout[data-resize-intent="fullscreen"] > .side-panel-workspace {
+		box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--info) 45%, transparent);
+	}
+	.side-panel-split-layout[data-resize-intent="collapse"] > .side-panel-resize-handle::after {
+		background: var(--warning);
+	}
+	.side-panel-split-layout[data-resize-intent="fullscreen"] > .side-panel-resize-handle::after {
+		background: var(--info);
+	}
 	/* When a proposal/preview panel is nested inside the shared side-panel
 	   workspace, the inner panel must fill its parent — the outer panel already
 	   supplies the user-selected width and the left border. */
