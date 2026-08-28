@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
+import { TEST_LAYOUT } from "./scripts/testing/layout-policy.mjs";
 import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
 
 // The browser harness redirects TMPDIR below. Preserve the intentional
@@ -141,6 +142,9 @@ function resolvePlaywrightWorkers(): number {
 }
 
 const playwrightWorkers = resolvePlaywrightWorkers();
+const canonicalBrowserMatches = (TEST_LAYOUT as readonly { semantic: string; suffix: string }[])
+	.filter(({ semantic }) => semantic === "browser-fixture" || semantic === "browser-journey")
+	.map(({ suffix }) => `**/*${suffix}`);
 
 export default {
 	timeout: 60_000,
@@ -176,6 +180,14 @@ export default {
 			testDir: "./tests2/browser",
 			testMatch: ["**/*.spec.ts"],
 			testIgnore: ["**/e2e/**"], // real-fidelity e2e:v2 specs; run only via `test:e2e:v2` (project browser-v2-e2e), never in tier-2 `test:v2`
+			use: {
+				browserName: "chromium" as const,
+			},
+		},
+		{
+			name: "browser-canonical",
+			testDir: "./tests/browser",
+			testMatch: canonicalBrowserMatches,
 			use: {
 				browserName: "chromium" as const,
 			},
