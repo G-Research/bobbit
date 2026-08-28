@@ -15,12 +15,13 @@ const declarationKey = (file, name) => `${file}\0${name}`;
 
 export function reconcileSemanticMappings({
 	semanticMappings,
-	requiredUnitFiles,
+	baseNamesByFile,
 	missingDeclarations,
 	currentNamesByFile,
 }) {
-	const requiredUnitFileSet = new Set(requiredUnitFiles);
-	const applicableMappings = semanticMappings.filter(({ baseFile }) => requiredUnitFileSet.has(baseFile));
+	const applicableMappings = semanticMappings.filter(({ baseFile, baseName }) => (
+		baseNamesByFile.get(baseFile)?.includes(baseName)
+	));
 	const missingKeys = new Set(missingDeclarations.map(({ file, name }) => declarationKey(file, name)));
 	const mappingByBase = new Map();
 	const invalidSemanticMappings = [];
@@ -329,7 +330,7 @@ for (const file of currentInventory) {
 
 const { mappingByBase, invalidSemanticMappings, invalidMappingKeys } = reconcileSemanticMappings({
 	semanticMappings,
-	requiredUnitFiles,
+	baseNamesByFile,
 	missingDeclarations,
 	currentNamesByFile,
 });

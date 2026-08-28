@@ -52,7 +52,7 @@ describe("declaration semantic mapping lifecycle", () => {
 	it("reconciles mappings while their source belongs to the selected pre-cutover base", () => {
 		const result = reconcileSemanticMappings({
 			semanticMappings: [mapping],
-			requiredUnitFiles: [baseFile],
+			baseNamesByFile: new Map([[baseFile, [baseName]]]),
 			missingDeclarations: [{ file: baseFile, name: baseName }],
 			currentNamesByFile: new Map([[targetFile, [targetName]]]),
 		});
@@ -62,36 +62,42 @@ describe("declaration semantic mapping lifecycle", () => {
 	});
 
 	it("ignores an absent historical source while still validating a surviving source", () => {
-		const survivingBaseName = "retired declaration in surviving file";
-		const survivingMapping = {
+		const historicalBaseName = "historical declaration in surviving file";
+		const staleBaseName = "declaration still present in selected base";
+		const historicalMapping = {
 			baseFile: targetFile,
-			baseName: survivingBaseName,
+			baseName: historicalBaseName,
 			current: [{ file: targetFile, name: targetName }],
-			rationale: "The same-file successor preserves the declaration.",
+			rationale: "The same-file successor preserves the historical declaration.",
+		};
+		const staleMapping = {
+			...historicalMapping,
+			baseName: staleBaseName,
 		};
 		const result = reconcileSemanticMappings({
-			semanticMappings: [mapping, survivingMapping],
-			requiredUnitFiles: [targetFile],
+			semanticMappings: [mapping, historicalMapping, staleMapping],
+			baseNamesByFile: new Map([[targetFile, [staleBaseName]]]),
 			missingDeclarations: [],
 			currentNamesByFile: new Map([[targetFile, [targetName]]]),
 		});
 
-		expect([...result.mappingByBase.values()]).toEqual([survivingMapping]);
+		expect([...result.mappingByBase.values()]).toEqual([staleMapping]);
 		expect(result.invalidSemanticMappings).toEqual([
-			`${targetFile} :: ${survivingBaseName} — stale mapping; base declaration is not missing`,
+			`${targetFile} :: ${staleBaseName} — stale mapping; base declaration is not missing`,
 		]);
 	});
 
 	it("keeps stale-source and missing-target validation while the source exists", () => {
+		const baseNamesByFile = new Map([[baseFile, [baseName]]]);
 		const stale = reconcileSemanticMappings({
 			semanticMappings: [mapping],
-			requiredUnitFiles: [baseFile],
+			baseNamesByFile,
 			missingDeclarations: [],
 			currentNamesByFile: new Map([[targetFile, [targetName]]]),
 		});
 		const missingTarget = reconcileSemanticMappings({
 			semanticMappings: [mapping],
-			requiredUnitFiles: [baseFile],
+			baseNamesByFile,
 			missingDeclarations: [{ file: baseFile, name: baseName }],
 			currentNamesByFile: new Map([[targetFile, ["different declaration"]]]),
 		});
