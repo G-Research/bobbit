@@ -265,6 +265,39 @@ async function expectSplitPercent(page: Page, percent: number): Promise<void> {
 	}, { message: `workspace should occupy ${percent}% of the split` }).toBeCloseTo(percent, 0);
 }
 
+async function terminalCueStyle(page: Page): Promise<{
+	content: string;
+	left: string;
+	right: string;
+	background: string;
+	expectedMixedPrimary: string;
+	animation: string;
+}> {
+	return page.locator(".side-panel-split-layout").evaluate((layout) => {
+		// Resolve the same expression as the outer-edge gradient in this document.
+		// Comparing computed values avoids pinning Chromium's oklch/oklab/rgb
+		// serialization while still proving the cue follows the live theme token.
+		const probe = document.createElement("span");
+		probe.style.backgroundColor = "color-mix(in oklch, var(--primary) 65%, transparent)";
+		layout.appendChild(probe);
+		const expectedMixedPrimary = getComputedStyle(probe).backgroundColor;
+		probe.remove();
+		const cue = getComputedStyle(layout, "::after");
+		return {
+			content: cue.content,
+			left: cue.left,
+			right: cue.right,
+			background: cue.backgroundImage,
+			expectedMixedPrimary,
+			animation: cue.animationName,
+		};
+	});
+}
+
+function compactCss(value: string): string {
+	return value.replace(/\s+/g, "");
+}
+
 test.describe("Side-panel tab contract", () => {
 	test("Chat is never a persisted tab and an empty non-staff side pane stays hidden @smoke", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
@@ -383,16 +416,16 @@ test.describe("Side-panel tab contract", () => {
 		await beginDividerDrag(page, 24);
 		await expect(splitLayout).toHaveAttribute("data-resize-intent", "collapse");
 		await expect.poll(() => page.locator(".side-panel-workspace").evaluate((panel) => Number(getComputedStyle(panel).opacity))).toBeLessThan(0.4);
-		const collapseCue = await splitLayout.evaluate((layout) => {
-			const cue = getComputedStyle(layout, "::after");
-			return { content: cue.content, left: cue.left, right: cue.right, background: cue.backgroundImage, animation: cue.animationName };
-		});
-		expect(collapseCue).toMatchObject({ content: '\"\"', right: "0px" });
-		await expect.poll(() => splitLayout.evaluate((layout) => getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor),
-			{ message: "the collapse divider cue resolves the current --primary after its transition" }).toBe("rgb(12, 34, 56)");
+		const collapseCue = await terminalCueStyle(page);
+		expect(collapseCue.content, "the collapse cue is an empty edge treatment, not a text overlay").toBe('\"\"');
+		expect(collapseCue.right, "the collapse cue pulses on the workspace outer edge").toBe("0px");
 		expect(collapseCue.left).not.toBe("0px");
 		expect(collapseCue.background).toContain("linear-gradient");
+		expect(compactCss(collapseCue.background), "the collapse edge gradient must contain the resolved mixed sentinel --primary")
+			.toContain(compactCss(collapseCue.expectedMixedPrimary));
 		expect(collapseCue.animation).toContain("side-panel-terminal-edge-pulse");
+		await expect.poll(() => splitLayout.evaluate((layout) => getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor),
+			{ message: "the collapse divider cue resolves the current --primary after its transition" }).toBe("rgb(12, 34, 56)");
 		await moveDividerDrag(page, 25);
 		await expect(splitLayout, "retreating to the inclusive bound clears the terminal cue").not.toHaveAttribute("data-resize-intent");
 		await expect.poll(() => page.locator(".side-panel-workspace").evaluate((panel) => Number(getComputedStyle(panel).opacity))).toBeGreaterThan(0.9);
@@ -417,16 +450,16 @@ test.describe("Side-panel tab contract", () => {
 		await beginDividerDrag(page, 76, 703);
 		await expect(splitLayout).toHaveAttribute("data-resize-intent", "fullscreen");
 		await expect.poll(() => page.locator(".side-panel-chat-pane").evaluate((chat) => Number(getComputedStyle(chat).opacity))).toBeLessThan(0.4);
-		const fullscreenCue = await splitLayout.evaluate((layout) => {
-			const cue = getComputedStyle(layout, "::after");
-			return { content: cue.content, left: cue.left, right: cue.right, background: cue.backgroundImage, animation: cue.animationName };
-		});
-		expect(fullscreenCue).toMatchObject({ content: '\"\"', left: "0px" });
-		await expect.poll(() => splitLayout.evaluate((layout) => getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor),
-			{ message: "the fullscreen divider cue resolves the current --primary after its transition" }).toBe("rgb(12, 34, 56)");
+		const fullscreenCue = await terminalCueStyle(page);
+		expect(fullscreenCue.content, "the fullscreen cue is an empty edge treatment, not a text overlay").toBe('\"\"');
+		expect(fullscreenCue.left, "the fullscreen cue pulses on the chat outer edge").toBe("0px");
 		expect(fullscreenCue.right).not.toBe("0px");
 		expect(fullscreenCue.background).toContain("linear-gradient");
+		expect(compactCss(fullscreenCue.background), "the fullscreen edge gradient must contain the resolved mixed sentinel --primary")
+			.toContain(compactCss(fullscreenCue.expectedMixedPrimary));
 		expect(fullscreenCue.animation).toContain("side-panel-terminal-edge-pulse");
+		await expect.poll(() => splitLayout.evaluate((layout) => getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor),
+			{ message: "the fullscreen divider cue resolves the current --primary after its transition" }).toBe("rgb(12, 34, 56)");
 		await moveDividerDrag(page, 75, 703);
 		await expect(splitLayout, "retreating to the inclusive bound clears the fullscreen cue").not.toHaveAttribute("data-resize-intent");
 		await expect.poll(() => page.locator(".side-panel-chat-pane").evaluate((chat) => Number(getComputedStyle(chat).opacity))).toBeGreaterThan(0.9);

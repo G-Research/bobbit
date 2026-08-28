@@ -52,32 +52,20 @@ import {
 
 registerRetentionBundleBuild();
 
-async function dragRetentionDivider(page: Page, rawPercent: number, pointerId: number): Promise<void> {
-	await page.getByRole("separator", { name: "Resize side panel" }).evaluate((element, input) => {
-		const handle = element as HTMLElement;
-		const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
-		const panel = layout?.querySelector<HTMLElement>(":scope > .side-panel-workspace");
-		if (!layout || !panel) throw new Error("retention divider has no split geometry");
-		const layoutBox = layout.getBoundingClientRect();
-		const handleBox = handle.getBoundingClientRect();
-		const startX = handleBox.x + handleBox.width / 2;
-		const startY = handleBox.y + Math.max(handleBox.height / 2, 1);
-		const startPercent = panel.getBoundingClientRect().width / layoutBox.width * 100;
-		const clientX = startX + (startPercent - input.rawPercent) * layoutBox.width / 100;
-		const event = (type: "pointerdown" | "pointermove" | "pointerup", x: number, buttons: number) => new PointerEvent(type, {
-			pointerId: input.pointerId,
-			pointerType: "touch",
-			isPrimary: true,
-			clientX: x,
-			clientY: startY,
-			button: type === "pointerdown" || type === "pointerup" ? 0 : -1,
-			buttons,
-			bubbles: true,
-		});
-		handle.dispatchEvent(event("pointerdown", startX, 1));
-		window.dispatchEvent(event("pointermove", clientX, 1));
-		window.dispatchEvent(event("pointerup", clientX, 0));
-	}, { rawPercent, pointerId });
+async function dragRetentionDivider(page: Page, rawPercent: number): Promise<void> {
+	const handle = page.getByRole("separator", { name: "Resize side panel" });
+	const [handleBox, layoutBox] = await Promise.all([
+		handle.boundingBox(),
+		page.locator(".side-panel-split-layout").boundingBox(),
+	]);
+	if (!handleBox || !layoutBox) throw new Error("retention divider has no visible split geometry");
+	const startX = handleBox.x + handleBox.width / 2;
+	const startY = handleBox.y + handleBox.height / 2;
+	const targetX = layoutBox.x + layoutBox.width * (1 - rawPercent / 100);
+	await page.mouse.move(startX, startY);
+	await page.mouse.down();
+	await page.mouse.move(targetX, startY, { steps: 6 });
+	await page.mouse.up();
 	await settleRender(page);
 }
 
@@ -93,11 +81,22 @@ test.describe("side-panel pane retention (desktop)", () => {
 
 		// 1. Real pointer resize, then pointer-driven collapse → expand. Neither may
 		// detach or re-navigate the retained pack iframe.
-		await dragRetentionDivider(page, 63, 801);
-		await expect(page.getByRole("separator", { name: "Resize side panel" })).toHaveAttribute("aria-valuenow", "63");
+		const divider = page.getByRole("separator", { name: "Resize side panel" });
+		await expect(divider, "the retained-pane fixture exposes the production-sized divider hit target").toBeVisible();
+		const dividerBox = await divider.boundingBox();
+		expect(dividerBox?.width, "the visible divider keeps its 8px pointer target").toBeCloseTo(8, 0);
+		await dragRetentionDivider(page, 63);
+		await expect(divider).toHaveAttribute("aria-valuenow", "63");
+		const resizedGeometry = await page.locator(".side-panel-split-layout").evaluate((layout) => {
+			const row = layout.getBoundingClientRect();
+			const panel = layout.querySelector<HTMLElement>(":scope > .side-panel-workspace")!.getBoundingClientRect();
+			return { panelPercent: panel.width / row.width * 100, handleColor: getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor };
+		});
+		expect(resizedGeometry.panelPercent, "the real drag must change retained-pane geometry to the requested split").toBeCloseTo(63, 0);
+		expect(resizedGeometry.handleColor, "the hovered divider exposes its theme-token line").not.toBe("rgba(0, 0, 0, 0)");
 		expect(await frameLoadCount(page, "a1"), "an interior pointer resize must not reload the framed document").toBe(1);
 		expect((await readFrameProbe(page, "a1")).property, "interior resize keeps the same iframe element").toBe(probe);
-		await dragRetentionDivider(page, 24, 802);
+		await dragRetentionDivider(page, 24);
 		await expect(page.getByTestId("side-panel-restore")).toBeVisible({ timeout: 5_000 });
 		expect(await inertnessOf(page, '[data-panel-workspace="content"]'), "a collapsed workspace stays mounted but inert")
 			.toMatchObject({ display: "none", hidden: true, inert: true, ariaHidden: "true" });
@@ -124,7 +123,7 @@ test.describe("side-panel pane retention (desktop)", () => {
 		await expect(frameLocator(page, "a1")).toBeVisible({ timeout: 5_000 });
 
 		// 4. Pointer-driven split → fullscreen → split.
-		await dragRetentionDivider(page, 76, 803);
+		await dragRetentionDivider(page, 76);
 		await expect.poll(async () => page.locator('[data-panel-workspace="content"]').first().getAttribute("data-side-panel-mode"), { timeout: 5_000 })
 			.toBe("fullscreen");
 		await expect(page.getByTestId("side-panel-restore"), "fullscreen shows no restore button").toHaveCount(0);
