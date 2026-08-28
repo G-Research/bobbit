@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -14,6 +14,8 @@ const DATABASE_SOURCE = readFileSync(new URL("../../market-packs/performance-opt
 const ROUTES_ENTRY_SOURCE = readFileSync(new URL("../../market-packs/performance-optimisation/src/performance-routes-entry.ts", import.meta.url), "utf8");
 const TOOL_ENTRY_SOURCE = readFileSync(new URL("../../market-packs/performance-optimisation/src/performance-tool-extension-entry.ts", import.meta.url), "utf8");
 const BUILD_METADATA = JSON.parse(readFileSync(new URL("../../market-packs/performance-optimisation/pack.build.json", import.meta.url), "utf8"));
+const NATIVE_FAMILY = new URL("../../market-packs/performance-optimisation/lib/native/database-driver/", import.meta.url);
+const NATIVE_MANIFEST = JSON.parse(readFileSync(new URL("manifest.json", NATIVE_FAMILY), "utf8"));
 const SCANNER_ROLE = readFileSync(new URL("../../market-packs/performance-optimisation/roles/performance-scanner.yaml", import.meta.url), "utf8");
 const DIRECTOR_ROLE = readFileSync(new URL("../../market-packs/performance-optimisation/roles/optimisation-director.yaml", import.meta.url), "utf8");
 const INSTALL_SKILL = readFileSync(new URL("../../market-packs/performance-optimisation/skills/install-performance-optimisation/SKILL.md", import.meta.url), "utf8");
@@ -207,6 +209,12 @@ describe("performance optimisation first-party pack", () => {
 			"linux-musl-arm64": "prebuilds/linuxmusl-arm64.node",
 			"linux-musl-x64": "prebuilds/linuxmusl-x64.node",
 		});
+		expect(NATIVE_MANIFEST).toMatchObject({ schema: 1, package: "better-sqlite3", version: "13.0.3" });
+		expect(Object.keys(NATIVE_MANIFEST.targets).sort()).toEqual([...nativeTargets].sort());
+		for (const target of nativeTargets) {
+			expect(NATIVE_MANIFEST.targets[target]).toMatchObject({ file: `${target}.node` });
+			expect(existsSync(new URL(`${target}.node`, NATIVE_FAMILY))).toBe(true);
+		}
 		expect(ROUTES_ENTRY_SOURCE).toContain('from "bobbit:pack-native-assets"');
 		expect(ROUTES_ENTRY_SOURCE).toContain('new URL("./native/database-driver/", import.meta.url)');
 		expect(TOOL_ENTRY_SOURCE).toContain('from "bobbit:pack-native-assets"');
