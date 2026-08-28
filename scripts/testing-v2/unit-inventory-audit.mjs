@@ -60,34 +60,76 @@ function staticTestNames(source, file) {
 function childProcessValueImports(source, file) {
 	const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 	const violations = [];
+	const valueBindings = new Map();
+	const bindingDeclarations = new Set();
+	const vitestSpyBindings = new Set();
 	const isChildProcess = (node) => node && ts.isStringLiteralLike(node)
 		&& (node.text === "node:child_process" || node.text === "child_process");
 	const lineOf = (node) => sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 	const add = (node, kind) => violations.push(`${file}:${lineOf(node)} — ${kind}`);
-	const visit = (node) => {
+	const addBinding = (identifier) => {
+		valueBindings.set(identifier.text, identifier);
+		bindingDeclarations.add(identifier);
+	};
+	const collect = (node) => {
+		if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)
+			&& node.moduleSpecifier.text === "vitest" && node.importClause?.namedBindings
+			&& ts.isNamedImports(node.importClause.namedBindings)) {
+			for (const element of node.importClause.namedBindings.elements) {
+				if (!element.isTypeOnly && (element.propertyName?.text ?? element.name.text) === "vi") {
+					vitestSpyBindings.add(element.name.text);
+				}
+			}
+		}
 		if (ts.isImportDeclaration(node) && isChildProcess(node.moduleSpecifier)) {
 			const clause = node.importClause;
-			const hasValueBinding = !clause
-				|| (!clause.isTypeOnly && (
-					Boolean(clause.name)
-					|| !clause.namedBindings
-					|| ts.isNamespaceImport(clause.namedBindings)
-					|| clause.namedBindings.elements.some((element) => !element.isTypeOnly)
-				));
-			if (hasValueBinding) add(node, "value import from child_process");
+			if (!clause) add(node, "side-effect import of child_process");
+			else if (!clause.isTypeOnly) {
+				if (clause.name) addBinding(clause.name);
+				if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) addBinding(clause.namedBindings.name);
+				else if (clause.namedBindings) {
+					for (const element of clause.namedBindings.elements) if (!element.isTypeOnly) addBinding(element.name);
+				}
+			}
 		} else if (ts.isImportEqualsDeclaration(node)
 			&& ts.isExternalModuleReference(node.moduleReference)
 			&& isChildProcess(node.moduleReference.expression)) {
-			add(node, "import-equals from child_process");
+			addBinding(node.name);
 		} else if (ts.isExportDeclaration(node) && isChildProcess(node.moduleSpecifier) && !node.isTypeOnly) {
 			add(node, "value re-export from child_process");
 		} else if (ts.isCallExpression(node) && node.arguments.length > 0 && isChildProcess(node.arguments[0])) {
 			if (node.expression.kind === ts.SyntaxKind.ImportKeyword) add(node, "dynamic import of child_process");
 			else if (ts.isIdentifier(node.expression) && node.expression.text === "require") add(node, "require of child_process");
 		}
-		ts.forEachChild(node, visit);
+		ts.forEachChild(node, collect);
 	};
-	visit(sourceFile);
+	collect(sourceFile);
+
+	const isTypeReference = (identifier) => {
+		for (let node = identifier.parent; node && !ts.isStatement(node); node = node.parent) {
+			if (ts.isTypeNode(node)) return true;
+		}
+		return false;
+	};
+	const isVitestSpyTarget = (identifier) => {
+		for (let node = identifier; node.parent && !ts.isStatement(node); node = node.parent) {
+			const parent = node.parent;
+			if (!ts.isCallExpression(parent) || parent.arguments[0] !== node) continue;
+			return ts.isPropertyAccessExpression(parent.expression)
+				&& ts.isIdentifier(parent.expression.expression)
+				&& vitestSpyBindings.has(parent.expression.expression.text)
+				&& parent.expression.name.text === "spyOn";
+		}
+		return false;
+	};
+	const inspectUses = (node) => {
+		if (ts.isIdentifier(node) && valueBindings.has(node.text) && !bindingDeclarations.has(node)
+			&& !isTypeReference(node) && !isVitestSpyTarget(node)) {
+			add(node, `child_process binding ${JSON.stringify(node.text)} is used outside vi.spyOn`);
+		}
+		ts.forEachChild(node, inspectUses);
+	};
+	inspectUses(sourceFile);
 	return violations;
 }
 
@@ -209,18 +251,23 @@ const requiredUnitFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "-
 const canonicalTestIdentity = (file) => file.replace(/\.(?:isolated|e2e)(?=\.test\.ts$)/, "");
 const currentByIdentity = new Map(currentInventory.map((file) => [canonicalTestIdentity(file), file]));
 const requiredIdentity = new Set(requiredUnitFiles.map(canonicalTestIdentity));
-const missingFiles = requiredUnitFiles.filter((file) => !currentByIdentity.has(canonicalTestIdentity(file)));
-const addedFiles = currentInventory.filter((file) => !requiredIdentity.has(canonicalTestIdentity(file)));
+const rawMissingFiles = requiredUnitFiles.filter((file) => !currentByIdentity.has(canonicalTestIdentity(file)));
+const rawAddedFiles = currentInventory.filter((file) => !requiredIdentity.has(canonicalTestIdentity(file)));
 const restoredFormerE2eFiles = formerlyRelocatedE2e.filter((file) => currentByIdentity.has(canonicalTestIdentity(file)));
 
 let baseDeclarations = 0;
 let currentDeclarations = 0;
 const missingDeclarations = [];
+const baseNamesByFile = new Map();
 for (const file of requiredUnitFiles) {
 	const baseNames = staticTestNames(gitText(["show", `${mergeBase}:${file}`]), file);
+	baseNamesByFile.set(file, baseNames);
 	baseDeclarations += baseNames.length;
 	const currentFile = currentByIdentity.get(canonicalTestIdentity(file));
-	if (!currentFile || !fs.existsSync(currentFile)) continue;
+	if (!currentFile || !fs.existsSync(currentFile)) {
+		missingDeclarations.push(...baseNames.map((name) => ({ file, name })));
+		continue;
+	}
 	const currentNames = staticTestNames(fs.readFileSync(currentFile, "utf-8"), currentFile);
 	currentDeclarations += currentNames.length;
 	const unmatched = [...currentNames];
@@ -242,28 +289,49 @@ const declarationKey = (file, name) => `${file}\0${name}`;
 const missingKeys = new Set(missingDeclarations.map(({ file, name }) => declarationKey(file, name)));
 const mappingByBase = new Map();
 const invalidSemanticMappings = [];
+const invalidMappingKeys = new Set();
+const invalidateMapping = (key, message) => {
+	invalidMappingKeys.add(key);
+	invalidSemanticMappings.push(message);
+};
 for (const mapping of semanticMappings) {
 	const key = declarationKey(mapping.baseFile, mapping.baseName);
 	if (mappingByBase.has(key)) {
-		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — duplicate mapping`);
+		invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — duplicate mapping`);
 		continue;
 	}
 	mappingByBase.set(key, mapping);
-	if (!missingKeys.has(key)) invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
-	if (!mapping.rationale?.trim()) invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
+	if (!missingKeys.has(key)) invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
+	if (!mapping.rationale?.trim()) invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
 	if (!Array.isArray(mapping.current) || mapping.current.length === 0) {
-		invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — no current semantic owner`);
+		invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — no current semantic owner`);
 		continue;
 	}
 	for (const target of mapping.current) {
 		if (!currentNamesByFile.get(target.file)?.includes(target.name)) {
-			invalidSemanticMappings.push(`${mapping.baseFile} :: ${mapping.baseName} — target not found: ${target.file} :: ${target.name}`);
+			invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — target not found: ${target.file} :: ${target.name}`);
 		}
 	}
 }
 const mappedDeclarations = missingDeclarations.filter(({ file, name }) => mappingByBase.has(declarationKey(file, name)));
 const unmappedDeclarations = missingDeclarations.filter(({ file, name }) => !mappingByBase.has(declarationKey(file, name)));
 const declarationSemanticsPreserved = unmappedDeclarations.length === 0 && invalidSemanticMappings.length === 0;
+// A removed base file is a semantic rename only when every static declaration
+// it owned has a valid mapping. This derives file replacement from the audited
+// declarations instead of maintaining a second filename exception list.
+const semanticFileReplacements = rawMissingFiles.flatMap((baseFile) => {
+	const baseNames = baseNamesByFile.get(baseFile) ?? [];
+	if (baseNames.length === 0) return [];
+	const mappings = baseNames.map((name) => mappingByBase.get(declarationKey(baseFile, name)));
+	if (mappings.some((mapping, index) => !mapping || invalidMappingKeys.has(declarationKey(baseFile, baseNames[index])))) return [];
+	const currentFiles = [...new Set(mappings.flatMap((mapping) => mapping.current.map((target) => target.file)))].sort();
+	if (currentFiles.length !== 1 || !rawAddedFiles.includes(currentFiles[0])) return [];
+	return [{ baseFile, currentFiles }];
+});
+const replacedBaseFiles = new Set(semanticFileReplacements.map(({ baseFile }) => baseFile));
+const semanticSuccessorFiles = new Set(semanticFileReplacements.flatMap(({ currentFiles }) => currentFiles));
+const missingFiles = rawMissingFiles.filter((file) => !replacedBaseFiles.has(file));
+const addedFiles = rawAddedFiles.filter((file) => !semanticSuccessorFiles.has(file));
 const childProcessImports = currentUnit.flatMap((file) => childProcessValueImports(fs.readFileSync(file, "utf-8"), file));
 const concurrentPathViolations = [...execution.core, ...execution.integration]
 	.flatMap((file) => concurrentPathOwnershipViolations(fs.readFileSync(file, "utf-8"), file));
@@ -323,6 +391,7 @@ const report = {
 	scheduledE2eVitestFiles: currentE2eVitestFiles.length,
 	missingRequiredUnitFiles: missingFiles,
 	addedUnitFiles: addedFiles,
+	semanticFileReplacements,
 	formerlyRelocatedE2eFiles: formerlyRelocatedE2e.length,
 	restoredFormerE2eFiles: restoredFormerE2eFiles.length,
 	currentE2eVitestFiles,
