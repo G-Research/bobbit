@@ -25,7 +25,7 @@
  * liveness test. The claim is that the framed document is DETACHED, not merely hidden,
  * which needs a held element reference in a live document.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import {
 	RETENTION_LIMIT,
 	beaconCount,
@@ -52,6 +52,23 @@ import {
 
 registerRetentionBundleBuild();
 
+async function dragRetentionDivider(page: Page, rawPercent: number): Promise<void> {
+	const handle = page.getByRole("separator", { name: "Resize side panel" });
+	const [handleBox, layoutBox] = await Promise.all([
+		handle.boundingBox(),
+		page.locator(".side-panel-split-layout").boundingBox(),
+	]);
+	if (!handleBox || !layoutBox) throw new Error("retention divider has no visible split geometry");
+	const startX = handleBox.x + handleBox.width / 2;
+	const startY = handleBox.y + handleBox.height / 2;
+	const targetX = layoutBox.x + layoutBox.width * (1 - rawPercent / 100);
+	await page.mouse.move(startX, startY);
+	await page.mouse.down();
+	await page.mouse.move(targetX, startY, { steps: 6 });
+	await page.mouse.up();
+	await settleRender(page);
+}
+
 test.describe("side-panel pane retention (desktop)", () => {
 	test("a retained pane's framed document loads exactly once across collapse, tab switch, session round-trip and the mode ladder — and cold-mounts after the tab is closed", async ({ page }) => {
 		const requests = await loadFixture(page);
@@ -62,8 +79,24 @@ test.describe("side-panel pane retention (desktop)", () => {
 		await expectFrameLoads(page, "a1", 1, "the pane's framed document should load once on first mount");
 		const probe = await stampFrameProbe(page, "a1");
 
-		// 1. Collapse → expand. The workspace is hidden, never removed.
-		await page.getByTestId("side-panel-collapse").first().click();
+		// 1. Real pointer resize, then pointer-driven collapse → expand. Neither may
+		// detach or re-navigate the retained pack iframe.
+		const divider = page.getByRole("separator", { name: "Resize side panel" });
+		await expect(divider, "the retained-pane fixture exposes the production-sized divider hit target").toBeVisible();
+		const dividerBox = await divider.boundingBox();
+		expect(dividerBox?.width, "the visible divider keeps its 8px pointer target").toBeCloseTo(8, 0);
+		await dragRetentionDivider(page, 63);
+		await expect(divider).toHaveAttribute("aria-valuenow", "63");
+		const resizedGeometry = await page.locator(".side-panel-split-layout").evaluate((layout) => {
+			const row = layout.getBoundingClientRect();
+			const panel = layout.querySelector<HTMLElement>(":scope > .side-panel-workspace")!.getBoundingClientRect();
+			return { panelPercent: panel.width / row.width * 100, handleColor: getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor };
+		});
+		expect(resizedGeometry.panelPercent, "the real drag must change retained-pane geometry to the requested split").toBeCloseTo(63, 0);
+		expect(resizedGeometry.handleColor, "the hovered divider exposes its theme-token line").not.toBe("rgba(0, 0, 0, 0)");
+		expect(await frameLoadCount(page, "a1"), "an interior pointer resize must not reload the framed document").toBe(1);
+		expect((await readFrameProbe(page, "a1")).property, "interior resize keeps the same iframe element").toBe(probe);
+		await dragRetentionDivider(page, 24);
 		await expect(page.getByTestId("side-panel-restore")).toBeVisible({ timeout: 5_000 });
 		expect(await inertnessOf(page, '[data-panel-workspace="content"]'), "a collapsed workspace stays mounted but inert")
 			.toMatchObject({ display: "none", hidden: true, inert: true, ariaHidden: "true" });
@@ -89,8 +122,8 @@ test.describe("side-panel pane retention (desktop)", () => {
 		await selectSession(page, sessionA);
 		await expect(frameLocator(page, "a1")).toBeVisible({ timeout: 5_000 });
 
-		// 4. Split → fullscreen → split.
-		await page.getByTestId("side-panel-fullscreen").first().click();
+		// 4. Pointer-driven split → fullscreen → split.
+		await dragRetentionDivider(page, 76);
 		await expect.poll(async () => page.locator('[data-panel-workspace="content"]').first().getAttribute("data-side-panel-mode"), { timeout: 5_000 })
 			.toBe("fullscreen");
 		await expect(page.getByTestId("side-panel-restore"), "fullscreen shows no restore button").toHaveCount(0);

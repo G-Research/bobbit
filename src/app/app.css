@@ -1140,31 +1140,106 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * GOAL ASSISTANT — split-screen preview panel & mobile tabs
  * ============================================================================ */
 
-/* Chat and preview panels each take 50% on desktop. Scope this to the
- * top-level split row only: proposal renderers can nest their own
- * .goal-preview-panel inside the right workspace, and those must fill the
- * workspace rather than inheriting a second 50% constraint. */
+/* The desktop split defaults to 50/50. The right workspace basis is a
+ * persisted user preference updated by its shared divider. Scope sizing to the
+ * top-level split row: proposal renderers can nest their own
+ * .goal-preview-panel, and those must fill the workspace. */
 @media (min-width: 768px) {
 	.side-panel-split-layout > .side-panel-chat-pane,
 	.goal-split-layout > .goal-chat-panel {
-		flex: 0 0 50%;
-		max-width: 50%;
+		flex: 1 1 auto;
+		max-width: calc(100% - var(--side-panel-width, 50%));
 		overflow: hidden;
 	}
 	.side-panel-split-layout > .side-panel-workspace,
 	.goal-split-layout > .goal-preview-panel {
-		flex: 0 0 50%;
-		max-width: 50%;
+		flex: 0 0 var(--side-panel-width, 50%);
+		max-width: var(--side-panel-width, 50%);
 		overflow: hidden;
+	}
+	.side-panel-split-layout {
+		position: relative;
+	}
+	/* Keep the wide transparent target in the split-layout parent so the
+	   workspace's overflow clipping cannot cut its chat-side half off. */
+	.side-panel-resize-handle {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: calc(100% - var(--side-panel-width, 50%) - 4px);
+		width: 8px;
+		z-index: 20;
+		cursor: col-resize;
+		touch-action: none;
+		outline: none;
+	}
+	.side-panel-resize-handle::after {
+		content: "";
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 3px;
+		width: 2px;
+		background: transparent;
+		transition: background 120ms ease;
+	}
+	.side-panel-resize-handle:hover::after,
+	.side-panel-resize-handle:active::after,
+	.side-panel-resize-handle:focus-visible::after {
+		background: color-mix(in oklch, var(--primary) 55%, transparent);
+	}
+	/* Once the pointer passes a terminal threshold, fade the pane that will
+	   disappear and pulse the outer edge toward which the divider was dragged. */
+	.side-panel-split-layout > .side-panel-chat-pane,
+	.side-panel-split-layout > .side-panel-workspace {
+		transition: opacity 140ms ease;
+	}
+	.side-panel-split-layout[data-resize-intent="collapse"] > .side-panel-workspace,
+	.side-panel-split-layout[data-resize-intent="fullscreen"] > .side-panel-chat-pane {
+		opacity: 0.22;
+	}
+	.side-panel-split-layout[data-resize-intent]::after {
+		content: "";
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		z-index: 30;
+		width: 12px;
+		pointer-events: none;
+		animation: side-panel-terminal-edge-pulse 900ms ease-in-out infinite;
+	}
+	.side-panel-split-layout[data-resize-intent="collapse"]::after {
+		right: 0;
+		transform-origin: right center;
+		background: linear-gradient(to left, color-mix(in oklch, var(--primary) 65%, transparent), transparent);
+	}
+	.side-panel-split-layout[data-resize-intent="fullscreen"]::after {
+		left: 0;
+		transform-origin: left center;
+		background: linear-gradient(to right, color-mix(in oklch, var(--primary) 65%, transparent), transparent);
+	}
+	.side-panel-split-layout[data-resize-intent] > .side-panel-resize-handle::after {
+		background: var(--primary);
+	}
+	@keyframes side-panel-terminal-edge-pulse {
+		0%, 100% { opacity: 0.3; transform: scaleX(0.65); }
+		50% { opacity: 0.8; transform: scaleX(1); }
 	}
 	/* When a proposal/preview panel is nested inside the shared side-panel
 	   workspace, the inner panel must fill its parent — the outer panel already
-	   supplies the 50% width and the left border. */
+	   supplies the user-selected width and the left border. */
 	.side-panel-workspace .goal-preview-panel,
 	.goal-preview-panel .goal-preview-panel {
 		flex: 1 1 auto;
 		max-width: 100%;
 		border-left: none;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.side-panel-split-layout[data-resize-intent]::after {
+		animation: none;
+		opacity: 0.55;
 	}
 }
 
