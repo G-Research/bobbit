@@ -1,9 +1,10 @@
 // v2-native — focused contract coverage for convention-based test discovery.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import ts from "typescript";
 import {
 	classifyTestPath,
 	discoverTests,
@@ -18,11 +19,11 @@ const { createFileMatcher } = require("playwright/lib/util") as {
 	createFileMatcher: (patterns: string | RegExp | Array<string | RegExp>) => (file: string) => boolean;
 };
 
-type ResolvedPlaywrightProject = {
+type CommittedPlaywrightProject = {
 	name: string;
 	testDir: string;
-	testMatch: string | RegExp | Array<string | RegExp>;
-	testIgnore: string | RegExp | Array<string | RegExp>;
+	testMatch: string[];
+	testIgnore: string[];
 };
 
 let root: string;
@@ -43,38 +44,95 @@ function materialize(...paths: string[]): void {
 	}
 }
 
-async function resolvedPlaywrightProjects(configFile: string): Promise<ResolvedPlaywrightProject[]> {
-	const originalEnvironment = { ...process.env };
-	try {
-		// Avoid taking a long-lived worker-ledger reservation while evaluating the
-		// committed browser config in this Vitest coordinator.
-		process.env.BOBBIT_V2_PLAYWRIGHT_WORKERS = "1";
-		const { configLoader } = require("playwright/lib/common") as {
-			configLoader: {
-				loadConfigFromFile: (path: string, overrides: object, ignoreDependencies: boolean) => Promise<{
-					projects: Array<{ project: ResolvedPlaywrightProject }>;
-				}>;
-			};
-		};
-		const loaded = await configLoader.loadConfigFromFile(resolve(REPO_ROOT, configFile), {}, true);
-		return loaded.projects.map(({ project }) => project);
-	} finally {
-		for (const key of Object.keys(process.env)) {
-			if (!(key in originalEnvironment)) delete process.env[key];
-		}
-		Object.assign(process.env, originalEnvironment);
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (
+		ts.isParenthesizedExpression(current)
+		|| ts.isAsExpression(current)
+		|| ts.isTypeAssertionExpression(current)
+		|| ts.isNonNullExpression(current)
+		|| ts.isSatisfiesExpression(current)
+	) {
+		current = current.expression;
 	}
+	return current;
 }
 
-function projectSelectsPath(project: ResolvedPlaywrightProject, repositoryPath: string): boolean {
+function property(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
+	for (const element of object.properties) {
+		if (!ts.isPropertyAssignment(element)) continue;
+		const key = element.name;
+		if ((ts.isIdentifier(key) || ts.isStringLiteral(key)) && key.text === name) return element.initializer;
+	}
+	return undefined;
+}
+
+function objectLiteral(expression: ts.Expression | undefined, context: string): ts.ObjectLiteralExpression {
+	if (!expression) throw new Error(`${context} is missing`);
+	const unwrapped = unwrapExpression(expression);
+	if (!ts.isObjectLiteralExpression(unwrapped)) throw new Error(`${context} must be an object literal`);
+	return unwrapped;
+}
+
+function arrayLiteral(expression: ts.Expression | undefined, context: string): ts.ArrayLiteralExpression {
+	if (!expression) throw new Error(`${context} is missing`);
+	const unwrapped = unwrapExpression(expression);
+	if (!ts.isArrayLiteralExpression(unwrapped)) throw new Error(`${context} must be an array literal`);
+	return unwrapped;
+}
+
+function stringLiteral(expression: ts.Expression | undefined, context: string): string {
+	if (!expression) throw new Error(`${context} is missing`);
+	const unwrapped = unwrapExpression(expression);
+	if (!ts.isStringLiteral(unwrapped) && !ts.isNoSubstitutionTemplateLiteral(unwrapped)) {
+		throw new Error(`${context} must be a string literal`);
+	}
+	return unwrapped.text;
+}
+
+function stringPatterns(expression: ts.Expression | undefined, context: string): string[] {
+	if (!expression) return [];
+	const unwrapped = unwrapExpression(expression);
+	if (ts.isStringLiteral(unwrapped) || ts.isNoSubstitutionTemplateLiteral(unwrapped)) return [unwrapped.text];
+	return arrayLiteral(unwrapped, context).elements.map((element, index) => stringLiteral(element, `${context}[${index}]`));
+}
+
+function committedPlaywrightProjects(configFile: string): CommittedPlaywrightProject[] {
+	const configPath = resolve(REPO_ROOT, configFile);
+	const source = ts.createSourceFile(configPath, readFileSync(configPath, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+	const exportAssignment = source.statements.find(ts.isExportAssignment);
+	if (!exportAssignment || exportAssignment.isExportEquals) throw new Error(`${configFile} must have one default export`);
+
+	let configExpression = unwrapExpression(exportAssignment.expression);
+	if (ts.isCallExpression(configExpression)) {
+		if (!ts.isIdentifier(configExpression.expression) || configExpression.expression.text !== "defineConfig" || configExpression.arguments.length !== 1) {
+			throw new Error(`${configFile} default export must be an object literal or defineConfig(object literal)`);
+		}
+		configExpression = unwrapExpression(configExpression.arguments[0]);
+	}
+	const config = objectLiteral(configExpression, `${configFile} default export`);
+	const projects = arrayLiteral(property(config, "projects"), `${configFile} projects`);
+	return projects.elements.map((element, index) => {
+		const project = objectLiteral(element, `${configFile} projects[${index}]`);
+		const context = `${configFile} projects[${index}]`;
+		return {
+			name: stringLiteral(property(project, "name"), `${context}.name`),
+			testDir: stringLiteral(property(project, "testDir"), `${context}.testDir`),
+			testMatch: stringPatterns(property(project, "testMatch"), `${context}.testMatch`),
+			testIgnore: stringPatterns(property(project, "testIgnore"), `${context}.testIgnore`),
+		};
+	});
+}
+
+function projectSelectsPath(project: CommittedPlaywrightProject, repositoryPath: string): boolean {
 	const candidate = resolve(REPO_ROOT, ...normalizeTestPath(repositoryPath).split("/"));
 	const normalizedCandidate = normalizeTestPath(candidate);
-	const normalizedTestDir = normalizeTestPath(resolve(project.testDir));
+	const normalizedTestDir = normalizeTestPath(resolve(REPO_ROOT, project.testDir));
 	if (normalizedCandidate !== normalizedTestDir && !normalizedCandidate.startsWith(`${normalizedTestDir}/`)) return false;
 	return createFileMatcher(project.testMatch)(candidate) && !createFileMatcher(project.testIgnore)(candidate);
 }
 
-function selectedRepositoryPaths(project: ResolvedPlaywrightProject): string[] {
+function selectedRepositoryPaths(project: CommittedPlaywrightProject): string[] {
 	const candidates: string[] = [];
 	const visit = (directory: string): void => {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -83,7 +141,7 @@ function selectedRepositoryPaths(project: ResolvedPlaywrightProject): string[] {
 			else if (entry.isFile()) candidates.push(normalizeTestPath(relative(REPO_ROOT, path)));
 		}
 	};
-	visit(project.testDir);
+	visit(resolve(REPO_ROOT, project.testDir));
 	return candidates.filter(path => projectSelectsPath(project, path)).sort();
 }
 
@@ -228,9 +286,9 @@ describe("discoverTests", () => {
 });
 
 describe("Playwright selector parity", () => {
-	it("keeps live browser and manual project selectors exactly aligned with discovery on POSIX and Windows paths", async () => {
-		const browserProjects = await resolvedPlaywrightProjects("playwright-v2.config.ts");
-		const manualProjects = await resolvedPlaywrightProjects("playwright-manual.config.ts");
+	it("keeps committed browser and manual selector literals exactly aligned with discovery on POSIX and Windows paths", () => {
+		const browserProjects = committedPlaywrightProjects("playwright-v2.config.ts");
+		const manualProjects = committedPlaywrightProjects("playwright-manual.config.ts");
 		expect(browserProjects.map(project => project.name)).toEqual(["browser-v2", "browser-v2-e2e"]);
 		expect(manualProjects.map(project => project.name)).toEqual(["manual-integration"]);
 
@@ -265,9 +323,13 @@ describe("Playwright selector parity", () => {
 			["tests2/browser/e2e/representative.spec.ts", "browser-v2-e2e"],
 			["tests/manual-integration/representative.test.ts", "manual-integration"],
 			["tests/manual-integration/representative.spec.ts", "manual-integration"],
+			["tests2/browser/api.test.ts", undefined],
+			["tests2/core/api.test.ts", undefined],
+			["tests/e2e/process.e2e.spec.ts", undefined],
+			["tests/manual-integration/representative.spec.js", undefined],
 		] as const) {
 			for (const pathForm of [path, path.replaceAll("/", "\\")]) {
-				expect(projects.filter(project => projectSelectsPath(project, pathForm)).map(project => project.name)).toEqual([owner]);
+				expect(projects.filter(project => projectSelectsPath(project, pathForm)).map(project => project.name)).toEqual(owner ? [owner] : []);
 			}
 		}
 	});
