@@ -6,10 +6,57 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { discoverTests } from "./test-discovery.mjs";
 import { readOptionalGitPath } from "./unit-inventory-git.mjs";
 
+const declarationKey = (file, name) => `${file}\0${name}`;
+
+export function reconcileSemanticMappings({
+	semanticMappings,
+	requiredUnitFiles,
+	missingDeclarations,
+	currentNamesByFile,
+}) {
+	const requiredUnitFileSet = new Set(requiredUnitFiles);
+	// The checked-in mappings reconcile one baseline cutover. Once any mapped
+	// source file is absent from the selected base, that cutover is historical;
+	// applying only the surviving records would make them spuriously stale.
+	const applicableMappings = semanticMappings.every(({ baseFile }) => requiredUnitFileSet.has(baseFile))
+		? semanticMappings
+		: [];
+	const missingKeys = new Set(missingDeclarations.map(({ file, name }) => declarationKey(file, name)));
+	const mappingByBase = new Map();
+	const invalidSemanticMappings = [];
+	const invalidMappingKeys = new Set();
+	const invalidateMapping = (key, message) => {
+		invalidMappingKeys.add(key);
+		invalidSemanticMappings.push(message);
+	};
+	for (const mapping of applicableMappings) {
+		const key = declarationKey(mapping.baseFile, mapping.baseName);
+		if (mappingByBase.has(key)) {
+			invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — duplicate mapping`);
+			continue;
+		}
+		mappingByBase.set(key, mapping);
+		if (!missingKeys.has(key)) invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
+		if (!mapping.rationale?.trim()) invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
+		if (!Array.isArray(mapping.current) || mapping.current.length === 0) {
+			invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — no current semantic owner`);
+			continue;
+		}
+		for (const target of mapping.current) {
+			if (!currentNamesByFile.get(target.file)?.includes(target.name)) {
+				invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — target not found: ${target.file} :: ${target.name}`);
+			}
+		}
+	}
+	return { mappingByBase, invalidSemanticMappings, invalidMappingKeys };
+}
+
+export function runUnitInventoryAudit() {
 const args = process.argv.slice(2);
 const valueAfter = (flag) => {
 	const index = args.indexOf(flag);
@@ -285,34 +332,12 @@ for (const file of currentInventory) {
 	allCurrentDeclarations += names.length;
 }
 
-const declarationKey = (file, name) => `${file}\0${name}`;
-const missingKeys = new Set(missingDeclarations.map(({ file, name }) => declarationKey(file, name)));
-const mappingByBase = new Map();
-const invalidSemanticMappings = [];
-const invalidMappingKeys = new Set();
-const invalidateMapping = (key, message) => {
-	invalidMappingKeys.add(key);
-	invalidSemanticMappings.push(message);
-};
-for (const mapping of semanticMappings) {
-	const key = declarationKey(mapping.baseFile, mapping.baseName);
-	if (mappingByBase.has(key)) {
-		invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — duplicate mapping`);
-		continue;
-	}
-	mappingByBase.set(key, mapping);
-	if (!missingKeys.has(key)) invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — stale mapping; base declaration is not missing`);
-	if (!mapping.rationale?.trim()) invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — missing rationale`);
-	if (!Array.isArray(mapping.current) || mapping.current.length === 0) {
-		invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — no current semantic owner`);
-		continue;
-	}
-	for (const target of mapping.current) {
-		if (!currentNamesByFile.get(target.file)?.includes(target.name)) {
-			invalidateMapping(key, `${mapping.baseFile} :: ${mapping.baseName} — target not found: ${target.file} :: ${target.name}`);
-		}
-	}
-}
+const { mappingByBase, invalidSemanticMappings, invalidMappingKeys } = reconcileSemanticMappings({
+	semanticMappings,
+	requiredUnitFiles,
+	missingDeclarations,
+	currentNamesByFile,
+});
 const mappedDeclarations = missingDeclarations.filter(({ file, name }) => mappingByBase.has(declarationKey(file, name)));
 const unmappedDeclarations = missingDeclarations.filter(({ file, name }) => !mappingByBase.has(declarationKey(file, name)));
 const declarationSemanticsPreserved = unmappedDeclarations.length === 0 && invalidSemanticMappings.length === 0;
@@ -433,3 +458,9 @@ if (outputPath) {
 }
 process.stdout.write(json);
 if (!report.inventoryPreserved) process.exitCode = 1;
+return report;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	runUnitInventoryAudit();
+}
