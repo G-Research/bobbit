@@ -224,6 +224,50 @@ test.describe("Side-panel tab contract", () => {
 		await expectNoPersistedChatTab(page, sessionId);
 	});
 
+	test("desktop divider resizes every side-panel workspace and persists the split", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		await page.evaluate(() => localStorage.removeItem("bobbit-side-panel-width-percent"));
+		await page.reload({ waitUntil: "domcontentloaded" });
+		const sessionId = await createRegularSessionViaApi(page);
+		await mountPreviewHtml(page, sessionId, "resizable.html", "Resizable preview");
+
+		const handle = page.getByRole("separator", { name: "Resize side panel" });
+		await expect(handle).toBeVisible();
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		const widths = async () => page.locator(".side-panel-split-layout").evaluate((layout) => ({
+			chat: layout.querySelector<HTMLElement>(".side-panel-chat-pane")?.getBoundingClientRect().width ?? 0,
+			panel: layout.querySelector<HTMLElement>(".side-panel-workspace")?.getBoundingClientRect().width ?? 0,
+		}));
+		const initial = await widths();
+
+		const box = await handle.boundingBox();
+		if (!box) throw new Error("side-panel resize handle has no bounding box");
+		const startX = box.x + box.width / 2;
+		const startY = box.y + box.height / 2;
+		await page.mouse.move(startX, startY);
+		await page.mouse.down();
+		await page.mouse.move(startX - 120, startY, { steps: 6 });
+		await page.mouse.up();
+
+		const resized = await widths();
+		expect(resized.panel - initial.panel, "dragging the divider left should widen the shared right workspace").toBeGreaterThan(100);
+		expect(initial.chat - resized.chat, "the chat should give the same space to the right workspace").toBeGreaterThan(100);
+		const persistedPercent = await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")));
+		expect(persistedPercent).toBeGreaterThan(50);
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectPreviewContains(page, "Resizable preview", "resizable preview after reload");
+		const reloaded = await widths();
+		expect(Math.abs(reloaded.panel - resized.panel), "the selected split should survive reload").toBeLessThan(3);
+
+		await handle.dblclick();
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		const reset = await widths();
+		expect(Math.abs(reset.panel - reset.chat), "double-click should restore the even split").toBeLessThan(3);
+	});
+
 	test("sequential preview files keep stable artifact routes across tabs and reload", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);

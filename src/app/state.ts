@@ -370,6 +370,34 @@ export function applySidebarWidthVar(w: number): void {
 applySidebarWidthVar(loadSidebarWidth());
 
 // ============================================================================
+// SIDE PANEL WIDTH (user-resizable desktop split)
+// ============================================================================
+
+export const SIDE_PANEL_WIDTH_KEY = "bobbit-side-panel-width-percent";
+export const SIDE_PANEL_WIDTH_DEFAULT = 50;
+export const SIDE_PANEL_WIDTH_MIN = 25;
+export const SIDE_PANEL_WIDTH_MAX = 75;
+
+export function clampSidePanelWidthPercent(percent: number): number {
+	if (!Number.isFinite(percent)) return SIDE_PANEL_WIDTH_DEFAULT;
+	return Math.max(SIDE_PANEL_WIDTH_MIN, Math.min(SIDE_PANEL_WIDTH_MAX, Math.round(percent * 10) / 10));
+}
+
+function loadSidePanelWidthPercent(): number {
+	const raw = safeGetItem(SIDE_PANEL_WIDTH_KEY);
+	if (!raw) return SIDE_PANEL_WIDTH_DEFAULT;
+	return clampSidePanelWidthPercent(Number.parseFloat(raw));
+}
+
+export function applySidePanelWidthVar(percent: number): void {
+	if (typeof document === "undefined") return;
+	document.documentElement.style.setProperty("--side-panel-width", `${percent}%`);
+}
+
+// Apply before the workspace is painted to avoid a 50% → persisted-width jump.
+applySidePanelWidthVar(loadSidePanelWidthPercent());
+
+// ============================================================================
 // SIDEBAR FONT SCALE — helpers live in `./sidebar-font-scale.ts` (no DOM
 // dependencies, so the Node unit test can import them directly). Re-exported
 // here so existing call sites can keep importing from `./state.js`.
@@ -532,6 +560,8 @@ export const state = {
 	sidebarCollapsed: safeGetItem("bobbit-sidebar-collapsed") === "true",
 	/** User-resizable sidebar width in px (expanded state). Clamped 180–480. */
 	sidebarWidth: loadSidebarWidth(),
+	/** Right-side workspace width as a percentage of the desktop split layout. */
+	sidePanelWidthPercent: loadSidePanelWidthPercent(),
 
 	/** Active session browsing view. Unknown persisted values safely resolve to By Project. */
 	sidebarSessionView: loadSidebarSessionView(),
@@ -1024,6 +1054,13 @@ export function setSidebarWidth(w: number, persist = true): void {
 	state.sidebarWidth = clamped;
 	applySidebarWidthVar(clamped);
 	if (persist) safeSetItem(SIDEBAR_WIDTH_KEY, String(clamped));
+}
+
+export function setSidePanelWidthPercent(percent: number, persist = true): void {
+	const clamped = clampSidePanelWidthPercent(percent);
+	state.sidePanelWidthPercent = clamped;
+	applySidePanelWidthVar(clamped);
+	if (persist) safeSetItem(SIDE_PANEL_WIDTH_KEY, String(clamped));
 }
 
 export const SIDEBAR_BREAKPOINT = 768;

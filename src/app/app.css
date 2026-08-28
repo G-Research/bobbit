@@ -1140,26 +1140,57 @@ details.wf-proposal-workflow .wf-proposal-gates {
  * GOAL ASSISTANT — split-screen preview panel & mobile tabs
  * ============================================================================ */
 
-/* Chat and preview panels each take 50% on desktop. Scope this to the
- * top-level split row only: proposal renderers can nest their own
- * .goal-preview-panel inside the right workspace, and those must fill the
- * workspace rather than inheriting a second 50% constraint. */
+/* The desktop split defaults to 50/50. The right workspace basis is a
+ * persisted user preference updated by its shared divider. Scope sizing to the
+ * top-level split row: proposal renderers can nest their own
+ * .goal-preview-panel, and those must fill the workspace. */
 @media (min-width: 768px) {
 	.side-panel-split-layout > .side-panel-chat-pane,
 	.goal-split-layout > .goal-chat-panel {
-		flex: 0 0 50%;
-		max-width: 50%;
+		flex: 1 1 auto;
+		max-width: calc(100% - var(--side-panel-width, 50%));
 		overflow: hidden;
 	}
 	.side-panel-split-layout > .side-panel-workspace,
 	.goal-split-layout > .goal-preview-panel {
-		flex: 0 0 50%;
-		max-width: 50%;
+		flex: 0 0 var(--side-panel-width, 50%);
+		max-width: var(--side-panel-width, 50%);
 		overflow: hidden;
+	}
+	.side-panel-split-layout > .side-panel-workspace {
+		position: relative;
+	}
+	/* A wide transparent target makes the one-pixel boundary easy to grab
+	   without taking layout space away from either pane. */
+	.side-panel-resize-handle {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: -4px;
+		width: 8px;
+		z-index: 20;
+		cursor: col-resize;
+		touch-action: none;
+		outline: none;
+	}
+	.side-panel-resize-handle::after {
+		content: "";
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 3px;
+		width: 2px;
+		background: transparent;
+		transition: background 120ms ease;
+	}
+	.side-panel-resize-handle:hover::after,
+	.side-panel-resize-handle:active::after,
+	.side-panel-resize-handle:focus-visible::after {
+		background: color-mix(in oklch, var(--primary) 55%, transparent);
 	}
 	/* When a proposal/preview panel is nested inside the shared side-panel
 	   workspace, the inner panel must fill its parent — the outer panel already
-	   supplies the 50% width and the left border. */
+	   supplies the user-selected width and the left border. */
 	.side-panel-workspace .goal-preview-panel,
 	.goal-preview-panel .goal-preview-panel {
 		flex: 1 1 auto;

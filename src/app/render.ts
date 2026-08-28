@@ -17,6 +17,10 @@ import {
 	activeSessionId,
 	getSidebarData,
 	setRenderSuppressed,
+	setSidePanelWidthPercent,
+	SIDE_PANEL_WIDTH_DEFAULT,
+	SIDE_PANEL_WIDTH_MIN,
+	SIDE_PANEL_WIDTH_MAX,
 	type GatewaySession,
 	type Project,
 } from "./state.js";
@@ -1159,6 +1163,62 @@ export function workspaceSessionId(): string {
 }
 
 type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
+
+function updateSidePanelDividerValue(handle: HTMLElement, percent: number): void {
+	setSidePanelWidthPercent(percent);
+	handle.setAttribute("aria-valuenow", String(state.sidePanelWidthPercent));
+}
+
+function onSidePanelResizePointerDown(event: PointerEvent): void {
+	event.preventDefault();
+	const handle = event.currentTarget as HTMLElement;
+	const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+	const panel = handle.closest<HTMLElement>(".side-panel-workspace");
+	if (!layout || !panel) return;
+
+	const layoutWidth = layout.getBoundingClientRect().width;
+	if (layoutWidth <= 0) return;
+	const startX = event.clientX;
+	const startPanelWidth = panel.getBoundingClientRect().width;
+	const previousCursor = document.body.style.cursor;
+	const previousUserSelect = document.body.style.userSelect;
+	try { handle.setPointerCapture(event.pointerId); } catch {}
+	document.body.style.cursor = "col-resize";
+	document.body.style.userSelect = "none";
+
+	const onMove = (moveEvent: PointerEvent) => {
+		const nextWidth = startPanelWidth - (moveEvent.clientX - startX);
+		updateSidePanelDividerValue(handle, (nextWidth / layoutWidth) * 100);
+	};
+	const onEnd = (endEvent: PointerEvent) => {
+		handle.removeEventListener("pointermove", onMove);
+		handle.removeEventListener("pointerup", onEnd);
+		handle.removeEventListener("pointercancel", onEnd);
+		try { handle.releasePointerCapture(endEvent.pointerId); } catch {}
+		document.body.style.cursor = previousCursor;
+		document.body.style.userSelect = previousUserSelect;
+	};
+	handle.addEventListener("pointermove", onMove);
+	handle.addEventListener("pointerup", onEnd);
+	handle.addEventListener("pointercancel", onEnd);
+}
+
+function onSidePanelResizeDoubleClick(event: MouseEvent): void {
+	event.preventDefault();
+	updateSidePanelDividerValue(event.currentTarget as HTMLElement, SIDE_PANEL_WIDTH_DEFAULT);
+}
+
+function onSidePanelResizeKeyDown(event: KeyboardEvent): void {
+	let next: number | undefined;
+	const step = event.shiftKey ? 10 : 2;
+	if (event.key === "ArrowLeft") next = state.sidePanelWidthPercent + step;
+	if (event.key === "ArrowRight") next = state.sidePanelWidthPercent - step;
+	if (event.key === "Home") next = SIDE_PANEL_WIDTH_MAX;
+	if (event.key === "End") next = SIDE_PANEL_WIDTH_MIN;
+	if (next === undefined) return;
+	event.preventDefault();
+	updateSidePanelDividerValue(event.currentTarget as HTMLElement, next);
+}
 
 function sidePanelSizeModeBySession(): Record<string, SidePanelSizeMode> {
 	const holder = state as any;
