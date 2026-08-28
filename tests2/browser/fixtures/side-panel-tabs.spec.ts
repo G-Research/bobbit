@@ -508,7 +508,7 @@ test.describe("Side-panel tab contract", () => {
 		await expectSplitPercent(page, 75);
 	});
 
-	test("desktop divider ignores unrelated pointers until the initiating pointer completes", async ({ page }) => {
+	test("desktop divider ignores secondary activations and unrelated pointers until the initiating pointer completes", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
 		await openApp(page);
 		await page.evaluate(() => localStorage.removeItem("bobbit-side-panel-width-percent"));
@@ -518,6 +518,82 @@ test.describe("Side-panel tab contract", () => {
 
 		const handle = page.getByRole("separator", { name: "Resize side panel" });
 		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+
+		const rejectedActivations = await handle.evaluate((element) => {
+			const handle = element as HTMLElement;
+			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+			if (!layout) throw new Error("side-panel resize handle has no split layout");
+			const handleBox = handle.getBoundingClientRect();
+			const layoutBox = layout.getBoundingClientRect();
+			const startX = handleBox.x + handleBox.width / 2;
+			const startY = handleBox.y + handleBox.height / 2;
+			const snapshot = () => ({
+				value: handle.getAttribute("aria-valuenow"),
+				persisted: localStorage.getItem("bobbit-side-panel-width-percent"),
+				intent: layout.dataset.resizeIntent ?? null,
+				cursor: document.body.style.cursor,
+				userSelect: document.body.style.userSelect,
+			});
+			const dispatchRejectedActivation = (pointerId: number, pointerType: string, isPrimary: boolean, button: number, buttons: number) => {
+				handle.dispatchEvent(new PointerEvent("pointerdown", {
+					pointerId,
+					pointerType,
+					isPrimary,
+					clientX: startX,
+					clientY: startY,
+					button,
+					buttons,
+					bubbles: true,
+				}));
+				const afterDown = snapshot();
+				window.dispatchEvent(new PointerEvent("pointermove", {
+					pointerId,
+					pointerType,
+					isPrimary,
+					clientX: layoutBox.left + 1,
+					clientY: startY,
+					button: -1,
+					buttons,
+					bubbles: true,
+				}));
+				const afterMove = snapshot();
+				window.dispatchEvent(new PointerEvent("pointerup", {
+					pointerId,
+					pointerType,
+					isPrimary,
+					clientX: layoutBox.left + 1,
+					clientY: startY,
+					button,
+					buttons: 0,
+					bubbles: true,
+				}));
+				return { afterDown, afterMove, afterUp: snapshot() };
+			};
+			return {
+				rightButton: dispatchRejectedActivation(31, "mouse", true, 2, 2),
+				middleButton: dispatchRejectedActivation(32, "mouse", true, 1, 4),
+				nonPrimary: dispatchRejectedActivation(33, "touch", false, 0, 1),
+			};
+		});
+		const unchangedActivation = {
+			value: "50",
+			persisted: null,
+			intent: null,
+			cursor: "",
+			userSelect: "",
+		};
+		for (const activation of Object.values(rejectedActivations)) {
+			expect(activation).toEqual({
+				afterDown: unchangedActivation,
+				afterMove: unchangedActivation,
+				afterUp: unchangedActivation,
+			});
+		}
+		await expectSplitPercent(page, 50);
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent"))).toBeNull();
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+
 		const result = await handle.evaluate((element) => {
 			const handle = element as HTMLElement;
 			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
