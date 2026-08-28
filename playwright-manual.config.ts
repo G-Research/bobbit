@@ -35,6 +35,7 @@ export default defineConfig({
 		{
 			name: "manual-integration",
 			testDir: "./tests/manual-integration",
+			testMatch: ["**/*.{test,spec}.ts"],
 		},
 	],
 });
