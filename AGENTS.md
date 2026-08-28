@@ -6,9 +6,9 @@
 npm run build          # Build server + UI
 npm run dev:harness    # Gateway + vite dev
 npm run restart-server # Rebuild & restart after server changes
-npm run check          # Layout validation + type-check server/web/tests
-npm run test:layout    # Validate test path, suffix, runner, and ownership
-npm run test:new -- <semantic> <name> # Scaffold a canonical test
+npm run check          # Layout + type checks
+npm run test:layout    # Validate test conventions
+npm run test:new -- <semantic> <name> # Scaffold canonical test
 npm run test:unit      # Vitest tier-1, fixed 3-worker cap
 npm run test:browser   # Playwright browser-v2
 npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
@@ -33,10 +33,10 @@ Orient here, then `rg` for the symbol.
 
 ## Before editing anything non-trivial
 
-1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — design constraints, rationale, and pinning tests live there. Read the hits before coding.
-2. **Look for a pinning test.** Tests enforce invariants, not prose. If you break one, fix the bug, not the test. If a regression isn't caught by a test, the missing test IS the bug; add it.
-3. **Search for "never reintroduce" / "single source of truth" / "pinned by"** in source comments around what you're touching.
-4. **`docs/debugging.md`** has full diagnostic walkthroughs indexed by symptom — search there before guessing.
+1. **`rg "<symbol-or-symptom>" docs/ tests/ src/`** — read design, rationale, and pinning-test hits before coding.
+2. **Look for a pinning test.** Fix broken invariants, not tests; add missing regression coverage.
+3. **Search for "never reintroduce" / "single source of truth" / "pinned by"** near the code.
+4. Search **`docs/debugging.md`** by symptom before guessing.
 
 ## Engineering principle
 
@@ -44,8 +44,7 @@ Treat every new branch, state owner, transformation, API, or abstraction as defe
 
 ## Testing
 
-- **Test ownership** — create new tests under canonical `tests/{unit,dom,integration,browser,e2e,manual}/` paths with the matching semantic suffix; `tests2/` and legacy patterns are transitional compatibility only. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
-- **Test authoring** — use `npm run test:new -- <semantic> <name>`; `npm run test:layout` enforces canonical placement without a registry step. See [docs/testing-strategy.md](docs/testing-strategy.md#create-a-test).
+- **Test authoring** — use `npm run test:new -- <semantic> <name>` for canonical `tests/{unit,dom,integration,browser,e2e,manual}/` placement and suffixes. `test:layout` enforces conventions without a registry; `tests2/` and legacy paths are transitional. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
 - **Test isolation** — every automated coordinator owns its run root; qualify retry-free. See [docs/testing-v2/cross-os-test-authoring.md](docs/testing-v2/cross-os-test-authoring.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - **Never junction/symlink a worktree's `node_modules` into a shared or primary tree.** See [docs/testing-v2/node-modules-corruption-rca.md](docs/testing-v2/node-modules-corruption-rca.md).
@@ -67,9 +66,9 @@ See [docs/dev-workflow.md](docs/dev-workflow.md).
 
 AGENTS.md is loaded into **every** agent turn. Keep it small and general.
 
-- **No specific recipes or debugging entries.** Symptom→fix lookups belong in `docs/debugging.md`; how-to-do-X in the relevant `docs/<topic>.md`. Agents find them via the "Before editing" search step above.
-- **No invariant prose pretending to prevent regressions.** Write the test that pins it instead.
-- Keep it small; new content usually belongs in `docs/`.
+- Put symptom lookups in `docs/debugging.md` and recipes in `docs/<topic>.md`.
+- Pin invariants with tests, not prose.
+- New detail usually belongs in `docs/`.
 
 ## Reference docs
 
