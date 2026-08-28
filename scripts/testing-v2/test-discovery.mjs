@@ -30,7 +30,7 @@ const OWNERS = Object.freeze({
 	manual: Object.freeze({ lane: "manual", phase: "manual", runner: "playwright", project: "manual-integration" }),
 	manualCanonical: Object.freeze({ lane: "manual", phase: "manual", runner: "playwright", project: "manual" }),
 	e2eApi: Object.freeze({ lane: "e2eApi", phase: "e2e", runner: "playwright", project: "api-canonical", e2eGroup: "B" }),
-	e2eBrowser: Object.freeze({ lane: "e2eBrowser", phase: "e2e", runner: "playwright", project: "browser-canonical", e2eGroup: "B" }),
+	e2eBrowser: Object.freeze({ lane: "e2eBrowser", phase: "e2e", runner: "playwright", project: "browser-canonical", e2eGroup: "C" }),
 });
 
 const CANONICAL_DISCOVERY_LANES = Object.freeze({
@@ -104,6 +104,7 @@ export function discoverTests({ repoRoot = REPO_ROOT } = {}) {
 
 	const canonicalPaths = [];
 	const transitionalPaths = [];
+	let transitionalIsolatedCount = 0;
 	const candidates = [
 		...collectFiles(repoRoot, "tests2/core"),
 		...collectFiles(repoRoot, "tests2/dom"),
@@ -116,11 +117,14 @@ export function discoverTests({ repoRoot = REPO_ROOT } = {}) {
 		if (!owner) continue;
 		leaves[owner.lane].push(path);
 		if (classifyCanonicalTestPath(path)) canonicalPaths.push(path);
-		else transitionalPaths.push(path);
+		else {
+			transitionalPaths.push(path);
+			if (owner.lane === "isolated") transitionalIsolatedCount += 1;
+		}
 	}
 
-	if (leaves.isolated.length > MAX_ISOLATED_TESTS) {
-		throw new Error(`Isolated Vitest discovery found ${leaves.isolated.length} files; maximum is ${MAX_ISOLATED_TESTS}.`);
+	if (transitionalIsolatedCount > MAX_ISOLATED_TESTS) {
+		throw new Error(`Transitional isolated Vitest discovery found ${transitionalIsolatedCount} files; maximum is ${MAX_ISOLATED_TESTS}.`);
 	}
 
 	for (const lane of Object.keys(leaves)) leaves[lane] = frozenSorted(leaves[lane]);
@@ -141,8 +145,8 @@ export function discoverTests({ repoRoot = REPO_ROOT } = {}) {
 	}
 	const e2eGroups = Object.freeze({
 		A: leaves.e2eNode,
-		B: frozenSorted([...leaves.e2ePlaywright, ...leaves.e2eApi, ...leaves.e2eBrowser]),
-		C: leaves.browserE2E,
+		B: frozenSorted([...leaves.e2ePlaywright, ...leaves.e2eApi]),
+		C: frozenSorted([...leaves.browserE2E, ...leaves.e2eBrowser]),
 		D: leaves.vitestE2E,
 	});
 

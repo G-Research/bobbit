@@ -16,12 +16,11 @@
  *   Group A — node real-fidelity specs (top-level tests/*.e2e.test.ts): real git
  *             worktree / sweeper / sandbox-mount / spawn-tree fidelity. Run via
  *             `tsx --test`.
- *   Group B — playwright e2e specs (tests/e2e/*.e2e.spec.ts): real
- *             worktree pool / MCP subprocess / port / restart. Run via the legacy
- *             playwright-e2e config at retries:3 (or 0 when qualifying).
- *   Group C — adapter browser specs: the geometry/journey specs migrated into
- *             tests2/browser/e2e/. Run via playwright-v2 config, project
- *             `browser-v2-e2e` (retries:3 normally, 0 when qualifying).
+ *   Group B — API/process Playwright E2E specs, including canonical api-e2e.
+ *             Run via the legacy playwright-e2e config at retries:3 (or 0 when qualifying).
+ *   Group C — real-browser fidelity: transitional tests2/browser/e2e specs use
+ *             playwright-v2 project `browser-v2-e2e`; canonical browser-e2e specs
+ *             use playwright-e2e project `browser-canonical`.
  *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
  *             run in the isolated `v2-e2e-vitest` project.
  *
@@ -269,27 +268,46 @@ async function runGroupB(specs, coordinatorEnv) {
 
 async function runGroupC(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	// playwright-v2 config, browser-v2-e2e project. The config's retry-free
-	// override is inherited through coordinatorEnv when qualifying.
-	// We run the WHOLE project (its testDir IS tests2/browser/e2e — the physical
-	// real-fidelity browser bucket) rather than passing individual spec paths:
-	// Playwright's `--project` is variadic and would swallow trailing positional
-	// file filters as extra project names. The e2e dir is the source of truth for
-	// this bucket (it also carries crash-restart.journey, which tier-2 `test:v2`
-	// ignores).
-	const localCli = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
-	const usesLocal = existsSync(localCli);
-	const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
-	const pre = usesLocal ? [localCli] : ["playwright"];
+	const transitionalSpecs = specs.filter((spec) => spec.startsWith("tests2/browser/e2e/"));
+	const canonicalSpecs = specs.filter((spec) => spec.startsWith("tests/e2e/browser/"));
+	if (transitionalSpecs.length + canonicalSpecs.length !== specs.length) {
+		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its browser E2E conventions" };
+	}
+
 	const pwWorkersC = resolveE2ePlaywrightWorkers();
 	const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];
-	return run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`, ...retryArgs], {
-		env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
-		label: "C/adapter-browser",
-		// node.exe path may contain spaces (C:\Program Files\nodejs); spawn it
-		// directly without a shell so the path isn't word-split.
-		shell: usesLocal ? false : (process.platform === "win32"),
-	});
+	let wallMs = 0;
+
+	if (transitionalSpecs.length > 0) {
+		// Keep the transitional project invocation whole: Playwright's variadic
+		// --project option would otherwise consume positional file filters.
+		const localCli = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
+		const usesLocal = existsSync(localCli);
+		const cmd = usesLocal ? process.execPath : (process.platform === "win32" ? "npx.cmd" : "npx");
+		const pre = usesLocal ? [localCli] : ["playwright"];
+		const transitional = await run(cmd, [...pre, "test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e", `--workers=${pwWorkersC}`, ...retryArgs], {
+			env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
+			label: "C/adapter-browser",
+			shell: usesLocal ? false : (process.platform === "win32"),
+		});
+		wallMs += transitional.wallMs;
+		if (transitional.code !== 0) return { ...transitional, wallMs };
+	}
+
+	if (canonicalSpecs.length > 0) {
+		const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
+		const canonical = await run(npmCmd(), [
+			"run", "test:e2e:run", "--", ...canonicalSpecs,
+			"--project=browser-canonical", `--workers=${pwWorkersC}`, ...retryArgs,
+		], {
+			env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
+			label: "C/canonical-browser",
+		});
+		wallMs += canonical.wallMs;
+		if (canonical.code !== 0) return { ...canonical, wallMs };
+	}
+
+	return { label: "C/browser-fidelity", code: 0, wallMs };
 }
 
 export function groupDVitestArgs(env = process.env) {

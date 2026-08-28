@@ -221,66 +221,45 @@ function conventionsForDirectory(filePath) {
 	return TEST_LAYOUT.filter(({ directory }) => filePath.startsWith(`${directory}/`));
 }
 
-function extractImportedModules(source) {
-	const modules = new Set();
-	// Runner ownership is determined from real, line-leading import declarations.
-	// Anchoring avoids treating examples, comments, and source snippets as imports.
-	const patterns = [
-		/^[ \t]*import(?:\s+type)?[^;]*?\bfrom\s*["']([^"']+)["'][^;]*;?/gm,
-		/^[ \t]*import\s*["']([^"']+)["'][^;]*;?/gm,
-		/^[ \t]*(?:const|let|var)\b[^;]*?\brequire\s*\(\s*["']([^"']+)["']\s*\)[^;]*;?/gm,
-	];
-	const executableSource = maskStringsAndComments(source);
-	for (const pattern of patterns) {
-		for (const match of source.matchAll(pattern)) {
-			const codeAtMatch = executableSource.slice(match.index, match.index + match[0].length).trimStart();
-			if (/^(?:import|const\b|let\b|var\b)/.test(codeAtMatch)) modules.add(match[1]);
-		}
-	}
-	return modules;
+function parseTestSource(filePath, source) {
+	return ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 }
 
-function maskStringsAndComments(source) {
-	let out = "";
-	let mode = "code";
-	let quote = "";
-	for (let index = 0; index < source.length; index += 1) {
-		const character = source[index];
-		const next = source[index + 1];
-		if (mode === "code") {
-			if (character === "/" && next === "/") {
-				mode = "line-comment";
-				out += "  ";
-				index += 1;
-			} else if (character === "/" && next === "*") {
-				mode = "block-comment";
-				out += "  ";
-				index += 1;
-			} else if (character === "\"" || character === "'" || character === "`") {
-				mode = "string";
-				quote = character;
-				out += " ";
-			} else out += character;
-		} else if (mode === "line-comment") {
-			if (character === "\n") {
-				mode = "code";
-				out += "\n";
-			} else out += " ";
-		} else if (mode === "block-comment") {
-			if (character === "*" && next === "/") {
-				mode = "code";
-				out += "  ";
-				index += 1;
-			} else out += character === "\n" ? "\n" : " ";
-		} else if (character === "\\") {
-			out += "  ";
-			index += 1;
-		} else if (character === quote) {
-			mode = "code";
-			out += " ";
-		} else out += character === "\n" ? "\n" : " ";
-	}
-	return out;
+function hasRuntimeNamedSpecifiers(namedBindings) {
+	return !namedBindings || !ts.isNamedImports(namedBindings)
+		|| namedBindings.elements.some((specifier) => !specifier.isTypeOnly);
+}
+
+/** Collect literal runtime module references without executing or resolving them. */
+function extractImportedModules(sourceFile) {
+	const modules = new Set();
+	const addLiteral = (candidate) => {
+		if (candidate && ts.isStringLiteralLike(candidate)) modules.add(candidate.text);
+	};
+	const visit = (node) => {
+		if (ts.isImportDeclaration(node)) {
+			const clause = node.importClause;
+			if (!clause || (!clause.isTypeOnly && (clause.name || hasRuntimeNamedSpecifiers(clause.namedBindings)))) {
+				addLiteral(node.moduleSpecifier);
+			}
+		} else if (ts.isExportDeclaration(node)) {
+			const hasRuntimeExport = !node.isTypeOnly
+				&& (!node.exportClause || !ts.isNamedExports(node.exportClause)
+					|| node.exportClause.elements.some((specifier) => !specifier.isTypeOnly));
+			if (hasRuntimeExport) addLiteral(node.moduleSpecifier);
+		} else if (ts.isImportEqualsDeclaration(node)
+			&& !node.isTypeOnly
+			&& ts.isExternalModuleReference(node.moduleReference)) {
+			addLiteral(node.moduleReference.expression);
+		} else if (ts.isCallExpression(node) && node.arguments.length === 1) {
+			const isDynamicImport = node.expression.kind === ts.SyntaxKind.ImportKeyword;
+			const isRequire = ts.isIdentifier(node.expression) && node.expression.text === "require";
+			if (isDynamicImport || isRequire) addLiteral(node.arguments[0]);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return modules;
 }
 
 const API_BROWSER_PRIMITIVES = new Set(["chromium", "firefox", "webkit", "page", "browser", "context"]);
@@ -290,7 +269,8 @@ function unwrapExpression(expression) {
 	while (ts.isParenthesizedExpression(current)
 		|| ts.isAsExpression(current)
 		|| ts.isTypeAssertionExpression(current)
-		|| ts.isNonNullExpression(current)) {
+		|| ts.isNonNullExpression(current)
+		|| ts.isAwaitExpression(current)) {
 		current = current.expression;
 	}
 	return current;
@@ -390,19 +370,35 @@ function browserFixtureInCallback(callback) {
 	return browserFixture;
 }
 
-function requireModuleName(expression) {
+function loadedModuleName(expression) {
 	const candidate = unwrapExpression(expression);
 	if (!ts.isCallExpression(candidate)
-		|| !ts.isIdentifier(candidate.expression)
-		|| candidate.expression.text !== "require"
 		|| candidate.arguments.length !== 1
 		|| !ts.isStringLiteralLike(candidate.arguments[0])) return null;
-	return candidate.arguments[0].text;
+	const isRequire = ts.isIdentifier(candidate.expression) && candidate.expression.text === "require";
+	const isDynamicImport = candidate.expression.kind === ts.SyntaxKind.ImportKeyword;
+	return isRequire || isDynamicImport ? candidate.arguments[0].text : null;
 }
 
-/** Parse Playwright usage once so comments, strings, callback syntax, and TypeScript annotations are unambiguous. */
-function analyzePlaywrightApiUsage(filePath, source) {
-	const sourceFile = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const PLAYWRIGHT_BROWSER_MODULES = new Set(["@playwright/test", "playwright", "playwright-core"]);
+
+function loadedModulePrimitive(expression) {
+	const parts = [];
+	let current = unwrapExpression(expression);
+	while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+		if (ts.isPropertyAccessExpression(current)) parts.unshift(current.name.text);
+		else if (current.argumentExpression && ts.isStringLiteralLike(current.argumentExpression)) parts.unshift(current.argumentExpression.text);
+		else return null;
+		current = unwrapExpression(current.expression);
+	}
+	const moduleName = loadedModuleName(current);
+	return moduleName && PLAYWRIGHT_BROWSER_MODULES.has(moduleName) && API_BROWSER_PRIMITIVES.has(parts[0])
+		? parts[0]
+		: null;
+}
+
+/** Analyze Playwright bindings so API/browser boundaries are syntax-aware. */
+function analyzePlaywrightApiUsage(sourceFile) {
 	const testBindings = new Set();
 	const namespaceBindings = new Set();
 	const callbackBindings = new Map();
@@ -411,42 +407,54 @@ function analyzePlaywrightApiUsage(filePath, source) {
 	for (const statement of sourceFile.statements) {
 		if (ts.isImportDeclaration(statement)
 			&& ts.isStringLiteralLike(statement.moduleSpecifier)
-			&& statement.moduleSpecifier.text === "@playwright/test"
 			&& statement.importClause
 			&& !statement.importClause.isTypeOnly) {
+			const moduleName = statement.moduleSpecifier.text;
 			const clause = statement.importClause;
-			if (clause.name) namespaceBindings.add(clause.name.text);
-			if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
-				namespaceBindings.add(clause.namedBindings.name.text);
+			if (PLAYWRIGHT_BROWSER_MODULES.has(moduleName)) {
+				if (clause.name) namespaceBindings.add(clause.name.text);
+				if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+					namespaceBindings.add(clause.namedBindings.name.text);
+				} else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+					for (const specifier of clause.namedBindings.elements) {
+						if (specifier.isTypeOnly) continue;
+						const imported = importedName(specifier);
+						if (moduleName === "@playwright/test" && imported === "test") testBindings.add(specifier.name.text);
+						if (!browserImport && API_BROWSER_PRIMITIVES.has(imported)) browserImport = imported;
+					}
+				}
 			} else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
 				for (const specifier of clause.namedBindings.elements) {
-					if (specifier.isTypeOnly) continue;
-					const imported = importedName(specifier);
-					if (imported === "test") testBindings.add(specifier.name.text);
-					if (!browserImport && API_BROWSER_PRIMITIVES.has(imported)) browserImport = imported;
+					if (!specifier.isTypeOnly && importedName(specifier) === "test") testBindings.add(specifier.name.text);
 				}
 			}
-		} else if (ts.isImportDeclaration(statement)
-			&& statement.importClause?.namedBindings
-			&& ts.isNamedImports(statement.importClause.namedBindings)) {
-			for (const specifier of statement.importClause.namedBindings.elements) {
-				if (!specifier.isTypeOnly && importedName(specifier) === "test") testBindings.add(specifier.name.text);
-			}
-		}
-
-		if (!ts.isVariableStatement(statement)) continue;
-		for (const declaration of statement.declarationList.declarations) {
-			if (!declaration.initializer || requireModuleName(declaration.initializer) !== "@playwright/test") continue;
-			if (ts.isIdentifier(declaration.name)) namespaceBindings.add(declaration.name.text);
-			else if (ts.isObjectBindingPattern(declaration.name)) {
-				for (const element of declaration.name.elements) {
-					const imported = bindingElementName(element);
-					if (imported === "test" && ts.isIdentifier(element.name)) testBindings.add(element.name.text);
-					if (!browserImport && imported && API_BROWSER_PRIMITIVES.has(imported)) browserImport = imported;
-				}
-			}
+		} else if (ts.isImportEqualsDeclaration(statement)
+			&& !statement.isTypeOnly
+			&& ts.isExternalModuleReference(statement.moduleReference)
+			&& statement.moduleReference.expression
+			&& ts.isStringLiteralLike(statement.moduleReference.expression)
+			&& PLAYWRIGHT_BROWSER_MODULES.has(statement.moduleReference.expression.text)) {
+			namespaceBindings.add(statement.name.text);
 		}
 	}
+
+	const collectModuleBindings = (node) => {
+		if (ts.isVariableDeclaration(node) && node.initializer) {
+			const moduleName = loadedModuleName(node.initializer);
+			if (moduleName && PLAYWRIGHT_BROWSER_MODULES.has(moduleName)) {
+				if (ts.isIdentifier(node.name)) namespaceBindings.add(node.name.text);
+				else if (ts.isObjectBindingPattern(node.name)) {
+					for (const element of node.name.elements) {
+						const imported = bindingElementName(element);
+						if (moduleName === "@playwright/test" && imported === "test" && ts.isIdentifier(element.name)) testBindings.add(element.name.text);
+						if (!browserImport && imported && API_BROWSER_PRIMITIVES.has(imported)) browserImport = imported;
+					}
+				}
+			}
+		}
+		ts.forEachChild(node, collectModuleBindings);
+	};
+	collectModuleBindings(sourceFile);
 
 	const variableDeclarations = [];
 	const collectBindings = (node) => {
@@ -554,6 +562,8 @@ function analyzePlaywrightApiUsage(filePath, source) {
 			const path = expressionPath(node);
 			if (path && namespaceBindings.has(path.root) && API_BROWSER_PRIMITIVES.has(path.parts[0])) {
 				browserImport = path.parts[0];
+			} else {
+				browserImport = loadedModulePrimitive(node);
 			}
 		}
 		if (!browserImport && ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
@@ -584,7 +594,9 @@ function analyzePlaywrightApiUsage(filePath, source) {
 
 function validateRunnerImports(filePath, source, owner) {
 	const diagnostics = [];
-	for (const moduleName of extractImportedModules(source)) {
+	const sourceFile = parseTestSource(filePath, source);
+	const importedModules = extractImportedModules(sourceFile);
+	for (const moduleName of importedModules) {
 		const observedRunner = RUNNER_MODULES[moduleName];
 		if (observedRunner && observedRunner !== owner.runner) {
 			diagnostics.push(diagnostic(
@@ -597,7 +609,7 @@ function validateRunnerImports(filePath, source, owner) {
 	}
 
 	if (owner.semantic === "api-e2e") {
-		const { browserFixture, browserImport } = analyzePlaywrightApiUsage(filePath, source);
+		const { browserFixture, browserImport } = analyzePlaywrightApiUsage(sourceFile);
 		if (browserFixture) {
 			diagnostics.push(diagnostic(
 				"api-browser-fixture",
@@ -616,7 +628,7 @@ function validateRunnerImports(filePath, source, owner) {
 			));
 		}
 
-		const boundary = [...extractImportedModules(source)].find((moduleName) => /(?:^|\/)(?:_helpers|support)(?:\/.*)?\/browser(?:\/|[-.])/.test(moduleName));
+		const boundary = [...importedModules].find((moduleName) => /(?:^|\/)(?:_helpers|support)(?:\/.*)?\/browser(?:\/|[-.])/.test(moduleName));
 		if (boundary) {
 			diagnostics.push(diagnostic(
 				"api-browser-boundary",

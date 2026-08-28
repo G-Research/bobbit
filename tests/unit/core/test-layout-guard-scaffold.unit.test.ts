@@ -80,6 +80,18 @@ describe("transitional test layout guard", () => {
 		expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/dom/**/*.dom.test.ts");
 	});
 
+	it("rejects a canonical admission that dynamically loads the wrong runner", () => {
+		const filePath = "tests/unit/core/dynamic-runner.unit.test.ts";
+		const diagnostics = collectLayoutDiagnostics({
+			root: "synthetic-root",
+			allPaths: [filePath],
+			introducedPaths: [filePath],
+			fileExists: () => true,
+			readSource: () => 'const runner = await import("node:test");',
+		});
+		expect(diagnostics.map(({ code }: Diagnostic) => code)).toContain("runner-import-mismatch");
+	});
+
 	it("wires the layout guard ahead of typechecking", () => {
 		const manifest = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> };
 		expect(manifest.scripts["test:layout"]).toBe("node scripts/testing/check-layout.mjs");

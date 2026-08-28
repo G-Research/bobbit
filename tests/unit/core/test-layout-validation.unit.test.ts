@@ -51,22 +51,30 @@ describe("test layout diagnostics", () => {
 		expect(validateTestPath("tests/unknown/panel.test.ts")[0]?.code).toBe("unclassified-test");
 	});
 
-	it("rejects incompatible runner imports", () => {
+	it("rejects incompatible runner module references across TypeScript syntax", () => {
 		const cases = [
-			["tests/unit/core/a.unit.test.ts", 'import { test } from "node:test";', "runner-import-mismatch"],
-			["tests/e2e/node/a.node-e2e.test.ts", 'import { it } from "vitest";', "runner-import-mismatch"],
-			["tests/browser/journeys/a.journey.spec.ts", 'import { it } from "vitest";', "runner-import-mismatch"],
+			["tests/unit/core/static.unit.test.ts", 'import { test } from "node:test";'],
+			["tests/unit/core/export.unit.test.ts", 'export { test } from "node:test";'],
+			["tests/unit/core/require.unit.test.ts", 'require("node:test").test("bad", () => {});'],
+			["tests/e2e/node/dynamic.node-e2e.test.ts", 'const runner = await import("vitest");'],
+			["tests/browser/journeys/equals.journey.spec.ts", 'import vitest = require("vitest");'],
 		] as const;
-		for (const [filePath, source, code] of cases) {
-			expect(validateTestPath(filePath, source)[0]?.code).toBe(code);
+		for (const [filePath, source] of cases) {
+			expect(validateTestPath(filePath, source).map(({ code }: Diagnostic) => code)).toContain("runner-import-mismatch");
 		}
 	});
 
-	it("keeps examples and comments from masquerading as imports", () => {
+	it("ignores type-only, nonliteral, comment, and string module references", () => {
 		const source = [
 			'import { it } from "vitest";',
+			'import type { TestContext } from "node:test";',
+			'export type { TestContext as Context } from "node:test";',
+			'type Context = import("node:test").TestContext;',
+			'const moduleName = "node:test";',
+			'void import(moduleName);',
+			'void require(moduleName);',
 			'const example = \'import { test } from "node:test";\';',
-			'// import { test } from "@playwright/test";',
+			'// require("@playwright/test");',
 		].join("\n");
 		expect(validateTestPath("tests/unit/core/examples.unit.test.ts", source)).toEqual([]);
 	});
@@ -127,10 +135,26 @@ describe("test layout diagnostics", () => {
 			'import * as playwright from "@playwright/test"; const { firefox: engine } = playwright;',
 			'import playwright from "@playwright/test"; playwright["firefox"].launch();',
 			'const playwright = require("@playwright/test"); playwright.webkit.launch();',
+			'import { chromium } from "playwright"; chromium.launch();',
+			'import * as core from "playwright-core"; core.firefox.launch();',
+			'const { webkit } = require("playwright"); webkit.launch();',
+			'require("playwright-core").chromium.launch();',
+			'const core = await import("playwright-core"); core.webkit.launch();',
 		] as const;
 		for (const source of primitiveCases) {
 			expect(validateTestPath("tests/e2e/api/browser.api-e2e.spec.ts", source).map(({ code }: Diagnostic) => code)).toContain("api-browser-import");
 		}
+	});
+
+	it("allows type-only and nonliteral Playwright browser references in API tests", () => {
+		const source = [
+			'import type { Browser, Page } from "playwright";',
+			'import type { BrowserContext } from "playwright-core";',
+			'const moduleName = "playwright";',
+			'void import(moduleName);',
+			'void require(moduleName);',
+		].join("\n");
+		expect(validateTestPath("tests/e2e/api/types.api-e2e.spec.ts", source)).toEqual([]);
 	});
 
 	it("allows API request fixtures and ignores browser examples in comments and strings", () => {

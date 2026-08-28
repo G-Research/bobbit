@@ -100,15 +100,26 @@ function stringPatterns(expression: ts.Expression | undefined, context: string):
 			.filter(({ semantic }) => semantic === "browser-fixture" || semantic === "browser-journey")
 			.map(({ suffix }) => `**/*${suffix}`);
 	}
-	return arrayLiteral(unwrapped, context).elements.map((element, index) => {
+	if (ts.isCallExpression(unwrapped)
+		&& ts.isIdentifier(unwrapped.expression)
+		&& unwrapped.expression.text === "canonicalE2EMatch"
+		&& unwrapped.arguments.length === 1) {
+		const semantic = stringLiteral(unwrapped.arguments[0], `${context} semantic`);
+		const convention = (TEST_LAYOUT as readonly { semantic: string; suffix: string }[])
+			.find((entry) => entry.semantic === semantic);
+		if (!convention) throw new Error(`${context} references unknown semantic ${semantic}`);
+		return [`**/*${convention.suffix}`];
+	}
+	return arrayLiteral(unwrapped, context).elements.flatMap((element, index) => {
 		const candidate = unwrapExpression(element);
 		if (ts.isIdentifier(candidate) && candidate.text === "canonicalManualMatch") {
 			const manual = (TEST_LAYOUT as readonly { semantic: string; suffix: string }[])
 				.find(({ semantic }) => semantic === "manual");
 			if (!manual) throw new Error("manual convention missing");
-			return `**/*${manual.suffix}`;
+			return [`**/*${manual.suffix}`];
 		}
-		return stringLiteral(candidate, `${context}[${index}]`);
+		if (ts.isCallExpression(candidate)) return stringPatterns(candidate, `${context}[${index}]`);
+		return [stringLiteral(candidate, `${context}[${index}]`)];
 	});
 }
 
@@ -185,7 +196,7 @@ const CANONICAL_CLASSIFICATIONS = [
 	["tests/e2e/node/deep/process.node-e2e.test.ts", { lane: "e2eNode", phase: "e2e", runner: "tsx", project: "e2e-node", e2eGroup: "A" }],
 	["tests/e2e/vitest/deep/restart.vitest-e2e.test.ts", { lane: "vitestE2E", phase: "e2e", runner: "vitest", project: "v2-e2e-vitest", e2eGroup: "D" }],
 	["tests/e2e/api/deep/mcp.api-e2e.spec.ts", { lane: "e2eApi", phase: "e2e", runner: "playwright", project: "api-canonical", e2eGroup: "B" }],
-	["tests/e2e/browser/deep/ui.browser-e2e.spec.ts", { lane: "e2eBrowser", phase: "e2e", runner: "playwright", project: "browser-canonical", e2eGroup: "B" }],
+	["tests/e2e/browser/deep/ui.browser-e2e.spec.ts", { lane: "e2eBrowser", phase: "e2e", runner: "playwright", project: "browser-canonical", e2eGroup: "C" }],
 	["tests/manual/deep/model.manual.spec.ts", { lane: "manual", phase: "manual", runner: "playwright", project: "manual" }],
 ] as const;
 
@@ -272,8 +283,8 @@ describe("discoverTests", () => {
 		expect(discovery.manual).toEqual(["tests/manual-integration/nested/a-manual.spec.ts", "tests/manual-integration/z-manual.test.ts", "tests/manual/canonical.manual.spec.ts"]);
 		expect(discovery.e2eGroups).toEqual({
 			A: ["tests/a-node.e2e.test.ts", "tests/e2e/node/canonical.node-e2e.test.ts", "tests/z-node.e2e.test.ts"],
-			B: ["tests/e2e/api/canonical.api-e2e.spec.ts", "tests/e2e/browser/canonical.browser-e2e.spec.ts", "tests/e2e/nested/a-playwright.e2e.spec.ts", "tests/e2e/z-playwright.e2e.spec.ts"],
-			C: discovery.browserE2E,
+			B: ["tests/e2e/api/canonical.api-e2e.spec.ts", "tests/e2e/nested/a-playwright.e2e.spec.ts", "tests/e2e/z-playwright.e2e.spec.ts"],
+			C: ["tests/e2e/browser/canonical.browser-e2e.spec.ts", ...discovery.browserE2E],
 			D: discovery.vitestE2E,
 		});
 		expect(discovery.unit).toEqual([
@@ -326,9 +337,12 @@ describe("discoverTests", () => {
 		expect(() => discoverTests({ repoRoot: root })).toThrow("Unsupported transitional test placement");
 	});
 
-	it(`enforces the numeric isolated-test cap of ${ISOLATED_TEST_CAP}`, () => {
-		materialize(...Array.from({ length: ISOLATED_TEST_CAP }, (_, index) => `tests2/core/state-${index}.isolated.test.ts`));
-		expect(discoverTests({ repoRoot: root }).isolated).toHaveLength(ISOLATED_TEST_CAP);
+	it(`caps only transitional isolated tests at ${ISOLATED_TEST_CAP}`, () => {
+		const transitional = Array.from({ length: ISOLATED_TEST_CAP }, (_, index) => `tests2/core/state-${index}.isolated.test.ts`);
+		materialize(...transitional, "tests/unit/isolated/canonical.isolated.test.ts");
+		const discovery = discoverTests({ repoRoot: root });
+		expect(discovery.isolated).toHaveLength(ISOLATED_TEST_CAP + 1);
+		expect(discovery.isolated.filter((path: string) => path === "tests/unit/isolated/canonical.isolated.test.ts")).toHaveLength(1);
 
 		materialize("tests2/integration/one-too-many.isolated.test.ts");
 		expect(() => discoverTests({ repoRoot: root })).toThrow(`maximum is ${ISOLATED_TEST_CAP}`);
@@ -338,12 +352,16 @@ describe("discoverTests", () => {
 describe("Playwright selector parity", () => {
 	it("keeps transitional and canonical browser/manual selectors disjoint on POSIX and Windows paths", () => {
 		const browserProjects = committedPlaywrightProjects("playwright-v2.config.ts");
+		const e2eProjects = committedPlaywrightProjects("playwright-e2e.config.ts");
 		const manualProjects = committedPlaywrightProjects("playwright-manual.config.ts");
 		expect(browserProjects.map(project => project.name)).toEqual(["browser-v2", "browser-canonical", "browser-v2-e2e"]);
+		expect(e2eProjects.map(project => project.name)).toEqual(["api", "api-canonical", "browser-canonical", "api-realpush", "browser"]);
 		expect(manualProjects.map(project => project.name)).toEqual(["manual-integration", "manual"]);
 		const browser = browserProjects.find(project => project.name === "browser-v2")!;
 		const browserCanonical = browserProjects.find(project => project.name === "browser-canonical")!;
 		const browserE2E = browserProjects.find(project => project.name === "browser-v2-e2e")!;
+		const apiCanonical = e2eProjects.find(project => project.name === "api-canonical")!;
+		const e2eBrowserCanonical = e2eProjects.find(project => project.name === "browser-canonical")!;
 		const manual = manualProjects.find(project => project.name === "manual-integration")!;
 		const manualCanonical = manualProjects.find(project => project.name === "manual")!;
 		const discovery = discoverTests();
@@ -351,11 +369,15 @@ describe("Playwright selector parity", () => {
 			browser: selectedRepositoryPaths(browser),
 			browserCanonical: selectedRepositoryPaths(browserCanonical),
 			browserE2E: selectedRepositoryPaths(browserE2E),
+			apiCanonical: selectedRepositoryPaths(apiCanonical),
+			e2eBrowserCanonical: selectedRepositoryPaths(e2eBrowserCanonical),
 			manual: selectedRepositoryPaths(manual),
 			manualCanonical: selectedRepositoryPaths(manualCanonical),
 		};
 		expect([...selected.browser, ...selected.browserCanonical].sort()).toEqual(discovery.browser);
 		expect(selected.browserE2E).toEqual(discovery.browserE2E);
+		expect(selected.apiCanonical).toEqual(discovery.e2eApi);
+		expect(selected.e2eBrowserCanonical).toEqual(discovery.e2eBrowser);
 		expect([...selected.manual, ...selected.manualCanonical].sort()).toEqual(discovery.manual);
 		expect(selected.browser.some(path => path.startsWith("tests2/browser/e2e/"))).toBe(false);
 		expect(selected.browserE2E.every(path => path.startsWith("tests2/browser/e2e/"))).toBe(true);
@@ -365,12 +387,14 @@ describe("Playwright selector parity", () => {
 				expect([...laneSets[left]].filter(path => laneSets[right].has(path))).toEqual([]);
 			}
 		}
-		const projects = [...browserProjects, ...manualProjects];
+		const projects = [...browserProjects, ...e2eProjects, ...manualProjects];
 		for (const [path, owner] of [
 			["tests2/browser/fixtures/representative.spec.ts", "browser-v2"],
 			["tests2/browser/e2e/representative.spec.ts", "browser-v2-e2e"],
 			["tests/browser/fixtures/representative.fixture.spec.ts", "browser-canonical"],
 			["tests/browser/journeys/representative.journey.spec.ts", "browser-canonical"],
+			["tests/e2e/api/representative.api-e2e.spec.ts", "api-canonical"],
+			["tests/e2e/browser/representative.browser-e2e.spec.ts", "browser-canonical"],
 			["tests/manual-integration/representative.test.ts", "manual-integration"],
 			["tests/manual-integration/representative.spec.ts", "manual-integration"],
 			["tests/manual/representative.manual.spec.ts", "manual"],
@@ -383,6 +407,11 @@ describe("Playwright selector parity", () => {
 				expect(projects.filter(project => projectSelectsPath(project, pathForm)).map(project => project.name)).toEqual(owner ? [owner] : []);
 			}
 		}
+
+		const coordinator = readFileSync(resolve(REPO_ROOT, "scripts/testing-v2/run-e2e-v2.mjs"), "utf8");
+		const groupC = coordinator.match(/async function runGroupC[\s\S]*?(?=\nexport function groupDVitestArgs)/)?.[0];
+		expect(groupC).toContain('spec.startsWith("tests/e2e/browser/")');
+		expect(groupC).toContain('"--project=browser-canonical"');
 	});
 });
 
