@@ -41,6 +41,7 @@ enableTsWorkerResolver();
 import { describe, it, beforeAll, afterAll, expect } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
@@ -323,6 +324,23 @@ describe.concurrent("ModuleHost — file-resolution confinement (pack module gra
 		try {
 			// packRoot = the actual pack root (not the group dir).
 			assert.equal(await mh.invoke(req(url, "run", bareCtx(), {}, root)), 7);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a bare package resolving from ancestor node_modules is REJECTED", async () => {
+		const dir = packDir();
+		const packageDir = path.join(tmp, "node_modules", "ancestor-native-fixture");
+		writeInDir(packageDir, "package.json", JSON.stringify({ name: "ancestor-native-fixture", type: "module", exports: "./index.mjs" }));
+		writeInDir(packageDir, "index.mjs", `export const value = "ancestor";`);
+		const url = writeInDir(dir, "entry.mjs", `import { value } from "ancestor-native-fixture";\nexport const actions = { run: async () => value };`);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			await assert.rejects(
+				() => mh.invoke(req(url, "run", bareCtx(), {}, dir)),
+				(e) => e instanceof ActionError && /escape|confinement/i.test(e.message),
+			);
 		} finally {
 			mh.dispose();
 		}
@@ -695,6 +713,62 @@ describe("ModuleHost — hooks execution", () => {
 			await expect(invocation).rejects.toMatchObject({ status: 499 });
 		} finally {
 			host.dispose();
+		}
+	});
+});
+
+describe.sequential("ModuleHost — pack-local native assets", () => {
+	it("loads an owned native addon while keeping its JS module graph inside the pack root", async (t) => {
+		const require = createRequire(import.meta.url);
+		const packageEntry = require.resolve("better-sqlite3");
+		const packageRoot = path.resolve(path.dirname(packageEntry), "..");
+		const getPrebuildPath = require(path.join(packageRoot, "lib", "binding.js")).getPrebuildPath as () => string | null;
+		const installedBinding = getPrebuildPath();
+		if (!installedBinding) {
+			t.skip(`better-sqlite3 has no prebuild for ${process.platform}/${process.arch}`);
+			return;
+		}
+
+		const root = path.join(tmp, `native-pack-${seq++}`);
+		const vendorDir = path.join(root, "lib", "vendor", "better-sqlite3");
+		const familyDir = path.join(root, "lib", "native", "database-driver");
+		const report = process.report.getReport() as { header?: { glibcVersionRuntime?: string } };
+		const libc = process.platform === "linux"
+			? (report.header?.glibcVersionRuntime ? "-glibc" : "-musl")
+			: "";
+		const target = `${process.platform}${libc}-${process.arch}`;
+		const packBinding = path.join(familyDir, `${target}.node`);
+		fs.cpSync(path.join(packageRoot, "lib"), vendorDir, { recursive: true });
+		fs.copyFileSync(path.join(packageRoot, "package.json"), path.join(vendorDir, "package.json"));
+		fs.mkdirSync(familyDir, { recursive: true });
+		fs.copyFileSync(installedBinding, packBinding);
+
+		// The fixture-local JS is equivalent to dependency code inlined into a
+		// first-party Node bundle. Its nativeBinding option names only the copied
+		// family file beneath lib/native; no ancestor dependency grant is used.
+		const url = writeInDir(
+			path.join(root, "lib"),
+			"native-actions.mjs",
+			`import Database from "./vendor/better-sqlite3/index.js";\n` +
+				`import { fileURLToPath } from "node:url";\n` +
+				`const nativeBinding = fileURLToPath(new URL(${JSON.stringify(`./native/database-driver/${target}.node`)}, import.meta.url));\n` +
+				`export const actions = { run: async () => {\n` +
+				`  const db = new Database(":memory:", { nativeBinding });\n` +
+				`  db.exec("create table smoke(value integer); insert into smoke values (42); select value from smoke;");\n` +
+				`  const memory = db.memory;\n` +
+				`  db.close();\n` +
+				`  return { memory, open: db.open, nativeBinding };\n` +
+				`} };`,
+		);
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			assert.deepEqual(await mh.invoke(req(url, "run", bareCtx(), {}, root)), {
+				memory: true,
+				open: false,
+				nativeBinding: packBinding,
+			});
+		} finally {
+			mh.dispose();
 		}
 	});
 });

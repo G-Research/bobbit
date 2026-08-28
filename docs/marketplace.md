@@ -620,6 +620,64 @@ The built-in band includes no-tools panel-and-route packs such as **`file-explor
 
 The shipped packs live in the repo at `market-packs/<name>/`, are built by `npm run build:packs`, and are copied into `dist/server/builtin-packs/market-packs/<name>/` by `scripts/copy-builtin-packs.mjs` (an explicit allowlist — *not* every dir under `market-packs/`). At runtime they are located relative to the server module dir (`resolveBuiltinPacksDir()` in `src/server/agent/builtin-packs.ts`, overridable via `BOBBIT_BUILTIN_PACKS_DIR` for tests). Docker sandboxes mount that built-in pack tree read-only and remap pack-owned `bobbit-extension` paths into the container, so first-party pack tools resolve the same way as `.bobbit/config/tools` and shipped `dist/server/defaults/tools` extensions.
 
+### First-party native build metadata
+
+A Bobbit-shipped pack may need a native Node addon even though its confined worker cannot resolve a
+package from the repository's ancestor `node_modules`. The first-party build solves this by copying
+only the required binding files into the owning pack. Keeping the assets pack-local means the
+existing built-in copy, release packaging, marketplace copy, and read-only container mount paths
+work without a privileged runtime dependency grant.
+
+An optional `pack.build.json` adjacent to a repository-owned first-party pack is trusted **build
+input**, separate from runtime `pack.yaml`. During `npm run build:packs`, Bobbit accepts native
+sources only from the lockfile-installed package matching an exact-version, direct production
+dependency in the root manifest. Package-specific upstream paths stay beside the owning pack rather
+than entering generic build or Extension Host code. The build validates the
+complete target set before changing output and materializes pack-local families for:
+
+- macOS x64 and arm64;
+- Linux glibc x64 and arm64;
+- Linux musl x64 and arm64; and
+- Windows x64 and arm64.
+
+Each generated family includes the eight canonical `.node` files and a deterministic manifest with
+the package version plus each file's name, size, and SHA-256 hash. Runtime selection chooses exactly
+one OS/libc/architecture target beneath the canonical pack root. There is no package, libc, or
+architecture fallback; unsupported or missing targets, missing files, corrupt manifest metadata,
+and unsafe paths fail explicitly. The complete author-facing constraints are in
+[Native assets in marketplace packs](extension-host-authoring.md#native-assets-in-marketplace-packs).
+
+This metadata is **not** a third-party marketplace API. Adding or installing a third-party source
+does not process `pack.build.json`, resolve its dependencies, run npm, compile an addon, or copy
+bytes from the host's package tree. Third-party publishers must include their compatible native
+artifacts inside the pack. First-party executable code is trusted in the same way as other pack
+server code: worker resource/crash isolation and module-graph containment remain, but neither the
+metadata nor a native addon creates an OS filesystem sandbox.
+
+#### Duplication and upgrades
+
+Pack-local copying intentionally duplicates native bytes. For the motivating
+`better-sqlite3@13.0.3` case, its eight bindings total **16,896,640 bytes** (**16.897 MB / 16.114
+MiB**) per universal pack, compared with roughly **27.3 MB** for the whole package. The smaller,
+bounded duplication lets one immutable release serve macOS, Windows, Linux glibc and Linux musl on
+x64 and arm64—including offline and container execution—without granting workers access to a host
+dependency tree. A shared native store or runtime grant would save bytes but add cross-pack
+privilege and lifecycle state; it is not justified for this prerequisite.
+
+Treat a native dependency upgrade as an artifact regeneration, not a version-only edit:
+
+1. Update the exact direct production dependency and lockfile together.
+2. Run the normal pack build. Moved or missing package-private binding paths fail with package,
+   version, target, and source context rather than retaining old bytes.
+3. Inspect the regenerated family manifest's version, sizes, and hashes, and review the package
+   layout changes kept beside the owning pack.
+4. Run release qualification, including packed-consumer and supported-target coverage, before
+   publishing.
+
+Each family replacement is atomic, so a successful replacement cannot mix addon versions within
+that family. The generated assets remain committed release artifacts and are included by the normal
+first-party copy/package flow.
+
 ### File explorer activation and launch
 
 The **`file-explorer`** pack is enabled by default and appears in **Built-in (shipped)**. It has no roles, tools, or skills: two entrypoints open one singleton panel per session, and the panel reaches the pack's allowlisted `list`, `resolve`, `search`, `read`, and `diff` routes through `host.callRoute`. The session actions entry is **Open File Explorer** and the composer entry is `/files`; both focus the same restored panel.

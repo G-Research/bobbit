@@ -8,14 +8,19 @@
  * server after a complete successful publish.
  */
 import { constants as fsConstants, watch as watchFs } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { copyFile, lstat, mkdir, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
 import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import {
+	materializePackNativeAssets,
+	NATIVE_ASSET_TARGETS,
+	packNativeAssetsPlugin,
+} from "./pack-native-assets.mjs";
 
 const require = createRequire(import.meta.url);
 export const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -203,7 +208,7 @@ async function captureDirectoryClaim(directoryPath, canonicalRoot, fsImpl) {
 	return { path: directoryPath, identity: stableIdentity(stats) };
 }
 
-const realMirrorFs = { copyFile, lstat, mkdir, realpath, rename, unlink };
+const realMirrorFs = { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, unlink, writeFile };
 
 /** Resolve, validate and deterministically order already-existing served pack roots. */
 export async function servingTargets(declaration, explicitTargets = [], options = {}) {
@@ -291,18 +296,27 @@ function pdfWorkerPlugin(workerSource) {
 export async function buildSelectedPack(declaration, options = {}) {
 	const validated = validateDeclaration(declaration);
 	const root = path.resolve(options.projectRoot ?? projectRoot);
+	const packRoot = path.join(root, validated.authorRoot);
 	const buildImpl = options.build ?? build;
 	const plugin = options.plugin ?? pdfWorkerPlugin(await bundlePdfWorker(buildImpl));
 	const log = options.log ?? ((message) => console.log(message));
+	const materialize = options.materializeNativeAssets ?? materializePackNativeAssets;
+	const nativeAssetFamilies = await materialize({
+		projectRoot: root,
+		packRoot,
+		...(options.resolvePackageRoot ? { resolvePackageRoot: options.resolvePackageRoot } : {}),
+	});
+	if (nativeAssetFamilies.length > 0) log(`[build:packs] materialized native assets for ${validated.pack}`);
 	for (const entry of validated.entries) {
-		const inFile = path.join(root, validated.authorRoot, "src", entry.in);
-		const outFile = path.join(root, validated.authorRoot, entry.out);
+		const inFile = path.join(packRoot, "src", entry.in);
+		const outFile = path.join(packRoot, entry.out);
+		const platform = entry.platform ?? "browser";
 		await buildImpl({
 			entryPoints: [inFile],
 			outfile: outFile,
 			bundle: true,
 			format: "esm",
-			platform: entry.platform ?? "browser",
+			platform,
 			target: "es2022",
 			minify: true,
 			legalComments: "none",
@@ -312,11 +326,12 @@ export async function buildSelectedPack(declaration, options = {}) {
 			...(entry.platform === "node"
 				? { banner: { js: "import { createRequire as __bbCreateRequire } from 'node:module';\nconst require = __bbCreateRequire(import.meta.url);" } }
 				: {}),
-			plugins: [plugin],
+			plugins: [packNativeAssetsPlugin({ projectRoot: root, platform }), plugin],
 			logLevel: "info",
 		});
 		log(`[build:packs] ${validated.pack}/src/${entry.in} → ${validated.pack}/${entry.out}`);
 	}
+	return { nativeAssetFamilies };
 }
 
 function isMissing(error) {
@@ -410,7 +425,8 @@ async function publishDeclaredOutput(source, destination, target, claims, fsImpl
 	let tempStats;
 	try {
 		await assertClaimsCurrent(claims, fsImpl);
-		await fsImpl.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
+		if (Buffer.isBuffer(source)) await fsImpl.writeFile(tempPath, source, { flag: "wx" });
+		else await fsImpl.copyFile(source, tempPath, fsConstants.COPYFILE_EXCL);
 		tempStats = await fsImpl.lstat(tempPath);
 		if (!tempStats.isFile() || tempStats.isSymbolicLink() || stableIdentity(tempStats) === undefined) {
 			throw new Error(`Mirror temporary output is not a stable regular file: ${tempPath}`);
@@ -453,6 +469,186 @@ async function publishDeclaredOutput(source, destination, target, claims, fsImpl
 	}
 }
 
+function parseGeneratedNativeManifest(text, context) {
+	let manifest;
+	try {
+		manifest = JSON.parse(text);
+	} catch (error) {
+		throw new Error(`Generated native asset manifest is corrupt at ${context}`, { cause: error });
+	}
+	if (!manifest || Object.keys(manifest).sort().join(",") !== "package,schema,targets,version"
+		|| manifest.schema !== 1 || typeof manifest.package !== "string" || manifest.package.length === 0
+		|| typeof manifest.version !== "string" || manifest.version.length === 0
+		|| !manifest.targets || typeof manifest.targets !== "object" || Array.isArray(manifest.targets)
+		|| Object.keys(manifest.targets).length !== NATIVE_ASSET_TARGETS.length) {
+		throw new Error(`Generated native asset manifest is invalid at ${context}`);
+	}
+	for (const target of NATIVE_ASSET_TARGETS) {
+		const record = manifest.targets[target];
+		if (!record || Object.keys(record).sort().join(",") !== "file,sha256,size"
+			|| record.file !== `${target}.node` || !Number.isSafeInteger(record.size) || record.size < 0
+			|| typeof record.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.sha256)) {
+			throw new Error(`Generated native asset manifest has invalid target ${target} at ${context}`);
+		}
+	}
+	return manifest;
+}
+
+async function captureNativeAssetFile(source, canonicalFamily, familyClaim, fsImpl) {
+	await assertDirectoryClaimCurrent(familyClaim, fsImpl);
+	const before = await fsImpl.lstat(source);
+	if (!before.isFile() || before.isSymbolicLink() || stableIdentity(before) === undefined) {
+		throw new Error(`Native asset output is not a stable regular file: ${source}`);
+	}
+	const canonicalBefore = await fsImpl.realpath(source);
+	if (!isWithin(canonicalFamily, canonicalBefore)) throw new Error(`Native asset output escapes its family: ${source}`);
+	const canonicalBeforeStats = await fsImpl.lstat(canonicalBefore);
+	if (!canonicalBeforeStats.isFile() || canonicalBeforeStats.isSymbolicLink() || !sameStableIdentity(before, canonicalBeforeStats)) {
+		throw staleTargetError(source);
+	}
+	await assertDirectoryClaimCurrent(familyClaim, fsImpl);
+	const bytes = await fsImpl.readFile(source);
+	const after = await fsImpl.lstat(source);
+	if (!after.isFile() || after.isSymbolicLink() || !sameStableIdentity(before, after)) throw staleTargetError(source);
+	const canonicalAfter = await fsImpl.realpath(source);
+	if (canonicalAfter !== canonicalBefore || !isWithin(canonicalFamily, canonicalAfter)) throw staleTargetError(source);
+	const canonicalAfterStats = await fsImpl.lstat(canonicalAfter);
+	if (!canonicalAfterStats.isFile() || canonicalAfterStats.isSymbolicLink() || !sameStableIdentity(before, canonicalAfterStats)) {
+		throw staleTargetError(source);
+	}
+	await assertDirectoryClaimCurrent(familyClaim, fsImpl);
+	return Buffer.isBuffer(bytes) ? Buffer.from(bytes) : Buffer.from(bytes);
+}
+
+async function describeNativeAssetFamily(familyDirectory, packRoot, fsImpl) {
+	const nativeRoot = path.join(packRoot, "lib", "native");
+	const resolvedFamily = path.resolve(familyDirectory);
+	const id = path.basename(resolvedFamily);
+	if (path.dirname(resolvedFamily) !== nativeRoot || !/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/.test(id)) {
+		throw new Error(`Native asset family is outside its declared pack root: ${familyDirectory}`);
+	}
+	const canonicalPack = await fsImpl.realpath(packRoot);
+	const familyStats = await fsImpl.lstat(resolvedFamily);
+	assertStableDirectory(familyStats, resolvedFamily);
+	const canonicalFamily = await fsImpl.realpath(resolvedFamily);
+	if (!isWithin(canonicalPack, canonicalFamily)) throw new Error(`Native asset family escapes its declared pack root: ${familyDirectory}`);
+	const canonicalStats = await fsImpl.lstat(canonicalFamily);
+	if (!sameStableIdentity(familyStats, canonicalStats)) throw staleTargetError(resolvedFamily);
+	const familyClaim = { path: resolvedFamily, identity: stableIdentity(familyStats) };
+
+	const expectedNames = new Set(["manifest.json", ...NATIVE_ASSET_TARGETS.map((target) => `${target}.node`)]);
+	const entries = await fsImpl.readdir(resolvedFamily, { withFileTypes: true });
+	if (entries.length !== expectedNames.size || entries.some((entry) => !expectedNames.has(entry.name) || !entry.isFile() || entry.isSymbolicLink())) {
+		throw new Error(`Native asset family contains unexpected output at ${resolvedFamily}`);
+	}
+
+	const manifestPath = path.join(resolvedFamily, "manifest.json");
+	const manifestBytes = await captureNativeAssetFile(manifestPath, canonicalFamily, familyClaim, fsImpl);
+	const manifest = parseGeneratedNativeManifest(manifestBytes.toString("utf8"), manifestPath);
+	const files = [{ name: "manifest.json", bytes: manifestBytes }];
+	for (const target of NATIVE_ASSET_TARGETS) {
+		const name = `${target}.node`;
+		const source = path.join(resolvedFamily, name);
+		const bytes = await captureNativeAssetFile(source, canonicalFamily, familyClaim, fsImpl);
+		const record = manifest.targets[target];
+		const hash = createHash("sha256").update(bytes).digest("hex");
+		if (bytes.byteLength !== record.size || hash !== record.sha256) {
+			throw new Error(`Native asset output does not match manifest package=${manifest.package}@${manifest.version} target=${target} at ${source}`);
+		}
+		files.push({ name, bytes });
+	}
+	await assertDirectoryClaimCurrent(familyClaim, fsImpl);
+	const finalEntries = await fsImpl.readdir(resolvedFamily, { withFileTypes: true });
+	if (finalEntries.length !== expectedNames.size || finalEntries.some((entry) => !expectedNames.has(entry.name) || !entry.isFile() || entry.isSymbolicLink())) {
+		throw staleTargetError(resolvedFamily);
+	}
+	await assertDirectoryClaimCurrent(familyClaim, fsImpl);
+	return { id, manifest, files: files.sort((left, right) => left.name.localeCompare(right.name)) };
+}
+
+async function captureExistingDirectoryPath(target, relativeDirectory, fsImpl) {
+	const rootClaim = { path: target.path, identity: target.identity };
+	const claims = [rootClaim];
+	await assertDirectoryClaimCurrent(rootClaim, fsImpl);
+	let currentPath = target.path;
+	for (const segment of relativeDirectory.split("/")) {
+		currentPath = path.join(currentPath, segment);
+		const stats = await lstatIfPresent(currentPath, fsImpl);
+		if (stats === undefined) return undefined;
+		assertStableDirectory(stats, currentPath);
+		claims.push(await captureDirectoryClaim(currentPath, target.canonicalPath, fsImpl));
+		await assertClaimsCurrent(claims, fsImpl);
+	}
+	return { path: currentPath, claims };
+}
+
+async function removePublishedFile(filePath, target, claims, fsImpl) {
+	const expected = await captureDestinationFile(filePath, target, claims, fsImpl);
+	if (expected === undefined) return;
+	await assertDestinationUnchanged(filePath, expected, target, claims, fsImpl);
+	await fsImpl.unlink(filePath);
+	await assertClaimsCurrent(claims, fsImpl);
+}
+
+async function removeGeneratedFamily(directory, target, familyClaims, fsImpl) {
+	await assertClaimsCurrent(familyClaims, fsImpl);
+	for (const entry of await fsImpl.readdir(directory, { withFileTypes: true })) {
+		if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(`Generated native asset family contains unsafe stale output: ${path.join(directory, entry.name)}`);
+		await removePublishedFile(path.join(directory, entry.name), target, familyClaims, fsImpl);
+	}
+	await assertClaimsCurrent(familyClaims, fsImpl);
+	if ((await fsImpl.readdir(directory)).length !== 0) throw staleTargetError(directory);
+	await fsImpl.rmdir(directory);
+	await assertClaimsCurrent(familyClaims.slice(0, -1), fsImpl);
+}
+
+async function mirrorNativeAssetFamilies(validated, targets, familyDirectories, root, fsImpl) {
+	const packRoot = path.join(root, validated.authorRoot);
+	const families = [];
+	for (const directory of familyDirectories) families.push(await describeNativeAssetFamily(directory, packRoot, fsImpl));
+	const desired = new Map(families.map((family) => [family.id, family]));
+
+	for (const target of targets) {
+		for (const family of families) {
+			for (const file of family.files) {
+				const relative = `lib/native/${family.id}/${file.name}`;
+				const destination = path.join(target.path, ...relative.split("/"));
+				const claims = await prepareDestinationParent(target, relative, fsImpl);
+				await publishDeclaredOutput(file.bytes, destination, target, claims, fsImpl);
+			}
+		}
+
+		const nativeRoot = await captureExistingDirectoryPath(target, "lib/native", fsImpl);
+		if (!nativeRoot) continue;
+		for (const entry of await fsImpl.readdir(nativeRoot.path, { withFileTypes: true })) {
+			if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+			const familyDirectory = path.join(nativeRoot.path, entry.name);
+			const familyStats = await fsImpl.lstat(familyDirectory);
+			assertStableDirectory(familyStats, familyDirectory);
+			const familyClaim = await captureDirectoryClaim(familyDirectory, target.canonicalPath, fsImpl);
+			const familyClaims = [...nativeRoot.claims, familyClaim];
+			await assertClaimsCurrent(familyClaims, fsImpl);
+			const manifestPath = path.join(familyDirectory, "manifest.json");
+			const manifestStats = await captureDestinationFile(manifestPath, target, familyClaims, fsImpl);
+			if (manifestStats === undefined) continue;
+			const manifestText = await fsImpl.readFile(manifestPath, "utf8");
+			await assertDestinationUnchanged(manifestPath, manifestStats, target, familyClaims, fsImpl);
+			parseGeneratedNativeManifest(manifestText, manifestPath);
+			const wanted = desired.get(entry.name);
+			if (!wanted) {
+				await removeGeneratedFamily(familyDirectory, target, familyClaims, fsImpl);
+				continue;
+			}
+			const wantedNames = new Set(wanted.files.map((file) => file.name));
+			for (const child of await fsImpl.readdir(familyDirectory, { withFileTypes: true })) {
+				if (wantedNames.has(child.name)) continue;
+				if (!child.isFile() || child.isSymbolicLink()) throw new Error(`Generated native asset family contains unsafe stale output: ${path.join(familyDirectory, child.name)}`);
+				await removePublishedFile(path.join(familyDirectory, child.name), target, familyClaims, fsImpl);
+			}
+		}
+	}
+}
+
 /** Mirror only declared outputs, retaining their pack-relative nested paths. */
 export async function mirrorDeclaredOutputs(declaration, targets, options = {}) {
 	const validated = validateDeclaration(declaration);
@@ -466,6 +662,7 @@ export async function mirrorDeclaredOutputs(declaration, targets, options = {}) 
 			await publishDeclaredOutput(source, destination, target, claims, fsImpl);
 		}
 	}
+	await mirrorNativeAssetFamilies(validated, targets, options.nativeAssetFamilies ?? [], root, fsImpl);
 }
 
 /** Notify Vite after a complete mirror. Only HTTP 204 is success. */
@@ -515,8 +712,8 @@ export function createSerializedRebuilder(options) {
 	const signalSource = options.signalSource ?? process;
 
 	const cycle = async () => {
-		await options.build();
-		await options.mirror();
+		const buildResult = await options.build();
+		await options.mirror(buildResult);
 		const reloadToken = nextReloadToken;
 		nextReloadToken += 1;
 		await options.notify({ pack: options.pack, reloadToken });
@@ -618,13 +815,36 @@ export async function runWatcher(parsed, options = {}) {
 	const rebuilder = createSerializedRebuilder({
 		pack: declaration.pack,
 		build: options.build ?? (() => buildSelectedPack(declaration, { projectRoot: root, plugin })),
-		mirror: options.mirror ?? (() => mirrorDeclaredOutputs(declaration, targets, { projectRoot: root })),
+		mirror: options.mirror ?? ((result) => mirrorDeclaredOutputs(declaration, targets, {
+			projectRoot: root,
+			nativeAssetFamilies: result?.nativeAssetFamilies ?? [],
+		})),
 		notify: options.notify ?? ((payload) => notifyVite(parsed.viteUrl, payload)),
 		signalSource: options.signalSource,
 		onError: options.onError,
 	});
-	const sourceRoot = path.join(root, declaration.authorRoot, "src");
-	const watcher = (options.watch ?? watchFs)(sourceRoot, { recursive: true }, () => rebuilder.schedule());
+	const authorRoot = path.join(root, declaration.authorRoot);
+	const sourceRoot = path.join(authorRoot, "src");
+	const watch = options.watch ?? watchFs;
+	const sourceWatcher = watch(sourceRoot, { recursive: true }, () => rebuilder.schedule());
+	let metadataWatcher;
+	try {
+		metadataWatcher = watch(authorRoot, { recursive: false }, (_eventType, filename) => {
+			if (filename === null || String(filename).replaceAll("\\", "/") === "pack.build.json") rebuilder.schedule();
+		});
+	} catch (error) {
+		sourceWatcher.close();
+		throw error;
+	}
+	const watcher = {
+		close() {
+			try {
+				sourceWatcher.close();
+			} finally {
+				metadataWatcher.close();
+			}
+		},
+	};
 	rebuilder.attachWatcher(watcher);
 	try {
 		rebuilder.schedule(true);

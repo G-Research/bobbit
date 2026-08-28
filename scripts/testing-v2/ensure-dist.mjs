@@ -13,6 +13,7 @@
  * The input set mirrors package.json's `build` pipeline
  * (`build:packs` → `build:server` → `build:ui`):
  *   - build:packs  — market-packs/** sources + scripts/build-market-packs.mjs
+ *                    and its scripts/pack-native-assets.mjs helper
  *   - build:server — src/** (tsconfig.server.json includes src/server + src/shared),
  *                    defaults/** (copy-defaults.mjs), market-packs/** again
  *                    (copy-builtin-packs.mjs), build-server.mjs, tsconfig.server.json
@@ -72,6 +73,7 @@ const INPUT_FILES = [
 	"scripts/copy-defaults.mjs",
 	"scripts/copy-builtin-packs.mjs",
 	"scripts/build-market-packs.mjs",
+	"scripts/pack-native-assets.mjs",
 ];
 /** Never part of the build input set even when nested under an input dir. */
 const SKIP_DIR_NAMES = new Set(["node_modules", "dist", ".vite", ".git"]);

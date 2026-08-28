@@ -31,11 +31,29 @@
     },
     {
       "path": "tests2/core/market-pack-dev.test.ts",
-      "reason": "Focused core coverage for strict generic pack-watch parsing and resolution, deterministic declared-output mirroring, serialized rebuild publication and failure recovery, bounded Vite notification, and cleanup.",
+      "reason": "Focused core coverage for strict generic pack-watch parsing and resolution, deterministic declared-output and native-family mirroring, serialized rebuild publication and failure recovery, metadata watching, bounded Vite notification, and cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pack-native-assets.test.ts",
+      "reason": "Focused core coverage for first-party native asset metadata validation, deterministic target materialization and selection, stale-family cleanup, explicit unsupported targets, and pack-root containment.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/pack-native-assets-bundle.test.ts",
+      "reason": "Isolated integration coverage proving the native helper alias is inlined without runtime host edges and native assets survive built-in copy, release packing, clean install, and read-only resolution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {

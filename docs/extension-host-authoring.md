@@ -2415,12 +2415,59 @@ Two hard rules keep a bundle loadable by the Blob-URL loader:
 2. **One self-contained file per entry — NO code splitting / dynamic chunks.** A Blob-URL
    module has no resolvable base for `import("./chunk.js")`, so every dep is inlined eagerly.
 
+## Native assets in marketplace packs
+
+A native Node addon cannot be resolved from an ancestor `node_modules` directory by a confined
+Extension Host worker. Keep both the JavaScript glue and every native binary the pack can load
+inside the pack root. This preserves one predictable module graph and lets the same immutable pack
+run from a marketplace install, the built-in distribution, or a read-only container mount.
+
+For a third-party pack, native assets are publisher-owned release artifacts:
+
+- Ship the `.node` files in the pack, for example under `lib/native/<family>/`, and bundle or
+  vendor their JavaScript caller under the same pack root.
+- Resolve the selected file from the installed module's location (normally with `import.meta.url`),
+  canonicalize it, and reject any path outside the canonical pack root. Pass that path through the
+  dependency's documented native-binding option rather than using a bare package import.
+- Build the addon for the Node engine and native ABI used by Bobbit. A matching OS and CPU is not
+  enough when the addon targets an incompatible Node ABI; ABI compatibility and release testing
+  remain the pack publisher's responsibility.
+
+Bobbit's marketplace installer copies pack files; it does **not** fetch npm packages, run an
+installer or compiler, grant access to ancestor dependencies, or search another location when a
+binding is absent. It also ignores `pack.build.json` in third-party packs. That file is
+repository-only metadata used while Bobbit builds its own first-party packs, not a marketplace
+schema or third-party build API. See
+[First-party native build metadata](marketplace.md#first-party-native-build-metadata) for that
+separate trusted build path.
+
+Portable native packs must select one exact runtime target:
+
+| Runtime | x64 target | arm64 target |
+|---|---|---|
+| macOS | `darwin-x64` | `darwin-arm64` |
+| Linux, glibc | `linux-glibc-x64` | `linux-glibc-arm64` |
+| Linux, musl | `linux-musl-x64` | `linux-musl-arm64` |
+| Windows | `win32-x64` | `win32-arm64` |
+
+Selection has no compatibility fallback: Linux libc is part of the target, and a missing target,
+unsupported platform or architecture, corrupt manifest, or unsafe file must fail explicitly. Do
+not silently choose another libc, architecture, system-installed package, or ancestor module.
+Failing closed makes packaging and ABI mistakes visible instead of loading unpredictable host
+bytes.
+
+Native server code has the same trust level as other installed pack executable code. Workers keep
+resource/crash isolation and realpath-confine the **module graph** to the pack root, but this is not
+an OS filesystem sandbox: trusted pack code still has ambient Node `fs`, process, and network
+access. Native assets add no broader dependency or filesystem grant.
+
 ### Hot-reload an authored pack during development
 
-Use the pack watcher when iterating on a declared bundle. It rebuilds one pack, mirrors only that
-pack's declared outputs into the tree the gateway already serves, and asks Vite to invalidate the
-matching browser modules. This keeps the normal pack build as the source of truth while avoiding a
-gateway restart or full-page reload for renderer and panel edits.
+Use the pack watcher when iterating on a declared bundle. It rebuilds one pack, mirrors that pack's
+declared bundle outputs and any generated native-asset families into every selected tree the
+gateway already serves, and asks Vite to invalidate the matching browser modules. This keeps the
+normal pack build as the source of truth while avoiding a gateway restart or full-page reload for
+renderer and panel edits.
 
 #### Prerequisites and command
 
@@ -2455,10 +2502,12 @@ npm run dev:pack -- <pack> [--target <served-pack-root>]... [--vite-url <http(s)
   supplied URL is ignored; the watcher posts to Vite's fixed development endpoint.
 - `npm run dev:pack -- --help` prints the compact usage form.
 
-The watcher starts observing `<authorRoot>/src` recursively and performs one full
-build/mirror/notification cycle before reporting readiness. Each cycle rebuilds every declared
-entry for the selected pack, sequentially. Changes arriving during a build are coalesced into one
-trailing cycle, so builds and publishes never overlap.
+The watcher observes `<authorRoot>/src` recursively and the adjacent `pack.build.json` directly,
+then performs one full build/mirror/notification cycle before reporting readiness. A native-metadata
+change therefore reruns materialization, bundle building, target mirroring, and notification without
+requiring a source-file touch. Each cycle materializes declared native families first and then
+rebuilds every declared entry for the selected pack, sequentially. Changes arriving during a build
+are coalesced into one trailing cycle, so builds and publishes never overlap.
 
 #### Build declaration and target mapping
 
@@ -2538,16 +2587,23 @@ already-running cycle settle.
 
 #### Limitations and failure recovery
 
-- Only changes under the selected `<authorRoot>/src` trigger a cycle. An edit to imported shared
-  source outside that directory needs a touch inside the selected `src/` tree or a watcher restart;
-  restarting runs the initial full cycle again.
-- Only declared `entries[].out` files are mirrored. Hand-authored modules and other pack files are
-  not copied, and YAML, manifests, contribution additions, entrypoints, actions, routes, channels,
-  and providers are not reconciled by this browser hot-reload path. Use their existing marketplace
-  and gateway lifecycle.
-- Copying is deterministic but in-place, not a staged atomic directory swap. A build failure skips
-  all mirroring and notification; a copy failure suppresses notification. A later source event
-  retries a complete cycle.
+- Changes under the selected `<authorRoot>/src` and changes to the adjacent `pack.build.json`
+  trigger a cycle. An edit to imported shared source elsewhere needs a touch inside the selected
+  `src/` tree or a watcher restart; restarting runs the initial full cycle again.
+- Declared `entries[].out` files are the normal mirror allowlist. Generated
+  `lib/native/<family>/` files are the bounded exception: each build validates and materializes the
+  complete family, then reconciles it into **every** serving target. Families no longer generated
+  are removed from each target only after a valid generated manifest and stable, contained, flat
+  files identify them as generated output; unsafe file types or path identities fail closed instead
+  of being deleted. Hand-authored modules and other pack files are not copied, and YAML,
+  contribution additions, entrypoints,
+  actions, routes, channels, and providers are not reconciled by this hot-reload path. Use their
+  existing marketplace and gateway lifecycle.
+- Each bundle or native-family file is published through a contained temporary file and rename;
+  authored native families are replaced atomically one family at a time. The complete
+  multi-output, multi-target cycle is not one atomic directory transaction. A build failure skips
+  mirroring and notification; a mirror failure suppresses notification even if an earlier output or
+  target was already updated. A later source or metadata event retries a complete cycle.
 - If Vite is unavailable, rejects the POST, or does not answer before the bounded timeout, the new
   bytes may already be mirrored but no client token is delivered. There is deliberately no idle
   backoff loop: fix Vite and make another edit (or restart the watcher) to rebuild, mirror, and send
