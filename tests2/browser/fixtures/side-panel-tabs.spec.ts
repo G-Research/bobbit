@@ -266,6 +266,29 @@ test.describe("Side-panel tab contract", () => {
 		await expect(handle).toHaveAttribute("aria-valuenow", "50");
 		const reset = await widths();
 		expect(Math.abs(reset.panel - reset.chat), "double-click should restore the even split").toBeLessThan(3);
+
+		const [resetHandleBox, panelBox, layoutBox] = await Promise.all([
+			handle.boundingBox(),
+			page.locator(".side-panel-workspace").boundingBox(),
+			page.locator(".side-panel-split-layout").boundingBox(),
+		]);
+		expect(resetHandleBox && panelBox ? resetHandleBox.x < panelBox.x && resetHandleBox.x + resetHandleBox.width > panelBox.x : false,
+			"the divider hit target should extend into both panes instead of being clipped by the workspace").toBe(true);
+		if (!resetHandleBox || !layoutBox) throw new Error("split layout has no resize geometry");
+		const collapseStartX = resetHandleBox.x + resetHandleBox.width / 2;
+		const collapseY = resetHandleBox.y + resetHandleBox.height / 2;
+		await page.mouse.move(collapseStartX, collapseY);
+		await page.mouse.down();
+		await page.mouse.move(layoutBox.x + layoutBox.width - 1, collapseY, { steps: 8 });
+		await page.mouse.up();
+
+		const restore = page.getByTestId("side-panel-restore");
+		await expect(restore, "dragging the divider fully right should collapse the side panel").toBeVisible();
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode, { timeout: 10_000 }).toBe("collapsed");
+		await restore.click();
+		await expect(handle).toBeVisible();
+		const restored = await widths();
+		expect(Math.abs(restored.panel - restored.chat), "restoring a drag-collapsed panel should preserve its prior width").toBeLessThan(3);
 	});
 
 	test("sequential preview files keep stable artifact routes across tabs and reload", async ({ page }) => {

@@ -1163,6 +1163,26 @@ export function workspaceSessionId(): string {
 }
 
 type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
+const SIDE_PANEL_COLLAPSE_THRESHOLD = 10;
+
+function renderSidePanelResizeHandle() {
+	return html`
+		<div
+			class="side-panel-resize-handle"
+			role="separator"
+			aria-label="Resize side panel"
+			aria-orientation="vertical"
+			aria-valuemin=${SIDE_PANEL_WIDTH_MIN}
+			aria-valuemax=${SIDE_PANEL_WIDTH_MAX}
+			aria-valuenow=${state.sidePanelWidthPercent}
+			tabindex="0"
+			title="Drag to resize (drag fully right to collapse; double-click to reset)"
+			@pointerdown=${onSidePanelResizePointerDown}
+			@dblclick=${onSidePanelResizeDoubleClick}
+			@keydown=${onSidePanelResizeKeyDown}
+		></div>
+	`;
+}
 
 function updateSidePanelDividerValue(handle: HTMLElement, percent: number): void {
 	setSidePanelWidthPercent(percent);
@@ -1173,34 +1193,52 @@ function onSidePanelResizePointerDown(event: PointerEvent): void {
 	event.preventDefault();
 	const handle = event.currentTarget as HTMLElement;
 	const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
-	const panel = handle.closest<HTMLElement>(".side-panel-workspace");
+	const panel = layout?.querySelector<HTMLElement>(":scope > .side-panel-workspace");
 	if (!layout || !panel) return;
 
 	const layoutWidth = layout.getBoundingClientRect().width;
 	if (layoutWidth <= 0) return;
 	const startX = event.clientX;
 	const startPanelWidth = panel.getBoundingClientRect().width;
+	const startPercent = (startPanelWidth / layoutWidth) * 100;
+	let lastRawPercent = startPercent;
 	const previousCursor = document.body.style.cursor;
 	const previousUserSelect = document.body.style.userSelect;
 	try { handle.setPointerCapture(event.pointerId); } catch {}
 	document.body.style.cursor = "col-resize";
 	document.body.style.userSelect = "none";
 
-	const onMove = (moveEvent: PointerEvent) => {
-		const nextWidth = startPanelWidth - (moveEvent.clientX - startX);
-		updateSidePanelDividerValue(handle, (nextWidth / layoutWidth) * 100);
-	};
-	const onEnd = (endEvent: PointerEvent) => {
-		handle.removeEventListener("pointermove", onMove);
-		handle.removeEventListener("pointerup", onEnd);
-		handle.removeEventListener("pointercancel", onEnd);
-		try { handle.releasePointerCapture(endEvent.pointerId); } catch {}
+	const cleanup = (pointerId?: number) => {
+		window.removeEventListener("pointermove", onMove);
+		window.removeEventListener("pointerup", onUp);
+		window.removeEventListener("pointercancel", onCancel);
+		window.removeEventListener("blur", onBlur);
+		if (pointerId !== undefined) {
+			try { handle.releasePointerCapture(pointerId); } catch {}
+		}
 		document.body.style.cursor = previousCursor;
 		document.body.style.userSelect = previousUserSelect;
 	};
-	handle.addEventListener("pointermove", onMove);
-	handle.addEventListener("pointerup", onEnd);
-	handle.addEventListener("pointercancel", onEnd);
+	const onMove = (moveEvent: PointerEvent) => {
+		const nextWidth = startPanelWidth - (moveEvent.clientX - startX);
+		lastRawPercent = (nextWidth / layoutWidth) * 100;
+		updateSidePanelDividerValue(handle, lastRawPercent);
+	};
+	const onUp = (upEvent: PointerEvent) => {
+		const shouldCollapse = lastRawPercent <= SIDE_PANEL_COLLAPSE_THRESHOLD;
+		cleanup(upEvent.pointerId);
+		if (shouldCollapse) {
+			// A collapse gesture should not overwrite the width restored on reopen.
+			setSidePanelWidthPercent(startPercent);
+			void setSidePanelSizeMode("collapsed", workspaceSessionId());
+		}
+	};
+	const onCancel = (cancelEvent: PointerEvent) => cleanup(cancelEvent.pointerId);
+	const onBlur = () => cleanup();
+	window.addEventListener("pointermove", onMove);
+	window.addEventListener("pointerup", onUp);
+	window.addEventListener("pointercancel", onCancel);
+	window.addEventListener("blur", onBlur);
 }
 
 function onSidePanelResizeDoubleClick(event: MouseEvent): void {
@@ -3762,6 +3800,7 @@ export function doRenderApp(): void {
 							?inert=${fullscreen}
 							aria-hidden=${fullscreen ? "true" : nothing}
 						>${chatContent}</div>
+						${workspaceOccupiesSplitLayout ? renderSidePanelResizeHandle() : ""}
 						${workspaceCollapsed ? sidePanelRestoreButton() : ""}
 						${renderSidePanelWorkspace(mode, { hidden: workspaceHidden, retainedSlots, showPackHost })}
 					</div>
