@@ -5559,7 +5559,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					// unrelated git checkout, `isGitRepo(<state>/system-project)`
 					// walks up to find the host repo and the pool would allocate
 					// `pool/_pool-*` branches there. See
-					// `tests/system-project-pool-leak.test.ts`.
+					// `tests/system-project-pool-leak.e2e.test.ts`.
 					// Headquarters never participates in the worktree pool — filter it
 					// out before any git probe or pool init.
 					const contexts = Array.from(projectContextManager.visible()).filter(
