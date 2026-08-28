@@ -264,6 +264,14 @@ test.describe("Side-panel tab contract", () => {
 
 		await handle.dblclick();
 		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		await expect(handle).toHaveAttribute("aria-controls", "side-panel-workspace");
+		await expect(page.locator("#side-panel-workspace")).toHaveCount(1);
+		await handle.press("Home");
+		await expect(handle).toHaveAttribute("aria-valuenow", "25");
+		await handle.press("End");
+		await expect(handle).toHaveAttribute("aria-valuenow", "75");
+		await handle.dblclick();
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
 		const reset = await widths();
 		expect(Math.abs(reset.panel - reset.chat), "double-click should restore the even split").toBeLessThan(3);
 
@@ -330,6 +338,130 @@ test.describe("Side-panel tab contract", () => {
 		await expect(handle).toBeVisible();
 		const splitAfterFullscreen = await widths();
 		expect(Math.abs(splitAfterFullscreen.panel - splitAfterFullscreen.chat), "returning from drag-fullscreen should preserve the prior split width").toBeLessThan(3);
+	});
+
+	test("desktop divider ignores unrelated pointers until the initiating pointer completes", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		await page.evaluate(() => localStorage.removeItem("bobbit-side-panel-width-percent"));
+		await page.reload({ waitUntil: "domcontentloaded" });
+		const sessionId = await createRegularSessionViaApi(page);
+		await mountPreviewHtml(page, sessionId, "pointer-owner.html", "Pointer owner preview");
+
+		const handle = page.getByRole("separator", { name: "Resize side panel" });
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		const result = await handle.evaluate((element) => {
+			const handle = element as HTMLElement;
+			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+			if (!layout) throw new Error("side-panel resize handle has no split layout");
+			const handleBox = handle.getBoundingClientRect();
+			const layoutBox = layout.getBoundingClientRect();
+			const startX = handleBox.x + handleBox.width / 2;
+			const startY = handleBox.y + handleBox.height / 2;
+			const dispatch = (target: EventTarget, type: string, pointerId: number, clientX: number, buttons: number) => {
+				target.dispatchEvent(new PointerEvent(type, {
+					pointerId,
+					pointerType: "touch",
+					isPrimary: pointerId === 41,
+					clientX,
+					clientY: startY,
+					button: type === "pointerdown" || type === "pointerup" ? 0 : -1,
+					buttons,
+					bubbles: true,
+				}));
+			};
+
+			dispatch(handle, "pointerdown", 41, startX, 1);
+			dispatch(window, "pointermove", 99, layoutBox.right - 1, 1);
+			const afterForeignMove = {
+				value: handle.getAttribute("aria-valuenow"),
+				persisted: localStorage.getItem("bobbit-side-panel-width-percent"),
+				intent: layout.dataset.resizeIntent ?? null,
+			};
+			dispatch(window, "pointerup", 99, layoutBox.right - 1, 0);
+			dispatch(window, "pointercancel", 100, layoutBox.right - 1, 0);
+			const afterForeignEnd = {
+				cursor: document.body.style.cursor,
+				userSelect: document.body.style.userSelect,
+			};
+			dispatch(window, "pointermove", 41, startX - 80, 1);
+			const afterOwnerMove = {
+				value: Number(handle.getAttribute("aria-valuenow")),
+				persisted: Number(localStorage.getItem("bobbit-side-panel-width-percent")),
+			};
+			dispatch(window, "pointerup", 41, startX - 80, 0);
+			return {
+				afterForeignMove,
+				afterForeignEnd,
+				afterOwnerMove,
+				afterOwnerEnd: {
+					cursor: document.body.style.cursor,
+					userSelect: document.body.style.userSelect,
+				},
+			};
+		});
+
+		expect(result.afterForeignMove).toEqual({ value: "50", persisted: null, intent: null });
+		expect(result.afterForeignEnd).toEqual({ cursor: "col-resize", userSelect: "none" });
+		expect(result.afterOwnerMove.value).toBeGreaterThan(50);
+		expect(result.afterOwnerMove.persisted).toBeGreaterThan(50);
+		expect(result.afterOwnerEnd).toEqual({ cursor: "", userSelect: "" });
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode, { timeout: 10_000 }).toBe("split");
+
+		const preferredSplit = result.afterOwnerMove.persisted;
+		const otherSessionId = await createRegularSessionViaApi(page);
+		await mountPreviewHtml(page, otherSessionId, "pointer-owner-other.html", "Other pointer owner preview");
+		await navigateToSession(page, sessionId);
+		await expect(handle).toBeVisible();
+		await handle.evaluate((element) => {
+			const handle = element as HTMLElement;
+			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+			if (!layout) throw new Error("side-panel resize handle has no split layout");
+			const handleBox = handle.getBoundingClientRect();
+			const layoutBox = layout.getBoundingClientRect();
+			const startX = handleBox.x + handleBox.width / 2;
+			const startY = handleBox.y + handleBox.height / 2;
+			handle.dispatchEvent(new PointerEvent("pointerdown", {
+				pointerId: 51,
+				pointerType: "touch",
+				isPrimary: true,
+				clientX: startX,
+				clientY: startY,
+				button: 0,
+				buttons: 1,
+				bubbles: true,
+			}));
+			window.dispatchEvent(new PointerEvent("pointermove", {
+				pointerId: 51,
+				pointerType: "touch",
+				isPrimary: true,
+				clientX: layoutBox.right - 1,
+				clientY: startY,
+				button: -1,
+				buttons: 1,
+			}));
+		});
+		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "collapse");
+		expect(await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")))).toBe(25);
+
+		await navigateToSession(page, otherSessionId);
+		await expect.poll(() => page.evaluate(() => ({
+			cursor: document.body.style.cursor,
+			userSelect: document.body.style.userSelect,
+		}))).toEqual({ cursor: "", userSelect: "" });
+		const restoredPreference = await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")));
+		expect(restoredPreference).toBeCloseTo(preferredSplit, 3);
+		await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointerup", {
+			pointerId: 51,
+			pointerType: "touch",
+			isPrimary: true,
+			clientX: window.innerWidth - 1,
+			clientY: window.innerHeight / 2,
+			button: 0,
+			buttons: 0,
+		})));
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode, { timeout: 10_000 }).toBe("split");
+		await expect.poll(async () => (await workspace(otherSessionId)).sizeMode, { timeout: 10_000 }).toBe("split");
 	});
 
 	test("sequential preview files keep stable artifact routes across tabs and reload", async ({ page }) => {
