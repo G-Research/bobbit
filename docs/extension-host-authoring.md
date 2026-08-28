@@ -1029,8 +1029,12 @@ Lifecycle semantics:
   not require an open grant because it does not create a new process or handler.
 - `list(opts)` returns only this pack's channels in this session. Use `name` to find singleton
   channels and `includeClosed` only for diagnostics or explicit closed-state UX.
-- Panel unmount, tab hide, browser reload, or WebSocket reconnect detach the client. They do not
-  kill the handler. Reopen/remount by calling `list()` and `attach()`.
+- Panel unmount, browser reload, or WebSocket reconnect detach the client. They do not
+  kill the handler. Reopen/remount by calling `list()` and `attach()`. A pack pane that is merely
+  **hidden** — collapsed panel, inactive tab, unselected session — usually stays mounted and
+  therefore stays attached; see
+  [Pane retention](side-panel-workspace.md#pane-retention-hidden-not-destroyed) for when a hidden
+  pane is destroyed anyway.
 - `close(reason?)` is the explicit owner action that terminates the server resource. All attached
   clients receive `onClose`.
 - Session termination, pack disable/uninstall/precedence changes, idle timeout, handler failure,
@@ -1401,6 +1405,16 @@ auto-shows a pending state, self-polls `status`, flips to rendered cards after f
 re-renders on reload via the child-self `recover` route (see
 [docs/pr-walkthrough-panel.md § The pane lives only with the reviewer child](pr-walkthrough-panel.md#the-pane-lives-only-with-the-reviewer-child)).
 Do **not** generalise this to owner-session panels or to any mutating call.
+
+#### Your panel can be mounted while hidden, and for a session that is not selected
+
+The client keeps a bounded set of pack panel panes **mounted but hidden** instead of destroying them when the side panel is collapsed, the active tab changes, or the user switches session — so an embedded `<iframe>` keeps running rather than re-navigating. Packs get this with no opt-in and no API change, but it makes three pre-existing contract points observable:
+
+- **Read the injected bound session, never the selected one.** A retained pane renders with its *own* session binding, which may not be the session the user is currently looking at. Use `params.__sessionId` (and the `host` you were handed, which is already bound) instead of reading global selected-session state. That was always the contract; retention is what makes violating it visible.
+- **Do not assume you only render while visible.** Hidden panes are re-projected on every app render rather than frozen, so `render(params, host)` must stay a cheap, idempotent projection of your own state. Do not start work, navigate, or fire one-shot side effects from a render call.
+- **A hidden pane has a zero-sized viewport.** While hidden, the pane is `display:none`, so measurements taken then are meaningless. If your panel caches layout measurements, recover from your own `ResizeObserver` on reveal rather than measuring once on mount.
+
+A pane can still be destroyed at any time — tab close, pack uninstall or disable, the owning session going archived/terminated, a cross-project session switch, or eviction once the retention cap is reached — so keep persisting anything that must survive in `host.store`. Behaviour, bounds and teardown rules: [docs/side-panel-workspace.md — Pane retention](side-panel-workspace.md#pane-retention-hidden-not-destroyed).
 
 ### Routes — the pack's own server endpoints (`host.callRoute`)
 
@@ -2569,10 +2583,13 @@ through the existing authenticated gateway routes, and imports them with fresh m
 Stale in-flight loads cannot overwrite a later generation.
 
 Mounted renderers and the active panel repaint through their normal render paths. An inactive panel
-loads the fresh module when it is next selected. The reload does not recreate the workspace or
-navigate the page: session binding, tab ids, tab order, active selection, panel parameters, and
-parameterized `instanceKey` values remain unchanged. Module-local renderer or panel state does
-reset because the code is evaluated as a new module; persist state that must survive in
+loads the fresh module when it is next selected. Panes that the client is keeping mounted-but-hidden
+(see [Pane retention](side-panel-workspace.md#pane-retention-hidden-not-destroyed)) are remounted too,
+so their iframes *do* reload on a hot reload — that is the intent, since new bytes are the point, and
+it is a development-only path with no production counterpart. The reload does not recreate the
+workspace or navigate the page: session binding, tab ids, tab order, active selection, panel
+parameters, and parameterized `instanceKey` values remain unchanged. Module-local renderer or panel
+state does reset because the code is evaluated as a new module; persist state that must survive in
 `host.store` or another durable host surface.
 
 The notification bridge exists only in Vite serve mode. The watcher supplies its required internal,

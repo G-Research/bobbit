@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   deleteEnvironmentValue,
   environmentValue,
+  GIT_ISOLATION_ENV,
   isAmbientBobbitRuntimeEnvKey,
   isAmbientTestEnvironmentKey,
   isCredentialEnvKey,
@@ -183,6 +184,11 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
   };
   for (const directory of [...Object.values(owned), paths.cacheRoot, paths.legacyTempParent]) mkdirSync(directory, { recursive: true });
   for (const [key, value] of Object.entries(owned)) setEnvironmentValue(env, key, value, platform);
+  // HOME above keeps the host's GLOBAL gitconfig out; /etc/gitconfig is read
+  // regardless of HOME, so the system tier needs its own switch (see
+  // GIT_ISOLATION_ENV). Without it a host `url.<base>.insteadOf` rewrite makes
+  // a fixture's own origin resolve to a host the fixture never wrote.
+  for (const [key, value] of Object.entries(GIT_ISOLATION_ENV)) setEnvironmentValue(env, key, value, platform);
   setEnvironmentValue(env, "PLAYWRIGHT_BROWSERS_PATH", browserRegistry, platform);
   setEnvironmentValue(env, "BOBBIT_V2_LEDGER_DIR", ledgerDirectory, platform);
   if (resolveChildTmpdir(env, platform) !== paths.tempDir) {

@@ -63,6 +63,21 @@ export const AMBIENT_BOBBIT_RUNTIME_ENV_NAMES = new Set([
   "BOBBIT_GH_COMMAND",
 ]);
 
+/**
+ * Git tiers an isolated harness must not inherit from the host.
+ *
+ * Redirecting HOME already keeps the developer's global gitconfig out, but
+ * `/etc/gitconfig` is read regardless of HOME and is only disabled by
+ * GIT_CONFIG_NOSYSTEM. A system-level `url.<base>.insteadOf` rewrite silently
+ * changes the remote a fixture just wrote, so `git remote get-url origin`
+ * returns a host the fixture never set.
+ *
+ * This disables only the system tier: repo-local config and the (already
+ * redirected) global config are untouched, so fixtures operating on real
+ * repositories keep real git behaviour.
+ */
+export const GIT_ISOLATION_ENV = Object.freeze({ GIT_CONFIG_NOSYSTEM: "1" });
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

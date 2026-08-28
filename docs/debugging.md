@@ -128,6 +128,13 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
   npm run test:unit -- --retry=0 tests2/core/unit-flake-source-contract-repro.test.ts
   ```
 
+## E2E fixture git remote resolves to an unexpected host (`HOST_NOT_TRUSTED`, "Trust this domain?", launcher toast stays `pending`)
+
+- **Symptom**: a browser/E2E spec configures a fixture origin such as `https://github.com/bobbit-fixtures/…` and the code under test sees a different host. `tests2/browser/e2e/pr-walkthrough-pack.spec.ts` T-1/T-2 fail even on unmodified `main`, because the pack's preflight returns `HOST_NOT_TRUSTED` instead of `NO_PR` and the client opens a trust prompt no test clicks.
+- **Cause**: a host-level `/etc/gitconfig` rewrite (`git config --system --get-regexp '^url\.'` shows `url.<mirror>.insteadof https://github.com/`). `git remote get-url origin` applies `insteadOf`, so the fixture's own remote is silently rewritten. Redirecting `HOME` only blocks the *global* config tier.
+- **Fix / invariant**: isolated harness environments set `GIT_CONFIG_NOSYSTEM=1` (`GIT_ISOLATION_ENV` in `scripts/testing-v2/environment-policy.mjs`, applied by `createIsolatedE2EEnvironment`). Only the system tier is disabled, so repo-local config still applies and real-repo fixtures keep real git behaviour. Pinned by `tests2/core/run-isolation.test.ts`.
+- **Diagnostic**: inside the fixture repo compare `git remote get-url origin` with `GIT_CONFIG_NOSYSTEM=1 git remote get-url origin`. Different values mean the harness environment lost its git isolation.
+
 ## Verification step stuck in `running`
 
 - **Symptom**: a `command`-type verification step (e.g. `npm run test:e2e`) stays in `running` long past its configured `timeout`. `ps` shows orphaned `npm`/`playwright`/Chromium descendants of the gateway.
@@ -644,6 +651,20 @@ The existing guard remains as a last-line safety net for genuinely unbindable pr
 **Server-side note:** `POST /api/goals` already accepts `projectId` *or* resolves a project from `cwd` via `resolveProjectForRequest`. The bug was purely UI-layer — the server was always willing to bind. Don't add server-side fallbacks here.
 
 **Regression test:** `tests/e2e/ui/goal-reattempt-project-binding.spec.ts` (browser E2E) — opens a re-attempt assistant against a project-bound goal, emits `propose_goal`, clicks Create, asserts the new goal is created with the inherited `projectId` and no toast fires.
+
+## A pack panel's iframe reloads on collapse/expand, tab switch, or session switch
+
+- **Symptom**: an embedded panel (for example the `vscode-panel` pack) reboots and loses its in-page state when the side panel is collapsed and re-expanded, when the active tab changes, or when the user leaves the session and comes back. A framed document's own load counter increments.
+- **Cause**: the pane was not retained. Retention keeps a bounded set of panes mounted-but-hidden; a pane leaves that set for one of a small number of documented reasons. In order of likelihood: the tab is not a **pack** tab (only `kind: "pack"` panes are retained — preview/review/inbox/proposal are excluded because their content reads global active state); the retention cap `PANEL_PANE_RETENTION_LIMIT` evicted the least-recently-active pane; the owning session went archived or terminated; the switch crossed into a **different project**, which prunes deterministically by design; the viewport flipped between desktop and mobile, which rebuilds everything; or it was a development pack hot reload, which remounts the rebuilt pack's panes on purpose.
+- **Fix / invariant**: a retained pane must keep one DOM position for its whole lifetime — an `<iframe>` re-navigates when it is removed *and* when it is moved. Pane DOM order is append-only insertion order, and visual order is CSS `order`. If a change made pane order follow tab order, session order or recency, that is the regression.
+- **Diagnostic**: inspect the pane host in the DOM. A retained pane is a `[data-panel-pane-key]` slot inside `[data-panel-pane-host]` (mobile: a `[data-mobile-pane-track]` per session); check whether the slot disappeared or merely gained `data-panel-pane-hidden="true"`. Disappeared means a teardown rule fired; still present with a fresh iframe means something reassigned `src` or moved the node. Behaviour reference: [docs/side-panel-workspace.md — Pane retention](side-panel-workspace.md#pane-retention-hidden-not-destroyed).
+
+## A hidden panel keeps stale content, or a pane is not torn down when expected
+
+- **Symptom**: a panel whose tab was closed, whose pack was uninstalled or disabled, or whose session was archived/terminated is still in the DOM (hidden), or reappears when the user returns to that session. Or: the panel briefly shows content from a pack that no longer exists.
+- **Cause**: retention state was treated as authoritative. It is not — liveness is re-derived on every render from the server workspace tab set, the pack-panel registry and the session list, so any state-only predicate lags by one frame and lets a dead pane render. A second known cause is a membership-only liveness test: a terminated session can **remain** in the live session list (and appear in both the live and archived collections), so "still listed" does not mean alive; the app's terminal-session test must be applied to the owner.
+- **Fix / invariant**: teardown happens in the **same render** as the event, and the render-local retention snapshot is computed once, before the shell decides which template to commit — otherwise a frame of empty-but-space-occupying panel slips through. Hidden panes are deliberately re-projected every render rather than frozen; that is what stops a hidden pane displaying bytes from an uninstalled or rebuilt pack, so do not "optimise" it with a freeze directive.
+- **Diagnostic**: confirm the tab is really absent from the server workspace (`GET /api/sessions/:id/side-panel-workspace`), then confirm the owning session's status — `archived: true`, `status: "archived"` or `status: "terminated"` must all prune. Hidden-pane inertness is also worth checking: every hidden slot needs inline `display:none` **plus** `hidden`, `inert` and `aria-hidden="true"`, because Tailwind's `flex` class beats the user-agent `[hidden]` rule and `hidden` alone leaves the element visible.
 
 ## Render performance
 
