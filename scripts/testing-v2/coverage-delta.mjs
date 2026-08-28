@@ -38,7 +38,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { spawnSync, execSync } from "node:child_process";
-import { REPO_ROOT } from "./lib-census.mjs";
+import { REPO_ROOT } from "./test-discovery.mjs";
 
 const toPosix = (p) => p.replace(/\\/g, "/");
 

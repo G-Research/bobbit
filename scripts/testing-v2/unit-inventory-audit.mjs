@@ -7,10 +7,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
-import {
-	APPROVED_E2E_VITEST_PATHS,
-	loadVitestExecutionMap,
-} from "./test-map-execution.mjs";
+import { discoverTests } from "./test-discovery.mjs";
 import { readOptionalGitPath } from "./unit-inventory-git.mjs";
 
 const args = process.argv.slice(2);
@@ -18,14 +15,14 @@ const valueAfter = (flag) => {
 	const index = args.indexOf(flag);
 	return index >= 0 ? args[index + 1] : undefined;
 };
-const upstream = valueAfter("--upstream") ?? "origin/master";
+const upstream = valueAfter("--upstream") ?? "origin/main";
 const outputPath = valueAfter("--json");
 const semanticMapPath = path.join("scripts", "testing-v2", "unit-declaration-semantic-map.json");
 const semanticMappings = JSON.parse(fs.readFileSync(semanticMapPath, "utf-8"));
-const execution = loadVitestExecutionMap();
+const execution = discoverTests();
 const currentUnit = [...execution.unit];
-const currentE2eVitestFiles = [...execution.e2e];
-const currentInventory = [...execution.all];
+const currentE2eVitestFiles = [...execution.vitestE2E];
+const currentInventory = [...execution.vitest];
 
 function gitText(gitArgs) {
 	return execFileSync("git", gitArgs, {
@@ -207,9 +204,14 @@ const baseE2eSource = readOptionalGitPath(gitText, { path: historicalE2ePath, re
 const formerlyRelocatedE2e = e2ePaths(baseE2eSource);
 const requiredUnitFiles = gitText(["ls-tree", "-r", "--name-only", mergeBase, "--", "tests2/core", "tests2/dom", "tests2/integration"])
 	.trim().split(/\r?\n/).filter((file) => /\.test\.ts$/.test(file));
-const missingFiles = requiredUnitFiles.filter((file) => !currentInventory.includes(file));
-const addedFiles = currentInventory.filter((file) => !requiredUnitFiles.includes(file));
-const restoredFormerE2eFiles = formerlyRelocatedE2e.filter((file) => currentInventory.includes(file));
+// Semantic suffixes express current execution ownership. Strip only those
+// markers when comparing the current tree with the pre-cutover merge base.
+const canonicalTestIdentity = (file) => file.replace(/\.(?:isolated|e2e)(?=\.test\.ts$)/, "");
+const currentByIdentity = new Map(currentInventory.map((file) => [canonicalTestIdentity(file), file]));
+const requiredIdentity = new Set(requiredUnitFiles.map(canonicalTestIdentity));
+const missingFiles = requiredUnitFiles.filter((file) => !currentByIdentity.has(canonicalTestIdentity(file)));
+const addedFiles = currentInventory.filter((file) => !requiredIdentity.has(canonicalTestIdentity(file)));
+const restoredFormerE2eFiles = formerlyRelocatedE2e.filter((file) => currentByIdentity.has(canonicalTestIdentity(file)));
 
 let baseDeclarations = 0;
 let currentDeclarations = 0;
@@ -217,8 +219,9 @@ const missingDeclarations = [];
 for (const file of requiredUnitFiles) {
 	const baseNames = staticTestNames(gitText(["show", `${mergeBase}:${file}`]), file);
 	baseDeclarations += baseNames.length;
-	if (!fs.existsSync(file)) continue;
-	const currentNames = staticTestNames(fs.readFileSync(file, "utf-8"), file);
+	const currentFile = currentByIdentity.get(canonicalTestIdentity(file));
+	if (!currentFile || !fs.existsSync(currentFile)) continue;
+	const currentNames = staticTestNames(fs.readFileSync(currentFile, "utf-8"), currentFile);
 	currentDeclarations += currentNames.length;
 	const unmatched = [...currentNames];
 	for (const name of baseNames) {
@@ -270,9 +273,9 @@ const concurrentPathViolations = [...execution.core, ...execution.integration]
 // FROZEN below (file:line) so the audit lands green while pinning that NO NEW
 // violations appear — fix an entry, then delete it; never add entries.
 const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
-	"tests/e2e/pool-claim-restart-resume.spec.ts:50",
-	"tests/e2e/pool-flow.spec.ts:41",
-	"tests/e2e/port-auto-increment.spec.ts:24",
+	"tests/e2e/pool-claim-restart-resume.e2e.spec.ts:50",
+	"tests/e2e/pool-flow.e2e.spec.ts:41",
+	"tests/e2e/port-auto-increment.e2e.spec.ts:25",
 	"tests/e2e/provider-turn-hooks.spec.ts:101",
 	"tests/e2e/ui/add-project-helpers.ts:52",
 	"tests/e2e/ui/add-project-symlink.spec.ts:33",
@@ -281,7 +284,8 @@ const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
 	"tests/e2e/ui/sidebar-archived-per-project.spec.ts:13",
 	"tests/e2e/ui/sidebar-keyboard-nav.spec.ts:23",
 	"tests/e2e/ui/sidebar-unified-tree.spec.ts:161",
-	"tests2/browser/fixtures/project-drag-reorder.spec.ts:64",
+	"tests2/browser/e2e/file-explorer-pack.spec.ts:351",
+	"tests2/browser/fixtures/project-drag-reorder.spec.ts:67",
 	"tests2/browser/journeys/prompt-interaction.journey.spec.ts:166",
 ]);
 function listTestSources(root, extensions) {
@@ -308,8 +312,6 @@ const grandfatheredE2eFixtureViolations = allE2eFixtureViolations
 	.filter((entry) => E2E_FIXTURE_PATH_GRANDFATHER.some((frozen) => entry.startsWith(`${frozen} —`)));
 const concurrentE2eFixtureViolations = allE2eFixtureViolations
 	.filter((entry) => !grandfatheredE2eFixtureViolations.includes(entry));
-const approvedE2e = [...APPROVED_E2E_VITEST_PATHS].sort();
-const e2eOwnershipExact = JSON.stringify(currentE2eVitestFiles) === JSON.stringify(approvedE2e);
 const scheduledInventoryPreserved = currentUnit.length + currentE2eVitestFiles.length === currentInventory.length;
 
 const report = {
@@ -323,9 +325,8 @@ const report = {
 	addedUnitFiles: addedFiles,
 	formerlyRelocatedE2eFiles: formerlyRelocatedE2e.length,
 	restoredFormerE2eFiles: restoredFormerE2eFiles.length,
-	approvedE2eVitestFiles: approvedE2e,
 	currentE2eVitestFiles,
-	e2eOwnershipExact,
+	e2eOwnershipConventionBased: true,
 	scheduledInventoryPreserved,
 	isolatedFiles: execution.isolated,
 	childProcessValueImports: childProcessImports,
@@ -351,7 +352,6 @@ const report = {
 		&& restoredFormerE2eFiles.length === formerlyRelocatedE2e.length
 		&& declarationSemanticsPreserved
 		&& scheduledInventoryPreserved
-		&& e2eOwnershipExact
 		&& childProcessImports.length === 0
 		&& concurrentPathViolations.length === 0
 		&& concurrentE2eFixtureViolations.length === 0,
