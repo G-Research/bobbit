@@ -72,6 +72,7 @@ export interface NestedGoalRouteDeps {
 	 */
 	jsonError(status: number, err: unknown, extra?: Record<string, unknown>): void;
 	broadcastToAll(event: any): void;
+	broadcastToUi?(event: any): void;
 	/** Read the system-scope subgoal nesting prefs (subgoalsEnabled, maxNestingDepth). */
 	getSubgoalNestingPrefs(): SubgoalNestingPrefs;
 	/** Canonical read-only dependencies shared with every goal creation owner. */
@@ -256,6 +257,7 @@ export async function tryHandleNestedGoalRoute(
 		json,
 		jsonError,
 		broadcastToAll,
+		broadcastToUi = broadcastToAll,
 		getSubgoalNestingPrefs,
 		cookieStore,
 		goalCandidateDeps,
@@ -355,7 +357,7 @@ export async function tryHandleNestedGoalRoute(
 		// dependency pauses when GoalManager restores persisted goals on boot.
 		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
 		await cancelAllVerifications(goalId);
-		broadcastToAll({ type: "goal_state_changed", goalId });
+		broadcastToUi({ type: "goal_state_changed", goalId });
 	}
 
 	/**
@@ -466,7 +468,7 @@ export async function tryHandleNestedGoalRoute(
 		};
 		// Persist via store.update so updatedAt and generation tick.
 		goalManager.getGoalStore().update(goal.id, { workflow });
-		broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
+		broadcastToUi({ type: "goal_state_changed", goalId: goal.id });
 		return { workflow };
 	}
 
@@ -838,7 +840,7 @@ export async function tryHandleNestedGoalRoute(
 					capacityBlocked = true;
 					try {
 						await goalManager.updateGoal(child.id, { state: "blocked" });
-						broadcastToAll({ type: "goal_state_changed", goalId: child.id });
+						broadcastToUi({ type: "goal_state_changed", goalId: child.id });
 					} catch (err) {
 						console.warn(`[spawn-child] failed to stamp capacity-blocked state for ${child.id} (non-fatal):`, err);
 					}
@@ -1202,7 +1204,7 @@ export async function tryHandleNestedGoalRoute(
 				if (child.mergeConflict) {
 					try {
 						await goalManager.updateGoal(childId, { mergeConflict: false });
-						broadcastToAll({ type: "goal_state_changed", goalId: childId });
+						broadcastToUi({ type: "goal_state_changed", goalId: childId });
 					} catch (err) {
 						console.warn(`[integrate-child] failed to clear mergeConflict (non-fatal):`, err);
 					}
@@ -1247,8 +1249,8 @@ export async function tryHandleNestedGoalRoute(
 				} catch (err) {
 					console.error(`[integrate-child] auto-unblock scan failed (non-fatal):`, err);
 				}
-				broadcastToAll({ type: "goal_state_changed", goalId: childId });
-				broadcastToAll({ type: "goal_state_changed", goalId: parentId });
+				broadcastToUi({ type: "goal_state_changed", goalId: childId });
+				broadcastToUi({ type: "goal_state_changed", goalId: parentId });
 				json({
 					merged: !!outcome.merged,
 					alreadyMerged: !!outcome.alreadyMerged,
@@ -1263,7 +1265,7 @@ export async function tryHandleNestedGoalRoute(
 				// tab can render this child's conflict state across reloads.
 				try {
 					await goalManager.updateGoal(childId, { mergeConflict: true });
-					broadcastToAll({ type: "goal_state_changed", goalId: childId });
+					broadcastToUi({ type: "goal_state_changed", goalId: childId });
 				} catch (err) {
 					console.warn(`[integrate-child] failed to set mergeConflict (non-fatal):`, err);
 				}
@@ -1385,7 +1387,7 @@ export async function tryHandleNestedGoalRoute(
 				apply: async (g) => Number(await resumeOperatorPausedGoal(
 					g,
 					getGoalManagerForGoal(g.id),
-					(goalId) => broadcastToAll({ type: "goal_state_changed", goalId }),
+					(goalId) => broadcastToUi({ type: "goal_state_changed", goalId }),
 				)),
 			},
 		);
@@ -1421,7 +1423,7 @@ export async function tryHandleNestedGoalRoute(
 			// `started` for an already-running child, so this cannot relabel one.
 			if (outcome === "capacity-blocked" && resumed.state !== "blocked") {
 				void getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "blocked" })
-					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.then(() => broadcastToUi({ type: "goal_state_changed", goalId }))
 					.catch(err => console.error(`[nested-goals] failed to stamp resumed child ${goalId} capacity-blocked:`, err));
 			}
 		}
@@ -1488,7 +1490,7 @@ export async function tryHandleNestedGoalRoute(
 				json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
 				return true;
 			}
-			broadcastToAll({ type: "goal_state_changed", goalId });
+			broadcastToUi({ type: "goal_state_changed", goalId });
 			json({ rootGoalId: goalId, outcomes });
 			return true;
 		}
@@ -1498,7 +1500,7 @@ export async function tryHandleNestedGoalRoute(
 			json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
 			return true;
 		}
-		broadcastToAll({ type: "goal_state_changed", goalId });
+		broadcastToUi({ type: "goal_state_changed", goalId });
 		const outcome = verificationHarness.retryScheduledChildStart?.(goalId) ?? verificationHarness.requestChildStart(goalId);
 		json({ childGoalId: goalId, outcome });
 		return true;
@@ -1700,7 +1702,7 @@ export async function tryHandleNestedGoalRoute(
 		// R-017: include the new policy values in the broadcast so clients
 		// don't need to re-fetch the goal record on every policy change.
 		const updatedGoal = getGoalAcrossProjects(id);
-		broadcastToAll({
+		broadcastToUi({
 			type: "goal_state_changed",
 			goalId: id,
 			...(updatedGoal?.divergencePolicy !== undefined ? { divergencePolicy: updatedGoal.divergencePolicy } : {}),
