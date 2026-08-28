@@ -112,6 +112,15 @@ describe("bobbit compact projections", () => {
 				correlationId: "correlation-1",
 				labels: ["alpha", "beta"],
 				context: { enabled: true, attempt: 2 },
+				reserved: {
+					id: "metadata-node",
+					generation: 9,
+					colorIndex: 3,
+					accessory: "metadata-owned",
+					metadataNodeId: "metadata-node",
+					spec: "metadata-owned spec",
+					workflow: { id: "metadata-workflow", gates: [{ id: "metadata-gate" }] },
+				},
 			},
 		};
 		stubFetch(() => ({
@@ -472,6 +481,7 @@ describe("unaffected Bobbit mutation-tool verbose behavior", () => {
 			state: "todo",
 			projectId: "project-1",
 			spec,
+			metadata: { "example-extension": { correlationId: "MUTATION_GOAL_METADATA_SENTINEL" } },
 			workflow: { id: "workflow-created", gates: [{ id: "design", verify: { prompt: "hidden by default" } }] },
 			cwd: "/created/cwd",
 			generation: 2,
@@ -493,6 +503,8 @@ describe("unaffected Bobbit mutation-tool verbose behavior", () => {
 			spec: preview(spec),
 		});
 		expect(compact.workflow).toBeUndefined();
+		expect(compact.metadata).toBeUndefined();
+		expect(JSON.stringify(compact)).not.toContain("MUTATION_GOAL_METADATA_SENTINEL");
 		expect(compact.cwd).toBeUndefined();
 		expect(compact.generation).toBeUndefined();
 		expect(verbose).toEqual(response);
