@@ -1,0 +1,7 @@
+name: perf_coverage_get_modules_to_scan
+group: Performance Optimisation
+description: List bounded stale and unscanned structural or cross-cutting units.
+summary: "List bounded stale and unscanned structural or cross-cutting units."
+provider:
+  type: bobbit-extension
+  extension: extension.js

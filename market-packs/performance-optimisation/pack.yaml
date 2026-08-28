@@ -1,0 +1,27 @@
+name: performance-optimisation
+schema: 2
+description: Autonomous performance discovery, measured optimisation goals, and a live control pane.
+version: 1.2.0
+defaultDisabled: true
+localData:
+  scope: project
+  directory: .performance-optimisation
+  access: read-write
+  preserveOnUninstall: true
+contents:
+  roles:
+    - performance-scanner
+    - performance-ideator
+    - optimisation-director
+  tools:
+    - performance-optimisation
+  skills:
+    - install-performance-optimisation
+  entrypoints:
+    - performance-optimisation-open
+    - performance-optimisation-session-menu
+    - performance-optimisation-route
+routes:
+  module: lib/performance-routes.mjs
+  names:
+    - performance-snapshot

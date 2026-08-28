@@ -1,0 +1,7 @@
+name: perf_benchmark_sync
+group: Performance Optimisation
+description: Sync bounded existing named project commands as benchmark references.
+summary: "Sync bounded existing named project commands as benchmark references."
+provider:
+  type: bobbit-extension
+  extension: extension.js

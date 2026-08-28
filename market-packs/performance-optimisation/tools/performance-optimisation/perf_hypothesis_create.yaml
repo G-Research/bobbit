@@ -1,0 +1,7 @@
+name: perf_hypothesis_create
+group: Performance Optimisation
+description: Create a validated deduplicated open performance hypothesis.
+summary: "Create a validated deduplicated open performance hypothesis."
+provider:
+  type: bobbit-extension
+  extension: extension.js

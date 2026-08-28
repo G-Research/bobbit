@@ -392,6 +392,60 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/performance-optimisation-pack.spec.ts",
+      "reason": "Browser journey for the opt-in performance pack covering launcher registration, honest empty state, explicit development fixture deep link, canonical flow, coverage and registry tabs, responsive non-overlap behavior, reload restoration, and cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/performance-optimisation-pack.test.ts",
+      "reason": "First-party performance pack contract coverage for opt-in shipping, roles, singleton panel and launchers, canonical flow/metrics/activity/coverage/registry UI, canonical Bobbit sprite data, mediated Host API navigation, and production build/dev-loop wiring.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/performance-registry-database.test.ts",
+      "reason": "Core coverage for the extension-owned better-sqlite3 schema, forward migration, durable revision, WAL/foreign-key configuration, activity retention, and explicit newer/corrupt database handling.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/performance-registry-operations.test.ts",
+      "reason": "Core coverage for deterministic coverage invalidation, scan reconciliation, cross-cutting units, hypothesis deduplication/merge/priority, goal linkage, benchmark runs, and terminal outcomes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/performance-registry-tools.test.ts",
+      "reason": "Core contract coverage for Pack Local Data-derived performance tools, bounded Git inventory, provider declarations, and the panel snapshot route.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/performance-panel-live-data.test.ts",
+      "reason": "DOM coverage for SQLite route reads, Bobbit project-state joins, unique flow edges, benchmark browsing/search, tab persistence, activity ordering, and coalesced notification refresh.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/github-trusted-host-resolver.test.ts",
       "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
       "execution": {

@@ -1,0 +1,7 @@
+name: perf_programme_set_settings
+group: Performance Optimisation
+description: Configure bounded performance programme settings and staff IDs.
+summary: "Configure bounded performance programme settings and staff IDs."
+provider:
+  type: bobbit-extension
+  extension: extension.js

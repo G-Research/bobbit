@@ -1,0 +1,7 @@
+name: perf_hypothesis_merge
+group: Performance Optimisation
+description: Append an observation and merge current hypothesis locations.
+summary: "Append an observation and merge current hypothesis locations."
+provider:
+  type: bobbit-extension
+  extension: extension.js

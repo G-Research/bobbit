@@ -174,11 +174,11 @@ The validated named commands are registered as follows:
 
 | Registry ID | Named command | Primary metric | Direction | Structural scan/file-glob applicability |
 |---|---|---|---|---|
-| `bobbit-session-open` | `npm run benchmark:session-open` | `timeToInteractiveMs` | Lower is better | Session snapshot/loading and WebSocket scan units; server session/WS modules plus app boot, transcript normalization, and UI message-rendering globs. |
-| `bobbit-gateway-startup` | `npm run benchmark:gateway-startup` | `readyMs` | Lower is better | Gateway bootstrap and restoration/indexing scan units; server entrypoint, persisted store, session/project/goal restoration, archived traversal, and search globs. |
-| `bobbit-event-stream` | `npm run benchmark:event-stream` | `eventToRenderP95Ms` | Lower is better | Event-ingestion/delivery and client-render scan units; agent/WS server modules plus app reducer, streaming component, and render-scheduling globs. |
+| `bobbit-session-open` | `benchmark:session-open` | `timeToInteractiveMs` | Lower is better | Session snapshot/loading and WebSocket scan units; server session/WS modules plus app boot, transcript normalization, and UI message-rendering globs. |
+| `bobbit-gateway-startup` | `benchmark:gateway-startup` | `readyMs` | Lower is better | Gateway bootstrap and restoration/indexing scan units; server entrypoint, persisted store, session/project/goal restoration, archived traversal, and search globs. |
+| `bobbit-event-stream` | `benchmark:event-stream` | `eventToRenderP95Ms` | Lower is better | Event-ingestion/delivery and client-render scan units; agent/WS server modules plus app reducer, streaming component, and render-scheduling globs. |
 
-Applicability is structural and limited to the production-area file globs described above. It intentionally does not make every source change run every expensive journey, and benchmark fixture/test-only edits do not select a production benchmark by themselves. Registry entries invoke only the existing package scripts above; they do not persist or execute caller-supplied shell text.
+Applicability is structural and limited to the production-area file globs described above. It intentionally does not make every source change run every expensive journey, and benchmark fixture/test-only edits do not select a production benchmark by themselves. Registry entries store only the existing package-script keys above; goal teams resolve them through the project manifest (for example, `npm run benchmark:session-open`). They do not persist or execute caller-supplied shell text.
 
 The recorded registry run IDs are the initial baselines listed above. When a schema, fixture, or security revision changes, preserve the old run as historical evidence and register a new like-for-like baseline rather than silently treating unlike reports as candidates.
 

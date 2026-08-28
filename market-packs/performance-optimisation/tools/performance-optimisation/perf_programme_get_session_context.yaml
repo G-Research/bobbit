@@ -1,0 +1,7 @@
+name: perf_programme_get_session_context
+group: Performance Optimisation
+description: Return the gateway-issued current session ID for authoritative Bobbit project resolution.
+summary: "Read the current programme session identity."
+provider:
+  type: bobbit-extension
+  extension: extension.js

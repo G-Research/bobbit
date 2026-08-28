@@ -19,7 +19,7 @@
  * (see scope.ts) + `assertNoLeaks()` (see leak-detector.ts).
  */
 import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import type WebSocket from "ws";
@@ -85,8 +85,12 @@ const BUILTINS_DIR = resolve(REPO_ROOT, "defaults");
 // exactly, so the v2 tools/roles cascade matches legacy. Keep this list in
 // sync with scripts/copy-builtin-packs.mjs::FIRST_PARTY_PACKS.
 const BUILTIN_PACKS_SRC = resolve(REPO_ROOT, "market-packs");
-const FIRST_PARTY_PACKS = ["file-explorer", "pr-walkthrough", "terminal"] as const;
+const FIRST_PARTY_PACKS = ["file-explorer", "performance-optimisation", "pr-walkthrough", "terminal"] as const;
 const BUILTIN_PACK_SKIP_DIRS = new Set(["src", "node_modules"]);
+// Source-booted Vitest gateways need manifests and executable bundles, but no
+// unit/integration test loads a native built-in route. Avoid copying universal
+// native payloads into every fork: release/native E2E owns those real bytes.
+const BUILTIN_PACK_SKIP_RELATIVE_DIRS = new Set(["lib/native"]);
 const MOCK_BRIDGE_SPECIFIER = new URL("../../tests/e2e/in-process-mock-bridge.mjs", import.meta.url).href;
 
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
@@ -221,7 +225,12 @@ function prepareBuiltinPacksDir(bobbitDir: string): string {
 		if (!existsSync(src)) throw new Error(`[tests2/gateway] first-party pack not found: ${src}`);
 		cpSync(src, join(curated, name), {
 			recursive: true,
-			filter: (source) => !BUILTIN_PACK_SKIP_DIRS.has(source.split(/[\\/]/).pop() ?? ""),
+			filter: (source) => {
+				const basename = source.split(/[\\/]/).pop() ?? "";
+				if (BUILTIN_PACK_SKIP_DIRS.has(basename)) return false;
+				const packRelative = relative(src, source).replaceAll("\\", "/");
+				return !BUILTIN_PACK_SKIP_RELATIVE_DIRS.has(packRelative);
+			},
 		});
 	}
 	return curated;

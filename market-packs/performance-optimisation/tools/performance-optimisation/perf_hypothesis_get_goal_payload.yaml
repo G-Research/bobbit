@@ -1,0 +1,7 @@
+name: perf_hypothesis_get_goal_payload
+group: Performance Optimisation
+description: Read one hypothesis with its canonical inline workflow and namespaced goal metadata for direct goal creation.
+summary: Read a direct performance goal payload.
+provider:
+  type: bobbit-extension
+  extension: extension.js

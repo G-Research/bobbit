@@ -1,0 +1,4 @@
+id: performance-optimisation.panel
+title: Perf Optimisation
+entry: ../lib/performance-panel.js
+instanceMode: singleton

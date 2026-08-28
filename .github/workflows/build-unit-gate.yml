@@ -53,10 +53,11 @@ jobs:
 
       - name: Unit gate
         run: npm run test:unit
-        # Hosted Windows can heavily starve three concurrent Vitest workers; an
-        # empty value on other runners preserves the suite's normal fixed cap.
+        # Hosted Windows repeatedly exceeded per-file wall budgets with two
+        # workers after the first universal native pack joined the built-in band.
+        # Serialize there; an empty value elsewhere preserves the normal cap.
         env:
-          VITEST_MAX_WORKERS: ${{ runner.os == 'Windows' && '2' || '' }}
+          VITEST_MAX_WORKERS: ${{ runner.os == 'Windows' && '1' || '' }}
 
   browser:
     name: Browser (${{ matrix.os }}, Node 22.19.0)
@@ -109,8 +110,9 @@ jobs:
     if: github.event_name != 'push'
     runs-on: ${{ matrix.os }}
     # Hosted Windows can spend over nine minutes preparing the lock-free packed
-    # consumer before the authoritative suite begins.
-    timeout-minutes: 50
+    # consumer before the authoritative suite begins, then runs Browser-backed
+    # groups serially to avoid gateway fixture starvation.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -154,6 +156,8 @@ jobs:
 
       - name: E2E gate
         run: npm run test:e2e
+        env:
+          E2E_V2_PW_WORKERS: ${{ runner.os == 'Windows' && '1' || '' }}
 
   release-contract:
     name: Release contract

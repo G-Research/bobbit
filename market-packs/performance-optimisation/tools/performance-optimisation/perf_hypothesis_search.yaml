@@ -1,0 +1,7 @@
+name: perf_hypothesis_search
+group: Performance Optimisation
+description: Search bounded likely existing performance hypotheses before writing.
+summary: "Search bounded likely existing performance hypotheses before writing."
+provider:
+  type: bobbit-extension
+  extension: extension.js

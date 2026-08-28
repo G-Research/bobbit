@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "package": "better-sqlite3",
+  "version": "13.0.3",
+  "targets": {
+    "darwin-arm64": {
+      "file": "darwin-arm64.node",
+      "size": 1980736,
+      "sha256": "98e0e8acd01c632fe5615243e1296af0372826f8783b18fc31c506f73c47459c"
+    },
+    "darwin-x64": {
+      "file": "darwin-x64.node",
+      "size": 1982880,
+      "sha256": "e6db154afe9d250e242e2ea3d45d273718ab80a0751d08873637553031752d21"
+    },
+    "linux-glibc-arm64": {
+      "file": "linux-glibc-arm64.node",
+      "size": 2066328,
+      "sha256": "8ba771f284dfd9430e3ef8e2ffc373ed7cc5a92fc7c4c0c7baf39dd672863485"
+    },
+    "linux-glibc-x64": {
+      "file": "linux-glibc-x64.node",
+      "size": 2226168,
+      "sha256": "6fd4292c6c5f352436cd85c9e1cb286978efa43c20ae350973f83414ced9991d"
+    },
+    "linux-musl-arm64": {
+      "file": "linux-musl-arm64.node",
+      "size": 2312112,
+      "sha256": "09d5927246024b6d93c079ae1079554cbdd85790792342bf24636987dce7a786"
+    },
+    "linux-musl-x64": {
+      "file": "linux-musl-x64.node",
+      "size": 2435680,
+      "sha256": "d661495d2dd4a026ccda893dd8ea1e2c245c3a681bd28224064953c8a9cc0a72"
+    },
+    "win32-arm64": {
+      "file": "win32-arm64.node",
+      "size": 1903104,
+      "sha256": "a47870d114b98baecaff0baa51cfb93d6280d43f064280adaadefafb6949f1bf"
+    },
+    "win32-x64": {
+      "file": "win32-x64.node",
+      "size": 1989632,
+      "sha256": "e21e5efd71fba66578e95b62554d9028064a80dafd7221bf8a8ef155de8d240a"
+    }
+  }
+}
