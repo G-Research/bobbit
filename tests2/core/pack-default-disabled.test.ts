@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 //
 // Ships-disabled-by-default first-party packs (Part 1 of the "Hide/Disable PR &
 // Hindsight" goal). Pins the manifest `defaultDisabled` flag, the

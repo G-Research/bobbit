@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 // Failing-first reproducer for archived team-owned sessions leaking through cold restore.
 
 import assert from "node:assert/strict";

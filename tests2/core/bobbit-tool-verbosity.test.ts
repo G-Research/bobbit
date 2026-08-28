@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Listed in tests-map.json `v2Native`.
+// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
 //
 // Acceptance coverage for compact-by-default Bobbit output, bounded verbose
 // reads, and the projection catalogue's drift guard.

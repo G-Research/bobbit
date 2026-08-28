@@ -1,5 +1,7 @@
 # Filesystem and persistence I/O boundary audit
 
+> **Historical audit.** Test-map membership and runner rules below describe the stated merge-base evidence cutoff, not current test placement or authoring instructions.
+
 **Audit date:** 2026-07-15
 
 **Evidence cutoff:** merge base `4df9a35e2bd1ac5b662382189e12973fc4e1c4c2` only

@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 // Pure AIGW well-known translation, filtering, collision, pricing, and default-seeding coverage.
 
 import { describe, it } from "vitest";

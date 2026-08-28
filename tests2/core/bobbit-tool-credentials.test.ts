@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Listed in tests-map.json `v2Native`.
+// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
 //
 // Credential/URL resolution for the bobbit extension: env creds, state-file
 // fallback, absent-creds (logs + no registration, no throw), and baseUrl
