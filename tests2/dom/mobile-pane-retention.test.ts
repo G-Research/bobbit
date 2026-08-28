@@ -66,6 +66,26 @@ function packTab(packId: string, panelId: string, sessionId: string) {
 	};
 }
 
+function previewTab(sessionId: string) {
+	return {
+		id: "preview:entry:index.html",
+		kind: "preview" as const,
+		title: "index.html",
+		label: "index.html",
+		source: { type: "preview" as const, entry: "index.html", sessionId },
+	};
+}
+
+function reviewTab(sessionId: string) {
+	return {
+		id: `review:${sessionId}-review`,
+		kind: "review" as const,
+		title: "Review",
+		label: "Review",
+		source: { type: "review" as const, reviewId: `${sessionId}-review`, sessionId },
+	};
+}
+
 function installSession(sessionId: string, tabs: any[], activeTabId?: string): void {
 	if (!state.gatewaySessions.some((session) => session.id === sessionId)) {
 		state.gatewaySessions = [...state.gatewaySessions, { id: sessionId, title: sessionId } as any];
@@ -143,6 +163,14 @@ function expectedSlideX(index: number, count: number): number {
 	return count <= 1 ? 0 : -(index * 100) / count;
 }
 
+function touchEvent(type: "touchstart" | "touchmove" | "touchend", x: number, y = 0): TouchEvent {
+	const event = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent;
+	Object.defineProperty(event, type === "touchend" ? "changedTouches" : "touches", {
+		value: [{ clientX: x, clientY: y }],
+	});
+	return event;
+}
+
 beforeAll(async () => {
 	(window as any).happyDOM?.setURL?.("file:///test.html");
 	localStorage.setItem("gateway.url", "http://localhost");
@@ -193,6 +221,57 @@ afterEach(() => {
 const CHAT_PANE_KEY = "__mobile_chat_pane__";
 
 describe("mobile side-panel pane retention", () => {
+	it("keeps selection and both swipe paths aligned after filtering a dead leading pack pane", () => {
+		// Keep this first: setupPreviewSwipe installs its delegated touch handlers on
+		// the suite's first connected #app element.
+		const deadPack = packTab("demo_pack", "dead.panel", "sA");
+		const preview = previewTab("sA");
+		const review = reviewTab("sA");
+		installSession("sA", [deadPack, preview, review], preview.id);
+		selectSession("sA");
+		renderOnce();
+
+		const deadFrame = iframeIn(trackFor("sA")!, deadPack.id)!;
+		expect(deadFrame).toBeTruthy();
+		expect(deadFrame.isConnected).toBe(true);
+
+		// Terminal liveness removes only the pack pane. Preview and review remain
+		// live because non-pack tabs are not retention-owned.
+		state.gatewaySessions = state.gatewaySessions.map((session) =>
+			session.id === "sA" ? ({ ...session, status: "terminated" } as any) : session,
+		);
+		renderOnce();
+
+		const filteredTrack = trackFor("sA")!;
+		expect(deadFrame.isConnected).toBe(false);
+		expect(paneKeysIn(filteredTrack)).toEqual([CHAT_PANE_KEY, preview.id, review.id]);
+		expect(paneIn(filteredTrack, deadPack.id)).toBeNull();
+		expect(orderOf(paneIn(filteredTrack, preview.id)!)).toBe("1");
+		expect(orderOf(paneIn(filteredTrack, review.id)!)).toBe("2");
+		expect(filteredTrack.style.width).toBe("300%");
+		expect(filteredTrack.style.transform).toBe(`translateX(${expectedSlideX(1, 3)}%)`);
+		expect(document.querySelector(`.goal-tab-pill--active[data-panel-tab-id="${preview.id}"]`)).toBeTruthy();
+
+		// The preview iframe message path moves to the adjacent LIVE pane (review),
+		// not to the stale unfiltered index formerly occupied by preview.
+		window.dispatchEvent(new MessageEvent("message", {
+			data: { type: "preview-swipe-end", dx: -100 },
+		}));
+		expect(filteredTrack.style.transform).toBe(`translateX(${expectedSlideX(2, 3)}%)`);
+		renderOnce();
+		expect(document.querySelector(`.goal-tab-pill--active[data-panel-tab-id="${review.id}"]`)).toBeTruthy();
+
+		// The non-iframe touch path maps the adjacent pane back to preview using the
+		// same filtered projection.
+		const app = document.getElementById("app")!;
+		app.dispatchEvent(touchEvent("touchstart", 100));
+		app.dispatchEvent(touchEvent("touchmove", 120));
+		app.dispatchEvent(touchEvent("touchend", 200));
+		expect(filteredTrack.style.transform).toBe(`translateX(${expectedSlideX(1, 3)}%)`);
+		renderOnce();
+		expect(document.querySelector(`.goal-tab-pill--active[data-panel-tab-id="${preview.id}"]`)).toBeTruthy();
+	});
+
 	it("self-check: the src observer actually fires on a real src mutation", () => {
 		const tab = packTab("demo_pack", "a.panel", "sA");
 		installSession("sA", [tab]);
@@ -650,11 +729,12 @@ describe("mobile side-panel pane retention", () => {
 			renderOnce(); // exactly one render
 
 			expect(frameA.isConnected).toBe(false);
-			const track = trackFor("sA");
-			if (track) {
-				expect(iframeIn(track, tabA.id)).toBeNull();
-				expect(paneKeysIn(track)).toEqual([CHAT_PANE_KEY]);
-			}
+			const track = trackFor("sA")!;
+			expect(track).toBeTruthy();
+			expect(iframeIn(track, tabA.id)).toBeNull();
+			expect(paneKeysIn(track)).toEqual([CHAT_PANE_KEY]);
+			expect(track.style.transform).toBe("translateX(0%)");
+			expect(document.querySelector('.goal-tab-pill--active[data-panel-tab-id="__mobile_chat_pane__"]')).toBeTruthy();
 			expect(document.querySelector('[data-testid="stub-pack-iframe"]')).toBeNull();
 		});
 	}

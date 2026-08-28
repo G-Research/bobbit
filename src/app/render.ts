@@ -1939,10 +1939,9 @@ function unifiedPanelContentTabs(): UnifiedContentTab[] {
 
 function setUnifiedMobileTab(tab: UnifiedPanelTab): void {
 	setUnifiedActiveTab(tab);
-	const tabs = unifiedPanelTabs();
-	const idx = tabs.findIndex((candidate) => candidate.id === tab.id);
-	mobileSelectedPaneIndex = idx >= 0 ? idx + 1 : 0;
-	mobileSelectedSideTabId = idx >= 0 ? tab.id : mobileSelectedSideTabId;
+	const idx = unifiedMobilePanes().findIndex((candidate) => candidate.id === tab.id);
+	mobileSelectedPaneIndex = idx > 0 ? idx : 0;
+	mobileSelectedSideTabId = idx > 0 ? tab.id : mobileSelectedSideTabId;
 }
 
 function setUnifiedDesktopTab(tab: UnifiedContentTab): void {
@@ -1976,37 +1975,45 @@ function mobilePanesForSession(sessionKey: string, tabs: UnifiedPanelTab[]): Mob
 	return [mobileChatPaneTab(sessionKey), ...tabs];
 }
 
+/** The selected session's single live-pane projection. Every steady-state
+ * mobile consumer uses this list so selection, geometry, and swipe adjacency
+ * cannot disagree when liveness removes a pack pane. */
 function unifiedMobilePanes(): MobilePaneTab[] {
-	return mobilePanesForSession(workspaceSessionId(), unifiedPanelTabs());
+	const sessionKey = workspaceSessionId();
+	const liveTabs = unifiedPanelTabs().filter((tab) => isLivePanelTabForSession(sessionKey, tab));
+	return mobilePanesForSession(sessionKey, liveTabs);
 }
 
 function unifiedMobilePaneIndex(): number {
-	const sideTabs = unifiedPanelTabs();
-	if (sideTabs.length === 0) {
+	const panes = unifiedMobilePanes();
+	const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
+	if (activeId && activeId !== mobileSelectedSideTabId) {
+		const activeIndex = panes.findIndex((pane) => pane.id === activeId);
+		mobileSelectedPaneIndex = activeIndex > 0 ? activeIndex : 0;
+		mobileSelectedSideTabId = activeId;
+	}
+	if (mobileSelectedPaneIndex === 0) return 0;
+
+	// Re-derive the numeric position from stable pane identity on every read.
+	// Closing or invalidating a pane must select chat, not whichever live pane
+	// shifted into its old array index.
+	const selectedIndex = panes.findIndex((pane) => pane.id === mobileSelectedSideTabId);
+	if (selectedIndex <= 0) {
 		mobileSelectedPaneIndex = 0;
 		return 0;
 	}
-	const activeId = activeSidePanelTabIdForSession(state, workspaceSessionId());
-	if (activeId && activeId !== mobileSelectedSideTabId) {
-		const activeIndex = sideTabs.findIndex((tab) => tab.id === activeId);
-		if (activeIndex >= 0) {
-			mobileSelectedPaneIndex = activeIndex + 1;
-			mobileSelectedSideTabId = activeId;
-		}
-	}
-	if (mobileSelectedPaneIndex < 0 || mobileSelectedPaneIndex > sideTabs.length) mobileSelectedPaneIndex = activeId ? Math.max(1, sideTabs.findIndex((tab) => tab.id === activeId) + 1) : 0;
-	return mobileSelectedPaneIndex;
+	mobileSelectedPaneIndex = selectedIndex;
+	return selectedIndex;
 }
 
 function setUnifiedMobilePaneByIndex(index: number): void {
-	const sideTabs = unifiedPanelTabs();
-	if (index <= 0) {
+	const pane = unifiedMobilePanes()[index];
+	if (index <= 0 || !pane || pane.kind === "chat") {
 		mobileSelectedPaneIndex = 0;
 		renderApp();
 		return;
 	}
-	const tab = sideTabs[index - 1];
-	if (tab) setUnifiedMobileTab(tab);
+	setUnifiedMobileTab(pane);
 }
 
 /** Compute slider translateX% for the given tab index and pane count. */
@@ -3565,12 +3572,9 @@ export function doRenderApp(): void {
 		// PANEL_PANE_RETENTION_LIMIT still shows all of them here.
 		const retainedForSession = retainedSlots.filter((slot) => slot.sessionKey === sessionKey).map((slot) => slot.tab);
 		const panes: MobilePaneTab[] = active
-			? mobilePanesForSession(
-				sessionKey,
-				shell.transition
-					? retainedForSession
-					: unifiedPanelTabs().filter((tab) => isLivePanelTabForSession(sessionKey, tab)),
-			)
+			? (shell.transition
+				? mobilePanesForSession(sessionKey, retainedForSession)
+				: unifiedMobilePanes())
 			: retainedForSession;
 		const visualIndexById = new Map(panes.map((pane, index) => [pane.id, index] as const));
 		const domOrder = stableDomOrder(`mobile-track:${sessionKey}`, panes.map((pane) => pane.id));
@@ -3578,11 +3582,7 @@ export function doRenderApp(): void {
 			.map((id) => panes.find((pane) => pane.id === id))
 			.filter((pane): pane is MobilePaneTab => pane !== undefined);
 		const count = Math.max(1, panes.length);
-		// `unifiedMobilePaneIndex()` indexes the session's UNFILTERED tab list, so it
-		// can point past the end once a dead pack tab is filtered out. Clamp rather
-		// than re-derive: the selection state keeps its current meaning and the
-		// transform stays valid for every live pane.
-		const curIdx = active && !shell.transition ? Math.max(0, Math.min(unifiedMobilePaneIndex(), panes.length - 1)) : 0;
+		const curIdx = active && !shell.transition ? unifiedMobilePaneIndex() : 0;
 		return html`
 			<div
 				class="side-panel-slider__track preview-slider__track"
@@ -3698,6 +3698,12 @@ export function doRenderApp(): void {
 				"mobile-tracks",
 				[activeSessionKey, ...retainedSlots.map((slot) => slot.sessionKey)],
 			);
+			const liveTrackOrderKeys = new Set(trackKeys.map((key) => `mobile-track:${key}`));
+			for (const containerId of appendOnlyDomOrder.keys()) {
+				if (containerId.startsWith("mobile-track:") && !liveTrackOrderKeys.has(containerId)) {
+					appendOnlyDomOrder.delete(containerId);
+				}
+			}
 			return html`
 				${reconnectBanner()}
 				${archivedBannerForParity}
