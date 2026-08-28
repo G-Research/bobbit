@@ -271,6 +271,10 @@ function projectEntity(
 	if (profile === "session" && value.restoreError) out.restoreFailed = true;
 	for (const [key, child] of Object.entries(value)) {
 		if (UNIVERSAL_DROP_FIELDS.has(key) || isRedundantIdAlias(key, child, value)) continue;
+		if (profile === "goal" && mode === "detail" && key === "metadata") {
+			out.metadata = child;
+			continue;
+		}
 		if (key === "workflow" && (profile === "goal" || profile === "session")) continue;
 		if (!allowed.has(key) && !UNIVERSAL_KEEP_FIELDS.has(key)
 			&& !(mode === "compact" && profile === "project" && key === "rootPath")) continue;
