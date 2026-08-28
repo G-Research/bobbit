@@ -177,6 +177,127 @@ async function workspace(sessionId: string): Promise<any> {
 	return JSON.parse(text);
 }
 
+type SplitGeometry = { row: number; chat: number; panel: number };
+
+async function splitGeometry(page: Page): Promise<SplitGeometry> {
+	return page.locator(".side-panel-split-layout").evaluate((layout) => ({
+		row: layout.getBoundingClientRect().width,
+		chat: layout.querySelector<HTMLElement>(".side-panel-chat-pane")?.getBoundingClientRect().width ?? 0,
+		panel: layout.querySelector<HTMLElement>(".side-panel-workspace")?.getBoundingClientRect().width ?? 0,
+	}));
+}
+
+async function beginDividerDrag(page: Page, rawPercent?: number, pointerId = 701): Promise<void> {
+	await page.getByRole("separator", { name: "Resize side panel" }).evaluate((element, input) => {
+		const handle = element as HTMLElement;
+		const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+		const panel = layout?.querySelector<HTMLElement>(":scope > .side-panel-workspace");
+		if (!layout || !panel) throw new Error("side-panel resize handle has no split geometry");
+		const handleBox = handle.getBoundingClientRect();
+		const layoutBox = layout.getBoundingClientRect();
+		const drag = {
+			layout,
+			pointerId: input.pointerId,
+			startX: handleBox.x + handleBox.width / 2,
+			startY: handleBox.y + Math.max(handleBox.height / 2, 1),
+			startPercent: panel.getBoundingClientRect().width / layoutBox.width * 100,
+			layoutWidth: layoutBox.width,
+		};
+		(window as any).__sidePanelSpecDrag = drag;
+		const dispatch = (target: EventTarget, type: string, raw: number, buttons: number) => {
+			const clientX = drag.startX + (drag.startPercent - raw) * drag.layoutWidth / 100;
+			target.dispatchEvent(new PointerEvent(type, {
+				pointerId: drag.pointerId,
+				pointerType: "touch",
+				isPrimary: true,
+				clientX,
+				clientY: drag.startY,
+				button: type === "pointerdown" || type === "pointerup" ? 0 : -1,
+				buttons,
+				bubbles: true,
+			}));
+		};
+		dispatch(handle, "pointerdown", drag.startPercent, 1);
+		if (input.rawPercent !== undefined) dispatch(window, "pointermove", input.rawPercent, 1);
+	}, { rawPercent, pointerId });
+}
+
+async function moveDividerDrag(page: Page, rawPercent: number, pointerId = 701): Promise<void> {
+	await page.evaluate(({ rawPercent, pointerId }) => {
+		const drag = (window as any).__sidePanelSpecDrag;
+		if (!drag || drag.pointerId !== pointerId) throw new Error("no matching side-panel spec drag");
+		const clientX = drag.startX + (drag.startPercent - rawPercent) * drag.layoutWidth / 100;
+		window.dispatchEvent(new PointerEvent("pointermove", {
+			pointerId,
+			pointerType: "touch",
+			isPrimary: true,
+			clientX,
+			clientY: drag.startY,
+			button: -1,
+			buttons: 1,
+			bubbles: true,
+		}));
+	}, { rawPercent, pointerId });
+}
+
+async function endDividerDrag(page: Page, rawPercent: number, pointerId = 701): Promise<void> {
+	await page.evaluate(({ rawPercent, pointerId }) => {
+		const drag = (window as any).__sidePanelSpecDrag;
+		if (!drag || drag.pointerId !== pointerId) throw new Error("no matching side-panel spec drag");
+		const clientX = drag.startX + (drag.startPercent - rawPercent) * drag.layoutWidth / 100;
+		window.dispatchEvent(new PointerEvent("pointerup", {
+			pointerId,
+			pointerType: "touch",
+			isPrimary: true,
+			clientX,
+			clientY: drag.startY,
+			button: 0,
+			buttons: 0,
+			bubbles: true,
+		}));
+	}, { rawPercent, pointerId });
+}
+
+async function expectSplitPercent(page: Page, percent: number): Promise<void> {
+	await expect.poll(async () => {
+		const geometry = await splitGeometry(page);
+		return geometry.panel / geometry.row * 100;
+	}, { message: `workspace should occupy ${percent}% of the split` }).toBeCloseTo(percent, 0);
+}
+
+async function terminalCueStyle(page: Page): Promise<{
+	content: string;
+	left: string;
+	right: string;
+	background: string;
+	expectedMixedPrimary: string;
+	animation: string;
+}> {
+	return page.locator(".side-panel-split-layout").evaluate((layout) => {
+		// Resolve the same expression as the outer-edge gradient in this document.
+		// Comparing computed values avoids pinning Chromium's oklch/oklab/rgb
+		// serialization while still proving the cue follows the live theme token.
+		const probe = document.createElement("span");
+		probe.style.backgroundColor = "color-mix(in oklch, var(--primary) 65%, transparent)";
+		layout.appendChild(probe);
+		const expectedMixedPrimary = getComputedStyle(probe).backgroundColor;
+		probe.remove();
+		const cue = getComputedStyle(layout, "::after");
+		return {
+			content: cue.content,
+			left: cue.left,
+			right: cue.right,
+			background: cue.backgroundImage,
+			expectedMixedPrimary,
+			animation: cue.animationName,
+		};
+	});
+}
+
+function compactCss(value: string): string {
+	return value.replace(/\s+/g, "");
+}
+
 test.describe("Side-panel tab contract", () => {
 	test("Chat is never a persisted tab and an empty non-staff side pane stays hidden @smoke", async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 800 });
@@ -222,6 +343,409 @@ test.describe("Side-panel tab contract", () => {
 		await navigateToSession(page, sessionId);
 		await expectPanelTabs(page, [previewId("current.html")], "preview tab should survive reload");
 		await expectNoPersistedChatTab(page, sessionId);
+	});
+
+	test("desktop resizing persists, follows the separator APG contract, and restores a non-default split through terminal modes", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		await page.evaluate(() => localStorage.removeItem("bobbit-side-panel-width-percent"));
+		await page.reload({ waitUntil: "domcontentloaded" });
+		const sessionId = await createRegularSessionViaApi(page);
+		await mountPreviewHtml(page, sessionId, "resizable.html", "Resizable preview");
+
+		const handle = page.getByRole("separator", { name: "Resize side panel" });
+		const splitLayout = page.locator(".side-panel-split-layout");
+		await expect(handle).toBeVisible();
+		await expect(handle).toHaveAttribute("aria-valuemin", "25");
+		await expect(handle).toHaveAttribute("aria-valuemax", "75");
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		await expect(handle).toHaveAttribute("aria-controls", "side-panel-workspace");
+		await expect(page.locator("#side-panel-workspace")).toHaveCount(1);
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent")), "the even default must not manufacture a stored preference").toBeNull();
+		const initial = await splitGeometry(page);
+		expect(initial.panel, "the default workspace is half the row").toBeCloseTo(initial.row / 2, 0);
+		expect(initial.chat, "the default chat pane is half the row").toBeCloseTo(initial.row / 2, 0);
+
+		await beginDividerDrag(page, 63);
+		await endDividerDrag(page, 63);
+		await expect(handle).toHaveAttribute("aria-valuenow", "63");
+		await expectSplitPercent(page, 63);
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent"))).toBe("63");
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expectPreviewContains(page, "Resizable preview", "resizable preview after reload");
+		await expect(handle).toHaveAttribute("aria-valuenow", "63");
+		await expectSplitPercent(page, 63);
+
+		await handle.focus();
+		expect(await handle.evaluate((element) => document.activeElement === element), "the separator remains keyboard-focusable").toBe(true);
+		expect(await handle.evaluate((element) => getComputedStyle(element, "::after").backgroundColor), "focus-visible must expose the divider accent").not.toBe("rgba(0, 0, 0, 0)");
+		await handle.dblclick();
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		await handle.press("ArrowLeft");
+		await expect(handle).toHaveAttribute("aria-valuenow", "52");
+		await handle.press("Shift+ArrowLeft");
+		await expect(handle).toHaveAttribute("aria-valuenow", "62");
+		await handle.press("ArrowRight");
+		await expect(handle).toHaveAttribute("aria-valuenow", "60");
+		await handle.press("Shift+ArrowRight");
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		await handle.press("Home");
+		await expect(handle).toHaveAttribute("aria-valuenow", "25");
+		await handle.press("ArrowRight");
+		await expect(handle, "keyboard changes clamp at the APG minimum").toHaveAttribute("aria-valuenow", "25");
+		await handle.press("End");
+		await expect(handle).toHaveAttribute("aria-valuenow", "75");
+		await handle.press("ArrowLeft");
+		await expect(handle, "keyboard changes clamp at the APG maximum").toHaveAttribute("aria-valuenow", "75");
+		await handle.dblclick();
+		await expectSplitPercent(page, 50);
+
+		const [handleBox, panelBox] = await Promise.all([handle.boundingBox(), page.locator(".side-panel-workspace").boundingBox()]);
+		expect(handleBox && panelBox ? handleBox.x < panelBox.x && handleBox.x + handleBox.width > panelBox.x : false,
+			"the divider hit target extends into both panes and is not clipped").toBe(true);
+
+		// Set the split restored after both terminal modes and override the live theme
+		// accent so the cue assertions cannot pass on a hard-coded legacy colour.
+		await beginDividerDrag(page, 63);
+		await endDividerDrag(page, 63);
+		await page.evaluate(() => document.documentElement.style.setProperty("--primary", "rgb(12, 34, 56)"));
+
+		await beginDividerDrag(page, 24);
+		await expect(splitLayout).toHaveAttribute("data-resize-intent", "collapse");
+		await expect.poll(() => page.locator(".side-panel-workspace").evaluate((panel) => Number(getComputedStyle(panel).opacity))).toBeLessThan(0.4);
+		const collapseCue = await terminalCueStyle(page);
+		expect(collapseCue.content, "the collapse cue is an empty edge treatment, not a text overlay").toBe('\"\"');
+		expect(collapseCue.right, "the collapse cue pulses on the workspace outer edge").toBe("0px");
+		expect(collapseCue.left).not.toBe("0px");
+		expect(collapseCue.background).toContain("linear-gradient");
+		expect(compactCss(collapseCue.background), "the collapse edge gradient must contain the resolved mixed sentinel --primary")
+			.toContain(compactCss(collapseCue.expectedMixedPrimary));
+		expect(collapseCue.animation).toContain("side-panel-terminal-edge-pulse");
+		await expect.poll(() => splitLayout.evaluate((layout) => getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor),
+			{ message: "the collapse divider cue resolves the current --primary after its transition" }).toBe("rgb(12, 34, 56)");
+		await moveDividerDrag(page, 25);
+		await expect(splitLayout, "retreating to the inclusive bound clears the terminal cue").not.toHaveAttribute("data-resize-intent");
+		await expect.poll(() => page.locator(".side-panel-workspace").evaluate((panel) => Number(getComputedStyle(panel).opacity))).toBeGreaterThan(0.9);
+		await endDividerDrag(page, 25);
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+		await beginDividerDrag(page, 63, 706);
+		await endDividerDrag(page, 63, 706);
+
+		await beginDividerDrag(page, undefined, 702);
+		await endDividerDrag(page, 24, 702);
+		await expect(page.getByTestId("side-panel-restore"), "pointerup itself crossing 25 must collapse").toBeVisible();
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("collapsed");
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent"))).toBe("63");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await navigateToSession(page, sessionId);
+		await expect(page.getByTestId("side-panel-restore"), "collapsed mode survives reload").toBeVisible();
+		await page.getByTestId("side-panel-restore").click();
+		await expect(handle).toHaveAttribute("aria-valuenow", "63");
+		await expectSplitPercent(page, 63);
+
+		await page.evaluate(() => document.documentElement.style.setProperty("--primary", "rgb(12, 34, 56)"));
+		await beginDividerDrag(page, 76, 703);
+		await expect(splitLayout).toHaveAttribute("data-resize-intent", "fullscreen");
+		await expect.poll(() => page.locator(".side-panel-chat-pane").evaluate((chat) => Number(getComputedStyle(chat).opacity))).toBeLessThan(0.4);
+		const fullscreenCue = await terminalCueStyle(page);
+		expect(fullscreenCue.content, "the fullscreen cue is an empty edge treatment, not a text overlay").toBe('\"\"');
+		expect(fullscreenCue.left, "the fullscreen cue pulses on the chat outer edge").toBe("0px");
+		expect(fullscreenCue.right).not.toBe("0px");
+		expect(fullscreenCue.background).toContain("linear-gradient");
+		expect(compactCss(fullscreenCue.background), "the fullscreen edge gradient must contain the resolved mixed sentinel --primary")
+			.toContain(compactCss(fullscreenCue.expectedMixedPrimary));
+		expect(fullscreenCue.animation).toContain("side-panel-terminal-edge-pulse");
+		await expect.poll(() => splitLayout.evaluate((layout) => getComputedStyle(layout.querySelector(".side-panel-resize-handle")!, "::after").backgroundColor),
+			{ message: "the fullscreen divider cue resolves the current --primary after its transition" }).toBe("rgb(12, 34, 56)");
+		await moveDividerDrag(page, 75, 703);
+		await expect(splitLayout, "retreating to the inclusive bound clears the fullscreen cue").not.toHaveAttribute("data-resize-intent");
+		await expect.poll(() => page.locator(".side-panel-chat-pane").evaluate((chat) => Number(getComputedStyle(chat).opacity))).toBeGreaterThan(0.9);
+		await endDividerDrag(page, 75, 703);
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+
+		await beginDividerDrag(page, 63, 704);
+		await endDividerDrag(page, 63, 704);
+		await beginDividerDrag(page, undefined, 705);
+		await endDividerDrag(page, 76, 705);
+		await expect(page.locator('[data-side-panel-mode="fullscreen"]'), "pointerup itself crossing 75 must enter fullscreen").toBeVisible();
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("fullscreen");
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent"))).toBe("63");
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.selectedSessionId ?? ""), { timeout: 20_000 }).toBe(sessionId);
+		await expect(page.locator('[data-side-panel-mode="fullscreen"]'), "fullscreen mode survives reload").toBeVisible({ timeout: 20_000 });
+		await page.getByTestId("side-panel-collapse").click();
+		await expect(handle).toHaveAttribute("aria-valuenow", "63");
+		await expectSplitPercent(page, 63);
+
+		// Mobile keeps its full-width slider/navigation and never consumes or mutates
+		// the desktop-only preference.
+		await handle.press("End");
+		await expect(handle).toHaveAttribute("aria-valuenow", "75");
+		await page.setViewportSize({ width: 390, height: 780 });
+		await expect(handle).toHaveCount(0);
+		const mobileBar = page.locator(".goal-tab-bar--mobile");
+		await expect(mobileBar.locator('[data-panel-tab-kind="chat"]')).toBeVisible();
+		const previewTab = mobileBar.locator(`[data-panel-tab-id="${previewId("resizable.html")}"]`);
+		await expect(previewTab).toBeVisible();
+		const mobileGeometry = await page.locator(".side-panel-slider").evaluate((slider) => {
+			const sliderBox = slider.getBoundingClientRect();
+			const visiblePane = [...slider.querySelectorAll<HTMLElement>("[data-mobile-pane-key]")]
+				.find((pane) => pane.getBoundingClientRect().width > 0 && getComputedStyle(pane).visibility !== "hidden");
+			return { slider: sliderBox.width, pane: visiblePane?.getBoundingClientRect().width ?? 0 };
+		});
+		expect(mobileGeometry.slider, "the mobile slider fills the viewport-width main surface").toBeGreaterThan(350);
+		expect(mobileGeometry.pane, "each mobile navigation pane remains full slider width").toBeCloseTo(mobileGeometry.slider, 0);
+		await mobileBar.locator('[data-panel-tab-kind="chat"]').click();
+		await expect(page.locator("textarea").first()).toBeVisible();
+		await previewTab.click();
+		await expectPreviewContains(page, "Resizable preview", "mobile navigation still reaches the panel");
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent"))).toBe("75");
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await expect(handle).toHaveAttribute("aria-valuenow", "75");
+		await expectSplitPercent(page, 75);
+	});
+
+	test("desktop divider ignores secondary activations and unrelated pointers until the initiating pointer completes", async ({ page }) => {
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await openApp(page);
+		await page.evaluate(() => localStorage.removeItem("bobbit-side-panel-width-percent"));
+		await page.reload({ waitUntil: "domcontentloaded" });
+		const sessionId = await createRegularSessionViaApi(page);
+		await mountPreviewHtml(page, sessionId, "pointer-owner.html", "Pointer owner preview");
+
+		const handle = page.getByRole("separator", { name: "Resize side panel" });
+		await expect(handle).toHaveAttribute("aria-valuenow", "50");
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+
+		const rejectedActivations = await handle.evaluate((element) => {
+			const handle = element as HTMLElement;
+			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+			if (!layout) throw new Error("side-panel resize handle has no split layout");
+			const handleBox = handle.getBoundingClientRect();
+			const layoutBox = layout.getBoundingClientRect();
+			const startX = handleBox.x + handleBox.width / 2;
+			const startY = handleBox.y + handleBox.height / 2;
+			const snapshot = () => ({
+				value: handle.getAttribute("aria-valuenow"),
+				persisted: localStorage.getItem("bobbit-side-panel-width-percent"),
+				intent: layout.dataset.resizeIntent ?? null,
+				cursor: document.body.style.cursor,
+				userSelect: document.body.style.userSelect,
+			});
+			const dispatchRejectedActivation = (pointerId: number, pointerType: string, isPrimary: boolean, button: number, buttons: number) => {
+				handle.dispatchEvent(new PointerEvent("pointerdown", {
+					pointerId,
+					pointerType,
+					isPrimary,
+					clientX: startX,
+					clientY: startY,
+					button,
+					buttons,
+					bubbles: true,
+				}));
+				const afterDown = snapshot();
+				window.dispatchEvent(new PointerEvent("pointermove", {
+					pointerId,
+					pointerType,
+					isPrimary,
+					clientX: layoutBox.left + 1,
+					clientY: startY,
+					button: -1,
+					buttons,
+					bubbles: true,
+				}));
+				const afterMove = snapshot();
+				window.dispatchEvent(new PointerEvent("pointerup", {
+					pointerId,
+					pointerType,
+					isPrimary,
+					clientX: layoutBox.left + 1,
+					clientY: startY,
+					button,
+					buttons: 0,
+					bubbles: true,
+				}));
+				return { afterDown, afterMove, afterUp: snapshot() };
+			};
+			return {
+				rightButton: dispatchRejectedActivation(31, "mouse", true, 2, 2),
+				middleButton: dispatchRejectedActivation(32, "mouse", true, 1, 4),
+				nonPrimary: dispatchRejectedActivation(33, "touch", false, 0, 1),
+			};
+		});
+		const unchangedActivation = {
+			value: "50",
+			persisted: null,
+			intent: null,
+			cursor: "",
+			userSelect: "",
+		};
+		for (const activation of Object.values(rejectedActivations)) {
+			expect(activation).toEqual({
+				afterDown: unchangedActivation,
+				afterMove: unchangedActivation,
+				afterUp: unchangedActivation,
+			});
+		}
+		await expectSplitPercent(page, 50);
+		expect(await page.evaluate(() => localStorage.getItem("bobbit-side-panel-width-percent"))).toBeNull();
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+
+		const result = await handle.evaluate((element) => {
+			const handle = element as HTMLElement;
+			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+			if (!layout) throw new Error("side-panel resize handle has no split layout");
+			const handleBox = handle.getBoundingClientRect();
+			const layoutBox = layout.getBoundingClientRect();
+			const startX = handleBox.x + handleBox.width / 2;
+			const startY = handleBox.y + handleBox.height / 2;
+			const dispatch = (target: EventTarget, type: string, pointerId: number, clientX: number, buttons: number) => {
+				target.dispatchEvent(new PointerEvent(type, {
+					pointerId,
+					pointerType: "touch",
+					isPrimary: pointerId === 41,
+					clientX,
+					clientY: startY,
+					button: type === "pointerdown" || type === "pointerup" ? 0 : -1,
+					buttons,
+					bubbles: true,
+				}));
+			};
+
+			dispatch(handle, "pointerdown", 41, startX, 1);
+			dispatch(window, "pointermove", 99, layoutBox.right - 1, 1);
+			const afterForeignMove = {
+				value: handle.getAttribute("aria-valuenow"),
+				persisted: localStorage.getItem("bobbit-side-panel-width-percent"),
+				intent: layout.dataset.resizeIntent ?? null,
+			};
+			dispatch(window, "pointerup", 99, layoutBox.right - 1, 0);
+			dispatch(window, "pointercancel", 100, layoutBox.right - 1, 0);
+			const afterForeignEnd = {
+				cursor: document.body.style.cursor,
+				userSelect: document.body.style.userSelect,
+			};
+			dispatch(window, "pointermove", 41, startX - 80, 1);
+			const afterOwnerMove = {
+				value: Number(handle.getAttribute("aria-valuenow")),
+				persisted: Number(localStorage.getItem("bobbit-side-panel-width-percent")),
+			};
+			dispatch(window, "pointerup", 41, startX - 80, 0);
+			return {
+				afterForeignMove,
+				afterForeignEnd,
+				afterOwnerMove,
+				afterOwnerEnd: {
+					cursor: document.body.style.cursor,
+					userSelect: document.body.style.userSelect,
+				},
+			};
+		});
+
+		expect(result.afterForeignMove).toEqual({ value: "50", persisted: null, intent: null });
+		expect(result.afterForeignEnd).toEqual({ cursor: "col-resize", userSelect: "none" });
+		expect(result.afterOwnerMove.value).toBeGreaterThan(50);
+		expect(result.afterOwnerMove.persisted).toBeGreaterThan(50);
+		expect(result.afterOwnerEnd).toEqual({ cursor: "", userSelect: "" });
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode, { timeout: 10_000 }).toBe("split");
+
+		const preferredSplit = result.afterOwnerMove.persisted;
+		const otherSessionId = await createRegularSessionViaApi(page);
+		await mountPreviewHtml(page, otherSessionId, "pointer-owner-other.html", "Other pointer owner preview");
+		await navigateToSession(page, sessionId);
+		await expect(handle).toBeVisible();
+		await handle.evaluate((element) => {
+			const handle = element as HTMLElement;
+			const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+			if (!layout) throw new Error("side-panel resize handle has no split layout");
+			const handleBox = handle.getBoundingClientRect();
+			const layoutBox = layout.getBoundingClientRect();
+			const startX = handleBox.x + handleBox.width / 2;
+			const startY = handleBox.y + handleBox.height / 2;
+			(window as any).__removedResizeLayout = layout;
+			handle.dispatchEvent(new PointerEvent("pointerdown", {
+				pointerId: 51,
+				pointerType: "touch",
+				isPrimary: true,
+				clientX: startX,
+				clientY: startY,
+				button: 0,
+				buttons: 1,
+				bubbles: true,
+			}));
+			window.dispatchEvent(new PointerEvent("pointermove", {
+				pointerId: 51,
+				pointerType: "touch",
+				isPrimary: true,
+				clientX: layoutBox.right - 1,
+				clientY: startY,
+				button: -1,
+				buttons: 1,
+			}));
+		});
+		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "collapse");
+		expect(await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")))).toBe(25);
+
+		await navigateToSession(page, otherSessionId);
+		await expect.poll(() => page.evaluate(() => ({
+			cursor: document.body.style.cursor,
+			userSelect: document.body.style.userSelect,
+		}))).toEqual({ cursor: "", userSelect: "" });
+		const restoredPreference = await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")));
+		expect(restoredPreference).toBeCloseTo(preferredSplit, 3);
+		expect(await page.evaluate(() => (window as any).__removedResizeLayout?.dataset.resizeIntent ?? null), "navigation cleanup clears intent on the removed layout").toBeNull();
+		await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointerup", {
+			pointerId: 51,
+			pointerType: "touch",
+			isPrimary: true,
+			clientX: window.innerWidth - 1,
+			clientY: window.innerHeight / 2,
+			button: 0,
+			buttons: 0,
+		})));
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode, { timeout: 10_000 }).toBe("split");
+		await expect.poll(async () => (await workspace(otherSessionId)).sizeMode, { timeout: 10_000 }).toBe("split");
+
+		// A mode change that removes the divider must cancel before a stale owner-up
+		// can reinterpret the drag as a second mode change.
+		await beginDividerDrag(page, 24, 61);
+		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "collapse");
+		await page.getByTestId("side-panel-fullscreen").click();
+		await expect(handle).toHaveCount(0);
+		await expect.poll(() => page.evaluate(() => ({ cursor: document.body.style.cursor, userSelect: document.body.style.userSelect })))
+			.toEqual({ cursor: "", userSelect: "" });
+		expect(await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")))).toBeCloseTo(preferredSplit, 3);
+		expect(await page.evaluate(() => (window as any).__sidePanelSpecDrag.layout.dataset.resizeIntent ?? null), "mode cleanup clears intent on the removed layout").toBeNull();
+		await endDividerDrag(page, 24, 61);
+		await expect.poll(async () => (await workspace(otherSessionId)).sizeMode).toBe("fullscreen");
+		expect(await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")))).toBeCloseTo(preferredSplit, 3);
+		await page.getByTestId("side-panel-collapse").click();
+		await expect(handle).toBeVisible();
+
+		// Crossing to mobile removes the desktop divider without changing mobile
+		// navigation or allowing the stale desktop pointer to commit.
+		await beginDividerDrag(page, 24, 62);
+		await expect(page.locator(".side-panel-split-layout")).toHaveAttribute("data-resize-intent", "collapse");
+		await page.setViewportSize({ width: 390, height: 780 });
+		await expect(handle).toHaveCount(0);
+		await expect.poll(() => page.evaluate(() => ({ cursor: document.body.style.cursor, userSelect: document.body.style.userSelect })))
+			.toEqual({ cursor: "", userSelect: "" });
+		expect(await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")))).toBeCloseTo(preferredSplit, 3);
+		expect(await page.evaluate(() => (window as any).__sidePanelSpecDrag.layout.dataset.resizeIntent ?? null), "mobile cleanup clears intent on the removed layout").toBeNull();
+		await endDividerDrag(page, 24, 62);
+		await expect.poll(async () => (await workspace(sessionId)).sizeMode).toBe("split");
+		await expect.poll(async () => (await workspace(otherSessionId)).sizeMode).toBe("split");
+		expect(await page.evaluate(() => Number(localStorage.getItem("bobbit-side-panel-width-percent")))).toBeCloseTo(preferredSplit, 3);
+
+		await page.setViewportSize({ width: 1280, height: 800 });
+		await expect(handle).toBeVisible();
+		await beginDividerDrag(page, 57, 63);
+		await endDividerDrag(page, 57, 63);
+		await expect(handle, "a fresh drag must work after every cleanup path").toHaveAttribute("aria-valuenow", "57");
+		await expectSplitPercent(page, 57);
 	});
 
 	test("sequential preview files keep stable artifact routes across tabs and reload", async ({ page }) => {

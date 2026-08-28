@@ -17,6 +17,10 @@ import {
 	activeSessionId,
 	getSidebarData,
 	setRenderSuppressed,
+	setSidePanelWidthPercent,
+	SIDE_PANEL_WIDTH_DEFAULT,
+	SIDE_PANEL_WIDTH_MIN,
+	SIDE_PANEL_WIDTH_MAX,
 	type GatewaySession,
 	type Project,
 } from "./state.js";
@@ -1159,6 +1163,166 @@ export function workspaceSessionId(): string {
 }
 
 type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
+type SidePanelDragIntent = "collapse" | "fullscreen" | null;
+
+let activeSidePanelResizeCancelIfInvalid: (() => void) | null = null;
+
+function sidePanelDragIntent(rawPercent: number): SidePanelDragIntent {
+	if (rawPercent < SIDE_PANEL_WIDTH_MIN) return "collapse";
+	if (rawPercent > SIDE_PANEL_WIDTH_MAX) return "fullscreen";
+	return null;
+}
+
+function renderSidePanelResizeHandle() {
+	return html`
+		<div
+			class="side-panel-resize-handle"
+			role="separator"
+			aria-label="Resize side panel"
+			aria-orientation="vertical"
+			aria-valuemin=${SIDE_PANEL_WIDTH_MIN}
+			aria-valuemax=${SIDE_PANEL_WIDTH_MAX}
+			aria-valuenow=${state.sidePanelWidthPercent}
+			aria-controls="side-panel-workspace"
+			tabindex="0"
+			title="Drag to resize (drag fully right to collapse; double-click to reset)"
+			@pointerdown=${onSidePanelResizePointerDown}
+			@dblclick=${onSidePanelResizeDoubleClick}
+			@keydown=${onSidePanelResizeKeyDown}
+		></div>
+	`;
+}
+
+function updateSidePanelDividerValue(handle: HTMLElement, percent: number): void {
+	setSidePanelWidthPercent(percent);
+	handle.setAttribute("aria-valuenow", String(state.sidePanelWidthPercent));
+}
+
+function onSidePanelResizePointerDown(event: PointerEvent): void {
+	if (!event.isPrimary || event.button !== 0) return;
+	event.preventDefault();
+	if (activeSidePanelResizeCancelIfInvalid) return;
+	const handle = event.currentTarget as HTMLElement;
+	const layout = handle.closest<HTMLElement>(".side-panel-split-layout");
+	const panel = layout?.querySelector<HTMLElement>(":scope > .side-panel-workspace");
+	if (!layout || !panel) return;
+
+	const layoutWidth = layout.getBoundingClientRect().width;
+	if (layoutWidth <= 0) return;
+	const pointerId = event.pointerId;
+	const dragSessionId = workspaceSessionId();
+	const startX = event.clientX;
+	const startPanelWidth = panel.getBoundingClientRect().width;
+	const startPercent = (startPanelWidth / layoutWidth) * 100;
+	let lastRawPercent = startPercent;
+	let cleaned = false;
+	let observer: MutationObserver | null = null;
+	let cancelIfInvalid: (() => void) | null = null;
+	const previousCursor = document.body.style.cursor;
+	const previousUserSelect = document.body.style.userSelect;
+	try { handle.setPointerCapture(pointerId); } catch {}
+	document.body.style.cursor = "col-resize";
+	document.body.style.userSelect = "none";
+
+	const rawPercentAt = (clientX: number) => {
+		const nextWidth = startPanelWidth - (clientX - startX);
+		return (nextWidth / layoutWidth) * 100;
+	};
+	const cleanup = (restoreTerminalWidth: boolean) => {
+		if (cleaned) return;
+		cleaned = true;
+		if (cancelIfInvalid && activeSidePanelResizeCancelIfInvalid === cancelIfInvalid) {
+			activeSidePanelResizeCancelIfInvalid = null;
+		}
+		observer?.disconnect();
+		window.removeEventListener("pointermove", onMove);
+		window.removeEventListener("pointerup", onUp);
+		window.removeEventListener("pointercancel", onCancel);
+		window.removeEventListener("blur", onBlur);
+		handle.removeEventListener("lostpointercapture", onLostPointerCapture);
+		delete layout.dataset.resizeIntent;
+		handle.removeAttribute("aria-valuetext");
+		if (restoreTerminalWidth && sidePanelDragIntent(lastRawPercent)) {
+			setSidePanelWidthPercent(startPercent);
+		}
+		try { handle.releasePointerCapture(pointerId); } catch {}
+		document.body.style.cursor = previousCursor;
+		document.body.style.userSelect = previousUserSelect;
+	};
+	const cancel = () => cleanup(true);
+	const onMove = (moveEvent: PointerEvent) => {
+		if (moveEvent.pointerId !== pointerId) return;
+		lastRawPercent = rawPercentAt(moveEvent.clientX);
+		updateSidePanelDividerValue(handle, lastRawPercent);
+		const intent = sidePanelDragIntent(lastRawPercent);
+		if (intent) {
+			layout.dataset.resizeIntent = intent;
+			handle.setAttribute("aria-valuetext", intent === "collapse" ? "Release to collapse panel" : "Release to expand panel fullscreen");
+		} else {
+			delete layout.dataset.resizeIntent;
+			handle.removeAttribute("aria-valuetext");
+		}
+	};
+	const onUp = (upEvent: PointerEvent) => {
+		if (upEvent.pointerId !== pointerId) return;
+		lastRawPercent = rawPercentAt(upEvent.clientX);
+		const intent = sidePanelDragIntent(lastRawPercent);
+		if (intent) {
+			// A terminal drag gesture should not overwrite the split width restored
+			// when the user returns from collapsed or fullscreen mode.
+			setSidePanelWidthPercent(startPercent);
+		} else {
+			updateSidePanelDividerValue(handle, lastRawPercent);
+		}
+		cleanup(false);
+		if (intent) {
+			void setSidePanelSizeMode(intent === "collapse" ? "collapsed" : "fullscreen", dragSessionId);
+		}
+	};
+	const onCancel = (cancelEvent: PointerEvent) => {
+		if (cancelEvent.pointerId !== pointerId) return;
+		cancel();
+	};
+	const onLostPointerCapture = (lostEvent: PointerEvent) => {
+		if (lostEvent.pointerId !== pointerId) return;
+		cancel();
+	};
+	const onBlur = () => cancel();
+	const isCurrentDivider = () => handle.isConnected
+		&& layout.isConnected
+		&& isDesktop()
+		&& workspaceSessionId() === dragSessionId
+		&& getSidePanelSizeMode(dragSessionId) === "split"
+		&& layout.querySelector(":scope > .side-panel-resize-handle") === handle;
+	cancelIfInvalid = () => {
+		if (!isCurrentDivider()) cancel();
+	};
+	activeSidePanelResizeCancelIfInvalid = cancelIfInvalid;
+	observer = new MutationObserver(cancelIfInvalid);
+	observer.observe(document.body, { childList: true, subtree: true });
+	window.addEventListener("pointermove", onMove);
+	window.addEventListener("pointerup", onUp);
+	window.addEventListener("pointercancel", onCancel);
+	window.addEventListener("blur", onBlur);
+	handle.addEventListener("lostpointercapture", onLostPointerCapture);
+}
+
+function onSidePanelResizeDoubleClick(event: MouseEvent): void {
+	event.preventDefault();
+	updateSidePanelDividerValue(event.currentTarget as HTMLElement, SIDE_PANEL_WIDTH_DEFAULT);
+}
+
+function onSidePanelResizeKeyDown(event: KeyboardEvent): void {
+	let next: number | undefined;
+	const step = event.shiftKey ? 10 : 2;
+	if (event.key === "ArrowLeft") next = state.sidePanelWidthPercent + step;
+	if (event.key === "ArrowRight") next = state.sidePanelWidthPercent - step;
+	if (event.key === "Home") next = SIDE_PANEL_WIDTH_MIN;
+	if (event.key === "End") next = SIDE_PANEL_WIDTH_MAX;
+	if (next === undefined) return;
+	event.preventDefault();
+	updateSidePanelDividerValue(event.currentTarget as HTMLElement, next);
+}
 
 function sidePanelSizeModeBySession(): Record<string, SidePanelSizeMode> {
 	const holder = state as any;
@@ -2396,6 +2560,7 @@ function renderArchivedBanner() {
 export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
+	activeSidePanelResizeCancelIfInvalid?.();
 	installSidebarStatusMotionClickGuard();
 	const sidebarStatusMotion = captureSidebarStatusMotion(app);
 
@@ -3509,6 +3674,7 @@ export function doRenderApp(): void {
 
 		return html`
 			<div
+				id="side-panel-workspace"
 				class="side-panel-workspace goal-preview-panel flex-1 flex flex-col ${mode === "split" ? "border-l border-border" : ""} min-h-0"
 				data-panel-workspace="content"
 				data-side-panel-mode=${mode}
@@ -3702,6 +3868,7 @@ export function doRenderApp(): void {
 							?inert=${fullscreen}
 							aria-hidden=${fullscreen ? "true" : nothing}
 						>${chatContent}</div>
+						${workspaceOccupiesSplitLayout ? renderSidePanelResizeHandle() : ""}
 						${workspaceCollapsed ? sidePanelRestoreButton() : ""}
 						${renderSidePanelWorkspace(mode, { hidden: workspaceHidden, retainedSlots, showPackHost })}
 					</div>
