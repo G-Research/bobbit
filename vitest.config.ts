@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { defineConfig } from "vitest/config";
-import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
+import { discoverTests } from "./scripts/testing-v2/test-discovery.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
 import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
 import GitTemplateHandoffReporter, {
@@ -59,7 +59,7 @@ export function resolveVitestCoveragePath(pid: number = process.pid): string {
 
 const MAX_WORKERS = resolveMaxWorkers();
 const MODULE_CACHE_PATH = resolveVitestModuleCachePath();
-const execution = loadVitestExecutionMap();
+const discovery = discoverTests();
 const shared = {
 	pool: "forks" as const,
 	isolate: false,
@@ -118,7 +118,7 @@ export default defineConfig({
 			"default",
 			new UnitFileBudgetReporter(),
 			...(coordinatorGitTemplate
-				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, MAX_WORKERS, execution.unit)]
+				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, MAX_WORKERS, discovery.unit)]
 				: []),
 		],
 		coverage,
@@ -131,7 +131,7 @@ export default defineConfig({
 					environment: "node",
 					isolate: true,
 					maxWorkers: 1,
-					include: execution.e2e,
+					include: discovery.vitestE2E,
 				},
 			}] : []),
 			{
@@ -143,7 +143,7 @@ export default defineConfig({
 					env: { [GIT_TEMPLATE_HANDOFF_PROOF_ENV]: "v2-core" },
 					runner: fileBoundaryRunner,
 					setupFiles: tier1SetupFiles,
-					include: execution.core,
+					include: discovery.core,
 				},
 			},
 			{
@@ -157,7 +157,7 @@ export default defineConfig({
 					pool: "threads" as const,
 					isolate: true,
 					setupFiles: [...tier1SetupFiles, "tests2/harness/v2-dom-environment.ts"],
-					include: execution.dom,
+					include: discovery.dom,
 				},
 			},
 			{
@@ -169,7 +169,7 @@ export default defineConfig({
 					env: { [GIT_TEMPLATE_HANDOFF_PROOF_ENV]: "v2-integration" },
 					runner: fileBoundaryRunner,
 					setupFiles: tier1SetupFiles,
-					include: execution.integration,
+					include: discovery.integration,
 					testTimeout: 60_000,
 					hookTimeout: 90_000,
 				},
@@ -183,7 +183,7 @@ export default defineConfig({
 					isolate: true,
 					maxWorkers: 1,
 					setupFiles: tier1SetupFiles,
-					include: execution.isolated,
+					include: discovery.isolated,
 				},
 			},
 		],
