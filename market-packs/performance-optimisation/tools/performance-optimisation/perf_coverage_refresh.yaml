@@ -1,0 +1,7 @@
+name: perf_coverage_refresh
+group: Performance Optimisation
+description: Refresh deterministic Git-tracked production coverage from the current workspace.
+summary: "Refresh deterministic Git-tracked production coverage from the current workspace."
+provider:
+  type: bobbit-extension
+  extension: extension.js

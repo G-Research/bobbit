@@ -608,6 +608,75 @@ describe("deterministic benchmark fixtures and independent oracles", () => {
 		}
 	});
 
+	it("builds a deterministic full-window retention phase below the byte budget", () => {
+		const fixture: any = eventStreamFixture.createEventStreamRetentionFixture();
+		assert.equal(fixture.prefillCount, 1_000);
+		assert.equal(fixture.evictionCount, 20_000);
+		assert.equal(fixture.events.length, 21_001);
+		assert.equal(fixture.semanticHash, "4884c726d531dd480c61fcf27b750aadbeee1dad2633a8d14de3d5efc39e1d93");
+		assert.deepEqual(
+			fixture.events.slice(0, fixture.prefillCount).map((entry: any) => entry.data.type),
+			Array(fixture.prefillCount).fill(eventStreamFixture.EVENT_STREAM_RETENTION_PREFILL_TYPE),
+		);
+		const evictionEvents = fixture.events.slice(fixture.prefillCount, -1);
+		assert.equal(evictionEvents.length, fixture.evictionCount);
+		assert.ok(evictionEvents.every((entry: any, index: number) =>
+			entry.data.type === eventStreamFixture.EVENT_STREAM_RETENTION_EVICTION_TYPE
+			&& entry.data.benchmarkRetentionOrdinal === index + 1));
+		assert.equal(fixture.events.at(-1).data.type, eventStreamFixture.EVENT_STREAM_RETENTION_PROBE_TYPE);
+		const finalWindow = [...evictionEvents.slice(-(1_000 - 1)), fixture.events.at(-1)];
+		const retainedBytes = finalWindow.reduce((total: number, entry: any, index: number) => total + Buffer.byteLength(JSON.stringify({
+			seq: fixture.prefillCount + fixture.evictionCount - (1_000 - 1) + index,
+			ts: 1_700_000_000_000,
+			event: entry.data,
+		}), "utf8"), 0);
+		assert.equal(finalWindow.length, 1_000);
+		assert.ok(retainedBytes > 0 && retainedBytes < 2 * 1024 * 1024);
+	});
+
+	it("projects direct retention diagnostics and rejects an unfilled suffix", () => {
+		const prefix = "session-manager:emitSessionEvent:";
+		const prefillType = eventStreamFixture.EVENT_STREAM_RETENTION_PREFILL_TYPE;
+		const evictionType = eventStreamFixture.EVENT_STREAM_RETENTION_EVICTION_TYPE;
+		const probeType = eventStreamFixture.EVENT_STREAM_RETENTION_PROBE_TYPE;
+		const jsonl = [
+			{ ws: {
+				[`${prefix}${prefillType}`]: { count: 400, retainMs: 1, bufferSize: 80_200, retainedBytes: 20_000_000 },
+				[`${prefix}${evictionType}`]: { count: 4, retainMs: 0.8, bufferSize: 4_000, retainedBytes: 800_000 },
+			} },
+			{ ws: {
+				[`${prefix}${prefillType}`]: { count: 600, retainMs: 1.5, bufferSize: 420_300, retainedBytes: 40_000_000 },
+				[`${prefix}${evictionType}`]: { count: 6, retainMs: 1.2, bufferSize: 6_000, retainedBytes: 1_200_000 },
+				[`${prefix}${probeType}`]: { count: 1, retainMs: 0.1, bufferSize: 1_000, retainedBytes: 210_000 },
+			} },
+		].map(value => JSON.stringify(value)).join("\n");
+		const projected = eventStreamBenchmark.projectEventStreamRetentionDiagnostics(jsonl, {
+			prefillCount: 1_000,
+			evictionCount: 10,
+		});
+		assert.deepEqual(projected.metrics, {
+			retentionEvictionTotalMs: 2,
+			retentionEvictionsPerSecond: 5_000,
+		});
+		assert.deepEqual(projected.proof, {
+			prefillEventCount: 1_000,
+			evictionEventCount: 10,
+			retainedCount: 1_000,
+			retainedBytes: 210_000,
+			maxSize: 1_000,
+			maxBytes: 2 * 1024 * 1024,
+			fullCountWindowForEveryEviction: true,
+			belowByteLimit: true,
+		});
+		assert.throws(
+			() => eventStreamBenchmark.projectEventStreamRetentionDiagnostics(jsonl.replace('"bufferSize":6000', '"bufferSize":5999'), {
+				prefillCount: 1_000,
+				evictionCount: 10,
+			}),
+			/full-window|remain at 1000/i,
+		);
+	});
+
 	it("rejects missing, changed, duplicated, or reordered rendered event markers", () => {
 		const fixture: any = createEventStreamFixture();
 		const renderedMarkers = [

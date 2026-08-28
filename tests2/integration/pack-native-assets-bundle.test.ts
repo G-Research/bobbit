@@ -199,7 +199,7 @@ function createBundleFixture(): { root: string; packRoot: string; sourceFile: st
 }
 
 async function runBuiltinCopy(fixtureRoot: string, outputRoot: string): Promise<void> {
-	for (const name of [PACK_NAME, "pr-walkthrough", "terminal"]) {
+	for (const name of [PACK_NAME, "performance-optimisation", "pr-walkthrough", "terminal"]) {
 		fs.mkdirSync(path.join(fixtureRoot, "market-packs", name), { recursive: true });
 	}
 	const previousCwd = process.cwd();

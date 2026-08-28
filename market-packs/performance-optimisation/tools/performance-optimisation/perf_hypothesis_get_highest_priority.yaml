@@ -1,0 +1,7 @@
+name: perf_hypothesis_get_highest_priority
+group: Performance Optimisation
+description: List open hypotheses in deterministic Director priority order.
+summary: "List open hypotheses in deterministic Director priority order."
+provider:
+  type: bobbit-extension
+  extension: extension.js

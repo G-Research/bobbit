@@ -132,7 +132,11 @@ describe("market pack development CLI", () => {
 		const declaredPacks = PACKS as Array<{ pack: string }>;
 		const expected = declaredPacks.map(({ pack }) => pack).sort().join(", ");
 		expect(() => resolvePackBuild("stale-committed-output")).toThrow(`Declared packs: ${expected}`);
-		expect(declaredPacks.some(({ pack }) => pack.includes("performance"))).toBe(false);
+		expect(resolvePackBuild("performance-optimisation")).toMatchObject({
+			pack: "performance-optimisation",
+			authorRoot: "market-packs/performance-optimisation",
+			defaultServingRoot: "dist/server/builtin-packs/market-packs/performance-optimisation",
+		});
 	});
 });
 

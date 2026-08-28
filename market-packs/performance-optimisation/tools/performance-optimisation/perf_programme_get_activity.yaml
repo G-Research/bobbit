@@ -1,0 +1,7 @@
+name: perf_programme_get_activity
+group: Performance Optimisation
+description: Read newest-first retained performance programme activity.
+summary: "Read newest-first retained performance programme activity."
+provider:
+  type: bobbit-extension
+  extension: extension.js

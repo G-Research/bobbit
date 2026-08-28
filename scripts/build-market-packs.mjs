@@ -68,6 +68,16 @@ export const PACKS = [
 		],
 	},
 	{
+		pack: "performance-optimisation",
+		authorRoot: "market-packs/performance-optimisation",
+		defaultServingRoot: "dist/server/builtin-packs/market-packs/performance-optimisation",
+		entries: [
+			{ in: "performance-panel.ts", out: "lib/performance-panel.js" },
+			{ in: "performance-routes-entry.ts", out: "lib/performance-routes.mjs", platform: "node" },
+			{ in: "performance-tool-extension-entry.ts", out: "tools/performance-optimisation/extension.js", platform: "node" },
+		],
+	},
+	{
 		pack: "file-explorer",
 		authorRoot: "market-packs/file-explorer",
 		defaultServingRoot: "dist/server/builtin-packs/market-packs/file-explorer",

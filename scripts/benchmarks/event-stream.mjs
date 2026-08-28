@@ -24,9 +24,15 @@ import {
 	EVENT_STREAM_INTERVAL_MS,
 	EVENT_STREAM_MARKER_PREFIX,
 	EVENT_STREAM_PROPOSAL_SPEC,
+	EVENT_STREAM_RETENTION_EVICTION_COUNT,
+	EVENT_STREAM_RETENTION_EVICTION_TYPE,
+	EVENT_STREAM_RETENTION_PREFILL_COUNT,
+	EVENT_STREAM_RETENTION_PREFILL_TYPE,
+	EVENT_STREAM_RETENTION_PROBE_TYPE,
 	EVENT_STREAM_UPDATE_COUNT,
 	EVENT_STREAM_VIEWPORT,
 	createEventStreamFixture,
+	createEventStreamRetentionFixture,
 	eventStreamSemanticCounts,
 	eventStreamToolPairs,
 } from "./event-stream/fixture.mjs";
@@ -34,8 +40,11 @@ import {
 const CASE_NAME = `stream-${EVENT_STREAM_UPDATE_COUNT}`;
 export const EVENT_STREAM_SAMPLE_TIMEOUT_MS = 120_000;
 export const EVENT_STREAM_WATCHDOG_GRACE_MS = 5_000;
-const EVENT_STREAM_PHASES = Object.freeze(["prepare", "stream", "oracle", "teardown"]);
+const EVENT_STREAM_PHASES = Object.freeze(["prepare", "saturate", "stream", "oracle", "teardown"]);
 const CLI_RELATIVE = path.join("dist", "server", "cli.js");
+const EVENT_BUFFER_DEFAULT_MAX_SIZE = 1_000;
+const EVENT_BUFFER_DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
+const RETENTION_DIAGNOSTIC_LABEL_PREFIX = "session-manager:emitSessionEvent:";
 const MOCK_AGENT_RELATIVE = path.join("tests", "e2e", "mock-agent.mjs");
 const MESSAGE_SELECTOR = "user-message, assistant-message, tool-message";
 
@@ -57,6 +66,62 @@ function sha256(value) {
 
 function assert(condition, message) {
 	if (!condition) throw new Error(message);
+}
+
+export function projectEventStreamRetentionDiagnostics(jsonl, {
+	prefillCount = EVENT_STREAM_RETENTION_PREFILL_COUNT,
+	evictionCount = EVENT_STREAM_RETENTION_EVICTION_COUNT,
+} = {}) {
+	const aggregate = new Map();
+	for (const line of String(jsonl ?? "").split(/\r?\n/).filter(Boolean)) {
+		const snapshot = JSON.parse(line);
+		const ws = snapshot?.ws;
+		if (!ws || typeof ws !== "object") continue;
+		for (const type of [
+			EVENT_STREAM_RETENTION_PREFILL_TYPE,
+			EVENT_STREAM_RETENTION_EVICTION_TYPE,
+			EVENT_STREAM_RETENTION_PROBE_TYPE,
+		]) {
+			const bucket = ws[`${RETENTION_DIAGNOSTIC_LABEL_PREFIX}${type}`];
+			if (!bucket || typeof bucket !== "object") continue;
+			const total = aggregate.get(type) ?? {};
+			for (const field of ["count", "retainMs", "bufferSize", "retainedBytes"]) {
+				const value = bucket[field];
+				if (Number.isFinite(value)) total[field] = (total[field] ?? 0) + value;
+			}
+			aggregate.set(type, total);
+		}
+	}
+	const prefill = aggregate.get(EVENT_STREAM_RETENTION_PREFILL_TYPE) ?? {};
+	const eviction = aggregate.get(EVENT_STREAM_RETENTION_EVICTION_TYPE) ?? {};
+	const probe = aggregate.get(EVENT_STREAM_RETENTION_PROBE_TYPE) ?? {};
+	assert(prefill.count === prefillCount, `Retention prefill diagnostics counted ${prefill.count ?? 0}, expected ${prefillCount}`);
+	assert(eviction.count === evictionCount, `Retention eviction diagnostics counted ${eviction.count ?? 0}, expected ${evictionCount}`);
+	assert(probe.count === 1, `Retention proof diagnostics counted ${probe.count ?? 0}, expected 1`);
+	assert(
+		eviction.bufferSize === evictionCount * EVENT_BUFFER_DEFAULT_MAX_SIZE,
+		`Retention suffix did not remain at ${EVENT_BUFFER_DEFAULT_MAX_SIZE} entries for every eviction`,
+	);
+	assert(probe.bufferSize === EVENT_BUFFER_DEFAULT_MAX_SIZE, `Retention proof count was ${probe.bufferSize ?? 0}`);
+	assert(Number.isFinite(probe.retainedBytes) && probe.retainedBytes > 0, "Retention proof bytes were unavailable");
+	assert(probe.retainedBytes < EVENT_BUFFER_DEFAULT_MAX_BYTES, `Retention proof exceeded the ${EVENT_BUFFER_DEFAULT_MAX_BYTES}-byte budget`);
+	assert(Number.isFinite(eviction.retainMs) && eviction.retainMs > 0, "Retention suffix timing was unavailable");
+	return {
+		metrics: {
+			retentionEvictionTotalMs: eviction.retainMs,
+			retentionEvictionsPerSecond: (evictionCount * 1_000) / eviction.retainMs,
+		},
+		proof: {
+			prefillEventCount: prefill.count,
+			evictionEventCount: eviction.count,
+			retainedCount: probe.bufferSize,
+			retainedBytes: probe.retainedBytes,
+			maxSize: EVENT_BUFFER_DEFAULT_MAX_SIZE,
+			maxBytes: EVENT_BUFFER_DEFAULT_MAX_BYTES,
+			fullCountWindowForEveryEviction: true,
+			belowByteLimit: true,
+		},
+	};
 }
 
 export function createEventStreamSampleWatchdog(options = {}) {
@@ -587,6 +652,7 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 	timeoutMs = EVENT_STREAM_SAMPLE_TIMEOUT_MS,
 	watchdogGraceMs = EVENT_STREAM_WATCHDOG_GRACE_MS,
 	watchdogDependencies = {},
+	retentionFixture = createEventStreamRetentionFixture(),
 	closeBrowser = closeBenchmarkBrowser,
 	stopRuntime = stopGateway,
 } = {}) {
@@ -597,6 +663,7 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 	let baseUrl;
 	let workspace;
 	let secretsDir;
+	let cpuDiagnosticsPath;
 	let sampleResult;
 	let sampleError;
 	let cleanupError;
@@ -630,6 +697,7 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 		secretsDir = path.join(sampleRoot, "secrets");
 		const agentDir = path.join(sampleRoot, "agent");
 		const homeDir = path.join(sampleRoot, "home");
+		cpuDiagnosticsPath = path.join(gatewayDir, "event-stream-cpu.jsonl");
 		await Promise.all([gatewayDir, secretsDir, agentDir, homeDir].map(directory => mkdir(directory, { recursive: true })));
 
 		const port = await getFreePort();
@@ -654,6 +722,9 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 				BOBBIT_TEST_NO_EXTERNAL: "1",
 				BOBBIT_TEST_NO_REMOTE: "1",
 				BOBBIT_NO_OPEN: "1",
+				BOBBIT_CPU_DIAG: "1",
+				BOBBIT_CPU_DIAG_FLUSH_MS: "250",
+				BOBBIT_CPU_DIAG_JSONL: cpuDiagnosticsPath,
 				HOME: homeDir,
 				USERPROFILE: homeDir,
 			},
@@ -692,6 +763,19 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			const app = window.bobbitState ?? window.__bobbitState;
 			return app?.selectedSessionId === id && app?.remoteAgent?.state?.status === "idle";
 		}, sessionId, { timeout: remainingTimeout(watchdog, 20_000) });
+
+		watchdog.setPhase("saturate");
+		await browser.page.evaluate(trigger => {
+			const app = window.bobbitState ?? window.__bobbitState;
+			if (!app?.remoteAgent?.prompt) throw new Error("Active production RemoteAgent was unavailable");
+			return app.remoteAgent.prompt(trigger);
+		}, retentionFixture.trigger);
+		await waitForSessionIdle(baseUrl, token, sessionId, watchdog);
+		await browser.page.waitForFunction(() => {
+			const app = window.bobbitState ?? window.__bobbitState;
+			const remote = app?.remoteAgent?.state;
+			return remote?.status === "idle" && remote?.isStreaming !== true;
+		}, undefined, { timeout: remainingTimeout(watchdog, 30_000) });
 
 		watchdog.setPhase("stream");
 		watchdog.throwIfExpired();
@@ -843,6 +927,18 @@ export async function runEventStreamSample(context, entry, fixture, fixtureRoot,
 			cleanupError = cleanupError ? new AggregateError([cleanupError, sanitized], "Event-stream watchdog cleanup failed") : sanitized;
 		}
 	}
+	if (!sampleError && !cleanupError && sampleResult) {
+		try {
+			const retention = projectEventStreamRetentionDiagnostics(await readFile(cpuDiagnosticsPath, "utf8"), {
+				prefillCount: retentionFixture.prefillCount,
+				evictionCount: retentionFixture.evictionCount,
+			});
+			Object.assign(sampleResult.sample.metrics, retention.metrics);
+			sampleResult.sample.retention = retention.proof;
+		} catch (error) {
+			sampleError = new Error(`Retention diagnostics validation failed: ${boundedErrorMessage(error)}`, { cause: error });
+		}
+	}
 	let failure = null;
 	if (sampleError && cleanupError) {
 		failure = new AggregateError(
@@ -866,6 +962,7 @@ export async function runJourney(context) {
 	]);
 
 	const fixture = createEventStreamFixture();
+	const retentionFixture = createEventStreamRetentionFixture();
 	const fixtureRoot = path.join(context.paths.fixtures, `event-stream-v${EVENT_STREAM_FIXTURE_VERSION}`);
 	const projectRoot = path.join(fixtureRoot, "project");
 	await mkdir(projectRoot, { recursive: true });
@@ -882,6 +979,9 @@ export async function runJourney(context) {
 			expectedToolPairs: fixture.expectedToolPairs,
 			expectedFinalSemanticHash: fixture.expectedFinalSemanticHash,
 			semanticHash: fixture.semanticHash,
+			retentionPrefillCount: retentionFixture.prefillCount,
+			retentionEvictionCount: retentionFixture.evictionCount,
+			retentionSemanticHash: retentionFixture.semanticHash,
 		}, null, 2)}\n`, "utf8"),
 	]);
 
@@ -889,7 +989,7 @@ export async function runJourney(context) {
 	const samples = [];
 	let browserVersion = null;
 	for (const entry of schedule) {
-		const result = await runEventStreamSample(context, entry, fixture, fixtureRoot);
+		const result = await runEventStreamSample(context, entry, fixture, fixtureRoot, { retentionFixture });
 		samples.push(result.sample);
 		browserVersion ??= result.browserVersion;
 	}
@@ -904,6 +1004,12 @@ export async function runJourney(context) {
 	return {
 		fixtureDimensions: {
 			fixtureVersion: EVENT_STREAM_FIXTURE_VERSION,
+			retention: {
+				prefillEventCount: retentionFixture.prefillCount,
+				evictionEventCount: retentionFixture.evictionCount,
+				maxSize: EVENT_BUFFER_DEFAULT_MAX_SIZE,
+				maxBytes: EVENT_BUFFER_DEFAULT_MAX_BYTES,
+			},
 			cases: [{
 				name: CASE_NAME,
 				updateCount: EVENT_STREAM_UPDATE_COUNT,
@@ -916,9 +1022,12 @@ export async function runJourney(context) {
 		fixtureHashes: {
 			eventSequenceSha256: fixture.semanticHash,
 			finalSemanticProjectionSha256: fixture.expectedFinalSemanticHash,
+			retentionSequenceSha256: retentionFixture.semanticHash,
 		},
 		samples,
 		metricDefinitions: {
+			retentionEvictionTotalMs: { unit: "ms", direction: "lower", reliability: "node-perf-hooks-production-path" },
+			retentionEvictionsPerSecond: { unit: "events/s", direction: "higher", reliability: "derived-from-node-perf-hooks-production-path" },
 			eventToRenderP95Ms: { unit: "ms", direction: "lower", reliability: metricSupport.eventToRender },
 			eventThroughputPerSecond: { unit: "events/s", direction: "higher", reliability: metricSupport.eventToRender },
 			elapsedMs: { unit: "ms", direction: "lower", reliability: metricSupport.eventToRender },
@@ -938,14 +1047,16 @@ export async function runJourney(context) {
 		correctness: {
 			status: "passed",
 			samplesPassed: samples.length,
+			retentionSamplesPassed: samples.filter(sample => sample.retention?.fullCountWindowForEveryEviction && sample.retention?.belowByteLimit).length,
 			expectedEventsPerSample: fixture.expectedFrames.length,
 			fixtureSemanticHash: fixture.semanticHash,
 			expectedFinalSemanticHash: fixture.expectedFinalSemanticHash,
 			expectedFinalSemanticCounts: fixture.expectedFinalSemanticCounts,
 			liveRefreshParity: true,
 		},
-		interpretation: "Validate event and live-refresh parity first. Then compare lower event-to-render p95 and frame/long-task/heap metrics from alternating runs on the same host.",
+		interpretation: "Validate retention saturation and event/live-refresh parity first. Compare direct lower retention-eviction time and higher derived throughput before treating browser metric movement as meaningful.",
 		limitations: [
+			"Direct retention timing sums the production emitSessionEvent push interval for a fixed tagged suffix; per-call performance.now overhead is shared by baseline and candidate.",
 			"Slow and dropped frames are estimates derived from requestAnimationFrame cadence, not compositor telemetry.",
 			"Long-task and heap metrics are reported only when Chromium exposes their browser APIs; unsupported values remain null. peakHeapBytes is the largest periodic precise-memory sample, so it is a sampled lower bound rather than a true high-water mark.",
 			"Mutation-to-animation-frame timing measures the first committed DOM containing each cumulative marker; superseded updates remain present in protocol counts.",
@@ -953,6 +1064,6 @@ export async function runJourney(context) {
 		noiseSources: [
 			"Browser scheduling, display refresh cadence, garbage collection, CPU frequency scaling, antivirus scanning, and concurrent host load.",
 		],
-		comparisonMethod: "Run baseline and candidate on the same host, Node/Chromium version, viewport and fixture hash; alternate revisions, confirm parity hashes, then inspect raw samples, median, p95, MAD and coefficient of variation.",
+		comparisonMethod: "Run baseline and candidate with this identical harness on the same host, Node/Chromium version, viewport and fixture hashes; alternate revisions, confirm saturation/parity proofs, then inspect raw samples, median, p95, min/max/range, MAD and coefficient of variation.",
 	};
 }
