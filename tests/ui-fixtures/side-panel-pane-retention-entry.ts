@@ -180,15 +180,15 @@ function addFixtureStyle(): void {
 	if (document.getElementById("pane-retention-fixture-style")) return;
 	const style = document.createElement("style");
 	style.id = "pane-retention-fixture-style";
-	// Minimal Tailwind-equivalents plus the REAL app.css split-row rules the
-	// geometry assertions depend on (app.css:1147-1159). `[hidden]` is deliberately
+	// Minimal Tailwind-equivalents plus the REAL app.css split-row and divider
+	// rules the geometry assertions depend on (app.css:1147-1190). `[hidden]` is deliberately
 	// NOT `!important`: Tailwind's preflight rule loses to a `display:flex`
 	// utility class exactly as it does in production, so the fixture still
 	// exercises the "hidden alone does not hide a flex box" trap (design §3.3).
 	style.textContent = `
 		:root { --border:#d0d0d0; --background:#fff; --foreground:#111; --muted-foreground:#666; --primary:#2563eb; --secondary:#f4f4f5; --mobile-header-height:60px; }
 		*, *::before, *::after { box-sizing: border-box; }
-		body { margin: 0; font-family: system-ui, sans-serif; }
+		body { margin: 0; font-family: system-ui, sans-serif; background: var(--background); color: var(--foreground); }
 		.app-shell { height: 100vh; }
 		[hidden] { display: none; }
 		.hidden { display: none; }
@@ -215,12 +215,46 @@ function addFixtureStyle(): void {
 		.py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
 		.goal-tab-bar { background: var(--background); overflow-x: auto; }
 		.goal-tab-pill { display: inline-flex; align-items: center; gap: 0.25rem; border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem 0.5rem; white-space: nowrap; }
-		.goal-tab-pill--active { background: var(--primary); color: #fff; }
+		.goal-tab-pill--active { background: var(--primary); color: var(--background); }
 		@media (min-width: 768px) {
 			.side-panel-split-layout > .side-panel-chat-pane,
-			.goal-split-layout > .goal-chat-panel { flex: 0 0 50%; max-width: 50%; overflow: hidden; }
+			.goal-split-layout > .goal-chat-panel {
+				flex: 1 1 auto;
+				max-width: calc(100% - var(--side-panel-width, 50%));
+				overflow: hidden;
+			}
 			.side-panel-split-layout > .side-panel-workspace,
-			.goal-split-layout > .goal-preview-panel { flex: 0 0 50%; max-width: 50%; overflow: hidden; }
+			.goal-split-layout > .goal-preview-panel {
+				flex: 0 0 var(--side-panel-width, 50%);
+				max-width: var(--side-panel-width, 50%);
+				overflow: hidden;
+			}
+			.side-panel-split-layout { position: relative; }
+			.side-panel-resize-handle {
+				position: absolute;
+				top: 0;
+				bottom: 0;
+				left: calc(100% - var(--side-panel-width, 50%) - 4px);
+				width: 8px;
+				z-index: 20;
+				cursor: col-resize;
+				touch-action: none;
+				outline: none;
+			}
+			.side-panel-resize-handle::after {
+				content: "";
+				position: absolute;
+				top: 0;
+				bottom: 0;
+				left: 3px;
+				width: 2px;
+				background: transparent;
+			}
+			.side-panel-resize-handle:hover::after,
+			.side-panel-resize-handle:active::after,
+			.side-panel-resize-handle:focus-visible::after {
+				background: color-mix(in oklch, var(--primary) 55%, transparent);
+			}
 		}
 		.side-panel-slider { width: 100%; }
 	`;
