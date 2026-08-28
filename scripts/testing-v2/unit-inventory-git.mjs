@@ -34,3 +34,24 @@ export function readOptionalGitPath(readGitText, { path, revision }) {
 		throw error;
 	}
 }
+
+/** Decode Git's `-z` pathname output without treating newlines as separators. */
+export function parseNullDelimitedGitPaths(output) {
+	const text = Buffer.isBuffer(output) ? output.toString("utf-8") : String(output ?? "");
+	return text.split("\0").filter(Boolean);
+}
+
+/**
+ * Collect pathnames introduced since a merge base plus untracked pathnames.
+ * Rename detection is deliberately disabled so every rename/copy destination
+ * is represented by the add-only diff and reaches placement admission.
+ */
+export function collectIntroducedPaths(readGitOutput, { mergeBase }) {
+	const tracked = parseNullDelimitedGitPaths(readGitOutput([
+		"diff", "--no-renames", "--diff-filter=A", "--name-only", "-z", mergeBase, "--",
+	]));
+	const untracked = parseNullDelimitedGitPaths(readGitOutput([
+		"ls-files", "--others", "--exclude-standard", "-z",
+	]));
+	return [...new Set([...tracked, ...untracked].map((path) => path.replace(/\\/g, "/")))].sort();
+}

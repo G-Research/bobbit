@@ -3,41 +3,23 @@
  * parity.mjs — Test Suite v2 parity / guard proof.
  *
  * Usage:
- *   node scripts/testing-v2/parity.mjs --scope core   (default, fast — bucket membership only)
- *   node scripts/testing-v2/parity.mjs --scope all    (full proof: coverage + spec + guard)
+ *   node scripts/testing-v2/parity.mjs --scope core   (default, fast — discovery only)
+ *   node scripts/testing-v2/parity.mjs --scope all    (full proof: coverage + spec + discovery)
  *
- * --scope core (default):
- *   Bucket membership + guard self-coverage checks only. No test runner invoked.
- *   Checks:
- *     1. No dangling v2Path (v2Path must point at an existing tests2 file).
- *     2. No orphans (every file under tests2/{core,dom,integration} is claimed or v2Native).
- *     3. No retired-without-replacement.
- *     4. Guard self-coverage (tests2/core/guard-v2.test.ts exists and is v2Native).
+ * --scope core verifies convention discovery, exactly-once ownership, and guard
+ * self-coverage without invoking a test runner.
  *
- * --scope all (full parity proof):
- *   Runs all of the above, PLUS:
- *     5. Runs vitest with V8 coverage — compares per-area line+branch coverage
- *        against tests2/v2-baseline-coverage.json (creates on first run).
- *     6. Runs spec-check-helper to verify story-registry contract completeness
- *        against tests2/v2-baseline-spec.json (creates on first run).
- *     7. Git-history honesty check — asserts baselines have not been bar-lowered
- *        relative to the last committed version.
+ * --scope all runs those checks plus V8 coverage comparison, story-registry
+ * contract completeness, and Git-history baseline honesty.
  *
  * Output: .profiles/testing-v2/parity/<timestamp>-<scope>.json
  * Exit 0 on pass; non-zero (with printed list) on any violation.
  */
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { spawnSync, execSync } from "node:child_process";
-import { REPO_ROOT } from "./lib-census.mjs";
+import { discoverTests, REPO_ROOT } from "./test-discovery.mjs";
 
-const SUPPORT_DIRS = new Set(["_quarantine", "_setup", "_e2e", "helpers"]);
-const MANAGED = [
-	["v2-core", "tests2/core"],
-	["v2-dom", "tests2/dom"],
-	["v2-integration", "tests2/integration"],
-];
-const MANAGED_BUCKETS = new Set(MANAGED.map(([b]) => b));
 const GUARD_PATH = "tests2/core/guard-v2.test.ts";
 
 const toPosix = (p) => p.replace(/\\/g, "/");
@@ -55,99 +37,29 @@ function parseArgs(argv) {
 	return out;
 }
 
-// ─── File listing ─────────────────────────────────────────────────────────────
+// ─── Convention inventory checks (scope core) ────────────────────────────────
 
-/** Recursively list *.test.ts / *.spec.ts under a tests2 subtree (repo-relative posix). */
-function listActual(rootRel) {
-	const abs = join(REPO_ROOT, rootRel);
-	const out = [];
-	const walk = (dir) => {
-		let ents;
-		try {
-			ents = readdirSync(dir, { withFileTypes: true });
-		} catch {
-			return; // subtree may not exist yet
-		}
-		for (const e of ents) {
-			const full = join(dir, e.name);
-			if (e.isDirectory()) {
-				if (SUPPORT_DIRS.has(e.name)) continue;
-				walk(full);
-			} else if (/\.(test|spec)\.ts$/.test(e.name)) {
-				out.push(toPosix(full.slice(REPO_ROOT.length + 1)));
-			}
-		}
-	};
-	walk(abs);
-	return out.sort();
-}
-
-// ─── Bucket membership checks (scope core) ───────────────────────────────────
-
-function runCoreChecks(entries, v2Native) {
+function runCoreChecks(discovery) {
 	const violations = [];
-
-	const claimed = new Set(
-		entries.filter((e) => typeof e.v2Path === "string" && e.v2Path).map((e) => e.v2Path),
-	);
-	const nativePaths = new Set(v2Native.map((n) => n.path));
-
-	// (1) No dangling v2Path.
-	for (const e of entries) {
-		if (MANAGED_BUCKETS.has(e.bucket) && typeof e.v2Path === "string" && e.v2Path) {
-			if (!existsSync(join(REPO_ROOT, e.v2Path))) {
-				violations.push(`DANGLING v2Path: ${e.file} -> ${e.v2Path} (file does not exist).`);
-			}
-		}
-	}
-
-	// (2) No orphans — every actual tests2 file is claimed or v2Native.
-	const actual = MANAGED.flatMap(([, rel]) => listActual(rel));
-	const orphans = actual.filter((f) => !claimed.has(f) && !nativePaths.has(f));
-	for (const f of orphans) {
-		violations.push(
-			`ORPHAN tests2 file: ${f} — not claimed by any v2Path and not in tests-map.json "v2Native".`,
-		);
-	}
-
-	// (3) No retired-without-replacement.
-	for (const e of entries) {
-		if (e.method === "retire-with-mapping") {
-			const hasRepl = Array.isArray(e.replacement) && e.replacement.length > 0;
-			const hasPath = typeof e.v2Path === "string" && e.v2Path.length > 0;
-			if (!hasRepl && !hasPath) {
-				violations.push(`RETIRED-WITHOUT-REPLACEMENT: ${e.file} (method retire-with-mapping, empty replacement[], no v2Path).`);
-			}
-		}
-	}
-
-	// (4) Guard self-coverage.
 	if (!existsSync(join(REPO_ROOT, GUARD_PATH))) {
-		violations.push(`GUARD MISSING: ${GUARD_PATH} does not exist (the v2 bucket-membership guard test).`);
+		violations.push(`GUARD MISSING: ${GUARD_PATH} does not exist.`);
 	}
-	if (!nativePaths.has(GUARD_PATH)) {
-		violations.push(`GUARD NOT SELF-COVERED: ${GUARD_PATH} is not listed in tests-map.json "v2Native".`);
+	if (!discovery.core.includes(GUARD_PATH)) {
+		violations.push(`GUARD NOT DISCOVERED: ${GUARD_PATH} must follow the tests2/core/**/*.test.ts convention.`);
 	}
-	for (const n of v2Native) {
-		if (!existsSync(join(REPO_ROOT, n.path))) {
-			violations.push(`V2NATIVE MISSING: ${n.path} listed in v2Native but not present on disk.`);
-		}
+	const duplicates = discovery.all.filter((file, index) => discovery.all.indexOf(file) !== index);
+	for (const file of [...new Set(duplicates)].sort()) {
+		violations.push(`DUPLICATE DISCOVERY: ${file} is assigned to more than one lane.`);
 	}
-
-	const migrated = entries.filter((e) => typeof e.v2Path === "string" && e.v2Path).length;
-	const daily = entries.filter((e) => e.bucket === "daily").length;
-	const pending = entries.filter((e) => MANAGED_BUCKETS.has(e.bucket) && !(typeof e.v2Path === "string" && e.v2Path)).length;
-
 	return {
 		violations,
 		counts: {
-			total: entries.length,
-			migrated,
-			daily,
-			pending,
-			v2Native: v2Native.length,
-			actualTests2Files: MANAGED.flatMap(([, rel]) => listActual(rel)).length,
-			orphans: orphans.length,
+			total: discovery.all.length,
+			unit: discovery.unit.length,
+			browser: discovery.browser.length,
+			e2e: Object.values(discovery.e2eGroups).flat().length,
+			manual: discovery.manual.length,
+			duplicates: duplicates.length,
 		},
 	};
 }
@@ -371,7 +283,7 @@ function checkBaselineHonesty(baselinePath, baselineLabel) {
 
 // ─── Full parity proof (scope all) ───────────────────────────────────────────
 
-function runScopeAll(entries, v2Native, opts = {}) {
+function runScopeAll(opts = {}) {
 	const violations = [];
 
 	// ── Step 1: Run vitest with V8 coverage ──────────────────────────────────
@@ -500,30 +412,22 @@ function runScopeAll(entries, v2Native, opts = {}) {
 
 function main() {
 	const { scope, skipRun } = parseArgs(process.argv.slice(2));
-	const mapPath = join(REPO_ROOT, "tests2", "tests-map.json");
-
-	let map;
+	let discovery;
 	try {
-		map = JSON.parse(readFileSync(mapPath, "utf8"));
-	} catch (e) {
-		console.error(`parity: could not read/parse ${mapPath}: ${e.message}`);
+		discovery = discoverTests();
+	} catch (error) {
+		console.error(`parity: discovery failed: ${error instanceof Error ? error.message : String(error)}`);
 		process.exit(2);
 	}
-	const entries = Array.isArray(map) ? map : map.entries;
-	if (!Array.isArray(entries)) {
-		console.error("parity: tests-map.json has no entries array.");
-		process.exit(2);
-	}
-	const v2Native = (map && !Array.isArray(map) && Array.isArray(map.v2Native)) ? map.v2Native : [];
 
-	// Always run core checks.
-	const core = runCoreChecks(entries, v2Native);
+	// Always run convention placement and exactly-once checks.
+	const core = runCoreChecks(discovery);
 	const violations = [...core.violations];
 
 	// Full proof when --scope all.
 	let fullResult = null;
 	if (scope === "all") {
-		fullResult = runScopeAll(entries, v2Native, { skipRun });
+		fullResult = runScopeAll({ skipRun });
 		violations.push(...fullResult.violations);
 	}
 
@@ -563,8 +467,8 @@ function main() {
 
 	const c = core.counts;
 	console.log(
-		`\n  total=${c.total} migrated=${c.migrated} daily=${c.daily} pending=${c.pending} ` +
-		`v2Native=${c.v2Native} orphans=${c.orphans} violations=0`,
+		`\n  total=${c.total} unit=${c.unit} browser=${c.browser} e2e=${c.e2e} ` +
+		`manual=${c.manual} duplicates=${c.duplicates} violations=0`,
 	);
 
 	if (fullResult?.coverage) {
