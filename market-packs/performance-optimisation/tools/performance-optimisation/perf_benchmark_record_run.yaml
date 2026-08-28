@@ -1,0 +1,7 @@
+name: perf_benchmark_record_run
+group: Performance Optimisation
+description: Record a structured baseline or candidate benchmark result.
+summary: "Record a structured baseline or candidate benchmark result."
+provider:
+  type: bobbit-extension
+  extension: extension.js

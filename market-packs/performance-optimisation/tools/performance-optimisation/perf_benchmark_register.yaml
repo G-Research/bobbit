@@ -1,0 +1,7 @@
+name: perf_benchmark_register
+group: Performance Optimisation
+description: Register one existing named project command as a benchmark reference.
+summary: "Register one existing named project command as a benchmark reference."
+provider:
+  type: bobbit-extension
+  extension: extension.js

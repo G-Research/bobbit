@@ -23,7 +23,7 @@ import path from "node:path";
 // NOTE: `hindsight` intentionally omitted — the pack does not work yet, so it is
 // hidden (not shipped as a built-in band, no marketplace row/toggle). Its source
 // stays under market-packs/hindsight/ so it can be re-added here later.
-const FIRST_PARTY_PACKS = ["file-explorer", "pr-walkthrough", "terminal"]; // explicit allowlist
+const FIRST_PARTY_PACKS = ["file-explorer", "performance-optimisation", "pr-walkthrough", "terminal"]; // explicit allowlist
 const SRC = "market-packs";
 const SERVER_OUT_DIR = process.env.BOBBIT_SERVER_OUT_DIR || "dist";
 const DEST = path.join(SERVER_OUT_DIR, "server", "builtin-packs", "market-packs");

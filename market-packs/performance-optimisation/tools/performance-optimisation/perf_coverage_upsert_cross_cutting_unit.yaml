@@ -1,0 +1,7 @@
+name: perf_coverage_upsert_cross_cutting_unit
+group: Performance Optimisation
+description: Create or update a validated semantic cross-cutting coverage unit.
+summary: "Create or update a validated semantic cross-cutting coverage unit."
+provider:
+  type: bobbit-extension
+  extension: extension.js

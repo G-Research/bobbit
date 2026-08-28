@@ -1,0 +1,7 @@
+name: perf_hypothesis_record_outcome
+group: Performance Optimisation
+description: Record one structured terminal performance recommendation.
+summary: "Record one structured terminal performance recommendation."
+provider:
+  type: bobbit-extension
+  extension: extension.js

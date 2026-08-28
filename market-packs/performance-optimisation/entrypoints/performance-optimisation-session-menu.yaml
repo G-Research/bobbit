@@ -1,0 +1,6 @@
+id: performance-optimisation.session-menu
+kind: session-menu
+label: Open performance control pane
+icon: zap
+target:
+  panelId: performance-optimisation.panel

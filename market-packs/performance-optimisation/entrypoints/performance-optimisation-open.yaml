@@ -1,0 +1,6 @@
+id: performance-optimisation.open
+kind: composer-slash
+label: /performance
+icon: zap
+target:
+  panelId: performance-optimisation.panel

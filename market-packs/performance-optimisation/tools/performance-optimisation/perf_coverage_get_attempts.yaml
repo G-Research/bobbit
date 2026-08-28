@@ -1,0 +1,7 @@
+name: perf_coverage_get_attempts
+group: Performance Optimisation
+description: Read bounded scan attempts for Scanner reconciliation.
+summary: "Read bounded scan attempts for Scanner reconciliation."
+provider:
+  type: bobbit-extension
+  extension: extension.js
