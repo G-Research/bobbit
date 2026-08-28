@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -117,14 +117,28 @@ describe("canonical test scaffold", () => {
 		expect(() => scaffoldTestPath("dom", "nested/???")).toThrow(/each segment/);
 	});
 
-	it("creates exclusively without a registry side effect", () => {
+	it("creates exclusively through real canonical directories without a registry side effect", () => {
 		const root = mkdtempSync(join(tmpdir(), "bobbit-test-layout-"));
 		temporaryRoots.push(root);
-		const relativePath = createTestFile("dom", "panel-layout", { root });
-		expect(relativePath).toBe("tests/dom/panel-layout.dom.test.ts");
+		mkdirSync(join(root, "tests", "dom"), { recursive: true });
+		const relativePath = createTestFile("dom", "nested/panel-layout", { root });
+		expect(relativePath).toBe("tests/dom/nested/panel-layout.dom.test.ts");
 		const source = readFileSync(join(root, ...relativePath.split("/")), "utf8");
 		expect(source).toContain('from "vitest"');
 		expect(validateTestPath(relativePath, source)).toEqual([]);
-		expect(() => createTestFile("dom", "panel-layout", { root })).toThrow(/Refusing to overwrite/);
+		expect(() => createTestFile("dom", "nested/panel-layout", { root })).toThrow(/Refusing to overwrite/);
+	});
+
+	it("rejects a symlink or junction parent without writing to its external target", () => {
+		const container = mkdtempSync(join(tmpdir(), "bobbit-test-layout-link-"));
+		temporaryRoots.push(container);
+		const root = join(container, "repository");
+		const external = join(container, "external");
+		mkdirSync(join(root, "tests", "unit"), { recursive: true });
+		mkdirSync(external);
+		symlinkSync(external, join(root, "tests", "unit", "core"), process.platform === "win32" ? "junction" : "dir");
+
+		expect(() => createTestFile("unit-core", "proof", { root })).toThrow(/symbolic links or junctions/);
+		expect(existsSync(join(external, "proof.unit.test.ts"))).toBe(false);
 	});
 });

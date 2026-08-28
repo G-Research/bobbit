@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { closeSync, mkdirSync, openSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { closeSync, lstatSync, mkdirSync, openSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TEST_LAYOUT, TEST_SEMANTICS, normalizeTestPath } from "./layout-policy.mjs";
 
@@ -47,11 +47,62 @@ export function scaffoldTestSource(semantic, name) {
 	return `import { test } from "@playwright/test";\n\ntest(${JSON.stringify(`${title} adds focused coverage`)}, async () => {\n\tthrow new Error("Implement this scaffolded test before committing it.");\n});\n`;
 }
 
+function isStrictlyContained(root, candidate) {
+	const child = relative(root, candidate);
+	return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+function assertRealDirectory(directory, relativePath) {
+	const stats = lstatSync(directory);
+	if (stats.isSymbolicLink()) {
+		throw new Error(`Unsafe scaffold path ${relativePath}: parent directories must not be symbolic links or junctions.`);
+	}
+	if (!stats.isDirectory()) {
+		throw new Error(`Unsafe scaffold path ${relativePath}: every parent component must be a directory.`);
+	}
+}
+
+/**
+ * Resolve and create a canonical parent without following links. This local CLI
+ * assumes its checkout is not concurrently replacing directories during the
+ * final check/open window; race-proof writes require an openat-style boundary.
+ */
+function prepareTarget(root, relativePath) {
+	const canonicalRoot = realpathSync(resolve(root));
+	assertRealDirectory(canonicalRoot, relativePath);
+	const lexicalTarget = resolve(canonicalRoot, ...relativePath.split("/"));
+	if (!isStrictlyContained(canonicalRoot, lexicalTarget)) {
+		throw new Error(`Unsafe scaffold path ${relativePath}: target must stay inside the repository.`);
+	}
+
+	const lexicalParent = dirname(lexicalTarget);
+	let current = canonicalRoot;
+	for (const segment of relative(canonicalRoot, lexicalParent).split(sep).filter(Boolean)) {
+		current = join(current, segment);
+		try {
+			assertRealDirectory(current, relativePath);
+		} catch (error) {
+			if (!error || typeof error !== "object" || error.code !== "ENOENT") throw error;
+			try {
+				mkdirSync(current);
+			} catch (mkdirError) {
+				if (!mkdirError || typeof mkdirError !== "object" || mkdirError.code !== "EEXIST") throw mkdirError;
+			}
+			assertRealDirectory(current, relativePath);
+		}
+	}
+
+	const canonicalParent = realpathSync(lexicalParent);
+	if (!isStrictlyContained(canonicalRoot, canonicalParent)) {
+		throw new Error(`Unsafe scaffold path ${relativePath}: resolved parent escapes the repository.`);
+	}
+	return join(canonicalParent, basename(lexicalTarget));
+}
+
 /** Create one canonical test exclusively; no registry or inventory is updated. */
 export function createTestFile(semantic, name, { root = REPO_ROOT } = {}) {
 	const relativePath = scaffoldTestPath(semantic, name);
-	const absolutePath = resolve(root, ...relativePath.split("/"));
-	mkdirSync(dirname(absolutePath), { recursive: true });
+	const absolutePath = prepareTarget(root, relativePath);
 	let descriptor;
 	try {
 		descriptor = openSync(absolutePath, "wx");
