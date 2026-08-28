@@ -1,5 +1,7 @@
 # Review-agent timeout contract
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 ## Status and scope
 
 This design covers the `llm-review` and `agent-qa` timeout/recovery work in the **Timeout contract and recovery** subgoal. It does not change command/build timeout policy.

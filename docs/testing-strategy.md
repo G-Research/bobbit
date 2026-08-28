@@ -9,13 +9,12 @@ suite. The commands in `.bobbit/config/project.yaml` route to these canonical ph
 
 | Phase | Gate command | Runs | Source of truth |
 |-------|-------------|------|-----------------|
-| **unit** | `npm run test:unit` | one direct Vitest invocation; tier-1 projects `v2-core`, `v2-dom`, `v2-integration`, and `v2-isolated` | [`vitest.config.ts`](../vitest.config.ts) and [`tests2/tests-map.json`](../tests2/tests-map.json) |
-| **browser** | `npm run test:browser` | Playwright browser-v2 fixtures and journeys | [`playwright-v2.config.ts`](../playwright-v2.config.ts) |
-| **e2e** | `npm run test:e2e` | real-fidelity local Git/worktree, Docker, MCP, process, port, and restart coverage, including conditional Vitest Group D | [`run-e2e-v2.mjs`](../scripts/testing-v2/run-e2e-v2.mjs) and `tests2/tests-map.json` |
+| **unit** | `npm run test:unit` | one direct Vitest invocation; tier-1 projects `v2-core`, `v2-dom`, `v2-integration`, and `v2-isolated` | [`vitest.config.ts`](../vitest.config.ts) and convention discovery |
+| **browser** | `npm run test:browser` | Playwright browser-v2 fixtures and journeys | [`playwright-v2.config.ts`](../playwright-v2.config.ts) and convention discovery |
+| **e2e** | `npm run test:e2e` | real-fidelity local Git/worktree, Docker, MCP, process, port, and restart coverage, including conditional Vitest Group D | [`run-e2e-v2.mjs`](../scripts/testing-v2/run-e2e-v2.mjs) and convention discovery |
 | **manual-integration** *(gate-exempt)* | `npm run test:manual` | real LLM, agents, and Docker | [`playwright-manual.config.ts`](../playwright-manual.config.ts) |
 
-There is no scheduled daily lane. The map's `daily` value is retained as an internal
-real-fidelity taxonomy consumed by `test:e2e:v2`; it is not a `test:daily` command.
+There is no scheduled daily lane or `test:daily` command. Real-fidelity automated tests run in `test:e2e`; real-agent and real-LLM tests run only in the gate-exempt `test:manual` lane.
 
 ### Complete lanes are the feedback model
 
@@ -23,11 +22,30 @@ Local development and workflow qualification use the same complete lane commands
 
 Run `npm run test:unit` for the normal edit loop. Add the complete browser or E2E lane when the change crosses those boundaries, and run every phase required by the workflow before merge. Manual integration remains explicitly opt-in because it uses real LLMs, agents, and Docker.
 
-**Execution membership is the invariant.** Every materialized test has explicit
-runner, tier, and project metadata in `tests2/tests-map.json`. New tests land in
-`tests2/`; `*.test.ts` uses Vitest and `*.spec.ts` uses Playwright. The guard, parity
-tooling, and `npm run test:unit:inventory` reject orphaned files, duplicate or missing
-ownership, and lost declaration semantics.
+**Execution membership is the invariant.** One shared filesystem classifier derives the runner, phase, and project from each test's repository-relative path and filename suffix. Correctly placed tests are discovered automatically; there is no registration step or checked-in per-test inventory. Placement and inventory guards reject unsupported paths, ambiguous suffixes, duplicate ownership, and lost declaration semantics.
+
+## Test placement and automatic discovery
+
+Choose the cheapest lane that proves the behavior, then place and name the file according to this table. Discovery is recursive where `**` is shown and sorts paths deterministically.
+
+| Placement | Owner | Use for |
+|---|---|---|
+| `tests2/core/**/*.test.ts` | unit / Vitest `v2-core` | Pure logic and server decisions without DOM or real subprocess fidelity |
+| `tests2/dom/**/*.test.ts` | unit / Vitest `v2-dom` | happy-dom component and browser-API behavior that does not need Chromium geometry |
+| `tests2/integration/**/*.test.ts` | unit / Vitest `v2-integration` | In-process gateway, API, and integration coverage |
+| `tests2/{core,integration}/**/*.isolated.test.ts` | unit / Vitest `v2-isolated` | Exceptional module or environment bleeders that require per-file isolation and one worker |
+| `tests2/browser/**/*.spec.ts` except `tests2/browser/e2e/**` | browser / Playwright `browser-v2` | Chromium fixtures and user journeys |
+| `tests/*.e2e.test.ts` at the top level | E2E Group A / `tsx --test` | Real Git, worktree, filesystem, sandbox-mount, or process-tree fidelity |
+| `tests/e2e/**/*.e2e.spec.ts` | E2E Group B / Playwright | Real worktree pool, MCP subprocess, port, Docker, or restart fidelity |
+| `tests2/browser/e2e/**/*.spec.ts` | E2E Group C / Playwright `browser-v2-e2e` | Browser journeys that require the real-fidelity E2E coordinator |
+| `tests2/{core,integration}/**/*.e2e.test.ts` | E2E Group D / Vitest `v2-e2e-vitest` | Real-fidelity Vitest suites excluded from the unit subprocess boundary |
+| `tests/manual-integration/**/*.{test,spec}.ts` | manual / Playwright | Real agents, real LLMs, and opt-in Docker coverage |
+
+The semantic suffix is part of ownership, not a label to add speculatively. Use `*.isolated.test.ts` only when normal shared-worker isolation is unsafe. Use `*.e2e.test.ts` or `*.e2e.spec.ts` only when the test genuinely needs process, Docker, worktree, restart, MCP, or operating-system fidelity. DOM does not accept either exceptional Vitest suffix.
+
+Unsupported or ambiguous placements fail with a destination or suffix remedy. In particular, `*.spec.ts` cannot enter a Vitest directory, `*.test.ts` cannot enter `tests2/browser`, Group B requires `*.e2e.spec.ts`, and a filename cannot contain both `.isolated.` and `.e2e.`. This keeps browser journeys out of API/Vitest lanes and prevents real-fidelity tests from being collected as ordinary browser or unit coverage.
+
+Retained historical `tests/**/*.test.ts` and `tests/e2e/**/*.spec.ts` files outside the supported semantic destinations may remain inactive. Adding, renaming, copying, or untracking a test-shaped file there is rejected. `node scripts/testing-v2/check-inventory.mjs` validates Git-introduced and untracked paths, including rename and copy destinations, without changing execution selection. Move `tests/new.test.ts` to an approved `tests2` unit location; rename and place `tests/e2e/new.spec.ts` as an approved Group B `*.e2e.spec.ts` file.
 
 The unit phase uses one Vitest coordinator with a fixed three-worker cap.
 `VITEST_MAX_WORKERS` may lower the cap only. The normal `retry: 3` / `retries: 3`
@@ -79,13 +97,10 @@ blind reloads, or weaker assertions; repair ownership or readiness instead. See
 |------|------------------|--------|
 | tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3; qualification uses `BOBBIT_V2_RETRY_FREE=1` |
 | browser | `v2-browser` | Playwright |
-| E2E real fidelity | tests-map `daily`, including conditional `v2-e2e-vitest` | `run-e2e-v2.mjs` Groups A–D |
+| E2E real fidelity | convention-discovered Groups A–D, including conditional `v2-e2e-vitest` | `run-e2e-v2.mjs` |
 | manual integration | `manual-integration` | Playwright manual config |
 
-Authoritative membership and counts come from `tests2/tests-map.json`, not prose.
-Exactly `tests2/core/team-manager.test.ts` and
-`tests2/core/marketplace-install.test.ts` are E2E-owned Vitest files; corresponding
-`*-decisions.test.ts` suites retain fast seam-based tier-1 coverage.
+Authoritative membership comes from the live filesystem and the [placement table](#test-placement-and-automatic-discovery), not prose or a checked-in inventory. `node scripts/testing-v2/run-e2e-v2.mjs --list` reports the discovered real-fidelity groups for review and parity checks.
 
 ### What Each Layer Actually Tests
 

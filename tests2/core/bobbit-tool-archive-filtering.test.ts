@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Listed in tests-map.json `v2Native`.
+// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
 //
 // Archive visibility contract: agent-facing bobbit_read list/search operations
 // hide archived rows by default, while preserving explicit archive opt-ins.

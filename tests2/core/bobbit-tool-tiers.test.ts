@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Listed in tests-map.json `v2Native`.
+// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
 //
 // Tier separation: each YAML declares its own `group` + `grantPolicy` defaults,
 // and the on-wire `operation` union of each tool matches both the dispatched

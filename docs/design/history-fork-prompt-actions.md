@@ -1,5 +1,7 @@
 # History Fork Prompt Actions
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 ## Status and decision
 
 This document is the implementation contract for **Fork From History**. It records the selected design and the alternatives considered during implementation.

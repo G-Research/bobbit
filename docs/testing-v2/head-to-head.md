@@ -1,10 +1,12 @@
 # Head-to-head: legacy vs v2 — measured wall + CPU cost (task 190c7af5)
 
+> **Historical measurement record.** Commands, lane membership, counts, and references to the retired `tests2/tests-map.json` below describe the suite at measurement time. Use [Testing strategy](../testing-strategy.md) for current commands and convention-based ownership.
+
 > ## ⏩ UPDATE (task 7862db76, test-engineer-6d58, 2026-07-08) — e2e:v2 is now GREEN + proven external-free
 >
 > The §4 caveats ("e2e:v2 under-measured, not yet green, no runner") are RESOLVED.
 > A reusable runner (`scripts/testing-v2/run-e2e-v2.mjs`, `npm run test:e2e:v2`)
-> now drives the whole real-fidelity tier from `tests2/tests-map.json`. Read the
+> drove the whole real-fidelity tier from the then-current registry. Read the
 > new **§8 (green e2e:v2)**, **§9 (external-service-free proof)**, and **§10 (the
 > corrected honest TOTAL)** below.
 >
@@ -222,7 +224,7 @@ sampler on a churny suite should be treated as inflated.**
 npm run test:unit                                   # legacy unit
 BOBBIT_E2E_SKIP_GUARDS=1 npm run test:e2e           # legacy e2e (bypass sleep lint)
 npm run test:v2                                     # v2 unit (tier-1 + tier-2)
-# e2e:v2 — now a single reusable runner (tracks tests-map.json, not a frozen list):
+# Historical e2e:v2 runner invocation:
 npm run test:e2e:v2                    # build + A(node) → B(e2e) → C(browser), retries:0
 node scripts/testing-v2/run-e2e-v2.mjs --group A|B|C   # one group at a time
 node scripts/testing-v2/run-e2e-v2.mjs --list          # show classification + exclusions
@@ -232,11 +234,7 @@ node scripts/testing-v2/run-e2e-v2.mjs --list          # show classification + e
 
 ## 8. e2e:v2 is GREEN (task 7862db76)
 
-The real-fidelity tier is now a reusable runner —
-`scripts/testing-v2/run-e2e-v2.mjs` (`npm run test:e2e:v2`) — that classifies the
-`daily`-bucket entries of `tests2/tests-map.json` into three groups, MINUS
-`manual-integration` (the real-LLM/agent lane) and MINUS the "one full legacy
-run" step. So it tracks the map instead of a hand-assembled snapshot.
+At measurement time, the real-fidelity tier used the reusable `scripts/testing-v2/run-e2e-v2.mjs` runner (`npm run test:e2e:v2`) to classify the retired registry's `daily` bucket into three groups, excluding `manual-integration` (the real-LLM/agent lane) and the "one full legacy run" step. Current Group A–D membership comes from filesystem conventions.
 
 | group | what | run via | result | wall | peak procs |
 |---|---|---|---|---|---|

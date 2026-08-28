@@ -1,5 +1,7 @@
 # Browser-chaos porting pass — HANDOFF
 
+> **Historical migration handoff.** References to the retired `tests2/tests-map.json` and `guard-v2` instructions below describe the completed porting campaign, not current test ownership or authoring steps.
+
 Comprehensive bounded pass: mutation-test every distinct audit-flagged browser
 behaviour (`consolidation-assertion-parity.md`), port every confirmed real hole
 into the owning v2 journey, end with a full-verify campaign at **0 real holes**.

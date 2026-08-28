@@ -2,15 +2,7 @@
 
 Per-area notes on what user stories and contracts are covered by which test files. For test architecture and harness APIs, see [testing-strategy.md](testing-strategy.md). For opt-in video capture on top of browser E2E, see [testing-tier-2-5.md](testing-tier-2-5.md).
 
-> **v2 path note.** This project runs **Test Suite v2**. Most `tests/…` paths cited
-> below were migrated at switchover into `tests2/…` (tier-1 vitest core/dom/integration
-> + tier-2 Playwright browser); the authoritative old→new mapping is
-> [`tests2/tests-map.json`](../tests2/tests-map.json) (`v2Path` per entry). Paths that
-> still resolve under `tests/e2e/…` are the **relocate** specs the `e2e:v2`
-> real-fidelity phase runs as-is, plus shared harness/helpers. The behavioural
-> coverage described here is preserved — only the file locations moved. Coverage
-> parity is proven by [`parity.mjs`](../scripts/testing-v2/parity.mjs) + the chaos
-> mutation comparison ([`docs/testing-v2/`](testing-v2/)).
+> **v2 path note.** This project runs **Test Suite v2**. Some `tests/…` paths cited below were migrated at switchover into `tests2/…` (tier-1 Vitest core/DOM/integration and tier-2 Playwright browser). The migration inventory under [`docs/testing-v2/`](testing-v2/) is historical evidence, not current authoring guidance. Current execution ownership comes from the path and suffix conventions in [Testing strategy](testing-strategy.md#test-placement-and-automatic-discovery).
 
 ## Phase invariant
 
@@ -19,10 +11,7 @@ Tests run in four phases: **unit** (`npm run test:unit`, one direct Vitest run o
 (`npm run test:browser`, Playwright browser-v2), **e2e** (`npm run test:e2e`, the
 real-fidelity local Git/worktree/Docker/MCP/process/restart remainder), and
 **manual integration** (`npm run test:manual`, gate-exempt real LLM/agent coverage).
-Execution membership is pinned by [`tests2/tests-map.json`](../tests2/tests-map.json),
-`guard-v2`, parity, and the unit inventory audit: no orphan file, duplicate/missing
-owner, dangling `v2Path`, or lost declaration semantics. `*.test.ts` uses Vitest and
-`*.spec.ts` uses Playwright. See [testing-strategy.md — The phase invariant](testing-strategy.md#the-phase-invariant-read-this-first).
+Execution membership is discovered from canonical paths and suffixes. Placement and inventory audits reject unsupported files, duplicate or missing ownership, and lost declaration semantics. See [Testing strategy — Test placement and automatic discovery](testing-strategy.md#test-placement-and-automatic-discovery).
 
 ## Build warning regression coverage
 

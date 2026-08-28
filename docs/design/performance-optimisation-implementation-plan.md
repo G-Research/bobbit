@@ -1,5 +1,7 @@
 # Performance optimisation programme — implementation plan
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 Status: implementation in progress for [Performance optimisation programme](performance-optimisation-programme.md).
 
 ## 1. Delivery strategy

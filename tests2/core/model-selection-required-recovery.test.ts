@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Listed in tests-map.json `v2Native`.
+// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 // Failing-first cold-restore reproducer for a persisted model retired from the selectable catalog.
 
 import { guardProcessEnv } from "./helpers/env-guard.js";

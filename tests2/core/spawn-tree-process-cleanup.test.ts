@@ -138,7 +138,7 @@ async function run(mode) {
 
 // The unit tier keeps Windows lifecycle assertions on deterministic seams.
 // Native Job-object descendant cleanup runs in the real-fidelity node E2E lane
-// (tests/spawn-tree-shutdown-survival.test.ts) so cold PowerShell/.NET
+// (tests/spawn-tree-shutdown-survival.e2e.test.ts) so cold PowerShell/.NET
 // compilation cannot make a fixed wall-clock probe load-bearing here. POSIX
 // retains its native timeout-tree probe because it has no cold supervisor.
 for (const mode of ["natural", "timeout", "cancel"]) await run(mode);

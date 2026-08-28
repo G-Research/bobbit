@@ -1,4 +1,4 @@
-// v2-native — focused runtime contract regression. Listed in tests-map.json `v2Native`.
+// v2-native — focused runtime contract regression. Discovered from its `tests2/core` path.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";

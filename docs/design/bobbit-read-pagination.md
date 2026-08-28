@@ -1,5 +1,7 @@
 # Design: `bobbit_read` pagination
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 > **Superseded contract notice:** This document records the original pagination rollout and is not the current agent-tool contract. See the authoritative [`bobbit` gateway tool reference](../bobbit-gateway-tool.md) and built-in [`bobbit_read` detail docs](../../defaults/tools/bobbit/bobbit_read.yaml).
 
 Status: **implemented** · Goal: Page Bobbit Tools · Author: coder-861a

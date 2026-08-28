@@ -1,5 +1,7 @@
 # Promote Session to Goal — implementation design
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 Status: implemented. For the durable operator/developer contract, see [Goals, Workflows, Tasks & Gates — Promote the current session in place](../goals-workflows-tasks.md#promote-the-current-session-in-place) and [REST API — Current-session goal promotion](../rest-api.md#current-session-goal-promotion). The comparative design and implementation inventory below preserve the rationale for the selected architecture.
 
 ## Scope and invariants

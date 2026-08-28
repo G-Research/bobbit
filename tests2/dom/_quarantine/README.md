@@ -24,7 +24,4 @@ Their assertions are real page-journey assertions — exactly tier-2 material.
 | `goal-workflow-editor` | Full workflow-editor page: WS-driven state + app render loop. |
 | `tool-manager-mcp-section` | Settings tool-manager page: app render loop + async refresh; flaky settle under happy-dom. |
 
-**Action for the team lead:** re-bucket these entries in `tests-map.json` from
-`v2-dom` to `browser` (tier 2) and fold their assertions into the corresponding
-browser smoke journeys (sidebar navigation, search page, settings, goal workflow).
-The `.txt` ports here are the faithful reference for those assertions.
+**Current placement guidance:** keep these `.txt` files as inactive historical ports. To restore an assertion, fold it into the corresponding `tests2/browser/**/*.spec.ts` journey (sidebar navigation, search page, settings, or goal workflow). The browser path and `*.spec.ts` suffix provide automatic Playwright ownership; do not rename a port to `*.test.ts` under this DOM directory.

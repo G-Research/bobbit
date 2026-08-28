@@ -1,5 +1,7 @@
 # Author Identity Metadata
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 **Status:** implemented historical decision record, superseded in part by the addendum below
 
 The original imperative language records the metadata-only implementation that preceded message-author surfacing. It remains here as historical rationale rather than pending work. For the current maintainer contract, see [Message author identity](../message-author-identity.md).

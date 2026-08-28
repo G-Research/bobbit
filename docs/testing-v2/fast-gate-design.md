@@ -2,7 +2,7 @@
 
 ## Status and decision
 
-**Implemented.** This is the frozen implementation design; use [`unit-gate.md`](unit-gate.md) for the current operating model and [`fast-gate-progress.md`](fast-gate-progress.md) for qualification evidence.
+**Implemented.** This is the frozen implementation design; references to the retired `tests2/tests-map.json` describe the pre-replacement architecture and are historical. Use [`unit-gate.md`](unit-gate.md) for the current operating model and [`fast-gate-progress.md`](fast-gate-progress.md) for qualification evidence.
 
 This design replaced the unit-stage lane runner with one ordinary Vitest invocation. The unit stage has one coordinator, at most three Vitest workers across all projects, no test ledger reservation, no gateway-boot lease, no lane logs, and no cost-based sharding.
 

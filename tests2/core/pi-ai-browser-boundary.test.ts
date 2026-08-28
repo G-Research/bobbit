@@ -1,4 +1,4 @@
-// v2-native — Pi runtime browser boundary canary. Listed in tests-map.json `v2Native`.
+// v2-native — Pi runtime browser boundary canary. Discovered from its `tests2/core` path.
 //
 // Pi 0.81.1 exposes browser-compatible runtime modules under
 // `@earendil-works/pi-ai/api/*` for streamSimple and provider modules under

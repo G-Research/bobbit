@@ -119,7 +119,7 @@ describe("UnitFileBudgetReporter", () => {
 
 	test("ignores the conditional e2e project", () => {
 		const { reporter, elapse } = timedReporter();
-		elapse(moduleFor("/repo/tests2/core/team-manager.test.ts", "v2-e2e-vitest"), 60_000);
+		elapse(moduleFor("/repo/tests2/core/team-manager.e2e.test.ts", "v2-e2e-vitest"), 60_000);
 
 		assert.doesNotThrow(() => reporter.onTestRunEnd());
 	});
