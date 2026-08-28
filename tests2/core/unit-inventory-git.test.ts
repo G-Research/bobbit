@@ -61,10 +61,11 @@ describe("declaration semantic mapping lifecycle", () => {
 		expect(result.invalidSemanticMappings).toEqual([]);
 	});
 
-	it("ignores the historical mapping set once a source file is absent from a post-cutover base", () => {
+	it("ignores an absent historical source while still validating a surviving source", () => {
+		const survivingBaseName = "retired declaration in surviving file";
 		const survivingMapping = {
 			baseFile: targetFile,
-			baseName: "retired declaration in surviving file",
+			baseName: survivingBaseName,
 			current: [{ file: targetFile, name: targetName }],
 			rationale: "The same-file successor preserves the declaration.",
 		};
@@ -75,8 +76,10 @@ describe("declaration semantic mapping lifecycle", () => {
 			currentNamesByFile: new Map([[targetFile, [targetName]]]),
 		});
 
-		expect(result.mappingByBase.size).toBe(0);
-		expect(result.invalidSemanticMappings).toEqual([]);
+		expect([...result.mappingByBase.values()]).toEqual([survivingMapping]);
+		expect(result.invalidSemanticMappings).toEqual([
+			`${targetFile} :: ${survivingBaseName} — stale mapping; base declaration is not missing`,
+		]);
 	});
 
 	it("keeps stale-source and missing-target validation while the source exists", () => {

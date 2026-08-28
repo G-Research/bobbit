@@ -20,12 +20,7 @@ export function reconcileSemanticMappings({
 	currentNamesByFile,
 }) {
 	const requiredUnitFileSet = new Set(requiredUnitFiles);
-	// The checked-in mappings reconcile one baseline cutover. Once any mapped
-	// source file is absent from the selected base, that cutover is historical;
-	// applying only the surviving records would make them spuriously stale.
-	const applicableMappings = semanticMappings.every(({ baseFile }) => requiredUnitFileSet.has(baseFile))
-		? semanticMappings
-		: [];
+	const applicableMappings = semanticMappings.filter(({ baseFile }) => requiredUnitFileSet.has(baseFile));
 	const missingKeys = new Set(missingDeclarations.map(({ file, name }) => declarationKey(file, name)));
 	const mappingByBase = new Map();
 	const invalidSemanticMappings = [];
