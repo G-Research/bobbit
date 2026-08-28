@@ -520,20 +520,9 @@ test.describe("remote-state coordinator routes", () => {
 			complete: (trusted: boolean) => void;
 		}> = [];
 		const routeRequests: Array<Promise<Response>> = [];
-		// Wall-clock bounded, not tick bounded. `setImmediate` only yields to the
-		// check phase, so a fixed tick budget is starvation bounded: when the awaited
-		// work needs real I/O or timer progress - especially with sibling vitest
-		// workers competing for CPU - the budget is spent before the counter moves and
-		// the assertion fires early. Yield with setImmediate first so the common case
-		// stays immediate, then with a real macrotask delay so the timer and I/O phases
-		// can also make progress. The final assertion is deliberately unchanged, so a
-		// genuine product regression still fails loudly at the deadline.
 		const waitForCount = async (read: () => number, expected: number) => {
-			const deadline = Date.now() + 5_000;
-			while (read() < expected && Date.now() < deadline) {
+			for (let attempt = 0; attempt < 100 && read() < expected; attempt++) {
 				await new Promise<void>(resolve => setImmediate(resolve));
-				if (read() >= expected) break;
-				await new Promise<void>(resolve => setTimeout(resolve, 1));
 			}
 			expect(read()).toBe(expected);
 		};
