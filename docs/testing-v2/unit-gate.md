@@ -67,7 +67,15 @@ Fixtures create writable trees under the active run root (or receive explicit fi
 
 The server prebundle is content-addressed and atomically published. Vitest transformed modules use a PID-scoped directory below the coordinator root, allowing one run's projects/workers to share transformed code without concurrent coordinators racing on writable metadata.
 
-Run the inventory audit after changing test ownership or fixtures:
+After adding or moving test-shaped paths, run the placement-admission check:
+
+```bash
+node scripts/testing-v2/check-inventory.mjs
+```
+
+It validates Git-introduced and untracked paths, including rename and copy destinations. Placement admission rejects unsupported new locations but does not select runners.
+
+Separately, run the unit declaration and ownership audit after changing test ownership or fixtures:
 
 ```bash
 npm run test:unit:inventory

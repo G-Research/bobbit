@@ -1,5 +1,7 @@
 # Portrait session cache ownership
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 ## Context
 
 Bobbit keeps recently visited session views in a bounded, client-side LRU in the session manager. Each entry owns both the rendered `ChatPanel` and its connected `RemoteAgent`, so returning to a session can restore the existing transcript DOM and WebSocket instead of rebuilding the panel and showing the connection loader.

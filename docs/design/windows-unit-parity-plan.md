@@ -1,5 +1,7 @@
 # Windows Unit-Suite Parity Plan
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 > [!CAUTION]
 > **Superseded historical plan.** This document is preserved as planning evidence and does not describe the shipped unit gate. The current architecture runs one direct Vitest process with a fixed three-worker cap per suite and no unit ledger, lane orchestration, cost sharding, or gateway-boot lease. See the [unit gate operating model](../testing-v2/unit-gate.md) for the current contract and the [fast-gate progress log](../testing-v2/fast-gate-progress.md) for qualification evidence. All eight-worker, `3/4/1` lane allocation, ledger peak of 24 or lower, weighted scheduler, and acceptance statements below are historical and must not guide new work.
 

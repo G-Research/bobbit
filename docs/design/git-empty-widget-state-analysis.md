@@ -1,5 +1,7 @@
 # Git empty widget terminal state analysis
 
+> **Test registry history notice:** All references to `tests2/tests-map.json` or `tests-map.json` in this document describe the completed pre-convention implementation. The registry has been deleted; those references are not current test-authoring instructions.
+
 ## Observation
 
 A real request against the live gateway for HQ session `0cdf548d-408e-44f8-89c8-31814c61380d` returned:

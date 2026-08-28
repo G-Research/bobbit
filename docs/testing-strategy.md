@@ -45,6 +45,8 @@ The semantic suffix is part of ownership, not a label to add speculatively. Use 
 
 Unsupported or ambiguous placements fail with a destination or suffix remedy. In particular, `*.spec.ts` cannot enter a Vitest directory, `*.test.ts` cannot enter `tests2/browser`, Group B requires `*.e2e.spec.ts`, and a filename cannot contain both `.isolated.` and `.e2e.`. This keeps browser journeys out of API/Vitest lanes and prevents real-fidelity tests from being collected as ordinary browser or unit coverage.
 
+Retained historical `tests/**/*.test.ts` and `tests/e2e/**/*.spec.ts` files outside the supported semantic destinations may remain inactive. Adding, renaming, copying, or untracking a test-shaped file there is rejected. `node scripts/testing-v2/check-inventory.mjs` validates Git-introduced and untracked paths, including rename and copy destinations, without changing execution selection. Move `tests/new.test.ts` to an approved `tests2` unit location; rename and place `tests/e2e/new.spec.ts` as an approved Group B `*.e2e.spec.ts` file.
+
 The unit phase uses one Vitest coordinator with a fixed three-worker cap.
 `VITEST_MAX_WORKERS` may lower the cap only. The normal `retry: 3` / `retries: 3`
 defaults protect developer and workflow runs; qualification uses the exact
