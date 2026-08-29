@@ -13,9 +13,9 @@ import {
 	type GoalCandidateSource,
 	type GoalCandidateTrustedSnapshots,
 	type RawGoalCandidate,
-} from "../../src/server/agent/goal-candidate-validator.js";
-import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
-import type { Workflow } from "../../src/server/agent/workflow-store.js";
+} from "../../../../src/server/agent/goal-candidate-validator.js";
+import type { PersistedGoal } from "../../../../src/server/agent/goal-store.js";
+import type { Workflow } from "../../../../src/server/agent/workflow-store.js";
 
 const FEATURE_WORKFLOW: Workflow = {
 	id: "feature",
