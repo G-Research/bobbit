@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -23,11 +23,11 @@ import path from "node:path";
 import type { Credential, OAuthCredential } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
 import {
 	AtomicCredentialStore,
 	__setBeforeStaleLockClaimForTests,
-} from "../../src/server/auth/credential-store.js";
+} from "../../../../../src/server/auth/credential-store.js";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-credential-store-"));
 const agentDir = path.join(tmp, "agent");
@@ -36,7 +36,7 @@ mkdirSync(agentDir, { recursive: true });
 process.env.BOBBIT_AGENT_DIR = agentDir;
 resetAgentDirStateForTests();
 
-const { getOAuthModels, stopFlowCleanup } = await import("../../src/server/auth/oauth.js");
+const { getOAuthModels, stopFlowCleanup } = await import("../../../../../src/server/auth/oauth.js");
 
 const realFetch = globalThis.fetch;
 
