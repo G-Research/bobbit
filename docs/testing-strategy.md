@@ -85,6 +85,8 @@ Valid semantics are `unit-core`, `unit-isolated`, `dom`, `gateway-integration`, 
 
 Move tests in small, rename-oriented PRs based on then-current `main`. Each cohort must preserve runner selection and coverage, and must not include product fixes or broad documentation cleanup.
 
+**Current shared-support migration status.** The proposal fixture cohort now lives at `tests/support/fixtures/unit/proposals/{goal-route-fixture,project-fixture}.ts`. Remaining support/harness cohorts are unit helpers, fixtures, and the general unit harness; browser helpers and assets; integration helpers and harnesses; E2E support; and manual support. Migrate each remaining cohort in a separate bounded PR.
+
 1. **Shared support and harnesses** — move non-runnable helpers, fixtures, data, and harnesses into `tests/support/` or lane-local `_helpers/` directories.
 2. **Bounded unit-core cohorts** — migrate small, reviewable groups into `tests/unit/core/`, preserving behavior before starting the next group.
 3. **DOM and gateway integration** — migrate the happy-dom and in-process gateway cohorts into `tests/dom/` and `tests/integration/gateway/`.

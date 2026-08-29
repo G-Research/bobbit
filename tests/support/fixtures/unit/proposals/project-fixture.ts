@@ -5,8 +5,8 @@ import {
 	deleteProposalFile,
 	parseProposalFile,
 	type ProposalType,
-} from "../../src/server/proposals/proposal-files.js";
-import type { TestComponent, TestWorkflowsBlock } from "../../tests/e2e/seed-workflows.js";
+} from "../../../../../src/server/proposals/proposal-files.js";
+import type { TestComponent, TestWorkflowsBlock } from "../../../../e2e/seed-workflows.js";
 
 interface ProposalProjectFixture {
 	id: string;

@@ -1,6 +1,6 @@
-import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
-import type { Workflow } from "../../src/server/agent/workflow-store.js";
-import { prepareGoalProposalSeed, validateGoalProposalWorkflow } from "../../src/server/proposals/goal-proposal-seed.js";
+import type { PersistedGoal } from "../../../../../src/server/agent/goal-store.js";
+import type { Workflow } from "../../../../../src/server/agent/workflow-store.js";
+import { prepareGoalProposalSeed, validateGoalProposalWorkflow } from "../../../../../src/server/proposals/goal-proposal-seed.js";
 
 export const VALIDATION_PROJECT_WORKFLOWS: readonly Workflow[] = [
 	{

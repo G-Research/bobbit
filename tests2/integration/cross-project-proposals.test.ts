@@ -43,7 +43,7 @@ import {
 	releaseSharedProposalSession,
 	sharedProposalSession,
 	withProposalSessionSnapshot,
-} from "./_proposal-project-fixture.js";
+} from "../../tests/support/fixtures/unit/proposals/project-fixture.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const SYSTEM_PROJECT_ID = "system";
