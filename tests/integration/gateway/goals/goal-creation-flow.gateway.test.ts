@@ -1,6 +1,6 @@
-import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base, apiFetch, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { GoalPreflightStaleError, GOAL_PREFLIGHT_STALE_MESSAGE } from "../../src/server/agent/goal-manager.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { readE2EToken, base, apiFetch, nonGitCwd } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { GoalPreflightStaleError, GOAL_PREFLIGHT_STALE_MESSAGE } from "../../../../src/server/agent/goal-manager.js";
 
 function deferred() {
 	let resolve!: () => void;

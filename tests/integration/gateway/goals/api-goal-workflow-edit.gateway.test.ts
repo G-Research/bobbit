@@ -1,10 +1,10 @@
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	defaultProjectId,
 	deleteGoal,
 	nonGitCwd,
-} from "./_e2e/e2e-setup.js";
+} from "../../../../tests2/integration/_e2e/e2e-setup.js";
 
 type Workflow = {
 	id: string;

@@ -7,13 +7,13 @@
  * that creating a child under a paused parent (or any paused ANCESTOR) is
  * refused with `409 GOAL_PAUSED` and no child is created.
  */
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
 	defaultProjectId,
 	nonGitCwd,
-} from "./_e2e/e2e-setup.js";
+} from "../../../../tests2/integration/_e2e/e2e-setup.js";
 
 async function createGoalRaw(body: Record<string, unknown>): Promise<{ status: number; body: any }> {
 	const resp = await apiFetch("/api/goals", {
