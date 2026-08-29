@@ -1,16 +1,16 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Load this while happy-dom's custom-elements registry is still available.
-import "../../src/ui/components/GitStatusWidget.js";
-import type { GatewaySession, Goal } from "../../src/app/state.js";
+import "../../../src/ui/components/GitStatusWidget.js";
+import type { GatewaySession, Goal } from "../../../src/app/state.js";
 
-type StateModule = typeof import("../../src/app/state.js");
-type DashboardModule = typeof import("../../src/app/goal-dashboard.js");
-type RenderHelpersModule = typeof import("../../src/app/render-helpers.js");
+type StateModule = typeof import("../../../src/app/state.js");
+type DashboardModule = typeof import("../../../src/app/goal-dashboard.js");
+type RenderHelpersModule = typeof import("../../../src/app/render-helpers.js");
 
 const now = 1_783_682_557_000;
 const goalId = "goal-setup-recovery";
@@ -136,9 +136,9 @@ beforeEach(async () => {
 	vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
 	vi.spyOn(console, "warn").mockImplementation(() => {});
 
-	const stateModule = await import("../../src/app/state.js");
-	const dashboardModule = await import("../../src/app/goal-dashboard.js");
-	const renderHelpersModule = await import("../../src/app/render-helpers.js");
+	const stateModule = await import("../../../src/app/state.js");
+	const dashboardModule = await import("../../../src/app/goal-dashboard.js");
+	const renderHelpersModule = await import("../../../src/app/render-helpers.js");
 	state = stateModule.state;
 	setRenderApp = stateModule.setRenderApp;
 	clearDashboardState = dashboardModule.clearDashboardState;

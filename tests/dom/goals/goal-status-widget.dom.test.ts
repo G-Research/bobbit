@@ -7,19 +7,19 @@
 // dot, sign-off card, and the review-document event the Start Review button
 // dispatches).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { GATE_STATUS_CLIENT_EVENT } from "../../src/app/gate-status-events.js";
-import { syncCustomElements } from "./_setup/custom-elements.js";
+import { GATE_STATUS_CLIENT_EVENT } from "../../../src/app/gate-status-events.js";
+import { syncCustomElements } from "../../../tests2/dom/_setup/custom-elements.js";
 
 // The custom-elements bridge keeps explicit registration deterministic. Import
 // session-manager first to initialize the pack-panels ⇄ session-manager cycle
 // before the widget's app/* imports hit it as a TDZ error.
-let state: typeof import("../../src/app/state.js").state;
+let state: typeof import("../../../src/app/state.js").state;
 
 beforeAll(async () => {
-	await import("../../src/app/session-manager.js");
-	({ state } = await import("../../src/app/state.js"));
-	await import("../../src/ui/components/GoalStatusWidget.js");
-	await import("../../src/ui/lazy/safe-markdown-block.js");
+	await import("../../../src/app/session-manager.js");
+	({ state } = await import("../../../src/app/state.js"));
+	await import("../../../src/ui/components/GoalStatusWidget.js");
+	await import("../../../src/ui/lazy/safe-markdown-block.js");
 	syncCustomElements();
 	await customElements.whenDefined("goal-status-widget");
 });

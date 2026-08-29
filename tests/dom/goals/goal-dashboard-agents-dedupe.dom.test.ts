@@ -1,15 +1,15 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import "../../src/ui/components/GitStatusWidget.js";
-import type { GatewaySession, Goal } from "../../src/app/state.js";
-import type { TeamAgent } from "../../src/app/goal-dashboard.js";
+import "../../../src/ui/components/GitStatusWidget.js";
+import type { GatewaySession, Goal } from "../../../src/app/state.js";
+import type { TeamAgent } from "../../../src/app/goal-dashboard.js";
 
-type StateModule = typeof import("../../src/app/state.js");
-type DashboardModule = typeof import("../../src/app/goal-dashboard.js");
+type StateModule = typeof import("../../../src/app/state.js");
+type DashboardModule = typeof import("../../../src/app/goal-dashboard.js");
 
 const NOW = 1_750_000_000_000;
 const GOAL_ID = "11111111-2222-4333-8444-555555555555";
@@ -157,8 +157,8 @@ beforeEach(async () => {
 	vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
 	vi.spyOn(console, "warn").mockImplementation(() => {});
 
-	const stateMod = await import("../../src/app/state.js");
-	const dashboardMod = await import("../../src/app/goal-dashboard.js");
+	const stateMod = await import("../../../src/app/state.js");
+	const dashboardMod = await import("../../../src/app/goal-dashboard.js");
 	state = stateMod.state;
 	setRenderApp = stateMod.setRenderApp;
 	clearDashboardState = dashboardMod.clearDashboardState;

@@ -1,15 +1,15 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import "../../src/ui/components/GitStatusWidget.js";
-import type { Goal } from "../../src/app/state.js";
-import { refreshSessions } from "../../src/app/api.js";
+import "../../../src/ui/components/GitStatusWidget.js";
+import type { Goal } from "../../../src/app/state.js";
+import { refreshSessions } from "../../../src/app/api.js";
 
-type StateModule = typeof import("../../src/app/state.js");
-type DashboardModule = typeof import("../../src/app/goal-dashboard.js");
+type StateModule = typeof import("../../../src/app/state.js");
+type DashboardModule = typeof import("../../../src/app/goal-dashboard.js");
 
 let state!: StateModule["state"];
 let setRenderApp!: StateModule["setRenderApp"];
@@ -144,8 +144,8 @@ beforeEach(async () => {
 		close() {}
 	} as unknown as typeof WebSocket);
 
-	const stateMod = await import("../../src/app/state.js");
-	const dashboardMod = await import("../../src/app/goal-dashboard.js");
+	const stateMod = await import("../../../src/app/state.js");
+	const dashboardMod = await import("../../../src/app/goal-dashboard.js");
 	state = stateMod.state;
 	setRenderApp = stateMod.setRenderApp;
 	clearDashboardState = dashboardMod.clearDashboardState;

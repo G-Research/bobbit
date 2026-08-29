@@ -1,19 +1,19 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GatewaySession, Project } from "../../src/app/state.js";
-import type { Workflow } from "../../src/app/api.js";
-import type { PanelWorkspaceTab } from "../../src/app/panel-workspace.js";
+import type { GatewaySession, Project } from "../../../src/app/state.js";
+import type { Workflow } from "../../../src/app/api.js";
+import type { PanelWorkspaceTab } from "../../../src/app/panel-workspace.js";
 
-vi.mock("../../src/app/lazy-review.js", () => ({
+vi.mock("../../../src/app/lazy-review.js", () => ({
 	ensureReviewComponents: vi.fn(),
 }));
 
-type StateModule = typeof import("../../src/app/state.js");
-type ProposalPanelsModule = typeof import("../../src/app/proposal-panels.js");
+type StateModule = typeof import("../../../src/app/state.js");
+type ProposalPanelsModule = typeof import("../../../src/app/proposal-panels.js");
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -245,8 +245,8 @@ beforeEach(async () => {
 	vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.spyOn(console, "warn").mockImplementation(() => {});
 
-	const stateMod = await import("../../src/app/state.js");
-	const proposalPanelsMod = await import("../../src/app/proposal-panels.js");
+	const stateMod = await import("../../../src/app/state.js");
+	const proposalPanelsMod = await import("../../../src/app/proposal-panels.js");
 	state = stateMod.state;
 	setRenderApp = stateMod.setRenderApp;
 	proposalPanelContent = proposalPanelsMod.proposalPanelContent;

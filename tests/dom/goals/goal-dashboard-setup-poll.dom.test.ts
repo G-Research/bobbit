@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/goal-dashboard-setup-poll.spec.ts (v2-dom tier).
 // The legacy Playwright fixture modelled goal-dashboard.ts's setup-status
@@ -8,7 +8,7 @@ __syncBeforeAll(() => __syncCE());
 // identical banner-transition and polling-lifecycle behaviours. Element presence
 // == visibility here because the render swaps innerHTML wholesale.
 import { afterEach, describe, expect, it } from "vitest";
-import { clearSchedulerRecoveryForGoal, retryPlanNodeSchedulerStart } from "../../src/app/goal-dashboard-plan-tab.ts";
+import { clearSchedulerRecoveryForGoal, retryPlanNodeSchedulerStart } from "../../../src/app/goal-dashboard-plan-tab.ts";
 
 type Status = "preparing" | "ready" | "error";
 

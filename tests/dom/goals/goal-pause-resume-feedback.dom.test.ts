@@ -1,18 +1,18 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // doRenderApp can lazy-load the dashboard git widget after teardown; import it
 // while happy-dom customElements is live so decorators cannot race teardown.
-import "../../src/ui/components/GitStatusWidget.js";
-import type { GatewaySession, Goal } from "../../src/app/state.js";
+import "../../../src/ui/components/GitStatusWidget.js";
+import type { GatewaySession, Goal } from "../../../src/app/state.js";
 
-type StateModule = typeof import("../../src/app/state.js");
-type DashboardModule = typeof import("../../src/app/goal-dashboard.js");
-type RenderModule = typeof import("../../src/app/render.js");
-type ApiModule = typeof import("../../src/app/api.js");
+type StateModule = typeof import("../../../src/app/state.js");
+type DashboardModule = typeof import("../../../src/app/goal-dashboard.js");
+type RenderModule = typeof import("../../../src/app/render.js");
+type ApiModule = typeof import("../../../src/app/api.js");
 
 let state!: StateModule["state"];
 let setRenderApp!: StateModule["setRenderApp"];
@@ -223,10 +223,10 @@ beforeEach(async () => {
 	vi.stubGlobal("WebSocket", MockWebSocket as unknown as typeof WebSocket);
 	vi.spyOn(console, "warn").mockImplementation(() => {});
 
-	const stateMod = await import("../../src/app/state.js");
-	const dashboardMod = await import("../../src/app/goal-dashboard.js");
-	const renderMod = await import("../../src/app/render.js");
-	const apiMod = await import("../../src/app/api.js");
+	const stateMod = await import("../../../src/app/state.js");
+	const dashboardMod = await import("../../../src/app/goal-dashboard.js");
+	const renderMod = await import("../../../src/app/render.js");
+	const apiMod = await import("../../../src/app/api.js");
 	state = stateMod.state;
 	setRenderApp = stateMod.setRenderApp;
 	clearDashboardState = dashboardMod.clearDashboardState;
