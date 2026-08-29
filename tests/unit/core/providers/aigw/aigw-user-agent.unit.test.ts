@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "../../src/server/agent/aigw-user-agent.js";
+import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "../../../../../src/server/agent/aigw-user-agent.js";
 
 const EXPECTED_USER_AGENT = `Bobbit/${JSON.parse(readFileSync(path.resolve("package.json"), "utf-8")).version}`;
 

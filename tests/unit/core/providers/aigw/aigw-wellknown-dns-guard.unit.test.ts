@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import {
 	GATEWAY, replaceAigwProviderDnsGuardHosts, resetAgentDirStateForTests,
 	writeAigwDnsGuardExtension, writeAigwModelsJson,
-} from "./helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
 
 describe("generated AIGW DNS guard", () => {
 	afterEach(() => replaceAigwProviderDnsGuardHosts([]));

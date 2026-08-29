@@ -1,7 +1,7 @@
 // v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
 // Retained AIGW catalog availability during transient discovery failures.
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
@@ -10,17 +10,17 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
-import { SessionManager } from "../../src/server/agent/session-manager.js";
-import { registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { PreferencesStore } from "../../../../../src/server/agent/preferences-store.js";
+import { SessionManager } from "../../../../../src/server/agent/session-manager.js";
+import { registerRpcBridgeFactory } from "../../../../../src/server/agent/rpc-bridge.js";
 import {
 	findSessionSelectableModel,
 	getAvailableModels,
 	invalidateModelCache,
 	resolveModelStateMeta,
-} from "../../src/server/agent/model-registry.js";
-import { clampThinkingLevelForModel } from "../../src/server/agent/thinking-level-clamp.js";
+} from "../../../../../src/server/agent/model-registry.js";
+import { clampThinkingLevelForModel } from "../../../../../src/server/agent/thinking-level-clamp.js";
 
 const RETAINED_ID = "gpt-5.4";
 const RETAINED_COST = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 };

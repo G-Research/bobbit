@@ -3,7 +3,7 @@
 // adopted on the ordinary model-registry read path, so live gateway discovery resumes
 // and upstream-provider provenance is restored without any separate refresh call.
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
@@ -13,24 +13,24 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { findNodeAtLocation, parseTree } from "jsonc-parser";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { PreferencesStore } from "../../../../../src/server/agent/preferences-store.js";
 import {
 	findSessionSelectableModel,
 	getAvailableModels,
 	invalidateModelCache,
-} from "../../src/server/agent/model-registry.js";
+} from "../../../../../src/server/agent/model-registry.js";
 import {
 	AigwModelsJsonOwnershipError,
 	adoptLegacyAigwProvider,
 	inspectAigwTargetRealm,
-} from "../../src/server/agent/aigw-models-json.js";
+} from "../../../../../src/server/agent/aigw-models-json.js";
 import {
 	writeAigwModelsJson,
 	writeModelsJsonText,
 	type AigwModel,
-} from "../../src/server/agent/aigw-manager.js";
-import { BOBBIT_AIGW_USER_AGENT } from "../../src/server/agent/aigw-user-agent.js";
+} from "../../../../../src/server/agent/aigw-manager.js";
+import { BOBBIT_AIGW_USER_AGENT } from "../../../../../src/server/agent/aigw-user-agent.js";
 
 /** Every assertion in this file carries this token so the gate can match the failure. */
 const NOT_ADOPTED = "legacy AIGW publication was not adopted";
