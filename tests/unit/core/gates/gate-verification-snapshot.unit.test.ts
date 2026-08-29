@@ -8,15 +8,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
-import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../../src/server/gate-artifacts.ts";
-import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../../src/server/gate-verification-snapshot.ts";
+import { installScopedMemoryFs } from "../../../../tests2/core/helpers/scoped-memory-fs.ts";
+import { GateArtifactResolutionError, buildArtifactLookup, resolveArtifactFromLookup } from "../../../../src/server/gate-artifacts.ts";
+import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "../../../../src/server/gate-verification-snapshot.ts";
 import {
 	VERIFICATION_WS_STEP_COMPLETE_OUTPUT_PREVIEW_BYTES,
 	VERIFICATION_WS_STEP_OUTPUT_PREVIEW_BYTES,
 	VerificationHarness,
 	sanitizeVerificationWsEvent,
-} from "../../src/server/agent/verification-harness.ts";
+} from "../../../../src/server/agent/verification-harness.ts";
 
 const tempDirs: string[] = [];
 let sharedArtifactFixtureDir: string | undefined;

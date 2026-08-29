@@ -13,9 +13,9 @@
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { GateStore } from "../../src/server/agent/gate-store.ts";
-import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { GateStore } from "../../../../src/server/agent/gate-store.ts";
+import type { Workflow, WorkflowGate } from "../../../../src/server/agent/workflow-store.ts";
+import { createMemFs, type MemFs } from "../../../../tests2/harness/mem-fs.js";
 
 let dirSeq = 0;
 

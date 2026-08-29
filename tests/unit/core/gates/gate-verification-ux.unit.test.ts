@@ -36,11 +36,11 @@ import assert from "node:assert/strict";
 // fail independently.
 
 // Issue 1 — slim gate-list projection (contract: gate-status-summary.ts).
-import * as gateStatusSummary from "../../src/server/gate-status-summary.ts";
+import * as gateStatusSummary from "../../../../src/server/gate-status-summary.ts";
 // Issue 2 — snapshot liveness (existing export; gains an additive input/field).
-import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.ts";
+import { buildGateVerificationSnapshot } from "../../../../src/server/gate-verification-snapshot.ts";
 // Issue 3 — restart-recovery classification helpers (contract: verification-logic.ts).
-import * as verificationLogic from "../../src/server/agent/verification-logic.ts";
+import * as verificationLogic from "../../../../src/server/agent/verification-logic.ts";
 
 // Type-only import is erased by tsx/esbuild at runtime; harmless if absent.
 // Kept for contract fidelity (the fix adds this exact type name).
