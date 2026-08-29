@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/sidebar-spawned-children.spec.ts (v2-dom tier).
 // The legacy file:// fixture re-implemented the helpers in inline JS. This port
@@ -13,7 +13,7 @@ import {
 	extendAncestors,
 	computeTitleSuffixes,
 	type SpawnedChildLike,
-} from "../../src/app/sidebar-spawned-children.js";
+} from "../../../src/app/sidebar-spawned-children.js";
 
 // Render-walk simulator — same shape as the real renderGoalGroup →
 // renderSpawnedChildGoalRow chain, built on the real helpers. Returns a flat

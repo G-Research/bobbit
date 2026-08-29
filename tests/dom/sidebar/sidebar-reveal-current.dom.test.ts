@@ -1,40 +1,40 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	clearArchivedSessionsState,
-} from "../../src/app/api.js";
+} from "../../../src/app/api.js";
 import {
 	SIDEBAR_TREE_STATE_STORAGE_KEY,
 	clearSidebarTreePreference,
 	isSidebarTreeExpanded,
 	setSidebarTreeExpanded,
-} from "../../src/app/sidebar-tree-state.js";
-import { sidebarTreeKey, type SidebarTreeNodeKey } from "../../src/app/sidebar-tree-builder.js";
+} from "../../../src/app/sidebar-tree-state.js";
+import { sidebarTreeKey, type SidebarTreeNodeKey } from "../../../src/app/sidebar-tree-builder.js";
 import {
 	SIDEBAR_PROJECT_FILTER_STORAGE_KEYS,
 	SIDEBAR_STATUS_COLLAPSED_SECTIONS_STORAGE_KEY,
 	SIDEBAR_STATUS_FILTER_STORAGE_KEYS,
 	setSidebarStatusSectionExpanded,
 	setSidebarViewFilter,
-} from "../../src/app/sidebar-view-preferences.js";
+} from "../../../src/app/sidebar-view-preferences.js";
 import {
 	buildSidebarStatusSections,
 	buildSidebarTreeModel,
 	renderSidebarViewControls,
-} from "../../src/app/sidebar.js";
-import { revealCurrentSidebarSession } from "../../src/app/sidebar-reveal.js";
-import { _setSubgoalsEnabledForTesting } from "../../src/app/subgoals-flag.js";
+} from "../../../src/app/sidebar.js";
+import { revealCurrentSidebarSession } from "../../../src/app/sidebar-reveal.js";
+import { _setSubgoalsEnabledForTesting } from "../../../src/app/subgoals-flag.js";
 import {
 	setRenderApp,
 	state,
 	type GatewaySession,
 	type Goal,
 	type Project,
-} from "../../src/app/state.js";
+} from "../../../src/app/state.js";
 
 const touchedTreeKeys: SidebarTreeNodeKey[] = [];
 
@@ -473,11 +473,11 @@ describe("reveal current sidebar session control", () => {
 		const unrelatedDeepGoalKey = sidebarTreeKey({ kind: "goal", goalId: "unrelated-deep-7" });
 
 		vi.resetModules();
-		let freshStateModule = await import("../../src/app/state.js");
-		let freshTreeState = await import("../../src/app/sidebar-tree-state.js");
-		let freshSubgoals = await import("../../src/app/subgoals-flag.js");
-		let freshSidebar = await import("../../src/app/sidebar.js");
-		let freshReveal = await import("../../src/app/sidebar-reveal.js");
+		let freshStateModule = await import("../../../src/app/state.js");
+		let freshTreeState = await import("../../../src/app/sidebar-tree-state.js");
+		let freshSubgoals = await import("../../../src/app/subgoals-flag.js");
+		let freshSidebar = await import("../../../src/app/sidebar.js");
+		let freshReveal = await import("../../../src/app/sidebar-reveal.js");
 		freshSubgoals._setSubgoalsEnabledForTesting(true);
 		freshStateModule.state.projects = projects;
 		freshStateModule.state.goals = goals;
@@ -502,10 +502,10 @@ describe("reveal current sidebar session control", () => {
 
 		// Discard module memory and rebuild all canonical inputs from storage.
 		vi.resetModules();
-		freshStateModule = await import("../../src/app/state.js");
-		freshTreeState = await import("../../src/app/sidebar-tree-state.js");
-		freshSubgoals = await import("../../src/app/subgoals-flag.js");
-		freshSidebar = await import("../../src/app/sidebar.js");
+		freshStateModule = await import("../../../src/app/state.js");
+		freshTreeState = await import("../../../src/app/sidebar-tree-state.js");
+		freshSubgoals = await import("../../../src/app/subgoals-flag.js");
+		freshSidebar = await import("../../../src/app/sidebar.js");
 		freshSubgoals._setSubgoalsEnabledForTesting(true);
 		freshStateModule.state.projects = projects;
 		freshStateModule.state.goals = goals;
