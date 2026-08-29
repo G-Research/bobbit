@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -8,12 +8,12 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { completeModelText, testModelPreference, type ModelCompletionDependencies } from "../../src/server/agent/model-completion.js";
-import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "../../src/server/agent/model-probe-result.js";
-import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
-import { clearOAuthCache, getAvailableModels, invalidateModelCache, type ApiModel } from "../../src/server/agent/model-registry.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { completeModelText, testModelPreference, type ModelCompletionDependencies } from "../../../../../src/server/agent/model-completion.js";
+import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "../../../../../src/server/agent/model-probe-result.js";
+import { PreferencesStore } from "../../../../../src/server/agent/preferences-store.js";
+import { clearOAuthCache, getAvailableModels, invalidateModelCache, type ApiModel } from "../../../../../src/server/agent/model-registry.js";
+import { createMemFs } from "../../../../../tests2/harness/mem-fs.js";
 
 let agentDir: string | undefined;
 

@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -9,14 +9,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { oauthStatus, refreshOAuthToken } from "../../src/server/auth/oauth.js";
-import { generateRoleNames } from "../../src/server/agent/name-generator.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { oauthStatus, refreshOAuthToken } from "../../../../../src/server/auth/oauth.js";
+import { generateRoleNames } from "../../../../../src/server/agent/name-generator.js";
 import {
 	createAnthropicDirectHeaders,
 	PI_ANTHROPIC_DIRECT_REQUEST_IDENTITY,
-} from "../../src/server/agent/anthropic-direct-request.js";
-import { generateGoalSummaryTitle, generateSessionTitle } from "../../src/server/agent/title-generator.js";
+} from "../../../../../src/server/agent/anthropic-direct-request.js";
+import { generateGoalSummaryTitle, generateSessionTitle } from "../../../../../src/server/agent/title-generator.js";
 
 let agentDir: string | undefined;
 const generatedRoleFiles = new Set<string>();

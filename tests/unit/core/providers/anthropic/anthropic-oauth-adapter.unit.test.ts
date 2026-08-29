@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 delete process.env.PI_OAUTH_CALLBACK_HOST;
 
@@ -13,8 +13,8 @@ import type { AuthInteraction, Credential, Models, OAuthCredential } from "@eare
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { AtomicCredentialStore } from "../../../../../src/server/auth/credential-store.js";
 
 type FakeCallbackHandler = (
 	request: { url?: string },
@@ -66,10 +66,10 @@ const {
 	refreshOAuthToken,
 	shutdownOAuthFlows,
 	stopFlowCleanup,
-} = await import("../../src/server/auth/oauth.js");
+} = await import("../../../../../src/server/auth/oauth.js");
 
 const activeFlowIds = new Set<string>();
-const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const SERVER_SOURCE = readFileSync(new URL("../../../../../src/server/server.ts", import.meta.url), "utf8");
 
 const REQUIRED_SCOPES = [
 	"org:create_api_key",
