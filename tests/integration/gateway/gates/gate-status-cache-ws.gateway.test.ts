@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import path from "node:path";
-import { GateStore } from "../../src/server/agent/gate-store.js";
-import { GoalStore } from "../../src/server/agent/goal-store.js";
+import { GateStore } from "../../../../src/server/agent/gate-store.js";
+import { GoalStore } from "../../../../src/server/agent/goal-store.js";
 import {
 	broadcastGateStatusChanged,
 	wireGateStatusGenerationInvalidation,
 	type GateStatusChangedEvent,
-} from "../../src/server/gate-status-broadcast.js";
-import { createManualClock, type ManualClock } from "../harness/clock.js";
-import { createMemFs } from "../harness/mem-fs.js";
+} from "../../../../src/server/gate-status-broadcast.js";
+import { createManualClock, type ManualClock } from "../../../../tests2/harness/clock.js";
+import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
 
 // Preserve the migrated Playwright declaration identity without importing the
 // gateway-backed compatibility harness.

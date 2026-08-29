@@ -1,10 +1,10 @@
-import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, connectWs, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { apiFetch, createSession, connectWs, nonGitCwd } from "../../../../tests2/integration/_e2e/e2e-setup.js";
 import {
 	signalAndWaitForAuthoredGate,
 	trackGateApiConnection,
 	useGateApiTestSupport,
-} from "./helpers/gate-api-test-support.js";
+} from "../../../../tests2/integration/helpers/gate-api-test-support.js";
 
 useGateApiTestSupport();
 

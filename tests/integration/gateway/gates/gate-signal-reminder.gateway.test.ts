@@ -1,15 +1,15 @@
 import path from "node:path";
 import { expect, test } from "vitest";
 
-import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
-import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import { GateStore, type GateSignal } from "../../../../src/server/agent/gate-store.js";
+import type { WorkflowGate } from "../../../../src/server/agent/workflow-store.js";
 import {
 	buildRunningGateSignalResponse,
 	reuseCachedGateSignal,
 	type CachedGateSignalNotifier,
-} from "../../src/server/gate-signal-response.js";
-import { createManualClock, type ManualClock } from "../harness/clock.js";
-import { createMemFs } from "../harness/mem-fs.js";
+} from "../../../../src/server/gate-signal-response.js";
+import { createManualClock, type ManualClock } from "../../../../tests2/harness/clock.js";
+import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
 
 const DO_NOT_POLL_PATTERN = /Verification is running asynchronously|Do not poll|gate_status|gate_inspect|Go idle|wait for the server/i;
 const GOAL_ID = "gate-signal-reminder-goal";

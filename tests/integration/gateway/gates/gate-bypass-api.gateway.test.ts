@@ -13,7 +13,7 @@
  */
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	base,
@@ -27,8 +27,8 @@ import {
 	startTeam,
 	teardownTeam,
 	type WsConnection,
-} from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+} from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { pollUntil } from "../../../e2e/test-utils/cleanup.js";
 
 function workflowId(prefix: string): string {
 	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
