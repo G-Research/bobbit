@@ -35,6 +35,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
 const cacheBootstrap = resolve(__dirname, "playwright-e2e-cache-bootstrap.cjs");
 const LEDGER_DIRNAME = "bobbit-test-v2-ledger";
+const PLAYWRIGHT_CLI = join(projectRoot, "node_modules", "playwright", "cli.js");
+
+/** Build a shell-free local Playwright invocation or fail before spawning. */
+export function createPlaywrightE2EInvocation(forwardedArgs = [], {
+  playwrightCli = PLAYWRIGHT_CLI,
+  exists = existsSync,
+  execPath = process.execPath,
+} = {}) {
+  if (!exists(playwrightCli)) {
+    throw new Error(`[e2e] Playwright CLI is unavailable at ${playwrightCli}. Install local dependencies with npm ci.`);
+  }
+  return Object.freeze({
+    command: execPath,
+    args: Object.freeze([playwrightCli, "test", "--config", "playwright-e2e.config.ts", ...forwardedArgs]),
+    shell: false,
+  });
+}
 
 function canonicalDirectory(directory) {
   mkdirSync(directory, { recursive: true });
@@ -198,6 +215,7 @@ export function createIsolatedE2EEnvironment(paths, inheritedEnv = process.env, 
 }
 
 export function runPlaywrightE2E(forwardedArgs = process.argv.slice(2)) {
+const invocation = createPlaywrightE2EInvocation(forwardedArgs);
 const paths = createE2ERunPaths(coordinatorTempDirectory());
 const cacheRoot = paths.cacheRoot;
 const cacheDir = cacheRoot;
@@ -227,22 +245,11 @@ if (env.BOBBIT_DEBUG_PWTEST_CACHE === "1") {
   console.error(`[e2e] BOBBIT_E2E_PWTEST_RUN_CACHE_ROOT=${cacheRoot}`);
 }
 
-function playwrightInvocation() {
-  const localCli = join(projectRoot, "node_modules", "playwright", "cli.js");
-  if (existsSync(localCli)) return { command: process.execPath, args: [localCli], shell: false };
-  return {
-    command: process.platform === "win32" ? "npx.cmd" : "npx",
-    args: ["playwright"],
-    shell: process.platform === "win32",
-  };
-}
-
-const invocation = playwrightInvocation();
-const result = spawnSync(invocation.command, [...invocation.args, "test", "--config", "playwright-e2e.config.ts", ...forwardedArgs], {
+const result = spawnSync(invocation.command, invocation.args, {
   cwd: projectRoot,
   env,
   stdio: "inherit",
-  shell: invocation.shell,
+  shell: false,
 });
 
 if (result.status === 0 && !result.signal && process.env.BOBBIT_KEEP_PWTEST_CACHE !== "1") {

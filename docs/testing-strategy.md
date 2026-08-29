@@ -1,6 +1,6 @@
-# Testing Strategy — Test Suite v2
+# Testing strategy
 
-> **Current operating model.** `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` execute the complete authoritative implementation-gate phases directly, with one shared cross-suite isolation contract. `npm run test:manual` remains the only gate-exempt lane. Migration plans and measurements under [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify themselves as current. Start with [cross-OS test authoring](testing-v2/cross-os-test-authoring.md) and the [unit-stage reference](testing-v2/unit-gate.md).
+> **Current transition.** New tests use the canonical `tests/` hierarchy below. Existing `tests2/` and legacy `tests/` suites remain discoverable until their bounded migration cohorts land. Do not copy their paths for new tests. The migration plans and measurements under [`docs/testing-v2/`](testing-v2/) remain historical unless they explicitly identify themselves as current.
 
 ## The phase invariant (read this first)
 
@@ -22,30 +22,79 @@ Local development and workflow qualification use the same complete lane commands
 
 Run `npm run test:unit` for the normal edit loop. Add the complete browser or E2E lane when the change crosses those boundaries, and run every phase required by the workflow before merge. Manual integration remains explicitly opt-in because it uses real LLMs, agents, and Docker.
 
-**Execution membership is the invariant.** One shared filesystem classifier derives the runner, phase, and project from each test's repository-relative path and filename suffix. Correctly placed tests are discovered automatically; there is no registration step or checked-in per-test inventory. Placement and inventory guards reject unsupported paths, ambiguous suffixes, duplicate ownership, and lost declaration semantics.
+**Execution membership is the invariant.** [`scripts/testing/layout-policy.mjs`](../scripts/testing/layout-policy.mjs) derives each test's lane, runner, and semantic owner from its repository-relative path and suffix. Correctly placed tests are discovered automatically, in deterministic order, and at most once; there is no registration step, dependency graph, per-file allowlist, or checked-in inventory.
 
 ## Test placement and automatic discovery
 
-Choose the cheapest lane that proves the behavior, then place and name the file according to this table. Discovery is recursive where `**` is shown and sorts paths deterministically.
+Choose the cheapest lane that proves the behavior. New runnable tests must use one canonical pattern from this table; directory and suffix together define ownership.
 
-| Placement | Owner | Use for |
+| Semantics | Canonical pattern | Lane and runner |
 |---|---|---|
-| `tests2/core/**/*.test.ts` | unit / Vitest `v2-core` | Pure logic and server decisions without DOM or real subprocess fidelity |
-| `tests2/dom/**/*.test.ts` | unit / Vitest `v2-dom` | happy-dom component and browser-API behavior that does not need Chromium geometry |
-| `tests2/integration/**/*.test.ts` | unit / Vitest `v2-integration` | In-process gateway, API, and integration coverage |
-| `tests2/{core,integration}/**/*.isolated.test.ts` | unit / Vitest `v2-isolated` | Exceptional module or environment bleeders that require per-file isolation and one worker |
-| `tests2/browser/**/*.spec.ts` except `tests2/browser/e2e/**` | browser / Playwright `browser-v2` | Chromium fixtures and user journeys |
-| `tests/*.e2e.test.ts` at the top level | E2E Group A / `tsx --test` | Real Git, worktree, filesystem, sandbox-mount, or process-tree fidelity |
-| `tests/e2e/**/*.e2e.spec.ts` | E2E Group B / Playwright | Real worktree pool, MCP subprocess, port, Docker, or restart fidelity |
-| `tests2/browser/e2e/**/*.spec.ts` | E2E Group C / Playwright `browser-v2-e2e` | Browser journeys that require the real-fidelity E2E coordinator |
-| `tests2/{core,integration}/**/*.e2e.test.ts` | E2E Group D / Vitest `v2-e2e-vitest` | Real-fidelity Vitest suites excluded from the unit subprocess boundary |
-| `tests/manual-integration/**/*.{test,spec}.ts` | manual / Playwright | Real agents, real LLMs, and opt-in Docker coverage |
+| Pure logic, data transforms, and node-local contracts | `tests/unit/core/**/*.unit.test.ts` | unit / Vitest |
+| Unit behavior that irreducibly needs singleton or environment isolation | `tests/unit/isolated/**/*.isolated.test.ts` | unit / Vitest, one worker |
+| DOM behavior without real browser geometry | `tests/dom/**/*.dom.test.ts` | unit / Vitest with happy-dom |
+| In-process gateway or API behavior with external I/O fenced | `tests/integration/gateway/**/*.gateway.test.ts` | unit / Vitest |
+| Deterministic Chromium rendering, component state, or geometry | `tests/browser/fixtures/**/*.fixture.spec.ts` | browser / Playwright |
+| Visible full-app journey against the normal mock gateway | `tests/browser/journeys/**/*.journey.spec.ts` | browser / Playwright |
+| Real Git, worktree, or process fidelity using Node's test runner | `tests/e2e/node/**/*.node-e2e.test.ts` | E2E Group A / Node |
+| Isolated Vitest coverage requiring real-fidelity setup | `tests/e2e/vitest/**/*.vitest-e2e.test.ts` | E2E Group D / Vitest |
+| API, MCP, port, restart, or Docker fidelity without a browser | `tests/e2e/api/**/*.api-e2e.spec.ts` | E2E Group B / Playwright |
+| Real browser plus process, restart, pack, or Docker fidelity | `tests/e2e/browser/**/*.browser-e2e.spec.ts` | E2E Group C / Playwright |
+| Real model, agent, credential, or external-service behavior | `tests/manual/**/*.manual.spec.ts` | manual / Playwright |
+| Non-runnable harnesses, helpers, fixtures, data, or templates | `tests/support/{harnesses,helpers,fixtures,data,templates}/<lane>/**` or lane-local `_helpers/**` | imported only |
 
-The semantic suffix is part of ownership, not a label to add speculatively. Use `*.isolated.test.ts` only when normal shared-worker isolation is unsafe. Use `*.e2e.test.ts` or `*.e2e.spec.ts` only when the test genuinely needs process, Docker, worktree, restart, MCP, or operating-system fidelity. DOM does not accept either exceptional Vitest suffix.
+The distinction between `tests/browser/` and `tests/e2e/browser/` is fidelity, not whether a UI is visible. Use browser E2E only when real process, restart, Docker, pack, or comparable system fidelity defines the test. An API E2E must not request browser fixtures; move it to browser E2E if it needs `page`, `browser`, or `context`. Manual tests never enter an automated lane.
 
-Unsupported or ambiguous placements fail with a destination or suffix remedy. In particular, `*.spec.ts` cannot enter a Vitest directory, `*.test.ts` cannot enter `tests2/browser`, Group B requires `*.e2e.spec.ts`, and a filename cannot contain both `.isolated.` and `.e2e.`. This keeps browser journeys out of API/Vitest lanes and prevents real-fidelity tests from being collected as ordinary browser or unit coverage.
+Semantic suffixes are ownership, not descriptive decoration. `*.isolated.test.ts` is for unavoidable singleton or environment isolation. E2E suffixes are for real-fidelity boundaries. Support code must not have a runnable suffix.
 
-Retained historical `tests/**/*.test.ts` and `tests/e2e/**/*.spec.ts` files outside the supported semantic destinations may remain inactive. Adding, renaming, copying, or untracking a test-shaped file there is rejected. `node scripts/testing-v2/check-inventory.mjs` validates Git-introduced and untracked paths, including rename and copy destinations, without changing execution selection. Move `tests/new.test.ts` to an approved `tests2` unit location; rename and place `tests/e2e/new.spec.ts` as an approved Group B `*.e2e.spec.ts` file.
+### Transitional compatibility
+
+The layout policy composes canonical discovery with compatibility conventions so migration does not reduce coverage:
+
+- `tests2/{core,dom,integration}/` and its isolated or E2E suffixes continue to feed the existing Vitest projects;
+- `tests2/browser/`, including its E2E subtree, continues to feed the existing Playwright projects;
+- legacy top-level Node E2E, `tests/e2e/` Playwright E2E, and `tests/manual-integration/` patterns continue to use their current runners.
+
+Compatibility conventions exist only for files already in those roots. Newly added, copied, renamed, or untracked tests must use a canonical pattern. The compatibility layer can be removed when the policy census reports no runnable files outside canonical destinations; it does not contain per-file exceptions.
+
+At the foundation census, 1,425 runnable-shaped files matched an existing lane convention and 191 did not. These are migration-planning snapshots, not a maintained inventory. `npm run test:layout` reports current legacy and unowned totals without failing solely because a pre-existing file is outside the canonical hierarchy.
+
+### Layout validation
+
+`npm run test:layout` validates Git-introduced paths, including add/copy/rename destinations, plus untracked test-shaped files. It rejects wrong directories or suffixes, ambiguous runner imports, browser/API boundary violations, duplicate ownership, runnable helpers, case-fold collisions, and unsafe paths. Diagnostics include the canonical destination. Git path input is NUL-safe, and both POSIX and Windows separators normalize to repository-relative paths. `npm run check` includes this validation.
+
+### Create a test
+
+Use the scaffold to get a canonical path and suffix without a registry step:
+
+```bash
+npm run test:new -- <semantic> <name>
+```
+
+For example:
+
+```bash
+npm run test:new -- unit-core agent/status-policy
+npm run test:new -- browser-journey settings/model-selection
+npm run test:new -- api-e2e restart/session-recovery
+```
+
+Valid semantics are `unit-core`, `unit-isolated`, `dom`, `gateway-integration`, `browser-fixture`, `browser-journey`, `node-e2e`, `vitest-e2e`, `api-e2e`, `browser-e2e`, and `manual`. Names are repository-relative stems such as `agent/status-policy`; traversal, absolute paths, invalid names, and collisions are refused. The generated placeholder must be implemented before committing.
+
+### Migration plan
+
+Move tests in small, rename-oriented PRs based on then-current `main`. Each cohort must preserve runner selection and coverage, and must not include product fixes or broad documentation cleanup.
+
+1. **Shared support and harnesses** — move non-runnable helpers, fixtures, data, and harnesses into `tests/support/` or lane-local `_helpers/` directories.
+2. **Bounded unit-core cohorts** — migrate small, reviewable groups into `tests/unit/core/`, preserving behavior before starting the next group.
+3. **DOM and gateway integration** — migrate the happy-dom and in-process gateway cohorts into `tests/dom/` and `tests/integration/gateway/`.
+4. **Browser fixtures and journeys** — separate deterministic fixture coverage from visible mock-gateway journeys under `tests/browser/{fixtures,journeys}/`.
+5. **E2E and manual lanes** — migrate Node, Vitest, API, browser, and manual coverage; reconcile every currently unowned runnable-shaped file with explicit equivalence or restored-coverage evidence.
+6. **Final single-root cutover** — after the census reaches zero outside canonical destinations, remove `tests2/`, transitional discovery, redundant semantic inventory machinery, and stale current guidance.
+
+### Foundation provenance
+
+This policy, validator, scaffold, and canonical hierarchy are selectively adapted from closed PR [#1256](https://github.com/G-Research/bobbit/pull/1256). Unlike that PR, this foundation keeps both existing roots and all independent quality tooling, moves no suites, and does not rewrite historical documents. PRs #1257, #1258, and #1263 already removed affected-test selection, fixed browser filtering, and replaced the manual test map with convention discovery; this work builds on those changes rather than reintroducing their machinery.
 
 The unit phase uses one Vitest coordinator with a fixed three-worker cap.
 `VITEST_MAX_WORKERS` may lower the cap only. The normal `retry: 3` / `retries: 3`
