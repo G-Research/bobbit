@@ -10,7 +10,7 @@ import { beforeEach, expect, test } from "vitest";
 import {
 	GoalProposalRouteFixture,
 	VALIDATION_PROJECT_WORKFLOWS,
-} from "./_proposal-goal-route-fixture.js";
+} from "../../tests/support/fixtures/unit/proposals/goal-route-fixture.js";
 
 const INLINE_WORKFLOW = {
 	id: "bespoke-seed-inline-e2e",
