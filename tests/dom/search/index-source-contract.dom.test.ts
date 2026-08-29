@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 /**
  * Shared contract runner for `IndexSource` implementations.
@@ -41,7 +41,7 @@ import type { IndexSource, IndexSourceContext, Indexable } from "../../../src/se
 import type { PersistedGoal, GoalStore } from "../../../src/server/agent/goal-store.ts";
 import type { PersistedSession, SessionStore } from "../../../src/server/agent/session-store.ts";
 import type { PersistedStaff, StaffStore } from "../../../src/server/agent/staff-store.ts";
-import { installScopedMemoryFs } from "../../core/helpers/scoped-memory-fs.ts";
+import { installScopedMemoryFs } from "../../../tests2/core/helpers/scoped-memory-fs.ts";
 
 // ── In-memory fake stores ────────────────────────────────────────────
 
