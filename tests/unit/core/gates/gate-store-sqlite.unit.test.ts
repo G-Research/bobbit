@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GateStore, type GateSignal, type GateState } from "../../src/server/agent/gate-store.js";
-import { ProjectContext } from "../../src/server/agent/project-context.js";
-import { recoverPreMigrationData } from "../../src/server/agent/state-migration.js";
-import type { Workflow } from "../../src/server/agent/workflow-store.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { GateStore, type GateSignal, type GateState } from "../../../../src/server/agent/gate-store.js";
+import { ProjectContext } from "../../../../src/server/agent/project-context.js";
+import { recoverPreMigrationData } from "../../../../src/server/agent/state-migration.js";
+import type { Workflow } from "../../../../src/server/agent/workflow-store.js";
+import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
 
 const roots: string[] = [];
 const stores: GateStore[] = [];

@@ -14,7 +14,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { checkGateDependencies, type GateDef } from "../../src/server/agent/gate-dependency-check.js";
+import { checkGateDependencies, type GateDef } from "../../../../src/server/agent/gate-dependency-check.js";
 
 // ── Test workflow: design-doc → implementation → ready-to-merge ──────
 

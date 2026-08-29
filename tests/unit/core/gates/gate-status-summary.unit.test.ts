@@ -4,9 +4,9 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { buildGateStatusSummary } from "../../src/server/gate-status-summary.js";
-import type { GateState } from "../../src/server/agent/gate-store.js";
-import type { ActiveVerification } from "../../src/server/agent/verification-harness.js";
+import { buildGateStatusSummary } from "../../../../src/server/gate-status-summary.js";
+import type { GateState } from "../../../../src/server/agent/gate-store.js";
+import type { ActiveVerification } from "../../../../src/server/agent/verification-harness.js";
 
 function gate(status: GateState["status"], gateId = "implementation"): GateState {
 	return {

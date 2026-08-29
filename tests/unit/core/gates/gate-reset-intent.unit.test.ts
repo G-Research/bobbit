@@ -1,10 +1,10 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
-import { GateStore } from "../../src/server/agent/gate-store.js";
-import { GateResetCoordinator } from "../../src/server/agent/gate-reset-intent.js";
-import type { Workflow } from "../../src/server/agent/workflow-store.js";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.js";
+import { GateStore } from "../../../../src/server/agent/gate-store.js";
+import { GateResetCoordinator } from "../../../../src/server/agent/gate-reset-intent.js";
+import type { Workflow } from "../../../../src/server/agent/workflow-store.js";
+import { createMemFs, type MemFs } from "../../../../tests2/harness/mem-fs.js";
 
 const workflow: Workflow = {
 	id: "reset-wal",

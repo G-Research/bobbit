@@ -48,11 +48,11 @@ const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "gate-signal-enum-test-")
 const STATE_DIR = path.join(TEST_DIR, "state");
 fs.mkdirSync(STATE_DIR, { recursive: true });
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
-const { GateStore } = await import("../../src/server/agent/gate-store.js");
+const { VerificationHarness } = await import("../../../../src/server/agent/verification-harness.js");
+const { GateStore } = await import("../../../../src/server/agent/gate-store.js");
 
-import type { GateSignal } from "../../src/server/agent/gate-store.js";
-import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import type { GateSignal } from "../../../../src/server/agent/gate-store.js";
+import type { WorkflowGate } from "../../../../src/server/agent/workflow-store.js";
 
 const GOAL_ID = "goal-enum-test";
 const GATE_ID = "implementation";

@@ -3,14 +3,14 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: default/namespace `node:test` import — map hooks/vi by hand
 
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
-import { GoalManager } from "../../src/server/agent/goal-manager.js";
-import { gateDiagnosticsGoalDir } from "../../src/server/agent/gate-diagnostics-cleanup.js";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.js";
+import { GoalManager } from "../../../../src/server/agent/goal-manager.js";
+import { gateDiagnosticsGoalDir } from "../../../../src/server/agent/gate-diagnostics-cleanup.js";
 
 function makeGoal(id: string): PersistedGoal {
 	return {
