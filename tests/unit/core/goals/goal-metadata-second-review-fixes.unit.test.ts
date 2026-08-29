@@ -24,9 +24,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { computeToolActivationArgs } from "../../src/server/agent/tool-activation.ts";
-import { assembleSystemPrompt, initPromptDirs } from "../../src/server/agent/system-prompt.ts";
-import { withEnv } from "../harness/with-env.js";
+import { computeToolActivationArgs } from "../../../../src/server/agent/tool-activation.ts";
+import { assembleSystemPrompt, initPromptDirs } from "../../../../src/server/agent/system-prompt.ts";
+import { withEnv } from "../../../../tests2/harness/with-env.js";
 
 // ── F4. tool-activation: fallback path honours disabledTools ─────────────────
 

@@ -16,9 +16,9 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
-import { TaskStore, type PersistedTask } from "../../src/server/agent/task-store.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.ts";
+import { TaskStore, type PersistedTask } from "../../../../src/server/agent/task-store.ts";
+import { createMemFs, type MemFs } from "../../../../tests2/harness/mem-fs.js";
 
 // Seed goals.json through the injected memfs, then load a GoalStore over the
 // SAME memfs so the load-time migration runs entirely in memory.

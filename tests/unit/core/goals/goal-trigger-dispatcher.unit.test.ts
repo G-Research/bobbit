@@ -16,9 +16,9 @@ import path from "node:path";
 import { describe, it, afterAll } from "vitest";
 import assert from "node:assert/strict";
 
-import { GoalTriggerDispatcher } from "../../src/server/agent/goal-trigger-dispatcher.ts";
-import { GoalManager } from "../../src/server/agent/goal-manager.ts";
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
+import { GoalTriggerDispatcher } from "../../../../src/server/agent/goal-trigger-dispatcher.ts";
+import { GoalManager } from "../../../../src/server/agent/goal-manager.ts";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.ts";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "goal-trigger-disp-"));
 afterAll(() => { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ok */ } });

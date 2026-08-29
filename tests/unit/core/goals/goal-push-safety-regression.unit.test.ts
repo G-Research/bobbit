@@ -13,18 +13,18 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import type { CommandRunner } from "../../../../src/server/gateway-deps.ts";
 
-import { WorktreePool } from "../../src/server/agent/worktree-pool.ts";
+import { WorktreePool } from "../../../../src/server/agent/worktree-pool.ts";
 import {
 	buildDefaultWorkflows,
 	readyToMergeGate,
 	type SeededVerifyStep,
-} from "../../src/server/state-migration/seed-default-workflows.ts";
+} from "../../../../src/server/state-migration/seed-default-workflows.ts";
 import {
 	PROJECT_ASSISTANT_PROMPT,
 	PROJECT_ASSISTANT_SCAFFOLDING_PROMPT,
-} from "../../src/server/agent/project-assistant.ts";
+} from "../../../../src/server/agent/project-assistant.ts";
 
 const SAFE_BRANCH_REFSPEC = "{{branch}}:refs/heads/{{branch}}";
 const BARE_BRANCH_PUSH = /git push origin \{\{branch\}\}(?!:)/;
@@ -151,7 +151,7 @@ describe("goal/session branch push safety regressions", () => {
 	});
 
 	it("server branch publish helper uses shell-free git argv refspecs", () => {
-		const source = fs.readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf-8");
+		const source = fs.readFileSync(new URL("../../../../src/server/server.ts", import.meta.url), "utf-8");
 		assert.match(source, /runner\.execFile\("git", args, \{ cwd, encoding: "utf-8", timeout \}\)/);
 		assert.match(source, /push: \["push", "origin", `HEAD:refs\/heads\/\$\{branch\}`\]/);
 		assert.match(source, /fetchRemoteTracking: \["fetch", "origin", `refs\/heads\/\$\{branch\}:refs\/remotes\/origin\/\$\{branch\}`\]/);

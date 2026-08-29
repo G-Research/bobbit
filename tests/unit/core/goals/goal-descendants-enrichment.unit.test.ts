@@ -14,8 +14,8 @@ import {
 	aggregateGateStatus,
 	enrichDescendantsForPlan,
 	type DescendantGate,
-} from "../../src/server/agent/goal-descendants.ts";
-import type { PersistedGoal } from "../../src/server/agent/goal-store.ts";
+} from "../../../../src/server/agent/goal-descendants.ts";
+import type { PersistedGoal } from "../../../../src/server/agent/goal-store.ts";
 
 const G = (over: Partial<PersistedGoal> = {}): PersistedGoal => ({
 	id: over.id ?? "g",

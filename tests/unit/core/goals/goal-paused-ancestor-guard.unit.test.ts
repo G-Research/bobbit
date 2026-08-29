@@ -13,7 +13,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { requireAncestorsNotPaused, GoalPausedError } from "../../src/server/agent/goal-paused-guard.ts";
+import { requireAncestorsNotPaused, GoalPausedError } from "../../../../src/server/agent/goal-paused-guard.ts";
 
 interface G { id: string; paused?: boolean; parentGoalId?: string; }
 

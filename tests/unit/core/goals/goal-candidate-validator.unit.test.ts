@@ -2,16 +2,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { validateInlineRoles } from "../../src/server/agent/inline-role-validator.js";
+import { validateInlineRoles } from "../../../../src/server/agent/inline-role-validator.js";
 import {
 	GoalManager,
 	GoalPreflightStaleError,
 	GOAL_PREFLIGHT_STALE_CODE,
 	GOAL_PREFLIGHT_STALE_MESSAGE,
-} from "../../src/server/agent/goal-manager.js";
-import { GoalStore } from "../../src/server/agent/goal-store.js";
-import { executionPathIdentity } from "../../src/server/agent/resolve-project.js";
-import { buildActive, buildFixture, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.js";
+} from "../../../../src/server/agent/goal-manager.js";
+import { GoalStore } from "../../../../src/server/agent/goal-store.js";
+import { executionPathIdentity } from "../../../../src/server/agent/resolve-project.js";
+import { buildActive, buildFixture, buildSubgoalStep } from "../../../helpers/run-subgoal-step-fixture.js";
 
 function deferred() {
 	let resolve!: () => void;

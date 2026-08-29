@@ -10,10 +10,10 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { buildReattemptContext } from "../../src/server/agent/goal-assistant.js";
-import { PrStatusStore } from "../../src/server/agent/pr-status-store.js";
-import type { PersistedGoal } from "../../src/server/agent/goal-store.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { buildReattemptContext } from "../../../../src/server/agent/goal-assistant.js";
+import { PrStatusStore } from "../../../../src/server/agent/pr-status-store.js";
+import type { PersistedGoal } from "../../../../src/server/agent/goal-store.js";
+import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
 
 function makeGoal(overrides: Partial<PersistedGoal> = {}): PersistedGoal {
 	return {
