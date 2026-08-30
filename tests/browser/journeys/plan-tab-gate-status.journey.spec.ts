@@ -1,5 +1,5 @@
 /**
- * Plan-tab per-node gate status + merge/conflict E2E (Phase 5c).
+ * Plan-tab per-node gate status + merge/conflict journey (Phase 5c).
  *
  * The backend stamps each descendant with `gateStatus`
  * ("pending"|"running"|"passed"|"failed") and `mergeConflict` (boolean).
@@ -15,12 +15,12 @@
  * exercising the real render path with a realistic data shape without
  * depending on the backend producing a real merge conflict.
  *
- * Reference: tests/e2e/ui/plan-tab-archived-children.spec.ts.
+ * Reference: tests/browser/journeys/plan-tab-archived-children.journey.spec.ts.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Plan tab — per-node gate status + merge/conflict", () => {
 	let parentId = "";

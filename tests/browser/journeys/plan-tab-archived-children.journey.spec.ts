@@ -1,5 +1,5 @@
 /**
- * Plan-tab archived-children E2E.
+ * Plan-tab archived-children journey.
  *
  * Bug: the Plan-tab DAG sourced children from `state.goals`, which excludes
  * archived goals when the sidebar's "See Archived" toggle is off. Children
@@ -17,9 +17,9 @@
  *   4. Loads the parent dashboard, opens the Plan tab.
  *   5. Asserts the plan-node renders with `data-archived="true"`.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Plan tab — archived children", () => {
 	let parentId = "";

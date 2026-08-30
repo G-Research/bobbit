@@ -1,5 +1,5 @@
 /**
- * E2E tests for proposal tool call features.
+ * Browser journey tests for proposal tool call features.
  *
  * Covers:
  * - propose_goal tool call block renders in message history
@@ -8,9 +8,9 @@
  * - Click "Open proposal" button reopens the proposal panel
  * - Dismiss hides proposal panel, tool block remains visible
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for proposal panel.
  *

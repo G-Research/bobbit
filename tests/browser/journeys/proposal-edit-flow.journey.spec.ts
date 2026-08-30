@@ -1,5 +1,5 @@
 /**
- * E2E — Project propose → edit → accept happy path for editable proposals.
+ * Journey — Project propose → edit → accept happy path for editable proposals.
  *
  * Spec: docs/design/editable-proposals.md §9.1.
  *
@@ -10,9 +10,9 @@
  *   3. User clicks Apply Changes → PUT /api/projects/:id/config payload reflects
  *      the edited build_command.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProjectId } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProjectId } from "../../e2e/e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
 	const projectId = await defaultProjectId();

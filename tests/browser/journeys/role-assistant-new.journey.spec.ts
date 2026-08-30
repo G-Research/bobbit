@@ -1,5 +1,5 @@
 /**
- * Browser E2E: clicking "+ New Role" on the Roles page creates a Role
+ * Browser journey: clicking "+ New Role" on the Roles page creates a Role
  * Assistant session.
  *
  * Regression guard for the Role Assistant 400 bug: `createRoleAssistantSession`
@@ -9,8 +9,8 @@
  * editors and don't need a project — this test asserts the happy path works
  * end-to-end through the browser.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Roles page — + New Role creates a session", () => {
 	test("clicking + New Role opens a Role Assistant session @smoke", async ({ page }) => {

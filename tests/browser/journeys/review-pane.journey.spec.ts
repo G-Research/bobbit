@@ -1,12 +1,12 @@
 /**
  * Browser coverage for the real review_open gateway/tool integration path.
  * Review tab management, reload suppression, approve/reject validation, and
- * annotation feedback are covered by tests/ui-fixtures/proposal-review-fixture.spec.ts.
+ * annotation feedback are covered by tests/browser/fixtures/proposal-review-fixture.fixture.spec.ts.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
 

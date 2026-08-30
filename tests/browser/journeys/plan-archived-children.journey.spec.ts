@@ -1,5 +1,5 @@
 /**
- * Plan tab + tree-cost — archived & completed children E2E.
+ * Plan tab + tree-cost journey — archived & completed children.
  *
  * Verifies the user-facing contract for the archived-children fix:
  *
@@ -17,9 +17,9 @@
  * because REST `POST /spawn-child` does not let us create a "complete"
  * or "archived" child in one step.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Plan tab + tree-cost — archived/completed children", () => {
 	let parentId = "";
