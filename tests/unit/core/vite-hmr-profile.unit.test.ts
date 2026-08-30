@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
-import { parseArgs, percentile, usage, validateReport } from "../../scripts/profile-vite-hmr.mjs";
+import { parseArgs, percentile, usage, validateReport } from "../../../scripts/profile-vite-hmr.mjs";
 
-const profilerPath = fileURLToPath(new URL("../../scripts/profile-vite-hmr.mjs", import.meta.url));
+const profilerPath = fileURLToPath(new URL("../../../scripts/profile-vite-hmr.mjs", import.meta.url));
 
 describe("Vite HMR profiler", () => {
 	it("parses bounded repeatable profile options", () => {

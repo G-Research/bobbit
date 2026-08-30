@@ -27,8 +27,8 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { goalBranchContainer, resolveStep } from "../../src/server/agent/verification-harness.ts";
-import type { Component } from "../../src/server/agent/project-config-store.ts";
+import { goalBranchContainer, resolveStep } from "../../../src/server/agent/verification-harness.ts";
+import type { Component } from "../../../src/server/agent/project-config-store.ts";
 
 describe("verify step resolution — goalBranchContainer composed with resolveStep", () => {
 	it("single-repo with relativePath — goalBranchContainer must not double the offset", () => {

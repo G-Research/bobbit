@@ -34,7 +34,7 @@ import path from "node:path";
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-proj-config-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+const { VerificationHarness } = await import("../../../src/server/agent/verification-harness.js");
 
 // ---------------------------------------------------------------------------
 // Minimal in-memory ProjectConfigStore shim (just `getWithDefaults`).

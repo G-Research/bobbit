@@ -17,16 +17,16 @@ const {
 	VerificationHarness,
 	VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS,
 	VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS,
-} = await import("../../src/server/agent/verification-harness.js");
+} = await import("../../../src/server/agent/verification-harness.js");
 const {
 	isTransientVerifierReviewError,
 	isTransientVerifierQaError,
-} = await import("../../src/server/agent/verification-logic.js");
+} = await import("../../../src/server/agent/verification-logic.js");
 const {
 	COLD_REPROMPT_PROMPT_TIMEOUT_MS,
 	COLD_REPROMPT_READY_TIMEOUT_MS,
 	RpcBridge,
-} = await import("../../src/server/agent/rpc-bridge.js");
+} = await import("../../../src/server/agent/rpc-bridge.js");
 
 const MARKER = "VERIFIER_LIFECYCLE_REPRO";
 

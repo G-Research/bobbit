@@ -45,8 +45,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
-const { isTransientReviewError, shouldRetryVerificationStep } = await import("../../src/server/agent/verification-logic.js");
+const { VerificationHarness } = await import("../../../src/server/agent/verification-harness.js");
+const { isTransientReviewError, shouldRetryVerificationStep } = await import("../../../src/server/agent/verification-logic.js");
 
 const MARKER = "LLM_REVIEW_RELIABILITY_REPRO";
 

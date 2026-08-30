@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, beforeEach } from "vitest";
@@ -12,8 +12,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { buildVerificationToolActivation } = await import("../../src/server/agent/verification-harness.ts");
-import type { ToolProvider } from "../../src/server/agent/tool-manager.ts";
+const { buildVerificationToolActivation } = await import("../../../src/server/agent/verification-harness.ts");
+import type { ToolProvider } from "../../../src/server/agent/tool-manager.ts";
 
 type ProviderWithPath = ToolProvider & { groupDir: string; baseDir: string };
 

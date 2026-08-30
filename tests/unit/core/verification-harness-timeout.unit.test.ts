@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -19,7 +19,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createManualClock } from "../harness/clock.js";
+import { createManualClock } from "../../../tests2/harness/clock.js";
 
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-treekill-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
@@ -32,9 +32,9 @@ const {
 	createContainerWitnessFrameDecoder,
 	createDockerEngineEventsResponseDecoder,
 	parseDockerExecCreateEvent,
-} = await import("../../src/server/agent/verification-harness.ts");
-const { spawnTracked } = await import("../../src/server/agent/spawn-tree.ts");
-const { createFakeVerificationCommandRunner } = await import("../harness/fake-verification-command-runner.js");
+} = await import("../../../src/server/agent/verification-harness.ts");
+const { spawnTracked } = await import("../../../src/server/agent/spawn-tree.ts");
+const { createFakeVerificationCommandRunner } = await import("../../../tests2/harness/fake-verification-command-runner.js");
 
 /** Poll predicate with explicit budget. Returns true if satisfied within the budget. */
 async function poll(predicate: () => boolean | Promise<boolean>, budgetMs: number, stepMs = 50): Promise<boolean> {

@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -23,15 +23,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { GateSignal } from "../../src/server/agent/gate-store.ts";
-import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import type { GateSignal } from "../../../src/server/agent/gate-store.ts";
+import { createFakeVerificationCommandRunner } from "../../../tests2/harness/fake-verification-command-runner.js";
 
 // Isolated temp dir for harness persistence
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
+const { VerificationHarness } = await import("../../../src/server/agent/verification-harness.ts");
 
 const HOST_CWD = os.tmpdir();
 const HOST_MARKER_COMMAND = "echo host-shell-test-marker";

@@ -6,12 +6,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import type { VerifyStep } from "../../src/server/agent/workflow-store.js";
+import type { VerifyStep } from "../../../src/server/agent/workflow-store.js";
 import {
 	initAuthorSidecarDir,
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
-} from "../../src/server/agent/author-sidecar.ts";
+} from "../../../src/server/agent/author-sidecar.ts";
 import {
 	DEFAULT_LLM_REVIEW_TIMEOUT_S,
 	MIN_LLM_REVIEW_TIMEOUT_S,
@@ -20,7 +20,7 @@ import {
 	VERIFICATION_RESULT_REMINDER,
 	resolveCommandStepTimeoutSec,
 	resolveReviewStepTimeoutSec,
-} from "../../src/server/agent/verification-harness.js";
+} from "../../../src/server/agent/verification-harness.js";
 
 const MARKER = "REVIEW_TIMEOUT_CONTRACT";
 const SYSTEM_MODEL_PREFIX = "[System]: ";

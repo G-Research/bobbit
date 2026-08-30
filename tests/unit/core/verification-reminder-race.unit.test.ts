@@ -29,8 +29,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
-import { VerificationHarness, VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER } from "../../src/server/agent/verification-harness.ts";
+import { initAuthorSidecarDir } from "../../../src/server/agent/author-sidecar.ts";
+import { VerificationHarness, VERIFICATION_RESTART_RESUME_PROMPT, VERIFICATION_RESULT_REMINDER } from "../../../src/server/agent/verification-harness.ts";
 
 const SYSTEM_MODEL_PREFIX = "[System]: ";
 
