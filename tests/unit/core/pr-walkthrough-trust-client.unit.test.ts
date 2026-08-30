@@ -25,7 +25,7 @@ import {
 	callSpawnRouteWithTrust,
 	type EnsureGithubHostTrustedDeps,
 	type SpawnRouteOutcome,
-} from "../../src/app/pr-walkthrough-trust.ts";
+} from "../../../src/app/pr-walkthrough-trust.ts";
 
 /** Minimal Response-like object for the injected fetch seam. */
 function jsonResponse(body: unknown, ok = true): Response {

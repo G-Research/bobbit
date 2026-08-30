@@ -10,11 +10,11 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it, vi } from "vitest";
 
-import type { CommandRunner, ExecFileResult } from "../../src/server/gateway-deps.ts";
-import { synthesiseWalkthroughCards, validateSynthesisedCards, type WalkthroughParsedFile } from "../../src/server/pr-walkthrough/card-synthesis.ts";
-import { normalizeGithubResolvedWalkthrough, resolveWalkthroughForTesting, setPrWalkthroughSynthesisAdapterForTesting } from "../../src/server/pr-walkthrough/routes.ts";
-import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../../src/server/pr-walkthrough/walkthrough-store.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import type { CommandRunner, ExecFileResult } from "../../../src/server/gateway-deps.ts";
+import { synthesiseWalkthroughCards, validateSynthesisedCards, type WalkthroughParsedFile } from "../../../src/server/pr-walkthrough/card-synthesis.ts";
+import { normalizeGithubResolvedWalkthrough, resolveWalkthroughForTesting, setPrWalkthroughSynthesisAdapterForTesting } from "../../../src/server/pr-walkthrough/routes.ts";
+import { WALKTHROUGH_STORE_SCHEMA_VERSION, WalkthroughStore } from "../../../src/server/pr-walkthrough/walkthrough-store.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 describe("PR walkthrough card synthesis", () => {
 	it("builds deterministic fallback phases and groups multiple diff blocks by path", async () => {

@@ -3,7 +3,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 
-const routesModule = await import("../../market-packs/pr-walkthrough/lib/routes.mjs");
+const routesModule = await import("../../../market-packs/pr-walkthrough/lib/routes.mjs");
 const { resolveCurrentBranchTarget } = routesModule.__test;
 
 type GitFixture = {

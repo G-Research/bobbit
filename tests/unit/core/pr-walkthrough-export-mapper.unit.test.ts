@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { EventEmitter } from "node:events";
@@ -11,14 +11,14 @@ import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.ts";
+import { realCommandRunner, type CommandRunner } from "../../../src/server/gateway-deps.ts";
 import {
 	buildGithubReviewPreview,
 	createGithubReviewPayload,
 	submitGithubReview,
 	type PrWalkthroughCard,
 	type PrWalkthroughReviewDraft,
-} from "../../src/server/pr-walkthrough/export-mapper.ts";
+} from "../../../src/server/pr-walkthrough/export-mapper.ts";
 import {
 	GITHUB_EXPORT_NEEDS_AUTH_REASON,
 	GithubPrAdapterError,
@@ -26,8 +26,8 @@ import {
 	parseGithubRemoteUrl,
 	resolveGithubExportAuth,
 	resolveGithubPr,
-} from "../../src/server/pr-walkthrough/github-adapter.ts";
-import { resolveDiffForBindingTargetForTesting, submitExportForTesting } from "../../src/server/pr-walkthrough/routes.ts";
+} from "../../../src/server/pr-walkthrough/github-adapter.ts";
+import { resolveDiffForBindingTargetForTesting, submitExportForTesting } from "../../../src/server/pr-walkthrough/routes.ts";
 
 const cards: PrWalkthroughCard[] = [
 	{

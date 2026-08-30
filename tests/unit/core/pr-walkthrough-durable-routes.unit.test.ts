@@ -3,8 +3,8 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: default/namespace `node:test` import — map hooks/vi by hand
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 
@@ -15,9 +15,9 @@ import { join, resolve } from "node:path";
 import { test, onTestFinished } from "vitest";
 import { pathToFileURL } from "node:url";
 
-import { routes } from "../../market-packs/pr-walkthrough/lib/routes.mjs";
-import { ModuleHost } from "../../src/server/extension-host/module-host-worker.ts";
-import { createPackStore } from "../../src/server/extension-host/pack-store.ts";
+import { routes } from "../../../market-packs/pr-walkthrough/lib/routes.mjs";
+import { ModuleHost } from "../../../src/server/extension-host/module-host-worker.ts";
+import { createPackStore } from "../../../src/server/extension-host/pack-store.ts";
 
 class MemoryStore {
 	data = new Map<string, unknown>();

@@ -29,12 +29,12 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const { resolveGrantPolicy, computeEffectiveAllowedTools, computeToolPolicies } = await import("../../src/server/agent/tool-activation.ts");
-const { generateToolGuardExtension } = await import("../../src/server/agent/tool-guard-extension.ts");
-import type { GroupPolicyProvider } from "../../src/server/agent/tool-activation.ts";
+const { resolveGrantPolicy, computeEffectiveAllowedTools, computeToolPolicies } = await import("../../../src/server/agent/tool-activation.ts");
+const { generateToolGuardExtension } = await import("../../../src/server/agent/tool-guard-extension.ts");
+import type { GroupPolicyProvider } from "../../../src/server/agent/tool-activation.ts";
 type GrantPolicy = "allow" | "ask" | "never";
 
-const ROOT = path.resolve(import.meta.dirname, "..", "..");
+const ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const DEFAULTS_DIR = path.join(ROOT, "defaults");
 const GROUP_POLICIES_FILE = path.join(DEFAULTS_DIR, "tool-group-policies.yaml");
 const GENERAL_ROLE_FILE = path.join(DEFAULTS_DIR, "roles", "general.yaml");

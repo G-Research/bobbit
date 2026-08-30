@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import provider from "../../market-packs/pr-walkthrough/lib/provider.mjs";
+import provider from "../../../market-packs/pr-walkthrough/lib/provider.mjs";
 
 class MemoryStore {
 	data = new Map<string, unknown>();

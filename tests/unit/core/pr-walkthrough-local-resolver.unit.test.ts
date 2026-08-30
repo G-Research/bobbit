@@ -3,8 +3,8 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
-import { resolveLocalChangeset } from "../../src/server/pr-walkthrough/git-changeset.ts";
-import type { CommandRunner, ExecFileResult } from "../../src/server/gateway-deps.ts";
+import { resolveLocalChangeset } from "../../../src/server/pr-walkthrough/git-changeset.ts";
+import type { CommandRunner, ExecFileResult } from "../../../src/server/gateway-deps.ts";
 
 const BASE_SHA = "a".repeat(40);
 const HEAD_SHA = "b".repeat(40);

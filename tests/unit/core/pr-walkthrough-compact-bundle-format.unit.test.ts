@@ -3,14 +3,14 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import extensionModule from "../../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
-import * as prWalkthroughExtension from "../../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
+import extensionModule from "../../../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
+import * as prWalkthroughExtension from "../../../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
 
 const extension = extensionModule as any;
 const compactApi = prWalkthroughExtension as any;
