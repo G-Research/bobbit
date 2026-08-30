@@ -1,13 +1,13 @@
 // v2-native — focused clear transaction, fencing, and rollback coverage.
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import { createManualClock } from "../harness/clock.js";
+import { makeTmpDir } from "../../helpers/tmp.ts";
+import { createManualClock } from "../../../tests2/harness/clock.js";
 
 const tmpRoot = makeTmpDir("context-clear-lifecycle-");
 const stateDir = path.join(tmpRoot, "state");
@@ -19,14 +19,14 @@ process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 fs.mkdirSync(stateDir, { recursive: true });
 fs.mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
 
-const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
+const { resetAgentDirStateForTests } = await import("../../../src/server/bobbit-dir.ts");
 resetAgentDirStateForTests?.();
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
-const { initCompactionSidecarDir } = await import("../../src/server/agent/compaction-sidecar.ts");
-const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { initAuthorSidecarDir } = await import("../../../src/server/agent/author-sidecar.ts");
+const { initCompactionSidecarDir } = await import("../../../src/server/agent/compaction-sidecar.ts");
+const { activeAgentSessionsDir } = await import("../../../src/server/agent/agent-session-path.ts");
 
 const PROVIDER = "anthropic";
 const MODEL_ID = "claude-clear-fixture";

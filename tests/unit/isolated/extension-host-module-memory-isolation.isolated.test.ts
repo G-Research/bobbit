@@ -1,6 +1,6 @@
 // v2-native — exact-registered partition for the deliberate ModuleHost worker OOM.
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 
@@ -9,9 +9,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
-import { ActionError, type ActionHandlerCtx } from "../../src/server/extension-host/action-dispatcher.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { ModuleHost, type InvokeRequest } from "../../../src/server/extension-host/module-host-worker.ts";
+import { ActionError, type ActionHandlerCtx } from "../../../src/server/extension-host/action-dispatcher.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 let tmp: string;
 

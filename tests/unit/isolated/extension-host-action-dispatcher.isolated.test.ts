@@ -20,10 +20,10 @@ import {
 	resolveActionToolManager,
 	type ActionHandlerCtx,
 	type ActionToolLocationResolver,
-} from "../../src/server/extension-host/action-dispatcher.ts";
-import type { InvokeRequest, ModuleHost } from "../../src/server/extension-host/module-host-worker.ts";
-import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+} from "../../../src/server/extension-host/action-dispatcher.ts";
+import type { InvokeRequest, ModuleHost } from "../../../src/server/extension-host/module-host-worker.ts";
+import { installScopedMemoryFs } from "../../../tests2/core/helpers/scoped-memory-fs.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 type InvokeFake = (request: InvokeRequest, timeoutMs?: number) => unknown | Promise<unknown>;
 type RecordedHost = { host: ModuleHost; calls: InvokeRequest[] };
