@@ -58,6 +58,7 @@ export function createE2EPhaseSelection() {
 			name: "api-canonical",
 			testDir: "./tests/e2e/api",
 			testMatch: [canonicalMatch("api-e2e")],
+			testIgnore: ["**/goal-archive-branch-cleanup.api-e2e.spec.ts"],
 		},
 		browserCanonical: {
 			name: "browser-canonical",
@@ -66,8 +67,8 @@ export function createE2EPhaseSelection() {
 		},
 		apiRealpush: {
 			name: "api-realpush",
-			testDir: "./tests/e2e",
-			testMatch: ["**/goal-archive-branch-cleanup.e2e.spec.ts"],
+			testDir: "./tests/e2e/api",
+			testMatch: ["**/goal-archive-branch-cleanup.api-e2e.spec.ts"],
 		},
 		browser: {
 			name: "browser",
@@ -80,6 +81,7 @@ export function createE2EPhaseSelection() {
 				"**/per-project-config-dirs*.spec.ts",
 				"**/port-auto-increment*.spec.ts",
 			],
+			testIgnore: ["**/api/**", "**/browser/**"],
 		},
 	};
 }
