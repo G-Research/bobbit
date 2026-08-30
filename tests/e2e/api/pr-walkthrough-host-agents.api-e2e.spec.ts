@@ -54,6 +54,16 @@ const REVIEWER_TOOLS = ["readonly_bash", "read_pr_walkthrough_bundle", "submit_p
 // submitted YAML's `pr` identity so submit-yaml validation passes.
 const PR_URL = "https://github.com/SuuBro/bobbit/pull/42";
 
+async function setPrWalkthroughActivation(disabled: Record<string, unknown>): Promise<any> {
+	const response = await apiFetch("/api/marketplace/pack-activation", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled }),
+	});
+	const text = await response.text();
+	expect(response.status, text).toBe(200);
+	return JSON.parse(text);
+}
+
 // ── git fixture (a real local repo so the bundle endpoint's live recompute
 //    resolves; mirrors pr-walkthrough-api.spec.ts::makeGitFixture). ──
 type GitFixture = { cwd: string; baseSha: string; headSha: string; cleanup: () => void };
@@ -183,6 +193,15 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	const createdSessionIds: string[] = [];
 
 	test.beforeAll(async () => {
+		const enabled = await setPrWalkthroughActivation({
+			enabled: true,
+			roles: [],
+			tools: [],
+			skills: [],
+			entrypoints: [],
+		});
+		expect(enabled.disabled.enabled).toBe(true);
+
 		ModuleHostClass = (await import("../../../dist/server/extension-host/module-host-worker.js")).ModuleHost;
 		createServerHostApi = (await import("../../../dist/server/extension-host/server-host-api.js")).createServerHostApi;
 		getPackStore = (await import("../../../dist/server/extension-host/pack-store.js")).getPackStore;
@@ -192,7 +211,12 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	});
 
 	test.afterAll(async () => {
-		moduleHost?.dispose();
+		try {
+			moduleHost?.dispose();
+		} finally {
+			const cleared = await setPrWalkthroughActivation({});
+			expect(cleared.disabled.enabled).toBeUndefined();
+		}
 	});
 
 	test.afterEach(async ({ gateway }) => {

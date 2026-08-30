@@ -5,8 +5,8 @@
  * gateway (mock agent — no LLM):
  *
  *  1. API / data model: per-goal `metadata` persists in the 201 response, the
- *     GET detail, and authoritative `goals.sqlite` storage. Empty/array
- *     metadata is ignored (absent ⇒ current behaviour).
+ *     GET detail, and authoritative `goals.sqlite` storage. Empty metadata is
+ *     ignored (absent ⇒ current behaviour); array metadata is rejected.
  *  2. Hierarchical resolver (the anti-asymmetry core): `getEffectiveGoalMetadata`
  *     deep-merges ancestors → self (descendant wins; arrays replace, objects
  *     recurse). A nested sub-goal inherits its parent's metadata; a metadata-less
@@ -158,16 +158,25 @@ test.describe.serial("Hierarchical goal metadata — persistence & resolver", ()
 		}
 	});
 
-	test("empty {} and array metadata are ignored (absent ⇒ current behaviour)", async ({ gateway }) => {
+	test("empty {} metadata is ignored while array metadata is rejected", async ({ gateway }) => {
 		const emptyGoal = await createGoalRaw({ title: "meta-empty", cwd: nonGitCwd(), metadata: {} });
 		created.push(emptyGoal.id);
 		expect(emptyGoal.metadata).toBeUndefined();
 		expect(effectiveMetadata(gateway, emptyGoal.id)).toEqual({});
 
-		const arrGoal = await createGoalRaw({ title: "meta-array", cwd: nonGitCwd(), metadata: ["nope"] as unknown });
-		created.push(arrGoal.id);
-		expect(arrGoal.metadata).toBeUndefined();
-		expect(effectiveMetadata(gateway, arrGoal.id)).toEqual({});
+		const arrayResponse = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "meta-array",
+				cwd: nonGitCwd(),
+				spec: SPEC,
+				autoStartTeam: false,
+				workflowId: "general",
+				metadata: ["nope"],
+			}),
+		});
+		expect(arrayResponse.status).toBe(400);
+		expect((await arrayResponse.json()).code).toBe("METADATA_INVALID");
 	});
 
 	test("resolver deep-merges ancestry: descendant wins, arrays replace, objects recurse", async ({ gateway }) => {
@@ -341,13 +350,13 @@ async function uninstallPack(): Promise<void> {
 		body: JSON.stringify({ scope: "server", packName: PACK_NAME }),
 	});
 	const text = await response.text();
-	expect(response.status, text).toBe(200);
+	expect(response.status, text).toBe(204);
 }
 
 async function removeSource(sourceId: string): Promise<void> {
 	const response = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
 	const text = await response.text();
-	expect(response.status, text).toBe(200);
+	expect(response.status, text).toBe(204);
 }
 
 /** PUT pack-activation to (re)set disabled providers AND bust the registry cache. */
