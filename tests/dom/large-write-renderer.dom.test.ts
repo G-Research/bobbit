@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { render } from "lit";
-import { syncCustomElements } from "./_setup/custom-elements.js";
+import { syncCustomElements } from "../../tests2/dom/_setup/custom-elements.js";
 import { WriteRenderer } from "../../src/ui/tools/renderers/WriteRenderer.js";
 
 beforeAll(() => syncCustomElements());

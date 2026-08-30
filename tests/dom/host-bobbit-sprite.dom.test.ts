@@ -1,5 +1,5 @@
 import { beforeAll as syncBeforeAll } from "vitest";
-import { syncCustomElements } from "./_setup/custom-elements.js";
+import { syncCustomElements } from "../../tests2/dom/_setup/custom-elements.js";
 syncBeforeAll(() => syncCustomElements());
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
