@@ -26,7 +26,7 @@ import {
 	sidebarTreeLegacyGoalIndentStyle,
 	sidebarTreeNodeIndentStyle,
 	sidebarTreeTruncationIndentStyle,
-} from "../../src/app/sidebar-tree-layout.ts";
+} from "../../../src/app/sidebar-tree-layout.ts";
 
 function installLocalStorageShim(): Map<string, string> {
 	const store = new Map<string, string>();

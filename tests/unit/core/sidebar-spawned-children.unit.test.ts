@@ -30,7 +30,7 @@ import {
 	computeSpawnedClaim,
 	type SpawnedChildLike,
 	type SessionLike,
-} from "../../src/app/sidebar-spawned-children.ts";
+} from "../../../src/app/sidebar-spawned-children.ts";
 
 function g(over: Partial<SpawnedChildLike> & { id: string }): SpawnedChildLike {
 	return {

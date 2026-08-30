@@ -31,9 +31,9 @@ afterAll(() => {
 	try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-const { resolveSkillExpansions } = await import("../../src/server/skills/resolve-skill-expansions.ts");
-const { buildActivationHeader } = await import("../../src/server/skills/skill-manifest.ts");
-const { buildSlashSkillPrompt, getSlashSkill } = await import("../../src/server/skills/slash-skills.ts");
+const { resolveSkillExpansions } = await import("../../../src/server/skills/resolve-skill-expansions.ts");
+const { buildActivationHeader } = await import("../../../src/server/skills/skill-manifest.ts");
+const { buildSlashSkillPrompt, getSlashSkill } = await import("../../../src/server/skills/slash-skills.ts");
 
 describe("activation header in resolveSkillExpansions", () => {
 	it("prefix-only expansion includes the activation header", () => {

@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 const { buildSkillResourceManifest, buildActivationHeader, ACTIVATION_HEADER_STRIP_RE } =
-	await import("../../src/server/skills/skill-manifest.ts");
+	await import("../../../src/server/skills/skill-manifest.ts");
 
 let root: string;
 

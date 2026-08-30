@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import {
 	computeSidebarActionFlipDeltas,
 	type SidebarActionsFlipRect,
-} from "../../src/ui/components/sidebar-actions-flip.ts";
+} from "../../../src/ui/components/sidebar-actions-flip.ts";
 
 function rect(left: number, top: number, width: number, height: number): DOMRectReadOnly {
 	return {
