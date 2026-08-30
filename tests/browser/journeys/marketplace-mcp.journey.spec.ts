@@ -6,8 +6,8 @@
  * Marketplace MCP REST contract and drives the real Market page UI end-to-end.
  */
 import type { Page, Route } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe.configure({ mode: "serial" });
 

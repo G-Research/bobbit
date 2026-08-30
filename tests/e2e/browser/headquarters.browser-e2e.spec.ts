@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { apiFetch, registerProject, deleteSession, deleteGoal } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const HEADQUARTERS_NAME = "Headquarters";

@@ -7,9 +7,9 @@
  * test confirms the live control still works end-to-end: opening the selector,
  * picking a different model, and that the choice persists across a reload.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp } from "./ui-helpers.js";
-import { createSession, apiFetch } from "../e2e-setup.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
+import { createSession, apiFetch } from "../../e2e/e2e-setup.js";
 
 test.describe("image-model selector (single source of truth)", () => {
 	test("selector changes the session image model and persists across reload", async ({ page }) => {

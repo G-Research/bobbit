@@ -9,9 +9,9 @@
  * src/app/render.ts (testid `bobbit-loader`), not inside any single route
  * branch.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 async function showHeadquarters(): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

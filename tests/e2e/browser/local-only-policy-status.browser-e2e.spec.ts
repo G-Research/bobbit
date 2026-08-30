@@ -15,7 +15,7 @@ import {
 	waitForSessionStatus,
 } from "../e2e-setup.js";
 import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToHash, openApp } from "../ui/ui-helpers.js";
 
 function makeGitRepo(): string {
 	const repo = mkdtempSync(join(tmpdir(), `bobbit-e2e-local-only-ui-${process.pid}-`));
