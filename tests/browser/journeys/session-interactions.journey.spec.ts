@@ -1,7 +1,7 @@
 /** Consolidated Session interaction UI journey: create, send, switch, reload, delete. */
-import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Session interactions (UI)", () => {
 	test("create/send, switch sessions, survive reload, and clean up deleted session", async ({ page }) => {

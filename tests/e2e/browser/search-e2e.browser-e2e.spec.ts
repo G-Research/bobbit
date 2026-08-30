@@ -7,7 +7,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, deleteSession, createGoal, deleteGoal, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 test.describe("Search (UI)", () => {
 	test("SR-01: sidebar filter matches session and goal titles @smoke", async ({ page }) => {

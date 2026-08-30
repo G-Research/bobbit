@@ -5,7 +5,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 test.describe("Session status — canonical-status recovery", () => {
 	test("status_resync heals stuck-streaming and subsequent prompts render once", async ({ page }) => {

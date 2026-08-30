@@ -16,7 +16,7 @@ import {
 	waitForSessionStatus,
 	type WsConnection,
 } from "../e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
+import { openApp, navigateToHash, sendMessage } from "../ui/ui-helpers.js";
 import { pollUntil } from "../test-utils/cleanup.js";
 
 const ASK_SESSION_PROMPT_TOOL = "session_prompt";
