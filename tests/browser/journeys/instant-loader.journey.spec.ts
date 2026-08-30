@@ -30,7 +30,10 @@ test.describe("Instant loader on session create", () => {
 		await openApp(page);
 
 		// Headquarters is the built-in first-run workspace, so the splash CTA is Quick Session.
-		const splashLabel = page.locator('[data-testid="splash-new-session-label"]').first();
+		// Desktop and mobile render the same control with viewport-specific test ids.
+		const splashLabel = page.locator(
+			'[data-testid="splash-new-session-label"], [data-testid="splash-quick-session-label"]',
+		).first();
 		await expect(splashLabel).toBeVisible({ timeout: 20_000 });
 		await expect(splashLabel).toContainText("Quick Session");
 
@@ -59,19 +62,17 @@ test.describe("Instant loader on session create", () => {
 			{ timeout: 10_000 },
 		);
 		await splashLabel.click();
-		// With Headquarters plus the harness default project visible, the splash
-		// Quick Session CTA opens the same project picker as other session entry
-		// points. Pick Headquarters to exercise the built-in first-run workspace;
-		// single-visible-project states still POST immediately.
-		const picker = page.locator("project-picker-popover").first();
-		if (await picker.isVisible({ timeout: 1_000 }).catch(() => false)) {
-			await picker.locator('button[data-project-id="headquarters"]').click();
-		} else {
-			const inlineHeadquartersOption = page.getByRole("button", { name: /Headquarters\s+Server workspace/i }).first();
-			if (await inlineHeadquartersOption.isVisible({ timeout: 1_000 }).catch(() => false)) {
-				await inlineHeadquartersOption.click();
-			}
-		}
+		// With Headquarters plus the harness default project visible, Quick Session
+		// opens the splash-specific inline picker. Select its Headquarters row so the
+		// click deterministically reaches createAndConnectSession's POST contract.
+		const picker = page.locator('[data-testid="splash-project-picker"]').first();
+		await expect(picker).toBeVisible();
+		const headquartersOption = picker
+			.locator('[data-testid="splash-project-picker-item"]')
+			.filter({ hasText: "Headquarters" })
+			.first();
+		await expect(headquartersOption).toBeVisible();
+		await headquartersOption.click();
 		await postStarted;
 
 		const loader = page.locator('[data-testid="bobbit-loader"]').first();
