@@ -63,7 +63,7 @@ describe("E2E Docker capability and scheduling", () => {
 	});
 
 	it("gates only image-backed sandbox cases and retains non-Docker coverage", () => {
-		const source = readFileSync("tests/e2e/api/sandbox-recovery.api-e2e.spec.ts", "utf8");
+		const source = readFileSync("tests/e2e/sandbox-recovery.e2e.spec.ts", "utf8");
 		expect(source.match(/test\.skip\(!isDockerSandboxAvailable\(\)/g)).toHaveLength(2);
 		expect(source).not.toContain("test.skip(!isDockerAvailable()");
 		expect(source).toContain('test.describe("process_exit event handling"');

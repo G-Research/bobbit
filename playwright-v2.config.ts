@@ -188,7 +188,6 @@ export default {
 			name: "browser-canonical",
 			testDir: "./tests/browser",
 			testMatch: canonicalBrowserMatches,
-			fullyParallel: true,
 			use: {
 				browserName: "chromium" as const,
 			},

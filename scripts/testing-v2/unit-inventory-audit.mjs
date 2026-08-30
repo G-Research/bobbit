@@ -363,9 +363,9 @@ const concurrentPathViolations = [...execution.core, ...execution.integration]
 // violations appear — fix an entry, then delete it; never add entries.
 const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
 	"tests/e2e/pool-claim-restart-resume.e2e.spec.ts:50",
-	"tests/e2e/api/pool-flow.api-e2e.spec.ts:41",
-	"tests/e2e/api/port-auto-increment.api-e2e.spec.ts:25",
-	"tests/e2e/api/provider-turn-hooks.api-e2e.spec.ts:101",
+	"tests/e2e/pool-flow.e2e.spec.ts:41",
+	"tests/e2e/port-auto-increment.e2e.spec.ts:25",
+	"tests/e2e/provider-turn-hooks.spec.ts:101",
 	"tests/e2e/ui/add-project-helpers.ts:52",
 	"tests/e2e/ui/add-project-symlink.spec.ts:33",
 	"tests/e2e/ui/marketplace.spec.ts:73",

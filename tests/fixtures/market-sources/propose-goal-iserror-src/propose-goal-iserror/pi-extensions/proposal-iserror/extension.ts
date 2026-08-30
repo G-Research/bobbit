@@ -1,4 +1,4 @@
-type GoalInput = { title?: string; spec?: string; workflow?: string };
+type GoalInput = { title?: string; spec?: string; workflow?: string; __sessionId?: string };
 
 function env(name: string): string {
 	const value = process.env[name];
@@ -7,11 +7,6 @@ function env(name: string): string {
 }
 
 export default function activate(pi: any) {
-	const sessionId = env("BOBBIT_SESSION_ID");
-	const sessionSecret = env("BOBBIT_SESSION_SECRET");
-	const gatewayUrl = env("BOBBIT_GATEWAY_URL");
-	const token = env("BOBBIT_TOKEN");
-
 	pi.tool({
 		name: "propose_goal",
 		description: "Test fixture propose_goal extension that returns isError:true when the seed endpoint rejects workflow validation.",
@@ -24,14 +19,17 @@ export default function activate(pi: any) {
 			},
 		},
 	}, async (input: GoalInput = {}) => {
+		const { __sessionId, ...args } = input;
+		const sessionId = __sessionId || env("BOBBIT_SESSION_ID");
+		const gatewayUrl = env("BOBBIT_GATEWAY_URL");
+		const token = env("BOBBIT_TOKEN");
 		const response = await fetch(`${gatewayUrl}/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/seed`, {
 			method: "POST",
 			headers: {
 				"Authorization": `Bearer ${token}`,
-				"X-Bobbit-Session-Secret": sessionSecret,
 				"Content-Type": "application/json",
 			},
-			body: JSON.stringify({ args: input }),
+			body: JSON.stringify({ args }),
 		});
 		const text = await response.text();
 		let body: any;

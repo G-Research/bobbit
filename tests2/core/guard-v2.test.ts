@@ -18,7 +18,7 @@ describe("guard-v2: convention inventory", () => {
 			discovery.isolated,
 			discovery.vitestE2E,
 			discovery.browser,
-			discovery.e2eGroups.C,
+			discovery.browserE2E,
 			discovery.e2eGroups.A,
 			discovery.e2eGroups.B,
 			discovery.manual,

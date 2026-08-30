@@ -1,17 +1,10 @@
 {
-	"api/pool-flow.api-e2e.spec.ts": 4,
 	"git-status-caching.spec.ts": 1,
 	"inline-workflow-goal-flow.spec.ts": 1,
 	"mcp-tool-permission.e2e.spec.ts": 1,
 	"multi-repo-goal.spec.ts": 1,
 	"multi-repo-pool.e2e.spec.ts": 1,
 	"multi-repo-project.spec.ts": 1,
-	"node/system-project-pool-leak.node-e2e.test.ts": 2,
-	"node/worktree-pool-base-ref.node-e2e.test.ts": 4,
-	"node/worktree-pool-multi.node-e2e.test.ts": 2,
-	"node/worktree-pool-nested-rootpath.node-e2e.test.ts": 1,
-	"node/worktree-pool.node-e2e.test.ts": 11,
-	"thinking-level.spec.ts": 1,
-	"vitest/benchmark-bobbit-journeys.vitest-e2e.test.ts": 2,
-	"vitest/marketplace-install.vitest-e2e.test.ts": 1
+	"pool-flow.e2e.spec.ts": 4,
+	"thinking-level.spec.ts": 1
 }

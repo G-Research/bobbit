@@ -1,8 +1,7 @@
 import { render } from "lit";
-import { clearSkillsPageState, handleScopeChange, renderSkillsPage } from "../../src/app/skills-page.js";
+import { clearSkillsPageState, loadSkillsPageData, renderSkillsPage } from "../../src/app/skills-page.js";
 import { renderSettingsPage } from "../../src/app/settings-page.js";
 import { setConfigScope } from "../../src/app/config-scope.js";
-import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
 import { HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT_KIND, HEADQUARTERS_PROJECT_NAME } from "../../src/app/headquarters.js";
 import { setProjects, setRenderApp, state, type Project } from "../../src/app/state.js";
 
@@ -115,10 +114,6 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	return response({ ok: true });
 }) as typeof window.fetch;
 
-// file:// has a null origin; give gatewayFetch a valid explicit base while the
-// fixture's fetch stub continues to own every request locally.
-commitGatewayConnection("http://fixture.invalid", "");
-
 function doRender(): void {
 	hydrateAppState();
 	const container = document.getElementById("container");
@@ -142,9 +137,10 @@ hydrateAppState();
 
 (window as any).__renderHqExplicitSkills = async (scope: string) => {
 	currentPage = "skills";
+	setConfigScope(scope);
 	clearSkillsPageState();
 	history.replaceState({}, "", "#/skills");
-	await handleScopeChange(scope);
+	await loadSkillsPageData();
 	doRender();
 };
 

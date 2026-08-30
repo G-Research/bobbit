@@ -26,7 +26,6 @@ type CommittedPlaywrightProject = {
 	testDir: string;
 	testMatch: string[];
 	testIgnore: string[];
-	fullyParallel: boolean;
 };
 
 let root: string;
@@ -93,14 +92,6 @@ function stringLiteral(expression: ts.Expression | undefined, context: string): 
 	return unwrapped.text;
 }
 
-function booleanLiteral(expression: ts.Expression | undefined, context: string): boolean {
-	if (!expression) throw new Error(`${context} is missing`);
-	const unwrapped = unwrapExpression(expression);
-	if (unwrapped.kind === ts.SyntaxKind.TrueKeyword) return true;
-	if (unwrapped.kind === ts.SyntaxKind.FalseKeyword) return false;
-	throw new Error(`${context} must be a boolean literal`);
-}
-
 function stringPatterns(expression: ts.Expression | undefined, context: string): string[] {
 	if (!expression) return [];
 	const unwrapped = unwrapExpression(expression);
@@ -148,9 +139,6 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 	}
 	const config = objectLiteral(configExpression, `${configFile} default export`);
 	const projects = arrayLiteral(property(config, "projects"), `${configFile} projects`);
-	const topLevelFullyParallel = property(config, "fullyParallel") === undefined
-		? false
-		: booleanLiteral(property(config, "fullyParallel"), `${configFile} fullyParallel`);
 	if (configFile === "playwright-e2e.config.ts") {
 		const selection = createE2EPhaseSelection() as Record<string, {
 			name: string; testDir: string; testMatch?: string[]; testIgnore?: string[];
@@ -170,9 +158,6 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 				testDir: selected.testDir,
 				testMatch: selected.testMatch ?? [],
 				testIgnore: selected.testIgnore ?? [],
-				fullyParallel: property(project, "fullyParallel") === undefined
-					? topLevelFullyParallel
-					: booleanLiteral(property(project, "fullyParallel"), `${configFile} projects[${index}].fullyParallel`),
 			};
 		});
 	}
@@ -184,9 +169,6 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 			testDir: stringLiteral(property(project, "testDir"), `${context}.testDir`),
 			testMatch: stringPatterns(property(project, "testMatch"), `${context}.testMatch`),
 			testIgnore: stringPatterns(property(project, "testIgnore"), `${context}.testIgnore`),
-			fullyParallel: property(project, "fullyParallel") === undefined
-				? topLevelFullyParallel
-				: booleanLiteral(property(project, "fullyParallel"), `${context}.fullyParallel`),
 		};
 	});
 }
@@ -401,40 +383,24 @@ describe("Playwright selector parity", () => {
 		const browser = browserProjects.find(project => project.name === "browser-v2")!;
 		const browserCanonical = browserProjects.find(project => project.name === "browser-canonical")!;
 		const browserE2E = browserProjects.find(project => project.name === "browser-v2-e2e")!;
-		const e2eApi = e2eProjects.find(project => project.name === "api")!;
 		const apiCanonical = e2eProjects.find(project => project.name === "api-canonical")!;
 		const e2eBrowserCanonical = e2eProjects.find(project => project.name === "browser-canonical")!;
-		const apiRealpush = e2eProjects.find(project => project.name === "api-realpush")!;
-		const e2eLegacyBrowser = e2eProjects.find(project => project.name === "browser")!;
 		const manual = manualProjects.find(project => project.name === "manual-integration")!;
 		const manualCanonical = manualProjects.find(project => project.name === "manual")!;
-		expect(browser.fullyParallel).toBe(false);
-		expect(browserCanonical.fullyParallel).toBe(true);
-		expect(browserE2E.fullyParallel).toBe(false);
 		const discovery = discoverTests();
 		const selected = {
 			browser: selectedRepositoryPaths(browser),
 			browserCanonical: selectedRepositoryPaths(browserCanonical),
 			browserE2E: selectedRepositoryPaths(browserE2E),
-			e2eApi: selectedRepositoryPaths(e2eApi),
 			apiCanonical: selectedRepositoryPaths(apiCanonical),
 			e2eBrowserCanonical: selectedRepositoryPaths(e2eBrowserCanonical),
-			apiRealpush: selectedRepositoryPaths(apiRealpush),
-			e2eLegacyBrowser: selectedRepositoryPaths(e2eLegacyBrowser),
 			manual: selectedRepositoryPaths(manual),
 			manualCanonical: selectedRepositoryPaths(manualCanonical),
 		};
 		expect([...selected.browser, ...selected.browserCanonical].sort()).toEqual(discovery.browser);
 		expect(selected.browserE2E).toEqual(discovery.browserE2E);
-		expect([...selected.apiCanonical, ...selected.apiRealpush].sort()).toEqual(discovery.e2eApi);
-		expect([...selected.e2eApi, ...selected.apiCanonical, ...selected.apiRealpush].sort()).toEqual(discovery.e2eGroups.B);
+		expect(selected.apiCanonical).toEqual(discovery.e2eApi);
 		expect(selected.e2eBrowserCanonical).toEqual(discovery.e2eBrowser);
-		expect(selected.e2eLegacyBrowser).toEqual(
-			readdirSync(resolve(REPO_ROOT, "tests/e2e/ui"), { withFileTypes: true })
-				.filter(entry => entry.isFile() && entry.name.endsWith(".spec.ts"))
-				.map(entry => `tests/e2e/ui/${entry.name}`)
-				.sort(),
-		);
 		expect([...selected.manual, ...selected.manualCanonical].sort()).toEqual(discovery.manual);
 		expect(selected.browser.some(path => path.startsWith("tests2/browser/e2e/"))).toBe(false);
 		expect(selected.browserE2E.every(path => path.startsWith("tests2/browser/e2e/"))).toBe(true);
@@ -451,12 +417,6 @@ describe("Playwright selector parity", () => {
 			["tests/browser/fixtures/representative.fixture.spec.ts", "browser-canonical"],
 			["tests/browser/journeys/representative.journey.spec.ts", "browser-canonical"],
 			["tests/e2e/api/representative.api-e2e.spec.ts", "api-canonical"],
-			["tests/e2e/api/goal-archive-branch-cleanup.api-e2e.spec.ts", "api-realpush"],
-			["tests/e2e/api/mcp-integration.api-e2e.spec.ts", "api-canonical"],
-			["tests/e2e/api/mcp-tool-permission.api-e2e.spec.ts", "api-canonical"],
-			["tests/e2e/api/port-auto-increment.api-e2e.spec.ts", "api-canonical"],
-			["tests/e2e/browser/per-project-config-dirs.browser-e2e.spec.ts", "browser-canonical"],
-			["tests/e2e/browser/session-lifecycle-ui.browser-e2e.spec.ts", "browser-canonical"],
 			["tests/e2e/browser/representative.browser-e2e.spec.ts", "browser-canonical"],
 			["tests/manual-integration/representative.test.ts", "manual-integration"],
 			["tests/manual-integration/representative.spec.ts", "manual-integration"],
