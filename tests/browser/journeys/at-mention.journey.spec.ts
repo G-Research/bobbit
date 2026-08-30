@@ -208,21 +208,17 @@ test.describe("@-mention file references UI", () => {
 		await expect(userBubble(page)).toContainText(`@${IMAGE_FILE}`);
 	});
 
-	test("unresolvable @nope.txt is captured as an unresolved chip without crashing", async ({ page }) => {
+	test("missing @nope.txt remains ordinary text without crashing", async ({ page }) => {
 		const cwd = uniqueCwd();
 		writeFixtures(cwd);
 		await openSession(page, cwd);
 
 		await sendMessage(page, "this references @nope.txt which does not exist");
 
-		// The send never tears down; the message renders with the literal @path.
+		// Missing targets remain ordinary text and do not produce file mentions.
 		await expect(userBubble(page)).toBeVisible({ timeout: 15_000 });
 		await expect(userBubble(page)).toContainText("@nope.txt");
-		// Per design §2 ALL kinds drive chips: an unresolved reference renders a
-		// chip labelled with the literal path (the disclosure shows the reason).
-		const chip = fileChip(page);
-		await expect(chip).toBeVisible({ timeout: 15_000 });
-		await expect(chip).toContainText("@nope.txt");
+		await expect(fileChip(page)).toHaveCount(0);
 		// No crash — the composer is still usable.
 		await expect(page.locator("textarea").first()).toBeVisible();
 	});

@@ -138,8 +138,9 @@ test.describe("Compact cost regression", () => {
 			}).toBe(compactedTranscript.length);
 
 			const after = await readCostSnapshot(page);
-			await expect(page.locator('agent-interface span[title^="Context:"]').first()).toBeVisible({ timeout: 10_000 });
-			await page.locator('agent-interface span[title^="Context:"]').first().click();
+			const contextTrigger = page.getByTestId("session-stats-bar").getByTestId("context-meter-trigger");
+			await expect(contextTrigger).toBeVisible({ timeout: 10_000 });
+			await contextTrigger.click();
 			await expect(page.locator("agent-interface .context-popover")).toBeVisible({ timeout: 5_000 });
 			const contextTotalCost = await readContextPopoverTotalCost(page);
 
