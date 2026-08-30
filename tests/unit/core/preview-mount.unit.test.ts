@@ -17,7 +17,7 @@ import {
 	setPreviewRootForTesting,
 	writeInline,
 	type PreviewAsyncFs,
-} from "../../src/server/preview/mount.ts";
+} from "../../../src/server/preview/mount.ts";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 const SID_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";

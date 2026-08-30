@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -18,10 +18,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { PassThrough } from "node:stream";
-import { handlePreviewRequest, pickEntry } from "../../src/server/preview/content-route.ts";
-import { setPreviewFsForTesting } from "../../src/server/preview/mount.ts";
-import { COOKIE_NAME, CookieStore } from "../../src/server/auth/cookie.ts";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { handlePreviewRequest, pickEntry } from "../../../src/server/preview/content-route.ts";
+import { setPreviewFsForTesting } from "../../../src/server/preview/mount.ts";
+import { COOKIE_NAME, CookieStore } from "../../../src/server/auth/cookie.ts";
+import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
 
 // `mountDir(sid)` reads BOBBIT_DIR on demand, so one immutable in-memory tree
 // can serve every route assertion without creating or deleting NTFS fixtures.

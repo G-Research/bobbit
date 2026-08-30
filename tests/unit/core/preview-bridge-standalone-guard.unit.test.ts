@@ -17,7 +17,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.ts";
+import { PREVIEW_THEME_BRIDGE } from "../../../src/shared/preview-bridge-scripts.ts";
 
 describe("PREVIEW_THEME_BRIDGE — standalone-tab guard", () => {
 	it("contains the parent === window early-return", () => {
