@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { createManualClock } from "../harness/clock.js";
+import { createManualClock } from "../../../tests2/harness/clock.js";
 
 const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
 const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
@@ -31,15 +31,15 @@ const {
 	dispatchTrackedSystemPrompt,
 	prepareArchivedMessageSnapshot,
 	restorePromptAuthorBindings,
-} = await import("../../src/server/agent/session-manager.ts");
-const { sendDelegatePrompt } = await import("../../src/server/agent/session-setup.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+} = await import("../../../src/server/agent/session-manager.ts");
+const { sendDelegatePrompt } = await import("../../../src/server/agent/session-setup.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
 const {
 	isTransientVerifierReviewError,
 	isVerifierBusyTransportError,
 	shouldRetryVerificationStep,
-} = await import("../../src/server/agent/verification-logic.ts");
+} = await import("../../../src/server/agent/verification-logic.ts");
 const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
@@ -47,11 +47,11 @@ const {
 	promptAuthorBindingMatchesText,
 	purgeAuthorSidecar,
 	readAuthorSidecar,
-} = await import("../../src/server/agent/author-sidecar.ts");
+} = await import("../../../src/server/agent/author-sidecar.ts");
 const {
 	initSkillSidecarDir,
 	readSkillSidecarEntries,
-} = await import("../../src/server/skills/skill-sidecar.ts");
+} = await import("../../../src/server/skills/skill-sidecar.ts");
 
 // Author persistence is exercised through the real secure sidecar API, backed
 // by a descriptor-aware in-memory filesystem. Unexpected paths fail closed.

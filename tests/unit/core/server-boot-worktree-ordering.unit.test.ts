@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { coordinateBootWorktreeLifecycle } from "../../src/server/server.ts";
+import { coordinateBootWorktreeLifecycle } from "../../../src/server/server.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;

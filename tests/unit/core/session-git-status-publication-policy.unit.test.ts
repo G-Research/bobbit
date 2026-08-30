@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const serverSource = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const serverSource = readFileSync(new URL("../../../src/server/server.ts", import.meta.url), "utf8");
 
 describe("removed session git-status publication policy", () => {
 	it("does not expose or invoke legacy auto-publication policy helpers", () => {

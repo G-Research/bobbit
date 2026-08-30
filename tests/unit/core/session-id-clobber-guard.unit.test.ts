@@ -11,21 +11,21 @@
 // loudly (never silently clobber), while the sanctioned restart-resume path
 // (opts.allowSessionReuse) is still permitted.
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 const tmpRoot = makeTmpDir("session-id-clobber-guard-test-");
 const stateDir = path.join(tmpRoot, "state");
 fs.mkdirSync(stateDir, { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
 
 const managers: any[] = [];
 afterEach(() => {

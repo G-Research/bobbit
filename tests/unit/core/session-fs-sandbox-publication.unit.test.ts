@@ -4,9 +4,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
-import type { SandboxManager } from "../../src/server/agent/sandbox-manager.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import type { SessionTranscriptRuntimeOperation } from "../../src/server/agent/project-sandbox.ts";
+import type { SandboxManager } from "../../../src/server/agent/sandbox-manager.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
+import type { SessionTranscriptRuntimeOperation } from "../../../src/server/agent/project-sandbox.ts";
 import {
 	canonicalContainerAgentSessionPath,
 	CrossRealmCopyError,
@@ -17,7 +17,7 @@ import {
 	sessionFileRead,
 	sessionFileRenameAtomic,
 	sessionFileWriteAtomic,
-} from "../../src/server/agent/session-fs.ts";
+} from "../../../src/server/agent/session-fs.ts";
 
 const owners = [`publication-a-${randomUUID()}`, `publication-b-${randomUUID()}`];
 const projectId = `sandbox-publication-${randomUUID()}`;
