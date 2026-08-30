@@ -2,12 +2,12 @@
 // Source: tests/session-path-routing.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { getRouteFromHash } from "../../src/app/routing.ts";
+import { getRouteFromHash } from "../../../src/app/routing.ts";
 
 type FakeLocation = {
 	pathname: string;

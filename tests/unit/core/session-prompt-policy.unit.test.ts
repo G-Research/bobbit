@@ -8,10 +8,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const { computeEffectiveAllowedTools, resolveGrantPolicy } = await import("../../src/server/agent/tool-activation.ts");
+const { computeEffectiveAllowedTools, resolveGrantPolicy } = await import("../../../src/server/agent/tool-activation.ts");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..", "..");
+const repoRoot = path.resolve(__dirname, "..", "..", "..");
 const sessionPromptYamlText = fs.readFileSync(
 	path.join(repoRoot, "defaults", "tools", "agent", "session_prompt.yaml"),
 	"utf8",

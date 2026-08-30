@@ -7,8 +7,8 @@ import { afterAll, describe, it, vi } from "vitest";
 const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-setup-ready-"));
 const priorBobbitDir = process.env.BOBBIT_DIR;
 process.env.BOBBIT_DIR = testDir;
-const { TeamManager, TeamStartError } = await import("../../src/server/agent/team-manager.ts");
-import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
+const { TeamManager, TeamStartError } = await import("../../../src/server/agent/team-manager.ts");
+import type { TeamManagerConfig } from "../../../src/server/agent/team-manager.ts";
 
 type Goal = {
 	id: string;

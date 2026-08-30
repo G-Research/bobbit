@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -20,8 +20,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { isWorktreePathReferencedByLiveSessionForCleanup } from "../../src/server/agent/worktree-reference-guard.ts";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
+import { isWorktreePathReferencedByLiveSessionForCleanup } from "../../../src/server/agent/worktree-reference-guard.ts";
 
 const nativeRealpath = promisify(fs.realpath.native) as (value: string) => Promise<string>;
 
@@ -109,7 +109,7 @@ const fakeGitRunner: CommandRunner = {
 // transitive singletons derive state from it.
 const importStateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-import-state-"));
 process.env.BOBBIT_DIR = importStateRoot;
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
 const [
 	{ SessionStore },
 	{ GoalManager },
@@ -118,12 +118,12 @@ const [
 	{ handleSetupFailure },
 	{ initPromptDirs },
 ] = await Promise.all([
-	import("../../src/server/agent/session-store.ts"),
-	import("../../src/server/agent/goal-manager.ts"),
-	import("../../src/server/agent/goal-store.ts"),
-	import("../../src/server/agent/staff-manager.ts"),
-	import("../../src/server/agent/session-setup.ts"),
-	import("../../src/server/agent/system-prompt.ts"),
+	import("../../../src/server/agent/session-store.ts"),
+	import("../../../src/server/agent/goal-manager.ts"),
+	import("../../../src/server/agent/goal-store.ts"),
+	import("../../../src/server/agent/staff-manager.ts"),
+	import("../../../src/server/agent/session-setup.ts"),
+	import("../../../src/server/agent/system-prompt.ts"),
 ]);
 initPromptDirs(importStateRoot);
 

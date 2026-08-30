@@ -9,13 +9,13 @@ import {
 	sessionTranscriptHostPath,
 	sessionTranscriptRoot,
 	sessionTranscriptStorageKey,
-} from "../../src/server/agent/agent-session-path.ts";
-import { buildDockerRunArgs } from "../../src/server/agent/docker-args.ts";
-import type { SandboxManager } from "../../src/server/agent/sandbox-manager.ts";
-import type { SessionTranscriptRuntimeOperation } from "../../src/server/agent/project-sandbox.ts";
-import { getSessionTranscriptMountStaleness } from "../../src/server/agent/project-sandbox.ts";
-import { containerPathToHost, toDockerPath } from "../../src/server/agent/rpc-bridge.ts";
-import { sessionFileRead, sessionFileWriteAtomic } from "../../src/server/agent/session-fs.ts";
+} from "../../../src/server/agent/agent-session-path.ts";
+import { buildDockerRunArgs } from "../../../src/server/agent/docker-args.ts";
+import type { SandboxManager } from "../../../src/server/agent/sandbox-manager.ts";
+import type { SessionTranscriptRuntimeOperation } from "../../../src/server/agent/project-sandbox.ts";
+import { getSessionTranscriptMountStaleness } from "../../../src/server/agent/project-sandbox.ts";
+import { containerPathToHost, toDockerPath } from "../../../src/server/agent/rpc-bridge.ts";
+import { sessionFileRead, sessionFileWriteAtomic } from "../../../src/server/agent/session-fs.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-session-transcript-roots-"));
 const sessionsRoot = path.join(root, "agent", "sessions");

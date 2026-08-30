@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import {
 	beginSessionPromptActivity,
 	cancelPendingSessionPromptActivity,
@@ -12,15 +12,15 @@ import {
 	isUserVisibleActivity,
 	recordSessionEventActivity,
 	suppressSessionActivityUntilPrompt,
-} from "../../src/server/agent/session-activity.ts";
-import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
+} from "../../../src/server/agent/session-activity.ts";
+import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.ts";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
 	readAuthorSidecar,
-} from "../../src/server/agent/author-sidecar.ts";
-import { registerRpcBridgeFactory, type RpcBridgeOptions } from "../../src/server/agent/rpc-bridge.ts";
+} from "../../../src/server/agent/author-sidecar.ts";
+import { registerRpcBridgeFactory, type RpcBridgeOptions } from "../../../src/server/agent/rpc-bridge.ts";
 
 class RestoreBridge {
 	listener?: (event: any) => void;

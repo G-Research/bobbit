@@ -5,7 +5,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-const { deliverSessionPrompt } = await import("../../src/server/agent/session-prompt-delivery.ts");
+const { deliverSessionPrompt } = await import("../../../src/server/agent/session-prompt-delivery.ts");
 
 type Call = { sessionId: string; message: string; opts?: Record<string, unknown> };
 
