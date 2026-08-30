@@ -20,7 +20,7 @@ import {
 	formatProjectAssistantAutoPrompt,
 	type ProjectScanItem,
 	type ProjectAssistantScanContext,
-} from "../../src/app/project-assistant-autoprompt.ts";
+} from "../../../src/app/project-assistant-autoprompt.ts";
 
 const apiItem: ProjectScanItem = {
 	id: "repo:api",

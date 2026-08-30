@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "yaml";
-import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.js";
+import { makeTmpDir } from "../../../tests/helpers/tmp.ts";
 
 let tmpDir: string;
 

@@ -18,10 +18,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as yamlParse } from "yaml";
-import { applyPromptConditionals } from "../../src/server/agent/prompt-conditionals.ts";
+import { applyPromptConditionals } from "../../../src/server/agent/prompt-conditionals.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.join(__dirname, "..", "..");
+const REPO = path.join(__dirname, "..", "..", "..");
 
 describe("applyPromptConditionals", () => {
 	it("returns text unchanged when there are no conditional tags", () => {

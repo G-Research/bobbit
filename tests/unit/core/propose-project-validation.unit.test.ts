@@ -16,8 +16,8 @@
  */
 import { describe, it, beforeAll } from "vitest";
 import assert from "node:assert/strict";
-import { withEnv } from "../harness/with-env.js";
-import extensionFactory from "../../defaults/tools/proposals/extension.ts";
+import { withEnv } from "../../../tests2/harness/with-env.js";
+import extensionFactory from "../../../defaults/tools/proposals/extension.ts";
 
 // Prevent seedProposal() from issuing real fetch() calls to a Bobbit gateway
 // when this test runs inside a live Bobbit session (env-inherited). Every

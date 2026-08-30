@@ -18,8 +18,8 @@ import {
 	proposalBackend,
 	clearProposalAnnotations,
 	composeProposalFeedback,
-} from "../../src/ui/components/review/proposal-annotations.ts";
-import type { ReviewAnnotation } from "../../src/ui/components/review/AnnotationStore.ts";
+} from "../../../src/ui/components/review/proposal-annotations.ts";
+import type { ReviewAnnotation } from "../../../src/ui/components/review/AnnotationStore.ts";
 
 let _idCounter = 0;
 function makeAnn(over: Partial<ReviewAnnotation> = {}): ReviewAnnotation {

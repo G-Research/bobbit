@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import {
 	PROJECT_ASSISTANT_PROMPT,
 	PROJECT_ASSISTANT_SCAFFOLDING_PROMPT,
-} from "../../src/server/agent/project-assistant.ts";
+} from "../../../src/server/agent/project-assistant.ts";
 
 // Sentinel from defaults/workflow-authoring-guide.md §1.
 const GUIDE_SENTINEL = "multi-repo invariant";

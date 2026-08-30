@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency } from "../../src/server/agent/bounded-async-work.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency } from "../../../src/server/agent/bounded-async-work.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import {
 	createPreviewSessionOperationQueue,
 	initializeBootProjectPools,
 	shutdownCpuDiagnostics,
-} from "../../src/server/server.ts";
-import { createManualClock } from "../harness/clock.ts";
+} from "../../../src/server/server.ts";
+import { createManualClock } from "../../../tests2/harness/clock.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 

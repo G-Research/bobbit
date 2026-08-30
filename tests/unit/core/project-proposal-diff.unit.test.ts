@@ -16,7 +16,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { buildProjectConfigDiff, PROJECT_NATIVE_FIELDS } from "../../src/app/project-proposal-diff.js";
+import { buildProjectConfigDiff, PROJECT_NATIVE_FIELDS } from "../../../src/app/project-proposal-diff.js";
 
 describe("buildProjectConfigDiff", () => {
 	it("forwards structured `components` and `workflows` to the config payload", () => {

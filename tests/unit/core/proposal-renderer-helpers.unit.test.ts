@@ -12,7 +12,7 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 // Import via the renderer module — the helpers are exported.
-import { parseRevFromResult, parseErrorCodeFromResult } from "../../src/ui/tools/renderers/proposal-rev-marker.ts";
+import { parseRevFromResult, parseErrorCodeFromResult } from "../../../src/ui/tools/renderers/proposal-rev-marker.ts";
 
 function mkResult(text: string) {
 	return {

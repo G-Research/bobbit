@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -25,7 +25,7 @@ guardProcessEnv();
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import registerProposalExtension from "../../defaults/tools/proposals/extension.ts";
+import registerProposalExtension from "../../../defaults/tools/proposals/extension.ts";
 
 type ExecuteFn = (toolUseId: string, params: unknown) => Promise<any>;
 

@@ -12,7 +12,7 @@
 // lands in the visible Headquarters store, not the hidden system store.
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { scopeProposalProjectId } from "../../defaults/tools/proposals/extension.ts";
+import { scopeProposalProjectId } from "../../../defaults/tools/proposals/extension.ts";
 
 describe("scopeProposalProjectId — hidden system project never becomes a proposal scope", () => {
 	it("maps the hidden `system` project to Headquarters/server scope", () => {

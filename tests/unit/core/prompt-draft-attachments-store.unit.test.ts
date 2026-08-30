@@ -19,9 +19,9 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { PromptDraftAttachmentsStore } from "../../src/ui/storage/stores/prompt-draft-attachments-store.ts";
-import type { Attachment } from "../../src/ui/utils/attachment-utils.ts";
-import type { StorageBackend } from "../../src/ui/storage/types.ts";
+import { PromptDraftAttachmentsStore } from "../../../src/ui/storage/stores/prompt-draft-attachments-store.ts";
+import type { Attachment } from "../../../src/ui/utils/attachment-utils.ts";
+import type { StorageBackend } from "../../../src/ui/storage/types.ts";
 
 
 /** Minimal in-memory StorageBackend — only the methods the store uses. */
