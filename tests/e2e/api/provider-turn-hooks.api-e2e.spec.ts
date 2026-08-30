@@ -190,7 +190,7 @@ test.describe("provider per-turn hooks", () => {
 		// Metadata-only block summary (no raw content field leaked).
 		const demoBlock = before.blocks.find((b) => b.id === "demo:turn");
 		expect(demoBlock).toBeTruthy();
-		expect(demoBlock!.providerId).toBe("demo");
+		expect(demoBlock!.providerId).toBe("host-hooks");
 		expect(demoBlock!.title).toBe("Demo turn");
 		expect(typeof demoBlock!.tokenEstimate).toBe("number");
 		expect("content" in demoBlock!).toBe(false);
