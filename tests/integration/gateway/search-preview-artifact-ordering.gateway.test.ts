@@ -16,10 +16,9 @@ test.describe("Search preview artifact ordering", () => {
 		emergencyCleanup = undefined;
 	});
 
-	test("held artifact validation does not block health or session creation and returns the first exact candidate", async ({ gateway }) => {
+	test("held artifact validation does not block health or session creation and returns the first exact candidate", async () => {
 		const sessionId = await createSession();
 		let unrelatedSessionId: string | undefined;
-		const fixtureRoot = path.join(gateway.bobbitDir, "preview-async-ordering", randomUUID());
 		const releaseHash = deferred();
 		let scanPromise: Promise<Response> | undefined;
 		let mutationPromise: Promise<Response> | undefined;
@@ -30,26 +29,16 @@ test.describe("Search preview artifact ordering", () => {
 			previewArtifacts.setPreviewArtifactFsForTesting(undefined);
 			if (unrelatedSessionId) await deleteSession(unrelatedSessionId).catch(() => {});
 			await deleteSession(sessionId).catch(() => {});
-			await fs.promises.rm(fixtureRoot, { recursive: true, force: true });
 		});
 		emergencyCleanup = cleanup;
 		try {
-			const entryPath = path.join(fixtureRoot, "report.html");
-			const assets: string[] = [];
-			await fs.promises.mkdir(fixtureRoot, { recursive: true });
-			await fs.promises.writeFile(entryPath, "<!doctype html><body>deep-preview</body>", "utf-8");
-			let relativeDir = "";
-			for (let depth = 0; depth < 3; depth++) {
-				relativeDir = path.posix.join(relativeDir, `level-${depth}`);
-				const relativeFile = path.posix.join(relativeDir, `asset-${depth}.txt`);
-				await fs.promises.mkdir(path.join(fixtureRoot, relativeDir), { recursive: true });
-				await fs.promises.writeFile(path.join(fixtureRoot, relativeFile), `asset-${depth}`, "utf-8");
-				assets.push(relativeFile);
-			}
-
 			const mountResponse = await apiFetch(`/api/preview/mount?sessionId=${sessionId}`, {
 				method: "POST",
-				body: JSON.stringify({ file: entryPath, assets, workspaceTab: false }),
+				body: JSON.stringify({
+					html: "<!doctype html><body>deep-preview</body>",
+					entry: "report.html",
+					workspaceTab: false,
+				}),
 			});
 			expect(mountResponse.status).toBe(200);
 			const mounted = await mountResponse.json() as { artifactId: string; contentHash: string };
