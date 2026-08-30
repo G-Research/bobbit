@@ -12,8 +12,8 @@
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { reconcilePersistedIntentRestore } from "../../src/server/agent/session-manager.ts";
-import { spliceInFlightMessage, spliceInFlightSteers } from "../../src/server/agent/splice-inflight-message.ts";
+import { reconcilePersistedIntentRestore } from "../../../src/server/agent/session-manager.ts";
+import { spliceInFlightMessage, spliceInFlightSteers } from "../../../src/server/agent/splice-inflight-message.ts";
 
 describe("spliceInFlightMessage (H3 server splice)", () => {
 	const baseRow = (id: string, text: string) => ({

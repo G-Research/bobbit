@@ -8,13 +8,13 @@ const {
 	SessionManager,
 	dispatchTrackedPrompt,
 	prepareVisibleAgentEvent,
-} = await import("../../src/server/agent/session-manager.ts");
+} = await import("../../../src/server/agent/session-manager.ts");
 const {
 	appendPromptAuthorDispatch,
 	digestPromptModelText,
 	initAuthorSidecarDir,
 	readAuthorSidecar,
-} = await import("../../src/server/agent/author-sidecar.ts");
+} = await import("../../../src/server/agent/author-sidecar.ts");
 
 const userAuthor = { kind: "user", id: "user:local", label: "User" } as const;
 const agentAuthor = { kind: "agent", id: "session:caller", label: "Caller" } as const;

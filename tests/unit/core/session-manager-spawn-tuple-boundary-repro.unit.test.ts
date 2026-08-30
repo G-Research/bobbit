@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -6,8 +6,8 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import { createMemFs } from "../harness/mem-fs.js";
+import { makeTmpDir } from "../../helpers/tmp.ts";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 const tmpRoot = makeTmpDir("session-manager-spawn-tuple-boundary-");
 const stateDir = path.join(tmpRoot, "state");
@@ -19,18 +19,18 @@ process.env.BOBBIT_AGENT_DIR = agentDir;
 process.env.BOBBIT_TEST_NO_REMOTE = "1";
 process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 
-const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
+const { resetAgentDirStateForTests } = await import("../../../src/server/bobbit-dir.ts");
 resetAgentDirStateForTests?.();
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
-const { modelRecencyRank } = await import("../../src/shared/model-ranks.ts");
-const { clampThinkingLevelForModel } = await import("../../src/server/agent/thinking-level-clamp.ts");
-const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { applyRuntimeSessionThinkingSelection } = await import("../../src/server/ws/runtime-model-selection.ts");
-const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
-const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
-const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
+const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
+const { getAvailableModels, invalidateModelCache } = await import("../../../src/server/agent/model-registry.ts");
+const { modelRecencyRank } = await import("../../../src/shared/model-ranks.ts");
+const { clampThinkingLevelForModel } = await import("../../../src/server/agent/thinking-level-clamp.ts");
+const { registerRpcBridgeFactory } = await import("../../../src/server/agent/rpc-bridge.ts");
+const { applyRuntimeSessionThinkingSelection } = await import("../../../src/server/ws/runtime-model-selection.ts");
+const { initAuthorSidecarDir } = await import("../../../src/server/agent/author-sidecar.ts");
+const { initPromptDirs } = await import("../../../src/server/agent/system-prompt.ts");
+const { loadOrCreateToken } = await import("../../../src/server/auth/token.ts");
 
 initPromptDirs(stateDir);
 initAuthorSidecarDir(stateDir, {

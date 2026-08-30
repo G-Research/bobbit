@@ -3,29 +3,29 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
+import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
-} from "../../src/server/agent/author-sidecar.ts";
+} from "../../../src/server/agent/author-sidecar.ts";
 import {
 	appendCompactionSidecarEntry,
 	initCompactionSidecarDir,
-} from "../../src/server/agent/compaction-sidecar.ts";
+} from "../../../src/server/agent/compaction-sidecar.ts";
 import {
 	SessionManager,
 	preparePromptAuthorDispatch,
 	prepareVisibleAgentEvent,
-} from "../../src/server/agent/session-manager.ts";
-import { correlateTranscriptPromptEntryIds } from "../../src/server/agent/visible-message-snapshot.ts";
+} from "../../../src/server/agent/session-manager.ts";
+import { correlateTranscriptPromptEntryIds } from "../../../src/server/agent/visible-message-snapshot.ts";
 import {
 	appendIdentifiedSkillSidecarEntry,
 	appendSkillSidecarEntry,
 	initSkillSidecarDir,
 	readSkillSidecarEntries,
-} from "../../src/server/skills/skill-sidecar.ts";
-import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
+} from "../../../src/server/skills/skill-sidecar.ts";
+import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../../src/shared/message-author.ts";
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-snapshot-memo-"));
 

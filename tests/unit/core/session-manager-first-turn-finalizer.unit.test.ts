@@ -3,10 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { it } from "vitest";
-import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { SessionStore } from "../../src/server/agent/session-store.ts";
-import { createManualClock } from "../harness/clock.js";
+import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
+import { SessionStore } from "../../../src/server/agent/session-store.ts";
+import { createManualClock } from "../../../tests2/harness/clock.js";
 
 function deferred() {
 	let resolve!: () => void;

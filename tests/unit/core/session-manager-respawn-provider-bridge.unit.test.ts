@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -31,8 +31,8 @@ import path from "node:path";
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "respawn-bridge-test-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { resolveToolActivation } = await import("../../src/server/agent/session-setup.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
+const { resolveToolActivation } = await import("../../../src/server/agent/session-setup.ts");
 
 const managers: any[] = [];
 

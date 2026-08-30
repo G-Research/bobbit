@@ -8,14 +8,14 @@ const {
 	SessionManager,
 	prepareVisibleAgentEvent,
 	restorePromptAuthorBindings,
-} = await import("../../src/server/agent/session-manager.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
+} = await import("../../../src/server/agent/session-manager.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
 	readAuthorSidecar,
-} = await import("../../src/server/agent/author-sidecar.ts");
+} = await import("../../../src/server/agent/author-sidecar.ts");
 
 const userAuthor = { kind: "user", id: "user:local", label: "User" } as const;
 const systemAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
