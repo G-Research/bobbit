@@ -11,7 +11,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 async function setPref(key: string, value: unknown): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

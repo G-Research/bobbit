@@ -25,7 +25,7 @@
 import { test } from "../gateway-harness.js";
 import { createGoal, deleteGoal, waitForHealth } from "../e2e-setup.js";
 import { isDockerAvailable } from "../test-utils/docker.js";
-import { SpecContext } from "./spec-framework.js";
+import { SpecContext } from "../ui/spec-framework.js";
 import {
 	STORY_RE01,
 	STORY_RE02,
@@ -35,7 +35,7 @@ import {
 	STORY_RE06,
 	STORY_RE07,
 	STORY_RE08,
-} from "./story-registry.js";
+} from "../ui/story-registry.js";
 
 test.describe("CT-05: Resilience", () => {
 	let s: SpecContext;

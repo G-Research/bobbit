@@ -1,6 +1,6 @@
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 // Built-in roles + their accessories (defaults/roles/*.yaml).
 const ROLE_A = "architect";

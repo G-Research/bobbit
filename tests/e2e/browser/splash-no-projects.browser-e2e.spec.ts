@@ -8,7 +8,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 

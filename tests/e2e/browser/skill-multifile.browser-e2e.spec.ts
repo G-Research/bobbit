@@ -15,7 +15,7 @@ import { test, expect } from "../gateway-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage } from "../ui/ui-helpers.js";
 
 const SKILL_NAME = "multi-file-skill";
 const BODY_MARKER = "MULTI_FILE_BODY_MARKER";

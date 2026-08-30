@@ -10,7 +10,7 @@ import {
 	nonGitCwd,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	const sessionIds: string[] = [];

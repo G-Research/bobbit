@@ -12,8 +12,8 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, base, readE2ETokenAsync, waitForHealth, deleteSession } from "../e2e-setup.js";
-import { waitForAgentResponse } from "./ui-helpers.js";
-import { SpecContext } from "./spec-framework.js";
+import { waitForAgentResponse } from "../ui/ui-helpers.js";
+import { SpecContext } from "../ui/spec-framework.js";
 import {
 	STORY_S01,
 	STORY_S02,
@@ -24,7 +24,7 @@ import {
 	STORY_S07,
 	STORY_S11,
 	STORY_S12,
-} from "./story-registry.js";
+} from "../ui/story-registry.js";
 
 async function openStoryApp(s: SpecContext): Promise<void> {
 	await expect(async () => {
