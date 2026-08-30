@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, onTestFinished } from "vitest";
@@ -21,7 +21,7 @@ type AgentDirResolution = {
 };
 
 async function loadAgentDirConfigModule(): Promise<Record<string, any>> {
-	for (const specifier of ["../../src/server/agent-dir-config.ts", "../../src/server/bobbit-dir.ts"]) {
+	for (const specifier of ["../../../src/server/agent-dir-config.ts", "../../../src/server/bobbit-dir.ts"]) {
 		try {
 			return await import(/* @vite-ignore */ specifier) as Record<string, any>;
 		} catch (err: any) {
@@ -171,8 +171,8 @@ describe("agent directory resolver", () => {
 		delete process.env.BOBBIT_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = legacyAgentDir;
 
-		const bobbitDirMod = await import("../../src/server/bobbit-dir.ts") as Record<string, any>;
-		const scaffoldMod = await import("../../src/server/scaffold.ts") as Record<string, any>;
+		const bobbitDirMod = await import("../../../src/server/bobbit-dir.ts") as Record<string, any>;
+		const scaffoldMod = await import("../../../src/server/scaffold.ts") as Record<string, any>;
 		assert.equal(bobbitDirMod.migrateFromLegacyPiDir, undefined, "Bobbit must not export or call automatic ~/.pi/agent migration");
 		assert.equal(typeof scaffoldMod.scaffoldBobbitDir, "function", "scaffoldBobbitDir must be exported");
 		assert.equal(typeof bobbitDirMod.initializeAgentDirRuntime, "function", "initializeAgentDirRuntime must be exported");

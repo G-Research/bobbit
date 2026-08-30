@@ -3,8 +3,8 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 
@@ -42,8 +42,8 @@ import {
 	type ActionHandlerCtx,
 	type ActionToolLocationResolver,
 	type ActionDispatcherOptions,
-} from "../../src/server/extension-host/action-dispatcher.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+} from "../../../src/server/extension-host/action-dispatcher.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 let tmp: string;
 

@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import {
 	subscribeHostSessionEvent,
 	publishClientStatus,
-} from "../../src/app/session-event-bus.ts";
+} from "../../../src/app/session-event-bus.ts";
 
 // vitest's node environment does not expose the CustomEvent global that
 // src/app/session-event-bus.ts uses inside its publish helpers; provide the

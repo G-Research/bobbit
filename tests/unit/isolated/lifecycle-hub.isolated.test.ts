@@ -2,8 +2,8 @@
 // Source: tests/lifecycle-hub.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 // Re-assert the worker .js->.ts resolver at RUN time (not just collect time):
@@ -20,14 +20,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { ContextTraceStore } from "../../src/server/agent/context-trace-store.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { LifecycleHub, type HookCtx } from "../../src/server/agent/lifecycle-hub.ts";
-import type { ProviderContribution } from "../../src/server/agent/pack-contributions.ts";
-import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
-import { ModuleHost } from "../../src/server/extension-host/module-host-worker.ts";
-import { createServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
-import { createPackStore } from "../../src/server/extension-host/pack-store.ts";
+import { ContextTraceStore } from "../../../src/server/agent/context-trace-store.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
+import { LifecycleHub, type HookCtx } from "../../../src/server/agent/lifecycle-hub.ts";
+import type { ProviderContribution } from "../../../src/server/agent/pack-contributions.ts";
+import type { PackContributionRegistry } from "../../../src/server/extension-host/pack-contribution-registry.ts";
+import { ModuleHost } from "../../../src/server/extension-host/module-host-worker.ts";
+import { createServerHostApi } from "../../../src/server/extension-host/server-host-api.ts";
+import { createPackStore } from "../../../src/server/extension-host/pack-store.ts";
 
 function tmpDir(): string {
 	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "lifecycle-hub-")));

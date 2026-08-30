@@ -3,8 +3,8 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent | mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 
@@ -44,10 +44,10 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
-import { ActionError, type ActionHandlerCtx } from "../../src/server/extension-host/action-dispatcher.ts";
-import { createServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { ModuleHost, type InvokeRequest } from "../../../src/server/extension-host/module-host-worker.ts";
+import { ActionError, type ActionHandlerCtx } from "../../../src/server/extension-host/action-dispatcher.ts";
+import { createServerHostApi } from "../../../src/server/extension-host/server-host-api.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 let tmp: string;
 let seq = 0;

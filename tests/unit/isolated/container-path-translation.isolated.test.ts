@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { describe, it } from "vitest";
@@ -30,7 +30,7 @@ const TEST_BOBBIT_DIR = process.platform === "win32"
 process.env.BOBBIT_AGENT_DIR = TEST_AGENT_DIR;
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
-const { containerPathToHost, hostPathToContainer } = await import("../../src/server/agent/rpc-bridge.ts");
+const { containerPathToHost, hostPathToContainer } = await import("../../../src/server/agent/rpc-bridge.ts");
 
 describe("containerPathToHost (bind-mount fallback)", () => {
 	it("translates agent sessions path", () => {

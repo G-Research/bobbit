@@ -2,8 +2,8 @@
 // Source: tests/extension-host-route-dispatcher.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 
@@ -30,11 +30,11 @@ import {
 	RouteDispatcher,
 	RouteRegistry,
 	type RouteHandlerCtx,
-} from "../../src/server/extension-host/route-dispatcher.ts";
-import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
-import type { PackContributions } from "../../src/server/agent/pack-contributions.ts";
-import type { PackContributionResolver } from "../../src/server/extension-host/pack-contribution-registry.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+} from "../../../src/server/extension-host/route-dispatcher.ts";
+import { ActionError } from "../../../src/server/extension-host/action-dispatcher.ts";
+import type { PackContributions } from "../../../src/server/agent/pack-contributions.ts";
+import type { PackContributionResolver } from "../../../src/server/extension-host/pack-contribution-registry.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 let tmp: string;
 

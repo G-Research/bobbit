@@ -1,13 +1,13 @@
 // v2-native — executable cold/live recovery coverage for lazy clear generations.
 
-import { guardProcessEnv } from "../core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import { createMemFs } from "../harness/mem-fs.js";
+import { makeTmpDir } from "../../helpers/tmp.ts";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 const tmpRoot = makeTmpDir("context-clear-recovery-");
 const stateDir = path.join(tmpRoot, "state");
@@ -19,17 +19,17 @@ process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
 fs.mkdirSync(stateDir, { recursive: true });
 fs.mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
 
-const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
+const { resetAgentDirStateForTests } = await import("../../../src/server/bobbit-dir.ts");
 resetAgentDirStateForTests?.();
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
-const { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
-const { initCompactionSidecarDir } = await import("../../src/server/agent/compaction-sidecar.ts");
-const { activeAgentSessionsDir } = await import("../../src/server/agent/agent-session-path.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
+const { invalidateModelCache } = await import("../../../src/server/agent/model-registry.ts");
+const { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } = await import("../../../src/server/agent/rpc-bridge.ts");
+const { initAuthorSidecarDir } = await import("../../../src/server/agent/author-sidecar.ts");
+const { initCompactionSidecarDir } = await import("../../../src/server/agent/compaction-sidecar.ts");
+const { activeAgentSessionsDir } = await import("../../../src/server/agent/agent-session-path.ts");
 
 const PROVIDER = "clear-recovery-provider";
 const MODEL_ID = "clear-recovery-model";

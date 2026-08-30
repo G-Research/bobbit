@@ -12,14 +12,14 @@ import {
 	resetAgentDirStateForTests,
 	setProjectRoot,
 	type AgentDirRuntimeState,
-} from "../../src/server/bobbit-dir.js";
-import type { CommandRunner, ExecFileOptions, GatewayDeps } from "../../src/server/gateway-deps.js";
-import { realClock, realFs } from "../../src/server/gateway-deps.js";
-import { scaffoldBobbitDir } from "../../src/server/scaffold.js";
-import { createGateway } from "../../src/server/server.js";
-import { MaintenanceGitModel } from "./helpers/maintenance-git-model.js";
+} from "../../../src/server/bobbit-dir.js";
+import type { CommandRunner, ExecFileOptions, GatewayDeps } from "../../../src/server/gateway-deps.js";
+import { realClock, realFs } from "../../../src/server/gateway-deps.js";
+import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
+import { createGateway } from "../../../src/server/server.js";
+import { MaintenanceGitModel } from "../../../tests2/integration/helpers/maintenance-git-model.js";
 
-const REPO_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const TOKEN = "maintenance-request-runner-isolation-token";
 const ENV_KEYS = [
 	"BOBBIT_DIR",

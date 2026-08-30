@@ -2,8 +2,8 @@
 // Source: tests/extension-host-channel-registry.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 
@@ -12,10 +12,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ChannelDispatcher, type ChannelHandlerContext } from "../../src/server/extension-host/channel-dispatcher.ts";
-import { WorkerChannelModuleHost } from "../../src/server/extension-host/channel-module-host.ts";
-import { ChannelRegistry } from "../../src/server/extension-host/channel-registry.ts";
-import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type ChannelOpenPermitBinding } from "../../src/server/extension-host/channel-types.ts";
+import { ChannelDispatcher, type ChannelHandlerContext } from "../../../src/server/extension-host/channel-dispatcher.ts";
+import { WorkerChannelModuleHost } from "../../../src/server/extension-host/channel-module-host.ts";
+import { ChannelRegistry } from "../../../src/server/extension-host/channel-registry.ts";
+import { ChannelError, type ChannelAuditEvent, type ChannelContributionRef, type ChannelOpenPermitBinding } from "../../../src/server/extension-host/channel-types.ts";
 
 const contribution = (quotas: ChannelContributionRef["quotas"] = {}): ChannelContributionRef => ({
 	contributionId: "terminal-panel",
