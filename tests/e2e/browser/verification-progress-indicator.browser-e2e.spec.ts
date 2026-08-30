@@ -24,7 +24,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup.js";
-import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
+import { openApp, navigateToGoalDashboard } from "../ui/ui-helpers.js";
 
 // Slow phase-0 step (~12s) so the verification stays observably in flight
 // across navigation + reload without pushing the default 30s Playwright test
@@ -35,8 +35,6 @@ const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),12000)"`;
 
 const GATE_ID = "slow-multi";
 const GATE_NAME = "Slow Multi-Step Gate";
-const EXPECTED_STEP_NAMES = ["Slow build", "Type check", "Unit tests"];
-
 function makeWorkflowId(): string {
 	return `progress-indicator-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }

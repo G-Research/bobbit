@@ -14,7 +14,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader, teardownTeam, waitForCondition } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 /**
  * Spawn a child via the ORCHESTRATION-class endpoint. spawn-child requires a

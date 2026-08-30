@@ -21,7 +21,7 @@
  * Run with capture on:
  *   RECORDSCREEN=1 npm run test:e2e -- steer-during-bash-tool.spec.ts
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../ui/fixtures.js";
 import {
 	connectWs,
 	createSession,
@@ -32,7 +32,7 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "../e2e-setup.js";
-import { navigateToHash, openApp, sendMessage } from "./ui-helpers.js";
+import { navigateToHash, openApp, sendMessage } from "../ui/ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");

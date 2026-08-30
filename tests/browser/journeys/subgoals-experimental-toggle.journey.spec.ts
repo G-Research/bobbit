@@ -13,9 +13,9 @@
  * REST PUT it exercises, so cross-test interference is avoided. A fresh
  * install (no stored pref) now reads as disabled — the default is OFF.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash, sendMessage, createSessionViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash, sendMessage, createSessionViaUI } from "../../e2e/ui/ui-helpers.js";
 
 /** Reset the flag at the API layer so each test starts deterministically. */
 async function resetFlag(value: boolean): Promise<void> {

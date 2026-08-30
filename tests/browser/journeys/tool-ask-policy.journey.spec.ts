@@ -5,15 +5,12 @@
  * Uses the REST tool-grant-request endpoint to simulate the guard extension's
  * long-poll, verifying the UI card rendering and user interaction flow.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	apiFetch,
-	createSession,
 	deleteSession,
-	nonGitCwd,
-	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp, createSessionViaUI } from "./ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp, createSessionViaUI } from "../../e2e/ui/ui-helpers.js";
 
 const ASK_ROLE = "e2e-ask-policy-role";
 const TOOL_NAME = "Bash";

@@ -37,7 +37,7 @@
 import { test, expect } from "../gateway-harness.js";
 import type { GatewayInfo } from "../gateway-harness.js";
 import { apiFetch, createSession, deleteSession, waitForHealth, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
+import { openApp, navigateToHash, sendMessage } from "../ui/ui-helpers.js";
 
 /**
  * The /orchestrate/* routes require the caller to authenticate AS the owner via

@@ -20,7 +20,7 @@ import { test, expect } from "../gateway-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage } from "../ui/ui-helpers.js";
 
 const SKILL_NAME = "ui-chip-skill";
 const SKILL_BODY_MARKER = "SKILL_CHIP_E2E_MARKER_BODY";
