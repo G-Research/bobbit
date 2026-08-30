@@ -8,7 +8,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, readE2EToken, base } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

@@ -1,6 +1,6 @@
-import { test, expect } from "../gateway-harness.js";
-import { openApp } from "./ui-helpers.js";
-import { apiFetch, defaultProject } from "../e2e-setup.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
+import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
 
 test.use({ viewport: { width: 375, height: 667 } });
 

@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 // A single end-to-end lifecycle; explicit serial so a failed run never leaks a
 // half-installed server-scope pack into a retry.

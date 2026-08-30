@@ -15,9 +15,9 @@
  * The deterministic-race e2e is a tracked follow-up (needs the USER_ECHO_DELAY
  * gate to clobber the slot mid-flight without flaking).
  */
-import { test, expect } from "./fixtures.js";
-import { apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/ui/fixtures.js";
+import { apiFetch, nonGitCwd } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 // 1x1 transparent PNG.
 const PNG_B64 =

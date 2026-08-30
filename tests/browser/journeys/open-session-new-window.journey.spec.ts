@@ -11,9 +11,9 @@
  * relying on a real popup window.
  */
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 function sessionRow(page: Page, sessionId: string): Locator {
 	return page.locator(`[data-session-id="${sessionId}"]`).first();

@@ -3,8 +3,8 @@
  *
  * API/gate coverage lives in tests/e2e/optional-steps-api.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Optional steps", () => {
 	test("goal proposal with options field is parsed", async ({ page }) => {

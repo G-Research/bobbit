@@ -26,8 +26,8 @@
  * Must FAIL on master (live id-less plain-text assistant row + appended
  * snapshot row -> 2 copies of "OK") and PASS once the fix lands.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("New-tab duplicate messages", () => {
 	test("visibilitychange after new-tab does not duplicate plain-text replies", async ({ page, context }) => {

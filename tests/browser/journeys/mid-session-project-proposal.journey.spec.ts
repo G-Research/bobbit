@@ -14,10 +14,10 @@
  *   3. persistence across reload — accepted config survives, proposal gone
  *   4. dismiss/undo — Dismiss clears the tab without writing config
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { apiFetch, createSession, deleteSession, registerProject } from "../e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
+import { apiFetch, createSession, deleteSession, registerProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash, sendMessage } from "../../e2e/ui/ui-helpers.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
