@@ -4,7 +4,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { isLikelyGeneratedPath } from "../../src/shared/pr-walkthrough/generated-path.ts";
+import { isLikelyGeneratedPath } from "../../../src/shared/pr-walkthrough/generated-path.ts";
 
 describe("isLikelyGeneratedPath", () => {
 	it("classifies built marketplace pack outputs as generated", () => {

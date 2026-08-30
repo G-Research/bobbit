@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { describe, it } from "vitest";
@@ -11,8 +11,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import extension from "../../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
-import { WALKTHROUGH_ALLOWED_TOOLS } from "../../src/server/pr-walkthrough/walkthrough-agent-manager.ts";
+import extension from "../../../market-packs/pr-walkthrough/tools/pr-walkthrough/extension.ts";
+import { WALKTHROUGH_ALLOWED_TOOLS } from "../../../src/server/pr-walkthrough/walkthrough-agent-manager.ts";
 
 const groupDir = path.resolve("market-packs/pr-walkthrough/tools/pr-walkthrough");
 

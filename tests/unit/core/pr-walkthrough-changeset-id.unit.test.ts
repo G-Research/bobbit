@@ -13,7 +13,7 @@ import {
 	shortSha,
 	stableSlug,
 	walkthroughCardId,
-} from "../../src/shared/pr-walkthrough/ids.ts";
+} from "../../../src/shared/pr-walkthrough/ids.ts";
 
 const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 const HEAD_SHA = "fedcba9876543210fedcba9876543210fedcba98";

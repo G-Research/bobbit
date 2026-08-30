@@ -16,12 +16,12 @@ import os from "node:os";
 import { join } from "node:path";
 import { test, onTestFinished } from "vitest";
 
-import { routes } from "../../market-packs/pr-walkthrough/lib/routes.mjs";
+import { routes } from "../../../market-packs/pr-walkthrough/lib/routes.mjs";
 import {
 	createAnalysisBundleFromParsedDiff,
 	analysisBundleToParsedDiff,
 	WalkthroughAnalysisBundleStore,
-} from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
+} from "../../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 

@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const { routes } = await import("../../market-packs/pr-walkthrough/lib/routes.mjs");
+const { routes } = await import("../../../market-packs/pr-walkthrough/lib/routes.mjs");
 
 interface MockCtx {
 	ctx: {
@@ -122,7 +122,7 @@ test("a mismatched ack for the wrong host still refuses to spawn", async () => {
 });
 
 test("pack manifest declares the panel submitReview route", () => {
-	const manifestPath = fileURLToPath(new URL("../../market-packs/pr-walkthrough/pack.yaml", import.meta.url));
+	const manifestPath = fileURLToPath(new URL("../../../market-packs/pr-walkthrough/pack.yaml", import.meta.url));
 	const manifest = readFileSync(manifestPath, "utf8");
 	assert.match(manifest, /names:\s*\[[^\]]*\bsubmitReview\b[^\]]*\]/);
 });

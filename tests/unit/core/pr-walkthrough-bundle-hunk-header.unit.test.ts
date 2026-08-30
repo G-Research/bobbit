@@ -9,8 +9,8 @@ import {
 	analysisBundleToParsedDiff,
 	PR_WALKTHROUGH_ANALYSIS_BUNDLE_KIND,
 	PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
-} from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
-import type { PrWalkthroughAnalysisBundle } from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
+} from "../../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
+import type { PrWalkthroughAnalysisBundle } from "../../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
 
 // Reproducing test for the PR walkthrough `hunkSignature` TypeError (Defect 2 —
 // the data/contract defect). `PrWalkthroughHunk.header` is declared a required

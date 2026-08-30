@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { NAV_LABEL_MAX_CHARS, NAV_LABEL_MAX_WORDS, deriveNavLabel, navLabelError } from "../../src/shared/pr-walkthrough/nav-label.ts";
+import { NAV_LABEL_MAX_CHARS, NAV_LABEL_MAX_WORDS, deriveNavLabel, navLabelError } from "../../../src/shared/pr-walkthrough/nav-label.ts";
 
 describe("PR walkthrough nav label", () => {
 	it("exposes the documented limits", () => {

@@ -24,7 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { it } from "vitest";
 
-import { resolveAndReadBindingBundleForTesting } from "../../src/server/pr-walkthrough/routes.ts";
+import { resolveAndReadBindingBundleForTesting } from "../../../src/server/pr-walkthrough/routes.ts";
 
 it(
 	"resolveAndReadBindingBundle deduplicates concurrent reads: resolveDiff called exactly once (mutex pattern)",

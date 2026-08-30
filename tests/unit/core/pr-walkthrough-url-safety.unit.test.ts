@@ -18,7 +18,7 @@ import {
 	normalizeTrustedHosts,
 	isTrustedExternalHost,
 	safeExternalUrl,
-} from "../../src/shared/pr-walkthrough/url-safety.ts";
+} from "../../../src/shared/pr-walkthrough/url-safety.ts";
 
 describe("normalizeTrustedHost", () => {
 	it("lowercases and strips a trailing dot", () => {

@@ -6,9 +6,9 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { parseUnifiedDiff } from "../../src/server/pr-walkthrough/diff-parser.ts";
-import { resolveLocalChangeset } from "../../src/server/pr-walkthrough/git-changeset.ts";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import { parseUnifiedDiff } from "../../../src/server/pr-walkthrough/diff-parser.ts";
+import { resolveLocalChangeset } from "../../../src/server/pr-walkthrough/git-changeset.ts";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
 
 const SAMPLE_DIFF = `diff --git a/src/a.ts b/src/a.ts
 index 1111111..2222222 100644

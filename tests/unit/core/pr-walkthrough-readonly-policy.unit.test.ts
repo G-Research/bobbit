@@ -5,7 +5,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { evaluateWalkthroughReadonlyCommand, type WalkthroughReadonlyPolicyOptions } from "../../src/server/pr-walkthrough/walkthrough-readonly-policy.ts";
+import { evaluateWalkthroughReadonlyCommand, type WalkthroughReadonlyPolicyOptions } from "../../../src/server/pr-walkthrough/walkthrough-readonly-policy.ts";
 
 const launchedGithubTarget: WalkthroughReadonlyPolicyOptions = {
 	githubTarget: { provider: "github", owner: "owner", repo: "repo", number: 123 },

@@ -20,7 +20,7 @@ import {
 	selectCoordinatedPrResult,
 	shouldLogRemoteStateTelemetry,
 	type CoordinatedPrLookupTarget,
-} from "../../src/server/server.ts";
+} from "../../../src/server/server.ts";
 
 const PR_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
 
@@ -118,7 +118,7 @@ describe("PR status GitHub CLI lookup", () => {
 			assert.equal(args[3], "acme/widget");
 		}
 
-		const source = fs.readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf-8");
+		const source = fs.readFileSync(new URL("../../../src/server/server.ts", import.meta.url), "utf-8");
 		assert.ok(!source.includes("execAsync(`gh pr merge"));
 	});
 

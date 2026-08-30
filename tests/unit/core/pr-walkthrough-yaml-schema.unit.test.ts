@@ -5,8 +5,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 
-import { mapYamlToWalkthroughPayload, validatePrWalkthroughYaml } from "../../src/server/pr-walkthrough/walkthrough-yaml-schema.ts";
-import type { PrWalkthroughDiffBlock } from "../../src/shared/pr-walkthrough/types.ts";
+import { mapYamlToWalkthroughPayload, validatePrWalkthroughYaml } from "../../../src/server/pr-walkthrough/walkthrough-yaml-schema.ts";
+import type { PrWalkthroughDiffBlock } from "../../../src/shared/pr-walkthrough/types.ts";
 
 describe("PR walkthrough YAML schema", () => {
 	it("accepts a minimal valid document", () => {

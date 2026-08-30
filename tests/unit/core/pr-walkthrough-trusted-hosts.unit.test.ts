@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -22,9 +22,9 @@ guardProcessEnv();
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
 
-const { canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting, numberOnlyTargetFromInferred } = await import("../../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
-const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, changesetIdForGithubForTesting } = await import("../../src/server/pr-walkthrough/github-adapter.ts");
-const { parseGithubRefForTesting, resolveWalkthroughForTesting } = await import("../../src/server/pr-walkthrough/routes.ts");
+const { canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting, numberOnlyTargetFromInferred } = await import("../../../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
+const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, changesetIdForGithubForTesting } = await import("../../../src/server/pr-walkthrough/github-adapter.ts");
+const { parseGithubRefForTesting, resolveWalkthroughForTesting } = await import("../../../src/server/pr-walkthrough/routes.ts");
 
 describe("canonicalizeTarget host-qualified identity", () => {
 	it("keeps the historical key shape for github.com", () => {

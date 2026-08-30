@@ -11,14 +11,14 @@ import {
 	PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
 	WalkthroughAnalysisBundleStore,
 	createAnalysisBundleFromParsedDiff,
-} from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
-import { handlePrWalkthroughApiRoute } from "../../src/server/pr-walkthrough/routes.ts";
-import type { PrWalkthroughAnalysisBundle } from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
-import type { PrWalkthroughJobRecord } from "../../src/server/pr-walkthrough/walkthrough-agent-store.ts";
+} from "../../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
+import { handlePrWalkthroughApiRoute } from "../../../src/server/pr-walkthrough/routes.ts";
+import type { PrWalkthroughAnalysisBundle } from "../../../src/server/pr-walkthrough/walkthrough-analysis-bundle.ts";
+import type { PrWalkthroughJobRecord } from "../../../src/server/pr-walkthrough/walkthrough-agent-store.ts";
 import {
 	installPrWalkthroughBundleStoreHarness,
 	type PrWalkthroughBundleStoreHarness,
-} from "./helpers/pr-walkthrough-bundle-store-read-window-harness.ts";
+} from "../../../tests2/core/helpers/pr-walkthrough-bundle-store-read-window-harness.ts";
 
 let harness: PrWalkthroughBundleStoreHarness;
 
