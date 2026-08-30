@@ -4,6 +4,16 @@ import {
 	installProviderDemoFixture,
 	type ProviderDemoFixture,
 } from "../test-utils/provider-demo-marketplace.js";
+
+// The provider-demo fixture is installed as a SERVER-SCOPE market pack into the
+// per-worker gateway dir — NOT via BOBBIT_BUILTIN_PACKS_DIR. The in-process
+// gateway is worker-scoped (one gateway shared by every spec in a Playwright
+// worker) and resolves the built-in packs dir from the global process.env, so
+// mutating BOBBIT_BUILTIN_PACKS_DIR would replace the real built-in band for
+// the whole worker and break sibling specs (pr-walkthrough, marketplace, …).
+// Installing the fixture as a market pack layers it ON TOP of the real built-in
+// band — listProviders enumerates installed market packs additively — so no
+// built-in pack is removed and the fixture is still discovered.
 import fs from "node:fs";
 import path from "node:path";
 
