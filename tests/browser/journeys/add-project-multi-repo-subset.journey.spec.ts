@@ -8,7 +8,7 @@
  * `tests/project-assistant-autoprompt.test.ts` at the formatter level and
  * here at the WebSocket-frame level.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import { rmSync } from "node:fs";
 import { basename } from "node:path";
 import {
@@ -18,7 +18,7 @@ import {
 	clearProjects,
 	captureAssistantPrompts,
 	preflightAvailable,
-} from "./add-project-helpers.js";
+} from "../../e2e/ui/add-project-helpers.js";
 
 test.describe("Add Project — multi-repo subset handoff", () => {
 	test.afterEach(async () => {

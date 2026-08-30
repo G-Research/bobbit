@@ -22,9 +22,9 @@
  *
  * See docs/auto-retry.md.
  */
-import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Auto-retry banner (UI)", () => {
 	test("auto_retry_pending shows banner; auto_retry_cancelled hides it", async ({ page }) => {

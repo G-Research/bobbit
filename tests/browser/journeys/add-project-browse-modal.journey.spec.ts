@@ -11,7 +11,7 @@
  *   - Re-opening the modal and pressing Esc closes it without mutating the
  *     picker input, and focus returns to the picker input.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
 import { rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
@@ -21,7 +21,7 @@ import {
 	clearProjects,
 	waitForPreflight,
 	preflightAvailable,
-} from "./add-project-helpers.js";
+} from "../../e2e/ui/add-project-helpers.js";
 
 async function setCompletedPickerPath(page: Page, path: string): Promise<void> {
 	await page.locator(ADD_PROJECT.picker).evaluate((el, nextPath) => {

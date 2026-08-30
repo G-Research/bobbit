@@ -7,7 +7,7 @@
  *   - `add-project-select-all` re-checks every row; count returns to "N of N";
  *     Continue re-enables.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import { rmSync } from "node:fs";
 import {
 	ADD_PROJECT,
@@ -15,7 +15,7 @@ import {
 	makeMultiRepoFixture,
 	clearProjects,
 	preflightAvailable,
-} from "./add-project-helpers.js";
+} from "../../e2e/ui/add-project-helpers.js";
 
 test.describe("Add Project — Select all / Deselect all", () => {
 	test.afterEach(async () => {

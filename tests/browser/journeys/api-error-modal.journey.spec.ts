@@ -12,9 +12,9 @@
  * goal-assistant flow (mirroring `tests/e2e/ui/goal-creation.spec.ts`) so a
  * real "Create Goal" click triggers `createGoal()` in production code.
  */
-import { test, expect } from "../gateway-harness.js";
-import { defaultProjectId } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { defaultProjectId } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 const FAKE_STACK =
 	"Error: Missing title\n" +

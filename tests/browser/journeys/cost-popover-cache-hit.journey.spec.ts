@@ -3,10 +3,10 @@
  * Boundary formatting and component fetch behavior live in tests/context-cost-stats.spec.ts.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import type { GatewayInfo } from "../gateway-harness.js";
-import { createGoal, deleteGoal, createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToGoalDashboard, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import type { GatewayInfo } from "../../e2e/gateway-harness.js";
+import { createGoal, deleteGoal, createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToGoalDashboard, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 interface CostAggregate {
 	inputTokens: number;

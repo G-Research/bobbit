@@ -19,9 +19,9 @@
  * route — instead an auto-import happens or the dialog routes elsewhere) and
  * PASS once `hasBobbit` is fixed to check `.bobbit/config/project.yaml`.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 import { mkdirSync, writeFileSync, existsSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

@@ -2,9 +2,9 @@
  * Retained spawned-gateway smoke for Children tool renderer registration.
  * Detailed renderer output/action matrices live in tests/children-tool-renderers.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 async function setSubgoalsFlag(value: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

@@ -9,7 +9,7 @@
  *   - Escape closes the open suggestion list without cancelling the dialog;
  *     a second Escape closes the dialog.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import { rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -19,7 +19,7 @@ import {
 	clearProjects,
 	waitForPreflight,
 	preflightAvailable,
-} from "./add-project-helpers.js";
+} from "../../e2e/ui/add-project-helpers.js";
 
 test.describe("Add Project — directory picker typeahead", () => {
 	test.afterEach(async () => {

@@ -22,8 +22,8 @@
  * events. (`BG_WAIT:<ms>` is now the real-bg-process trigger — different
  * surface, see mock-agent-core.mjs header.)
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, createSessionViaUI, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 async function countBashBgCards(page: any): Promise<number> {
 	return page.evaluate(() => {

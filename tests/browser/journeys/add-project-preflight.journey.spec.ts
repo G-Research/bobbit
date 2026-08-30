@@ -24,9 +24,9 @@
  * inside each test. This keeps the suite green while the server side of the
  * goal is in flight; once the endpoint is wired, the assertions become live.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
