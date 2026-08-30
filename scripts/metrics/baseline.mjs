@@ -49,28 +49,28 @@ Retained spawned-gateway browser E2E should prove integration wiring that fixtur
 
 ### Renderer and panel surfaces
 
-- Tool renderer registration: \`tests/e2e/ui/children-tool-renderers.spec.ts\`.
-- Ask-user choices lifecycle and finalization: \`tests/e2e/ui/ask-user-choices-ui.spec.ts\`.
-- Proposal/review panel integration: \`tests/e2e/ui/proposal-open-all-types.spec.ts\`, \`proposal-tools.spec.ts\`, \`review-pane.spec.ts\`.
-- Preview and dynamic side-panel integration: \`tests/e2e/ui/preview-happy-path.spec.ts\`, \`side-panel-tabs.spec.ts\`, \`dynamic-chat-tabs.spec.ts\`.
-- Status and stats widgets with server-fed data: \`tests/e2e/ui/goal-status-widget.spec.ts\`, \`cost-popover-cache-hit.spec.ts\`, \`prompt-stats-e2e.spec.ts\`.
+- Tool renderer registration: \`tests/browser/journeys/children-tool-renderers.journey.spec.ts\`.
+- Ask-user choices lifecycle and finalization: \`tests/browser/journeys/ask-user-choices-ui.journey.spec.ts\`.
+- Proposal/review panel integration: \`tests/browser/journeys/proposal-open-all-types.journey.spec.ts\`, \`tests/browser/journeys/proposal-tools.journey.spec.ts\`, \`tests/browser/journeys/review-pane.journey.spec.ts\`.
+- Preview and dynamic side-panel integration: \`tests/browser/journeys/preview-happy-path.journey.spec.ts\`, \`tests2/browser/fixtures/side-panel-tabs.spec.ts\`, \`tests2/browser/fixtures/dynamic-chat-tabs.spec.ts\`.
+- Status and stats widgets with server-fed data: \`tests/browser/journeys/goal-status-widget.journey.spec.ts\`, \`tests/browser/journeys/cost-popover-cache-hit.journey.spec.ts\`, \`tests/browser/journeys/prompt-stats-e2e.journey.spec.ts\`.
 
 ### Scroll and geometry surfaces
 
-- Real streaming tail-follow: \`tests/e2e/ui/tail-chat-real-stream.spec.ts\`.
-- Session-navigation replay bottom-pin: \`tests/e2e/ui/tail-chat-session-navigate.spec.ts\`.
-- Jump-to-last-prompt mobile/header integration: \`tests/e2e/ui/jump-to-last-prompt.spec.ts\`.
-- Narrow-width pill overflow integration: \`tests/e2e/ui/pill-overflow-promotion.spec.ts\`.
-- Mobile review viewport integration: \`tests/e2e/ui/mobile-review-commenting.spec.ts\`.
+- Real streaming tail-follow: \`tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts\`.
+- Session-navigation replay bottom-pin: \`tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts\`.
+- Jump-to-last-prompt mobile/header integration: \`tests2/browser/fixtures/jump-to-last-prompt.spec.ts\`.
+- Narrow-width pill overflow integration: \`tests2/browser/fixtures/pill-overflow-promotion.spec.ts\`.
+- Mobile review viewport integration: \`tests2/browser/fixtures/mobile-review-commenting.spec.ts\`.
 
 ### Sidebar surfaces
 
-- Filter/search integration: \`tests/e2e/ui/stories-sidebar.spec.ts\` and the retained smoke in \`sidebar-filters.spec.ts\`.
-- Keyboard route journey: \`tests/e2e/ui/sidebar-keyboard-nav.spec.ts\`.
-- Archived desktop/per-project behavior: \`tests/e2e/ui/sidebar-archived-layout.spec.ts\` and \`sidebar-archived-per-project.spec.ts\`.
-- Session/goal navigation: \`tests/e2e/ui/sidebar-navigation.spec.ts\`.
-- Staff/search integration: \`tests/e2e/ui/sidebar-staff-loading.spec.ts\`, \`search-e2e.spec.ts\`, and \`search-result-navigation.spec.ts\`.
-- Session+goal action-menu integration: \`tests/e2e/ui/sidebar-actions-menu.spec.ts\`.
+- Filter/search integration: \`tests/browser/journeys/stories-sidebar.journey.spec.ts\` and the retained smoke in \`tests/browser/journeys/sidebar-filters.journey.spec.ts\`.
+- Keyboard route journey: \`tests/browser/journeys/sidebar-keyboard-nav.journey.spec.ts\`.
+- Archived desktop/per-project behavior: \`tests/browser/journeys/sidebar-archived-layout.journey.spec.ts\` and \`tests/browser/journeys/sidebar-archived-per-project.journey.spec.ts\`.
+- Session/goal navigation: \`tests/browser/journeys/sidebar-navigation.journey.spec.ts\`.
+- Staff/search integration: \`tests/browser/journeys/sidebar-staff-loading.journey.spec.ts\`, \`tests/browser/journeys/search-e2e.journey.spec.ts\`, and \`tests/e2e/browser/search-result-navigation.browser-e2e.spec.ts\`.
+- Session+goal action-menu integration: \`tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts\`.
 
 ## Coverage-map update rules
 

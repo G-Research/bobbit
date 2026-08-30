@@ -367,12 +367,12 @@ const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
 	"tests/e2e/port-auto-increment.e2e.spec.ts:25",
 	"tests/e2e/provider-turn-hooks.spec.ts:101",
 	"tests/e2e/ui/add-project-helpers.ts:52",
-	"tests/e2e/ui/add-project-symlink.spec.ts:33",
-	"tests/e2e/ui/marketplace.spec.ts:73",
-	"tests/e2e/ui/project-management.spec.ts:17",
-	"tests/e2e/ui/sidebar-archived-per-project.spec.ts:13",
-	"tests/e2e/ui/sidebar-keyboard-nav.spec.ts:23",
-	"tests/e2e/ui/sidebar-unified-tree.spec.ts:161",
+	"tests/e2e/browser/add-project-symlink.browser-e2e.spec.ts:33",
+	"tests/e2e/browser/marketplace.browser-e2e.spec.ts:73",
+	"tests/browser/journeys/project-management.journey.spec.ts:17",
+	"tests/browser/journeys/sidebar-archived-per-project.journey.spec.ts:13",
+	"tests/browser/journeys/sidebar-keyboard-nav.journey.spec.ts:23",
+	"tests/browser/journeys/sidebar-unified-tree.journey.spec.ts:161",
 	"tests/e2e/browser/file-explorer-pack.browser-e2e.spec.ts:351",
 	"tests2/browser/fixtures/project-drag-reorder.spec.ts:67",
 	"tests/browser/journeys/prompt-interaction.journey.spec.ts:166",
@@ -393,6 +393,7 @@ function listTestSources(root, extensions) {
 }
 const e2eBrowserSources = [
 	...listTestSources("tests/e2e", [".ts", ".mjs"]),
+	...listTestSources("tests/browser", [".ts"]),
 	...listTestSources("tests2/browser", [".ts"]),
 ];
 const allE2eFixtureViolations = e2eBrowserSources

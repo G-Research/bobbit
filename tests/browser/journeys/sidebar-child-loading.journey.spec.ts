@@ -55,7 +55,7 @@ test.describe("Sidebar child auto-loading", () => {
 		// 5. After expanding, the team lead session should be visible as a child.
 		//    Use the same approach as SB-02: navigate directly to the team lead
 		//    and verify it loads (proving the session is accessible via the goal).
-		const { navigateToHash } = await import("../ui/ui-helpers.js");
+		const { navigateToHash } = await import("../../e2e/ui/ui-helpers.js");
 		await navigateToHash(page, `#/session/${teamLeadId}`);
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
