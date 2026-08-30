@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -22,8 +22,8 @@ import path from "node:path";
 const TEST_BOBBIT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ghost-workers-test-"));
 process.env.BOBBIT_DIR = TEST_BOBBIT_DIR;
 
-const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
-import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
+const { TeamManager } = await import("../../../src/server/agent/team-manager.ts");
+import type { TeamManagerConfig } from "../../../src/server/agent/team-manager.ts";
 
 const TEAM_STORE_FILE = path.join(TEST_BOBBIT_DIR, "state", "team-state.json");
 const createdManagers: any[] = [];

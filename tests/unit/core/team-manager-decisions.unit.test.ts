@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
-import { TeamManager, type TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
-import { createManualClock } from "../harness/clock.ts";
+import { TeamManager, type TeamManagerConfig } from "../../../src/server/agent/team-manager.ts";
+import { createManualClock } from "../../../tests2/harness/clock.ts";
 
 interface MockGoal {
 	id: string;

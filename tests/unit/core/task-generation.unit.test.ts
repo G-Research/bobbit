@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { TaskStore, type PersistedTask } from "../../src/server/agent/task-store.ts";
-import { ProjectContextManager } from "../../src/server/agent/project-context-manager.ts";
-import { ProjectContext } from "../../src/server/agent/project-context.ts";
+import { TaskStore, type PersistedTask } from "../../../src/server/agent/task-store.ts";
+import { ProjectContextManager } from "../../../src/server/agent/project-context-manager.ts";
+import { ProjectContext } from "../../../src/server/agent/project-context.ts";
 
 function task(id: string, assignedSessionId?: string): PersistedTask {
 	return {

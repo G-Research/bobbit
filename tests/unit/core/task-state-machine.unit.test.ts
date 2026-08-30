@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -32,8 +32,8 @@ function ensureStateDir() {
 }
 
 // Import after env var is set
-const { TaskManager } = await import("../../src/server/agent/task-manager.ts");
-const { TaskStore } = await import("../../src/server/agent/task-store.ts");
+const { TaskManager } = await import("../../../src/server/agent/task-manager.ts");
+const { TaskStore } = await import("../../../src/server/agent/task-store.ts");
 
 describe("TaskManager State Machine", () => {
 	let mgr: InstanceType<typeof TaskManager>;

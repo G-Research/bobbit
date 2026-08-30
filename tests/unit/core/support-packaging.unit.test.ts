@@ -5,7 +5,7 @@
 //   • package.json `files` includes docs/ and src/.
 //   • `npm pack --dry-run --json` lists at least one docs/ and one src/ entry.
 //   • resolveBundledDocsDir()/resolveBundledSrcDir() return existing directories.
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
@@ -13,9 +13,9 @@ import path from "node:path";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-const { resolveBundledDocsDir, resolveBundledSrcDir } = await import("../../src/server/agent/bundled-paths.ts");
+const { resolveBundledDocsDir, resolveBundledSrcDir } = await import("../../../src/server/agent/bundled-paths.ts");
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
+const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const PACKAGE_JSON = path.join(REPO_ROOT, "package.json");
 
 describe("support packaging — package.json files", () => {

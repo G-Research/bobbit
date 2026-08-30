@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -32,7 +32,7 @@ const {
 	cleanupSessionPromptAsync,
 	purgePromptSectionsJsonAsync,
 	initPromptDirs,
-} = await import("../../src/server/agent/system-prompt.ts");
+} = await import("../../../src/server/agent/system-prompt.ts");
 
 // Initialize prompt dirs with the test stateDir (required after parameterization)
 initPromptDirs(stateDir);

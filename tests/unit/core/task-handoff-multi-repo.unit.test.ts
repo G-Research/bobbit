@@ -13,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { TaskStore, readHandoff, type PersistedTask } from "../../src/server/agent/task-store.ts";
+import { TaskStore, readHandoff, type PersistedTask } from "../../../src/server/agent/task-store.ts";
 
 let stateDir: string;
 
