@@ -15,7 +15,7 @@ import {
 	repoWorktreePath,
 	componentRoot,
 	branchToSlug,
-} from "../../src/server/skills/worktree-paths.ts";
+} from "../../../src/server/skills/worktree-paths.ts";
 
 describe("branchToSlug", () => {
 	it("flattens slashes to dashes", () => {

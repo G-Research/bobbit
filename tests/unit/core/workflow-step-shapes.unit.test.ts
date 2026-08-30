@@ -15,11 +15,11 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { resolveStep } from "../../src/server/agent/verification-harness.ts";
-import { substituteVars } from "../../src/server/agent/verification-logic.ts";
-import { validateWorkflow, type ValidatorWorkflow, type WorkflowComponentRef } from "../../src/server/agent/workflow-validator.ts";
-import type { Component } from "../../src/server/agent/project-config-store.ts";
-import type { VerifyStep } from "../../src/server/agent/workflow-store.ts";
+import { resolveStep } from "../../../src/server/agent/verification-harness.ts";
+import { substituteVars } from "../../../src/server/agent/verification-logic.ts";
+import { validateWorkflow, type ValidatorWorkflow, type WorkflowComponentRef } from "../../../src/server/agent/workflow-validator.ts";
+import type { Component } from "../../../src/server/agent/project-config-store.ts";
+import type { VerifyStep } from "../../../src/server/agent/workflow-store.ts";
 
 const components: Component[] = [
 	{ name: "api", repo: ".", commands: { build: "npm run build", test: "npm test" } },

@@ -8,9 +8,9 @@ import {
 	buildVitestArgs,
 	parseArgs,
 	resolveWorkerLimit,
-} from "../../scripts/testing-v2/profile-windows-unit.mjs";
+} from "../../../scripts/testing-v2/profile-windows-unit.mjs";
 
-const profilerPath = fileURLToPath(new URL("../../scripts/testing-v2/profile-windows-unit.mjs", import.meta.url));
+const profilerPath = fileURLToPath(new URL("../../../scripts/testing-v2/profile-windows-unit.mjs", import.meta.url));
 
 describe("Windows unit child-process profiler", () => {
 	it("aggregates executable cost and peak concurrency without retaining arguments", () => {
@@ -37,14 +37,14 @@ describe("Windows unit child-process profiler", () => {
 
 	it("invokes Vitest directly with explicit projects and file filters", () => {
 		assert.match(VITEST_ENTRY.replaceAll("\\", "/"), /\/node_modules\/vitest\/vitest\.mjs$/);
-		const args = buildVitestArgs("core", ["tests2/core/windows-process-profile.test.ts"]);
+		const args = buildVitestArgs("core", ["tests/unit/core/windows-process-profile.unit.test.ts"]);
 		assert.equal(args[0], "run");
 		assert.equal(args[1], "--config");
 		assert.match(String(args[2]).replaceAll("\\", "/"), /\/vitest\.config\.ts$/);
 		assert.deepEqual(args.slice(3), [
 			"--project", "v2-core",
 			"--silent=passed-only",
-			"tests2/core/windows-process-profile.test.ts",
+			"tests/unit/core/windows-process-profile.unit.test.ts",
 		]);
 
 		assert.deepEqual(parseArgs([]).projects, ["v2-core", "v2-integration", "v2-dom", "v2-isolated"]);

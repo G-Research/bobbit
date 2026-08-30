@@ -11,8 +11,8 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { runComponentSetups } from "../../src/server/skills/worktree-setup.ts";
-import type { Component } from "../../src/server/agent/project-config-store.ts";
+import { runComponentSetups } from "../../../src/server/skills/worktree-setup.ts";
+import type { Component } from "../../../src/server/agent/project-config-store.ts";
 
 describe("runComponentSetups", () => {
 	it("runs in declared order; data-only skipped; failure is non-fatal", async () => {

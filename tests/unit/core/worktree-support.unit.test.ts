@@ -6,8 +6,8 @@ import { describe, it } from "vitest";
 import assert from "node:assert";
 import path from "node:path";
 
-import { resolveWorktreeSupport, type WorktreeSupportDeps } from "../../src/server/agent/worktree-support.js";
-import type { Component } from "../../src/server/agent/project-config-store.js";
+import { resolveWorktreeSupport, type WorktreeSupportDeps } from "../../../src/server/agent/worktree-support.js";
+import type { Component } from "../../../src/server/agent/project-config-store.js";
 
 /**
  * Unit coverage for the single-source-of-truth worktree-support resolver,

@@ -6,7 +6,7 @@ import { afterEach, describe, it, vi } from "vitest";
 import {
 	offsetWorktreeCwd,
 	relativeSandboxCwdOffset,
-} from "../../src/server/agent/session-setup.js";
+} from "../../../src/server/agent/session-setup.js";
 
 const hostRoot = path.parse(path.resolve(".")).root;
 const syntheticRoot = path.join(hostRoot, "bobbit-cwd-offset-fixture");

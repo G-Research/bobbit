@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it, vi } from "vitest";
 
-import { WorktreePool, type WorktreePoolFs } from "../../src/server/agent/worktree-pool.ts";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import { WorktreePool, type WorktreePoolFs } from "../../../src/server/agent/worktree-pool.ts";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
 
 describe("WorktreePool startup ownership", () => {
 	it("does not discover, adopt, or claim a pre-existing pool-shaped worktree", async () => {

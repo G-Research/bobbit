@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { describe, expect, it } from "vitest";
-import { SessionCommandSerialiser } from "../../src/server/ws/session-command-serialiser.js";
+import { SessionCommandSerialiser } from "../../../src/server/ws/session-command-serialiser.js";
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -513,7 +513,7 @@ describe("SessionCommandSerialiser", () => {
 
 	it("passes each command abort signal into both mention preflight and resolution", () => {
 		const handlerSource = fs.readFileSync(
-			new URL("../../src/server/ws/handler.ts", import.meta.url),
+			new URL("../../../src/server/ws/handler.ts", import.meta.url),
 			"utf8",
 		);
 		expect(handlerSource).toMatch(
