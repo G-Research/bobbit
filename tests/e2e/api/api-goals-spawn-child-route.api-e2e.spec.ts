@@ -26,6 +26,7 @@
  * Mirrors the in-process harness import pattern from
  * `tests/e2e/gates-api.spec.ts`.
  */
+import { realpathSync } from "node:fs";
 import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
@@ -34,12 +35,14 @@ import {
 	gitCwd,
 	rawApiFetch,
 	readE2EToken,
+	registerProject,
 	seedTeamLeadHeader,
 } from "../e2e-setup.js";
 import { pollUntil } from "../test-utils/cleanup.js";
 
 let token: string;
 let gitProjectId: string;
+let gitProjectRoot: string;
 // The in-process gateway (worker-scoped) — captured in beforeAll so the
 // helpers below can reach `gateway.teamManager` to establish a team-lead.
 let gw: any;
@@ -47,9 +50,27 @@ let gw: any;
 test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
 	gw = gateway;
-	gitCwd();
-	gitProjectId = (await defaultProjectId())!;
+	const nativeRoot = realpathSync.native(gitCwd());
+	// The fixture repo is nested below the ambient project. Retire that record so
+	// preflight can register the Git root itself as this suite's authority.
+	const ambientProjectId = await defaultProjectId();
+	expect(ambientProjectId).toBeTruthy();
+	const ambientDelete = await apiFetch(`/api/projects/${encodeURIComponent(ambientProjectId!)}`, { method: "DELETE" });
+	expect(ambientDelete.status, await ambientDelete.text()).toBe(200);
+	const project = await registerProject({
+		name: `spawn-child-route-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		rootPath: nativeRoot,
+	});
+	gitProjectId = project.id;
+	gitProjectRoot = project.rootPath;
 	expect(gitProjectId).toBeTruthy();
+	expect(gitProjectRoot).toBe(nativeRoot);
+});
+
+test.afterAll(async () => {
+	if (!gitProjectId) return;
+	const response = await apiFetch(`/api/projects/${encodeURIComponent(gitProjectId)}`, { method: "DELETE" });
+	expect(response.status, await response.text()).toBe(200);
 });
 
 /**
@@ -79,13 +100,13 @@ async function createParentGoal(): Promise<{ id: string; cwd: string; repoPath?:
 		method: "POST",
 		body: JSON.stringify({
 			title: `spawn-child route parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: gitCwd(),
+			cwd: gitProjectRoot,
 			projectId: gitProjectId,
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
 	});
-	expect(resp.status).toBe(201);
+	expect(resp.status, await resp.clone().text()).toBe(201);
 	const created = await resp.json();
 	// Wait for setupStatus to settle — we need repoPath and worktreePath
 	// stamped before the spawn-child handler reads them.
@@ -506,14 +527,14 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			method: "POST",
 			body: JSON.stringify({
 				title: `inherit parent ${Date.now()}`,
-				cwd: gitCwd(),
+				cwd: gitProjectRoot,
 				projectId: gitProjectId,
 				autoStartTeam: false,
 				workflowId: "feature",
 				inlineRoles: parentInline,
 			}),
 		});
-		expect(parentResp.status).toBe(201);
+		expect(parentResp.status, await parentResp.clone().text()).toBe(201);
 		const parent = await parentResp.json();
 		// Settle parent so spawn-child reads the inlineRoles back from disk.
 		await pollUntil(
