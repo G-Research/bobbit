@@ -209,6 +209,14 @@ The browser bubble, transcript APIs, pre-compaction history, archived reads, cop
 
 Search remains bounded. If compact sidecar correlation exceeds its record or byte budget, Bobbit skips ambiguous ordinary prompt rows rather than indexing an injected prefix or guessing an author; dependent tool attribution is omitted as needed. Legacy absence follows normal safe inference, but an authoritative set that cannot be correlated is not treated as local-human history.
 
+### Search-worker bootstrap boundary
+
+The search worker is a separate isolate, so it does not inherit the gateway's initialized sidecar module state. Each lazily created or restarted worker initializes reader-only author-sidecar state from the canonical server secrets during worker open, before opening the index or performing any rebuild or source read. This ensures raw transcript rows are projected with trusted provenance before their text enters the index.
+
+Reader initialization accepts no project or legacy state path. Gateway startup remains the sole authority for legacy sidecar migration, preventing a search worker from promoting project-owned data into the trusted provenance ledger. If private reader initialization fails, worker open fails through the existing worker lifecycle; indexing does not continue with raw prefixed text as a fallback.
+
+Tests must exercise this production open path. Fixture preloads are forbidden because they duplicate bootstrap outside the worker lifecycle, mask missing production initialization, and leave compiled production workers defective.
+
 ## Failure and security behavior
 
 The system prefers preserving literal content over guessing and deleting it:
