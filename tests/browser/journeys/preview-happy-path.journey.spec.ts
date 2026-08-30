@@ -8,8 +8,6 @@
 import { test, expect } from "../../e2e/ui/fixtures.js";
 import { openApp, createSessionViaUI } from "../../e2e/ui/ui-helpers.js";
 
-const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 test.describe("Preview panel retained full-stack smoke", () => {
 	test("opens mounted preview and refreshes iframe cache-buster", async ({ page }) => {
 		await openApp(page);
@@ -68,13 +66,15 @@ test.describe("Preview panel retained full-stack smoke", () => {
 			return { status: r.status, text, body };
 		}, { baseUrl, sessionId });
 		expect(mountResp.status, `mount POST should succeed: ${mountResp.text}`).toBe(200);
-		const mount = mountResp.body as { entry?: string; mtime?: number; contentHash?: string } | null;
+		const mount = mountResp.body as { entry?: string; mtime?: number; contentHash?: string; artifactId?: string } | null;
 		const expectedEntry = String(mount?.entry || "");
 		const expectedMtime = Number(mount?.mtime || 0);
 		const expectedHash = String(mount?.contentHash || "");
+		const expectedArtifactId = String(mount?.artifactId || "");
 		expect(expectedEntry).toBe("report.html");
 		expect(expectedMtime).toBeGreaterThan(0);
 		expect(expectedHash).toMatch(/^[a-f0-9]{64}$/);
+		expect(expectedArtifactId).not.toBe("");
 
 		// Wait for the mount identity to arrive through the product readiness path
 		// (live SSE or its bootstrap frame) before asserting DOM URL shape.
@@ -97,34 +97,44 @@ test.describe("Preview panel retained full-stack smoke", () => {
 		});
 
 		const encodedSessionId = encodeURIComponent(sessionId);
+		const encodedArtifactId = encodeURIComponent(expectedArtifactId);
 		const encodedEntry = encodeURIComponent(expectedEntry);
-		const expectedSrc = `/preview/${encodedSessionId}/${encodedEntry}?mtime=${expectedMtime}`;
-		const previewSrcPattern = new RegExp(`^/preview/${escapeRegExp(encodedSessionId)}/${escapeRegExp(encodedEntry)}\\?mtime=\\d+$`);
+		const expectedPath = `/preview/${encodedSessionId}/_artifact/${encodedArtifactId}/${encodedEntry}`;
 
-		// Wait for the iframe to mount with the exact server-confirmed cache-buster.
+		// Wait for the iframe to mount with the immutable artifact URL and exact
+		// server-confirmed cache-buster.
 		const iframe = page.locator(".goal-preview-panel iframe").first();
-		await expect(iframe, "preview iframe should use the mounted entry URL").toHaveAttribute("src", expectedSrc, { timeout: 10_000 });
+		await expect(iframe, "preview iframe should expose an absolute gateway URL").toHaveAttribute("src", /^https?:\/\//, { timeout: 10_000 });
 		await expect(iframe).toBeVisible();
 		const src = await iframe.getAttribute("src");
-		expect(src).toBe(expectedSrc);
-		expect(src).toMatch(previewSrcPattern);
+		expect(src).not.toBeNull();
+		const srcUrl = new URL(src!);
+		expect(srcUrl.origin, "preview iframe should stay on the active gateway origin").toBe(baseUrl);
+		expect(srcUrl.pathname).toBe(expectedPath);
+		expect([...srcUrl.searchParams.keys()], "preview iframe should carry only the cache buster").toEqual(["mtime"]);
+		expect(srcUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
+		expect(Number(srcUrl.searchParams.get("mtime"))).toBe(expectedMtime);
+		expect(srcUrl.hash).toBe("");
 		expect(src).not.toContain("/api/preview/render");
 		await expect(
 			page.frameLocator(".goal-preview-panel iframe").first().locator("body"),
 			"mounted preview iframe should load report.html content",
 		).toContainText("x", { timeout: 10_000 });
 
-		// Open-in-new-tab anchor renders with matching href.
+		// Open-in-new-tab anchor uses the same immutable artifact without a
+		// cache-buster.
 		const link = page.locator('a[title="Open preview in new tab"]').first();
-		const expectedHref = `/preview/${encodedSessionId}/${encodedEntry}`;
 		await expect(link).toBeVisible({ timeout: 10_000 });
-		await expect(link).toHaveAttribute("href", expectedHref);
+		await expect(link, "preview popout should expose an absolute gateway URL").toHaveAttribute("href", /^https?:\/\//);
 		const href = await link.getAttribute("href");
-		expect(href).toBe(expectedHref);
-		// New-tab link must NOT carry any cache-buster.
-		expect(href).not.toMatch(/[?#]mtime=/);
+		expect(href).not.toBeNull();
+		const hrefUrl = new URL(href!);
+		expect(hrefUrl.origin, "preview popout should stay on the active gateway origin").toBe(baseUrl);
+		expect(hrefUrl.pathname).toBe(expectedPath);
+		expect(hrefUrl.search, "preview popout must not carry the iframe cache buster").toBe("");
+		expect(hrefUrl.hash).toBe("");
 
-		// Refresh button bumps mtime → iframe src changes.
+		// Refresh bumps mtime while preserving the immutable artifact route.
 		const refresh = page.locator('button[title="Refresh preview"]').first();
 		await expect(refresh).toBeVisible();
 		await refresh.click();
@@ -141,6 +151,12 @@ test.describe("Preview panel retained full-stack smoke", () => {
 		}).not.toEqual(src);
 		const src2 = await iframe.getAttribute("src");
 		expect(src2).not.toBeNull();
-		expect(src2).toMatch(previewSrcPattern);
+		const refreshedSrcUrl = new URL(src2!);
+		expect(refreshedSrcUrl.origin).toBe(baseUrl);
+		expect(refreshedSrcUrl.pathname).toBe(expectedPath);
+		expect([...refreshedSrcUrl.searchParams.keys()]).toEqual(["mtime"]);
+		expect(refreshedSrcUrl.searchParams.get("mtime")).toMatch(/^\d+$/);
+		expect(Number(refreshedSrcUrl.searchParams.get("mtime"))).toBeGreaterThan(Number(srcUrl.searchParams.get("mtime")));
+		expect(refreshedSrcUrl.hash).toBe("");
 	});
 });
