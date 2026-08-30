@@ -706,7 +706,7 @@ export class SidebarRegion extends RegionHandle {
 
 const intentSelectors: Record<string, string> = {
 	send_message: "message-editor button[title='Send message']",
-	stop_streaming: "button[title='Stop streaming']",
+	stop_streaming: "button[title='Stop current turn']",
 	attach_file: "message-editor input[type='file']",
 };
 
