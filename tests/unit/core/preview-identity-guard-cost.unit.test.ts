@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import { createFsFromVolume, Volume } from "memfs";
-import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
+import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
 import {
 	artifactDir,
 	artifactMountDir,
@@ -15,7 +15,7 @@ import {
 	setPreviewArtifactRootForTesting,
 	sweepOrphanArtifacts,
 	type PreviewArtifactRecord,
-} from "../../src/server/preview/artifacts.ts";
+} from "../../../src/server/preview/artifacts.ts";
 import {
 	copyPreviewDirectory,
 	createPreviewAsyncFs,
@@ -24,7 +24,7 @@ import {
 	setPreviewRootForTesting,
 	writeInline,
 	type PreviewAsyncFs,
-} from "../../src/server/preview/mount.ts";
+} from "../../../src/server/preview/mount.ts";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 const SID_SCALE = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";

@@ -1,6 +1,6 @@
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import { PREVIEW_THEME_BRIDGE } from "../../src/shared/preview-bridge-scripts.js";
+import { PREVIEW_THEME_BRIDGE } from "../../../src/shared/preview-bridge-scripts.js";
 
 function bridgeProgram(): string {
 	const match = PREVIEW_THEME_BRIDGE.match(/^<script(?:\s[^>]*)?>([\s\S]*)<\/script>$/i);

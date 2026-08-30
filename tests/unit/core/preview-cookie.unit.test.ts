@@ -17,12 +17,12 @@ import {
 	issueIfMissing,
 	parseCookies,
 	tryAuth,
-} from "../../src/server/auth/cookie.ts";
+} from "../../../src/server/auth/cookie.ts";
 import {
 	COOKIE_SIGNING_KEY_FILE,
 	loadOrCreateCookieSigningKey,
 	type CookieSigningKeyFileSystem,
-} from "../../src/server/auth/cookie-signing-key.ts";
+} from "../../../src/server/auth/cookie-signing-key.ts";
 
 const BASE_NOW = 1_800_000_000;
 const KEY = Buffer.alloc(32, 0x11);
@@ -118,8 +118,8 @@ async function runIndependentKeyContenders(
 	fs.mkdirSync(coordinationDir);
 	const contenderPath = path.join(workDir, "cookie-key-contender.mjs");
 	const launcherPath = path.join(workDir, "cookie-key-launcher.cjs");
-	const signingKeyModule = fileURLToPath(new URL("../../src/server/auth/cookie-signing-key.ts", import.meta.url));
-	const cookieModule = fileURLToPath(new URL("../../src/server/auth/cookie.ts", import.meta.url));
+	const signingKeyModule = fileURLToPath(new URL("../../../src/server/auth/cookie-signing-key.ts", import.meta.url));
+	const cookieModule = fileURLToPath(new URL("../../../src/server/auth/cookie.ts", import.meta.url));
 
 	fs.writeFileSync(contenderPath, String.raw`
 import fs from "node:fs";
@@ -281,12 +281,12 @@ describe("parseCookies", () => {
 
 describe("stateless signed cookies", () => {
 	it("keeps the signing and legacy-registry filesystem boundaries structurally isolated", () => {
-		const cookieSource = fs.readFileSync(new URL("../../src/server/auth/cookie.ts", import.meta.url), "utf8");
+		const cookieSource = fs.readFileSync(new URL("../../../src/server/auth/cookie.ts", import.meta.url), "utf8");
 		assert.deepEqual(importedModuleSpecifiers(cookieSource), ["node:crypto", "node:http"]);
 		assert.doesNotMatch(cookieSource, /\b(?:require|process\.getBuiltinModule)\s*\(|\b(?:readFile|writeFile|open|stat|lstat|readdir|mkdir|unlink|rename|link|chmod|fsync|flushNow|ensureLoaded)(?:Sync)?\s*\(/);
 		assert.doesNotMatch(cookieSource, /auth-cookies|\bstateDir\b|\bregistry\b/);
 
-		const keyLoaderSource = fs.readFileSync(new URL("../../src/server/auth/cookie-signing-key.ts", import.meta.url), "utf8");
+		const keyLoaderSource = fs.readFileSync(new URL("../../../src/server/auth/cookie-signing-key.ts", import.meta.url), "utf8");
 		assert.match(keyLoaderSource, /export const COOKIE_SIGNING_KEY_FILE = "cookie-signing-key";/);
 		assert.equal(keyLoaderSource.match(/["']cookie-signing-key["']/g)?.length, 1);
 		assert.match(keyLoaderSource, /loadOrCreateCookieSigningKey\(\s*secretsDir: string,/);
@@ -299,7 +299,7 @@ describe("stateless signed cookies", () => {
 		]);
 		assert.equal(keyLoaderSource.match(/path\.join\(/g)?.length, keyPathComponents.length);
 
-		const serverRoot = fileURLToPath(new URL("../../src/server/", import.meta.url));
+		const serverRoot = fileURLToPath(new URL("../../../src/server/", import.meta.url));
 		const legacyRegistryReferences = productionServerSourceFiles(serverRoot)
 			.filter((file) => fs.readFileSync(file, "utf8").includes("auth-cookies.json"))
 			.map((file) => path.relative(serverRoot, file).split(path.sep).join("/"));

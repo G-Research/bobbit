@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -18,12 +18,12 @@ import { Buffer } from "node:buffer";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import extensionFactory from "../../defaults/tools/html/extension.ts";
+import extensionFactory from "../../../defaults/tools/html/extension.ts";
 import {
 	PREVIEW_SNAPSHOT_MARKER_V3,
 	parseSnapshot,
 	buildPreviewSnapshotV3Block,
-} from "../../defaults/tools/html/snapshot.ts";
+} from "../../../defaults/tools/html/snapshot.ts";
 
 type ToolReg = {
 	name: string;

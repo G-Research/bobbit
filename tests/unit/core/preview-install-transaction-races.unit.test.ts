@@ -6,8 +6,8 @@ import path from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { afterEach, describe, it, vi } from "vitest";
 import { createFsFromVolume, Volume } from "memfs";
-import { CookieStore } from "../../src/server/auth/cookie.ts";
-import { handlePreviewRequest } from "../../src/server/preview/content-route.ts";
+import { CookieStore } from "../../../src/server/auth/cookie.ts";
+import { handlePreviewRequest } from "../../../src/server/preview/content-route.ts";
 import {
 	createPreviewAsyncFs,
 	installPreviewDirectoryTransaction,
@@ -20,7 +20,7 @@ import {
 	withPreviewDirectoryUnavailable,
 	writeInline,
 	type PreviewAsyncFs,
-} from "../../src/server/preview/mount.ts";
+} from "../../../src/server/preview/mount.ts";
 
 const SID_A = "11111111-2222-3333-4444-555555555551";
 const SID_B = "11111111-2222-3333-4444-555555555552";

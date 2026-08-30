@@ -10,8 +10,8 @@ import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { isPathContained, resolveAssetPath } from "../../src/server/preview/path-guard.ts";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { isPathContained, resolveAssetPath } from "../../../src/server/preview/path-guard.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 let baseDir: string;
 let outsideFile: string;

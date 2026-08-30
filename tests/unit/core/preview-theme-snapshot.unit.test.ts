@@ -15,7 +15,7 @@ import {
 	getPreviewThemeSnapshot,
 	parseThemeBlocks,
 	_resetPreviewThemeSnapshotCache,
-} from "../../src/server/preview/theme-snapshot.ts";
+} from "../../../src/server/preview/theme-snapshot.ts";
 
 describe("parseThemeBlocks", () => {
 	it("captures top-level :root and .dark declarations", () => {

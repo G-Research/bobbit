@@ -7,7 +7,7 @@ import { createFsFromVolume, Volume } from "memfs";
 import {
 	removeTree,
 	walkTree,
-} from "../../src/server/agent/bounded-async-work.ts";
+} from "../../../src/server/agent/bounded-async-work.ts";
 import {
 	bindPreviewDirectoryRoot,
 	copyPreviewDirectory,
@@ -16,7 +16,7 @@ import {
 	PreviewMountError,
 	type BoundPreviewDirectoryRoot,
 	type PreviewAsyncFs,
-} from "../../src/server/preview/mount.ts";
+} from "../../../src/server/preview/mount.ts";
 import {
 	artifactDir,
 	PreviewArtifactError,
@@ -24,7 +24,7 @@ import {
 	setPreviewArtifactFsForTesting,
 	setPreviewArtifactRootForTesting,
 	type PreviewArtifactRecord,
-} from "../../src/server/preview/artifacts.ts";
+} from "../../../src/server/preview/artifacts.ts";
 
 const SID = "11111111-2222-3333-4444-555555555555";
 
