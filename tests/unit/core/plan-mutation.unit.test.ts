@@ -11,7 +11,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { classifyMutation, type ClassifierPlanStep } from "../../src/server/agent/plan-mutation.ts";
+import { classifyMutation, type ClassifierPlanStep } from "../../../src/server/agent/plan-mutation.ts";
 
 function step(planId: string, opts: Partial<ClassifierPlanStep> & { phase?: number; spec?: string; title?: string } = {}): ClassifierPlanStep {
 	return {

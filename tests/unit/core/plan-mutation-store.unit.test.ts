@@ -15,9 +15,9 @@ import {
 	DEFAULT_MUTATION_TTL_MS,
 	PLAN_MUTATION_PRUNE_CONCURRENCY,
 	type PendingMutation,
-} from "../../src/server/agent/plan-mutation-store.ts";
-import type { Clock } from "../../src/server/gateway-deps.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+} from "../../../src/server/agent/plan-mutation-store.ts";
+import type { Clock } from "../../../src/server/gateway-deps.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 const stateDir = path.resolve("/memfs/plan-mutation-store/state");
 let memfs: MemFs;
