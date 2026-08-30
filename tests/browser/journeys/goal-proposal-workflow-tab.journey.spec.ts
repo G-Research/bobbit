@@ -15,7 +15,7 @@
  *   4. Sync — the Workflow-tab select mirrors the Goal-tab select value.
  */
 import type { Locator } from "@playwright/test";
-import { test, expect } from "../../e2e/gateway-harness.js";
+import { test, expect, type GatewayInfo } from "../../e2e/gateway-harness.js";
 import { apiFetch, deleteGoal } from "../../e2e/e2e-setup.js";
 import { openApp, sendMessage, createSessionViaUI, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
@@ -85,9 +85,17 @@ async function selectedOptionText(locator: Locator): Promise<string> {
 	});
 }
 
-async function seedInlineWorkflowGoalProposal(sessionId: string): Promise<void> {
+function sessionCapabilityHeaders(gateway: GatewayInfo, sessionId: string): Record<string, string> {
+	const secret = gateway.sessionManager?.sessionSecretStore?.getOrCreateSecret(sessionId);
+	expect(secret, `session ${sessionId} needs its server-minted proposal capability`).toEqual(expect.any(String));
+	return { "X-Bobbit-Session-Secret": secret };
+}
+
+async function seedInlineWorkflowGoalProposal(gateway: GatewayInfo, sessionId: string): Promise<void> {
+	const headers = sessionCapabilityHeaders(gateway, sessionId);
 	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 		method: "POST",
+		headers,
 		body: JSON.stringify({
 			args: {
 				title: "Inline Workflow Label Goal",
@@ -101,6 +109,7 @@ async function seedInlineWorkflowGoalProposal(sessionId: string): Promise<void> 
 
 	const editResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/edit`, {
 		method: "POST",
+		headers,
 		body: JSON.stringify({
 			old_text: "workflow: general",
 			new_text: `workflow: ${INLINE_WORKFLOW_ID}\n${INLINE_WORKFLOW_FRONTMATTER}`,
@@ -110,9 +119,10 @@ async function seedInlineWorkflowGoalProposal(sessionId: string): Promise<void> 
 	expect(editResp.status, `replace library workflow with inline workflow: ${editText}`).toBe(200);
 }
 
-async function seedInlineOnlyWorkflowGoalProposal(sessionId: string): Promise<void> {
+async function seedInlineOnlyWorkflowGoalProposal(gateway: GatewayInfo, sessionId: string): Promise<void> {
 	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 		method: "POST",
+		headers: sessionCapabilityHeaders(gateway, sessionId),
 		body: JSON.stringify({
 			args: {
 				title: "Inline Workflow Seed Only Goal",
@@ -128,9 +138,10 @@ async function seedInlineOnlyWorkflowGoalProposal(sessionId: string): Promise<vo
 	).toBe(200);
 }
 
-async function seedConflictingInlineWorkflowGoalProposal(sessionId: string): Promise<void> {
+async function seedConflictingInlineWorkflowGoalProposal(gateway: GatewayInfo, sessionId: string): Promise<void> {
 	const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 		method: "POST",
+		headers: sessionCapabilityHeaders(gateway, sessionId),
 		body: JSON.stringify({
 			args: {
 				title: "Inline Workflow Precedence Goal",
@@ -166,12 +177,12 @@ async function ensureSubgoals(value: boolean): Promise<void> {
 test.describe("Goal proposal — Workflow tab", () => {
 	test.afterEach(async () => { await ensureSubgoals(true); });
 
-	test("inline-only bespoke workflow proposal opens normally and submits workflow body", async ({ page }) => {
+	test("inline-only bespoke workflow proposal opens normally and submits workflow body", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await ensureSubgoals(true);
 		await openApp(page);
 		const sessionId = await createSessionViaUI(page);
-		await seedInlineOnlyWorkflowGoalProposal(sessionId);
+		await seedInlineOnlyWorkflowGoalProposal(gateway, sessionId);
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 
@@ -251,7 +262,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 		await deleteGoal(created.id);
 	});
 
-	test("live assistant proposals prefer a distinct inline workflow over the project workflow id", async ({ page }) => {
+	test("live assistant proposals prefer a distinct inline workflow over the project workflow id", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await ensureSubgoals(true);
 		await openApp(page);
@@ -268,7 +279,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 			{ timeout: 10_000, message: "project workflow cache should be loaded before hydrating the inline proposal" },
 		).toContain("general");
 
-		await seedConflictingInlineWorkflowGoalProposal(sessionId);
+		await seedConflictingInlineWorkflowGoalProposal(gateway, sessionId);
 
 		await expect(titleInput).toHaveValue("Inline Workflow Precedence Goal", { timeout: 10_000 });
 		await expect.poll(
@@ -313,12 +324,12 @@ test.describe("Goal proposal — Workflow tab", () => {
 		expect(await workflowSelect.inputValue()).not.toBe("general");
 	});
 
-	test("inline workflow proposals show a Bespoke selected option in both workflow pickers", async ({ page }) => {
+	test("inline workflow proposals show a Bespoke selected option in both workflow pickers", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		await ensureSubgoals(true);
 		await openApp(page);
 		const sessionId = await createSessionViaUI(page);
-		await seedInlineWorkflowGoalProposal(sessionId);
+		await seedInlineWorkflowGoalProposal(gateway, sessionId);
 		// Reload so the UI rehydrates from the server-side draft after the edit;
 		// otherwise the live proposal merge may preserve the initial library workflow id.
 		await page.reload({ waitUntil: "domcontentloaded" });
@@ -387,7 +398,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 		).toEqual({ goal: updatedLabel, workflow: updatedLabel });
 	});
 
-	test("inline workflow proposals remain creatable when the workflow cache is empty", async ({ page }) => {
+	test("inline workflow proposals remain creatable when the workflow cache is empty", async ({ page, gateway }) => {
 		test.setTimeout(90_000);
 		let workflowListRequests = 0;
 		await page.route(/\/api\/workflows(?:\?.*)?$/, async (route, req) => {
@@ -406,7 +417,7 @@ test.describe("Goal proposal — Workflow tab", () => {
 		await ensureSubgoals(true);
 		await openApp(page);
 		const sessionId = await createSessionViaUI(page);
-		await seedInlineWorkflowGoalProposal(sessionId);
+		await seedInlineWorkflowGoalProposal(gateway, sessionId);
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("button").filter({ hasText: "Settings" }).first()).toBeVisible({ timeout: 20_000 });
 
