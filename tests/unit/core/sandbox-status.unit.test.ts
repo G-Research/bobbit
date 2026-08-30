@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "../../../src/server/agent/sandbox-status.js";
 
-const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const SERVER_SOURCE = readFileSync(new URL("../../../src/server/server.ts", import.meta.url), "utf8");
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
 
 function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
@@ -26,7 +26,7 @@ describe("sandbox Docker context resolution", () => {
 		const projectDir = mkdtempSync(join(tmpdir(), "bobbit-sandbox-project-without-docker-"));
 		try {
 			const context = resolveSandboxDockerContext(projectDir);
-			assert.equal(context, resolve(import.meta.dirname, "..", ".."));
+			assert.equal(context, resolve(import.meta.dirname, "..", "..", ".."));
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}
@@ -39,7 +39,7 @@ describe("sandbox Docker context resolution", () => {
 			writeFileSync(join(projectDir, "docker", "Dockerfile"), "FROM scratch\n", "utf-8");
 
 			const context = resolveSandboxDockerContext(projectDir);
-			assert.equal(context, resolve(import.meta.dirname, "..", ".."));
+			assert.equal(context, resolve(import.meta.dirname, "..", "..", ".."));
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}
@@ -53,7 +53,7 @@ describe("sandbox Docker context resolution", () => {
 		assert.deepEqual(probeCalls, [{ file: "docker", args: ["info", "--format", "{{.ServerVersion}}"] }]);
 
 		const buildCalls: Array<{ file: string; args: readonly string[] }> = [];
-		const result = await buildSandboxImage("fenced-image", resolve(import.meta.dirname, "..", ".."), fencedDockerRunner(buildCalls));
+		const result = await buildSandboxImage("fenced-image", resolve(import.meta.dirname, "..", "..", ".."), fencedDockerRunner(buildCalls));
 		assert.equal(result.success, false);
 		assert.match(result.error ?? "", new RegExp(DOCKER_FENCE_ERROR));
 		assert.equal(buildCalls.length, 1);
@@ -74,7 +74,7 @@ describe("sandbox Docker context resolution", () => {
 			},
 		};
 
-		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), recordingRunner), true);
+		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", "..", ".."), recordingRunner), true);
 		assert.deepEqual(calls.map(({ file, args }) => ({ file, command: args[0] })), [
 			{ file: "docker", command: "inspect" },
 			{ file: "docker", command: "build" },

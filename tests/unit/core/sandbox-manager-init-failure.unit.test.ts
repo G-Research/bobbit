@@ -20,7 +20,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { SandboxManager, type SandboxBootstrap } from "../../src/server/agent/sandbox-manager.js";
+import { SandboxManager, type SandboxBootstrap } from "../../../src/server/agent/sandbox-manager.js";
 
 describe("SandboxManager.ensureForProject failure isolation", () => {
 	it("rejects on the awaited boundary, leaks no unhandledRejection, and stays usable", async () => {

@@ -2,7 +2,7 @@
 // Source: tests/safe-storage.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -23,7 +23,7 @@ guardProcessEnv();
  */
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
-import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON } from "../../src/app/safe-storage.ts";
+import { safeSetItem, safeGetItem, safeRemoveItem, safeGetJSON } from "../../../src/app/safe-storage.ts";
 
 const realLocalStorage = (globalThis as any).localStorage;
 

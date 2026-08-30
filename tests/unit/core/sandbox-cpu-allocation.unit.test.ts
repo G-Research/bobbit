@@ -4,8 +4,8 @@
 
 import { describe, it, beforeEach, afterAll } from "vitest";
 import assert from "node:assert";
-import type { CommandRunner } from "../../src/server/gateway-deps.js";
-import { computeResourceLimits, getDockerResourceLimits, _resetDockerLimitsCache } from "../../src/server/agent/project-sandbox.js";
+import type { CommandRunner } from "../../../src/server/gateway-deps.js";
+import { computeResourceLimits, getDockerResourceLimits, _resetDockerLimitsCache } from "../../../src/server/agent/project-sandbox.js";
 
 function fakeDockerRunner(result: { stdout?: string; error?: Error }): { runner: CommandRunner; calls: string[][] } {
 	const calls: string[][] = [];

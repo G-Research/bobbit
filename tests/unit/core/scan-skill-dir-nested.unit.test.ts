@@ -17,8 +17,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { scanSkillDir } from "../../src/server/skills/slash-skills.ts";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { scanSkillDir } from "../../../src/server/skills/slash-skills.ts";
+import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/scan-skill-nested");
 const PLUGINS_PARENT = path.join(ROOT, "plugins-parent");

@@ -9,7 +9,7 @@ import {
 	applySandboxCwdOffset,
 	normalizeSandboxCwdOffset,
 	relativeSandboxCwdOffset,
-} from "../../src/server/agent/session-setup.js";
+} from "../../../src/server/agent/session-setup.js";
 
 describe("sandbox cwd offset helpers", () => {
 	it("preserves a repo-relative subdirectory under sandbox worktrees", () => {

@@ -9,7 +9,7 @@ import {
 	nextDotState,
 	type DotState,
 	type IndexEvent,
-} from "../../src/app/components/search-status-dot-state.js";
+} from "../../../src/app/components/search-status-dot-state.js";
 
 const idle: DotState = { kind: "idle" };
 

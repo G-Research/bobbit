@@ -36,12 +36,12 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
-import { broadcastStatus } from "../../src/server/agent/session-status.ts";
+import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
+import { broadcastStatus } from "../../../src/server/agent/session-status.ts";
 
 // Resolve session-manager.ts path without importing it (the import chain pulls
 // in flexsearch and other heavy deps that don't work under tsx --test).
-const SESSION_MANAGER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..",
+const SESSION_MANAGER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..",
 	"src",
 	"server",
 	"agent",

@@ -4,8 +4,8 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
-import type { Component } from "../../src/server/agent/project-config-store.js";
+import { ProjectSandbox } from "../../../src/server/agent/project-sandbox.js";
+import type { Component } from "../../../src/server/agent/project-config-store.js";
 
 type ExecCall = {
 	containerId: string;

@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, vi } from "vitest";
@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
 
-import { buildDockerRunArgs } from "../../src/server/agent/docker-args.js";
+import { buildDockerRunArgs } from "../../../src/server/agent/docker-args.js";
 import {
 	buildSandboxAgentAuthJson,
 	resolveHostTokenValue,
@@ -20,8 +20,8 @@ import {
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsCodexAuth,
 	sandboxTokenPolicyAllowsGoogleAuth,
-} from "../../src/server/agent/host-tokens.js";
-import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
+} from "../../../src/server/agent/host-tokens.js";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../../tests/helpers/agent-dir.js";
 
 const previousEnv: Record<string, string | undefined> = {};
 const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;

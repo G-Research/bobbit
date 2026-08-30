@@ -25,7 +25,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
+import { resolveSandboxCloneSource } from "../../../src/server/agent/sandbox-clone-source.js";
 
 // A POSIX-style canonical mount source (what the caller's resolveSandboxMountRoot
 // returns). Pure resolver — never touches the filesystem, so this need not exist.

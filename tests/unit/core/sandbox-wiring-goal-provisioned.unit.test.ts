@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -34,14 +34,14 @@ import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { SessionManager } from "../../src/server/agent/session-manager.js";
-import { LifecycleHub } from "../../src/server/agent/lifecycle-hub.js";
-import type { ModuleHost, InvokeRequest } from "../../src/server/extension-host/module-host-worker.js";
-import type { ContextTraceStore } from "../../src/server/agent/context-trace-store.js";
-import type { ProviderContribution } from "../../src/server/agent/pack-contributions.js";
-import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.js";
-import { makeTmpDir } from "../../tests/helpers/tmp.js";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { SessionManager } from "../../../src/server/agent/session-manager.js";
+import { LifecycleHub } from "../../../src/server/agent/lifecycle-hub.js";
+import type { ModuleHost, InvokeRequest } from "../../../src/server/extension-host/module-host-worker.js";
+import type { ContextTraceStore } from "../../../src/server/agent/context-trace-store.js";
+import type { ProviderContribution } from "../../../src/server/agent/pack-contributions.js";
+import type { PackContributionRegistry } from "../../../src/server/extension-host/pack-contribution-registry.js";
+import { makeTmpDir } from "../../../tests/helpers/tmp.js";
+import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
 

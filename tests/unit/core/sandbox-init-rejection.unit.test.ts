@@ -24,7 +24,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
+import { ProjectSandbox } from "../../../src/server/agent/project-sandbox.js";
 
 describe("ProjectSandbox.init() failure does not leak an unhandled rejection", () => {
 	it("does not emit a global unhandledRejection when init fails", async () => {
