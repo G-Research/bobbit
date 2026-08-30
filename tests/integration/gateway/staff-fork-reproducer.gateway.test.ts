@@ -370,6 +370,7 @@ function seedHistoryTranscript(gateway: any, sessionId: string): string {
 }
 
 let baselineStaffIds = new Set<string>();
+let baselineArchivedSessionIds = new Set<string>();
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 
@@ -382,6 +383,9 @@ test.describe.serial("staff session fork identity", () => {
 
 	test.beforeEach(async ({ gateway }) => {
 		baselineStaffIds = new Set((await listStaff(gateway)).map((staff: any) => staff.id));
+		baselineArchivedSessionIds = new Set(
+			gateway.sessionManager.listArchivedSessions().map((session: any) => session.id as string),
+		);
 	});
 
 	test.afterEach(async ({ gateway }) => {
@@ -389,6 +393,16 @@ test.describe.serial("staff session fork identity", () => {
 		// Borrowers/forks must be released before their source owners.
 		extras.sort((a: any, b: any) => Number(b.name?.startsWith("Fork: ")) - Number(a.name?.startsWith("Fork: ")));
 		for (const staff of extras) await deleteStaff(gateway, staff.id).catch(() => undefined);
+
+		const archivedExtras = gateway.sessionManager.listArchivedSessions()
+			.map((session: any) => session.id as string)
+			.filter((id: string) => !baselineArchivedSessionIds.has(id));
+		for (const id of archivedExtras) {
+			await gateway.sessionManager.purgeArchivedSession(id);
+		}
+		expect(new Set(
+			gateway.sessionManager.listArchivedSessions().map((session: any) => session.id as string),
+		)).toEqual(baselineArchivedSessionIds);
 	});
 
 	test("clones a staff configuration snapshot, transcript and runtime authority without sharing inbox or trigger state", async ({ gateway }) => {
