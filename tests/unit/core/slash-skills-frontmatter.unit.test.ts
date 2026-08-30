@@ -12,7 +12,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-const { parseFrontmatter } = await import("../../src/server/skills/slash-skills.ts");
+const { parseFrontmatter } = await import("../../../src/server/skills/slash-skills.ts");
 
 describe("parseFrontmatter", () => {
 	it("parses block-list values into string[]", () => {

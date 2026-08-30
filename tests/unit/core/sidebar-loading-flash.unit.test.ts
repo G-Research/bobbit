@@ -29,7 +29,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { isInitialSessionsLoad } from "../../src/app/session-load-state.ts";
+import { isInitialSessionsLoad } from "../../../src/app/session-load-state.ts";
 
 describe("isInitialSessionsLoad — sidebar loading-flash contract", () => {
 	it("shows the spinner once on a genuine first load (never fetched, no error)", () => {

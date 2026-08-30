@@ -7,8 +7,8 @@ guardProcessEnv();
 
 import { describe, it, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { sidebarTreeKey } from "../../src/app/sidebar-tree-builder.ts";
-import type { SidebarTreeNodeKey } from "../../src/app/sidebar-tree-builder.ts";
+import { sidebarTreeKey } from "../../../src/app/sidebar-tree-builder.ts";
+import type { SidebarTreeNodeKey } from "../../../src/app/sidebar-tree-builder.ts";
 
 const STORAGE_KEY = "bobbit-sidebar-tree-state:v1";
 const realLocalStorage = (globalThis as any).localStorage;
@@ -37,11 +37,11 @@ function installStorage(initial?: Record<string, string>): FakeStorage {
 	return fake;
 }
 
-async function importFresh(_tag: string): Promise<typeof import("../../src/app/sidebar-tree-state.ts")> {
+async function importFresh(_tag: string): Promise<typeof import("../../../src/app/sidebar-tree-state.ts")> {
 	// Re-execute module top-level (reads localStorage at init) via resetModules;
 	// vitest's module runner does not support query-string cache busting.
 	vi.resetModules();
-	return await import("../../src/app/sidebar-tree-state.ts");
+	return await import("../../../src/app/sidebar-tree-state.ts");
 }
 
 function storedExpansion(store: Map<string, string>): Record<string, string> {

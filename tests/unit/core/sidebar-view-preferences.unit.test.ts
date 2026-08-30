@@ -18,7 +18,7 @@ import {
 	setSidebarViewFilter,
 	sidebarNeedsArchivedSessions,
 	type SidebarViewPreferenceState,
-} from "../../src/app/sidebar-view-preferences.ts";
+} from "../../../src/app/sidebar-view-preferences.ts";
 
 class MemoryStorage implements Storage {
 	private values = new Map<string, string>();

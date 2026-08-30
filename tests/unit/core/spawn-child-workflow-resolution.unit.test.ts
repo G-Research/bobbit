@@ -17,14 +17,14 @@ import assert from "node:assert/strict";
 
 import {
 	resolveChildWorkflow,
-} from "../../src/server/agent/spawn-child-workflow.ts";
-import { adaptReadyToMergeForChild } from "../../src/server/agent/child-ready-to-merge.ts";
-import type { PersistedGoal } from "../../src/server/agent/goal-store.ts";
+} from "../../../src/server/agent/spawn-child-workflow.ts";
+import { adaptReadyToMergeForChild } from "../../../src/server/agent/child-ready-to-merge.ts";
+import type { PersistedGoal } from "../../../src/server/agent/goal-store.ts";
 import type {
 	Workflow,
 	WorkflowStore,
 	VerifyStepSubgoal,
-} from "../../src/server/agent/workflow-store.ts";
+} from "../../../src/server/agent/workflow-store.ts";
 
 function wf(id: string, hidden = false): Workflow {
 	return {

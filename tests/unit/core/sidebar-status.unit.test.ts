@@ -5,12 +5,12 @@ import {
 	selectSidebarStatusSections,
 	type StatusCandidate,
 	type StatusSession,
-} from "../../src/app/sidebar-status.ts";
+} from "../../../src/app/sidebar-status.ts";
 import {
 	buildSidebarTree,
 	type SidebarTreeModel,
 	type SidebarTreeNode,
-} from "../../src/app/sidebar-tree-builder.ts";
+} from "../../../src/app/sidebar-tree-builder.ts";
 
 function session(id: string, over: Partial<StatusSession> = {}): StatusSession {
 	return {

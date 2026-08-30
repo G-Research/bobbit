@@ -106,7 +106,7 @@ afterAll(() => {
 	}
 });
 
-const { discoverSlashSkillsResolved, invalidateSlashSkillsCache } = await import("../../src/server/skills/slash-skills.ts");
+const { discoverSlashSkillsResolved, invalidateSlashSkillsCache } = await import("../../../src/server/skills/slash-skills.ts");
 type DisabledLookup = (scope: "server" | "global-user" | "project", packName: string) => { skills?: string[] };
 
 function resolveWith(disabled: DisabledLookup | undefined): Map<string, { content: string; packName: string | null }> {

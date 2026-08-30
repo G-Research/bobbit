@@ -13,8 +13,8 @@ import {
 	type GoalLike,
 	type ProjectLike,
 	type SessionLike,
-} from "../../src/app/sidebar-tree-builder.ts";
-import { _setSubgoalsEnabledForTesting } from "../../src/app/subgoals-flag.ts";
+} from "../../../src/app/sidebar-tree-builder.ts";
+import { _setSubgoalsEnabledForTesting } from "../../../src/app/subgoals-flag.ts";
 
 const project = (id = "p1"): ProjectLike => ({ id, name: id, rootPath: `/tmp/${id}` });
 

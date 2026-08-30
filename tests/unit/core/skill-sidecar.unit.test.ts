@@ -30,7 +30,7 @@ const {
 	mergeSidecarEntriesIntoMessages,
 	projectPromptDisplayMessage,
 	projectPromptDisplayMessagesForSession,
-} = await import("../../src/server/skills/skill-sidecar.ts");
+} = await import("../../../src/server/skills/skill-sidecar.ts");
 
 initSkillSidecarDir(stateDir);
 

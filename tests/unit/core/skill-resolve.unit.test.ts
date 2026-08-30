@@ -39,9 +39,9 @@ afterAll(() => {
 	try { fs.rmSync(cwdDir, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-const { resolveSkillExpansions } = await import("../../src/server/skills/resolve-skill-expansions.ts");
-const { buildSlashSkillPrompt, getSlashSkill } = await import("../../src/server/skills/slash-skills.ts");
-const { buildActivationHeader } = await import("../../src/server/skills/skill-manifest.ts");
+const { resolveSkillExpansions } = await import("../../../src/server/skills/resolve-skill-expansions.ts");
+const { buildSlashSkillPrompt, getSlashSkill } = await import("../../../src/server/skills/slash-skills.ts");
+const { buildActivationHeader } = await import("../../../src/server/skills/skill-manifest.ts");
 
 function expandedFor(name: string, args = ""): string {
 	const skill = getSlashSkill(cwdDir, name);

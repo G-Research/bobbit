@@ -47,7 +47,7 @@ afterAll(() => {
 });
 
 const { discoverSlashSkills, getSlashSkill } =
-	await import("../../src/server/skills/slash-skills.ts");
+	await import("../../../src/server/skills/slash-skills.ts");
 const skillContext = {
 	serverBase: cwd,
 	globalUserBase: path.join(cwd, "empty-home"),

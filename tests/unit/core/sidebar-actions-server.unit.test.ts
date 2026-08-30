@@ -4,7 +4,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { buildGithubBranchUrl, parseGithubRemoteUrl } from "../../src/server/sidebar-actions.ts";
+import { buildGithubBranchUrl, parseGithubRemoteUrl } from "../../../src/server/sidebar-actions.ts";
 
 describe("sidebar actions server GitHub remote helpers", () => {
 	it("parses sanitized HTTPS and SSH GitHub remotes", () => {
