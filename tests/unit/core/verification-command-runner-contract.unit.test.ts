@@ -10,9 +10,9 @@ import {
 	realVerificationCommandRunner,
 	type VerificationCommandRunner,
 	type VerificationCommandSpawnSpec,
-} from "../../src/server/agent/verification-command-runner.js";
-import { createFakeVerificationCommandRunner, interpretFakeCommand } from "../harness/fake-verification-command-runner.js";
-import { resolveGatewayDeps } from "../../src/server/gateway-deps.js";
+} from "../../../src/server/agent/verification-command-runner.js";
+import { createFakeVerificationCommandRunner, interpretFakeCommand } from "../../../tests2/harness/fake-verification-command-runner.js";
+import { resolveGatewayDeps } from "../../../src/server/gateway-deps.js";
 
 interface Observed {
 	stdout: string;
@@ -73,7 +73,7 @@ describe("verification command-step runner wiring", () => {
 	it("keeps production CLI free of test-runner wiring", async () => {
 		const { readFileSync } = await import("node:fs");
 		const { fileURLToPath } = await import("node:url");
-		const cliPath = fileURLToPath(new URL("../../src/server/cli.ts", import.meta.url));
+		const cliPath = fileURLToPath(new URL("../../../src/server/cli.ts", import.meta.url));
 		const src = readFileSync(cliPath, "utf8");
 		expect(src).not.toMatch(/commandStepRunner/);
 		expect(src).not.toMatch(/fake-verification-command-runner/i);

@@ -3,32 +3,32 @@ import os from "node:os";
 import path from "node:path";
 import JSZip from "jszip";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { initialState, reduce } from "../../src/app/message-reducer.ts";
-import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
+import { initialState, reduce } from "../../../src/app/message-reducer.ts";
+import { initAuthorSidecarDir, readAuthorSidecar } from "../../../src/server/agent/author-sidecar.ts";
 import {
 	MAX_PROMPT_ATTACHMENT_BYTES,
 	validateUploadedPromptAttachments,
-} from "../../src/server/agent/attachment-display.ts";
-import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
-import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
+} from "../../../src/server/agent/attachment-display.ts";
+import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
+import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 import {
 	emitSessionEvent,
 	prepareVisibleAgentEvent,
 	projectPromptAuthorMessagesForTitle,
 	restorePromptAuthorBindings,
 	SessionManager,
-} from "../../src/server/agent/session-manager.ts";
+} from "../../../src/server/agent/session-manager.ts";
 import {
 	setUploadedAttachmentRootForTesting,
 	setUploadedAttachmentSessionQuotaForTesting,
-} from "../../src/server/agent/uploaded-attachment-store.ts";
+} from "../../../src/server/agent/uploaded-attachment-store.ts";
 import {
 	appendSkillSidecarEntry,
 	appendSkillSidecarTranscriptBinding,
 	initSkillSidecarDir,
 	readSkillSidecarEntries,
-} from "../../src/server/skills/skill-sidecar.ts";
-import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.ts";
+} from "../../../src/server/skills/skill-sidecar.ts";
+import { LOCAL_USER_AUTHOR } from "../../../src/shared/message-author.ts";
 
 const SESSION_ID = "83749600-0000-4000-8000-000000000001";
 const TYPED_TEXT = "Summarize the uploaded notes.";

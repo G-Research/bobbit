@@ -4,7 +4,7 @@ import {
 	appendUploadedAttachmentContext,
 	UPLOADED_ATTACHMENT_AGGREGATE_TOKEN_BUDGET,
 	UPLOADED_ATTACHMENT_PER_FILE_TOKEN_BUDGET,
-} from "../../src/shared/uploaded-attachment-context.js";
+} from "../../../src/shared/uploaded-attachment-context.js";
 
 function document(overrides: Record<string, unknown> = {}) {
 	return {

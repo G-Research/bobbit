@@ -6,11 +6,11 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
-import { discoverTests } from "../../scripts/testing-v2/test-discovery.mjs";
+import { discoverTests } from "../../../scripts/testing-v2/test-discovery.mjs";
 import {
 	GitTemplateHandoffReporter,
 	type GitTemplateHandoffCertifier,
-} from "../harness/git-template-handoff-proof.js";
+} from "../../../tests2/harness/git-template-handoff-proof.js";
 
 type ProjectConfig = {
 	test: {
@@ -43,12 +43,12 @@ type LoadedConfig = {
 	default: { test: { projects: ProjectConfig[] } };
 };
 
-const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const CONFIG_PATH = resolve(REPO_ROOT, "vitest.config.ts");
 const HARNESS_ROOT = resolve(REPO_ROOT, "tests2", "harness");
 const LEDGER_PATH = resolve(REPO_ROOT, "scripts", "testing-v2", "ledger.mjs");
 const packageJson = JSON.parse(
-	readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+	readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
 ) as { scripts: Record<string, string> };
 const configSource = readFileSync(CONFIG_PATH, "utf8");
 const discoveredTests = discoverTests();
@@ -134,7 +134,7 @@ async function loadConfig({ e2eFlag, retryFreeFlag }: {
 	else process.env.BOBBIT_V2_RETRY_FREE = retryFreeFlag;
 	delete process.env.VITEST_MAX_WORKERS;
 	vi.resetModules();
-	return await import("../../vitest.config.ts") as LoadedConfig;
+	return await import("../../../vitest.config.ts") as LoadedConfig;
 }
 
 beforeAll(async () => {

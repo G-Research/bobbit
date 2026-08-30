@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import JSZip from "jszip";
-import { MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES } from "../../src/server/agent/uploaded-specialized-document-extractor.js";
+import { MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES } from "../../../src/server/agent/uploaded-specialized-document-extractor.js";
 import {
 	MAX_UPLOADED_ATTACHMENT_BYTES,
 	MAX_UPLOADED_ATTACHMENT_OCCURRENCES_PER_SESSION,
@@ -20,7 +20,7 @@ import {
 	setUploadedAttachmentSessionQuotaForTesting,
 	setUploadedAttachmentStoreHooksForTesting,
 	sweepUploadedAttachments,
-} from "../../src/server/agent/uploaded-attachment-store.js";
+} from "../../../src/server/agent/uploaded-attachment-store.js";
 
 const SESSION_A = "11111111-1111-4111-8111-111111111111";
 const SESSION_B = "22222222-2222-4222-8222-222222222222";

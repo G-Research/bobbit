@@ -5,12 +5,12 @@ import { describe, expect, it } from "vitest";
 import {
 	deriveSpecializedDocumentText,
 	MAX_SERVER_DERIVED_DOCUMENT_TEXT_BYTES,
-} from "../../src/server/agent/uploaded-specialized-document-extractor.js";
+} from "../../../src/server/agent/uploaded-specialized-document-extractor.js";
 import {
 	extractPdfTextInIsolate,
 	MAX_CONCURRENT_PDF_EXTRACTIONS,
 	type PdfExtractionWorkerOptions,
-} from "../../src/server/agent/uploaded-pdf-extractor-isolate.js";
+} from "../../../src/server/agent/uploaded-pdf-extractor-isolate.js";
 
 function pdfWithContentStream(stream: Buffer, compressed = false): Buffer {
 	const objects: Array<Buffer | undefined> = [

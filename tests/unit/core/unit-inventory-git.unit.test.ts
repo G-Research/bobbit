@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { reconcileSemanticMappings } from "../../scripts/testing-v2/unit-inventory-audit.mjs";
-import { readOptionalGitPath } from "../../scripts/testing-v2/unit-inventory-git.mjs";
+import { reconcileSemanticMappings } from "../../../scripts/testing-v2/unit-inventory-audit.mjs";
+import { readOptionalGitPath } from "../../../scripts/testing-v2/unit-inventory-git.mjs";
 
 const revision = "0123456789abcdef";
 const historicalPath = "scripts/testing-v2/integration-e2e-files.mjs";
