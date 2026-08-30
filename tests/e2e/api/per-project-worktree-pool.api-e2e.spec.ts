@@ -9,12 +9,12 @@
  * returns a `pools` object keyed by projectId. It is expected to FAIL on the
  * pre-fix codebase because the current API returns `{ enabled, ready, target, filling }`.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 
 // This spec exercises the worktree pool endpoints — opt the worker gateway
 // into filling its pool. Other tests skip the fill to save CPU.
 test.use({ enableWorktreePool: true });
-import { apiFetch } from "./e2e-setup.js";
+import { apiFetch } from "../e2e-setup.js";
 import { mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";

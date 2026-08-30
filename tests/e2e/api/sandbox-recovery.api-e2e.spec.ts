@@ -7,18 +7,18 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test, expect } from "./in-process-harness.js";
-import { globalAgentDir } from "../../src/server/bobbit-dir.js";
-import { projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
-import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
-import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "./test-utils/docker.js";
+import { test, expect } from "../in-process-harness.js";
+import { globalAgentDir } from "../../../src/server/bobbit-dir.js";
+import { projectSandboxVolumeNames } from "../../../src/server/agent/docker-args.js";
+import { ProjectSandbox } from "../../../src/server/agent/project-sandbox.js";
+import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "../test-utils/docker.js";
 import {
 	apiFetch,
 	nonGitCwd,
 	connectWs,
 	waitForSessionStatus,
 	statusPredicate,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Live Docker inode-remount contract. The v2 E2E runner reports this file as

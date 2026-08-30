@@ -18,9 +18,9 @@
  * shell-specific syntax.
  */
 
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "./e2e-setup.js";
-import { pollUntil as pollUntilCleanup } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, createGoal, deleteGoal, defaultProjectId } from "../e2e-setup.js";
+import { pollUntil as pollUntilCleanup } from "../test-utils/cleanup.js";
 
 const TIMEOUT_WORKFLOW = `test-verif-timeout-${Date.now()}`;
 const CANCEL_WORKFLOW = `test-verif-cancel-${Date.now()}`;

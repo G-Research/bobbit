@@ -14,8 +14,8 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const PROJECT_ROOT = resolve(__dirname, "..", "..");
-const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
+const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
+const MOCK_AGENT = resolve(__dirname, "..", "mock-agent.mjs");
 const SEED_SCRIPT = resolve(PROJECT_ROOT, "scripts", "qa-seed", "seed.mjs");
 
 interface SeededGateway {
@@ -64,10 +64,10 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		process.env.BOBBIT_LLM_REVIEW_SKIP = "1";
 		process.env.BOBBIT_NO_OPEN = "1";
 
-		const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
-		const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-		const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-		const { createGateway } = await import("../../dist/server/server.js");
+		const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
+		const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
+		const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
+		const { createGateway } = await import("../../../dist/server/server.js");
 
 		setProjectRoot(workDir);
 		scaffoldBobbitDir(workDir);

@@ -15,13 +15,13 @@
  *
  * See docs/design/multi-repo-components.md and the Polyrepo Git Status design.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 
 // Pool prebuild must run so a multi-repo session can claim per-repo worktrees.
 test.use({ enableWorktreePool: true });
 
-import { apiFetch, deleteSession, defaultProjectId, defaultProjectRootPath } from "./e2e-setup.js";
-import { waitForPool, pollSessionUntil } from "./test-utils/pool-polling.mjs";
+import { apiFetch, deleteSession, defaultProjectId, defaultProjectRootPath } from "../e2e-setup.js";
+import { waitForPool, pollSessionUntil } from "../test-utils/pool-polling.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -73,7 +73,7 @@ test.describe.serial("session git-status multi-repo envelope", () => {
 	let webWt: string;
 
 	test.beforeAll(async () => {
-		serverModule = await import("../../dist/server/server.js");
+		serverModule = await import("../../../dist/server/server.js");
 		expect(typeof serverModule.__setGitStatusFake).toBe("function");
 
 		root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-sess-mr-"));

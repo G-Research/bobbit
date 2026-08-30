@@ -22,13 +22,13 @@
  *   - re-read the API and assert byte-equality of `branch` + `worktreePath`,
  *   - re-record reflog and assert no new entries — i.e. no rename ran.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 
 // Pool pre-fill must run.
 test.use({ enableWorktreePool: true });
 
-import { apiFetch } from "./e2e-setup.js";
-import { waitForPool, pollSessionUntilSessionBranch } from "./test-utils/pool-polling.mjs";
+import { apiFetch } from "../e2e-setup.js";
+import { waitForPool, pollSessionUntilSessionBranch } from "../test-utils/pool-polling.mjs";
 import { mkdirSync, existsSync, statSync, mkdtempSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";

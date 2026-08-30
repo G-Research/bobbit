@@ -4,9 +4,9 @@
  * These tests manage their own server lifecycle since they need to control
  * port allocation. They do NOT use the shared webServer gateway.
  */
-import { test, expect } from "./gateway-harness.js";
-import { pollUntil } from "./test-utils/cleanup.js";
-import { isConnectionRefusal } from "./test-utils/gateway-readiness.js";
+import { test, expect } from "../gateway-harness.js";
+import { pollUntil } from "../test-utils/cleanup.js";
+import { isConnectionRefusal } from "../test-utils/gateway-readiness.js";
 import { createServer as createTcpServer } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -16,8 +16,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(__dirname, "../..");
-const HELPER_SCRIPT = join(__dirname, "port-test-helper.mjs");
+const PROJECT_ROOT = path.resolve(__dirname, "../../..");
+const HELPER_SCRIPT = join(__dirname, "../port-test-helper.mjs");
 const MOCK_AGENT = join(PROJECT_ROOT, "tests/e2e/mock-agent.mjs");
 
 /** Create an isolated BOBBIT_DIR for a test. */
@@ -175,7 +175,7 @@ async function waitForGateway(
 		return { kind: "ready" };
 	}, { timeoutMs, intervalMs: 100, label: `gateway healthy on :${port}` });
 
-	if (result.kind === "failed") throw new Error(result.message);
+	if (result?.kind === "failed") throw new Error(result.message);
 }
 
 /** Kill a child process and wait for it to exit. */

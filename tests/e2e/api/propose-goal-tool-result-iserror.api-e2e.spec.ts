@@ -1,4 +1,4 @@
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -6,12 +6,12 @@ import {
 	createSession,
 	deleteSession,
 	nonGitCwd,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const FIXTURE_SOURCE = path.resolve(__dirname, "..", "fixtures", "market-sources", "propose-goal-iserror-src");
+const FIXTURE_SOURCE = path.resolve(__dirname, "..", "..", "fixtures", "market-sources", "propose-goal-iserror-src");
 const PACK_NAME = "propose-goal-iserror";
 
 const sessions: string[] = [];

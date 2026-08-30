@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, rawApiFetch, registerProject, deleteSession } from "./e2e-setup.js";
-import { pollSessionUntil } from "./test-utils/pool-polling.mjs";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, rawApiFetch, registerProject, deleteSession } from "../e2e-setup.js";
+import { pollSessionUntil } from "../test-utils/pool-polling.mjs";
 
 type ProjectRecord = { id: string; rootPath: string; [key: string]: unknown };
 

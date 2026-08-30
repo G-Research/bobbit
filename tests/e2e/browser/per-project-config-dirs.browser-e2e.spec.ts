@@ -7,8 +7,8 @@
  * 2. Adding a custom directory via the UI persists to the project-scoped API.
  * 3. Project-scoped custom dirs do NOT leak into system-level config dirs.
  */
-import { test, expect } from "./gateway-harness.js";
-import { apiFetch, readE2EToken } from "./e2e-setup.js";
+import { test, expect } from "../gateway-harness.js";
+import { apiFetch, readE2EToken } from "../e2e-setup.js";
 import { resolve, join } from "node:path";
 import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";

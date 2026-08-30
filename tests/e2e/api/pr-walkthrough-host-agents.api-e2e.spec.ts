@@ -39,12 +39,12 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession, nonGitCwd } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, createSession, deleteSession, nonGitCwd } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const PROJECT_ROOT = resolve(__dirname, "..", "..");
+const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
 const PACK_ROOT = resolve(PROJECT_ROOT, "market-packs", "pr-walkthrough");
 const ROUTES_MODULE = resolve(PACK_ROOT, "lib", "routes.mjs");
 const PACK_ID = "pr-walkthrough";
@@ -182,9 +182,9 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	const createdSessionIds: string[] = [];
 
 	test.beforeAll(async () => {
-		ModuleHostClass = (await import("../../dist/server/extension-host/module-host-worker.js")).ModuleHost;
-		createServerHostApi = (await import("../../dist/server/extension-host/server-host-api.js")).createServerHostApi;
-		getPackStore = (await import("../../dist/server/extension-host/pack-store.js")).getPackStore;
+		ModuleHostClass = (await import("../../../dist/server/extension-host/module-host-worker.js")).ModuleHost;
+		createServerHostApi = (await import("../../../dist/server/extension-host/server-host-api.js")).createServerHostApi;
+		getPackStore = (await import("../../../dist/server/extension-host/pack-store.js")).getPackStore;
 		// ONE shared ModuleHost for the gateway-process lifetime, mirroring how
 		// server.ts constructs a single RouteDispatcher/ModuleHost.
 		moduleHost = new ModuleHostClass({ timeoutMs: 30_000 });
@@ -904,7 +904,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 	// undefined. This pins restore resolution against the gateway's REAL
 	// group-policy store.
 	test("a restored reviewer re-resolves the pack role (cascade + projectId) and keeps its walkthrough tools", async ({ gateway }) => {
-		const { resolveGrantPolicy } = await import("../../dist/server/agent/tool-activation.js");
+		const { resolveGrantPolicy } = await import("../../../dist/server/agent/tool-activation.js");
 		const fixture = makeGitFixture();
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
