@@ -7,6 +7,11 @@ function env(name: string): string {
 }
 
 export default function activate(pi: any) {
+	const sessionId = env("BOBBIT_SESSION_ID");
+	const sessionSecret = env("BOBBIT_SESSION_SECRET");
+	const gatewayUrl = env("BOBBIT_GATEWAY_URL");
+	const token = env("BOBBIT_TOKEN");
+
 	pi.tool({
 		name: "propose_goal",
 		description: "Test fixture propose_goal extension that returns isError:true when the seed endpoint rejects workflow validation.",
@@ -19,10 +24,6 @@ export default function activate(pi: any) {
 			},
 		},
 	}, async (input: GoalInput = {}) => {
-		const sessionId = env("BOBBIT_SESSION_ID");
-		const sessionSecret = env("BOBBIT_SESSION_SECRET");
-		const gatewayUrl = env("BOBBIT_GATEWAY_URL");
-		const token = env("BOBBIT_TOKEN");
 		const response = await fetch(`${gatewayUrl}/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/seed`, {
 			method: "POST",
 			headers: {
