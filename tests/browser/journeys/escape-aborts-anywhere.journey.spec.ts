@@ -28,7 +28,7 @@ test.describe("Escape aborts agent globally", () => {
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 		await sendMessage(page, "STAY_BUSY:30000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 
 		// Blur the textarea so focus is NOT on an editable element.
 		await page.evaluate(() => { (document.activeElement as HTMLElement | null)?.blur?.(); });
@@ -41,7 +41,7 @@ test.describe("Escape aborts agent globally", () => {
 		// it to the focused element; with no focus it dispatches to body.
 		await page.keyboard.press("Escape");
 
-		await expect(page.locator("button[title='Stop streaming']")).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toHaveCount(0, { timeout: 10_000 });
 		await waitForSessionStatus(sessionId, "idle", 10_000);
 	});
 
@@ -54,11 +54,11 @@ test.describe("Escape aborts agent globally", () => {
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 
 		await sendMessage(page, "STAY_BUSY:30000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 
 		await page.locator("textarea").first().focus();
 		await page.keyboard.press("Escape");
 
-		await expect(page.locator("button[title='Stop streaming']")).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toHaveCount(0, { timeout: 10_000 });
 	});
 });
