@@ -5,8 +5,8 @@
  * gateway (mock agent — no LLM):
  *
  *  1. API / data model: per-goal `metadata` persists in the 201 response, the
- *     GET detail, and `goals.json` on disk (survives reload). Empty/array
- *     metadata is ignored (absent ⇒ current behaviour).
+ *     GET detail, and authoritative `goals.sqlite` storage. Empty metadata is
+ *     ignored (absent ⇒ current behaviour); array metadata is rejected.
  *  2. Hierarchical resolver (the anti-asymmetry core): `getEffectiveGoalMetadata`
  *     deep-merges ancestors → self (descendant wins; arrays replace, objects
  *     recurse). A nested sub-goal inherits its parent's metadata; a metadata-less
@@ -33,7 +33,9 @@
  * deterministically in-process rather than through expensive real agents.
  */
 import { test, expect } from "../in-process-harness.js";
-import { apiFetch, createSession, defaultProjectStateDir, deleteSession, deleteGoal, nonGitCwd } from "../e2e-setup.js";
+import { apiFetch, createSession, defaultProjectStateDir, nonGitCwd } from "../e2e-setup.js";
+import { awaitableRm } from "../test-utils/cleanup.js";
+import Database from "better-sqlite3";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -105,6 +107,18 @@ function readMarker(worktreeDir: string): Record<string, any> | undefined {
 	return JSON.parse(fs.readFileSync(p, "utf-8"));
 }
 
+async function purgeSession(id: string): Promise<void> {
+	const response = await apiFetch(`/api/sessions/${encodeURIComponent(id)}?purge=true`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, `purge session ${id}: ${text}`).toBe(200);
+}
+
+async function deleteGoalStrict(id: string): Promise<void> {
+	const response = await apiFetch(`/api/goals/${encodeURIComponent(id)}?cascade=true`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, `delete goal ${id}: ${text}`).toBe(200);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 1 + 2. API persistence + hierarchical resolver (data-only, non-git, fast)
 // ════════════════════════════════════════════════════════════════════════════
@@ -113,10 +127,10 @@ test.describe.serial("Hierarchical goal metadata — persistence & resolver", ()
 	const created: string[] = [];
 
 	test.afterAll(async () => {
-		for (const id of created.splice(0)) await deleteGoal(id).catch(() => {});
+		for (const id of created.splice(0).reverse()) await deleteGoalStrict(id);
 	});
 
-	test("metadata persists in the 201 response, GET detail, and goals.json", async () => {
+	test("metadata persists in the 201 response, GET detail, and authoritative goals.sqlite", async ({ gateway }) => {
 		const metadata = { "bobbit.disabledTools": ["browser_navigate"], "experiment": { arm: "A", seed: 1 } };
 		const goal = await createGoalRaw({ title: "meta-persist", cwd: nonGitCwd(), metadata });
 		created.push(goal.id);
@@ -128,25 +142,41 @@ test.describe.serial("Hierarchical goal metadata — persistence & resolver", ()
 		const detail = await (await apiFetch(`/api/goals/${goal.id}`)).json();
 		expect(detail.metadata).toEqual(metadata);
 
-		// 3) persisted to goals.json on disk (project-scoped state for the normal
-		// harness default project, not Headquarters/server state).
-		const goalsJson = path.join(await defaultProjectStateDir(), "goals.json");
-		const goals = JSON.parse(fs.readFileSync(goalsJson, "utf-8")) as Array<Record<string, any>>;
-		const persisted = goals.find((g) => g.id === goal.id);
-		expect(persisted, "goal must be persisted to goals.json").toBeTruthy();
-		expect(persisted!.metadata).toEqual(metadata);
+		// 3) persisted to the authoritative SQLite store. Cross the store's flush
+		// barrier before opening an independent read-only connection.
+		const context = gateway.projectContextManager.getContextForGoal(goal.id);
+		expect(context, "project context must own the goal").toBeTruthy();
+		await context.goalStore.flush();
+		const goalsDb = path.join(await defaultProjectStateDir(), "goals.sqlite");
+		const db = new Database(goalsDb, { readonly: true, fileMustExist: true });
+		try {
+			const row = db.prepare("SELECT payload FROM goal_records WHERE id = ?").get(goal.id) as { payload: string } | undefined;
+			expect(row, "goal must be persisted to goals.sqlite").toBeTruthy();
+			expect(JSON.parse(row!.payload).metadata).toEqual(metadata);
+		} finally {
+			db.close();
+		}
 	});
 
-	test("empty {} and array metadata are ignored (absent ⇒ current behaviour)", async ({ gateway }) => {
+	test("empty {} metadata is ignored while array metadata is rejected", async ({ gateway }) => {
 		const emptyGoal = await createGoalRaw({ title: "meta-empty", cwd: nonGitCwd(), metadata: {} });
 		created.push(emptyGoal.id);
 		expect(emptyGoal.metadata).toBeUndefined();
 		expect(effectiveMetadata(gateway, emptyGoal.id)).toEqual({});
 
-		const arrGoal = await createGoalRaw({ title: "meta-array", cwd: nonGitCwd(), metadata: ["nope"] as unknown });
-		created.push(arrGoal.id);
-		expect(arrGoal.metadata).toBeUndefined();
-		expect(effectiveMetadata(gateway, arrGoal.id)).toEqual({});
+		const arrayResponse = await apiFetch("/api/goals", {
+			method: "POST",
+			body: JSON.stringify({
+				title: "meta-array",
+				cwd: nonGitCwd(),
+				spec: SPEC,
+				autoStartTeam: false,
+				workflowId: "general",
+				metadata: ["nope"],
+			}),
+		});
+		expect(arrayResponse.status).toBe(400);
+		expect((await arrayResponse.json()).code).toBe("METADATA_INVALID");
 	});
 
 	test("resolver deep-merges ancestry: descendant wins, arrays replace, objects recurse", async ({ gateway }) => {
@@ -213,9 +243,9 @@ test.describe.serial("Anti-asymmetry — disabled tool across the goal subtree",
 	});
 
 	test.afterAll(async () => {
-		for (const id of sessions.splice(0)) await deleteSession(id).catch(() => {});
-		// Children first (cascade handles it, but be explicit/best-effort).
-		for (const id of goals.splice(0)) await deleteGoal(id).catch(() => {});
+		for (const id of sessions.splice(0).reverse()) await purgeSession(id);
+		// Children first so teardown does not rely on a parent's cascade side effect.
+		for (const id of goals.splice(0).reverse()) await deleteGoalStrict(id);
 	});
 
 	test("resolver: lead/member/reviewer/delegate (teamGoalId) and nested all resolve the disabled set", ({ gateway }) => {
@@ -286,21 +316,47 @@ test.describe.serial("Anti-asymmetry — disabled tool across the goal subtree",
 // 4. Filesystem treatment via the goalProvisioned lifecycle hook (git worktrees)
 // ════════════════════════════════════════════════════════════════════════════
 
-function installPack(headquartersDir: string): string {
-	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
-	fs.rmSync(packDir, { recursive: true, force: true });
-	fs.cpSync(FIXTURE_PACK_DIR, packDir, { recursive: true });
-	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
-		"sourceUrl: e2e",
-		"sourceRef: local",
-		"commit: test",
-		`packName: ${PACK_NAME}`,
-		"version: 1.0.0",
-		"installedAt: '2026-01-01T00:00:00.000Z'",
-		"updatedAt: '2026-01-01T00:00:00.000Z'",
-		"scope: server",
-	].join("\n") + "\n", "utf-8");
-	return packDir;
+async function installPack(): Promise<string> {
+	const sourceRoot = path.dirname(FIXTURE_PACK_DIR);
+	const add = await apiFetch("/api/marketplace/sources", {
+		method: "POST",
+		body: JSON.stringify({ url: sourceRoot }),
+	});
+	const addText = await add.text();
+	let sourceId: string;
+	if (add.status === 409) {
+		const sources = await apiFetch("/api/marketplace/sources");
+		expect(sources.status).toBe(200);
+		const existing = ((await sources.json()).sources ?? []).find((source: any) => source.url === sourceRoot);
+		expect(existing, addText).toBeTruthy();
+		sourceId = existing.id;
+	} else {
+		expect(add.status, addText).toBe(201);
+		sourceId = (JSON.parse(addText) as { source: { id: string } }).source.id;
+	}
+
+	const install = await apiFetch("/api/marketplace/install", {
+		method: "POST",
+		body: JSON.stringify({ sourceId, dirName: PACK_NAME, scope: "server" }),
+	});
+	const installText = await install.text();
+	expect(install.status, installText).toBe(201);
+	return sourceId;
+}
+
+async function uninstallPack(): Promise<void> {
+	const response = await apiFetch("/api/marketplace/installed", {
+		method: "DELETE",
+		body: JSON.stringify({ scope: "server", packName: PACK_NAME }),
+	});
+	const text = await response.text();
+	expect(response.status, text).toBe(204);
+}
+
+async function removeSource(sourceId: string): Promise<void> {
+	const response = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, text).toBe(204);
 }
 
 /** PUT pack-activation to (re)set disabled providers AND bust the registry cache. */
@@ -313,18 +369,20 @@ async function setMarkerDisabled(providers: string[]): Promise<void> {
 }
 
 test.describe.serial("goalProvisioned filesystem treatment across worktrees", () => {
+	let fixtureRoot: string;
 	let repoPath: string;
 	let projectId: string;
-	let packDir: string;
+	let sourceId: string;
 	const goals: string[] = [];
 
-	test.beforeAll(async ({ gateway }) => {
-		const rootDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "goal-meta-fs-")));
-		repoPath = path.join(rootDir, "repo");
+	test.beforeAll(async () => {
+		fixtureRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "goal-meta-fs-")));
+		repoPath = path.join(fixtureRoot, "repo");
 		gitInit(repoPath);
 
-		packDir = installPack(gateway.bobbitDir);
-		// Enable the provider + invalidate the worker's registry cache.
+		// Install through the marketplace lifecycle so the resolver observes the
+		// pack deterministically; activation refreshes the registry after install.
+		sourceId = await installPack();
 		await setMarkerDisabled([]);
 
 		const reg = await apiFetch("/api/projects", {
@@ -336,9 +394,15 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 	});
 
 	test.afterAll(async () => {
-		for (const id of goals.splice(0)) await deleteGoal(id).catch(() => {});
-		await setMarkerDisabled([]).catch(() => {});
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		for (const id of goals.splice(0).reverse()) await deleteGoalStrict(id);
+		await setMarkerDisabled([]);
+		await uninstallPack();
+		await removeSource(sourceId);
+		const projectDelete = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+		const projectDeleteText = await projectDelete.text();
+		expect(projectDelete.status, projectDeleteText).toBe(200);
+		const cleanup = await awaitableRm(fixtureRoot);
+		expect(cleanup.removed, `fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 	});
 
 	test("marker lands on the goal worktree with the resolved metadata", async () => {
