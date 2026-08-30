@@ -23,9 +23,9 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-const { computeToolActivationArgs, tagAllowedTools } = await import("../../src/server/agent/tool-activation.ts");
-import type { ToolProvider } from "../../src/server/agent/tool-manager.ts";
-import type { EffectiveTool } from "../../src/server/agent/tool-activation.ts";
+const { computeToolActivationArgs, tagAllowedTools } = await import("../../../src/server/agent/tool-activation.ts");
+import type { ToolProvider } from "../../../src/server/agent/tool-manager.ts";
+import type { EffectiveTool } from "../../../src/server/agent/tool-activation.ts";
 
 type ProviderWithGroup = ToolProvider & { groupDir: string; baseDir: string };
 

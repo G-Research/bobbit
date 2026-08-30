@@ -12,8 +12,8 @@ import {
 	computeToolPolicies,
 	writeToolGuardExtension,
 	type EffectiveTool,
-} from "../../src/server/agent/tool-activation.ts";
-import type { ScopedToolContext, ToolProvider } from "../../src/server/agent/tool-manager.ts";
+} from "../../../src/server/agent/tool-activation.ts";
+import type { ScopedToolContext, ToolProvider } from "../../../src/server/agent/tool-manager.ts";
 
 type ProviderWithGroup = ToolProvider & { groupDir: string; baseDir: string };
 

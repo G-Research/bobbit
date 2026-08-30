@@ -8,7 +8,7 @@ import {
 	TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE,
 	TEAM_FORENSIC_RECOVERY_COMPLETION_FENCE_FILE,
 	TEAM_FORENSIC_RECOVERY_VERSION,
-} from "../../src/server/agent/team-recovery-checkpoint.ts";
+} from "../../../src/server/agent/team-recovery-checkpoint.ts";
 
 const cleanup: string[] = [];
 

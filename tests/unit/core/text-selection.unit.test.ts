@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { selectText } from "../../src/server/utils/text-selection.js";
+import { selectText } from "../../../src/server/utils/text-selection.js";
 
 function numberedLines(count: number, prefix = "line"): string {
 	return Array.from({ length: count }, (_, i) => `${prefix}-${i + 1}`).join("\n");

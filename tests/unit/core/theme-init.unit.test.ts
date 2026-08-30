@@ -2,7 +2,7 @@
 // Source: tests/theme-init.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -16,7 +16,7 @@ guardProcessEnv();
  */
 import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
-import { normalizeThemePreference } from "../../src/app/theme-init.ts";
+import { normalizeThemePreference } from "../../../src/app/theme-init.ts";
 
 function makeLocalStorage(initial?: string): { store: { theme?: string }; ls: Storage } {
 	const store: { theme?: string } = {};

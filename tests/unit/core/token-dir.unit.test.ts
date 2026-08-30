@@ -4,18 +4,18 @@
 // Review: mutates process.env — wrapped in withEnv(patch, fn) so BOBBIT_DIR /
 // BOBBIT_SECRETS_DIR are restored in a finally (forks are shared, isolate:false).
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
-import { loadOrCreateToken, readToken } from "../../src/server/auth/token.js";
-import { caCertPath, tlsDir } from "../../src/server/auth/tls.js";
-import { bobbitStateDir, serverSecretsDir } from "../../src/server/bobbit-dir.js";
-import { withEnv } from "../harness/with-env.js";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { loadOrCreateToken, readToken } from "../../../src/server/auth/token.js";
+import { caCertPath, tlsDir } from "../../../src/server/auth/tls.js";
+import { bobbitStateDir, serverSecretsDir } from "../../../src/server/bobbit-dir.js";
+import { withEnv } from "../../../tests2/harness/with-env.js";
+import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/token-dir");
 
