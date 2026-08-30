@@ -21,7 +21,7 @@ import path from "node:path";
 import os from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { WorktreePool } from "../src/server/agent/worktree-pool.ts";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
 
 const execFile = promisify(execFileCb);
 

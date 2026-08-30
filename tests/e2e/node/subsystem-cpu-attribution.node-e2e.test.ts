@@ -28,7 +28,7 @@ function restoreEnv(): void {
 }
 
 async function flushSnapshot(reason: string): Promise<any> {
-	const { getCpuDiagnostics } = await import("../src/server/agent/cpu-diagnostics.js");
+	const { getCpuDiagnostics } = await import("../../../src/server/agent/cpu-diagnostics.js");
 	await getCpuDiagnostics().flush(reason);
 	const lines = fs.readFileSync(diagFile, "utf-8").trim().split(/\r?\n/);
 	return JSON.parse(lines.at(-1)!);
@@ -54,7 +54,7 @@ function initRepo(name: string): string {
 
 after(async () => {
 	try {
-		const { getCpuDiagnostics } = await import("../src/server/agent/cpu-diagnostics.js");
+		const { getCpuDiagnostics } = await import("../../../src/server/agent/cpu-diagnostics.js");
 		await getCpuDiagnostics().shutdown();
 	} catch { /* ignore */ }
 	restoreEnv();
@@ -64,7 +64,7 @@ after(async () => {
 describe("subsystem CPU attribution", () => {
 	it("records child-process attribution for native git status", async () => {
 		const repo = initRepo("git-status");
-		const { runBatchGitStatusNative } = await import("../src/server/skills/git-status-native.js");
+		const { runBatchGitStatusNative } = await import("../../../src/server/skills/git-status-native.js");
 
 		const result = await runBatchGitStatusNative(repo);
 		assert.ok(result);
@@ -76,7 +76,7 @@ describe("subsystem CPU attribution", () => {
 	});
 
 	it("records Docker child attribution and sandbox health timers", async () => {
-		const { getDockerResourceLimits, _resetDockerLimitsCache, ProjectSandbox } = await import("../src/server/agent/project-sandbox.js");
+		const { getDockerResourceLimits, _resetDockerLimitsCache, ProjectSandbox } = await import("../../../src/server/agent/project-sandbox.js");
 		_resetDockerLimitsCache();
 		await getDockerResourceLimits();
 
@@ -94,8 +94,8 @@ describe("subsystem CPU attribution", () => {
 	});
 
 	it("records inbox nudger timer counters without changing nudge behavior", async () => {
-		const { InboxStore } = await import("../src/server/agent/inbox-store.js");
-		const { InboxNudger } = await import("../src/server/agent/inbox-nudger.js");
+		const { InboxStore } = await import("../../../src/server/agent/inbox-store.js");
+		const { InboxNudger } = await import("../../../src/server/agent/inbox-nudger.js");
 		const stateDir = fs.mkdtempSync(path.join(tmpRoot, "inbox-"));
 		const inboxStore = new InboxStore(stateDir);
 		const staff: any = { id: "staff-1", state: "active", currentSessionId: "session-1", contextPolicy: "preserve" };
@@ -138,7 +138,7 @@ describe("subsystem CPU attribution", () => {
 
 	it("records staff trigger scan timers and git child attribution", async () => {
 		const repo = initRepo("trigger");
-		const { TriggerEngine } = await import("../src/server/agent/staff-trigger-engine.js");
+		const { TriggerEngine } = await import("../../../src/server/agent/staff-trigger-engine.js");
 		const trigger: any = { id: "git-1", type: "git", enabled: true, config: { repo, branch: "HEAD" } };
 		const staff: any = { id: "staff-1", name: "Staff", state: "active", cwd: repo, triggers: [trigger] };
 		const staffManager = {
@@ -163,8 +163,8 @@ describe("subsystem CPU attribution", () => {
 		git(tmpRoot, "init", "--bare", "-q", origin);
 		git(repo, "remote", "add", "origin", origin);
 		git(repo, "push", "-u", "origin", "master");
-		const { WorktreePool } = await import("../src/server/agent/worktree-pool.js");
-		const { runComponentSetups } = await import("../src/server/skills/worktree-setup.js");
+		const { WorktreePool } = await import("../../../src/server/agent/worktree-pool.js");
+		const { runComponentSetups } = await import("../../../src/server/skills/worktree-setup.js");
 		const pool = new WorktreePool({ repoPath: repo, targetSize: 0 });
 
 		assert.equal(await pool.claim("session/test"), null);

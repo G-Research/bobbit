@@ -10,8 +10,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resetAgentDirStateForTests } from "../../src/server/agent-dir-config.js";
-import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { resetAgentDirStateForTests } from "../../../src/server/agent-dir-config.js";
+import { createManualClock, type ManualClock } from "../../../tests2/harness/clock.js";
 
 // Flush pending microtasks/IO after advancing the manual clock so async timer
 // callbacks settle before assertions.
@@ -24,9 +24,9 @@ process.env.BOBBIT_DIR = TEST_PI_DIR;
 resetAgentDirStateForTests();
 
 // Import AFTER setting env var and resetting cached agent-dir state so bobbitDir() picks it up.
-const { TeamManager } = await import("../../src/server/agent/team-manager.ts");
-const { TOOLS_DIR } = await import("../../src/server/agent/tool-manager.ts");
-import type { TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
+const { TeamManager } = await import("../../../src/server/agent/team-manager.ts");
+const { TOOLS_DIR } = await import("../../../src/server/agent/tool-manager.ts");
+import type { TeamManagerConfig } from "../../../src/server/agent/team-manager.ts";
 
 const TEAM_STORE_FILE = path.join(TEST_PI_DIR, "state", "team-state.json");
 function clearTeamStore() { try { fs.unlinkSync(TEAM_STORE_FILE); } catch { /* ignore */ } }

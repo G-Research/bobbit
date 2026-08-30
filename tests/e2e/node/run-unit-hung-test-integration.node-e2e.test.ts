@@ -34,7 +34,7 @@ test("node --test-timeout fails and names a hung test file while the reporter re
 	// behave as a nested reporter child and exit early — strip it so the child is a
 	// clean top-level test run (the real run-unit.mjs never spawns from a test
 	// context, so this only affects the test harness).
-	const childEnv = { ...process.env, BOBBIT_UNIT_NODE_HEARTBEAT_FILE: heartbeatFile };
+	const childEnv: NodeJS.ProcessEnv = { ...process.env, BOBBIT_UNIT_NODE_HEARTBEAT_FILE: heartbeatFile };
 	delete childEnv.NODE_TEST_CONTEXT;
 
 	const { code, output } = await new Promise<{ code: number | null; output: string }>((res) => {

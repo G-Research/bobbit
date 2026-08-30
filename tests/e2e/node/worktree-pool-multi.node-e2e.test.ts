@@ -19,8 +19,8 @@ import path from "node:path";
 import os from "node:os";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { WorktreePool } from "../src/server/agent/worktree-pool.ts";
-import type { Component } from "../src/server/agent/project-config-store.ts";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
+import type { Component } from "../../../src/server/agent/project-config-store.ts";
 
 const execFile = promisify(execFileCb);
 
@@ -103,7 +103,7 @@ describe("WorktreePool — multi-repo prebuild + claim", () => {
 
 			// Replenishment: pool should fill again after claim (generous budget for
 			// the shared, loaded Group A process — see the initial-fill note above).
-			for (let i = 0; i < 300 && pool.size === 0; i++) {
+			for (let i = 0; i < 300 && Number(pool.size) === 0; i++) {
 				await new Promise(r => setTimeout(r, 100));
 			}
 			assert.equal(pool.size, 1, "pool should replenish after claim");

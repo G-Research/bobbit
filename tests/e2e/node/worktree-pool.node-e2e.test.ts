@@ -16,11 +16,11 @@ import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
-import { RECOVERY_IO_CONCURRENCY } from "../src/server/agent/bounded-async-work.ts";
-import type { Component } from "../src/server/agent/project-config-store.ts";
-import type { CommandRunner, ExecFileResult } from "../src/server/gateway-deps.ts";
-import { makeTmpDir } from "./helpers/tmp.ts";
+import { WorktreePool, isPoolBranch } from "../../../src/server/agent/worktree-pool.ts";
+import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
+import type { Component } from "../../../src/server/agent/project-config-store.ts";
+import type { CommandRunner, ExecFileResult } from "../../../src/server/gateway-deps.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -372,7 +372,7 @@ describe.skip("WorktreePool — retired orphan reclaim", () => {
 				await inspectionGate.promise;
 				activeInspections--;
 			},
-			opendir: async (dirPath) => {
+			opendir: async (dirPath: string) => {
 				assert.equal(dirPath, configuredRoot);
 				return {
 					read: async () => entries[readCalls++] ?? null,
@@ -704,7 +704,7 @@ describe.skip("Retired restart round-trip: pool worktrees are not adopted by sha
 
 describe("Regression: gateway shutdown drains current-instance worktree pools", () => {
 	it("wires the worktree-pool drain phase after boot settles and before project contexts close", () => {
-		const serverTs = fs.readFileSync(path.resolve(__dirname, "..", "src", "server", "server.ts"), "utf-8");
+		const serverTs = fs.readFileSync(path.resolve(__dirname, "..", "..", "..", "src", "server", "server.ts"), "utf-8");
 		// Brace-match the shutdown() body (opening `{` to its matching close) so we
 		// scan exactly the method — not a fixed-size window that can spill into the
 		// next declaration or truncate as shutdown() grows. Inner braces
@@ -739,7 +739,7 @@ describe("Regression: gateway shutdown drains current-instance worktree pools", 
 
 describe("Regression: rename helpers and claimUnnamed must stay deleted", () => {
 	it("no source file references renameSessionFromPool / claimUnnamed / UnnamedClaim", () => {
-		const srcRoot = path.resolve(__dirname, "..", "src");
+		const srcRoot = path.resolve(__dirname, "..", "..", "..", "src");
 		const banned = /(renameSessionFromPool|_renameSessionFromPoolMultiRepo|claimUnnamed|UnnamedClaim)/;
 		const hits: string[] = [];
 		function scan(dir: string) {
@@ -760,7 +760,7 @@ describe("Regression: rename helpers and claimUnnamed must stay deleted", () => 
 	});
 
 	it("moveWorktree is no longer exported from src/server/skills/git.ts", () => {
-		const gitTs = path.resolve(__dirname, "..", "src", "server", "skills", "git.ts");
+		const gitTs = path.resolve(__dirname, "..", "..", "..", "src", "server", "skills", "git.ts");
 		const body = fs.readFileSync(gitTs, "utf-8");
 		assert.equal(/export\s+(async\s+)?function\s+moveWorktree\b/.test(body), false,
 			"moveWorktree must be inlined into worktree-pool.ts (design §14)");
@@ -774,7 +774,7 @@ describe("Regression: legacy top-level worktree_setup_command must not be read",
 		// The migration in state-migration/migrate-project-yaml.ts is the only
 		// allowed reader of the legacy top-level key. Every other reader is a
 		// regression of the components[*].worktreeSetupCommand source-of-truth.
-		const srcRoot = path.resolve(__dirname, "..", "src");
+		const srcRoot = path.resolve(__dirname, "..", "..", "..", "src");
 		const hits: string[] = [];
 		function scan(dir: string) {
 			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -897,7 +897,7 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		const claimed = await pool.claim("session/after-retry");
 		assert.ok(claimed, "a successful retry should expose the registered entry");
 		assert.deepEqual(
-			mutationCommands.map(args => args.slice(0, 2)),
+			mutationCommands.map((args: string[]) => args.slice(0, 2)),
 			[["branch", "-m"], ["worktree", "move"]],
 			"claim mutations should begin only after initialization succeeds",
 		);

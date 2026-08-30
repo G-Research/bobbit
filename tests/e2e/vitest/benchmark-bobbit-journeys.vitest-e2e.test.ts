@@ -8,15 +8,15 @@ import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 
-import { ProjectRegistry } from "../../src/server/agent/project-registry.js";
-import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.js";
+import { ProjectRegistry } from "../../../src/server/agent/project-registry.js";
+import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.js";
 import {
 	GATEWAY_STARTUP_PROJECT_ID,
 	GATEWAY_STARTUP_SEARCH_SENTINEL,
 	buildGatewayStartupFixtureRecords,
 	cleanupTrackedGateways,
 	validateGatewayStartupSemanticProjection,
-} from "../../scripts/benchmarks/gateway-startup.mjs";
+} from "../../../scripts/benchmarks/gateway-startup.mjs";
 import {
 	cleanupBenchmarkRunRoot,
 	createBenchmarkGatewayToken,
@@ -25,9 +25,9 @@ import {
 	spawnGateway,
 	stopGateway,
 	waitForGatewayReady,
-} from "../../scripts/benchmarks/runtime.mjs";
+} from "../../../scripts/benchmarks/runtime.mjs";
 
-const REPO_ROOT = path.resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const REPO_ROOT = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const FIXTURE_TIME = 1_700_000_000_000;
 const LIVE_ID = "benchmark-smoke-live";
 const DIRECT_ARCHIVED_ID = "benchmark-smoke-archived-direct";

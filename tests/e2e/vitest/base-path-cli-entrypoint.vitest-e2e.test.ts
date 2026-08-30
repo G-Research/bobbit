@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 
-import { awaitableRm, pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
-import { isConnectionRefusal } from "../../tests/e2e/test-utils/gateway-readiness.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
+import { isConnectionRefusal } from "../test-utils/gateway-readiness.js";
 
-const REPO_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const CLI_ENTRY = join(REPO_ROOT, "src", "server", "cli.ts");
 const BUILT_CLI_ENTRY = join(REPO_ROOT, "dist", "server", "cli.js");
 const MOUNT = "/team/cli-smoke";

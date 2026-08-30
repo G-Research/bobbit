@@ -1,14 +1,14 @@
 // v2-e2e-vitest real-filesystem owner: exercises host and sandbox transcript
 // rehydration boundaries plus coordinated replacement lifecycle behavior.
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createMemFs } from "../harness/mem-fs.js";
-import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { SandboxSessionFilesystem } from "../../../tests2/harness/sandbox-session-filesystem.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -20,27 +20,27 @@ const {
 	activeAgentSessionsDir,
 	sessionTranscriptHostPath,
 	sessionTranscriptRoot,
-} = await import("../../src/server/agent/agent-session-path.ts");
-const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+} = await import("../../../src/server/agent/agent-session-path.ts");
+const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
+const { invalidateModelCache } = await import("../../../src/server/agent/model-registry.ts");
 const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
 	readAuthorSidecar,
-} = await import("../../src/server/agent/author-sidecar.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { sessionFileCopy, sessionFsContextForAgentFile } = await import("../../src/server/agent/session-fs.ts");
-const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../src/server/agent/session-manager.ts");
-const { executePlan } = await import("../../src/server/agent/session-setup.ts");
-const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
-const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+} = await import("../../../src/server/agent/author-sidecar.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { registerRpcBridgeFactory } = await import("../../../src/server/agent/rpc-bridge.ts");
+const { sessionFileCopy, sessionFsContextForAgentFile } = await import("../../../src/server/agent/session-fs.ts");
+const { SessionManager: BaseSessionManager, switchSessionPathForAgent } = await import("../../../src/server/agent/session-manager.ts");
+const { executePlan } = await import("../../../src/server/agent/session-setup.ts");
+const { initPromptDirs } = await import("../../../src/server/agent/system-prompt.ts");
+const { loadOrCreateToken } = await import("../../../src/server/auth/token.ts");
 const {
 	applyRuntimeSessionModelSelection,
 	applyRuntimeSessionThinkingSelection,
-} = await import("../../src/server/ws/runtime-model-selection.ts");
+} = await import("../../../src/server/ws/runtime-model-selection.ts");
 
 const FIXTURE_MODEL_PROVIDER = "orphan-boundary-mock";
 const FIXTURE_MODEL_ID = "orphan-boundary-model";

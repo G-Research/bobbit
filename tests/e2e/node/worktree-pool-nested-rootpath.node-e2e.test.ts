@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { WorktreePool } from "../src/server/agent/worktree-pool.ts";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
 
 // Force `BOBBIT_TEST_NO_PUSH=1` regardless of environment so the pool's
 // background freshen path never hits the network.

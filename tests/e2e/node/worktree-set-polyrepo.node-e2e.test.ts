@@ -12,7 +12,7 @@ const execFile = promisify(execFileCb);
 process.env.BOBBIT_TEST_NO_PUSH = "1";
 process.env.BOBBIT_SKIP_NPM_CI = "1";
 
-import { createWorktreeSet } from "../src/server/skills/git.js";
+import { createWorktreeSet } from "../../../src/server/skills/git.js";
 
 /** Run git in a given cwd */
 async function git(args: string[], cwd: string): Promise<string> {

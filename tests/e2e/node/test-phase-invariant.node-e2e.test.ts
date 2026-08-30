@@ -24,11 +24,11 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createE2EPhaseSelection, createUnitBrowserPhaseSelection, NODE_UNIT_GLOBS } from "../scripts/test-phase-config.mjs";
-import { runtimeImportedModules } from "../scripts/testing/layout-policy.mjs";
-import { classifyTestPath, discoverTests } from "../scripts/testing-v2/test-discovery.mjs";
+import { createE2EPhaseSelection, createUnitBrowserPhaseSelection, NODE_UNIT_GLOBS } from "../../../scripts/test-phase-config.mjs";
+import { runtimeImportedModules } from "../../../scripts/testing/layout-policy.mjs";
+import { classifyTestPath, discoverTests } from "../../../scripts/testing-v2/test-discovery.mjs";
 
-const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
+const TESTS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const REPO_ROOT = resolve(TESTS_DIR, "..");
 
 // Playwright's built-in default when a project sets neither testMatch nor a
@@ -141,7 +141,7 @@ test("every test file is claimed by exactly one phase (no orphans, no double-cla
 			else if (owner?.phase === "e2e") buckets.push("e2e");
 			else if (owner?.phase === "manual") buckets.push("manual");
 		} else {
-			if (nodeUnitRes.some((re) => re.test(repoRel))) buckets.push("unit·node");
+			if (nodeUnitRes.some((re: RegExp) => re.test(repoRel))) buckets.push("unit·node");
 			if (configRuns(unitConfig, TESTS_DIR, abs)) buckets.push("unit·browser");
 			if (configRuns(e2eConfig, REPO_ROOT, abs)) buckets.push("e2e");
 			if (repoRel.startsWith("tests/manual-integration/")) buckets.push("manual-integration");
