@@ -7,7 +7,7 @@ import {
 	isKnownThinkingLevel,
 	supportsXHigh,
 	type ModelLike,
-} from "../../src/shared/thinking-levels.ts";
+} from "../../../src/shared/thinking-levels.ts";
 
 const BASE = ["off", "minimal", "low", "medium", "high"];
 

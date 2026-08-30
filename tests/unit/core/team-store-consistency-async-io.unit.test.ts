@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
+import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
 import {
 	discoverAgentsForGoal,
 	pickCanonicalTeamLeadJsonl,
 	scanSlugDirForJsonlsAt,
 	slugDirNameForCwd,
 	type CandidateJsonl,
-} from "../../src/server/agent/team-store-consistency.ts";
+} from "../../../src/server/agent/team-store-consistency.ts";
 import {
 	TeamRecoveryFsFake,
 	basenamePosix,
@@ -15,7 +15,7 @@ import {
 	joinPosix,
 	microtaskTurns,
 	sessionHeader,
-} from "./team-recovery-test-fake.ts";
+} from "../../../tests2/core/team-recovery-test-fake.ts";
 
 const SESSIONS_ROOT = "/agent/sessions";
 const TEAM_CWD = "/worktrees/goal-alpha";

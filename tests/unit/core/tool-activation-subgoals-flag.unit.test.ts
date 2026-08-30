@@ -30,15 +30,15 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 const { resolveGrantPolicy } = await import(
-	"../../src/server/agent/tool-activation.ts"
+	"../../../src/server/agent/tool-activation.ts"
 );
 
 /** Minimal GroupPolicyProvider with a controllable subgoalsEnabled getter. */
-function makeGroupPolicyStore(subgoalsEnabled: boolean | undefined): import("../../src/server/agent/tool-activation.ts").GroupPolicyProvider {
+function makeGroupPolicyStore(subgoalsEnabled: boolean | undefined): import("../../../src/server/agent/tool-activation.ts").GroupPolicyProvider {
 	return {
 		getGroupPolicy: () => null,
 		getSubgoalsEnabled: subgoalsEnabled === undefined ? undefined : () => subgoalsEnabled,
-	} as unknown as import("../../src/server/agent/tool-activation.ts").GroupPolicyProvider;
+	} as unknown as import("../../../src/server/agent/tool-activation.ts").GroupPolicyProvider;
 }
 
 /** Team-lead role excerpt — has always-allow for all Children tools. */
@@ -98,7 +98,7 @@ describe("resolveGrantPolicy — Children group subgoalsEnabled gate", () => {
 		// short-circuits on the first conjunct (undefined is falsy) — no veto.
 		const storeWithoutGetter = {
 			getGroupPolicy: () => null,
-		} as unknown as import("../../src/server/agent/tool-activation.ts").GroupPolicyProvider;
+		} as unknown as import("../../../src/server/agent/tool-activation.ts").GroupPolicyProvider;
 
 		it("goal_spawn_child with team-lead resolves to 'allow' when method absent", () => {
 			const policy = resolveGrantPolicy("goal_spawn_child", "Children", TEAM_LEAD_ROLE, undefined, storeWithoutGetter);

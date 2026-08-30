@@ -26,8 +26,8 @@
 
 import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { TeamManager, type TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
-import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { TeamManager, type TeamManagerConfig } from "../../../src/server/agent/team-manager.ts";
+import { createManualClock, type ManualClock } from "../../../tests2/harness/clock.js";
 
 // Drain promise chains scheduled by manual-clock callbacks without yielding to
 // host timers or I/O.

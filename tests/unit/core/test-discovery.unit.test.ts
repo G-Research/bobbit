@@ -10,12 +10,12 @@ import {
 	discoverTests,
 	normalizeTestPath,
 	validateIntroducedTestPaths,
-} from "../../scripts/testing-v2/test-discovery.mjs";
-import { TEST_LAYOUT } from "../../scripts/testing/layout-policy.mjs";
-import { createE2EPhaseSelection } from "../../scripts/test-phase-config.mjs";
+} from "../../../scripts/testing-v2/test-discovery.mjs";
+import { TEST_LAYOUT } from "../../../scripts/testing/layout-policy.mjs";
+import { createE2EPhaseSelection } from "../../../scripts/test-phase-config.mjs";
 
 const ISOLATED_TEST_CAP = 14;
-const REPO_ROOT = resolve(import.meta.dirname, "..", "..");
+const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const require = createRequire(import.meta.url);
 const { createFileMatcher } = require("playwright/lib/util") as {
 	createFileMatcher: (patterns: string | RegExp | Array<string | RegExp>) => (file: string) => boolean;

@@ -14,7 +14,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { cleanTitle } from "../../src/server/agent/title-generator.js";
+import { cleanTitle } from "../../../src/server/agent/title-generator.js";
 
 describe("cleanTitle", () => {
 	it("extracts a plain <title> block", () => {

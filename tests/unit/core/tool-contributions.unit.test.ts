@@ -28,7 +28,7 @@ import {
 	isSafeRelativePath,
 	computeRendererKind,
 	isMarketPackBaseDir,
-} from "../../src/server/agent/tool-contributions.ts";
+} from "../../../src/server/agent/tool-contributions.ts";
 
 const FP = "/fake/market-packs/demo/tools/demo/sample.yaml";
 

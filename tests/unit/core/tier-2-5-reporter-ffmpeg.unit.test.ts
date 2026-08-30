@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -21,7 +21,7 @@ guardProcessEnv();
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
 import assert from "node:assert/strict";
-import { resolveFfmpeg } from "../../tests/e2e/report/tier-2-5-reporter.js";
+import { resolveFfmpeg } from "../../../tests/e2e/report/tier-2-5-reporter.js";
 
 describe("resolveFfmpeg", () => {
 	let savedFfmpegPath: string | undefined;
