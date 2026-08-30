@@ -212,7 +212,7 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await expect(page.locator('[data-panel="staff-proposal"]').first()).toBeVisible({ timeout: 10_000 });
 	});
 
-	test("review panel tabs render, switch, close workspace tab without deleting content, and keep submit disabled without annotations", async ({ page }) => {
+	test("standalone reviews render as primary tabs, switch content, close exactly one review, and expose current decision controls", async ({ page }) => {
 		await page.evaluate(() => (window as any).__setReviewFixture([
 			{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
 			{ title: "Document B", markdown: "# Document B\n\nSecond document content." },
@@ -221,16 +221,21 @@ test.describe("Proposal/review lightweight fixture", () => {
 
 		await expect(page.locator(".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']")).toHaveCount(3, { timeout: 10_000 });
 		await reviewPanelTab(page, "Document B").click();
-		await expect(page.locator("review-pane .review-tab")).toHaveCount(3, { timeout: 10_000 });
-		await expect(page.locator("review-document").getByText("Second document content").first()).toBeVisible({ timeout: 10_000 });
-		await expect(page.locator("button.review-submit-btn")).toBeDisabled();
+		const pane = page.locator("review-pane").filter({ has: page.getByText("Second document content.", { exact: true }) });
+		await expect(pane).toBeVisible({ timeout: 10_000 });
+		await expect(pane.locator(".review-tab-bar"), "single-file reviews must not duplicate primary tabs as secondary navigation").toHaveCount(0);
+		await expect(pane.locator(".review-submit-count")).toHaveText("No inline comments on this review");
+		await expect(pane.getByRole("button", { name: "Reject" })).toBeEnabled();
+		await expect(pane.getByRole("button", { name: "Approve", exact: true })).toBeEnabled();
 
-		await page.locator('review-pane button.review-tab[title="Document A"]').click();
-		await expect(page.locator("review-document").getByText("First document content").first()).toBeVisible({ timeout: 10_000 });
+		await reviewPanelTab(page, "Document A").click();
+		await expect(page.locator("review-document").getByText("First document content.", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 
-		await page.locator('review-pane button.review-tab[title="Document B"] .review-tab-close').click();
+		await reviewPanelTab(page, "Document B").locator(".goal-tab-close, [data-testid='side-panel-close']").click();
 		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 5_000 });
-		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document B", "Document C"]);
+		await expect(reviewPanelTab(page, "Document A")).toBeVisible();
+		await expect(reviewPanelTab(page, "Document C")).toBeVisible();
+		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document C"]);
 	});
 
 	test("project proposal fixture renders component config rows and preserves them through partial updates", async ({ page }) => {
@@ -351,10 +356,10 @@ test.describe("Proposal/review lightweight fixture", () => {
 			"Annotated Doc": [{ id: "ann-1", quote: "Some important text", comment: "Inline fixture comment", start: 17, end: 36 }],
 		}, { persist: true }));
 		await reviewPanelTab(page, "Annotated Doc").click();
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await expect(pane.locator(".review-submit-count")).toHaveText("1 inline comment across this review", { timeout: 5_000 });
 		await reloadAndRehydrateFixture(page);
 		await reviewPanelTab(page, "Annotated Doc").click();
-		await expect(page.locator(".review-tab-badge")).toHaveText("1", { timeout: 5_000 });
+		await expect(pane.locator(".review-submit-count")).toHaveText("1 inline comment across this review", { timeout: 5_000 });
 		await pane.getByRole("button", { name: "Reject" }).click();
 		await expect.poll(async () => page.evaluate(() => (window as any).__getProposalReviewPromptLog().at(-1) || ""), { timeout: 10_000 })
 			.toContain("Inline fixture comment");

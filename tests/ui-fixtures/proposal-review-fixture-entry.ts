@@ -5,6 +5,7 @@ import { clearProposalDismissed, isProposalDismissed, markProposalDismissed } fr
 import { PROPOSAL_TYPE_REGISTRY, type ProposalType } from "../../src/app/proposal-registry.js";
 import { resetProposalAnnCount } from "../../src/app/proposal-panels.js";
 import { addAnnotation, clearAllAnnotations, clearReviewSubmitted, getAnnotations, getDocumentAnnotationCount, isReviewSubmitted } from "../../src/ui/components/review/AnnotationStore.js";
+import type { ReviewGroupModel } from "../../src/ui/components/review/review-types.js";
 
 type FetchLogEntry = { url: string; method: string; body: any };
 type ReviewDoc = { title: string; markdown: string; source?: any };
@@ -339,9 +340,13 @@ function resetState(options: ResetOptions = {}): void {
 		activePanelTabId: "chat",
 		panelWorkspaceActiveBySession: {},
 		panelWorkspacePreviewKeyBySession: {},
+		reviewGroupsBySession: { ...state.reviewGroupsBySession, [SESSION_ID]: [] },
+		reviewGroups: new Map(),
+		reviewActiveReviewId: "",
 		reviewDocuments: new Map(),
 		reviewActiveTab: "",
 		reviewPanelOpen: false,
+		sidePanelWorkspaceBySession: {},
 		inboxEntries: [],
 		inboxPanelOpen: false,
 		chatPanel: html`<div data-testid="fixture-chat" style="padding:12px;"><textarea aria-label="Chat input"></textarea></div>`,
@@ -432,11 +437,29 @@ function activeSlot(type: ProposalType): Record<string, unknown> | null {
 function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}, opts: { persist?: boolean } = {}): void {
 	const normalizedDocs = docs.map((doc) => ({
 		...doc,
-		source: doc.source || { kind: "markdown-review", sessionId: SESSION_ID },
+		source: doc.source || { kind: "markdown-review", sessionId: SESSION_ID } as const,
 	}));
-	state.reviewDocuments = new Map(normalizedDocs.map((doc) => [doc.title, doc]));
-	state.reviewActiveTab = normalizedDocs[0]?.title ?? "";
-	state.reviewPanelOpen = normalizedDocs.length > 0;
+	// Each fixture document models one current review_open call: one primary
+	// workspace tab with one file. Secondary ReviewPane tabs are reserved for
+	// files grouped by a single review_open invocation.
+	const groups: ReviewGroupModel[] = normalizedDocs.map((doc) => ({
+		reviewId: doc.title,
+		title: doc.title,
+		files: [{ fileId: doc.title, title: doc.title, markdown: doc.markdown }],
+		activeFileId: doc.title,
+		source: doc.source,
+	}));
+	state.reviewGroupsBySession = { ...state.reviewGroupsBySession, [SESSION_ID]: groups };
+	state.reviewGroups = new Map(groups.map((group) => [group.reviewId, group]));
+	state.reviewActiveReviewId = groups[0]?.reviewId ?? "";
+	state.reviewDocuments = new Map(normalizedDocs.map((doc) => [doc.title, {
+		...doc,
+		documentId: doc.title,
+		fileId: doc.title,
+		reviewId: doc.title,
+	}]));
+	state.reviewActiveTab = groups[0]?.activeFileId ?? "";
+	state.reviewPanelOpen = groups.length > 0;
 	state.previewPanelActiveTab = "review";
 	state.previewPanelTab = "review";
 	for (const [title, anns] of Object.entries(annotations)) {
@@ -490,8 +513,8 @@ document.addEventListener("proposal-open", (event) => {
 (window as any).__setReviewFixture = setReviewDocs;
 (window as any).__getReviewState = () => ({
 	open: state.reviewPanelOpen,
-	active: state.reviewActiveTab,
-	titles: [...state.reviewDocuments.keys()],
+	active: state.reviewActiveReviewId,
+	titles: [...state.reviewGroups.values()].map((group) => group.title),
 	submitted: isReviewSubmitted(SESSION_ID) || persistedReviewSubmitted(),
 });
 (window as any).__getReviewAnnotationCount = (title: string) => getDocumentAnnotationCount(SESSION_ID, title);
