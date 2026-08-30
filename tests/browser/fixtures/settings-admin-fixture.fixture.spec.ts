@@ -1,7 +1,7 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "../../fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const ENTRY = path.resolve("tests/ui-fixtures/settings-admin-fixture-entry.ts");
@@ -164,12 +164,6 @@ async function scanWorktrees(page: Page) {
 
 function visibleWorktreeRows(page: Page): Locator {
 	return page.locator('[data-testid="worktree-cleanup-row"]:visible');
-}
-
-async function clickWorktreeRowCheckbox(page: Page, id: string): Promise<void> {
-	const row = page.locator(`[data-testid="worktree-cleanup-row"][data-worktree-id="${id}"]`).first();
-	await expect(row).toBeVisible();
-	await row.locator('input[type="checkbox"]').click();
 }
 
 test.describe("Settings/admin UI fixture", () => {
