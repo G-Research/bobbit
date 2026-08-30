@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -35,7 +35,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { resetAgentDirStateForTests } from "../../../src/server/bobbit-dir.js";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-oauth-google-"));
 const agentDir = path.join(tmp, "agent");
@@ -51,7 +51,7 @@ const {
 	oauthLogout,
 	refreshGoogleOAuthToken,
 	stopFlowCleanup,
-} = await import("../../src/server/auth/oauth.js");
+} = await import("../../../src/server/auth/oauth.js");
 
 const realFetch = globalThis.fetch;
 

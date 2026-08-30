@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import {
 	buildParentReadyNotification,
 	buildParentCompletionNotification,
-} from "../../src/server/agent/notify-team-lead-child-passed.ts";
+} from "../../../src/server/agent/notify-team-lead-child-passed.ts";
 
 describe("buildParentReadyNotification", () => {
 	it("returns null for non-ready-to-merge gate", () => {

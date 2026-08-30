@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -16,13 +16,13 @@ const {
 	classifyErroredPromptRecovery,
 	emitSessionEvent,
 	prepareVisibleAgentEvent,
-} = await import("../../src/server/agent/session-manager.ts");
-const { deliverSessionPrompt } = await import("../../src/server/agent/session-prompt-delivery.ts");
-const { isOrphanToolResultOrderingError } = await import("../../src/server/agent/poisoned-history.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
-const { initSkillSidecarDir } = await import("../../src/server/skills/skill-sidecar.ts");
+} = await import("../../../src/server/agent/session-manager.ts");
+const { deliverSessionPrompt } = await import("../../../src/server/agent/session-prompt-delivery.ts");
+const { isOrphanToolResultOrderingError } = await import("../../../src/server/agent/poisoned-history.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { initAuthorSidecarDir } = await import("../../../src/server/agent/author-sidecar.ts");
+const { initSkillSidecarDir } = await import("../../../src/server/skills/skill-sidecar.ts");
 
 const legacyStateDir = path.join(tmpRoot, "state");
 fs.mkdirSync(legacyStateDir, { recursive: true });

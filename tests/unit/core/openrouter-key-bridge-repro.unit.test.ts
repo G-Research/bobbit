@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -23,8 +23,8 @@ afterEach(() => { vi.useRealTimers(); });
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import { createMemFs } from "../harness/mem-fs.js";
+import { makeTmpDir } from "../../helpers/tmp.ts";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 const tmpRoot = makeTmpDir("openrouter-key-bridge-repro-");
 const stateDir = path.join(tmpRoot, "state");
@@ -34,14 +34,14 @@ fs.mkdirSync(path.join(agentDir, "sessions"), { recursive: true });
 process.env.BOBBIT_DIR = tmpRoot;
 process.env.BOBBIT_AGENT_DIR = agentDir;
 
-const { SessionManager, emitSessionEvent } = await import("../../src/server/agent/session-manager.ts");
-const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
-const { initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
-const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+const { SessionManager, emitSessionEvent } = await import("../../../src/server/agent/session-manager.ts");
+const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { registerRpcBridgeFactory } = await import("../../../src/server/agent/rpc-bridge.ts");
+const { initAuthorSidecarDir } = await import("../../../src/server/agent/author-sidecar.ts");
+const { initPromptDirs } = await import("../../../src/server/agent/system-prompt.ts");
+const { loadOrCreateToken } = await import("../../../src/server/auth/token.ts");
 
 initPromptDirs(stateDir);
 initAuthorSidecarDir(stateDir, {

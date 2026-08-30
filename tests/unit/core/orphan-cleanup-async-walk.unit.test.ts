@@ -6,8 +6,8 @@ import {
 	scanOrphanedTranscriptsAsync,
 	type AsyncOrphanDirectory,
 	type AsyncOrphanScanFs,
-} from "../../src/server/agent/orphan-cleanup.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.ts";
+} from "../../../src/server/agent/orphan-cleanup.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.ts";
 
 const root = path.resolve("/memfs/orphan-async-walk/agent-sessions");
 let memfs: MemFs;

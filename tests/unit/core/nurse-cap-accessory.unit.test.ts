@@ -16,10 +16,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ACCESSORIES, ACCESSORY_IDS, ACCESSORY_NURSE_CAP } from "../../src/ui/bobbit-sprite-data.ts";
-import { normalizeStaffAccessory } from "../../src/server/agent/staff-store.ts";
+import { ACCESSORIES, ACCESSORY_IDS, ACCESSORY_NURSE_CAP } from "../../../src/ui/bobbit-sprite-data.ts";
+import { normalizeStaffAccessory } from "../../../src/server/agent/staff-store.ts";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const read = (rel: string) => fs.readFileSync(path.join(root, rel), "utf8");
 
 describe("nurse-cap accessory", () => {

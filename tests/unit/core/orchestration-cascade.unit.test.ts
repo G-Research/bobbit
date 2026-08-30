@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -25,9 +25,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
-const { SessionStore } = await import("../../src/server/agent/session-store.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
+const { SessionStore } = await import("../../../src/server/agent/session-store.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 
 describe("SessionManager archive cascade-reap (OrchestrationCore §6)", () => {
 	let stateRoot = "";
