@@ -37,10 +37,10 @@
  */
 import { test, expect } from "../in-process-harness.js";
 import {
+	apiFetch,
 	assertStaysFalse,
 	createGoal,
 	createSession,
-	deleteGoal,
 	waitForCondition,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
@@ -56,6 +56,12 @@ function getInternals(gateway: any) {
 	if (!harness) throw new Error("verification harness not wired on session manager");
 	if (!teamManager) throw new Error("team manager not wired on verification harness");
 	return { sm, harness, teamManager };
+}
+
+async function deleteGoalStrict(goalId: string): Promise<void> {
+	const response = await apiFetch(`/api/goals/${encodeURIComponent(goalId)}?cascade=true`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, `delete goal ${goalId}: ${text}`).toBe(200);
 }
 
 test.describe("gate verification resume after restart", () => {
@@ -107,7 +113,7 @@ test.describe("gate verification resume after restart", () => {
 			// The TeamManager is already constructed in this gateway; calling
 			// the private restoreTeams() refreshes its in-memory map from the
 			// store we just seeded.
-			(teamManager as any).restoreTeams();
+			await (teamManager as any).restoreTeams();
 			teamManager.resubscribeTeamEvents();
 
 			const internalAgents = (teamManager as any).teams.get(goalId).agents;
@@ -186,7 +192,7 @@ test.describe("gate verification resume after restart", () => {
 				sm.enqueuePrompt = origEnqueue;
 			}
 		} finally {
-			try { await deleteGoal(goalId); } catch { /* ignore */ }
+			await deleteGoalStrict(goalId);
 		}
 	});
 
@@ -295,13 +301,13 @@ test.describe("gate verification resume after restart", () => {
 					timeoutMs: 10_000,
 					message: "resumeInterruptedVerifications to settle",
 				});
-				reviewerSession.rpcClient.prompt = origPrompt;
 			} finally {
+				reviewerSession.rpcClient.prompt = origPrompt;
 				sm.terminateSession = origTerminate;
-				try { fs.unlinkSync(persistPath); } catch { /* best-effort */ }
+				if (fs.existsSync(persistPath)) fs.unlinkSync(persistPath);
 			}
 		} finally {
-			try { await deleteGoal(goalId); } catch { /* ignore */ }
+			await deleteGoalStrict(goalId);
 		}
 	});
 });
