@@ -1,8 +1,8 @@
 /**
- * Page title E2E test: verify dynamic document.title reflects active project.
+ * Page title journey: verify dynamic document.title reflects active project.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Dynamic page title", () => {
 	test("shows active project name with interpunct and Bobbit", async ({ page }) => {

@@ -1,13 +1,13 @@
 /**
- * Browser E2E — the Remove Project button renders for the first normal project
+ * Browser journey — the Remove Project button renders for the first normal project
  * in Settings → (project) → General → Danger Zone. Headquarters is anchored
  * first and immutable, so it is intentionally skipped for destructive removal.
  *
  * Pattern: navigate → happy path → assert removal in sidebar.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, registerProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, registerProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

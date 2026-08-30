@@ -31,10 +31,10 @@
  * payload, the live `state.activeProposals.goal.fields`, and the
  * `_proposalSpec` form-mirror so we can pinpoint A/B/C.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../ui/ui-helpers.js";
-import { createSession, waitForHealth } from "../e2e-setup.js";
+import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
+import { createSession, waitForHealth } from "../../e2e/e2e-setup.js";
 
 /** Open a goal-assistant session and drive a propose_goal. */
 async function openGoalAssistantWithProposal(page: Page) {

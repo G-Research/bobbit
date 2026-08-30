@@ -1,9 +1,9 @@
 /**
- * E2E (gateway-harness, API-level) — marketplace INSTALL + REGISTRY surfacing of
+ * API E2E (in-process harness) — marketplace INSTALL + REGISTRY surfacing of
  * pack-contribution conflicts and orphan/UI-only packs (built-in-first-party-packs
  * design §10, item-0 #734 fixture cleanup).
  *
- * These assertions cover the layer the loader UNIT tests (tests/pack-contributions.test.ts,
+ * These assertions cover the layer the loader UNIT tests (tests2/core/pack-contributions.test.ts,
  * which drive loadPackContributions over inline temp dirs) CANNOT: the live
  * marketplace install ledger + the PackContributionRegistry as surfaced by
  * GET /api/ext/contributions. Install and registration are two distinct layers —
@@ -41,13 +41,15 @@
  * afterEach uninstalls every installed pack + clears every registered source so a
  * server-scope pack never leaks into a sibling spec on the worker.
  *
- * Pattern: mirrors the install harness in tests/e2e/ui/extension-host.spec.ts and
- * artifacts-pack.spec.ts (register a local-dir source, install named packs at server
- * scope), but asserts at the REST layer — no browser UI surface is required because
+ * Pattern: mirrors the install harness in
+ * tests/e2e/browser/extension-host.browser-e2e.spec.ts and
+ * tests/e2e/browser/artifacts-pack.browser-e2e.spec.ts (register a local-dir source,
+ * install named packs at server scope), but asserts at the REST layer — no browser
+ * UI surface is required because
  * the behaviour under test is install + server-side registration.
  */
 import { fileURLToPath } from "node:url";
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 
 // Within-file serial: each test installs server-scope packs; serialise so a failed

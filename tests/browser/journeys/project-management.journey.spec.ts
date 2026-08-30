@@ -1,10 +1,10 @@
 /**
  * Project Management browser coverage.
- * API-only registry add/remove checks live in tests/e2e/project-ui-api.spec.ts.
+ * API-only registry add/remove checks live in tests2/integration/project-ui-api.test.ts.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, registerProject } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, registerProject } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";

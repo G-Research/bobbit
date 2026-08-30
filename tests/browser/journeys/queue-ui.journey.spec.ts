@@ -1,10 +1,10 @@
 /**
- * Browser E2E tests for queue UI interactions.
+ * Browser journey tests for queue UI interactions.
  *
  * Tests queue pills, steer, abort, and draft persistence through the browser.
- * Uses the gateway-harness (spawned gateway process) for real browser interaction.
+ * Uses the in-process mock-gateway harness for served-app browser interaction.
  */
-import { test, expect } from "../ui/fixtures.js";
+import { test, expect } from "../../e2e/ui/fixtures.js";
 import {
 	createSession,
 	connectWs,
@@ -14,8 +14,8 @@ import {
 	statusPredicate,
 	queueLenPredicate,
 	agentEndPredicate,
-} from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");

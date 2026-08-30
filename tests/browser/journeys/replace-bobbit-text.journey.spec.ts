@@ -1,5 +1,5 @@
 /**
- * "Replace bobbit sprite with text" chat-blob E2E tests.
+ * "Replace bobbit sprite with text" chat-blob journey tests.
  *
  * Covers the General-settings toggle that swaps the animated chat-blob sprite
  * for an animated status-text label (Idle / Busy / Compacting / Ended):
@@ -8,9 +8,9 @@
  *   • the preference persists across a full page reload;
  *   • disabling it restores the sprite canvas.
  */
-import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 const EXPECTED_WORDS = ["Idle", "Busy", "Compacting", "Ended"];
 

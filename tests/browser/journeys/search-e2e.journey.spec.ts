@@ -1,13 +1,13 @@
 /**
- * Search E2E tests — SR-01, SR-02, SR-05, SR-07.
+ * Search journey tests — SR-01, SR-02, SR-05, SR-07.
  *
  * Keeps served-app coverage for sidebar search wiring, keyboard shortcuts,
  * full-search navigation, and archived auto-open/close. Full search result
  * grouping/filter rendering lives in the lightweight search-page fixture.
  */
-import { test, expect } from "../gateway-harness.js";
-import { createSession, deleteSession, createGoal, deleteGoal, apiFetch, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession, createGoal, deleteGoal, apiFetch, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Search (UI)", () => {
 	test("SR-01: sidebar filter matches session and goal titles @smoke", async ({ page }) => {

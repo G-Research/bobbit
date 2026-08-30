@@ -1,12 +1,12 @@
 /**
- * Browser E2E coverage for opening every proposal type from a normal chat session.
+ * Browser journey coverage for opening every proposal type from a normal chat session.
  *
  * The proposal transport is type-generic; ordinary sessions must surface a
  * tab/pane for every active proposal slot, not just goal/project.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Locator, Page } from "@playwright/test";
-import { openApp, createSessionViaUI, sendMessage } from "../ui/ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
 type ProposalLabel = "Goal" | "Project" | "Role" | "Tool" | "Staff";
@@ -68,9 +68,9 @@ const CASES: ProposalCase[] = [
 	},
 ];
 
-// Browser E2E keeps one generic non-goal/project proposal flow as a real
+// This browser journey keeps one generic non-goal/project proposal flow as a
 // gateway + mock-agent smoke. The full per-type rendering/dismissal matrix is
-// covered by tests/ui-fixtures/proposal-review-fixture.spec.ts.
+// covered by tests/browser/fixtures/proposal-review-fixture.fixture.spec.ts.
 const BROWSER_CASES = CASES.filter((c) => c.type === "role");
 
 async function waitForProposalSlot(page: Page, type: ProposalType): Promise<void> {

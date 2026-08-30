@@ -1,5 +1,5 @@
 /**
- * Browser E2E tests for prompt stats interactions (PI-15, PI-17, PI-18, PI-23).
+ * Browser journey tests for prompt stats interactions (PI-15, PI-17, PI-18, PI-23).
  *
  * Tests model name display, context usage bar, cost display, and the
  * combined stats bar after real agent interaction via the gateway harness.
@@ -8,9 +8,9 @@
  * (one session setup instead of four). Interactive tests (popovers, reload,
  * button click) remain separate but run in parallel.
  */
-import { test, expect } from "../gateway-harness.js";
-import { waitForHealth } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { waitForHealth } from "../../e2e/e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Prompt stats E2E", () => {
 	test.describe.configure({ mode: "parallel" });
