@@ -46,9 +46,10 @@ async function createDelegate(parentId: string): Promise<Record<string, any>> {
 	return resp.json();
 }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string; tail: string }> {
+async function callBeforePrompt(sessionId: string, prompt: string, sessionSecret: string): Promise<{ status: number; content: string; tail: string }> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt }),
 	});
 	const body = resp.status === 200 ? await resp.json() : {};
@@ -87,7 +88,7 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "provider effective-goal fixture cleanup failed");
 	});
 
-	test("delegate (teamGoalId only) under a metadata-disabled goal gets EMPTY content; metadata-less control still fires", async () => {
+	test("delegate (teamGoalId only) under a metadata-disabled goal gets EMPTY content; metadata-less control still fires", async ({ gateway }) => {
 		// Goal whose metadata disables the demo provider for the whole subtree.
 		const disabledGoal = await createGoalRaw({
 			title: "hook-disabled",
@@ -119,7 +120,11 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		const prompt = "Summarize the quarterly metrics";
 
 		// FIX: the endpoint resolves teamGoalId → goal metadata → demo filtered out.
-		const disabled = await callBeforePrompt(disabledDelegate.id, prompt);
+		const disabled = await callBeforePrompt(
+			disabledDelegate.id,
+			prompt,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(disabledDelegate.id),
+		);
 		expect(disabled.status).toBe(200);
 		expect(disabled.content, "demo must be filtered for a delegate whose teamGoalId-goal disables it").toBe("");
 		expect(disabled.tail).toBe("");
@@ -127,7 +132,11 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		// Control delegate (metadata-less goal) still receives the demo block —
 		// proves the endpoint itself works and the filtering is goal-metadata-driven
 		// via teamGoalId, not a global outage.
-		const control = await callBeforePrompt(controlDelegate.id, prompt);
+		const control = await callBeforePrompt(
+			controlDelegate.id,
+			prompt,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(controlDelegate.id),
+		);
 		expect(control.status).toBe(200);
 		expect(control.content).toContain(`DEMO_BEFORE_PROMPT ${prompt}`);
 		expect(control.tail).toContain(control.content);
