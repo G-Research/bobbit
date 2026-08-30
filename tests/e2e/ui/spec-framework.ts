@@ -1155,18 +1155,18 @@ export class SpecContext {
 	async stop_streaming() {
 		trackIntent(this._activeStory, this._phase, "stop_streaming");
 		trackRegion(this._activeStory, this._phase, "editor");
-		await this._page.locator("button[title='Stop streaming']").first().click();
+		await this._page.getByRole("button", { name: "Stop current turn" }).first().click();
 	}
 
 	async wait_for_streaming(): Promise<void> {
 		trackIntent(this._activeStory, this._phase, "wait_for_streaming");
-		await expect(this._page.locator("button[title='Stop streaming']").first())
+		await expect(this._page.getByRole("button", { name: "Stop current turn" }).first())
 			.toBeVisible({ timeout: 15_000 });
 	}
 
 	async wait_for_idle(): Promise<void> {
 		trackIntent(this._activeStory, this._phase, "wait_for_idle");
-		await expect(this._page.locator("button[title='Stop streaming']").first())
+		await expect(this._page.getByRole("button", { name: "Stop current turn" }).first())
 			.not.toBeVisible({ timeout: 15_000 });
 		await expect(this._page.locator("message-editor button[title='Send message']").first())
 			.toBeVisible({ timeout: 5_000 });
