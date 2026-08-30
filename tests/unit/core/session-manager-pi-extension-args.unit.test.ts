@@ -8,8 +8,8 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import ts from "typescript";
 
-import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
+import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import {
 	executePlan,
 	resolveMarketplacePiExtensionActivation,
@@ -17,13 +17,13 @@ import {
 	scopedToolContext,
 	type MarketplacePiExtensionResolver,
 	type ResolvedPiExtensionContribution,
-} from "../../src/server/agent/session-setup.ts";
-import { BOBBIT_PACK_LOCAL_DATA_ENV } from "../../src/server/agent/pack-local-data-runtime.ts";
-import { packLocalDataDockerExecArgs, registerRpcBridgeFactory } from "../../src/server/agent/rpc-bridge.ts";
-import { ToolManager, type ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
-import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
-import { installMemoryFs } from "./helpers/memory-fs-spies.js";
-import type { MemFs } from "../harness/mem-fs.js";
+} from "../../../src/server/agent/session-setup.ts";
+import { BOBBIT_PACK_LOCAL_DATA_ENV } from "../../../src/server/agent/pack-local-data-runtime.ts";
+import { packLocalDataDockerExecArgs, registerRpcBridgeFactory } from "../../../src/server/agent/rpc-bridge.ts";
+import { ToolManager, type ScopedToolContext } from "../../../src/server/agent/tool-manager.ts";
+import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
+import { installMemoryFs } from "../../../tests2/core/helpers/memory-fs-spies.js";
+import type { MemFs } from "../../../tests2/harness/mem-fs.js";
 
 let memoryFs: MemFs;
 let restoreFs: () => void;

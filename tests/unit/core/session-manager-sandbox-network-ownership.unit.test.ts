@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
-import { SessionManager } from "../../src/server/agent/session-manager.js";
-import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { SessionManager } from "../../../src/server/agent/session-manager.js";
+import type { CommandRunner } from "../../../src/server/gateway-deps.js";
 
 type NetworkCreateOutcome = "created" | "already-exists";
 type NetworkRemoveOutcome = "removed" | "failed";

@@ -8,7 +8,7 @@ import {
 	SessionMarkdownImageError,
 	localMarkdownImagePath,
 	readSessionMarkdownImage,
-} from "../../src/server/agent/session-markdown-image.js";
+} from "../../../src/server/agent/session-markdown-image.js";
 
 const roots: string[] = [];
 const PNG = Buffer.from("89504e470d0a1a0a", "hex");

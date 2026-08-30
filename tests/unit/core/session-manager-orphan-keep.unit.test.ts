@@ -4,8 +4,8 @@ import { describe, it, vi } from "vitest";
 import {
 	shouldKeepDespiteOrphan,
 	type OrphanPreservationOptions,
-} from "../../src/server/agent/orphan-cleanup.ts";
-import type { PersistedSession } from "../../src/server/agent/session-store.ts";
+} from "../../../src/server/agent/orphan-cleanup.ts";
+import type { PersistedSession } from "../../../src/server/agent/session-store.ts";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;

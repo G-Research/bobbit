@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 
 // Avoid pulling in the full SessionManager (which transitively imports
 // project-context-manager + sandbox bits). The helper is a pure module.
-const { broadcastStatus } = await import("../../src/server/agent/session-status.ts");
+const { broadcastStatus } = await import("../../../src/server/agent/session-status.ts");
 
 /** Minimal SessionInfo-shaped object used purely to exercise `broadcastStatus`. */
 function makeFakeSession(status: any = "idle") {
