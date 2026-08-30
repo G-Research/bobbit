@@ -233,6 +233,10 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 					if (typeof candidate === "string") worktreePaths.add(candidate);
 				}
 			}
+			if (gateway.sessionManager.getArchivedSession(id) && gateway.sessionManager.getSession(id)) {
+				const terminated = await gateway.sessionManager.terminateSession(id);
+				expect(terminated, `terminate split archived/live session ${id}`).toBe(true);
+			}
 			const response = await apiFetch(`/api/sessions/${encodeURIComponent(id)}?purge=true`, { method: "DELETE" });
 			const text = await response.text();
 			expect(response.status, `purge session ${id}: ${text}`).toBe(200);
