@@ -33,7 +33,6 @@ import { join } from "node:path";
 import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
-	defaultProjectId,
 	deleteGoal,
 	nonGitCwd,
 	rawApiFetch,
@@ -105,23 +104,24 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 }
 
 /**
- * Create a data-only parent by default; the two worktree assertions opt into
- * the suite's real Git project. No parent team is started in either mode.
+ * Create a parent goal in a real git repo so it gets a worktree
+ * (`worktreePath`, `repoPath`, `branch`). Use `autoStartTeam: false` so
+ * the team-lead doesn't actually spawn — we only need the goal record.
  */
 async function createParentGoal(realWorktree = false): Promise<{ id: string; cwd: string; repoPath?: string; worktreePath?: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
 			title: `spawn-child route parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: realWorktree ? gitProjectRoot : nonGitCwd(),
-			projectId: realWorktree ? gitProjectId : await defaultProjectId(),
-			worktree: realWorktree,
+			...(realWorktree ? { cwd: gitProjectRoot, projectId: gitProjectId } : { cwd: nonGitCwd(), worktree: false }),
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
 	});
 	expect(resp.status, await resp.clone().text()).toBe(201);
 	const created = await resp.json();
+	// Wait for setupStatus to settle — we need repoPath and worktreePath
+	// stamped before the spawn-child handler reads them.
 	const settled = await pollUntil(
 		async () => {
 			const r = await apiFetch(`/api/goals/${created.id}`);
@@ -539,9 +539,8 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			method: "POST",
 			body: JSON.stringify({
 				title: `inherit parent ${Date.now()}`,
-				cwd: nonGitCwd(),
-				projectId: await defaultProjectId(),
-				worktree: false,
+				cwd: gitProjectRoot,
+				projectId: gitProjectId,
 				autoStartTeam: false,
 				workflowId: "feature",
 				inlineRoles: parentInline,
@@ -555,7 +554,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				const r = await apiFetch(`/api/goals/${parent.id}`);
 				if (r.status !== 200) return null;
 				const g = await r.json();
-				return g.setupStatus === "ready" ? g : null;
+				return g.setupStatus === "ready" && g.repoPath ? g : null;
 			},
 			{ timeoutMs: 30_000, intervalMs: 100, label: `parent ${parent.id} setup ready` },
 		);
