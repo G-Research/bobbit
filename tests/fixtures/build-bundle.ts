@@ -13,10 +13,10 @@
  *   bytes in. A reader sees a partial JS payload and the IIFE never finishes
  *   evaluating.
  *
- * Fix: serialise rebuild via a directory-based mutex (`mkdirSync` is atomic
- * on every OS we care about). Only one worker rebuilds; the others poll until
- * the lock is released, then re-check the mtime and skip. Combined with a
- * mtime-staleness gate, the steady-state cost is one `statSync` per worker.
+ * Fix: serialise freshness checks and rebuilds via a directory-based mutex
+ * (`mkdirSync` is atomic on every OS we care about). Only one worker inspects
+ * or rebuilds at a time; the others acquire the lock after it is released,
+ * then re-check the mtime and skip.
  */
 import { execSync } from "node:child_process";
 import fs from "node:fs";
@@ -76,12 +76,6 @@ export function buildBundle(opts: BuildBundleOptions): void {
 	const deps = opts.deps ?? [entry];
 	const depMtime = deps.reduce((m, p) => Math.max(m, fs.statSync(p).mtimeMs), 0);
 	const cssSidecarExisted = fs.existsSync(cssSidecarFor(outfile));
-
-	if (isFresh(outfile, depMtime)) {
-		if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
-		return;
-	}
-
 	const outDir = path.dirname(outfile);
 	fs.mkdirSync(outDir, { recursive: true });
 
@@ -115,12 +109,6 @@ export function buildBundle(opts: BuildBundleOptions): void {
 				throw new Error(`buildBundle: timed out waiting for ${lockDir}`);
 			}
 			sleep(POLL_INTERVAL_MS);
-
-			// Another worker may have finished the rebuild while we slept.
-			if (isFresh(outfile, depMtime)) {
-				if (!opts.keepCss) cleanupCssSidecar(outfile, cssSidecarExisted);
-				return;
-			}
 		}
 	}
 
