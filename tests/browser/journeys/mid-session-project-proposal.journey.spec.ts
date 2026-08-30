@@ -1,8 +1,8 @@
 /**
  * Mid-session project proposal — browser E2E.
  *
- * A regular (non-assistant) session in a registered normal project emits a
- * <project_proposal> tool call via the mock agent. The Project tab should
+ * A regular (non-assistant) session in a registered normal project receives a
+ * protected, persisted project proposal fixture. The Project tab should
  * appear in the unified preview panel with a diff rendered against the
  * current config. Accept writes the diffed fields to project.yaml
  * (via PUT /api/projects/:id/config) without terminating the session.
@@ -16,17 +16,35 @@
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { apiFetch, createSession, deleteSession, registerProject } from "../../e2e/e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "../../e2e/ui/ui-helpers.js";
+import { apiFetch, createSession, deleteSession, rawApiFetch, registerProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 type TestProject = { id: string; rootPath: string; name: string };
 
+const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
+const PROJECT_PROPOSAL_PANEL_SELECTOR = '[data-panel="project-proposal"]';
+
 const createdProjects = new Set<string>();
 const createdSessions = new Set<string>();
 const createdDirs = new Set<string>();
+let operatorCookie: string | undefined;
+
+async function authenticatedOperatorCookie(): Promise<string> {
+	if (operatorCookie) return operatorCookie;
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	operatorCookie = setCookies
+		.map((cookie) => cookie.split(";")[0])
+		.find((cookie) => cookie.startsWith("bobbit_session="));
+	if (!operatorCookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	return operatorCookie;
+}
 
 async function createNormalProject(label: string): Promise<TestProject> {
 	const rootPath = mkdtempSync(join(tmpdir(), `bobbit-mid-proposal-${label}-`));
@@ -45,11 +63,82 @@ async function openProjectSession(page: Page, project: TestProject): Promise<str
 	createdSessions.add(sessionId);
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
+	await expect.poll(() => page.evaluate((expectedSessionId) => {
+		const state = (window as any).bobbitState;
+		const remote = state?.remoteAgent;
+		return state?.selectedSessionId === expectedSessionId
+			&& state?.connectingSessionId === null
+			&& state?.connectionStatus === "connected"
+			&& remote?.gatewaySessionId === expectedSessionId
+			&& typeof remote?.onProposal === "function"
+			? expectedSessionId
+			: null;
+	}, sessionId), {
+		timeout: 10_000,
+		message: "selected session should finish proposal hydration before injecting project proposal",
+	}).toBe(sessionId);
 	return sessionId;
 }
 
 function projectProposalTab(page: Page) {
-	return page.locator('[data-testid="side-panel-tab"][data-panel-tab-id="proposal:project"]');
+	return page.locator(`[data-testid="side-panel-tab"][data-panel-tab-id="${PROJECT_PROPOSAL_TAB_ID}"]`);
+}
+
+async function seedAndHydrateProjectProposal(
+	page: Page,
+	sessionId: string,
+	project: TestProject,
+): Promise<ReturnType<Page["locator"]>> {
+	const fields = {
+		projectId: project.id,
+		name: project.name,
+		root_path: project.rootPath,
+		build_command: "npm run build",
+		test_command: "npm test",
+	};
+	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
+		method: "POST",
+		headers: { Cookie: await authenticatedOperatorCookie() },
+		body: JSON.stringify({ args: fields }),
+	});
+	const text = await resp.text();
+	expect(resp.status, `seed project proposal failed: ${text}`).toBe(200);
+	const rev = (JSON.parse(text) as { rev?: number }).rev;
+	expect(typeof rev, `seed response should carry a revision: ${text}`).toBe("number");
+
+	const proposalsResp = await apiFetch(`/api/sessions/${sessionId}/proposals`);
+	const proposalsText = await proposalsResp.text();
+	expect(proposalsResp.status, `read persisted project proposal failed: ${proposalsText}`).toBe(200);
+	const proposals = (JSON.parse(proposalsText) as {
+		proposals?: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }>;
+	}).proposals;
+	const persisted = proposals?.find((proposal) => proposal.proposalType === "project");
+	expect(persisted, `seeded project proposal should be persisted: ${proposalsText}`).toBeDefined();
+	expect(persisted?.rev, "persisted project proposal should carry the seed revision").toBe(rev);
+	expect(persisted?.fields, "persisted project proposal should retain the seeded fields").toMatchObject(fields);
+
+	const hydratedMode = await page.evaluate(({ sessionId, fields, rev }) => {
+		const state = (window as any).bobbitState;
+		const remote = state?.remoteAgent;
+		if (state?.selectedSessionId !== sessionId || remote?.gatewaySessionId !== sessionId) {
+			throw new Error(`Cannot hydrate project proposal for inactive session ${sessionId}`);
+		}
+		if (typeof remote.onProposal !== "function") {
+			throw new Error("Active remote agent is missing its proposal callback");
+		}
+		remote.onProposal("project", fields, false, rev, "rehydrate");
+		const slot = state.activeProposals?.project;
+		return slot?.sessionId === sessionId && slot?.rev === rev ? slot.mode : null;
+	}, { sessionId, fields: persisted!.fields, rev: rev! });
+	expect(hydratedMode, "server-seeded project proposal should hydrate in registered mode").toBe("registered");
+
+	const projectTab = projectProposalTab(page);
+	await expect(projectTab, `stable ${PROJECT_PROPOSAL_TAB_ID} tab should appear`).toBeVisible({ timeout: 10_000 });
+	const panel = page.locator(`${PROJECT_PROPOSAL_PANEL_SELECTOR}[data-mode="registered"]`).first();
+	if (!await panel.isVisible().catch(() => false)) await projectTab.click();
+	await expect(panel, "server-seeded registered project proposal panel should render").toBeVisible({ timeout: 10_000 });
+	await expect(panel.locator('[data-testid="accept-label"]').first()).toContainText("Apply Changes", { timeout: 5_000 });
+	return panel;
 }
 
 test.describe("Mid-session project proposal (non-assistant session)", () => {
@@ -73,12 +162,8 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 
 		await openApp(page);
-		await openProjectSession(page, project);
-
-		// Mock agent recognizes the "project_proposal" trigger phrase and emits
-		// a propose_project tool call with canned fields (see
-		// tests/e2e/mock-agent-core.mjs respondToPrompt).
-		await sendMessage(page, "Please emit a project_proposal for testing");
+		const sessionId = await openProjectSession(page, project);
+		await seedAndHydrateProjectProposal(page, sessionId, project);
 
 		// The Project tab should appear in the unified preview panel.
 		const projectTab = projectProposalTab(page);
@@ -138,8 +223,8 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 
 		await openApp(page);
-		await openProjectSession(page, project);
-		await sendMessage(page, "Please emit a project_proposal for testing");
+		const sessionId = await openProjectSession(page, project);
+		await seedAndHydrateProjectProposal(page, sessionId, project);
 
 		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
@@ -200,9 +285,9 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		});
 		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("settings-cache-baseline");
 
-		// 2. Open a session, trigger a propose_project, click Apply Changes.
-		await openProjectSession(page, project);
-		await sendMessage(page, "Please emit a project_proposal for testing");
+		// 2. Open a session, seed a registered-project proposal, click Apply Changes.
+		const sessionId = await openProjectSession(page, project);
+		await seedAndHydrateProjectProposal(page, sessionId, project);
 
 		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
