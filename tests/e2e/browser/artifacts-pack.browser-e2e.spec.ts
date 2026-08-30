@@ -6,7 +6,7 @@
 import { fileURLToPath } from "node:url";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage } from "../ui/ui-helpers.js";
 
 test.describe.configure({ mode: "serial" });
 

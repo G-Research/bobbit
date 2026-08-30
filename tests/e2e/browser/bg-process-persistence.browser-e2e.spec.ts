@@ -33,7 +33,7 @@
  */
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, createSessionViaUI } from "./ui-helpers.js";
+import { openApp, createSessionViaUI } from "../ui/ui-helpers.js";
 import type { Page } from "@playwright/test";
 
 test.describe.configure({ mode: "serial" });

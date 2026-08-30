@@ -32,14 +32,14 @@
  * `bg.abortAllWaits` call from `_dispatchSteer`, or queued promotion stops
  * dispatching immediately while streaming — this single test catches it.
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../ui/fixtures.js";
 import {
 	createSession,
 	waitForHealth,
 	waitForSessionStatus,
 	apiFetch,
 } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { openApp, sendMessage } from "../ui/ui-helpers.js";
 
 // Long-running bg command — must outlive the entire test so we can assert it
 // is still running after the wait is aborted.

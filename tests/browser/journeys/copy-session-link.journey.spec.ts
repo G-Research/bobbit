@@ -8,9 +8,9 @@
  *   3. Persistence across reload — after page.reload() the button is still
  *      present and click still copies.
  */
-import { test, expect } from "../gateway-harness.js";
-import { base, createSession, deleteSession, readE2ETokenAsync, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { base, createSession, deleteSession, readE2ETokenAsync, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 async function openSessionByHash(page: import("@playwright/test").Page, sessionId: string): Promise<void> {
 	await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);

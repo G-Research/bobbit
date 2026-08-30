@@ -14,9 +14,9 @@
  *    arriving through the normal message_end stream).
  *  - Keyboard-only multi-question submission.
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../../e2e/ui/fixtures.js";
 import type { Page } from "@playwright/test";
-import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 // Stable, identifiable marker embedded in every pre-submit draft-loss
 // assertion message. The reproducing-test gate matches a single error_pattern

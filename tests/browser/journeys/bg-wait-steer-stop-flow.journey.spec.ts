@@ -5,9 +5,9 @@
  * The steered text must appear as exactly one user-message in the transcript —
  * no duplication via the "abort drains the queue" path.
  */
-import { test, expect } from "./fixtures.js";
-import { createSession, deleteSession, waitForHealth, waitForSessionStatus } from "../e2e-setup.js";
-import { navigateToHash, openApp, sendMessage } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/ui/fixtures.js";
+import { createSession, deleteSession, waitForHealth, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { navigateToHash, openApp, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 const BUSY_MS = 30_000;
 const STEER_TEXT = "EXACTLY_ONCE_TEXT";

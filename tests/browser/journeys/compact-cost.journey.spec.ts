@@ -5,9 +5,9 @@
  * messages snapshot contains only the reduced visible transcript. The UI must
  * keep using the persisted cumulative cost, not the reduced visible-message sum.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 const BUG_MARKER = "COMPACT_COST_PERSISTED_COST_BUG";
 

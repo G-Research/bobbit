@@ -25,12 +25,12 @@
  * endpoint + `resolveFileMentions` in the WS handler) that snapshots
  * `fileMentions` into the broadcast user message.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { apiFetch, deleteSession } from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+import { apiFetch, deleteSession } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 // The gateway-harness is worker-scoped, so projects created here persist across
 // specs running on the same worker unless we delete them. Leaking a second
