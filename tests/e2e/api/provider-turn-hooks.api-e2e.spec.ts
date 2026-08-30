@@ -47,9 +47,10 @@ interface TraceEntry { ts: number; hook: string; sessionId: string; providers: T
 
 interface BeforePromptResult { status: number; content: string; tail: string; blocks: Array<Record<string, unknown>> }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
+async function callBeforePrompt(sessionId: string, prompt: string, sessionSecret: string): Promise<BeforePromptResult> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt }),
 	});
 	const body = resp.status === 200 ? await resp.json() : {};
@@ -61,7 +62,7 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	};
 }
 
-async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
+async function registerGeneratedBridgeHandlers(sessionId: string, sessionSecret: string, tempDir: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
 	const source = generateProviderBridgeExtension(sessionId);
 	const transpiled = ts.transpileModule(source, {
 		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
@@ -72,7 +73,15 @@ async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: strin
 	const extensionFactory = typeof mod.default === "function" ? mod.default : mod.default?.default;
 	expect(typeof extensionFactory, "generated bridge default export").toBe("function");
 	const handlers = new Map<string, (event: any) => Promise<any> | any>();
-	extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	const hadSessionSecret = Object.prototype.hasOwnProperty.call(process.env, "BOBBIT_SESSION_SECRET");
+	const previousSessionSecret = process.env.BOBBIT_SESSION_SECRET;
+	try {
+		process.env.BOBBIT_SESSION_SECRET = sessionSecret;
+		extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	} finally {
+		if (hadSessionSecret) process.env.BOBBIT_SESSION_SECRET = previousSessionSecret!;
+		else delete process.env.BOBBIT_SESSION_SECRET;
+	}
 	return handlers;
 }
 
@@ -153,7 +162,7 @@ test.describe("provider per-turn hooks", () => {
 		if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "provider turn-hooks fixture cleanup failed");
 	});
 
-	test("beforePrompt returns dynamic-context message content, then afterTurn fires; both appear in the context trace", async () => {
+	test("beforePrompt returns dynamic-context message content, then afterTurn fires; both appear in the context trace", async ({ gateway }) => {
 		// demo + boom enabled; slow disabled so the happy path stays deterministic.
 		await providerFixture!.setDisabled(["slow"]);
 		const { id, cwd } = await newSession("happy");
@@ -162,7 +171,11 @@ test.describe("provider per-turn hooks", () => {
 		expect(readLog(cwd)).toEqual(["sessionSetup"]);
 
 		const promptText = "Summarize the quarterly metrics";
-		const before = await callBeforePrompt(id, promptText);
+		const before = await callBeforePrompt(
+			id,
+			promptText,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+		);
 		expect(before.status).toBe(200);
 
 		// The endpoint returns message content carrying the demo block — and a
@@ -207,10 +220,14 @@ test.describe("provider per-turn hooks", () => {
 		expect(at!.providers.some((p) => p.id === "demo")).toBe(true);
 	});
 
-	test("generated bridge delivers dynamic context as a hidden custom message and keeps system prompt stable", async () => {
+	test("generated bridge delivers dynamic context as a hidden custom message and keeps system prompt stable", async ({ gateway }) => {
 		await providerFixture!.setDisabled(["slow"]);
 		const { id, cwd } = await newSession("bridge");
-		const handlers = await registerGeneratedBridgeHandlers(id, cwd);
+		const handlers = await registerGeneratedBridgeHandlers(
+			id,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+			cwd,
+		);
 		const beforeAgentStart = handlers.get("before_agent_start") as (event: any) => Promise<any>;
 		const filterContext = handlers.get("context") as (event: any) => any;
 		expect(typeof beforeAgentStart, "generated bridge registered before_agent_start").toBe("function");
@@ -262,11 +279,12 @@ test.describe("provider per-turn hooks", () => {
 		expect(filtered.messages.at(-1)).toBe(dynamicMessages[1]);
 	});
 
-	test("context-trace honours the limit query param", async () => {
+	test("context-trace honours the limit query param", async ({ gateway }) => {
 		await providerFixture!.setDisabled(["slow"]);
 		const { id } = await newSession("limit");
+		const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id);
 		// Generate several beforePrompt dispatches (each appends one trace entry).
-		for (let i = 0; i < 3; i++) await callBeforePrompt(id, `turn ${i}`);
+		for (let i = 0; i < 3; i++) await callBeforePrompt(id, `turn ${i}`, sessionSecret);
 
 		const limited = await readContextTrace(id, 2);
 		expect(limited.length).toBeLessThanOrEqual(2);
@@ -274,14 +292,18 @@ test.describe("provider per-turn hooks", () => {
 		expect(limited.at(-1)!.hook).toBe("beforePrompt");
 	});
 
-	test("disabling the provider is a kill switch — no hook fires for the next turn", async () => {
+	test("disabling the provider is a kill switch — no hook fires for the next turn", async ({ gateway }) => {
 		await providerFixture!.setDisabled(["demo", "boom", "slow"]);
 		const { id, cwd } = await newSession("disabled");
 
 		// No sessionSetup ran, so no log file exists at all.
 		expect(fs.existsSync(path.join(cwd, ".provider-demo-log"))).toBe(false);
 
-		const before = await callBeforePrompt(id, "anything");
+		const before = await callBeforePrompt(
+			id,
+			"anything",
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+		);
 		expect(before.status).toBe(200);
 		expect(before.content).toBe("");
 		expect(before.tail).toBe("");
@@ -297,13 +319,17 @@ test.describe("provider per-turn hooks", () => {
 		});
 	});
 
-	test("a hanging provider is bounded by its timeout — endpoint returns empty content with a timeout trace row", async () => {
+	test("a hanging provider is bounded by its timeout — endpoint returns empty content with a timeout trace row", async ({ gateway }) => {
 		// Only the slow (hanging) provider is enabled.
 		await providerFixture!.setDisabled(["demo", "boom"]);
 		const { id } = await newSession("hang");
 
 		const t0 = Date.now();
-		const before = await callBeforePrompt(id, "hangs");
+		const before = await callBeforePrompt(
+			id,
+			"hangs",
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+		);
 		const elapsed = Date.now() - t0;
 
 		expect(before.status).toBe(200);
