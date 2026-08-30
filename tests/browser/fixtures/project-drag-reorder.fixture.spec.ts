@@ -8,9 +8,9 @@ import type { Locator, Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createSession, deleteSession, registerProject, waitForHealth } from "../e2e-setup.js";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, createSession, deleteSession, registerProject, waitForHealth } from "../../../tests2/browser/e2e-setup.js";
+import { navigateToHash, openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 375, height: 667 };

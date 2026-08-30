@@ -3,15 +3,15 @@
  * nowrap label, cache, and promotion matrix lives in the deterministic
  * `tests/ui-fixtures/chat-scroll.spec.ts` fixture.
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../../../tests2/browser/fixtures/fixtures.js";
 import {
 	createSession,
 	waitForHealth,
 	waitForSessionStatus,
 	apiFetch,
-} from "../e2e-setup.js";
+} from "../../../tests2/browser/e2e-setup.js";
 import type { Page } from "@playwright/test";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToHash, openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 const padName = (i: number): string => `qa-pill-xxxxxx-${i.toString().padStart(2, "0")}`;
 const bgProcessesRoute = (sessionId: string): string => `**/api/sessions/${sessionId}/bg-processes`;

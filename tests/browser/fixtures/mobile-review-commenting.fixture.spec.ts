@@ -1,9 +1,9 @@
 /**
  * Mobile review commenting E2E — full mobile annotation flow with persistence.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage, navigateToHash } from "./ui-helpers.js";
-import { apiFetch, createSession } from "../e2e-setup.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { openApp, sendMessage, navigateToHash } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { apiFetch, createSession } from "../../../tests2/browser/e2e-setup.js";
 
 async function setupMobileEmulation(page: import("@playwright/test").Page) {
 	await page.addInitScript(() => {

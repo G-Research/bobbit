@@ -7,9 +7,9 @@
  * truth before and after restart.
  */
 import type { Page } from "@playwright/test";
-import { test, expect, type GatewayInfo } from "../gateway-harness.js";
-import { apiFetch, base, createSession, nonGitCwd, readE2ETokenAsync } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect, type GatewayInfo } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, base, createSession, nonGitCwd, readE2ETokenAsync } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 const ENTRY = "durable-preview.html";
 const BODY_TEXT = "DURABLE_PREVIEW_RESTART";

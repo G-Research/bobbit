@@ -16,8 +16,8 @@
  * seam `window.__bobbitReloadHook` (see pwa-lifecycle.ts), which avoids real
  * navigation and the read-only Location object.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
-import { openApp } from "./ui-helpers.js";
+import { test, expect, type Page } from "../../../tests2/browser/gateway-harness.js";
+import { openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 /** Inject a standalone-display signal + a reload observer before any app JS. */
 async function injectStandaloneAndReloadSeam(page: Page): Promise<void> {
