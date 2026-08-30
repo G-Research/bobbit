@@ -216,6 +216,18 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const rChild = await spawnChild(gateway, parent.id, { planId: "sub-c", title: "Tree-cost subtree child", spec: "tree-cost subtree-rooted E2E child: padded to meet spec validator minimum length." });
 		expect(rChild.status).toBe(201);
 		const childId = (await rChild.json()).id as string;
+
+		// spawn-child returns before the child's auto-started team is fully
+		// established. Wait for its authoritative lead so spawnChild's existing
+		// seedTeamLeadHeader call signs with that identity rather than racing it
+		// with a temporary synthetic lead.
+		await waitForCondition(
+			() => {
+				const leadId = gateway.teamManager?.getTeamState(childId)?.teamLeadSessionId;
+				return typeof leadId === "string" && leadId.length > 0;
+			},
+			{ message: `authoritative team lead for child ${childId}` },
+		);
 		const rGrand = await spawnChild(gateway, childId, { planId: "sub-g", title: "Tree-cost subtree grandchild", spec: "tree-cost subtree-rooted E2E grandchild: padded to meet spec validator minimum length." });
 		expect(rGrand.status).toBe(201);
 		const grandId = (await rGrand.json()).id as string;
