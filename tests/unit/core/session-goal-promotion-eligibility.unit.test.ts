@@ -7,7 +7,7 @@ import {
 	type EvaluateSessionGoalPromotionInput,
 	type SessionGoalPromotionLiveSession,
 	type SessionGoalPromotionPersistedSession,
-} from "../../src/server/agent/session-goal-promotion.js";
+} from "../../../src/server/agent/session-goal-promotion.js";
 
 const OWNER = "session-owner";
 const PROJECT = "project-one";

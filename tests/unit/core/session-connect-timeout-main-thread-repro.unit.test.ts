@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 
 const MARKER = "SEARCH_MAIN_THREAD_STARVATION_REGRESSION";
-const SEARCH_DIR = fileURLToPath(new URL("../../src/server/search/", import.meta.url));
+const SEARCH_DIR = fileURLToPath(new URL("../../../src/server/search/", import.meta.url));
 const SEARCH_SERVICE = join(SEARCH_DIR, "search-service.ts");
 
 function searchSourceFiles(dir = SEARCH_DIR): string[] {

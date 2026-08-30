@@ -1,28 +1,28 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createMemFs } from "../harness/mem-fs.js";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-goal-promotion-runtime-"));
 process.env.BOBBIT_DIR = root;
 process.env.BOBBIT_AGENT_DIR = path.join(root, "agent");
 
-const { activeAgentSessionsDir, sessionTranscriptRoot } = await import("../../src/server/agent/agent-session-path.ts");
-const { initAuthorSidecarDir } = await import("../../src/server/agent/author-sidecar.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
-const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
-const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
-const { loadOrCreateToken } = await import("../../src/server/auth/token.ts");
+const { activeAgentSessionsDir, sessionTranscriptRoot } = await import("../../../src/server/agent/agent-session-path.ts");
+const { initAuthorSidecarDir } = await import("../../../src/server/agent/author-sidecar.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { invalidateModelCache } = await import("../../../src/server/agent/model-registry.ts");
+const { PreferencesStore } = await import("../../../src/server/agent/preferences-store.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
+const { registerRpcBridgeFactory } = await import("../../../src/server/agent/rpc-bridge.ts");
+const { loadOrCreateToken } = await import("../../../src/server/auth/token.ts");
 const {
 	PromotedSessionLifecycleConflictError,
 	SessionManager,
-} = await import("../../src/server/agent/session-manager.ts");
+} = await import("../../../src/server/agent/session-manager.ts");
 
 loadOrCreateToken();
 initAuthorSidecarDir(root, {

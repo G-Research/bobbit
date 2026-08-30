@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it, vi } from "vitest";
 
-vi.mock("../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
-	const original = await importOriginal<typeof import("../../src/server/agent/orphan-cleanup.ts")>();
+vi.mock("../../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
+	const original = await importOriginal<typeof import("../../../src/server/agent/orphan-cleanup.ts")>();
 	return {
 		...original,
 		scanOrphanedTranscriptsAsync: async () => ({ count: 0, paths: [] }),
 	};
 });
 
-const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
 
 function persisted(id: string, overrides: Record<string, unknown> = {}): any {
 	return {

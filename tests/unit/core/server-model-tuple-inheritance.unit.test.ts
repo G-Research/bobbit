@@ -1,9 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { resolveServerInitialModelTuple } from "../../src/server/server.js";
+import { resolveServerInitialModelTuple } from "../../../src/server/server.js";
 
-const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const SERVER_SOURCE = readFileSync(new URL("../../../src/server/server.ts", import.meta.url), "utf8");
 
 describe("server Pi 0.82 exact tuple inheritance", () => {
 	it("prefers durable effective thinking, falls back to the live mirror, and leaves final clamping to SessionManager", () => {

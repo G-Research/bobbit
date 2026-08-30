@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 
-import { copyProposalDirIfPresent } from "../../src/server/agent/continue-archived.js";
-import { resolveSessionGoalWorktreeMode } from "../../src/server/agent/session-goal-promotion.js";
+import { copyProposalDirIfPresent } from "../../../src/server/agent/continue-archived.js";
+import { resolveSessionGoalWorktreeMode } from "../../../src/server/agent/session-goal-promotion.js";
 import {
 	editProposalFile,
 	latestRev,
@@ -15,7 +15,7 @@ import {
 	readSnapshot,
 	restoreSnapshot,
 	writeProposalFile,
-} from "../../src/server/proposals/proposal-files.js";
+} from "../../../src/server/proposals/proposal-files.js";
 
 const roots: string[] = [];
 

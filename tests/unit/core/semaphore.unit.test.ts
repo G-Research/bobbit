@@ -4,7 +4,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { Semaphore } from "../../src/server/agent/semaphore.js";
+import { Semaphore } from "../../../src/server/agent/semaphore.js";
 
 type AcquireOutcome = "acquired" | "aborted";
 

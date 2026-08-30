@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -33,8 +33,8 @@ import path from "node:path";
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-restore-test-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { assembleSystemPrompt, initPromptDirs } = await import("../../src/server/agent/system-prompt.ts");
-type PersistedSession = import("../../src/server/agent/session-store.ts").PersistedSession;
+const { assembleSystemPrompt, initPromptDirs } = await import("../../../src/server/agent/system-prompt.ts");
+type PersistedSession = import("../../../src/server/agent/session-store.ts").PersistedSession;
 
 // assembleSystemPrompt writes to <stateDir>/session-prompts — initialize it.
 initPromptDirs(path.join(tmpRoot, "state"));

@@ -20,14 +20,14 @@ import {
 	serverPrebundleResolver,
 	validateServerPrebundle,
 	validateServerPrebundleManifest,
-} from "../../scripts/testing-v2/server-prebundle.mjs";
+} from "../../../scripts/testing-v2/server-prebundle.mjs";
 import {
 	bundledRepoSourceFiles,
 	resolveBundledSource,
 	serverRuntimeRepoSourceFiles,
-} from "../../scripts/testing-v2/repo-source-closure.mjs";
+} from "../../../scripts/testing-v2/repo-source-closure.mjs";
 
-const ACTUAL_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const ACTUAL_REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const BASE_SERVER = "export { sharedValue as value } from '../shared/value.js';\n";
 const BASE_SHARED = "import { foundationValue } from '../foundation/value.js';\nexport const sharedValue = foundationValue;\n";
 const BASE_FOUNDATION = "export const foundationValue = 1;\n";
