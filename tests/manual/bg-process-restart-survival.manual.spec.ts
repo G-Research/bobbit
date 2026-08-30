@@ -28,8 +28,8 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { manualTmpRoot } from "./manual-test-paths.ts";
-import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
+import { manualTmpRoot } from "../manual-integration/manual-test-paths.ts";
+import { seedManualTestModelPreferences } from "../manual-integration/manual-test-model-seeding.ts";
 import { windowsGatewayKillArgs } from "../../src/server/harness-kill.ts";
 
 const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");

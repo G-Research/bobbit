@@ -39,8 +39,8 @@ import {
 	cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { manualTmpRoot } from "./manual-test-paths.ts";
-import { seedManualTestModelPreferences } from "./manual-test-model-seeding.ts";
+import { manualTmpRoot } from "../manual-integration/manual-test-paths.ts";
+import { seedManualTestModelPreferences } from "../manual-integration/manual-test-model-seeding.ts";
 import { fileURLToPath } from "node:url";
 import { setupMultiRepoFixture } from "../fixtures/multi-repo/setup-fixture.mjs";
 
