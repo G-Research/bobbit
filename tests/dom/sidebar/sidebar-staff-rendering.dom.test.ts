@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/sidebar-staff-rendering.spec.ts (v2-dom tier).
 // FIDELITY NOTE: the legacy file:// fixture drove an INLINED pure function
@@ -8,9 +8,9 @@ __syncBeforeAll(() => __syncCE());
 // byte-identical replica of the fixture helper and preserves every assertion.
 import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getSidebarData, state, type GatewaySession } from "../../src/app/state.js";
-import { startSessionListPushSync, stopSessionListPushSync } from "../../src/app/api.js";
-import { buildSidebarTreeModel, renderSidebar } from "../../src/app/sidebar.js";
+import { getSidebarData, state, type GatewaySession } from "../../../src/app/state.js";
+import { startSessionListPushSync, stopSessionListPushSync } from "../../../src/app/api.js";
+import { buildSidebarTreeModel, renderSidebar } from "../../../src/app/sidebar.js";
 
 function getStaffRowInfo(
 	staffMember: { name: string; retired?: boolean },

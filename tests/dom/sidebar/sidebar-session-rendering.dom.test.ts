@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/sidebar-session-rendering.spec.ts (v2-dom tier).
 // `terseRelativeTime` and `formatSessionAge` are imported REAL from
@@ -11,8 +11,8 @@ __syncBeforeAll(() => __syncCE());
 // every assertion (SB-05..08, SB-15, SB-34, SB-36).
 import { render } from "lit";
 import { describe, expect, it } from "vitest";
-import { terseRelativeTime, formatSessionAge, renderSessionTime } from "../../src/app/render-helpers.js";
-import { state, type GatewaySession } from "../../src/app/state.js";
+import { terseRelativeTime, formatSessionAge, renderSessionTime } from "../../../src/app/render-helpers.js";
+import { state, type GatewaySession } from "../../../src/app/state.js";
 
 function hasUnseenActivity(session: any, activeId: string, goals: any[], visitedMap: Record<string, number>): boolean {
 	if (session.status === "streaming" || session.status === "busy") return false;
