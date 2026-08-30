@@ -9,8 +9,7 @@
  * Each Playwright worker gets its own isolated gateway with:
  *   - A unique OS-assigned port (port 0)
  *   - A unique BOBBIT_DIR (ephemeral, cleaned up after)
- *   - An isolated BOBBIT_AGENT_DIR with fake oauth creds so the UI skips
- *     the OAuth prompt
+ *   - An isolated, credential-free BOBBIT_AGENT_DIR
  *   - The mock agent (no API key needed)
  *
  * By default MCP subprocesses are skipped (BOBBIT_SKIP_MCP=1). Specs that
@@ -449,19 +448,10 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			}, null, 2),
 		);
 
-		// Create a fake agent dir with auth.json so the UI skips OAuth prompts.
-		// The client checks /api/oauth/status which reads ~/.bobbit/agent/auth.json;
-		// by setting BOBBIT_AGENT_DIR we redirect that to our isolated dir.
+		// Isolate provider state without seeding usable credentials. Browser access
+		// is authenticated with the worker's gateway token instead.
 		const agentDir = join(bobbitDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-			anthropic: {
-				type: "oauth",
-				access: "fake-isolated-e2e-access-token",
-				refresh: "fake-isolated-e2e-refresh-token",
-				expires: Date.now() + 86_400_000,
-			},
-		}));
 
 		// Set env BEFORE importing server modules. Playwright workers are
 		// separate Node processes, so module singletons are per-worker — no

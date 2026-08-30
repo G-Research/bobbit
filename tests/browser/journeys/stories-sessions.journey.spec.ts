@@ -11,7 +11,7 @@
  *   cleanup → teardown (not tracked)
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
-import { apiFetch, base, readE2ETokenAsync, waitForHealth, deleteSession } from "../../e2e/e2e-setup.js";
+import { waitForHealth, deleteSession } from "../../e2e/e2e-setup.js";
 import { waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
 import { SpecContext } from "../../e2e/ui/spec-framework.js";
 import {
@@ -25,22 +25,6 @@ import {
 	STORY_S11,
 	STORY_S12,
 } from "../../e2e/ui/story-registry.js";
-
-async function openStoryApp(s: SpecContext): Promise<void> {
-	await expect(async () => {
-		const resp = await apiFetch("/api/oauth/status?provider=anthropic");
-		expect(resp.ok).toBe(true);
-		const status = await resp.json();
-		expect(status.authenticated).toBe(true);
-	}).toPass({ timeout: 20_000 });
-
-	const page = s.page;
-	const token = await readE2ETokenAsync();
-	await page.goto(`${base()}/?token=${encodeURIComponent(token)}`);
-	await expect(
-		page.locator("button").filter({ hasText: "Settings" }).first(),
-	).toBeVisible({ timeout: 20_000 });
-}
 
 test.describe("Session lifecycle stories", () => {
 	let s: SpecContext;
@@ -65,7 +49,7 @@ test.describe("Session lifecycle stories", () => {
 		// shared setup
 		await s.createTestSession("A");
 		await s.createTestSession("B");
-		await openStoryApp(s);
+		await s.open();
 
 		s.begin(STORY_S01);
 
@@ -105,7 +89,7 @@ test.describe("Session lifecycle stories", () => {
 	test("S-02/S-11/S-12: Sending messages produces responses in sequence", async () => {
 		// shared setup
 		await s.createTestSession("A");
-		await openStoryApp(s);
+		await s.open();
 		await s.navigate_to("session", "A");
 
 		s.begin(STORY_S02);
@@ -154,7 +138,7 @@ test.describe("Session lifecycle stories", () => {
 
 		// setup
 		const sessionId = await s.createTestSession("A");
-		await openStoryApp(s);
+		await s.open();
 		await s.navigate_to("session", "A");
 
 		// act
@@ -176,7 +160,7 @@ test.describe("Session lifecycle stories", () => {
 		await s.createTestSession("A");
 		await s.createTestSession("B");
 		await s.createTestSession("C");
-		await openStoryApp(s);
+		await s.open();
 
 		s.begin(STORY_S05);
 

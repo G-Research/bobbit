@@ -21,20 +21,6 @@ function uniqueDir(label: string): string {
 	return realpathSync(dir);
 }
 
-function ensureE2EAgentAuth(): void {
-	const agentDir = process.env.BOBBIT_AGENT_DIR;
-	if (!agentDir) return;
-	mkdirSync(agentDir, { recursive: true });
-	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-		anthropic: {
-			type: "oauth",
-			access: "fake-isolated-e2e-access-token",
-			refresh: "fake-isolated-e2e-refresh-token",
-			expires: Date.now() + 86_400_000,
-		},
-	}));
-}
-
 /** Get all projects from the API. */
 async function getProjects(): Promise<any[]> {
 	const resp = await apiFetch("/api/projects");
@@ -135,10 +121,6 @@ async function waitForProjectAssistantCleanup(
 }
 
 test.describe("Project assistant UX (consolidated)", () => {
-	test.beforeEach(() => {
-		ensureE2EAgentAuth();
-	});
-
 	test("happy path — create provisional, accept proposal, project promoted with config", async ({ page }) => {
 		await openApp(page);
 
