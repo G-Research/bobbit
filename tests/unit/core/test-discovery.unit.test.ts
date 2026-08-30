@@ -401,8 +401,11 @@ describe("Playwright selector parity", () => {
 		const browser = browserProjects.find(project => project.name === "browser-v2")!;
 		const browserCanonical = browserProjects.find(project => project.name === "browser-canonical")!;
 		const browserE2E = browserProjects.find(project => project.name === "browser-v2-e2e")!;
+		const e2eApi = e2eProjects.find(project => project.name === "api")!;
 		const apiCanonical = e2eProjects.find(project => project.name === "api-canonical")!;
 		const e2eBrowserCanonical = e2eProjects.find(project => project.name === "browser-canonical")!;
+		const apiRealpush = e2eProjects.find(project => project.name === "api-realpush")!;
+		const e2eLegacyBrowser = e2eProjects.find(project => project.name === "browser")!;
 		const manual = manualProjects.find(project => project.name === "manual-integration")!;
 		const manualCanonical = manualProjects.find(project => project.name === "manual")!;
 		expect(browser.fullyParallel).toBe(false);
@@ -413,15 +416,25 @@ describe("Playwright selector parity", () => {
 			browser: selectedRepositoryPaths(browser),
 			browserCanonical: selectedRepositoryPaths(browserCanonical),
 			browserE2E: selectedRepositoryPaths(browserE2E),
+			e2eApi: selectedRepositoryPaths(e2eApi),
 			apiCanonical: selectedRepositoryPaths(apiCanonical),
 			e2eBrowserCanonical: selectedRepositoryPaths(e2eBrowserCanonical),
+			apiRealpush: selectedRepositoryPaths(apiRealpush),
+			e2eLegacyBrowser: selectedRepositoryPaths(e2eLegacyBrowser),
 			manual: selectedRepositoryPaths(manual),
 			manualCanonical: selectedRepositoryPaths(manualCanonical),
 		};
 		expect([...selected.browser, ...selected.browserCanonical].sort()).toEqual(discovery.browser);
 		expect(selected.browserE2E).toEqual(discovery.browserE2E);
-		expect(selected.apiCanonical).toEqual(discovery.e2eApi);
+		expect([...selected.apiCanonical, ...selected.apiRealpush].sort()).toEqual(discovery.e2eApi);
+		expect([...selected.e2eApi, ...selected.apiCanonical, ...selected.apiRealpush].sort()).toEqual(discovery.e2eGroups.B);
 		expect(selected.e2eBrowserCanonical).toEqual(discovery.e2eBrowser);
+		expect(selected.e2eLegacyBrowser).toEqual(
+			readdirSync(resolve(REPO_ROOT, "tests/e2e/ui"), { withFileTypes: true })
+				.filter(entry => entry.isFile() && entry.name.endsWith(".spec.ts"))
+				.map(entry => `tests/e2e/ui/${entry.name}`)
+				.sort(),
+		);
 		expect([...selected.manual, ...selected.manualCanonical].sort()).toEqual(discovery.manual);
 		expect(selected.browser.some(path => path.startsWith("tests2/browser/e2e/"))).toBe(false);
 		expect(selected.browserE2E.every(path => path.startsWith("tests2/browser/e2e/"))).toBe(true);
@@ -438,6 +451,12 @@ describe("Playwright selector parity", () => {
 			["tests/browser/fixtures/representative.fixture.spec.ts", "browser-canonical"],
 			["tests/browser/journeys/representative.journey.spec.ts", "browser-canonical"],
 			["tests/e2e/api/representative.api-e2e.spec.ts", "api-canonical"],
+			["tests/e2e/api/goal-archive-branch-cleanup.api-e2e.spec.ts", "api-realpush"],
+			["tests/e2e/api/mcp-integration.api-e2e.spec.ts", "api-canonical"],
+			["tests/e2e/api/mcp-tool-permission.api-e2e.spec.ts", "api-canonical"],
+			["tests/e2e/api/port-auto-increment.api-e2e.spec.ts", "api-canonical"],
+			["tests/e2e/browser/per-project-config-dirs.browser-e2e.spec.ts", "browser-canonical"],
+			["tests/e2e/browser/session-lifecycle-ui.browser-e2e.spec.ts", "browser-canonical"],
 			["tests/e2e/browser/representative.browser-e2e.spec.ts", "browser-canonical"],
 			["tests/manual-integration/representative.test.ts", "manual-integration"],
 			["tests/manual-integration/representative.spec.ts", "manual-integration"],
