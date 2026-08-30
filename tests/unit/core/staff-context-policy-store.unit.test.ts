@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, it } from "vitest";
-import { StaffStore } from "../../src/server/agent/staff-store.js";
+import { StaffStore } from "../../../src/server/agent/staff-store.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "staff-context-policy-store-"));
 

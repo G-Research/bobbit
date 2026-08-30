@@ -8,7 +8,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { stripTokenFromGitUrl } from "../../src/server/skills/git.ts";
+import { stripTokenFromGitUrl } from "../../../src/server/skills/git.ts";
 
 describe("stripTokenFromGitUrl", () => {
 	it("strips token from https URL with username", () => {

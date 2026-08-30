@@ -2,12 +2,12 @@
 // Source: tests/state-sidebar-legacy-goals.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { test, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { sidebarTreeKey } from "../../src/app/sidebar-tree-builder.ts";
+import { sidebarTreeKey } from "../../../src/app/sidebar-tree-builder.ts";
 
 const STORAGE_KEY = "bobbit-sidebar-tree-state:v1";
 const LEGACY_EXPANDED_GOALS_KEY = "bobbit-expanded-goals";
@@ -68,8 +68,8 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	// Fresh state.ts (reads localStorage at init); its internal sidebar-tree-state
 	// dep is the SAME registry instance the test imports next (shared, not reset).
 	vi.resetModules();
-	const stateModule = await import("../../src/app/state.ts");
-	const sidebarTreeState = await import("../../src/app/sidebar-tree-state.js");
+	const stateModule = await import("../../../src/app/state.ts");
+	const sidebarTreeState = await import("../../../src/app/sidebar-tree-state.js");
 
 	assert.equal(sidebarTreeState.isGoalExpanded("goal-live"), true, "legacy expanded goal should migrate initially");
 
@@ -91,7 +91,7 @@ test("saveExpandedGoals does not let stale legacy expanded goals override explic
 	// resetModules only affects FUTURE imports; the already-captured stateModule /
 	// sidebarTreeState references stay live.
 	vi.resetModules();
-	const reloadedSidebarTreeState = await import("../../src/app/sidebar-tree-state.ts");
+	const reloadedSidebarTreeState = await import("../../../src/app/sidebar-tree-state.ts");
 	assert.equal(reloadedSidebarTreeState.isGoalExpanded("goal-live"), false, "stale legacy expansion must not override stored unified collapse on reload");
 	assert.equal(reloadedSidebarTreeState.getSidebarTreePreference({ kind: "goal", goalId: "goal-live" }), "collapsed");
 

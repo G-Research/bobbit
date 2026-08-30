@@ -8,10 +8,10 @@ import {
 	initAuthorSidecarDir,
 	mergeAuthorSidecarIntoMessages,
 	type PromptAuthorBinding,
-} from "../../src/server/agent/author-sidecar.ts";
-import { spliceInFlightSteers } from "../../src/server/agent/splice-inflight-message.ts";
-import { normalizePersistedInFlightSteers } from "../../src/server/agent/session-store.ts";
-import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
+} from "../../../src/server/agent/author-sidecar.ts";
+import { spliceInFlightSteers } from "../../../src/server/agent/splice-inflight-message.ts";
+import { normalizePersistedInFlightSteers } from "../../../src/server/agent/session-store.ts";
+import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../../src/shared/message-author.ts";
 
 const SYSTEM_AUTHOR: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 const AGENT_AUTHOR: MessageAuthor = { kind: "agent", id: "session:relay", label: "Relay" };

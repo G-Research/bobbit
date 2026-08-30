@@ -14,7 +14,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { resolveDepthControl } from "../../src/app/subgoal-eligibility.ts";
+import { resolveDepthControl } from "../../../src/app/subgoal-eligibility.ts";
 
 describe("resolveDepthControl", () => {
 	it("untouched top-level goal shows the full inherited cap", () => {

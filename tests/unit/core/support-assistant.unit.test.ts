@@ -6,7 +6,7 @@
 //     tool policies (orchestrate: allow, admin: ask), and session_prompt: allow.
 //   • SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction.
 //   • assistantRoleForType maps support -> support, everything else -> assistant.
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
@@ -15,10 +15,10 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import YAML from "yaml";
 
-const { getAssistantDef, assistantRoleForType, composeAssistantTitle } = await import("../../src/server/agent/assistant-registry.ts");
-const { SUPPORT_ASSISTANT_PROMPT } = await import("../../src/server/agent/support-assistant.ts");
+const { getAssistantDef, assistantRoleForType, composeAssistantTitle } = await import("../../../src/server/agent/assistant-registry.ts");
+const { SUPPORT_ASSISTANT_PROMPT } = await import("../../../src/server/agent/support-assistant.ts");
 
-const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "defaults");
+const DEFAULTS_DIR = path.resolve(import.meta.dirname, "..", "..", "..", "defaults");
 const SUPPORT_ROLE_FILE = path.join(DEFAULTS_DIR, "roles", "support.yaml");
 
 describe("support assistant type", () => {
