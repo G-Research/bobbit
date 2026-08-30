@@ -93,7 +93,6 @@ test.describe("propose_goal bridge isError preservation", () => {
 		const conn = await connectWs(sessionId);
 		try {
 			const input = {
-				__sessionId: sessionId,
 				title: "Missing Workflow Goal",
 				spec: "A focused reproducing draft that intentionally omits workflow so validation rejects it.",
 			};
