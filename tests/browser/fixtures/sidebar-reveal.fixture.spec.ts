@@ -1,8 +1,8 @@
 /**
  * v2 browser (geometry) — parity port of tests/e2e/ui/sidebar-reveal.spec.ts.
- * Kept in Chromium under tests2/browser/fixtures/ because it exercises
+ * Kept in Chromium under tests/browser/fixtures/ because it exercises
  * getBoundingClientRect / scrollIntoView / scrollTop geometry against a real
- * gateway. Import paths resolve through the tests2/browser/*.ts shims verbatim.
+ * gateway. Import paths resolve through the tests2/browser/*.ts shims explicitly.
  *
  * Browser E2E for "Sidebar Reveal On Nav".
  *
@@ -12,7 +12,7 @@
  * unrelated expansion state, and (2) scroll the row into view with
  * `scrollIntoView({ block: "nearest" })`.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
+import { test, expect, type Page } from "../../../tests2/browser/gateway-harness.js";
 import {
 	apiFetch,
 	base,
@@ -27,8 +27,8 @@ import {
 	teardownTeam,
 	waitForHealth,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+} from "../../../tests2/browser/e2e-setup.js";
+import { openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";
 const SPEC = "Sidebar reveal-on-nav fixture goal with enough detail to satisfy validation.";

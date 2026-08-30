@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "../../../tests2/browser/fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const ENTRY = path.resolve("tests/ui-fixtures/search-index-ui-entry.ts");

@@ -1,9 +1,9 @@
 /**
  * Browser E2E for the sidebar tree indentation setting.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect, type Page } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 const INDENT_KEY = "bobbit:sidebar-tree-indent";
 const DEFAULT_PX = 6;
