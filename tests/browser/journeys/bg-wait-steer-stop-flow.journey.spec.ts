@@ -14,7 +14,7 @@ const STEER_TEXT = "EXACTLY_ONCE_TEXT";
 
 async function clickStopAndWaitForIdle(page: any, sessionId: string): Promise<void> {
 	const clicked = await page.waitForFunction(() => {
-		const button = document.querySelector<HTMLButtonElement>("button[title='Stop streaming']");
+		const button = document.querySelector<HTMLButtonElement>("button[title='Stop current turn']");
 		if (!button || button.disabled) return false;
 		button.click();
 		return true;
@@ -56,7 +56,7 @@ test.describe("Steer + Stop exactly-once (AC §1)", () => {
 			);
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, `STAY_BUSY:${BUSY_MS} long-running`);
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 
 			const textarea = page.locator("textarea").first();
 			await textarea.fill(STEER_TEXT);
