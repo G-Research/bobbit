@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/suggest-goal.spec.ts (v2-dom tier).
 // The legacy fixture tested a plain-JS mirror of the <suggest_goal/> detection/
@@ -8,7 +8,7 @@ __syncBeforeAll(() => __syncCE());
 // happy-dom — strictly higher fidelity: the same regex + the real "+ Create Goal"
 // button + the real bubbling/composed `suggest-goal` CustomEvent.
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { syncCustomElements } from "./_setup/custom-elements.js";
+import { syncCustomElements } from "../../tests2/dom/_setup/custom-elements.js";
 
 // Ordered dynamic import (session-manager first to prime the pack-panels ⇄
 // session-manager cycle before Messages.js's app/* imports hit it as a TDZ
