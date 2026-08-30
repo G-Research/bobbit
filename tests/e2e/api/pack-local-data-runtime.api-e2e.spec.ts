@@ -490,6 +490,8 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	expect(gateway.sessionManager.getSession(sessionId)?.sandboxed).toBe(true);
 	const declaredHostDirectory = path.join(project.rootPath, ".pack-local-data-fixture");
 	expect(fs.existsSync(declaredHostDirectory), "sandbox activation must materialize the host directory before mounting it").toBe(true);
+	// The fixture crosses host/container UID boundaries; permit the configured non-root user to exercise its read-write bind.
+	fs.chmodSync(declaredHostDirectory, 0o777);
 	const expectedHostDirectory = fs.realpathSync(declaredHostDirectory);
 	const expectedContainerDirectory = "/bobbit/local-data/pack-local-data";
 	const runtimeOptions = gateway.sessionManager.getSession(sessionId)?.rpcClient?.options ?? {};
