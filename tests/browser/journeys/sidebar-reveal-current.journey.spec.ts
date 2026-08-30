@@ -820,6 +820,7 @@ test.describe("Journey: Reveal current sidebar session", () => {
 		await setFilters(page, { busy: false, read: false });
 		const search = page.locator("input[data-search]");
 		await search.fill("cold-archive-query-with-no-match");
+		await expect.poll(() => page.evaluate(() => (window as any).__bobbitState.searchQuery)).toBe("cold-archive-query-with-no-match");
 		await installRevealProbes(page, IDS.archived);
 
 		await activateReveal(page);
