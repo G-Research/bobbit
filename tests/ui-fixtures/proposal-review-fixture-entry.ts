@@ -4,7 +4,8 @@ import { renderApp, setProjects, setRenderApp, state, type GatewaySession, type 
 import { clearProposalDismissed, isProposalDismissed, markProposalDismissed } from "../../src/app/proposal-helpers.js";
 import { PROPOSAL_TYPE_REGISTRY, type ProposalType } from "../../src/app/proposal-registry.js";
 import { resetProposalAnnCount } from "../../src/app/proposal-panels.js";
-import { addAnnotation, clearAllAnnotations, clearReviewSubmitted, getAnnotations, getDocumentAnnotationCount, isReviewSubmitted } from "../../src/ui/components/review/AnnotationStore.js";
+import { applySidePanelWorkspaceFromServer, getSidePanelWorkspace } from "../../src/app/side-panel-workspace.js";
+import { addAnnotation, clearAllAnnotations, clearReviewSubmitted, clearReviewTombstone, getAnnotations, getDocumentAnnotationCount, getReviewTombstones, isReviewSubmitted, type ReviewTombstoneState } from "../../src/ui/components/review/AnnotationStore.js";
 import type { ReviewGroupModel } from "../../src/ui/components/review/review-types.js";
 
 type FetchLogEntry = { url: string; method: string; body: any };
@@ -34,6 +35,7 @@ const PROJECT_ROOT = "/tmp/proposal-review-fixture";
 const PROPOSAL_STORE_KEY = `bobbit-proposal-review-fixture-proposals-${SESSION_ID}`;
 const REVIEW_STORE_KEY = `bobbit-proposal-review-fixture-reviews-${SESSION_ID}`;
 const REVIEW_SUBMITTED_KEY = `bobbit-proposal-review-fixture-review-submitted-${SESSION_ID}`;
+const REVIEW_TOMBSTONES_KEY = `bobbit-proposal-review-fixture-review-tombstones-${SESSION_ID}`;
 
 const PROJECT: Project = {
 	id: PROJECT_ID,
@@ -174,6 +176,7 @@ function clearPersistedReviews(): void {
 	try {
 		localStorage.removeItem(REVIEW_STORE_KEY);
 		localStorage.removeItem(REVIEW_SUBMITTED_KEY);
+		localStorage.removeItem(REVIEW_TOMBSTONES_KEY);
 	} catch { /* ignore */ }
 }
 
@@ -186,6 +189,23 @@ function setPersistedReviewSubmitted(submitted: boolean): void {
 		if (submitted) localStorage.setItem(REVIEW_SUBMITTED_KEY, "true");
 		else localStorage.removeItem(REVIEW_SUBMITTED_KEY);
 	} catch { /* ignore */ }
+}
+
+function readPersistedReviewTombstones(): Record<string, ReviewTombstoneState> {
+	try {
+		const raw = localStorage.getItem(REVIEW_TOMBSTONES_KEY);
+		if (!raw) return {};
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+		return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, ReviewTombstoneState] =>
+			entry[1] === "submitted" || entry[1] === "closed"));
+	} catch {
+		return {};
+	}
+}
+
+function writePersistedReviewTombstones(tombstones: Record<string, ReviewTombstoneState>): void {
+	try { localStorage.setItem(REVIEW_TOMBSTONES_KEY, JSON.stringify(tombstones)); } catch { /* ignore */ }
 }
 
 function persistReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}): void {
@@ -248,7 +268,24 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		}
 		return response({ staff: [] });
 	}
-	if (url.includes("/review/annotations")) return response({ annotations: {}, submitted: persistedReviewSubmitted() });
+	if (url.includes("/review/annotations")) {
+		const tombstones = readPersistedReviewTombstones();
+		return response({
+			annotations: {},
+			submitted: persistedReviewSubmitted(),
+			submittedReviewIds: Object.keys(tombstones).filter((reviewId) => tombstones[reviewId] === "submitted"),
+			closedReviewIds: Object.keys(tombstones).filter((reviewId) => tombstones[reviewId] === "closed"),
+		});
+	}
+	const tombstoneMatch = /\/review\/tombstones\/([^?]+)/.exec(url);
+	if (tombstoneMatch) {
+		const reviewId = decodeURIComponent(tombstoneMatch[1]);
+		const tombstones = readPersistedReviewTombstones();
+		if (method === "PUT" && (body?.state === "submitted" || body?.state === "closed")) tombstones[reviewId] = body.state;
+		if (method === "DELETE") delete tombstones[reviewId];
+		writePersistedReviewTombstones(tombstones);
+		return response({ reviewId, state: tombstones[reviewId] });
+	}
 	if (url.includes("/review/submitted")) {
 		if (method === "PUT") setPersistedReviewSubmitted(!!body?.submitted);
 		return response({ submitted: persistedReviewSubmitted() });
@@ -282,7 +319,10 @@ function resetState(options: ResetOptions = {}): void {
 	releaseStaffCreateGate = null;
 	staffCreateFailureStatus = 0;
 	clearAllAnnotations(SESSION_ID);
-	if (clearPersisted) clearReviewSubmitted(SESSION_ID);
+	if (clearPersisted) {
+		clearReviewSubmitted(SESSION_ID);
+		for (const reviewId of getReviewTombstones(SESSION_ID).keys()) void clearReviewTombstone(SESSION_ID, reviewId);
+	}
 	for (const type of ["goal", "role", "staff"] as const) resetProposalAnnCount(type);
 	if (clearPersisted) {
 		clearPersistedProposals();
@@ -434,6 +474,28 @@ function activeSlot(type: ProposalType): Record<string, unknown> | null {
 	return slot ? JSON.parse(JSON.stringify(slot.fields)) : null;
 }
 
+function syncReviewWorkspace(groups: ReviewGroupModel[]): void {
+	const current = getSidePanelWorkspace(SESSION_ID);
+	const reviewTabs = groups.map((group) => ({
+		id: `review:${encodeURIComponent(group.reviewId)}`,
+		kind: "review" as const,
+		title: `Review: ${group.title}`,
+		label: `Review: ${group.title}`,
+		source: { type: "review" as const, sessionId: SESSION_ID, reviewId: group.reviewId, title: group.title },
+		updatedAt: Date.now(),
+	}));
+	const tabs = [...current.tabs.filter((tab) => tab.kind !== "review"), ...reviewTabs];
+	applySidePanelWorkspaceFromServer({
+		...current,
+		version: 1,
+		sessionId: SESSION_ID,
+		revision: current.revision + 1,
+		tabs,
+		activeTabId: reviewTabs[0]?.id || tabs[0]?.id || "",
+		updatedAt: Date.now(),
+	}, { source: "hydrate", skipRender: true, force: true });
+}
+
 function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {}, opts: { persist?: boolean } = {}): void {
 	const normalizedDocs = docs.map((doc) => ({
 		...doc,
@@ -462,6 +524,7 @@ function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {
 	state.reviewPanelOpen = groups.length > 0;
 	state.previewPanelActiveTab = "review";
 	state.previewPanelTab = "review";
+	syncReviewWorkspace(groups);
 	for (const [title, anns] of Object.entries(annotations)) {
 		for (const ann of anns) addAnnotation(SESSION_ID, title, ann);
 	}
@@ -472,7 +535,11 @@ function setReviewDocs(docs: ReviewDoc[], annotations: Record<string, any[]> = {
 function rehydratePersistedReviews(): void {
 	const persisted = readPersistedReviews();
 	if (!persisted || persistedReviewSubmitted() || isReviewSubmitted(SESSION_ID)) return;
-	setReviewDocs(persisted.docs, persisted.annotations, { persist: false });
+	const tombstones = readPersistedReviewTombstones();
+	const docs = persisted.docs.filter((doc) => !tombstones[doc.title]);
+	if (docs.length === 0) return;
+	const annotations = Object.fromEntries(Object.entries(persisted.annotations).filter(([title]) => !tombstones[title]));
+	setReviewDocs(docs, annotations, { persist: false });
 }
 
 setRenderApp(doRenderApp);
@@ -515,7 +582,10 @@ document.addEventListener("proposal-open", (event) => {
 	open: state.reviewPanelOpen,
 	active: state.reviewActiveReviewId,
 	titles: [...state.reviewGroups.values()].map((group) => group.title),
-	submitted: isReviewSubmitted(SESSION_ID) || persistedReviewSubmitted(),
+	submitted: isReviewSubmitted(SESSION_ID)
+		|| [...getReviewTombstones(SESSION_ID).values()].includes("submitted")
+		|| Object.values(readPersistedReviewTombstones()).includes("submitted")
+		|| persistedReviewSubmitted(),
 });
 (window as any).__getReviewAnnotationCount = (title: string) => getDocumentAnnotationCount(SESSION_ID, title);
 (window as any).__getReviewAnnotations = (title: string) => getAnnotations(SESSION_ID, title).map((ann) => ({ ...ann }));

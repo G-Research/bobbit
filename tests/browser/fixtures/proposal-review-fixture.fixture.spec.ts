@@ -94,8 +94,12 @@ function proposalPanel(page: Page, expected: ProposalExpectation) {
 	return page.locator(`[data-panel="${expected.panel}"]`).first();
 }
 
-function reviewPanelTab(page: Page, title: string) {
+function reviewPanelTabsByTitle(page: Page, title: string) {
 	return page.locator(`.goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review'][data-panel-tab-title="Review: ${title}"]`);
+}
+
+function reviewPanelTab(page: Page, title: string) {
+	return page.locator(`.goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review'][data-panel-tab-id="review:${encodeURIComponent(title)}"][data-panel-tab-title="Review: ${title}"]`);
 }
 
 test.describe("Proposal/review lightweight fixture", () => {
@@ -232,9 +236,12 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await expect(page.locator("review-document").getByText("First document content.", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
 
 		await reviewPanelTab(page, "Document B").locator(".goal-tab-close, [data-testid='side-panel-close']").click();
-		await expect(reviewPanelTab(page, "Document B")).toHaveCount(0, { timeout: 5_000 });
+		await expect(reviewPanelTabsByTitle(page, "Document B")).toHaveCount(0, { timeout: 5_000 });
+		await expect(reviewPanelTabsByTitle(page, "Document A"), "Document A must retain exactly one primary tab").toHaveCount(1);
+		await expect(reviewPanelTabsByTitle(page, "Document C"), "Document C must retain exactly one primary tab").toHaveCount(1);
 		await expect(reviewPanelTab(page, "Document A")).toBeVisible();
 		await expect(reviewPanelTab(page, "Document C")).toBeVisible();
+		await expect(page.locator(".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']")).toHaveCount(2);
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual(["Document A", "Document C"]);
 	});
 
@@ -344,10 +351,11 @@ test.describe("Proposal/review lightweight fixture", () => {
 		await expect.poll(async () => page.evaluate(() => (window as any).__getProposalReviewPromptLog().at(-1) || ""), { timeout: 10_000 })
 			.toContain("Review Rejected");
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().titles)).toEqual([]);
+		await expect(reviewPanelTabsByTitle(page, "Decision Doc"), "submission should close every primary for the exact review").toHaveCount(0);
 		await expect.poll(async () => page.evaluate(() => (window as any).__getReviewState().submitted)).toBe(true);
 
 		await reloadAndRehydrateFixture(page);
-		await expect(reviewPanelTab(page, "Decision Doc"), "submitted reviews should not rehydrate after reload").toHaveCount(0, { timeout: 5_000 });
+		await expect(reviewPanelTabsByTitle(page, "Decision Doc"), "submitted reviews should not rehydrate after reload").toHaveCount(0, { timeout: 5_000 });
 
 		await page.evaluate(() => (window as any).__resetProposalReviewFixture());
 		await page.evaluate(() => (window as any).__setReviewFixture([
