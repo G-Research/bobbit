@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -94,7 +94,7 @@ parentPort.postMessage({ type: "ready" });
 
 		writeFileSync(outfile, "complete publication", "utf8");
 		utimesSync(outfile, future, future);
-		rmSync(lockDir);
+		rmdirSync(lockDir);
 		await returned;
 		expect(readFileSync(outfile, "utf8")).toBe("complete publication");
 	}, 10_000);
