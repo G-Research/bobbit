@@ -9,7 +9,7 @@ import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { build, type Metafile, type Plugin } from "esbuild";
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 type NativeAssetRuntime = {
 	platform: string;

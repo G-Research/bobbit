@@ -5,10 +5,10 @@ import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 
-import { resolveWorktreeSupport } from "../src/server/agent/worktree-support.js";
-import { WorktreePool } from "../src/server/agent/worktree-pool.js";
-import { createWorktree } from "../src/server/skills/git.js";
-import { makeTmpDir } from "./helpers/tmp.js";
+import { resolveWorktreeSupport } from "../../../src/server/agent/worktree-support.js";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.js";
+import { createWorktree } from "../../../src/server/skills/git.js";
+import { makeTmpDir } from "../../helpers/tmp.js";
 
 const execFile = promisify(execFileCb);
 

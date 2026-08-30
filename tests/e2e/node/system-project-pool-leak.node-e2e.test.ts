@@ -72,9 +72,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { ProjectRegistry, SYSTEM_PROJECT_ID, type RegisteredProject } from "../src/server/agent/project-registry.ts";
-import { WorktreePool } from "../src/server/agent/worktree-pool.ts";
-import { isGitRepo, getRepoRoot } from "../src/server/skills/git.ts";
+import { ProjectRegistry, SYSTEM_PROJECT_ID, type RegisteredProject } from "../../../src/server/agent/project-registry.ts";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
+import { isGitRepo, getRepoRoot } from "../../../src/server/skills/git.ts";
 
 // Belt-and-braces: keep the pool freshen path off the network. Tests
 // must never touch a remote.

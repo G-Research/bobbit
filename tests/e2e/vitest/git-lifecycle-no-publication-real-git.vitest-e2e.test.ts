@@ -4,14 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { GoalManager } from "../../src/server/agent/goal-manager.ts";
-import { GoalStore } from "../../src/server/agent/goal-store.ts";
-import { WorktreePool } from "../../src/server/agent/worktree-pool.ts";
+import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
+import { GoalStore } from "../../../src/server/agent/goal-store.ts";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
 import {
 	createWorktree,
 	createWorktreeSet,
 	recoverWorktree,
-} from "../../src/server/skills/git.ts";
+} from "../../../src/server/skills/git.ts";
 
 const roots: string[] = [];
 

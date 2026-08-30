@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 const { spawnTracked, killAllTracked, _trackedCount } =
-	await import("../src/server/agent/spawn-tree.ts");
+	await import("../../../src/server/agent/spawn-tree.ts");
 
 function isAlive(pid: number | undefined): boolean {
 	if (!pid || !Number.isFinite(pid) || pid <= 0) return false;

@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { classifyWorktrees, sweepOrphanedWorktrees } from "../src/server/agent/worktree-sweeper.ts";
+import { classifyWorktrees, sweepOrphanedWorktrees } from "../../../src/server/agent/worktree-sweeper.ts";
 
 const REPO = "/tmp/repo";
 

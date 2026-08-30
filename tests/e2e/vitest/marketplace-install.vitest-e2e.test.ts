@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const installMod = await import("../../src/server/agent/marketplace-install.ts");
+const installMod = await import("../../../src/server/agent/marketplace-install.ts");
 const {
 	MarketplaceInstaller,
 	MarketplaceError,
@@ -33,12 +33,12 @@ const {
 	readPackEntityDescriptions,
 } = installMod;
 const { MarketplaceSourceStore, deriveSourceId, isValidSourceId } = await import(
-	"../../src/server/agent/marketplace-source-store.ts"
+	"../../../src/server/agent/marketplace-source-store.ts"
 );
-const { ProjectConfigStore } = await import("../../src/server/agent/project-config-store.ts");
-const { readManifest, readMeta } = await import("../../src/server/agent/pack-manifest.ts");
-const { scopePaths } = await import("../../src/server/agent/pack-types.ts");
-const { fetchMcpGatewayWithDiagnostics, parseMcpGatewayDocument } = await import("../../src/server/agent/mcp-gateway-source.ts");
+const { ProjectConfigStore } = await import("../../../src/server/agent/project-config-store.ts");
+const { readManifest, readMeta } = await import("../../../src/server/agent/pack-manifest.ts");
+const { scopePaths } = await import("../../../src/server/agent/pack-types.ts");
+const { fetchMcpGatewayWithDiagnostics, parseMcpGatewayDocument } = await import("../../../src/server/agent/mcp-gateway-source.ts");
 
 const gatewayFixtures = new Map<string, () => unknown[]>();
 let gatewayFixtureSequence = 0;

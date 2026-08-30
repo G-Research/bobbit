@@ -11,7 +11,7 @@ const execFile = promisify(execFileCb);
 // Skip npm ci / setup commands in tests
 process.env.BOBBIT_SKIP_NPM_CI = "1";
 
-import { createWorktree } from "../src/server/skills/git.js";
+import { createWorktree } from "../../../src/server/skills/git.js";
 
 /** Run git in a given cwd */
 async function git(args: string[], cwd: string): Promise<string> {
