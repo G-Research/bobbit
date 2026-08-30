@@ -1,5 +1,5 @@
 import { expect, test } from "../in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../e2e-setup.js";
+import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
 
 const GATE_ID = "active-snapshot-gate";
 const LIVE_OUTPUT_CMD = `node -e "for (let i=1;i<=60;i++) console.log('active-live-line-'+i); setTimeout(()=>process.exit(0),30000)"`;
@@ -35,7 +35,15 @@ async function createWorkflow(id: string, projectId: string): Promise<void> {
 }
 
 async function deleteWorkflow(id: string, projectId: string): Promise<void> {
-	await apiFetch(`/api/workflows/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => { /* best-effort */ });
+	const response = await apiFetch(`/api/workflows/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, `delete workflow ${id}: ${text}`).toBe(200);
+}
+
+async function deleteGoalStrict(id: string): Promise<void> {
+	const response = await apiFetch(`/api/goals/${encodeURIComponent(id)}?cascade=true`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, `delete goal ${id}: ${text}`).toBe(200);
 }
 
 async function inspectVerification(goalId: string, params: Record<string, string | number> = {}): Promise<any> {
@@ -51,6 +59,31 @@ async function inspectVerification(goalId: string, params: Record<string, string
 function durationOf(step: Record<string, unknown>): number | undefined {
 	const value = step.duration_ms ?? step.durationMs;
 	return typeof value === "number" ? value : undefined;
+}
+
+function selectedOutputLines(output: unknown): string[] {
+	return typeof output === "string" ? output.split(/\r?\n/).filter(Boolean) : [];
+}
+
+function liveLineNumbers(output: unknown): number[] {
+	return selectedOutputLines(output).flatMap((line) => {
+		const match = /active-live-line-(\d+)/.exec(line);
+		return match ? [Number(match[1])] : [];
+	});
+}
+
+function expectExactTail(step: any, lines: number): void {
+	const outputLines = selectedOutputLines(step.output);
+	expect(outputLines, `${MARKER}: tail must contain exactly ${lines} retained output lines`).toHaveLength(lines);
+	const liveNumbers = liveLineNumbers(step.output);
+	expect(liveNumbers.at(-1), `${MARKER}: tail must retain the final live stdout line`).toBe(60);
+	expect(liveNumbers).toEqual(Array.from(
+		{ length: liveNumbers.length },
+		(_, index) => 60 - liveNumbers.length + 1 + index,
+	));
+	expect(step.selection).toMatchObject({ mode: "tail" });
+	expect(step.selection.range.to).toBe(step.selection.totalLines);
+	expect(step.selection.range.to - step.selection.range.from + 1).toBe(lines);
 }
 
 async function waitForActiveLiveOutput(goalId: string): Promise<void> {
@@ -110,22 +143,17 @@ test.describe("active gate verification snapshot overlay", () => {
 			expect(running.passed === undefined || running.passed === null, `${MARKER}: running active step must not be surfaced as final passed=false`).toBe(true);
 			expect(durationOf(running), `${MARKER}: running active step must expose non-zero elapsed duration`).toBeGreaterThan(0);
 			expect(running.output, `${MARKER}: running active command step must expose live output tail`).toContain("active-live-line-60");
-			expect(running.output, `${MARKER}: default inspect output must be bounded to the last 20 lines per step`).toContain("active-live-line-41");
-			expect(running.output, `${MARKER}: default inspect output must not include line 40 when 60 live lines exist`).not.toContain("active-live-line-40");
-			expect(running.selection, `${MARKER}: running step selection must describe the default 20-line live tail`).toMatchObject({
-				mode: "tail",
-				totalLines: 60,
-				range: { from: 41, to: 60 },
-			});
+			// The command runner merges stdout and stderr. Windows PowerShell may add
+			// a final CLIXML diagnostic row, so assert the exact tail selection rather
+			// than assuming all 20 retained rows came from stdout.
+			expectExactTail(running, 20);
 
 			expect(["waiting", "yet-to-run", "pending"], `${MARKER}: waiting active step must expose waiting/yet-to-run status`).toContain(waiting.status);
 			expect(waiting.passed === undefined || waiting.passed === null, `${MARKER}: waiting active step must not be surfaced as final passed=false`).toBe(true);
 
 			const tail25 = await inspectVerification(goalId, { mode: "tail", lines: 25 });
 			const tailStep = tail25.steps.find((s: any) => s.name === "Live output command");
-			expect(tailStep.output, `${MARKER}: explicit tail selection should allow deeper active output inspection`).toContain("active-live-line-36");
-			expect(tailStep.output).not.toContain("active-live-line-35");
-			expect(tailStep.selection).toMatchObject({ mode: "tail", totalLines: 60, range: { from: 36, to: 60 } });
+			expectExactTail(tailStep, 25);
 
 			const slice = await inspectVerification(goalId, { mode: "slice", from: 10, to: 12 });
 			const sliceStep = slice.steps.find((s: any) => s.name === "Live output command");
@@ -137,7 +165,8 @@ test.describe("active gate verification snapshot overlay", () => {
 			const grepStep = grep.steps.find((s: any) => s.name === "Live output command");
 			expect(grepStep.output, `${MARKER}: grep selection should work against active live output`).toContain("active-live-line-50");
 			expect(grepStep.output).toContain("active-live-line-52");
-			expect(grepStep.selection).toMatchObject({ mode: "grep", totalLines: 60, matchCount: 3, shownMatches: 3 });
+			expect(grepStep.selection).toMatchObject({ mode: "grep", matchCount: 3, shownMatches: 3 });
+			expect(grepStep.selection.totalLines).toBeGreaterThanOrEqual(60);
 
 			const statusRes = await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}?view=summary`);
 			if (statusRes.status !== 200) {
@@ -152,13 +181,16 @@ test.describe("active gate verification snapshot overlay", () => {
 			expect(statusRunning?.passed === undefined || statusRunning?.passed === null, `${MARKER}: gate status running step must not be surfaced as final passed=false`).toBe(true);
 			expect(durationOf(statusRunning), `${MARKER}: gate status running step must expose non-zero elapsed duration`).toBeGreaterThan(0);
 			expect(statusRunning?.output, `${MARKER}: gate status detail must include bounded live output tail`).toContain("active-live-line-60");
+			expect(selectedOutputLines(statusRunning?.output), `${MARKER}: gate status detail must retain exactly the default 20 lines`).toHaveLength(20);
 			expect(statusRunning?.output, `${MARKER}: gate status detail must bound live output to the last 20 lines`).not.toContain("active-live-line-40");
 			expect(["waiting", "yet-to-run", "pending"], `${MARKER}: gate status detail must agree with inspect for the waiting step`).toContain(statusWaiting?.status);
 			expect(statusWaiting?.passed === undefined || statusWaiting?.passed === null, `${MARKER}: gate status waiting step must not be surfaced as final passed=false`).toBe(true);
 		} finally {
 			if (goalId) {
-				await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}/cancel-verification`, { method: "POST" }).catch(() => { /* best-effort */ });
-				await deleteGoal(goalId);
+				const cancel = await apiFetch(`/api/goals/${goalId}/gates/${GATE_ID}/cancel-verification`, { method: "POST" });
+				const cancelText = await cancel.text();
+				expect(cancel.status, `cancel verification for ${goalId}: ${cancelText}`).toBe(200);
+				await deleteGoalStrict(goalId);
 			}
 			await deleteWorkflow(wfId, projectId!);
 		}
