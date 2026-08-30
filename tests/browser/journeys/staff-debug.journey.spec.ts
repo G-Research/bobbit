@@ -344,10 +344,14 @@ test.describe("Journey: Staff Role Select", () => {
 			await expect(page.getByTestId("staff-color-select")).not.toContainText(/Colour \d+/);
 
 			await page.setViewportSize({ width: 360, height: 640 });
-			const saveBox = await headerActions.getByRole("button", { name: "Save Changes" }).boundingBox();
-			expect(saveBox).not.toBeNull();
-			expect(saveBox!.x).toBeGreaterThanOrEqual(0);
-			expect(saveBox!.x + saveBox!.width).toBeLessThanOrEqual(360);
+			const mobileSave = headerActions.getByRole("button", { name: "Save Changes" });
+			await expect(mobileSave).toBeVisible();
+			await expect.poll(async () => {
+				const box = await mobileSave.boundingBox();
+				return box !== null && box.x >= 0 && box.x + box.width <= 360;
+			}, {
+				message: "mobile Save Changes button should remain fully contained in the viewport",
+			}).toBe(true);
 		} finally {
 			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
 		}
