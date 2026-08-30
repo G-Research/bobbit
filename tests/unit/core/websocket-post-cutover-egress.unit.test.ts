@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import { describe, it } from "vitest";
-import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
-import { BgProcessManager } from "../../src/server/agent/bg-process-manager.ts";
-import { broadcastStatus } from "../../src/server/agent/session-status.ts";
-import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
-import { isSocketSendable } from "../../src/server/ws/socket-sendability.ts";
+import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
+import { BgProcessManager } from "../../../src/server/agent/bg-process-manager.ts";
+import { broadcastStatus } from "../../../src/server/agent/session-status.ts";
+import { handleWebSocketConnection } from "../../../src/server/ws/handler.ts";
+import { isSocketSendable } from "../../../src/server/ws/socket-sendability.ts";
 
 class FakeWebSocket extends EventEmitter {
 	readyState = 1;

@@ -5,7 +5,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { validateVerificationPushSafety, type VerificationPushSafetyVars } from "../../src/server/agent/verification-harness.ts";
+import { validateVerificationPushSafety, type VerificationPushSafetyVars } from "../../../src/server/agent/verification-harness.ts";
 
 const GOAL_VARS: VerificationPushSafetyVars = {
 	branch: "goal/foo",

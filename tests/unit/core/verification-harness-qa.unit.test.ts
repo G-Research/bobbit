@@ -27,7 +27,7 @@ import path from "node:path";
 const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-qa-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+const { VerificationHarness } = await import("../../../src/server/agent/verification-harness.js");
 
 type Component = {
 	name: string;

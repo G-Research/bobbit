@@ -35,11 +35,11 @@ import {
 	initAuthorSidecarDir,
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
-} from "../../src/server/agent/author-sidecar.ts";
+} from "../../../src/server/agent/author-sidecar.ts";
 import {
 	VerificationHarness,
 	VERIFICATION_RESULT_REMINDER,
-} from "../../src/server/agent/verification-harness.ts";
+} from "../../../src/server/agent/verification-harness.ts";
 
 const GOAL_ID = "goal-test";
 const GATE_ID = "documentation";

@@ -40,7 +40,7 @@ const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-restart-test-"));
 const STATE_DIR = path.join(TEST_DIR, "state");
 fs.mkdirSync(STATE_DIR, { recursive: true });
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
+const { VerificationHarness } = await import("../../../src/server/agent/verification-harness.js");
 
 const SIGNAL_ID = "sig-zombie-1";
 const GOAL_ID = "goal-test";

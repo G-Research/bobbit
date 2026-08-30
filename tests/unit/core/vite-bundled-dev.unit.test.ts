@@ -9,7 +9,7 @@ import viteConfig, {
 	configuredPublicViteHosts,
 	isLocalVitePeer,
 	packDevHotReload,
-} from "../../vite.config.ts";
+} from "../../../vite.config.ts";
 
 async function configFor(command: "serve" | "build", mode = "development"): Promise<UserConfig> {
 	const raw = typeof viteConfig === "function"
@@ -228,7 +228,7 @@ describe("Vite bundled development mode", () => {
 	});
 
 	it("keeps Tailwind source detection out of non-UI agent edit paths", () => {
-		const css = readFileSync(new URL("../../src/ui/app.css", import.meta.url), "utf8");
+		const css = readFileSync(new URL("../../../src/ui/app.css", import.meta.url), "utf8");
 
 		expect(css).toContain('@import "tailwindcss" source(none)');
 		expect(css).toContain('@source "../"');
