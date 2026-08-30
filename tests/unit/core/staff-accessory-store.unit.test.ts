@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -24,7 +24,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "staff-accessory-store-"))
 process.env.BOBBIT_DIR = tmpRoot;
 fs.mkdirSync(path.join(tmpRoot, "state"), { recursive: true });
 
-const { StaffStore } = await import("../../src/server/agent/staff-store.ts");
+const { StaffStore } = await import("../../../src/server/agent/staff-store.ts");
 
 afterAll(() => {
 	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ok */ }

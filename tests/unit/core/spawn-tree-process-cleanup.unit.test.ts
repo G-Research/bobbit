@@ -5,11 +5,11 @@ import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
-import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
-import { createManualClock } from "../harness/clock.js";
+import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
+import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
+import { createManualClock } from "../../../tests2/harness/clock.js";
 
-const SPAWN_TREE_SOURCE = readFileSync(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
+const SPAWN_TREE_SOURCE = readFileSync(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 
@@ -28,8 +28,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
-import { createManualClock } from ${JSON.stringify(new URL("../harness/clock.ts", import.meta.url).href)};
+import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { createManualClock } from ${JSON.stringify(new URL("../../../tests2/harness/clock.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
 const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
@@ -146,7 +146,7 @@ for (const mode of ["natural", "timeout", "cancel"]) await run(mode);
 
 const RECOVERED_SENTINEL_PROBE = String.raw`
 import fs from "node:fs";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
 const stateDir = process.env.BOBBIT_RECOVERED_SENTINEL_STATE;
 const exitFile = process.env.BOBBIT_RECOVERED_SENTINEL_EXIT;
@@ -172,7 +172,7 @@ const FAST_EXIT_SENTINEL_PROBE = String.raw`
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-fast-sentinel-"));
 const identityFile = path.join(dir, "sentinel.json");
 const tracked = spawnTracked("/bin/sh", ["-c", "exit 0"], {
@@ -195,7 +195,7 @@ process.stdout.write(JSON.stringify({ rootPid: tracked.child.pid, identity }) + 
 
 const NESTED_SENTINEL_PAYLOAD = String.raw`
 import fs from "node:fs";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 const inherited = {
   file: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_FILE,
   nonce: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE,
@@ -217,7 +217,7 @@ const NESTED_SENTINEL_PROBE = String.raw`
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nested-sentinel-"));
 const outerFile = path.join(dir, "outer.json"), nestedFile = path.join(dir, "nested.json"), resultFile = path.join(dir, "result.json");
 const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type=module", "-e", ${JSON.stringify(NESTED_SENTINEL_PAYLOAD)}], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: { ...process.env, BOBBIT_OUTER_SENTINEL_FILE: outerFile, BOBBIT_NESTED_SENTINEL_FILE: nestedFile, BOBBIT_NESTED_SENTINEL_RESULT: resultFile }, posixSentinelIdentity: { file: outerFile, nonce: "outer-nonce" } });
@@ -235,7 +235,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
 const SENTINEL_ARG = "bobbit-posix-sentinel:write-fail";
 const SNAPSHOT_TIMEOUT_MS = 1_000;
@@ -2271,7 +2271,7 @@ test("observation-only recovery leaves a reused attested Engine PGID pending wit
 });
 
 test("container escalation revalidates the exact witness before TERM and KILL without a timing gap", async () => {
-	const source = fs.readFileSync(new URL("../../src/server/agent/verification-harness.ts", import.meta.url), "utf8");
+	const source = fs.readFileSync(new URL("../../../src/server/agent/verification-harness.ts", import.meta.url), "utf8");
 	const method = source.slice(source.indexOf("private async _killAndVerifyRecoveredContainerProcessGroup"), source.indexOf("private async _resumeContainerCommandStep"));
 	const term = method.indexOf('kill -TERM -"$pgid"');
 	const kill = method.indexOf('kill -KILL -"$pgid"');

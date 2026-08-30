@@ -1,9 +1,9 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
-import { PrStatusStore } from "../../src/server/agent/pr-status-store.js";
-import { ReviewAnnotationStore } from "../../src/server/review-annotation-store.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
+import { PrStatusStore } from "../../../src/server/agent/pr-status-store.js";
+import { ReviewAnnotationStore } from "../../../src/server/review-annotation-store.js";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 describe("store fsImpl contract", () => {
 	it("writes selected stores through the injected fs", () => {

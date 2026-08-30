@@ -15,11 +15,11 @@ import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
-import { GoalManager } from "../../src/server/agent/goal-manager.ts";
-import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
-import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
-import { PreferencesStore } from "../../src/server/agent/preferences-store.ts";
+import { GoalStore, type PersistedGoal } from "../../../src/server/agent/goal-store.ts";
+import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
+import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.ts";
+import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
+import { PreferencesStore } from "../../../src/server/agent/preferences-store.ts";
 import {
 	readSubgoalNestingPrefs,
 	clampMaxDepth,
@@ -31,8 +31,8 @@ import {
 	SYSTEM_MAX_NESTING_DEPTH_DEFAULT,
 	SYSTEM_MAX_NESTING_DEPTH_MAX,
 	SYSTEM_MAX_NESTING_DEPTH_MIN,
-} from "../../src/server/agent/subgoal-nesting-limit.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+} from "../../../src/server/agent/subgoal-nesting-limit.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/subgoal-nesting/work");

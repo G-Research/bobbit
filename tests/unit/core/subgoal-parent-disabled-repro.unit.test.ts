@@ -27,12 +27,12 @@ import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { GoalStore } from "../../src/server/agent/goal-store.ts";
-import { GoalManager } from "../../src/server/agent/goal-manager.ts";
-import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
-import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
-import { checkCanSpawnChild } from "../../src/server/agent/subgoal-nesting-limit.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { GoalStore } from "../../../src/server/agent/goal-store.ts";
+import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
+import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.ts";
+import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
+import { checkCanSpawnChild } from "../../../src/server/agent/subgoal-nesting-limit.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/subgoal-parent-disabled/work");

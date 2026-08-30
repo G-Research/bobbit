@@ -2,7 +2,7 @@
 // Source: tests/subgoals-flag.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import {
 	isSubgoalsEnabled,
 	_setSubgoalsEnabledForTesting,
-} from "../../src/app/subgoals-flag.ts";
+} from "../../../src/app/subgoals-flag.ts";
 
 describe("isSubgoalsEnabled", () => {
 	beforeEach(() => {

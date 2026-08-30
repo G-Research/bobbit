@@ -14,7 +14,7 @@ import {
 	fieldMatches,
 	cronMatches,
 	TriggerEngine,
-} from "../../src/server/agent/staff-trigger-engine.ts";
+} from "../../../src/server/agent/staff-trigger-engine.ts";
 
 // ---------------------------------------------------------------------------
 // fieldMatches — individual cron field matching
