@@ -9,7 +9,7 @@ import {
 	truncateLargeToolContentInMessages,
 	truncateSnapshotBlock,
 	LARGE_CONTENT_THRESHOLD,
-} from "../../src/server/agent/truncate-large-content.js";
+} from "../../../src/server/agent/truncate-large-content.js";
 
 const PREVIEW_MARKER = "__preview_snapshot_v1__\n";
 

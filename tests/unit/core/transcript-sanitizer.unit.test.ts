@@ -37,7 +37,7 @@ import {
 	resolveSafeSessionsPath,
 	trustPersistedAgentSessionFile,
 	type TranscriptRootPolicy,
-} from "../../src/server/agent/transcript-sanitizer.ts";
+} from "../../../src/server/agent/transcript-sanitizer.ts";
 
 function msg(role: string, content: unknown, id = "x"): string {
 	return JSON.stringify({ type: "message", id, ts: "2026-01-01T00-00-00-000Z", message: { role, content } });

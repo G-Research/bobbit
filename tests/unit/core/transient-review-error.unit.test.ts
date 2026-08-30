@@ -4,7 +4,7 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { isTransientReviewError, isTransientQaError } from "../../src/server/agent/verification-harness.js";
+import { isTransientReviewError, isTransientQaError } from "../../../src/server/agent/verification-harness.js";
 
 describe("isTransientReviewError", () => {
 	it("detects 'Agent process not running'", () => {

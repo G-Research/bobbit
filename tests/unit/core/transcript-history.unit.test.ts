@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAskResponseEnvelope } from "../../src/shared/ask-envelope.js";
+import { buildAskResponseEnvelope } from "../../../src/shared/ask-envelope.js";
 import {
 	deriveTranscriptNavigation,
 	filterTranscriptEntries,
@@ -7,8 +7,8 @@ import {
 	transcriptMessageIdentity,
 	transcriptMessageTargetId,
 	type TranscriptHistoryEntry,
-} from "../../src/ui/transcript-history.js";
-import { classifyAskUserChoicesState } from "../../src/ui/tools/ask-user-choices-state.js";
+} from "../../../src/ui/transcript-history.js";
+import { classifyAskUserChoicesState } from "../../../src/ui/tools/ask-user-choices-state.js";
 
 const USER = { kind: "user" as const, id: "user:local", label: "User" };
 const AGENT = { kind: "agent" as const, id: "session:worker", label: "Coder" };

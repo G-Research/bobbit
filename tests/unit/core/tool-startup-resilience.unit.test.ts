@@ -8,10 +8,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { parseToolsDir } from "../../src/server/agent/builtin-config.ts";
-import { computeToolActivationArgs, type EffectiveTool } from "../../src/server/agent/tool-activation.ts";
-import { ToolManager, __resetToolScanCache } from "../../src/server/agent/tool-manager.ts";
-import { __setToolModuleLoadProbeForTesting, preflightConfigExtensionFile } from "../../src/server/agent/tool-extension-preflight.ts";
+import { parseToolsDir } from "../../../src/server/agent/builtin-config.ts";
+import { computeToolActivationArgs, type EffectiveTool } from "../../../src/server/agent/tool-activation.ts";
+import { ToolManager, __resetToolScanCache } from "../../../src/server/agent/tool-manager.ts";
+import { __setToolModuleLoadProbeForTesting, preflightConfigExtensionFile } from "../../../src/server/agent/tool-extension-preflight.ts";
 
 const roots: string[] = [];
 

@@ -21,8 +21,8 @@
 import path from "node:path";
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
-import { CostTracker, computeTreeCost, _resetTreeCostCacheForTesting } from "../../src/server/agent/cost-tracker.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { CostTracker, computeTreeCost, _resetTreeCostCacheForTesting } from "../../../src/server/agent/cost-tracker.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 let memfs: MemFs;
 const stateDir = path.resolve("/memfs/tree-cost-purge-survival/state");

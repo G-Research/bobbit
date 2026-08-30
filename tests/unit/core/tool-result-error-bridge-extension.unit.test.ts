@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -19,7 +19,7 @@ import {
 	generateToolResultErrorBridgeExtension,
 	resetToolResultErrorBridgeExtensionCache,
 	writeToolResultErrorBridgeExtension,
-} from "../../src/server/agent/tool-result-error-bridge-extension.js";
+} from "../../../src/server/agent/tool-result-error-bridge-extension.js";
 
 async function loadGeneratedExtension(): Promise<(pi: any) => void> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-generated-error-bridge-"));

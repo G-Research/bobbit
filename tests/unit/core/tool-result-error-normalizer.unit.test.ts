@@ -8,7 +8,7 @@ import {
 	normalizeToolResultErrorEvent,
 	normalizeToolResultErrorMessages,
 	normalizeToolResultErrorSnapshot,
-} from "../../src/server/agent/tool-result-error-normalizer.js";
+} from "../../../src/server/agent/tool-result-error-normalizer.js";
 
 describe("tool result error normalization", () => {
 	it("normalizes message-level is_error to isError", () => {

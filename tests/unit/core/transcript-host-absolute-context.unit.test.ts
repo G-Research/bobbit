@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { sessionFileCopy, sessionFileRead, sessionFsContextForAgentFile } from "../../src/server/agent/session-fs.js";
+import { sessionFileCopy, sessionFileRead, sessionFsContextForAgentFile } from "../../../src/server/agent/session-fs.js";
 
 function tmpDir(label: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-transcript-host-${label}-`));

@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent | mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { afterAll, describe, it as vitestIt, type TestContext } from "vitest";
@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { withEnv } from "../harness/with-env.js";
+import { withEnv } from "../../../tests2/harness/with-env.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-transcript-agent-dir-"));
 const projectRoot = path.join(tmpRoot, "project");
@@ -25,9 +25,9 @@ const testEnv = {
 	USERPROFILE: tmpHome,
 };
 
-const bobbitDirModule = await import("../../src/server/bobbit-dir.ts");
+const bobbitDirModule = await import("../../../src/server/bobbit-dir.ts");
 const previousProjectRoot = bobbitDirModule.getProjectRoot();
-const sanitizer = await import("../../src/server/agent/transcript-sanitizer.ts");
+const sanitizer = await import("../../../src/server/agent/transcript-sanitizer.ts");
 
 const {
 	isWithinAgentSessionsDir,

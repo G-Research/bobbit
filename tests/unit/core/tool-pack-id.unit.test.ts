@@ -23,11 +23,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ToolManager } from "../../src/server/agent/tool-manager.ts";
-import { resolvePackIdentityForTool } from "../../src/server/extension-host/pack-identity.ts";
-import { packIdFromRoot } from "../../src/server/agent/pack-contributions.ts";
-import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
-import type { PackEntry, PackManifest } from "../../src/server/agent/pack-types.ts";
+import { ToolManager } from "../../../src/server/agent/tool-manager.ts";
+import { resolvePackIdentityForTool } from "../../../src/server/extension-host/pack-identity.ts";
+import { packIdFromRoot } from "../../../src/server/agent/pack-contributions.ts";
+import { PackContributionRegistry } from "../../../src/server/extension-host/pack-contribution-registry.ts";
+import type { PackEntry, PackManifest } from "../../../src/server/agent/pack-types.ts";
 
 let tmp: string;
 let configDir: string;
