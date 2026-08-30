@@ -5,7 +5,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../../tests2/browser/fixtures/fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/default-tool-renderer.html");
 const BUNDLE = path.resolve("tests/fixtures/default-tool-renderer-bundle.js");

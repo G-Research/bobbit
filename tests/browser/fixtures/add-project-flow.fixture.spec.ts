@@ -4,10 +4,10 @@
  * browse UI, and project assistant session creation.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
-import { ADD_PROJECT } from "./add-project-helpers.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch } from "../../../tests2/browser/e2e-setup.js";
+import { openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { ADD_PROJECT } from "../../../tests2/browser/fixtures/add-project-helpers.js";
 import { existsSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

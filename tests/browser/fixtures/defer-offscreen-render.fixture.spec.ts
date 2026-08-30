@@ -19,7 +19,7 @@
 import { test, expect } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.ts";
+import { buildBundle } from "../../../tests2/browser/fixtures/fixtures/build-bundle.ts";
 
 const FIXTURE = path.resolve("tests/fixtures/defer-offscreen-render.html");
 const BUNDLE = path.resolve("tests/fixtures/defer-offscreen-render-bundle.js");
