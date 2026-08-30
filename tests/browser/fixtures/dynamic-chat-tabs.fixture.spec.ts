@@ -2,9 +2,9 @@
  * Retained browser E2E smoke for Dynamic Chat Tabs.
  * Broad tab derivation/order/history matrices live in tests/ui-fixtures/dynamic-panel-workspace-fixture.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../../tests2/browser/fixtures/ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
