@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/components-editor.spec.ts (v2-dom tier).
 // The legacy spec exercised pure helpers via an esbuild file:// bundle. This port

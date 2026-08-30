@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // v2-native — arbitrary file selection and text detection for composer uploads.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
