@@ -151,7 +151,7 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 }
 
 /** Specs whose Docker-backed cases require the local sandbox image. */
-const DOCKER_GATED = ["tests/e2e/sandbox-recovery.e2e.spec.ts"];
+const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 const TSX_CLI = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
 const PLAYWRIGHT_CLI = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
 const PLAYWRIGHT_E2E_WRAPPER = join(REPO_ROOT, "scripts", "run-playwright-e2e.mjs");
