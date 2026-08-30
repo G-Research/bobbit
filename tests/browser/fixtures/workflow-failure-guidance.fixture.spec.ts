@@ -2,7 +2,7 @@
 
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../../tests2/browser/fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const PROJECT_ENTRY = path.resolve("tests/ui-fixtures/goal-workflow-editor-entry.ts");
