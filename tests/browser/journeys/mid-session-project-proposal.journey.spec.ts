@@ -48,6 +48,10 @@ async function openProjectSession(page: Page, project: TestProject): Promise<str
 	return sessionId;
 }
 
+function projectProposalTab(page: Page) {
+	return page.locator('[data-testid="side-panel-tab"][data-panel-tab-id="proposal:project"]');
+}
+
 test.describe("Mid-session project proposal (non-assistant session)", () => {
 	test.afterEach(async () => {
 		for (const id of Array.from(createdSessions).reverse()) await deleteSession(id).catch(() => {});
@@ -77,7 +81,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		await sendMessage(page, "Please emit a project_proposal for testing");
 
 		// The Project tab should appear in the unified preview panel.
-		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
 
 		// The panel renders with data-panel="project-proposal" in registered mode.
@@ -117,7 +121,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		// Reload — proposal should stay gone, config stays.
 		await page.reload();
 		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator(".goal-tab-pill").filter({ hasText: /^Project/ })).toHaveCount(0);
+		await expect(projectProposalTab(page)).toHaveCount(0);
 
 		const cfgAfter = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
 		expect(cfgAfter.build_command).toBe("npm run build");
@@ -137,7 +141,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		await openProjectSession(page, project);
 		await sendMessage(page, "Please emit a project_proposal for testing");
 
-		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
 
 		const panel = page.locator('[data-panel="project-proposal"]').first();
@@ -200,7 +204,7 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		await openProjectSession(page, project);
 		await sendMessage(page, "Please emit a project_proposal for testing");
 
-		const projectTab = page.locator(".goal-tab-pill").filter({ hasText: /^Project/ }).first();
+		const projectTab = projectProposalTab(page);
 		await expect(projectTab).toBeVisible({ timeout: 15_000 });
 		const panel = page.locator('[data-panel="project-proposal"]').first();
 		await expect(panel).toBeVisible({ timeout: 10_000 });

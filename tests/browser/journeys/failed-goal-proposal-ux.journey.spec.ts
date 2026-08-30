@@ -16,7 +16,9 @@ async function assertMissingWorkflowPanel(page: Page, reason: string) {
 	await expect(titleInput, `${reason}: failed card must reopen its own draft, not the later successful retry`)
 		.toHaveValue("Missing Workflow Goal", { timeout: 10_000 });
 
-	const workflowError = page.locator('[data-testid="goal-proposal-workflow-error"]');
+	const workflowError = page
+		.locator("#side-panel-workspace")
+		.locator('[data-testid="goal-proposal-workflow-error"]');
 	await expect(workflowError, `${reason}: workflow validation error must be surfaced in the proposal footer/status area`)
 		.toContainText(WORKFLOW_ERROR_RE, { timeout: 10_000 });
 	await expect(workflowError).toContainText(/general/i);
