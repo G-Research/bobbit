@@ -6,7 +6,7 @@
 // reconciliation, and the generation-guarded stale-load drops (TOCTOU + the
 // writer-ordering matrix). No geometry — pure registry/event/lit logic.
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { syncCustomElements } from "./_setup/custom-elements.js";
+import { syncCustomElements } from "../../tests2/dom/_setup/custom-elements.js";
 import { html, render } from "lit";
 import type { ToolRenderer } from "../../src/ui/tools/types.js";
 
