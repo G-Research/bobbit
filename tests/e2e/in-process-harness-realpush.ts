@@ -40,7 +40,6 @@ installRunIsolation();
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
 export interface GatewayInfo {
