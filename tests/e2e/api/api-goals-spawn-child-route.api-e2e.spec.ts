@@ -33,7 +33,9 @@ import { join } from "node:path";
 import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
+	defaultProjectId,
 	deleteGoal,
+	nonGitCwd,
 	rawApiFetch,
 	readE2EToken,
 	registerProject,
@@ -103,31 +105,29 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 }
 
 /**
- * Create a parent goal in a real git repo so it gets a worktree
- * (`worktreePath`, `repoPath`, `branch`). Use `autoStartTeam: false` so
- * the team-lead doesn't actually spawn — we only need the goal record.
+ * Create a data-only parent by default; the two worktree assertions opt into
+ * the suite's real Git project. No parent team is started in either mode.
  */
-async function createParentGoal(): Promise<{ id: string; cwd: string; repoPath?: string; worktreePath?: string }> {
+async function createParentGoal(realWorktree = false): Promise<{ id: string; cwd: string; repoPath?: string; worktreePath?: string }> {
 	const resp = await apiFetch("/api/goals", {
 		method: "POST",
 		body: JSON.stringify({
 			title: `spawn-child route parent ${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-			cwd: gitProjectRoot,
-			projectId: gitProjectId,
+			cwd: realWorktree ? gitProjectRoot : nonGitCwd(),
+			projectId: realWorktree ? gitProjectId : await defaultProjectId(),
+			worktree: realWorktree,
 			autoStartTeam: false,
 			workflowId: "feature",
 		}),
 	});
 	expect(resp.status, await resp.clone().text()).toBe(201);
 	const created = await resp.json();
-	// Wait for setupStatus to settle — we need repoPath and worktreePath
-	// stamped before the spawn-child handler reads them.
 	const settled = await pollUntil(
 		async () => {
 			const r = await apiFetch(`/api/goals/${created.id}`);
 			if (r.status !== 200) return null;
 			const g = await r.json();
-			return g.setupStatus === "ready" && g.repoPath ? g : null;
+			return g.setupStatus === "ready" ? g : null;
 		},
 		{ timeoutMs: 30_000, intervalMs: 100, label: `parent ${created.id} setup ready` },
 	);
@@ -345,7 +345,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 	});
 
 	test("child cwd derived from parent.repoPath, not parent.cwd (no nested -wt/)", async () => {
-		const parent = await createParentGoal();
+		const parent = await createParentGoal(true);
 		// Sanity: the parent must have BOTH a worktreePath and a repoPath
 		// for the invariant to be testable. If either is absent (e.g. the
 		// harness env doesn't produce a worktree), the parent.repoPath-vs-
@@ -390,7 +390,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 	});
 
 	test("setup is triggered: child does NOT sit in setupStatus=preparing forever", async () => {
-		const parent = await createParentGoal();
+		const parent = await createParentGoal(true);
 		try {
 			const { status, body } = await spawnChildRaw({
 				parentId: parent.id,
@@ -539,8 +539,9 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 			method: "POST",
 			body: JSON.stringify({
 				title: `inherit parent ${Date.now()}`,
-				cwd: gitProjectRoot,
-				projectId: gitProjectId,
+				cwd: nonGitCwd(),
+				projectId: await defaultProjectId(),
+				worktree: false,
 				autoStartTeam: false,
 				workflowId: "feature",
 				inlineRoles: parentInline,
@@ -554,7 +555,7 @@ test.describe("POST /api/goals/:id/spawn-child — route wiring", () => {
 				const r = await apiFetch(`/api/goals/${parent.id}`);
 				if (r.status !== 200) return null;
 				const g = await r.json();
-				return g.setupStatus === "ready" && g.repoPath ? g : null;
+				return g.setupStatus === "ready" ? g : null;
 			},
 			{ timeoutMs: 30_000, intervalMs: 100, label: `parent ${parent.id} setup ready` },
 		);
