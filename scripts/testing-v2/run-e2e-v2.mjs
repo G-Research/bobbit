@@ -221,7 +221,7 @@ export function createCanonicalGroupCInvocation(specs, {
 // Windows). Keep the bound aligned with the global browser-render lease cap.
 export function resolveE2ePlaywrightWorkers(env = process.env) {
 	const requested = Number(env.E2E_V2_PW_WORKERS);
-	if (!Number.isInteger(requested) || requested < 1) return 2;
+	if (!Number.isInteger(requested) || requested < 1) return env === process.env && process.platform === "win32" ? 1 : 2;
 	return Math.min(4, requested);
 }
 
