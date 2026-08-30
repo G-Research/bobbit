@@ -3,16 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 
 guardProcessEnv();
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-setup-event-fence-"));
 process.env.BOBBIT_DIR = tmpRoot;
 
-const { persistOnce, subscribeToEvents } = await import("../../src/server/agent/session-setup.ts");
-const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
-const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
+const { persistOnce, subscribeToEvents } = await import("../../../src/server/agent/session-setup.ts");
+const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
+const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 
 afterAll(() => {
 	fs.rmSync(tmpRoot, { recursive: true, force: true });

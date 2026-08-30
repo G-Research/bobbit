@@ -19,8 +19,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { resolvePrompt, type SessionSetupPlan } from "../../src/server/agent/session-setup.ts";
-import type { EffectiveTool } from "../../src/server/agent/tool-activation.ts";
+import { resolvePrompt, type SessionSetupPlan } from "../../../src/server/agent/session-setup.ts";
+import type { EffectiveTool } from "../../../src/server/agent/tool-activation.ts";
 
 function tools(...names: string[]): EffectiveTool[] {
 	return names.map(name => ({ kind: "yaml" as const, name }));

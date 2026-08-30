@@ -10,8 +10,8 @@
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.ts";
+import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.ts";
 
 type SessionStoreMemFs = MemFs & {
 	openSync(file: string, flags: string): number;

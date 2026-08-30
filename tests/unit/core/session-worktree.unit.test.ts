@@ -15,7 +15,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { shouldCreateWorktree } from "../../src/server/agent/worktree-decision.js";
+import { shouldCreateWorktree } from "../../../src/server/agent/worktree-decision.js";
 
 describe("Session auto-worktree decision", () => {
 	describe("non-goal, non-assistant sessions", () => {

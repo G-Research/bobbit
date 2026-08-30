@@ -2,7 +2,7 @@
 // -triage PARTIAL: projectless-session MCP fail-closed). Faithful port of the
 // pure-unit "session MCP manager resolution fails closed for projectless sessions"
 // case — same assertions, vitest + fork env-guard.
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { test } from "vitest";
@@ -19,9 +19,9 @@ test("session MCP manager resolution fails closed for projectless sessions", asy
 	const bobbitDir = tmpDir("bobbit-mcp-cwd-scope-");
 	process.env.BOBBIT_DIR = bobbitDir;
 	delete process.env.BOBBIT_PI_DIR;
-	const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir.ts");
+	const { resetAgentDirStateForTests } = await import("../../../src/server/bobbit-dir.ts");
 	resetAgentDirStateForTests?.();
-	const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+	const { SessionManager } = await import("../../../src/server/agent/session-manager.ts");
 	const manager = new SessionManager();
 	try {
 		const cwd = tmpDir("bobbit-mcp-session-cwd-");

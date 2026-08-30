@@ -11,7 +11,7 @@ import {
 	replaceTag,
 	sessionShowsLastActivity,
 	sessionTeamKind,
-} from "../../src/shared/session-tags.js";
+} from "../../../src/shared/session-tags.js";
 
 describe("session tag normalization", () => {
 	it("reads legacy missing and malformed containers as empty arrays", () => {

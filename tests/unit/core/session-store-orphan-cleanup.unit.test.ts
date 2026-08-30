@@ -8,15 +8,15 @@ import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import type { Dirent, PathLike, PathOrFileDescriptor, Stats, WriteFileOptions } from "node:fs";
-import type { FsLike } from "../../src/server/gateway-deps.ts";
-import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
+import type { FsLike } from "../../../src/server/gateway-deps.ts";
+import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.ts";
 import {
 	scanOrphanedTranscriptsAsync,
 	shouldKeepDespiteOrphan,
 	type AsyncOrphanDirectory,
 	type AsyncOrphanScanFs,
-} from "../../src/server/agent/orphan-cleanup.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+} from "../../../src/server/agent/orphan-cleanup.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 type SessionStoreMemFs = MemFs & {
 	openSync(file: PathLike, flags: string): number;

@@ -12,8 +12,8 @@ import {
 	nextActiveAfterClose,
 	SidePanelWorkspaceError,
 	SidePanelWorkspaceLocks,
-} from "../../src/server/side-panel-workspace.ts";
-import type { SidePanelWorkspaceTab } from "../../src/shared/side-panel-workspace.ts";
+} from "../../../src/server/side-panel-workspace.ts";
+import type { SidePanelWorkspaceTab } from "../../../src/shared/side-panel-workspace.ts";
 
 const sessionId = "session-1";
 
