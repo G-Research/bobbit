@@ -109,7 +109,7 @@ test.describe("remote-state coordinator native worktree route", () => {
 		let releaseFetch!: () => void;
 		const fetchStarted = new Promise<void>(resolve => { resolveFetchStarted = resolve; });
 		const fetchReleased = new Promise<void>(resolve => { releaseFetch = resolve; });
-		const isolatedRemote = `https://token:secret@example.github.test/acme/widget-${Date.now()}.git`;
+		const isolatedRemote = `https://token:secret@github.com/acme/widget-${Date.now()}.git`;
 		let primaryWs: Awaited<ReturnType<typeof connectWs>> | undefined;
 		let siblingWs: Awaited<ReturnType<typeof connectWs>> | undefined;
 
