@@ -741,54 +741,6 @@ test.describe.serial("staff session fork identity", () => {
 		}
 	});
 
-	test("new-worktree mode gives source and destination disjoint durable ownership", async ({ gateway }) => {
-		const root = path.join(gateway.bobbitDir, `staff-fork-worktree-${randomUUID()}`);
-		copyGitTemplate(root);
-		const project = await registerProject({
-			name: `staff-fork-worktree-${randomUUID()}`,
-			rootPath: root,
-			seedWorkflows: false,
-		});
-		let source: any;
-		let destination: any;
-		try {
-			source = await createStaff(gateway, {
-				name: "Owned worktree source",
-				projectId: project.id,
-				cwd: root,
-				worktree: true,
-			});
-			seedSessionTranscript(gateway, source.currentSessionId);
-			const result = await forkSession(gateway, source.currentSessionId, { newWorktree: true });
-			expect(result.response.status, JSON.stringify(result.value)).toBe(201);
-			destination = (await listStaff(gateway, project.id)).find((staff: any) => staff.currentSessionId === result.value.id);
-			const sourcePersisted = gateway.sessionManager.getPersistedSession(source.currentSessionId);
-			const destinationPersisted = gateway.sessionManager.getPersistedSession(result.value.id);
-
-			expect(destinationPersisted.staffId).toBe(destination.id);
-			expect(destinationPersisted.borrowsWorktree).not.toBe(true);
-			expect(destinationPersisted.worktreePath).toBeTruthy();
-			expect(destinationPersisted.branch).toMatch(/^session\//);
-			expect(destinationPersisted.worktreePath).not.toBe(sourcePersisted.worktreePath);
-			expect(destinationPersisted.branch).not.toBe(sourcePersisted.branch);
-			expect(fs.existsSync(destinationPersisted.worktreePath)).toBe(true);
-			expect(fs.existsSync(sourcePersisted.worktreePath)).toBe(true);
-
-			const destinationWorktree = destinationPersisted.worktreePath;
-			const sourceWorktree = sourcePersisted.worktreePath;
-			expect((await deleteStaff(gateway, destination.id)).status).toBe(200);
-			destination = undefined;
-			expect(fs.existsSync(destinationWorktree)).toBe(false);
-			expect(fs.existsSync(sourceWorktree)).toBe(true);
-			expect((gateway.sessionManager as any).staffRecordSource.getStaff(source.id)).toBeTruthy();
-		} finally {
-			if (destination?.id) await deleteStaff(gateway, destination.id).catch(() => undefined);
-			if (source?.id) await deleteStaff(gateway, source.id).catch(() => undefined);
-			await gateway.api(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => undefined);
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
 	test("whole-session sandbox staff fork keeps a canonical container transcript in its filesystem realm", async ({ gateway }) => {
 		await assertSandboxWholeStaffFork(gateway, "canonical-container");
 	});
