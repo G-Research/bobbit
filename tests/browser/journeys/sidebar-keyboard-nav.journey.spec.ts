@@ -1,9 +1,9 @@
 /**
  * Sidebar keyboard navigation representative real-app smoke.
  * The exhaustive visible-row/order/wrap/archive matrix lives in the file://
- * fixture at tests/ui-fixtures/sidebar-keyboard-nav-fixture.spec.ts.
+ * fixture at tests2/browser/fixtures/sidebar-keyboard-nav-fixture.spec.ts.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
@@ -11,8 +11,8 @@ import {
 	deleteSession,
 	deleteGoal,
 	waitForHealth,
-} from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

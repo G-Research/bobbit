@@ -1,10 +1,10 @@
 /**
  * Retained full-stack smoke for sidebar filter/search integration.
- * Exhaustive filter/search matrices live in tests/ui-fixtures/sidebar-filter-search-fixture.spec.ts.
+ * Exhaustive filter/search matrices live in tests2/browser/fixtures/sidebar-filter-search-fixture.spec.ts.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
-import { apiFetch, createSession, deleteSession, nonGitCwd, waitForHealth } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { apiFetch, createSession, deleteSession, nonGitCwd, waitForHealth } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 async function resetFilters(page: Page): Promise<void> {
 	await page.evaluate(() => {

@@ -1,12 +1,12 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Sidebar Refresh agent action", () => {
 	const sessionIds: string[] = [];

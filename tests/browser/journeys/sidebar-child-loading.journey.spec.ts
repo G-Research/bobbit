@@ -5,15 +5,15 @@
  * coverage for GET /api/goals/:id/team/agents?include=archived lives in
  * tests/e2e/sidebar-api.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	createGoal,
 	startTeam,
 	teardownTeam,
 	deleteGoal,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Sidebar child auto-loading", () => {
 	const goalIds: string[] = [];

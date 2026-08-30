@@ -1,15 +1,15 @@
 /**
  * Sidebar navigation E2E smoke — the row-selection/team/dashboard matrix now lives in
- * tests/ui-fixtures/sidebar-navigation-fixture.spec.ts.
+ * tests/browser/fixtures/sidebar-navigation-fixture.fixture.spec.ts.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 async function waitForActiveSessionReady(page: Page, sessionId: string): Promise<void> {
 	await expect.poll(
