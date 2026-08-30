@@ -1,10 +1,10 @@
 /**
  * Minimal desktop full-stack smoke for per-project Archived subsections.
- * Collapse/search/order matrices live in tests/ui-fixtures/sidebar-archived-fixture.spec.ts.
+ * Collapse/search/order matrices live in tests2/browser/fixtures/sidebar-archived-fixture.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, deleteGoal, waitForHealth } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, deleteGoal, waitForHealth } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

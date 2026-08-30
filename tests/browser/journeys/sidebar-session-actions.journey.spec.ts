@@ -1,15 +1,15 @@
 /**
  * Sidebar session actions E2E smokes — the start-team/start-one action matrix now
- * lives in tests/ui-fixtures/sidebar-navigation-fixture.spec.ts.
+ * lives in tests/browser/fixtures/sidebar-navigation-fixture.fixture.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	createSession,
 	deleteSession,
 	apiFetch,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Sidebar session actions", () => {
 	const sessionIds: string[] = [];

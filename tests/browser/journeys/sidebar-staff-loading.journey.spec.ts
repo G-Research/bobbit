@@ -9,9 +9,9 @@
  * This test asserts the loader appears before navigation completes,
  * mirroring the behaviour of the "+ New Goal" / "+ Role" buttons.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Sidebar +Staff loading feedback", () => {
 	test("shows bobbit-loader immediately on click", async ({ page }) => {

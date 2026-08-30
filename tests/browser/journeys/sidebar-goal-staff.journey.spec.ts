@@ -6,10 +6,10 @@
  *   SB-22: Re-attempt archived/fresh goal → goal assistant opens
  *   SB-23: Archive goal lifecycle (live → archive → appears in archived section)
  */
-import { test, expect } from "../gateway-harness.js";
-import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp, createGoalAssistantViaUI } from "../ui/ui-helpers.js";
-import { filtersButton, clickShowArchivedToggle } from "../ui/utils/sidebar-filters.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../../e2e/e2e-setup.js";
+import { openApp, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "../../e2e/ui/utils/sidebar-filters.js";
 
 test.describe("Sidebar goal actions & staff", () => {
 	const goalIds: string[] = [];

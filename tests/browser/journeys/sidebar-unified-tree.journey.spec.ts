@@ -4,7 +4,7 @@
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, expect, type Page, type GatewayInfo } from "../gateway-harness.js";
+import { test, expect, type Page, type GatewayInfo } from "../../e2e/gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -16,8 +16,8 @@ import {
 	teardownTeam,
 	waitForHealth,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { navigateToHash, openApp } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { navigateToHash, openApp } from "../../e2e/ui/ui-helpers.js";
 
 const TREE_KEY_PREFIX = "sidebar-tree/v1";
 const SPEC = "Unified sidebar tree browser E2E fixture, padded to satisfy goal spec validation.";
