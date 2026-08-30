@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/ui-fixtures/preview-archived-snapshot.spec.ts (v2-dom tier).
 // Acceptance criterion #8: archived sessions stamped with v1 / v2 markers still

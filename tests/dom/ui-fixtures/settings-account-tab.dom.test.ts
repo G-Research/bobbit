@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/ui-fixtures/settings-account-tab.spec.ts (v2-dom tier).
 // Renders the REAL renderAccountTab() Google-OAuth row under happy-dom (was an
