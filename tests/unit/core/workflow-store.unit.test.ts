@@ -24,8 +24,8 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "yaml";
 
-import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
-import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
+import { ProjectConfigStore } from "../../../src/server/agent/project-config-store.ts";
+import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
 
 let tmpRoot: string;
 let configDir: string;

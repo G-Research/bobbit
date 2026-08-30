@@ -9,8 +9,8 @@
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 
-import { WorkflowManager } from "../../src/server/agent/workflow-manager.ts";
-import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.ts";
+import { WorkflowManager } from "../../../src/server/agent/workflow-manager.ts";
+import type { Workflow, WorkflowGate } from "../../../src/server/agent/workflow-store.ts";
 
 // ---------------------------------------------------------------------------
 // In-memory mock WorkflowStore

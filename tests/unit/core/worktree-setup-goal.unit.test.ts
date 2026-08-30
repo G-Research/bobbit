@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import {
 	DEFAULT_WORKTREE_SETUP_TIMEOUT_MS,
 	resolveSetupTimeoutMs,
-} from "../../src/server/skills/worktree-setup.ts";
+} from "../../../src/server/skills/worktree-setup.ts";
 
 describe("resolveSetupTimeoutMs", () => {
 	it("exposes the documented 120s default constant", () => {

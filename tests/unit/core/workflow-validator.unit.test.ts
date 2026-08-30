@@ -15,7 +15,7 @@ import {
 	WorkflowResolveError,
 	type ValidatorWorkflow,
 	type WorkflowComponentRef,
-} from "../../src/server/agent/workflow-validator.ts";
+} from "../../../src/server/agent/workflow-validator.ts";
 
 const components: WorkflowComponentRef[] = [
 	{ name: "api", commands: { build: "npm run build", test: "npm test", check: "npm run check" } },

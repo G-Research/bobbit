@@ -21,11 +21,11 @@
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { RECOVERY_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
-import { classifyWorktrees, sweepOrphanedWorktrees } from "../../src/server/agent/worktree-sweeper.ts";
-import { normalizeWorktreeHostPath } from "../../src/server/agent/worktree-reference-guard.ts";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import type { RemoteGitPolicy } from "../../src/server/skills/git.ts";
+import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
+import { classifyWorktrees, sweepOrphanedWorktrees } from "../../../src/server/agent/worktree-sweeper.ts";
+import { normalizeWorktreeHostPath } from "../../../src/server/agent/worktree-reference-guard.ts";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
+import type { RemoteGitPolicy } from "../../../src/server/skills/git.ts";
 
 describe("worktree-sweeper — multi-repo classification", () => {
 	it("recognises per-repo worktrees of the same session as active in both repos", () => {

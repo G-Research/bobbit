@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { WorktreeInventoryService, classifyPoolReclaimCandidate, isContainerInternalWorktreePath, type WorktreeInventoryFs } from "../../src/server/agent/worktree-inventory.ts";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { createMemFs, type MemFs } from "../harness/mem-fs.js";
+import { WorktreeInventoryService, classifyPoolReclaimCandidate, isContainerInternalWorktreePath, type WorktreeInventoryFs } from "../../../src/server/agent/worktree-inventory.ts";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
+import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
 
 function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?: any[]; archivedSessions?: any[]; goals?: any[]; teams?: any[]; staff?: any[]; components?: any[]; filesystem?: MemFs | typeof fs }) {
 	return {

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it, vi } from "vitest";
 
-import * as serverExports from "../../src/server/server.ts";
-import { WorktreePool } from "../../src/server/agent/worktree-pool.ts";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import * as serverExports from "../../../src/server/server.ts";
+import { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
 
 interface ShutdownPool {
 	stop(): Promise<void>;

@@ -17,8 +17,8 @@ import {
 	describeWsPayload,
 	formatWsPayloadDiagnostics,
 	guardWebSocketOverflow,
-} from "../../src/server/ws-overflow-guard.ts";
-import { decideResumeReplay, RESUME_REPLAY_MAX_BYTES, waitForReplayDrain } from "../../src/server/replay-pacing.ts";
+} from "../../../src/server/ws-overflow-guard.ts";
+import { decideResumeReplay, RESUME_REPLAY_MAX_BYTES, waitForReplayDrain } from "../../../src/server/replay-pacing.ts";
 
 test("OG-01: under threshold => send", () => {
 	const action = decideOverflowAction(0, false);
