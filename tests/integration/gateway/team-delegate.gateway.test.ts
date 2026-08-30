@@ -1,0 +1,267 @@
+/**
+ * v2 integration — `team_delegate` blocking-lifecycle + model inheritance.
+ *
+ * Ported faithfully from tests/e2e/team-delegate.spec.ts (source of truth) onto
+ * the Test Suite v2 fork-scoped gateway fixture + in-process mock bridge. The
+ * scoping / authz surface of that spec is already covered by
+ * tests2/core/orchestration-core.test.ts; this port preserves the sub-behaviours
+ * the triage flagged as GENUINE-LOSS:
+ *   • blocking one-shot delegate → spawn → wait → collected output → auto-dismiss,
+ *   • parallel blocking delegate WAITS FOR ALL children,
+ *   • a spawned child inherits the parent's CURRENT model (regression vs the old
+ *     system-default drop) + per-call `model` override wins.
+ *
+ * Drives the real `/api/sessions/:id/orchestrate/*` routes (in-process
+ * OrchestrationCore) end to end against the deterministic mock agent — a
+ * delegate child auto-runs its instructions prompt and the mock responds "OK",
+ * so blocking flows settle in milliseconds (never test:manual).
+ */
+import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { apiFetch, createSession, deleteSession, connectWs, defaultProject, type WsConnection } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import {
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../../src/server/agent/author-sidecar.js";
+import { sanitizeAuthorIdComponent } from "../../../src/server/agent/message-author.js";
+
+const OPUS = { provider: "anthropic", modelId: "claude-opus-5", thinkingLevel: "xhigh" } as const;
+const DELEGATE_KICKOFF = "Execute the task described in your system prompt. Follow the instructions carefully.";
+
+function messageText(message: any): string {
+	if (typeof message?.content === "string") return message.content;
+	if (!Array.isArray(message?.content)) return "";
+	return message.content
+		.filter((part: any) => part?.type === "text" && typeof part.text === "string")
+		.map((part: any) => part.text)
+		.join("\n");
+}
+
+async function getMessages(conn: WsConnection): Promise<any[]> {
+	const cursor = conn.messageCount();
+	conn.send({ type: "get_messages" });
+	const frame = await conn.waitForFrom(cursor, (message) => message.type === "messages");
+	return Array.isArray(frame.data) ? frame.data : frame.data?.messages ?? [];
+}
+
+/** Poll a predicate until it returns a truthy value, or throw on timeout. */
+async function pollUntil<T>(
+	predicate: () => T | Promise<T>,
+	opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {},
+): Promise<T> {
+	const timeoutMs = opts.timeoutMs ?? 10_000;
+	const intervalMs = opts.intervalMs ?? 50;
+	const label = opts.label ?? "predicate";
+	const start = Date.now();
+	let lastErr: unknown;
+	while (Date.now() - start < timeoutMs) {
+		try { const v = await predicate(); if (v) return v; } catch (err) { lastErr = err; }
+		await new Promise(r => setTimeout(r, intervalMs));
+	}
+	const errSuffix = lastErr ? ` (last error: ${(lastErr as Error)?.message ?? lastErr})` : "";
+	throw new Error(`pollUntil("${label}") timed out after ${Date.now() - start}ms${errSuffix}`);
+}
+
+async function orchestrate(ownerId: string, verb: string, body?: unknown): Promise<{ status: number; json: any }> {
+	const resp = await apiFetch(`/api/sessions/${ownerId}/orchestrate/${verb}`, {
+		method: "POST",
+		body: JSON.stringify(body ?? {}),
+	});
+	let json: any = undefined;
+	try { json = await resp.json(); } catch { /* chunked / empty */ }
+	return { status: resp.status, json };
+}
+
+async function listChildren(ownerId: string): Promise<any[]> {
+	const resp = await apiFetch(`/api/sessions/${ownerId}/orchestrate/children`);
+	expect(resp.status).toBe(200);
+	return (await resp.json()).children ?? [];
+}
+
+/** Set a session's model via WS and wait until it persists. */
+async function setSessionModel(gateway: any, sessionId: string, provider: string, modelId: string, thinkingLevel: string): Promise<void> {
+	const conn = await connectWs(sessionId);
+	try {
+		conn.send({ type: "set_model", provider, modelId, thinkingLevel });
+		await pollUntil(async () => {
+			const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+			return persisted?.modelProvider === provider
+				&& persisted.modelId === modelId
+				&& persisted.effectiveThinkingLevel === thinkingLevel ? true : null;
+		}, { timeoutMs: 5_000, intervalMs: 50, label: `tuple ${provider}/${modelId}/${thinkingLevel} persisted` });
+	} finally {
+		conn.close();
+	}
+}
+
+test.describe("team_delegate — blocking one-shot (delegate parity)", () => {
+	test("single blocking delegate spawns, waits, returns output, and auto-dismisses", async () => {
+		const parent = await createSession();
+		try {
+			const { status, json } = await orchestrate(parent, "delegate", { instructions: "do a small task" });
+			expect(status).toBe(200);
+			expect(Array.isArray(json.delegates)).toBe(true);
+			expect(json.delegates.length).toBe(1);
+			expect(json.delegates[0].status).toBe("completed");
+			// Mock agent's default reply is "OK" → that is the collected output.
+			expect(json.delegates[0].output).toContain("OK");
+			// Auto-dismiss: no tracked children remain after a blocking delegate.
+			expect(await listChildren(parent)).toHaveLength(0);
+		} finally {
+			await deleteSession(parent);
+		}
+	});
+
+	test("parallel blocking delegate waits for ALL children", async () => {
+		const parent = await createSession();
+		try {
+			const { status, json } = await orchestrate(parent, "delegate", {
+				parallel: [{ instructions: "task one" }, { instructions: "task two" }, { instructions: "task three" }],
+			});
+			expect(status).toBe(200);
+			expect(json.delegates.length).toBe(3);
+			expect(json.delegates.every((d: any) => d.status === "completed")).toBe(true);
+			expect(await listChildren(parent)).toHaveLength(0);
+		} finally {
+			await deleteSession(parent);
+		}
+	});
+});
+
+test.describe("team_delegate — accountable kickoff author", () => {
+	test("renamed staff owner persists its current author and reloads it without changing prompt bytes or role", async ({ gateway }) => {
+		const project = await defaultProject();
+		const oldName = `Delegate Staff Old ${Date.now()}`;
+		const newName = `Delegate Staff New ${Date.now()}`;
+		const created = await apiFetch("/api/staff", {
+			method: "POST",
+			body: JSON.stringify({
+				name: oldName,
+				systemPrompt: "Own a delegate author regression.",
+				cwd: project.rootPath,
+				projectId: project.id,
+				worktree: false,
+			}),
+		});
+		expect(created.status, await created.clone().text()).toBe(201);
+		const staff = await created.json();
+		const parent = staff.currentSessionId as string;
+		let childId: string | undefined;
+		try {
+			const renamed = await apiFetch(`/api/staff/${staff.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ name: newName }),
+			});
+			expect(renamed.status, await renamed.clone().text()).toBe(200);
+			expect(gateway.sessionManager.getSession(parent)?.title).toBe(oldName);
+
+			const { status, json } = await orchestrate(parent, "spawn", {
+				instructions: "delegate author lifecycle",
+			});
+			expect(status).toBe(201);
+			childId = json.childSessionId as string;
+			expect(childId).toBeTruthy();
+
+			await pollUntil(() => gateway.sessionManager.getSession(childId!)?.status === "idle", {
+				timeoutMs: 5_000,
+				intervalMs: 25,
+				label: "delegate kickoff settled",
+			});
+
+			const sanitizedStaffId = sanitizeAuthorIdComponent(staff.id, "unknown", 128);
+			const agentAuthor = { kind: "agent", id: `staff:${sanitizedStaffId}`, label: newName };
+			const modelPrefix = `[${newName} (${sanitizedStaffId.slice(0, 6)})]: `;
+			const piKickoff = `${modelPrefix}${DELEGATE_KICKOFF}`;
+			const rawMessages = gateway.sessionManager.getSession(childId!)?.rpcClient?._agent?.conversationMessages;
+			expect(Array.isArray(rawMessages), "delegate child exposes the in-process Pi transcript").toBe(true);
+			expect(rawMessages.filter((message: any) => message.role === "user" && messageText(message) === piKickoff),
+				"authenticated owner agent prefix is injected exactly once at Pi").toHaveLength(1);
+
+			const binding = readAuthorSidecar(childId!).find((entry) =>
+				promptAuthorBindingMatchesText(entry, piKickoff),
+			);
+			expect(binding).toMatchObject({
+				schemaVersion: 2,
+				modelTextDigest: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+				modelPrefix,
+				source: "agent",
+				author: agentAuthor,
+				settlement: { outcome: "echoed" },
+			});
+			expect(promptAuthorBindingMatchesText(binding!, DELEGATE_KICKOFF),
+				"delegate sidecar digest covers decorated Pi text, not visible text").toBe(false);
+
+			// Attach only after the turn has settled: get_messages must reconstruct
+			// this persisted transcript row from the Bobbit sidecar, not a live ledger.
+			const reloaded = await connectWs(childId!);
+			try {
+				const messages = await getMessages(reloaded);
+				const kickoff = messages.find((message) => message.role === "user" && messageText(message) === DELEGATE_KICKOFF);
+				expect(kickoff).toMatchObject({
+					role: "user",
+					author: binding!.author,
+				});
+				expect(messageText(kickoff)).toBe(DELEGATE_KICKOFF);
+				expect(messages.some((message) => message.role === "assistant")).toBe(true);
+			} finally {
+				reloaded.close();
+			}
+		} finally {
+			if (childId) await orchestrate(parent, "dismiss", { childSessionId: childId }).catch(() => undefined);
+			await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => undefined);
+		}
+	});
+});
+
+test.describe("team_delegate — model inheritance", () => {
+	test("a spawned child inherits the parent's CURRENT model/thinking tuple (not the system default)", async ({ gateway }) => {
+		const parent = await createSession();
+		try {
+			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
+			const { status, json } = await orchestrate(parent, "spawn", { instructions: "inherit-model child" });
+			expect(status).toBe(201);
+			const childId = json.childSessionId as string;
+			expect(childId).toBeTruthy();
+			// The child session is pinned to the owner's CURRENT model end-to-end
+			// (REST route → OrchestrationCore.spawn → createDelegateSession →
+			// session-setup), NOT dropped to the system default.
+			const childTuple = await pollUntil(async () => {
+				const child = gateway.sessionManager.getSession(childId);
+				return child?.spawnPinnedModel && child.spawnPinnedThinkingLevel
+					? { model: child.spawnPinnedModel, thinkingLevel: child.spawnPinnedThinkingLevel }
+					: null;
+			}, { timeoutMs: 5_000, intervalMs: 25, label: "child spawn-pinned tuple" });
+			expect(childTuple).toEqual({
+				model: `${OPUS.provider}/${OPUS.modelId}`,
+				thinkingLevel: OPUS.thinkingLevel,
+			});
+			await orchestrate(parent, "dismiss", { childSessionId: childId });
+		} finally {
+			await deleteSession(parent);
+		}
+	});
+
+	test("per-call model/thinking override wins over inheritance", async ({ gateway }) => {
+		const parent = await createSession();
+		try {
+			await setSessionModel(gateway, parent, OPUS.provider, OPUS.modelId, OPUS.thinkingLevel);
+			const override = { model: "anthropic/claude-sonnet-5", thinkingLevel: "medium" } as const;
+			const { status, json } = await orchestrate(parent, "spawn", {
+				instructions: "override-model child",
+				model: override.model,
+				thinking_level: override.thinkingLevel,
+			});
+			expect(status).toBe(201);
+			const childId = json.childSessionId as string;
+			const childTuple = await pollUntil(async () => {
+				const child = gateway.sessionManager.getSession(childId);
+				return child?.spawnPinnedModel && child.spawnPinnedThinkingLevel
+					? { model: child.spawnPinnedModel, thinkingLevel: child.spawnPinnedThinkingLevel }
+					: null;
+			}, { timeoutMs: 5_000, intervalMs: 25, label: "child override tuple" });
+			expect(childTuple).toEqual(override);
+			await orchestrate(parent, "dismiss", { childSessionId: childId });
+		} finally {
+			await deleteSession(parent);
+		}
+	});
+});
