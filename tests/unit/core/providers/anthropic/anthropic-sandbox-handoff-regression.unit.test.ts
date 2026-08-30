@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -7,8 +7,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import path from "node:path";
 import { tmpdir } from "node:os";
 
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { SessionManager } from "../../src/server/agent/session-manager.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { SessionManager } from "../../../../../src/server/agent/session-manager.js";
 import {
 	buildSandboxAgentAuthJson,
 	detectHostTokens,
@@ -17,7 +17,7 @@ import {
 	resolveHostTokenValue,
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsAnthropicAuth,
-} from "../../src/server/agent/host-tokens.js";
+} from "../../../../../src/server/agent/host-tokens.js";
 
 const originalBobbitAgentDir = process.env.BOBBIT_AGENT_DIR;
 const originalBobbitDir = process.env.BOBBIT_DIR;

@@ -7,7 +7,7 @@ import {
 	GATEWAY, byId, collectAigwProviderDnsHosts, createAigwGuardedLookup, loadFixture,
 	normalizeAigwPricing, normalizeWellKnownCost, seedDefaultModelsFromWellKnown,
 	translateWellKnown,
-} from "./helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
 
 describe("translateWellKnown — provider → pi-ai api mapping", () => {
 	it("routes @ai-sdk/openai to openai-responses on its own /openai/v1 baseURL with bare ids", () => {

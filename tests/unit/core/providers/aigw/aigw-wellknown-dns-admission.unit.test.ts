@@ -9,7 +9,7 @@ import path from "node:path";
 import {
 	GATEWAY, filterValidatedProviderUrls, getAigwProviderDnsGuardHosts, removeAigw,
 	replaceAigwProviderDnsGuardHosts, resetAgentDirStateForTests, translateWellKnown,
-} from "./helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
 
 describe("AIGW DNS admission lifecycle", () => {
 	afterEach(() => replaceAigwProviderDnsGuardHosts([]));

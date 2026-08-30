@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -9,8 +9,8 @@ import path from "node:path";
 import { Worker } from "node:worker_threads";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import { AtomicCredentialStore } from "../../src/server/auth/credential-store.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
+import { AtomicCredentialStore } from "../../../../../src/server/auth/credential-store.js";
 
 const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-anthropic-persistence-"));
 const agentDir = path.join(tmp, "agent");
@@ -25,7 +25,7 @@ const {
 	refreshGoogleOAuthToken,
 	refreshOAuthToken,
 	stopFlowCleanup,
-} = await import("../../src/server/auth/oauth.js");
+} = await import("../../../../../src/server/auth/oauth.js");
 
 const realFetch = globalThis.fetch;
 

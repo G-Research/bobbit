@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -27,7 +27,7 @@ import http from "node:http";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { resetAgentDirStateForTests } from "../../../../../src/server/bobbit-dir.js";
 
 const EXPECTED_HEADER_VALUE =
 	`!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`;
@@ -77,8 +77,8 @@ beforeEach(() => {
 	delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
 });
 
-const { startupAigwCheck, discoverAigwModels, configureAigwRuntimeFlags } = await import("../../src/server/agent/aigw-manager.js");
-const { PreferencesStore } = await import("../../src/server/agent/preferences-store.js");
+const { startupAigwCheck, discoverAigwModels, configureAigwRuntimeFlags } = await import("../../../../../src/server/agent/aigw-manager.js");
+const { PreferencesStore } = await import("../../../../../src/server/agent/preferences-store.js");
 
 function readModels(): any {
 	const f = path.join(tmp, "models.json");
