@@ -15,11 +15,11 @@
  *   (c) `ProjectSandbox.init()` refuses to run (no Docker, no git clone, no
  *       one-off state layout) for those ids as a defensive backstop.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { SandboxManager, isSandboxExemptProject, type SandboxBootstrap } from "../src/server/agent/sandbox-manager.ts";
-import { ProjectSandbox } from "../src/server/agent/project-sandbox.ts";
-import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "../src/server/agent/project-registry.ts";
+import { SandboxManager, isSandboxExemptProject, type SandboxBootstrap } from "../../../src/server/agent/sandbox-manager.ts";
+import { ProjectSandbox } from "../../../src/server/agent/project-sandbox.ts";
+import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "../../../src/server/agent/project-registry.ts";
 
 describe("Headquarters/system sandbox exemption", () => {
 	it("isSandboxExemptProject flags only HQ and system", () => {

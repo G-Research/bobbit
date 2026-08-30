@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, it, after } from "node:test";
+import { afterAll as after, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { makeTmpDir } from "./helpers/tmp.ts";
+import { makeTmpDir } from "../../helpers/tmp.ts";
 
 const tmpRoot = makeTmpDir("runtime-project-scope-");
 
@@ -10,8 +10,8 @@ after(() => {
 	try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
-const { ProjectRegistry } = await import("../src/server/agent/project-registry.ts");
-const { resolveProjectForRequest, validateExecutionCwd } = await import("../src/server/agent/resolve-project.ts");
+const { ProjectRegistry } = await import("../../../src/server/agent/project-registry.ts");
+const { resolveProjectForRequest, validateExecutionCwd } = await import("../../../src/server/agent/resolve-project.ts");
 
 function freshDir(name: string): string {
 	const dir = path.join(tmpRoot, `${name}-${Date.now()}-${Math.random().toString(16).slice(2)}`);

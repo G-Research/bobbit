@@ -8,13 +8,13 @@
  * The fix adds seedModelDefaultsFromLegacy() which is called after migration to
  * non-destructively seed the missing keys.
  */
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { migrateLegacyHeadquartersDirectory, seedModelDefaultsFromLegacy } = await import("../src/server/agent/state-migration.ts");
+const { migrateLegacyHeadquartersDirectory, seedModelDefaultsFromLegacy } = await import("../../../src/server/agent/state-migration.ts");
 
 // Pin BOBBIT_SECRETS_DIR to an isolated temp dir so the test never writes admin
 // secrets into the developer's home directory.

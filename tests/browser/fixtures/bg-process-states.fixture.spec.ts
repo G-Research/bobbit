@@ -6,7 +6,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "./fixtures/build-bundle.js";
+import { buildBundle } from "../../fixtures/build-bundle.js";
 
 const FIXTURE = `file://${path.resolve("tests/bg-process-states.html").replace(/\\/g, "/")}`;
 const TIMER_FIXTURE_PATH = path.resolve("tests/fixtures/bg-process-timer.html");
@@ -84,7 +84,7 @@ async function ready(page: Page) {
 	await page.waitForFunction(() => (window as any)._testReady === true);
 }
 
-async function createPill(page: Page, processInfo: typeof RUNNING_PROCESS) {
+async function createPill(page: Page, processInfo: Record<string, unknown>) {
 	return page.evaluate((p) => {
 		const pill = (window as any).createPill(p);
 		return pill !== null;
@@ -340,7 +340,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__dismissCalls = [];
-			pill.onDismiss = (id) => (window as any).__dismissCalls.push(id);
+			pill.onDismiss = (id: string) => (window as any).__dismissCalls.push(id);
 		}, UNRECOVERABLE_PROCESS);
 
 		await page.locator("bg-process-pill [data-x-btn]").click();
@@ -353,7 +353,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
-			pill.onKill = (id) => (window as any).__killCalls.push(id);
+			pill.onKill = (id: string) => (window as any).__killCalls.push(id);
 		}, RUNNING_PROCESS);
 
 		await page.locator("bg-process-pill [data-toggle-btn]").click();
@@ -372,7 +372,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
-			pill.onKill = (id) => (window as any).__killCalls.push(id);
+			pill.onKill = (id: string) => (window as any).__killCalls.push(id);
 		}, RUNNING_PROCESS);
 
 		await page.locator("bg-process-pill [data-toggle-btn]").click();
@@ -387,7 +387,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__dismissCalls = [];
-			pill.onDismiss = (id) => (window as any).__dismissCalls.push(id);
+			pill.onDismiss = (id: string) => (window as any).__dismissCalls.push(id);
 		}, EXITED_OK_PROCESS);
 
 		await page.locator("bg-process-pill [data-toggle-btn]").click();
@@ -412,7 +412,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__killCalls = [];
-			pill.onKill = (id) => (window as any).__killCalls.push(id);
+			pill.onKill = (id: string) => (window as any).__killCalls.push(id);
 		}, RUNNING_PROCESS);
 
 		await page.locator("bg-process-pill [data-x-btn]").click();
@@ -450,7 +450,7 @@ test.describe("BgProcessPill kill and dismiss", () => {
 		await page.evaluate((p) => {
 			const pill = (window as any).createPill(p);
 			(window as any).__dismissCalls = [];
-			pill.onDismiss = (id) => (window as any).__dismissCalls.push(id);
+			pill.onDismiss = (id: string) => (window as any).__dismissCalls.push(id);
 		}, EXITED_OK_PROCESS);
 
 		await page.locator("bg-process-pill [data-x-btn]").click();

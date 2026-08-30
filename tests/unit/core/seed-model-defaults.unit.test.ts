@@ -1,10 +1,10 @@
-import { describe, it, beforeEach, afterEach } from "node:test";
+import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const { seedModelDefaultsFromLegacy, MODEL_DEFAULT_PREF_KEYS } = await import("../src/server/agent/state-migration.ts");
+const { seedModelDefaultsFromLegacy, MODEL_DEFAULT_PREF_KEYS } = await import("../../../src/server/agent/state-migration.ts");
 
 function tmpDir(prefix = "bobbit-seed-model-defaults-"): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));

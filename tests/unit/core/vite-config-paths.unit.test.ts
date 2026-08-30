@@ -15,9 +15,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { test } from "vitest";
 
-const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const viteConfig = fs.readFileSync(path.join(projectRoot, "vite.config.ts"), "utf-8");
 const bobbitDir = fs.readFileSync(path.join(projectRoot, "src", "server", "bobbit-dir.ts"), "utf-8");
 
