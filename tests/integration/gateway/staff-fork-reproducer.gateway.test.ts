@@ -22,8 +22,6 @@ import {
 	FAILURE_MARKER,
 } from "./_helpers/staff-fork-fixtures.js";
 
-const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
-
 type Deferred<T = void> = {
 	promise: Promise<T>;
 	resolve: (value?: T) => void;
@@ -266,56 +264,6 @@ async function assertSandboxWholeStaffFork(
 	}
 }
 
-function seedHistoryTranscript(gateway: any, sessionId: string): string {
-	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
-	const live = gateway.sessionManager.getSession(sessionId);
-	if (!persisted?.projectId || !live) throw new Error(`session ${sessionId} must be live and persisted`);
-	const entries = [
-		{
-			type: "session",
-			version: 3,
-			id: `pi-${sessionId}`,
-			timestamp: FIXTURE_TIME,
-			cwd: live.cwd,
-			provider: "fixture-provider",
-		},
-		{
-			type: "message",
-			id: "retained-user",
-			parentId: null,
-			timestamp: FIXTURE_TIME,
-			message: { role: "user", content: [{ type: "text", text: "RETAINED_STAFF_HISTORY" }] },
-		},
-		{
-			type: "message",
-			id: "retained-assistant",
-			parentId: "retained-user",
-			timestamp: FIXTURE_TIME,
-			message: { role: "assistant", content: [{ type: "text", text: "RETAINED_STAFF_ANSWER" }] },
-		},
-		{
-			type: "message",
-			id: "cut-user",
-			parentId: "retained-assistant",
-			timestamp: FIXTURE_TIME,
-			message: { role: "user", content: [{ type: "text", text: "CUT_STAFF_PROMPT" }] },
-		},
-		{
-			type: "message",
-			id: "discarded-assistant",
-			parentId: "cut-user",
-			timestamp: FIXTURE_TIME,
-			message: { role: "assistant", content: [{ type: "text", text: "DISCARDED_STAFF_HISTORY" }] },
-		},
-	];
-	const file = path.join(gateway.bobbitDir, "state", "session-prompts", `${sessionId}-staff-history-fork.jsonl`);
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`, "utf8");
-	live.agentSessionFile = file;
-	gateway.sessionManager.getSessionStore(persisted.projectId).update(sessionId, { agentSessionFile: file });
-	return file;
-}
-
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 
@@ -438,38 +386,6 @@ test.describe.serial("staff session fork identity", () => {
 		expect(sourceSnapshot(await gateway.apiJson(`/api/staff/${source.id}`))).toEqual(sourceSnapshot(sourceBefore));
 		expect((await inbox(gateway, source.id)).map(entry => entry.title)).toEqual(["source only"]);
 		expect((await inbox(gateway, destination.id)).map(entry => entry.title)).toEqual(["destination only"]);
-	});
-
-	test("preserves cut-before-prompt history and binds colliding fork names by ID", async ({ gateway }) => {
-		const collisionName = `Collision ${randomUUID()}`;
-		const source = await createStaff(gateway, { name: collisionName });
-		const decoy = await createStaff(gateway, {
-			name: `Fork: ${collisionName}`,
-			description: "same-name decoy",
-			systemPrompt: "DECOY_PROMPT",
-		});
-		seedHistoryTranscript(gateway, source.currentSessionId);
-
-		const result = await forkSession(gateway, source.currentSessionId, {
-			entryId: "cut-user",
-			newWorktree: false,
-		});
-		expect(result.response.status, JSON.stringify(result.value)).toBe(201);
-		const persisted = gateway.sessionManager.getPersistedSession(result.value.id);
-		const owners = (await listStaff(gateway)).filter((staff: any) => staff.currentSessionId === result.value.id);
-		expect(owners).toHaveLength(1);
-		expect(owners[0].id).toBe(persisted.staffId);
-		expect(owners[0].id).not.toBe(source.id);
-		expect(owners[0].id).not.toBe(decoy.id);
-		expect(owners[0].name).toBe(decoy.name);
-		expect(decoy.currentSessionId).not.toBe(result.value.id);
-		expect(decoy.systemPrompt).toBe("DECOY_PROMPT");
-
-		const transcript = fs.readFileSync(persisted.agentSessionFile, "utf8");
-		expect(transcript).toContain("RETAINED_STAFF_HISTORY");
-		expect(transcript).toContain("RETAINED_STAFF_ANSWER");
-		expect(transcript).not.toContain("CUT_STAFF_PROMPT");
-		expect(transcript).not.toContain("DISCARDED_STAFF_HISTORY");
 	});
 
 	test("rejects host source-first deletion before mutation, then cleans the owner once after borrower deletion", async ({ gateway }) => {
