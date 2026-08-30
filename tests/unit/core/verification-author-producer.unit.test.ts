@@ -8,11 +8,11 @@ import {
 	initAuthorSidecarDir,
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
-} from "../../src/server/agent/author-sidecar.ts";
+} from "../../../src/server/agent/author-sidecar.ts";
 import {
 	VerificationHarness,
 	VERIFICATION_RESULT_REMINDER,
-} from "../../src/server/agent/verification-harness.ts";
+} from "../../../src/server/agent/verification-harness.ts";
 
 it("VerificationHarness prefixes its resumed-review reminder only at the provider boundary", async () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-author-producer-"));

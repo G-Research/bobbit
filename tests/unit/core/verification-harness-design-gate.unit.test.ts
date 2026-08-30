@@ -16,8 +16,8 @@
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildReviewPrompt } from "../../src/server/agent/verification-harness.js";
-import { isPreImplementationGate, substituteVars } from "../../src/server/agent/verification-logic.js";
+import { buildReviewPrompt } from "../../../src/server/agent/verification-harness.js";
+import { isPreImplementationGate, substituteVars } from "../../../src/server/agent/verification-logic.js";
 
 test("design-doc gate: prompt contains NO git diff instructions", async () => {
 	const gate = { id: "design-doc", content: true, depends_on: [] };

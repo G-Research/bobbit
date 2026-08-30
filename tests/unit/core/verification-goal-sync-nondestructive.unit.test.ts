@@ -8,8 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { inspect } from "node:util";
 
-import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
-import type { CommandRunner } from "../../src/server/gateway-deps.ts";
+import { VerificationHarness } from "../../../src/server/agent/verification-harness.js";
+import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
 
 const GOAL_BRANCH = "goal/nondestructive-sync";
 const SHA_A = "a".repeat(40);

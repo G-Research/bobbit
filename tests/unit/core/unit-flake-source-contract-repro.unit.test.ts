@@ -5,10 +5,10 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "vitest";
 
 const credentialStoreTestSource = readFileSync(
-	new URL("../../tests/unit/core/providers/anthropic/anthropic-oauth-credential-store.unit.test.ts", import.meta.url),
+	new URL("../../../tests/unit/core/providers/anthropic/anthropic-oauth-credential-store.unit.test.ts", import.meta.url),
 	"utf8",
 );
-const serverSource = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const serverSource = readFileSync(new URL("../../../src/server/server.ts", import.meta.url), "utf8");
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {
 	const start = source.indexOf(startMarker);

@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import {
 	resolveCommandStepTimeoutSec,
 	runVerificationPhaseSteps,
-} from "../../src/server/agent/verification-harness.js";
-import { groupStepsByPhase, getSortedPhases } from "../../src/server/agent/verification-logic.js";
-import type { VerifyStep } from "../../src/server/agent/workflow-store.js";
+} from "../../../src/server/agent/verification-harness.js";
+import { groupStepsByPhase, getSortedPhases } from "../../../src/server/agent/verification-logic.js";
+import type { VerifyStep } from "../../../src/server/agent/workflow-store.js";
 
 test("resolveCommandStepTimeoutSec gives component unit commands a longer default", () => {
 	const unitStep = {

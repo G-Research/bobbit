@@ -6,7 +6,7 @@ import {
 	UNIT_CONCURRENT_PROOF_ENV,
 	UNIT_FILE_WALL_BUDGET_MS,
 	UnitFileBudgetReporter,
-} from "../harness/unit-file-budget-reporter.js";
+} from "../../../tests2/harness/unit-file-budget-reporter.js";
 
 type TestModule = Parameters<UnitFileBudgetReporter["onTestModuleStart"]>[0];
 
@@ -133,13 +133,13 @@ describe("UnitFileBudgetReporter", () => {
 	});
 
 	test("leaves the standard unit command and Vitest execution controls independent of proof mode", () => {
-		const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+		const packageJson = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8"));
 		assert.equal(
 			packageJson.scripts["test:unit"],
 			"vitest run --config vitest.config.ts --silent=passed-only",
 		);
 
-		const config = readFileSync(new URL("../../vitest.config.ts", import.meta.url), "utf8");
+		const config = readFileSync(new URL("../../../vitest.config.ts", import.meta.url), "utf8");
 		assert.doesNotMatch(config, new RegExp(UNIT_CONCURRENT_PROOF_ENV));
 		assert.match(config, /export const FIXED_UNIT_WORKERS = 3/);
 		assert.match(config, /retry: process\.env\.BOBBIT_V2_RETRY_FREE === "1" \? 0 : 3/);

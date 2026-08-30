@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { makeTmpDir } from "../../tests/helpers/tmp.ts";
-import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
+import { makeTmpDir } from "../../../tests/helpers/tmp.ts";
+import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
 
 const MARKER = "RESTART_SAFE_GATE_COMMANDS_REPRO";
 const GOAL_ID = "goal-restart-safe-commands";

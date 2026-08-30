@@ -1,6 +1,6 @@
 // v2-native — pure UTF-8 text-likeness classification for uploaded attachments.
 import { describe, expect, it } from "vitest";
-import { decodeLikelyUtf8Text } from "../../src/shared/uploaded-attachment-text.js";
+import { decodeLikelyUtf8Text } from "../../../src/shared/uploaded-attachment-text.js";
 
 const encode = (text: string): Uint8Array => new TextEncoder().encode(text);
 
