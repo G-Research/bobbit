@@ -3,8 +3,8 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
-import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../../tests2/core/helpers/env-guard.js";
+import { enableTsWorkerResolver } from "../../../../tests2/core/helpers/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 // Re-assert the worker .js->.ts resolver at RUN time (see lifecycle-hub.test.ts):
@@ -36,15 +36,15 @@ import {
 	computeToolActivationArgs,
 	writeToolGuardExtension,
 	type EffectiveTool,
-} from "../../src/server/agent/tool-activation.ts";
-import type { ToolProvider } from "../../src/server/agent/tool-manager.ts";
-import { reorderLabeledSections, assembleSystemPrompt, getPromptSections, initPromptDirs } from "../../src/server/agent/system-prompt.ts";
-import { offsetWorktreeCwd } from "../../src/server/agent/session-setup.ts";
-import { LifecycleHub, type HookCtx } from "../../src/server/agent/lifecycle-hub.ts";
-import type { ProviderContribution } from "../../src/server/agent/pack-contributions.ts";
-import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
-import { ModuleHost } from "../../src/server/extension-host/module-host-worker.ts";
-import { ContextTraceStore } from "../../src/server/agent/context-trace-store.ts";
+} from "../../../../src/server/agent/tool-activation.ts";
+import type { ToolProvider } from "../../../../src/server/agent/tool-manager.ts";
+import { reorderLabeledSections, assembleSystemPrompt, getPromptSections, initPromptDirs } from "../../../../src/server/agent/system-prompt.ts";
+import { offsetWorktreeCwd } from "../../../../src/server/agent/session-setup.ts";
+import { LifecycleHub, type HookCtx } from "../../../../src/server/agent/lifecycle-hub.ts";
+import type { ProviderContribution } from "../../../../src/server/agent/pack-contributions.ts";
+import type { PackContributionRegistry } from "../../../../src/server/extension-host/pack-contribution-registry.ts";
+import { ModuleHost } from "../../../../src/server/extension-host/module-host-worker.ts";
+import { ContextTraceStore } from "../../../../src/server/agent/context-trace-store.ts";
 
 // ── 1. tool-activation: bobbit.disabledTools ────────────────────────────────
 

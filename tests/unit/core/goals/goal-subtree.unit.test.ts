@@ -17,8 +17,8 @@ import {
 	walkGoalSubtree,
 	cascadeSubtree,
 	SUBTREE_WALK_DEFAULT_DEPTH_CAP,
-} from "../../src/server/agent/goal-subtree.ts";
-import type { PersistedGoal } from "../../src/server/agent/goal-store.ts";
+} from "../../../../src/server/agent/goal-subtree.ts";
+import type { PersistedGoal } from "../../../../src/server/agent/goal-store.ts";
 
 /**
  * Minimal helper to fabricate a PersistedGoal — the walk only reads

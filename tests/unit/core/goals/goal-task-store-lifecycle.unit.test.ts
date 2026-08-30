@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, it } from "vitest";
-import { ProjectContext } from "../../src/server/agent/project-context.js";
-import { ProjectContextManager } from "../../src/server/agent/project-context-manager.js";
-import { recoverPreMigrationData } from "../../src/server/agent/state-migration.js";
+import { ProjectContext } from "../../../../src/server/agent/project-context.js";
+import { ProjectContextManager } from "../../../../src/server/agent/project-context-manager.js";
+import { recoverPreMigrationData } from "../../../../src/server/agent/state-migration.js";
 
 const roots: string[] = [];
 

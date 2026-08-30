@@ -3,9 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
-import { readDeletionTombstones } from "../../src/server/agent/deletion-tombstones.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.js";
+import { readDeletionTombstones } from "../../../../src/server/agent/deletion-tombstones.js";
+import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
 
 const roots: string[] = [];
 const stores: GoalStore[] = [];

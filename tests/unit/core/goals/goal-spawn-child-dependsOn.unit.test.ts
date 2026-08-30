@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import {
 	validateDependsOn,
 	validatePlanDependsOn,
-} from "../../src/server/agent/depends-on-validation.ts";
+} from "../../../../src/server/agent/depends-on-validation.ts";
 
 describe("POST /api/goals/:id/spawn-child — dependsOn validation", () => {
 	it("ok when no dependsOn supplied", () => {

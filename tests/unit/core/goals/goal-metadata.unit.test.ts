@@ -20,7 +20,7 @@ import {
 	GOAL_METADATA_WALK_DEPTH_CAP,
 	type GoalMetadata,
 	type GoalMetadataLookup,
-} from "../../src/server/agent/goal-metadata.ts";
+} from "../../../../src/server/agent/goal-metadata.ts";
 
 /** In-memory lookup over a flat node map. */
 function lookupOf(nodes: Record<string, { parentGoalId?: string; metadata?: GoalMetadata }>): GoalMetadataLookup {

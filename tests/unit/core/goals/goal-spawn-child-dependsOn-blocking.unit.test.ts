@@ -27,15 +27,15 @@ import path from "node:path";
 import http from "node:http";
 import yaml from "yaml";
 
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
-import { GoalManager } from "../../src/server/agent/goal-manager.ts";
-import { GateStore } from "../../src/server/agent/gate-store.ts";
-import { ProjectConfigStore } from "../../src/server/agent/project-config-store.ts";
-import { InlineWorkflowStore } from "../../src/server/agent/workflow-store.ts";
-import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
-import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
-import { CookieStore } from "../../src/server/auth/cookie.ts";
-import type { GoalCandidateDeps } from "../../src/server/agent/goal-candidate-validator.ts";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.ts";
+import { GoalManager } from "../../../../src/server/agent/goal-manager.ts";
+import { GateStore } from "../../../../src/server/agent/gate-store.ts";
+import { ProjectConfigStore } from "../../../../src/server/agent/project-config-store.ts";
+import { InlineWorkflowStore } from "../../../../src/server/agent/workflow-store.ts";
+import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../../../src/server/agent/nested-goal-routes.ts";
+import { ChildTeamScheduler } from "../../../../src/server/agent/child-team-scheduler.ts";
+import { CookieStore } from "../../../../src/server/auth/cookie.ts";
+import type { GoalCandidateDeps } from "../../../../src/server/agent/goal-candidate-validator.ts";
 
 interface Harness {
 	tmpRoot: string;

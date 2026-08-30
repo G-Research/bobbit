@@ -17,7 +17,7 @@ import {
 	collectDescendants,
 	DESCENDANT_WALK_DEPTH_CAP,
 	type DescendantWalkGoal,
-} from "../../src/server/agent/goal-descendants.ts";
+} from "../../../../src/server/agent/goal-descendants.ts";
 
 interface G extends DescendantWalkGoal {
 	id: string;
