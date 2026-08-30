@@ -271,9 +271,10 @@ test.afterEach(async () => {
 	for (const root of fixtureSourceRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 	const project = await defaultProject().catch(() => undefined);
 	if (project) {
-		for (const directory of [".pack-local-data-fixture", ".pi-winner-project", ".pi-winner-server"]) {
+		for (const directory of [".pack-local-data-fixture", ".pi-winner-project", ".pi-winner-server", ".git"]) {
 			fs.rmSync(path.join(project.rootPath, directory), { recursive: true, force: true });
 		}
+		fs.rmSync(path.join(project.rootPath, ".pack-local-data-git-fixture"), { force: true });
 	}
 });
 
@@ -462,6 +463,14 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	};
 	test.skip(docker.info.status !== 0 || docker.image.status !== 0, "Docker and the bobbit-agent image are required for the writable bind-mount round trip");
 
+	expect(fs.existsSync(path.join(project.rootPath, ".git"))).toBe(false);
+	const gitMarker = path.join(project.rootPath, ".pack-local-data-git-fixture");
+	fs.writeFileSync(gitMarker, "Git-backed sandbox fixture\n", "utf8");
+	for (const args of [["init", "--quiet"], ["add", path.basename(gitMarker)], ["-c", "user.name=Bobbit E2E", "-c", "user.email=bobbit-e2e@example.test", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Initialize sandbox fixture"]]) {
+		const git = spawnSync("git", args, { cwd: project.rootPath, encoding: "utf8" });
+		expect(git.status, git.stderr || git.stdout).toBe(0);
+	}
+
 	const setSandbox = await apiFetch(`/api/projects/${project.id}/config`, {
 		method: "PUT",
 		body: JSON.stringify({ sandbox: "docker" }),
@@ -470,22 +479,34 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	expect(setSandbox.status, configText).toBe(200);
 	sandboxConfigured = true;
 
-	const sessionId = await createSession({ projectId: project.id });
+	const createResponse = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ projectId: project.id, cwd: project.rootPath, sandboxed: true, worktree: false }),
+	});
+	const createText = await createResponse.text();
+	expect(createResponse.status, createText).toBe(201);
+	const sessionId = JSON.parse(createText).id as string;
 	sessionIds.push(sessionId);
+	expect(gateway.sessionManager.getSession(sessionId)?.sandboxed).toBe(true);
 	const declaredHostDirectory = path.join(project.rootPath, ".pack-local-data-fixture");
 	expect(fs.existsSync(declaredHostDirectory), "sandbox activation must materialize the host directory before mounting it").toBe(true);
 	const expectedHostDirectory = fs.realpathSync(declaredHostDirectory);
 	const expectedContainerDirectory = "/bobbit/local-data/pack-local-data";
-	const runtimeEnvironment = gateway.sessionManager.getSession(sessionId)?.rpcClient?.options?.env ?? {};
+	const runtimeOptions = gateway.sessionManager.getSession(sessionId)?.rpcClient?.options ?? {};
+	const runtimeEnvironment = runtimeOptions.env ?? {};
+	const runtimeContainerId = runtimeOptions.containerId;
+	expect(runtimeContainerId, "the sandbox session must own a Docker runtime").toBeTruthy();
 	expect(JSON.parse(runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({ [PACK]: expectedContainerDirectory });
+	const containerNode = (script: string) => spawnSync("docker", ["exec", runtimeContainerId, "node", "-e", script], { encoding: "utf8" });
 
-	const containerWrite = await runPiTool(sessionId, { operation: "write", name: "container-marker.txt", content: "written-in-container" });
-	expect(containerWrite.directory).toBe(expectedContainerDirectory);
+	const containerWrite = containerNode(`require("node:fs").writeFileSync(${JSON.stringify(`${expectedContainerDirectory}/container-marker.txt`)}, "written-in-container")`);
+	expect(containerWrite.status, containerWrite.stderr).toBe(0);
 	expect(fs.readFileSync(path.join(expectedHostDirectory, "container-marker.txt"), "utf8")).toBe("written-in-container");
 
 	fs.writeFileSync(path.join(expectedHostDirectory, "host-marker.txt"), "written-on-host", "utf8");
-	const containerRead = await runPiTool(sessionId, { operation: "read", name: "host-marker.txt" });
-	expect(containerRead).toMatchObject({ directory: expectedContainerDirectory, content: "written-on-host" });
+	const containerRead = containerNode(`process.stdout.write(require("node:fs").readFileSync(${JSON.stringify(`${expectedContainerDirectory}/host-marker.txt`)}, "utf8"))`);
+	expect(containerRead.status, containerRead.stderr).toBe(0);
+	expect(containerRead.stdout).toBe("written-on-host");
 	const markerBytes = fs.readFileSync(path.join(expectedHostDirectory, "container-marker.txt"));
 
 	await setFixtureActivation({});

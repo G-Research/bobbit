@@ -189,7 +189,7 @@ async function loadMockPiExtensions(args = [], env = {}, extensionCache = shared
 				// Generated guards capture gateway-owned child env during synchronous
 				// activation. Mirror only those values, then restore process-global state
 				// before independent in-process sessions execute.
-				const activationEnvKeys = ["BOBBIT_DIR", "BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN", "BOBBIT_SESSION_ID"];
+				const activationEnvKeys = ["BOBBIT_DIR", "BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN", "BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET"];
 				const previousEnv = new Map(activationEnvKeys.map((key) => [key, process.env[key]]));
 				let activationResult;
 				try {
