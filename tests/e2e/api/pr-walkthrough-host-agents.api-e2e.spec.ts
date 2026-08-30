@@ -35,13 +35,13 @@
  *   • Scope: the pack drives only its own reviewer child.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { test, expect } from "../in-process-harness.js";
-import { apiFetch, createSession, deleteSession, nonGitCwd } from "../e2e-setup.js";
-import { pollUntil } from "../test-utils/cleanup.js";
+import { apiFetch, createSession, nonGitCwd, waitForSessionStatus } from "../e2e-setup.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
@@ -57,6 +57,7 @@ const PR_URL = "https://github.com/SuuBro/bobbit/pull/42";
 // ── git fixture (a real local repo so the bundle endpoint's live recompute
 //    resolves; mirrors pr-walkthrough-api.spec.ts::makeGitFixture). ──
 type GitFixture = { cwd: string; baseSha: string; headSha: string; cleanup: () => void };
+const fixtureRoots = new Set<string>();
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -75,10 +76,10 @@ function makeGitFixture(): GitFixture {
 	git(cwd, ["add", "."]);
 	git(cwd, ["commit", "-m", "head"]);
 	const headSha = git(cwd, ["rev-parse", "HEAD"]);
-	// Best-effort cleanup: on Windows a still-live session whose cwd is this repo
-	// (the reviewer child + owner) holds handles, so rmSync can EPERM. The dir is
-	// an OS temp dir that the OS reclaims; never fail a test on fixture teardown.
-	const cleanup = () => { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* OS reclaims */ } };
+	// Queue removal until after child-before-owner session purge. Removing the
+	// primary repository while linked worktrees are live corrupts their .git
+	// indirection and turns later setup/teardown failures into misleading ENOENTs.
+	const cleanup = () => { fixtureRoots.add(cwd); };
 	return { cwd, baseSha, headSha, cleanup };
 }
 
@@ -194,9 +195,34 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		moduleHost?.dispose();
 	});
 
-	test.afterEach(async () => {
-		while (createdSessionIds.length) {
-			await deleteSession(createdSessionIds.pop()!);
+	test.afterEach(async ({ gateway }) => {
+		// Purge reviewer children before their owners so linked worktrees and
+		// persisted rows are gone before the primary Git fixture is removed.
+		for (const id of [...new Set(createdSessionIds.splice(0))].reverse()) {
+			const persisted = gateway.sessionManager.getPersistedSession(id);
+			const worktreePaths = new Set<string>();
+			if (typeof persisted?.worktreePath === "string") worktreePaths.add(persisted.worktreePath);
+			for (const value of Object.values(persisted?.repoWorktrees ?? {})) {
+				if (typeof value === "string") worktreePaths.add(value);
+				else if (value && typeof value === "object") {
+					const candidate = (value as any).worktreePath ?? (value as any).path;
+					if (typeof candidate === "string") worktreePaths.add(candidate);
+				}
+			}
+			const response = await apiFetch(`/api/sessions/${encodeURIComponent(id)}?purge=true`, { method: "DELETE" });
+			const text = await response.text();
+			expect(response.status, `purge session ${id}: ${text}`).toBe(200);
+			await pollUntil(() => {
+				const absent = !gateway.sessionManager.getSession(id)
+					&& !gateway.sessionManager.getPersistedSession(id)
+					&& [...worktreePaths].every((worktreePath) => !existsSync(worktreePath));
+				return absent ? true : null;
+			}, { timeoutMs: 10_000, intervalMs: 50, label: `session ${id} purge` });
+		}
+		for (const root of fixtureRoots) {
+			const cleanup = await awaitableRm(root);
+			expect(cleanup.removed, `remove PR walkthrough fixture ${root}: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+			fixtureRoots.delete(root);
 		}
 	});
 
@@ -223,6 +249,16 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			ctx: { host, sessionId: ownerId, toolUseId: "tu-prw", tool: `pr-walkthrough/${member}`, workingDir },
 			arg: req,
 		});
+	}
+
+	async function invokeReadyRun(gateway: any, ownerId: string, req: any, workingDir: string): Promise<any> {
+		await waitForSessionStatus(ownerId, "idle");
+		const result = await invokeRoute(gateway, ownerId, "run", req, workingDir);
+		expect(result, `run route failed: ${JSON.stringify(result)}`).toMatchObject({ ok: true, created: true });
+		expect(typeof result.childSessionId).toBe("string");
+		createdSessionIds.push(result.childSessionId);
+		await waitForSessionStatus(result.childSessionId, "idle");
+		return result;
 	}
 
 	const runReq = (fixture: GitFixture) => ({
@@ -286,7 +322,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			// Anti-postMessage baseline: the owner's own agent has no transcript yet.
 			expect(await sessionMessages(gateway, owner)).toHaveLength(0);
 
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			expect(started.ok).toBe(true);
 			expect(started.created).toBe(true);
 			expect(typeof started.childSessionId).toBe("string");
@@ -340,7 +376,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 			const secret = reviewerSecret(gateway, child);
@@ -411,7 +447,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			// run): a SECOND, still-live reviewer for a DISTINCT target whose job
 			// already carries a submitted marker rejects a fresh submit with 409
 			// BEFORE re-validating the YAML.
-			const startedB = await invokeRoute(gateway, owner, "run", {
+			const startedB = await invokeReadyRun(gateway, owner, {
 				method: "POST",
 				body: { prUrl: "https://github.com/SuuBro/bobbit/pull/43", baseSha: fixture.baseSha, headSha: fixture.headSha },
 			}, fixture.cwd);
@@ -503,6 +539,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		try {
 			// A panel-style LOCAL launch (baseSha/headSha only — no prUrl/owner/repo).
+			await waitForSessionStatus(owner, "idle");
 			const started = await invokeRoute(gateway, owner, "run", {
 				method: "POST",
 				body: { baseSha: fixture.baseSha, headSha: fixture.headSha },
@@ -526,7 +563,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 			const secret = reviewerSecret(gateway, child);
@@ -559,12 +596,12 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
 		try {
-			const first = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const first = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			expect(first.ok).toBe(true);
 			expect(first.created).toBe(true);
 			createdSessionIds.push(first.childSessionId);
 
-			const second = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const second = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			expect(second.ok).toBe(true);
 			expect(second.created).toBe(true);
 			expect(second.childSessionId).not.toBe(first.childSessionId);
@@ -598,8 +635,8 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		try {
 			const [a, b] = await Promise.all([
-				invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd),
-				invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd),
+				invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd),
+				invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd),
 			]);
 			expect(a.ok).toBe(true);
 			expect(b.ok).toBe(true);
@@ -626,7 +663,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -684,7 +721,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 			// Reviewer is live before submit.
@@ -740,7 +777,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -794,21 +831,18 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			{ parentSessionId: owner, childKind: "host-agents", readOnly: true, projectId: parentProjectId },
 		);
 		const child = childInfo.id;
-		try {
-			// Stamp the GENERIC persisted terminal marker (what submit-yaml does before
-			// it dismisses). The parent stays ALIVE — only the marker drives the reap.
-			sm.updateSessionMeta(child, { childTerminal: true, terminalAt: Date.now() });
-			expect(sm.getPersistedSession(child)?.childTerminal).toBe(true);
+		createdSessionIds.push(child);
+		// Stamp the GENERIC persisted terminal marker (what submit-yaml does before
+		// it dismisses). The parent stays ALIVE — only the marker drives the reap.
+		sm.updateSessionMeta(child, { childTerminal: true, terminalAt: Date.now() });
+		expect(sm.getPersistedSession(child)?.childTerminal).toBe(true);
 
-			// Drive the per-session boot path; the generic kindTerminal reap archives
-			// the orphan before any re-spawn.
-			await (sm as any).restoreOneSession(sm.getPersistedSession(child));
+		// Drive the per-session boot path; the generic kindTerminal reap archives
+		// the orphan before any re-spawn. Central afterEach then purges both rows.
+		await (sm as any).restoreOneSession(sm.getPersistedSession(child));
 
-			const stillLive = gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child);
-			expect(stillLive).toBe(false);
-		} finally {
-			await deleteSession(child).catch(() => {});
-		}
+		const stillLive = gateway.projectContextManager.getAllLiveSessions().some((s: any) => s.id === child);
+		expect(stillLive).toBe(false);
 	});
 
 	// ── Row T-8: the user terminates the reviewer via the standard session control. ──
@@ -822,7 +856,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -867,7 +901,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -909,7 +943,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		const owner = await createSession({ cwd: fixture.cwd });
 		createdSessionIds.push(owner);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -961,7 +995,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		let delegateChild: string | undefined;
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -972,6 +1006,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 				childKind: "delegate",
 			});
 			delegateChild = del.sessionId;
+			createdSessionIds.push(delegateChild);
 
 			// host.agents sees ONLY the host-agents reviewer.
 			const host = buildHost(gateway, owner);
@@ -986,7 +1021,6 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 			}, fixture.cwd);
 			expect(st.phase).toBe("error");
 		} finally {
-			if (delegateChild) await gateway.orchestrationCore.dismiss(owner, delegateChild).catch(() => {});
 			fixture.cleanup();
 		}
 	});
@@ -1013,7 +1047,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(foreign);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
@@ -1107,7 +1141,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 		createdSessionIds.push(owner);
 		const yaml = buildValidYaml(fixture.baseSha, fixture.headSha);
 		try {
-			const started = await invokeRoute(gateway, owner, "run", runReq(fixture), fixture.cwd);
+			const started = await invokeReadyRun(gateway, owner, runReq(fixture), fixture.cwd);
 			const child = started.childSessionId;
 			createdSessionIds.push(child);
 
