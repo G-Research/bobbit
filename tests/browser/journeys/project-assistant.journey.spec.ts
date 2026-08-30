@@ -9,6 +9,7 @@ import { openApp, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-help
 import { realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { awaitableRm } from "../../e2e/test-utils/cleanup.js";
 
 /** Create a unique temp dir for each test.
  *  Returns the canonical (realpath) form so the project-assistant flow
@@ -25,7 +26,12 @@ function ensureE2EAgentAuth(): void {
 	if (!agentDir) return;
 	mkdirSync(agentDir, { recursive: true });
 	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-		anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
+		anthropic: {
+			type: "oauth",
+			access: "fake-isolated-e2e-access-token",
+			refresh: "fake-isolated-e2e-refresh-token",
+			expires: Date.now() + 86_400_000,
+		},
 	}));
 }
 
@@ -270,11 +276,23 @@ test.describe("Project assistant UX (consolidated)", () => {
 		await expect(sidebar.getByText("(setting up)").first()).toBeVisible({ timeout: 15_000 });
 		await expect(sidebar.getByText(dirBasename).first()).toBeVisible();
 
-		// Cleanup
+		// Close the browser transport before tearing down the revived session and
+		// its provisional project context. Each response is an ordering barrier for
+		// the next owner in the lifecycle.
 		const prov = await findProvisionalProject(dir);
-		await deleteSession(sessionId);
-		if (prov) await cleanupProject(prov.id);
-		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
+		expect(prov, "refreshed provisional project should remain registered until cleanup").toBeTruthy();
+		const projectId = prov!.id;
+		await page.close();
+
+		const sessionDelete = await apiFetch(`/api/sessions/${sessionId}?purge=true`, { method: "DELETE" });
+		expect(sessionDelete.status, await sessionDelete.clone().text()).toBe(200);
+
+		const projectDelete = await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" });
+		expect(projectDelete.status, await projectDelete.clone().text()).toBe(200);
+		expect((await getProjects()).find((project: any) => project.id === projectId)).toBeUndefined();
+
+		const cleanup = await awaitableRm(dir);
+		expect(cleanup.removed, `refresh fixture cleanup failed after ${cleanup.attempts} attempts: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 	});
 
 	test("panel updates live across two propose_project calls", async ({ page }) => {
