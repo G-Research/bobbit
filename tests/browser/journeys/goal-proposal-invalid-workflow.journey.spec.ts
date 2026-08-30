@@ -21,9 +21,9 @@
  * way an invalid id reaches the UI in isolation is via the in-memory state the
  * normalization is meant to repair.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 const PHANTOM_WORKFLOW = "__does_not_exist_wf__";
 

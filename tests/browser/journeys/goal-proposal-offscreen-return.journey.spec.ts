@@ -27,9 +27,9 @@
  * Modeled on goal-proposal-dismiss-reload.spec.ts and
  * proposal-spec-survives-navigate.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, createSessionViaUI, navigateToHash, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, navigateToHash, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 import {
 	apiFetch,
 	connectWs,
@@ -37,7 +37,7 @@ import {
 	readE2ETokenAsync,
 	base,
 	waitForHealth,
-} from "../e2e-setup.js";
+} from "../../e2e/e2e-setup.js";
 
 const GOAL_TITLE = "E2E Test Goal";
 const GOAL_SPEC_TAIL = "It validates the goal creation UI.";

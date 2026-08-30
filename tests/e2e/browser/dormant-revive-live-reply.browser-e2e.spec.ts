@@ -32,7 +32,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 /** Count assistant-message custom elements whose visible text contains a bare "OK". */
 async function countAssistantOk(page: import("@playwright/test").Page): Promise<number> {

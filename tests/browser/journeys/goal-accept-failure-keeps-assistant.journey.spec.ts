@@ -3,8 +3,8 @@
  * `gateway.sessionId`, and form state must remain intact so the user can
  * edit and retry. Pin for the "Robust goal workflow UX" goal §1.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 test.describe.configure({ timeout: 90_000 });
 

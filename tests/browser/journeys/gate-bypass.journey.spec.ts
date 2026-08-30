@@ -16,9 +16,10 @@
  * is self-contained and deterministic; the cross-slice JSON contract it asserts
  * against is pinned by the API E2E suite (criteria 1–8).
  */
-import { test, expect, type Page, type Route } from "../gateway-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import type { Page, Route } from "@playwright/test";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 const FAILED_GATE_ID = "implementation";
 const FAILED_GATE_NAME = "Implementation";

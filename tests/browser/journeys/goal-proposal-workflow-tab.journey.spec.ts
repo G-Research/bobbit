@@ -15,9 +15,9 @@
  *   4. Sync — the Workflow-tab select mirrors the Goal-tab select value.
  */
 import type { Locator } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, deleteGoal } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI, activeSessionId, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, deleteGoal } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, createSessionViaUI, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 const INLINE_WORKFLOW_ID = "bespoke-inline-e2e";
 const INLINE_WORKFLOW_GATE_COUNT = 3;

@@ -1,7 +1,7 @@
 /** Browser E2E coverage for prompt draft persistence across session switches and hard reloads. */
-import { test, expect } from "../gateway-harness.js";
-import { createSession, waitForHealth, waitForSessionStatus, apiFetch, deleteSession } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { createSession, waitForHealth, waitForSessionStatus, apiFetch, deleteSession } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
 
 async function navigateToSession(page: import("@playwright/test").Page, sessionId: string): Promise<void> {
 	await page.evaluate((id) => { window.location.hash = `#/session/${id}`; }, sessionId);

@@ -24,7 +24,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal, defaultProjectId, createSession, connectWs, signalAndWaitForGate } from "../e2e-setup.js";
-import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
+import { openApp, navigateToGoalDashboard } from "../ui/ui-helpers.js";
 
 // A fast command whose stdout is a large, unmistakable marker string. If the
 // list endpoint is slim, this marker MUST NOT appear in the /gates payload;

@@ -1,12 +1,12 @@
-import { test, expect, type Page } from "../gateway-harness.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 // The Debug-mode toggle lives next to Restart Server and is gated to dev-harness
 // mode, so opt the worker into harness mode like the restart spec. It's the
 // unified switch: it shows the floating DBG client-debug button AND arms
 // boot-timing perf instrumentation (both localStorage-backed).
 const devHarnessTest = test.extend<{}, { enableDevHarnessRestart: boolean }>({
-	enableDevHarnessRestart: [true, { scope: "worker", option: true }],
+	enableDevHarnessRestart: [true, { scope: "worker" }],
 });
 
 async function openSettings(page: Page): Promise<void> {

@@ -1,6 +1,7 @@
-import { test, expect, type Page, type Route } from "../gateway-harness.js";
+import type { Page, Route } from "@playwright/test";
+import { test, expect } from "../gateway-harness.js";
 import { createGoal, createSession, deleteGoal, deleteSession, registerProject, apiFetch } from "../e2e-setup.js";
-import { navigateToGoalDashboard, navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToGoalDashboard, navigateToHash, openApp } from "../ui/ui-helpers.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

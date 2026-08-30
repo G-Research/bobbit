@@ -4,8 +4,8 @@
  * clicking "Open Project Assistant" creates a project-assistant session.
  * Pin for the "Robust goal workflow UX" goal §3.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 test.describe.configure({ timeout: 90_000 });
 
