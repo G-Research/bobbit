@@ -234,6 +234,13 @@ test.describe("Journey: marketplace-pack development hot reload", () => {
 			await page.goto(`${viteBaseUrl}/?token=${encodeURIComponent(token)}`, { waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 25_000 });
+			await page.evaluate(async () => {
+				const reconcilePackRenderers = (window as any).__bobbitReconcilePackRenderers;
+				if (typeof reconcilePackRenderers !== "function") {
+					throw new Error("pack renderer reconciliation hook is unavailable");
+				}
+				await reconcilePackRenderers();
+			});
 
 			const renderer = page.getByTestId("pack-hot-reload-renderer");
 			await expect(renderer).toHaveAttribute("data-version", "v1", { timeout: 25_000 });
