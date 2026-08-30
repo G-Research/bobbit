@@ -11,11 +11,11 @@
  *   cleanup → teardown (not tracked)
  */
 import type { Page, Route } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, createGoal, deleteGoal } from "../e2e-setup.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { waitForHealth, createGoal, deleteGoal } from "../../../tests2/browser/e2e-setup.js";
 import {
 	SpecContext,
-} from "./spec-framework.js";
+} from "../../../tests2/browser/e2e/spec-framework.js";
 import {
 	STORY_N01,
 	STORY_N02,
@@ -26,8 +26,8 @@ import {
 	STORY_N08,
 	STORY_N09,
 	STORY_N10,
-} from "./story-registry.js";
-import { navigateToHash } from "./ui-helpers.js";
+} from "../../../tests2/browser/e2e/story-registry.js";
+import { navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 async function waitForSessionRouteSettlement(page: Page, sessionId: string): Promise<void> {
 	await page.waitForFunction((id) => {

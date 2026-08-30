@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { expect, test, type GatewayInfo } from "../gateway-harness.js";
+import { expect, test, type GatewayInfo } from "../../../tests2/browser/gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -10,7 +10,7 @@ import {
 	deleteSession,
 	waitForHealth,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
+} from "../../../tests2/browser/e2e-setup.js";
 
 type BootMetrics = {
 	wallMs: number;

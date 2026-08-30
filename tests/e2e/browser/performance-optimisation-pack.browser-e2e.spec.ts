@@ -1,6 +1,6 @@
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, deleteSession } from "../e2e-setup.js";
-import { createSessionViaUI, openApp } from "./ui-helpers.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, deleteSession } from "../../../tests2/browser/e2e-setup.js";
+import { createSessionViaUI, openApp } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 test.describe.configure({ mode: "serial" });
 

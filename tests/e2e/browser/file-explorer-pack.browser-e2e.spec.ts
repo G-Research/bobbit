@@ -14,7 +14,7 @@ import {
 	sendMessage,
 	test,
 	waitForSessionStatus,
-} from "../_helpers/journey-fixture.js";
+} from "../../../tests2/browser/_helpers/journey-fixture.js";
 
 test.describe.configure({ mode: "serial" });
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });

@@ -44,10 +44,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
 import type { Page, Response } from "@playwright/test";
-import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
+import { apiFetch, waitForSessionStatus, base, readE2ETokenAsync } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 // Within-file serial: a single end-to-end lifecycle test in describe 1; the
 // child-pane describe seeds its own state per test.

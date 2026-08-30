@@ -6,9 +6,9 @@
  * derived from a stale/incomplete gate summary cache.
  */
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, waitForSessionStatus } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 const GATE_ID = "slow-gate";
 const VERIFY_TITLE = "0 of 1 gates passed — verifying 1";

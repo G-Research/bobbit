@@ -12,9 +12,9 @@
  *     fills to the bottom edge; split/collapsed modes keep the composer.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, createSession, nonGitCwd } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 const FEEDBACK = '[data-testid="launcher-feedback"]';
 const DISMISS = '[data-testid="launcher-feedback-dismiss"]';

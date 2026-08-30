@@ -29,9 +29,9 @@
  *        and the contributions remain resolved.
  *   J-4. DISABLE via master toggle → contributions gone again, toggle unchecked.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, base, readE2ETokenAsync, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, base, readE2ETokenAsync, waitForSessionStatus } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, createSessionViaUI, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 // Within-file serial: the single journey below mutates shared server-scope
 // activation state; keep it isolated from any sibling test that may be added.
