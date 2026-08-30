@@ -186,12 +186,12 @@ test.describe("marketplace pi extensions", () => {
 				body: JSON.stringify({ scope: pack.scope, packName: pack.packName, ...(pack.projectId ? { projectId: pack.projectId } : {}) }),
 			});
 			const text = await response.text();
-			expect(response.status, `uninstall ${pack.packName}: ${text}`).toBe(200);
+			expect(response.status, `uninstall ${pack.packName}: ${text}`).toBe(204);
 		}
 		for (const sourceId of [...sourceIds]) {
 			const response = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
 			const text = await response.text();
-			expect(response.status, `delete source ${sourceId}: ${text}`).toBe(200);
+			expect(response.status, `delete source ${sourceId}: ${text}`).toBe(204);
 			sourceIds.delete(sourceId);
 		}
 		for (const project of projectsToRemove.splice(0).reverse()) {
