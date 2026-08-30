@@ -6,7 +6,7 @@ import {
 	deleteSession,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 test.describe("Sidebar Refresh agent action", () => {
 	const sessionIds: string[] = [];

@@ -8,8 +8,8 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createGoal, deleteGoal, apiFetch, nonGitCwd } from "../e2e-setup.js";
-import { openApp, createGoalAssistantViaUI } from "./ui-helpers.js";
-import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
+import { openApp, createGoalAssistantViaUI } from "../ui/ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "../ui/utils/sidebar-filters.js";
 
 test.describe("Sidebar goal actions & staff", () => {
 	const goalIds: string[] = [];

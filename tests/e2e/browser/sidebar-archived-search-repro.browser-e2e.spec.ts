@@ -7,7 +7,7 @@
 import { expect } from "@playwright/test";
 import { test } from "../gateway-harness.js";
 import { apiFetch, registerProject, waitForHealth } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

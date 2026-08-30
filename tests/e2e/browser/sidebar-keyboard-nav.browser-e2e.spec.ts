@@ -12,7 +12,7 @@ import {
 	deleteGoal,
 	waitForHealth,
 } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

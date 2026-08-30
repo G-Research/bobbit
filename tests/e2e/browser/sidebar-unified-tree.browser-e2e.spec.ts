@@ -17,7 +17,7 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { navigateToHash, openApp } from "./ui-helpers.js";
+import { navigateToHash, openApp } from "../ui/ui-helpers.js";
 
 const TREE_KEY_PREFIX = "sidebar-tree/v1";
 const SPEC = "Unified sidebar tree browser E2E fixture, padded to satisfy goal spec validation.";

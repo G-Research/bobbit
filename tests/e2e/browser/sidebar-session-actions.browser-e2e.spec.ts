@@ -9,7 +9,7 @@ import {
 	apiFetch,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 test.describe("Sidebar session actions", () => {
 	const sessionIds: string[] = [];

@@ -9,7 +9,7 @@ import {
 	deleteSession,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 async function waitForActiveSessionReady(page: Page, sessionId: string): Promise<void> {
 	await expect.poll(
