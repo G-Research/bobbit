@@ -10,8 +10,8 @@
  * See docs/design/persist-compaction-history.md \u00a76.3 and \u00a73.4.
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
-import { createSession, waitForSessionStatus, apiFetch } from "../../e2e/e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "../../e2e/ui/ui-helpers.js";
+import { createSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 import fs from "node:fs";
 import path from "node:path";
 
