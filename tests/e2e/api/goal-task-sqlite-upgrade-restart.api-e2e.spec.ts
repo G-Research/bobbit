@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 const PROJECT_ID = "goal-task-sqlite-upgrade";
 const KEEP_GOAL_ID = "legacy-goal-keep";
@@ -92,13 +92,13 @@ async function prepareFixture(): Promise<Fixture> {
 	process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 	process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 
-	const bobbitDirModule = await import("../../dist/server/bobbit-dir.js");
+	const bobbitDirModule = await import("../../../dist/server/bobbit-dir.js");
 	const previousProjectRoot = bobbitDirModule.getProjectRoot?.();
-	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-	const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
+	const { createGateway } = await import("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 
 	bobbitDirModule.setProjectRoot(bobbitDir);
 	scaffoldBobbitDir(bobbitDir);
@@ -107,7 +107,7 @@ async function prepareFixture(): Promise<Fixture> {
 		anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
 	}));
 
-	const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+	const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("../seed-workflows.js");
 	const projectConfig = JSON.stringify({
 		name: "SQLite upgrade fixture",
 		components: [TEST_DEFAULT_COMPONENT],

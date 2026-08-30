@@ -9,18 +9,19 @@
  *
  * See docs/design/multi-repo-components.md §5.1 / §5.3 / §9.2.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 
 // Pool prebuild must run for this spec.
 test.use({ enableWorktreePool: true });
 
-import { apiFetch } from "./e2e-setup.js";
-import { waitForPool, pollSessionUntil, pollSessionUntilArchived } from "./test-utils/pool-polling.mjs";
+import { apiFetch } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
+import { waitForPool, pollSessionUntil, pollSessionUntilArchived } from "../test-utils/pool-polling.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 // Repos come from the immutable committed template (master + README.md +
 // .gitattributes + one commit); nothing in this spec asserts on tree contents.
@@ -80,17 +81,13 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		const goalId = goal.id;
 
 		// Wait for setupStatus → ready.
-		let setupStatus: string | undefined;
-		let detail: any;
-		for (let i = 0; i < 100; i++) {
-			detail = await apiFetch(`/api/goals/${goalId}`).then(r => r.status === 200 ? r.json() : null);
-			if (detail && detail.setupStatus) {
-				setupStatus = detail.setupStatus;
-				if (setupStatus === "ready" || setupStatus === "error") break;
-			}
-			await new Promise(r => setTimeout(r, 200));
-		}
-		expect(setupStatus).toBe("ready");
+		const detail: any = await pollUntil(async () => {
+			const candidate = await apiFetch(`/api/goals/${goalId}`).then(r => r.status === 200 ? r.json() : null);
+			return candidate && (candidate.setupStatus === "ready" || candidate.setupStatus === "error")
+				? candidate
+				: null;
+		}, { timeoutMs: 20_000, intervalMs: 200, label: "multi-repo goal setup" });
+		expect(detail.setupStatus).toBe("ready");
 
 		// Per-repo worktrees should exist on disk under the goal branch slug.
 		const branch: string = detail.branch;

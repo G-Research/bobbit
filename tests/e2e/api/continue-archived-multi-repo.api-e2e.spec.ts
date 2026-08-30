@@ -3,14 +3,14 @@
  * session creation for multi-repo projects whose rootPath is a non-git
  * container with git sub-repo components.
  */
-import { test, expect } from "./in-process-harness.js";
-import { agentEndPredicate, apiFetch, connectWs, registerProject } from "./e2e-setup.js";
-import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { agentEndPredicate, apiFetch, connectWs, registerProject } from "../e2e-setup.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, normalize } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 // Exercise the same host-side pool path normal worktree sessions use, while
 // still accepting the cold createWorktreeSet fallback if the pool is empty.

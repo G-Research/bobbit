@@ -16,9 +16,9 @@
  * has after a restart that deferred it), then DELETEs it with `purge=false` and
  * asserts the live child is cascade-archived through the public route.
  */
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession, nonGitCwd } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, createSession, deleteSession, nonGitCwd } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 async function createDelegate(parentId: string): Promise<string> {
 	const resp = await apiFetch("/api/sessions", {

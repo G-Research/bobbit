@@ -10,7 +10,7 @@
  * Uses the mock MCP server (tests/fixtures/mock-mcp-server.mjs) to provide
  * real MCP tools that the role doesn't initially have access to.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "../gateway-harness.js";
 
 // This spec actually exercises MCP — opt the worker gateway into starting MCP servers.
 test.use({ enableMcp: true });
@@ -30,10 +30,10 @@ import {
 	nonGitCwd,
 	agentEndPredicate,
 	type WsConnection,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 import type { Page } from "@playwright/test";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_MCP_SERVER = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 const mcpRestartPath = (projectId: string, name = "mock") => `/api/mcp-servers/${encodeURIComponent(name)}/restart?projectId=${encodeURIComponent(projectId)}`;
 
@@ -594,7 +594,9 @@ test.describe("MCP Tool Permission — Fullstack UI", () => {
 		// The long-poll should resolve
 		const grantResult = await Promise.race([
 			grantPromise.then(r => r.json()),
-			new Promise(r => setTimeout(() => r({ granted: false, reason: "timeout" }), 10_000)),
+			new Promise(resolveTimeout => {
+				setTimeout(() => resolveTimeout({ granted: false, reason: "timeout" }), 10_000);
+			}),
 		]);
 		expect((grantResult as any).granted).toBe(true);
 

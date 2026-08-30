@@ -11,7 +11,7 @@ import {
 import { request } from "node:http";
 import { join } from "node:path";
 
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "../gateway-harness.js";
 
 const ANTHROPIC_SANDBOX_TOKEN = "ANTHROPIC_OAUTH_TOKEN";
 
@@ -62,8 +62,8 @@ async function oauthStatus(baseURL: string): Promise<Record<string, unknown>> {
 
 async function assertMockModelUsesStoredCredential(access: string): Promise<void> {
 	const [{ clearOAuthCache }, { completeModelText }] = await Promise.all([
-		import("../../dist/server/agent/model-registry.js"),
-		import("../../dist/server/agent/model-completion.js"),
+		import("../../../dist/server/agent/model-registry.js"),
+		import("../../../dist/server/agent/model-completion.js"),
 	]);
 	clearOAuthCache();
 	let observedApiKey: unknown;
@@ -99,8 +99,8 @@ async function assertMockModelUsesStoredCredential(access: string): Promise<void
 
 async function assertMockModelProbeClassifications(bobbitDir: string): Promise<void> {
 	const [{ testModelPreference }, { PreferencesStore }] = await Promise.all([
-		import("../../dist/server/agent/model-completion.js"),
-		import("../../dist/server/agent/preferences-store.js"),
+		import("../../../dist/server/agent/model-completion.js"),
+		import("../../../dist/server/agent/preferences-store.js"),
 	]);
 	const probeStateDir = join(bobbitDir, "restart-model-probe-state");
 	const prefs = new PreferencesStore(probeStateDir);
@@ -174,8 +174,8 @@ test.describe.serial("Anthropic OAuth restart, sandbox, and lock regressions", (
 		writeAnthropicCredential(file, hostCredential);
 
 		const [{ buildSandboxAgentAuthJson, hasExplicitSandboxAnthropicCredential, sandboxTokenPolicyAllowsAnthropicAuth }, { resolveSandboxTokens }] = await Promise.all([
-			import("../../dist/server/agent/host-tokens.js"),
-			import("../../dist/server/agent/session-manager.js"),
+			import("../../../dist/server/agent/host-tokens.js"),
+			import("../../../dist/server/agent/session-manager.js"),
 		]);
 		const noSandboxPolicy = { getSandboxTokens: () => [], get: () => undefined } as any;
 		const explicitEmptyPolicy = {
@@ -230,7 +230,7 @@ test.describe.serial("Anthropic OAuth restart, sandbox, and lock regressions", (
 		utimesSync(lockPath, stale, stale);
 
 		try {
-			const { AtomicCredentialStore } = await import("../../dist/server/auth/credential-store.js");
+			const { AtomicCredentialStore } = await import("../../../dist/server/auth/credential-store.js");
 			const store = new AtomicCredentialStore(file);
 			await store.modify("unrelated-provider", async () => ({ type: "api_key", key: unrelatedKey }));
 

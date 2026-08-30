@@ -2,14 +2,14 @@
  * Repro: Continue-Archived from a worktree-backed source must surface fresh
  * worktree/base-ref creation failures synchronously.
  */
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, connectWs, agentEndPredicate, defaultProjectId, registerProject } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, connectWs, agentEndPredicate, defaultProjectId, registerProject } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import { existsSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 test.use({ enableWorktreePool: false });
 

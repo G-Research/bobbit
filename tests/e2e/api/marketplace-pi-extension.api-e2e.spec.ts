@@ -1,4 +1,4 @@
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -7,13 +7,13 @@ import {
 	deleteSession,
 	nonGitCwd,
 	registerProject,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const FIXTURES = path.resolve(__dirname, "..", "fixtures", "market-sources");
 const DEMO_SOURCE = path.join(FIXTURES, "pi-extension-demo-src");
 const FAILURE_SOURCE = path.join(FIXTURES, "pi-extension-failure-src");

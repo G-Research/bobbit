@@ -1,5 +1,5 @@
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, defaultProjectId } from "./e2e-setup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, defaultProjectId } from "../e2e-setup.js";
 import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_MCP_SERVER = path.resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const projectQuery = (projectId: string) => `projectId=${encodeURIComponent(projectId)}`;
