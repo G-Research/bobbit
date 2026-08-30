@@ -5,7 +5,7 @@ import {
 	assertLargeReviewFixture,
 	largeReviewCanonicalHash,
 	largeReviewFiles,
-} from "./large-review-payload-fixture.js";
+} from "../../../tests2/browser/fixtures/large-review-payload-fixture.js";
 
 test.describe("Large review browser payload fixture", () => {
 	test("is a deterministic 20-file, exact 485 KiB UTF-8 payload with opaque duplicate-title identities", () => {
