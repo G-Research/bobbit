@@ -1,5 +1,5 @@
 /**
- * Staff trigger editor — goal_created / goal_archived browser E2E.
+ * Staff trigger editor — goal_created / goal_archived browser journey.
  *
  * Pins the UI surface for the goal lifecycle trigger types in the staff edit
  * page (design: goal lifecycle staff triggers — Task B):
@@ -12,9 +12,9 @@
  *
  * Failure pattern: STAFF_GOAL_TRIGGER_BROWSER_<thing>.
  */
-import { test, expect, type Page } from "../gateway-harness.js";
-import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 type StaffRecord = {
 	id: string;

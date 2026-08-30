@@ -2,7 +2,7 @@
  * Draft Preservation stories — CT-02 (full coverage)
  *
  * These stories ARE the specification. Each test reads as a behavioral
- * requirement and runs as a Playwright E2E test.
+ * requirement and runs as a Playwright browser journey.
  *
  * Phase annotations control what gets tracked in the spec graph:
  *   setup  → preconditions, incidental navigation (not tracked)
@@ -14,14 +14,14 @@
  *   CT-02-e: goal-dashboard-detour
  *   CT-02-g: reconnect-after-disconnect
  */
-import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, createGoal, deleteGoal, apiFetch } from "../e2e-setup.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { waitForHealth, createGoal, deleteGoal, apiFetch } from "../../e2e/e2e-setup.js";
 import {
 	SpecContext,
 	defineStory,
-} from "../ui/spec-framework.js";
-import { CT_02, CT_05, CT_15 } from "../ui/spec-contracts.js";
-import { navigateToHash } from "../ui/ui-helpers.js";
+} from "../../e2e/ui/spec-framework.js";
+import { CT_02, CT_05, CT_15 } from "../../e2e/ui/spec-contracts.js";
+import { navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 // ---------------------------------------------------------------
 // Reproducing-test helpers (composer draft-loss regression).

@@ -16,9 +16,9 @@
  * NEW goal being proposed, not the selected parent — so it cannot fix this.
  * This test asserts the picker itself carries the signal.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, deleteGoal, defaultProjectId, nonGitCwd } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, deleteGoal, defaultProjectId, nonGitCwd } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, createSessionViaUI } from "../../e2e/ui/ui-helpers.js";
 
 const PARENT_SPEC =
 	"Parent goal for the parent-picker eligibility repro — padded to satisfy the spec minimum length validator.";

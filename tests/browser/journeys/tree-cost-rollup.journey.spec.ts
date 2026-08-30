@@ -1,5 +1,5 @@
 /**
- * Phase 5b — tree cost rollup E2E.
+ * Phase 5b — tree cost rollup browser journey.
  *
  * The Phase 6 server endpoint `GET /api/goals/:id/tree-cost` returns a
  * `breakdown[]` shaped sum across the descendant tree. This test verifies
@@ -12,9 +12,9 @@
  * row STILL renders for parent goals with children — the breakdown table
  * surfaces the structure even when totals are $0.00.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader, teardownTeam, waitForCondition } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader, teardownTeam, waitForCondition } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 /**
  * Spawn a child via the ORCHESTRATION-class endpoint. spawn-child requires a
@@ -202,7 +202,7 @@ test.describe("Phase 5b — tree cost rollup", () => {
 	// the handler resolved `rootGoalId = goal.rootGoalId ?? goal.id`.
 	//
 	// Server fix lives in `src/server/server.ts` (GET /api/goals/:id/tree-cost)
-	// and is pinned at the unit level by `tests/api-goals-tree-cost.test.ts`.
+	// and is pinned at the unit level by `tests2/core/api-goals-tree-cost.test.ts`.
 	// This block pins the user-visible behaviour: the dashboard header value
 	// (`data-testid="tree-cost-total"`) must reflect the requested subgoal's
 	// subtree sum, not the project-wide grand total.

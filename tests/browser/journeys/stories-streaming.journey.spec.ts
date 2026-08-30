@@ -2,7 +2,7 @@
  * Streaming Lifecycle stories — CT-01, CT-06
  *
  * These stories ARE the specification. Each test reads as a behavioral
- * requirement and runs as a Playwright E2E test.
+ * requirement and runs as a Playwright browser journey.
  *
  * Phase annotations control what gets tracked in the spec graph:
  *   setup  → preconditions, incidental navigation (not tracked)
@@ -10,10 +10,10 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import { test, expect } from "../ui/fixtures.js";
-import { apiFetch, waitForHealth } from "../e2e-setup.js";
-import { SpecContext, defineStory } from "../ui/spec-framework.js";
-import { CT_01, CT_02, CT_05, CT_06 } from "../ui/spec-contracts.js";
+import { test, expect } from "../../e2e/ui/fixtures.js";
+import { apiFetch, waitForHealth } from "../../e2e/e2e-setup.js";
+import { SpecContext, defineStory } from "../../e2e/ui/spec-framework.js";
+import { CT_01, CT_02, CT_05, CT_06 } from "../../e2e/ui/spec-contracts.js";
 
 test.describe("CT-01: Streaming lifecycle", () => {
 	let s: SpecContext;

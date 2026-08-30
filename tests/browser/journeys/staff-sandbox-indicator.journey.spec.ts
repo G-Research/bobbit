@@ -1,5 +1,5 @@
 /**
- * Browser E2E for the fix-staff-sandbox-model design:
+ * Browser journey for the fix-staff-sandbox-model design:
  *
  *   1. The staff edit page's Sandbox row reflects the persisted boolean
  *      verbatim ("Enabled" / "Disabled") — no whale badge, no "Inherited
@@ -16,14 +16,14 @@
  *      been removed). The toggle-on case (`Enabled`) cannot be exercised
  *      end-to-end here because saving a `sandboxed: true` staff requires
  *      Docker — covered at the data-model layer by
- *      tests/staff-sandboxed-persistence.test.ts and at the API layer by
- *      tests/e2e/staff.spec.ts.
+ *      tests2/core/staff-sandboxed-persistence.test.ts and at the API layer by
+ *      tests2/integration/staff.test.ts.
  *
- * Pattern mirrors tests/e2e/ui/settings.spec.ts for navigation + reload.
+ * Pattern mirrors tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts for navigation + reload.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Staff sandbox indicator", () => {
 	const cleanup: string[] = [];

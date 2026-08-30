@@ -1,5 +1,5 @@
 /**
- * Per-project Staff sub-section — browser E2E.
+ * Per-project Staff sub-section — browser journey.
  *
  * Story coverage pinned here:
  *   SB-31: staff rows render under a dedicated per-project Staff sub-section,
@@ -7,12 +7,12 @@
  *
  * Browser coverage is consolidated into the real user-facing flows here. The
  * pure PATCH /api/staff/:id project reassignment data path is covered by the
- * API E2E suite in tests/e2e/staff-patch-reassign.spec.ts.
+ * API E2E suite in tests2/integration/staff-patch-reassign.test.ts.
  */
 import { type Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 const STAFF_HEADER_FOR_PROJECT = (page: Page, projectId: string) =>
 	page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${projectId}"]`).first();

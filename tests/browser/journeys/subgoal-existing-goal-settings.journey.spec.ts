@@ -1,5 +1,5 @@
 /**
- * BROWSER E2E — existing-goal Sub-goals settings (the dead-end fix).
+ * BROWSER JOURNEY — existing-goal Sub-goals settings (the dead-end fix).
  *
  * Goal acceptance criterion: "A user can enable sub-goals on an existing goal
  * via the UI, then successfully create a child under it." This covers the full
@@ -19,15 +19,15 @@
  * auth: subgoal-only edits are operator-authorized (human cookie), so the
  * dashboard control actually works for a human operator.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
 	deleteGoal,
 	defaultProjectId,
 	nonGitCwd,
-} from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

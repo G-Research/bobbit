@@ -1,16 +1,16 @@
 /**
- * Sidebar stories E2E smoke — CT-03/CT-04 matrix coverage now lives in
- * tests/ui-fixtures/sidebar-navigation-fixture.spec.ts.
+ * Sidebar stories journey smoke — CT-03/CT-04 matrix coverage now lives in
+ * tests/browser/fixtures/sidebar-navigation-fixture.fixture.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import {
 	createSession,
 	deleteSession,
 	apiFetch,
 	nonGitCwd,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("CT-03 & CT-04: Sidebar stories", () => {
 	const sessionIds: string[] = [];

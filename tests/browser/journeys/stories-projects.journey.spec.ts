@@ -2,11 +2,12 @@
  * Project organization stories — CT-16
  *
  * These stories ARE the specification. Each test reads as a behavioral
- * requirement and runs as a Playwright E2E test.
+ * requirement and runs as a Playwright browser journey.
  *
  * Focus: projects organize sessions and survive page reload.
  * Full project UI flows (add-project wizard, assistant, removal) are
- * tested in add-project-flow.spec.ts and project-assistant.spec.ts.
+ * tested in tests2/browser/fixtures/add-project-flow.spec.ts and
+ * tests/e2e/browser/project-assistant.browser-e2e.spec.ts.
  * These tests cover the CT-16 contract: sidebar grouping and reload persistence.
  *
  * Phase annotations control what gets tracked in the spec graph:
@@ -15,10 +16,10 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import { test, expect } from "../gateway-harness.js";
-import { waitForHealth, apiFetch, deleteSession } from "../e2e-setup.js";
-import { SpecContext } from "../ui/spec-framework.js";
-import { STORY_PR01, STORY_PR09, STORY_PR10 } from "../ui/story-registry.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { waitForHealth, apiFetch, deleteSession } from "../../e2e/e2e-setup.js";
+import { SpecContext } from "../../e2e/ui/spec-framework.js";
+import { STORY_PR01, STORY_PR09, STORY_PR10 } from "../../e2e/ui/story-registry.js";
 
 test.describe("CT-16: Projects organize sessions", () => {
 	let s: SpecContext;

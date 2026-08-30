@@ -1,6 +1,6 @@
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 const ACCESSORY_ID = "wizard-hat";
 const ACCESSORY_LABEL = "Wizard Hat";

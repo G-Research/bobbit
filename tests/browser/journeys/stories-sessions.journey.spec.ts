@@ -2,7 +2,7 @@
  * Session lifecycle stories — CT-01, CT-02, CT-05, CT-15, CT-16
  *
  * These stories ARE the specification. Each test reads as a behavioral
- * requirement and runs as a Playwright E2E test.
+ * requirement and runs as a Playwright browser journey.
  *
  * Phase annotations control what gets tracked in the spec graph:
  *   setup  → preconditions, incidental navigation (not tracked)
@@ -10,10 +10,10 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, base, readE2ETokenAsync, waitForHealth, deleteSession } from "../e2e-setup.js";
-import { waitForAgentResponse } from "../ui/ui-helpers.js";
-import { SpecContext } from "../ui/spec-framework.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, base, readE2ETokenAsync, waitForHealth, deleteSession } from "../../e2e/e2e-setup.js";
+import { waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
+import { SpecContext } from "../../e2e/ui/spec-framework.js";
 import {
 	STORY_S01,
 	STORY_S02,
@@ -24,7 +24,7 @@ import {
 	STORY_S07,
 	STORY_S11,
 	STORY_S12,
-} from "../ui/story-registry.js";
+} from "../../e2e/ui/story-registry.js";
 
 async function openStoryApp(s: SpecContext): Promise<void> {
 	await expect(async () => {

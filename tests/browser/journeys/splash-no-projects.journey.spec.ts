@@ -1,14 +1,14 @@
 /**
- * Browser E2E — when Headquarters is hidden and no normal projects are visible,
+ * Browser journey — when Headquarters is hidden and no normal projects are visible,
  * the splash does not regress to the old forced "New Project" gate. It offers a
  * Quick Session in the internally resolvable Headquarters workspace plus Show
  * Headquarters/Add Project recovery actions.
  *
  * Pattern: navigate → happy path → persistence → cleanup.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 

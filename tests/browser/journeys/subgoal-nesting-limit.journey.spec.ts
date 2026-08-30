@@ -1,5 +1,5 @@
 /**
- * Browser E2E coverage for the Subgoal nesting-limit controls.
+ * Browser journey coverage for the Subgoal nesting-limit controls.
  *
  *   1. Settings stepper renders and persists across reload.
  *   2. Per-goal controls (Allow subgoals + Max nesting depth) are visible
@@ -9,9 +9,9 @@
  * The proposal panel cases drive the form by toggling the system flag and
  * checking the data-testid attributes on the goal-form controls.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 async function setPref(key: string, value: unknown): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

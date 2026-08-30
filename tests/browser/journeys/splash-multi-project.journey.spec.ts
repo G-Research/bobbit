@@ -1,10 +1,10 @@
 /**
- * Browser E2E — splash screen with Headquarters plus another visible project
+ * Browser journey — splash screen with Headquarters plus another visible project
  * opens a project picker popover anchored at the "Quick Session" button.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp } from "../../e2e/ui/ui-helpers.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

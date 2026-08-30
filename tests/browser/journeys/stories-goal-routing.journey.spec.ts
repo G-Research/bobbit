@@ -12,9 +12,9 @@
  *
  * Phase annotations: setup (not tracked), act, assert, cleanup.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, rawApiFetch, waitForHealth } from "../e2e-setup.js";
-import { SpecContext } from "../ui/spec-framework.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, rawApiFetch, waitForHealth } from "../../e2e/e2e-setup.js";
+import { SpecContext } from "../../e2e/ui/spec-framework.js";
 import {
 	STORY_GR01,
 	STORY_GR02,
@@ -23,7 +23,7 @@ import {
 	STORY_GR05,
 	STORY_GR09,
 	STORY_GR10,
-} from "../ui/story-registry.js";
+} from "../../e2e/ui/story-registry.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

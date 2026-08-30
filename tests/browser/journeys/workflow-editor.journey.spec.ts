@@ -6,11 +6,11 @@
  * editor's step-type dropdown was missing the `human-signoff` option and
  * forced authors into the `command` default (silent auto-skip).
  *
- * Canonical pattern: tests/e2e/ui/workflow-page-scope.spec.ts.
+ * Canonical pattern: tests/browser/journeys/workflow-page-scope.journey.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, rawApiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, rawApiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
