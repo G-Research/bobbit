@@ -26,7 +26,7 @@ test.describe("Prompt stats E2E", () => {
 		await sendMessage(page, "Full stats test");
 		await waitForAgentResponse(page);
 
-	const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+		const statsBar = page.getByTestId("session-stats-bar");
 		await expect(statsBar).toBeVisible({ timeout: 15_000 });
 
 		// The stats fields populate asynchronously from a "state" WS broadcast
@@ -38,10 +38,10 @@ test.describe("Prompt stats E2E", () => {
 		await expect(statsBar).toContainText("mock-model", { timeout: 20_000 });
 
 		// PI-17: Context usage bar shows percentage
-		const contextSpan = page.locator("span[title*='Context:']");
-		await expect(contextSpan).toBeVisible({ timeout: 15_000 });
-		await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
-		await expect(contextSpan).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
+		const contextTrigger = statsBar.getByTestId("context-meter-trigger");
+		await expect(contextTrigger).toBeVisible({ timeout: 15_000 });
+		await expect(contextTrigger).toContainText(/\d+%/, { timeout: 15_000 });
+		await expect(contextTrigger).toHaveAttribute("title", /Context:.*tokens/, { timeout: 10_000 });
 
 		// PI-18: Cost display appears
 		await expect(statsBar).toContainText("$", { timeout: 15_000 });
@@ -57,11 +57,12 @@ test.describe("Prompt stats E2E", () => {
 		// Wait for the context stats to actually populate (not just for the element
 		// to exist) — the stats arrive via a WS broadcast after the agent response,
 		// and clicking before then yields a blank popover / no-op.
-		const contextSpan = page.locator("span[title*='Context:']");
-		await expect(contextSpan).toBeVisible({ timeout: 15_000 });
-		await expect(contextSpan).toContainText(/\d+%/, { timeout: 15_000 });
+		const statsBar = page.getByTestId("session-stats-bar");
+		const contextTrigger = statsBar.getByTestId("context-meter-trigger");
+		await expect(contextTrigger).toBeVisible({ timeout: 15_000 });
+		await expect(contextTrigger).toContainText(/\d+%/, { timeout: 15_000 });
 
-		await contextSpan.click();
+		await contextTrigger.click();
 
 		const popover = page.locator(".context-popover");
 		await expect(popover).toBeVisible({ timeout: 5_000 });
@@ -81,11 +82,8 @@ test.describe("Prompt stats E2E", () => {
 		await sendMessage(page, "Cost popover test");
 		await waitForAgentResponse(page);
 
-		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
-		await expect(async () => {
-			const text = await statsBar.textContent();
-			expect(text).toContain("$");
-		}).toPass({ timeout: 10_000 });
+		const statsBar = page.getByTestId("session-stats-bar");
+		await expect(statsBar).toContainText("$", { timeout: 10_000 });
 
 		const costSpan = statsBar.locator("span.cursor-pointer").filter({ hasText: "$" }).first();
 		await costSpan.click();
@@ -99,7 +97,7 @@ test.describe("Prompt stats E2E", () => {
 		await sendMessage(page, "Hello");
 		await waitForAgentResponse(page);
 
-		const statsBar = page.locator(".text-xs.text-muted-foreground.flex.justify-between");
+		const statsBar = page.getByTestId("session-stats-bar");
 		await expect(statsBar).toBeVisible({ timeout: 10_000 });
 		await expect(statsBar).toContainText("mock-model", { timeout: 10_000 });
 
