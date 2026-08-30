@@ -1,50 +1,46 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 
 const temporaryRoots: string[] = [];
-const children: ChildProcess[] = [];
+const workers: Worker[] = [];
 
-function waitForMessage(child: ChildProcess, type: string, timeoutMs = 5_000): Promise<Record<string, unknown>> {
+function waitForMessage(worker: Worker, type: string, timeoutMs = 5_000): Promise<Record<string, unknown>> {
 	return new Promise((resolveMessage, rejectMessage) => {
 		const timer = setTimeout(() => {
 			cleanup();
-			rejectMessage(new Error(`Timed out waiting for child message ${type}`));
+			rejectMessage(new Error(`Timed out waiting for worker message ${type}`));
 		}, timeoutMs);
 		const onMessage = (message: unknown): void => {
 			if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== type) return;
 			cleanup();
 			resolveMessage(message as Record<string, unknown>);
 		};
-		const onExit = (code: number | null): void => {
+		const onError = (error: Error): void => {
 			cleanup();
-			rejectMessage(new Error(`Child exited with code ${code} before message ${type}`));
+			rejectMessage(error);
+		};
+		const onExit = (code: number): void => {
+			cleanup();
+			rejectMessage(new Error(`Worker exited with code ${code} before message ${type}`));
 		};
 		function cleanup(): void {
 			clearTimeout(timer);
-			child.off("message", onMessage);
-			child.off("exit", onExit);
+			worker.off("message", onMessage);
+			worker.off("error", onError);
+			worker.off("exit", onExit);
 		}
-		child.on("message", onMessage);
-		child.on("exit", onExit);
+		worker.on("message", onMessage);
+		worker.on("error", onError);
+		worker.on("exit", onExit);
 	});
 }
 
 afterEach(async () => {
-	await Promise.all(children.splice(0).map(async child => {
-		if (child.exitCode !== null || child.signalCode !== null) return;
-		await new Promise<void>(resolveExit => {
-			const timeout = setTimeout(resolveExit, 1_000);
-			child.once("exit", () => {
-				clearTimeout(timeout);
-				resolveExit();
-			});
-			child.kill();
-		});
-	}));
+	await Promise.all(workers.splice(0).map(worker => worker.terminate()));
 	for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -64,31 +60,30 @@ describe("buildBundle lock ownership", () => {
 
 		const helperUrl = pathToFileURL(resolve(import.meta.dirname, "../../fixtures/build-bundle.ts")).href;
 		writeFileSync(runner, `
+import { parentPort } from "node:worker_threads";
 import { buildBundle } from ${JSON.stringify(helperUrl)};
-process.on("message", (message) => {
+parentPort.on("message", (message) => {
   if (message !== "go") return;
-  process.send({ type: "calling" }, () => {
-    try {
-      buildBundle(${JSON.stringify({ entry, outfile })});
-      process.send({ type: "returned" }, () => process.disconnect());
-    } catch (error) {
-      process.send({ type: "failed", error: String(error?.stack ?? error) }, () => process.disconnect());
-    }
-  });
+  parentPort.postMessage({ type: "calling" });
+  try {
+    buildBundle(${JSON.stringify({ entry, outfile })});
+    parentPort.postMessage({ type: "returned" });
+  } catch (error) {
+    parentPort.postMessage({ type: "failed", error: String(error?.stack ?? error) });
+  } finally {
+    parentPort.close();
+  }
 });
-process.send({ type: "ready" });
+parentPort.postMessage({ type: "ready" });
 `, "utf8");
 
-		const child = spawn(process.execPath, ["--import", "tsx", runner], {
-			cwd: resolve(import.meta.dirname, "../../.."),
-			stdio: ["ignore", "pipe", "pipe", "ipc"],
-		});
-		children.push(child);
-		await waitForMessage(child, "ready");
-		const returned = waitForMessage(child, "returned");
-		const failed = waitForMessage(child, "failed");
-		child.send("go");
-		await waitForMessage(child, "calling");
+		const worker = new Worker(runner, { execArgv: ["--import", "tsx"] });
+		workers.push(worker);
+		await waitForMessage(worker, "ready");
+		const returned = waitForMessage(worker, "returned");
+		const failed = waitForMessage(worker, "failed");
+		worker.postMessage("go");
+		await waitForMessage(worker, "calling");
 
 		const premature = await Promise.race([
 			returned.then(() => "returned"),
