@@ -11,7 +11,7 @@
  *      the edited build_command.
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
-import { apiFetch, defaultProjectId } from "../../e2e/e2e-setup.js";
+import { apiFetch, defaultProjectId, nonGitCwd } from "../../e2e/e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
@@ -52,6 +52,39 @@ test.describe("Editable proposals — project propose → edit → accept", () =
 		// Project panel must be visible.
 		const panel = page.locator('[data-panel="project-proposal"]').first();
 		await expect(panel).toBeVisible({ timeout: 15_000 });
+
+		// This is an existing-project edit journey: make the target explicit and
+		// replace the mock's legacy nonexistent /tmp path with the harness temp root.
+		// The server edit keeps the persisted draft and browser slot in sync.
+		const sessionId = await page.evaluate(() => {
+			const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+			return s?.selectedSessionId as string | undefined;
+		});
+		expect(sessionId).toBeTruthy();
+		const targetEdit = await page.evaluate(async ({ sid, cwd, targetProjectId }) => {
+			// Proposal mutation is a human-operator action. Keep this request on the
+			// mounted app's origin so the browser's signed operator cookie, rather
+			// than the Node harness bearer token, authenticates the owner explicitly.
+			const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposal/project/edit`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					old_text: "root_path: /tmp/editable",
+					new_text: `root_path: ${JSON.stringify(cwd)}\nprojectId: ${targetProjectId}`,
+				}),
+			});
+			return { status: response.status, text: await response.text() };
+		}, { sid: sessionId!, cwd: nonGitCwd(), targetProjectId: projectId });
+		expect(targetEdit.status, `explicit project target edit failed: ${targetEdit.text}`).toBe(200);
+		await page.waitForFunction(
+			(id) => {
+				const s = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return s?.activeProposals?.project?.fields?.projectId === id
+					&& s?.activeProposals?.project?.mode === "registered";
+			},
+			projectId,
+			{ timeout: 15_000 },
+		);
 
 		// 2. Trigger the edit. EDITABLE_PROPOSAL_EDIT emits an
 		//    edit_proposal tool call which the mock-agent translates

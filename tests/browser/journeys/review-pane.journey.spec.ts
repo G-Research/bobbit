@@ -8,10 +8,10 @@ import { test, expect } from "../../e2e/gateway-harness.js";
 import { createSession, deleteSession, waitForSessionStatus } from "../../e2e/e2e-setup.js";
 import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
-const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
+const REVIEW_PANEL_TAB_SELECTOR = "[data-testid=side-panel-tab][data-panel-tab-kind=review][data-panel-tab-title='Review: Test Document']";
 
 function reviewTab(page: Page) {
-	return page.locator(REVIEW_PANEL_TAB_SELECTOR).filter({ hasText: /^Review:\s*Test Document$/ });
+	return page.locator(REVIEW_PANEL_TAB_SELECTOR);
 }
 
 async function goToSession(page: Page, sessionId: string) {
