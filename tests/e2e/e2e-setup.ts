@@ -167,6 +167,11 @@ export function gitCwd(): string {
 		mkdirSync(cwd, { recursive: true });
 		writeFileSync(join(cwd, "README.md"), "# E2E test repo\n");
 		execFileSync("git", ["init"], { cwd, stdio: "pipe" });
+		// The E2E launcher deliberately isolates HOME/USERPROFILE, so this fixture
+		// must not depend on a developer's global identity. Keep the identity local
+		// to the repository; worktrees created from it inherit the same config.
+		execFileSync("git", ["config", "user.name", "Bobbit E2E"], { cwd, stdio: "pipe" });
+		execFileSync("git", ["config", "user.email", "bobbit-e2e@example.test"], { cwd, stdio: "pipe" });
 		execFileSync("git", ["add", "."], { cwd, stdio: "pipe" });
 		execFileSync("git", ["commit", "-m", "init"], { cwd, stdio: "pipe" });
 	}
