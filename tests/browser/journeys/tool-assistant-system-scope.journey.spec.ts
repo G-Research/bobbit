@@ -7,9 +7,9 @@
  * `{ toolAssistant: true, projectId: "headquarters" }` and succeed even when
  * no normal projects are registered.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Tools page — New Tool with Headquarters scope", () => {
 	test("POST body carries projectId='headquarters' and server returns 201", async ({ page }) => {

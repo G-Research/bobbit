@@ -8,9 +8,9 @@
  * This proves the read state is sourced from the server (lastReadAt) rather
  * than the legacy client-side `bobbit-session-visited` localStorage key.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<{ id: string; rootPath: string }> {
 	const project = await defaultProject();

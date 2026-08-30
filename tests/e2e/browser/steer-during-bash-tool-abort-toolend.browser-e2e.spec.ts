@@ -35,7 +35,7 @@
  * MOCK_ABORT_TOOL_END=1 makes the in-process mock emit `tool_execution_end`
  * on abort (matches the real bash extension's behaviour).
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../ui/fixtures.js";
 import {
 	connectWs,
 	createSession,
@@ -46,7 +46,7 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "../e2e-setup.js";
-import { navigateToHash, openApp, sendMessage } from "./ui-helpers.js";
+import { navigateToHash, openApp, sendMessage } from "../ui/ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");
