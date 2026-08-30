@@ -39,7 +39,7 @@ let isLegacyUnattributableTreeCostRow: HelperFn | undefined;
 let LEGACY_THRESHOLD_FALLBACK_MS: number | undefined;
 let importError: string | undefined;
 try {
-	const mod = await import("../../src/app/tree-cost-legacy.ts") as unknown as {
+	const mod = await import("../../../src/app/tree-cost-legacy.ts") as unknown as {
 		isLegacyUnattributableTreeCostRow?: HelperFn;
 		LEGACY_THRESHOLD_FALLBACK_MS?: number;
 	};

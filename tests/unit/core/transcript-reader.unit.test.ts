@@ -12,7 +12,7 @@ import {
 	TranscriptReaderError,
 	readAgentTranscript,
 	type ReadTranscriptEnvelope,
-} from "../../src/server/agent/transcript-reader.js";
+} from "../../../src/server/agent/transcript-reader.js";
 
 function makeJsonl(messages: Array<{ role: string; content: any; ts?: string }>): string {
 	return messages

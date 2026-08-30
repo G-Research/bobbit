@@ -63,7 +63,7 @@ detail_docs: |-
 	"utf-8",
 );
 
-const { ToolManager } = await import("../../src/server/agent/tool-manager.ts");
+const { ToolManager } = await import("../../../src/server/agent/tool-manager.ts");
 
 afterAll(() => {
 	try { fs.rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -237,8 +237,8 @@ describe("getToolDocsForPrompt — byte budget (real builtins)", () => {
 	it("renders the full default builtin set under 8 KB", () => {
 		// Point ToolManager at the real defaults/tools directory, not tmpConfigDir.
 		// Legacy source lived in tests/ (1 level under repo root); this copy lives in
-		// tests2/core/ (2 levels), so the defaults/ hop needs one extra parent.
-		const builtinsDir = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "..", "..", "defaults", "tools");
+		// tests/unit/core/ (3 levels), so the defaults/ hop needs three parents.
+		const builtinsDir = path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "..", "..", "..", "defaults", "tools");
 		const fakeConfig = fs.mkdtempSync(path.join(os.tmpdir(), "tool-docs-budget-"));
 		fs.mkdirSync(path.join(fakeConfig, "tools"), { recursive: true });
 		const tm = new ToolManager(fakeConfig, builtinsDir);

@@ -25,7 +25,7 @@ const {
 	resolveLegacyThresholdMs,
 	EARLIEST_SIDECAR_TIMESTAMP_MS,
 	LEGACY_TREE_COST_ROW_TOOLTIP,
-} = await import("../../src/app/tree-cost-legacy.ts");
+} = await import("../../../src/app/tree-cost-legacy.ts");
 
 const zeroEntry = { costUsd: 0, tokensIn: 0, tokensOut: 0 };
 const nonZeroBucket = { costUsd: 12.34, tokensIn: 1000, tokensOut: 2000 };

@@ -2,7 +2,7 @@
 // Distinctive failure token: ORPHAN_TOOL_RESULTS_ACTIVE_BRANCH.
 
 import { describe, expect, it } from "vitest";
-import { sanitizeTranscriptContent } from "../../src/server/agent/transcript-sanitizer.ts";
+import { sanitizeTranscriptContent } from "../../../src/server/agent/transcript-sanitizer.ts";
 
 const AFFECTED_TOOL_CALL_IDS = [
 	"toolu_011XxjFHDfiTyzt8UgF2eVe2",
