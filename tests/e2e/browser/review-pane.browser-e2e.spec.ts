@@ -6,7 +6,7 @@
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
+import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../ui/ui-helpers.js";
 
 const REVIEW_PANEL_TAB_SELECTOR = ".goal-preview-panel .goal-tab-pill[data-panel-tab-kind='review']";
 

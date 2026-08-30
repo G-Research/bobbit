@@ -4,7 +4,7 @@
  * Tests queue pills, steer, abort, and draft persistence through the browser.
  * Uses the gateway-harness (spawned gateway process) for real browser interaction.
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../ui/fixtures.js";
 import {
 	createSession,
 	connectWs,
@@ -15,7 +15,7 @@ import {
 	queueLenPredicate,
 	agentEndPredicate,
 } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, sendMessage, waitForAgentResponse } from "../ui/ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");

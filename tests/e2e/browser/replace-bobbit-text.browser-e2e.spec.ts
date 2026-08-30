@@ -10,7 +10,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "./ui-helpers.js";
+import { openApp, sendMessage, waitForAgentResponse, navigateToHash } from "../ui/ui-helpers.js";
 
 const EXPECTED_WORDS = ["Idle", "Busy", "Compacting", "Ended"];
 

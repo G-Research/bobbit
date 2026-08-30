@@ -12,7 +12,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, defaultProjectId } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage } from "../ui/ui-helpers.js";
 
 async function getDefaultProjectId(): Promise<string> {
 	const projectId = await defaultProjectId();

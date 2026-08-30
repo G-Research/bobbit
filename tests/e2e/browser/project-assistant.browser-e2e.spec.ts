@@ -5,7 +5,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteSession } from "../e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, sendMessage, waitForAgentResponse } from "../ui/ui-helpers.js";
 import { realpathSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

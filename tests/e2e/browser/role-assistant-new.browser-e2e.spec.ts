@@ -10,7 +10,7 @@
  * end-to-end through the browser.
  */
 import { test, expect } from "../gateway-harness.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 test.describe("Roles page — + New Role creates a session", () => {
 	test("clicking + New Role opens a Role Assistant session @smoke", async ({ page }) => {

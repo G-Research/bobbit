@@ -14,13 +14,13 @@
  *
  * No production code is modified.
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../ui/fixtures.js";
 import { apiFetch, nonGitCwd } from "../e2e-setup.js";
 import {
 	openApp,
 	navigateToHash,
 	sendMessage,
-} from "./ui-helpers.js";
+} from "../ui/ui-helpers.js";
 
 const ITER = Number(process.env.H3_BROWSER_ITER ?? 2);
 const STREAM_DONE_RE = /STREAM_BURST_DONE:\d+/;

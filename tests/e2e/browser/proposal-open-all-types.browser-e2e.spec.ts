@@ -6,7 +6,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Locator, Page } from "@playwright/test";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage } from "../ui/ui-helpers.js";
 
 type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
 type ProposalLabel = "Goal" | "Project" | "Role" | "Tool" | "Staff";
