@@ -257,7 +257,7 @@ test.describe("Add Project — directory picker typeahead", () => {
 			await input.press("Tab");
 			await expect(input).not.toBeFocused();
 
-			releaseBrowse?.();
+			(releaseBrowse as (() => void) | null)?.();
 			await browseFinished;
 			await expect(page.locator(ADD_PROJECT.pickerSuggestions)).toHaveCount(0);
 			await expect(page.locator('[data-testid="directory-picker-loading"]')).toHaveCount(0);
