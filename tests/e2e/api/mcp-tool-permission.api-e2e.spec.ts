@@ -31,8 +31,6 @@ import {
 	agentEndPredicate,
 	type WsConnection,
 } from "../e2e-setup.js";
-import type { Page } from "@playwright/test";
-
 const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_MCP_SERVER = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 const mcpRestartPath = (projectId: string, name = "mock") => `/api/mcp-servers/${encodeURIComponent(name)}/restart?projectId=${encodeURIComponent(projectId)}`;
@@ -513,20 +511,10 @@ test.describe("MCP Tool Permission — WebSocket protocol", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 2. Fullstack UI: tool permission card rendering and grant button
+// 2. Fullstack protocol: tool permission grant request and resolution
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Open the app authenticated via token query param. */
-async function openApp(page: Page): Promise<void> {
-	const token = readE2EToken();
-	const b = `http://127.0.0.1:${process.env.E2E_PORT}`;
-	await page.goto(`${b}/?token=${encodeURIComponent(token)}`);
-	await expect(
-		page.locator("button[title^='New session']").first(),
-	).toBeVisible({ timeout: 15_000 });
-}
-
-test.describe("MCP Tool Permission — Fullstack UI", () => {
+test.describe("MCP Tool Permission — Fullstack protocol", () => {
 	let sessionId: string;
 	test.afterEach(async () => {
 		if (sessionId) { await deleteSession(sessionId).catch(() => {}); sessionId = ""; }

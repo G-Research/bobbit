@@ -133,8 +133,8 @@ test.describe("Continue-Archived stale worktree source", () => {
 		const baseDir = realpathSync(tmpdir()) + `/bobbit-e2e-cont-wt-stale-source-${process.pid}-${Date.now()}`;
 		const repoPath = join(baseDir, "repo");
 		let projectId: string | undefined;
-		let srcId: string | undefined;
-		let newId: string | undefined;
+		let srcId = "";
+		let newId = "";
 
 		try {
 			await initRepo(repoPath);

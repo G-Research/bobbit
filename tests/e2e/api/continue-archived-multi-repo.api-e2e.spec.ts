@@ -112,8 +112,8 @@ test.describe("Continue-Archived multi-repo worktree support", () => {
 		const apiRepo = join(rootPath, "api");
 		const webRepo = join(rootPath, "web");
 		let projectId: string | undefined;
-		let srcId: string | undefined;
-		let newId: string | undefined;
+		let srcId = "";
+		let newId = "";
 
 		try {
 			mkdirSync(rootPath, { recursive: true });

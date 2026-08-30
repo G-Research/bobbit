@@ -241,7 +241,7 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 		// Poll ls-remote until every expected per-role branch is absent (≤55s).
 		let branchesAfter = new Set<string>();
 		try {
-			branchesAfter = await pollUntil(async () => {
+			const absentBranches = await pollUntil(async () => {
 				const { stdout } = await execFileAsync(
 					"git", ["ls-remote", "--heads", bareRepo],
 					{ encoding: "utf-8" },
@@ -249,6 +249,8 @@ test.describe("orphan remote branch cleanup — Bug 1 (team goal archive)", () =
 				const remoteBranches = remoteHeadBranches(stdout);
 				return expectedBranches.every(b => !remoteBranches.has(b)) ? remoteBranches : null;
 			}, { timeoutMs: 55_000, intervalMs: 500, label: "all per-role branches absent from origin after archive" });
+			if (!absentBranches) throw new Error("branch cleanup poll returned without a branch snapshot");
+			branchesAfter = absentBranches;
 		} catch {
 			// Fall through to the per-branch expect() below for a clearer diff.
 			const { stdout } = await execFileAsync(

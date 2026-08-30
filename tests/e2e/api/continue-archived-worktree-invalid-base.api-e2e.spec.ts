@@ -69,7 +69,7 @@ test.describe("Continue-Archived worktree base-ref failure", () => {
 		const repoPath = join(baseDir, "repo");
 		let projectId: string | undefined;
 		let defaultId: string | undefined;
-		let srcId: string | undefined;
+		let srcId = "";
 		let unexpectedContinuedId: string | undefined;
 
 		try {

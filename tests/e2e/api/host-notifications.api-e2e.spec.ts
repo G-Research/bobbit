@@ -290,6 +290,7 @@ test.describe.serial("canonical host notification E2E", () => {
 				const entries = row ? inbox.entries.filter(entry => entry.id === row.deliveryId) : [];
 				return row?.state === "accepted" && entries.length === 1 ? { rows, row, inbox } : null;
 			}, { timeoutMs: 20_000, label: "accepted goalCreated staff delivery" });
+			if (!accepted) throw new Error("delivery poll returned before durable acceptance");
 
 			const originalNotification = structuredClone(accepted.row.notification);
 			expect(accepted.inbox.entries.find(entry => entry.id === accepted.row.deliveryId)?.notificationInput?.notification).toEqual(originalNotification);
@@ -344,6 +345,7 @@ test.describe.serial("canonical host notification E2E", () => {
 				const row = rows.find(candidate => candidate.deliveryId === accepted.row.deliveryId);
 				return row?.state === "accepted" ? row : null;
 			}, { timeoutMs: 20_000, label: "restart reconciliation accepts expired staff lease" });
+			if (!reconciled) throw new Error("restart reconciliation poll returned before acceptance");
 			const restartedInbox = JSON.parse(readFileSync(inboxFile, "utf8")) as InboxFile;
 			const matchingEntries = restartedInbox.entries.filter(entry => entry.id === accepted.row.deliveryId);
 			expect(matchingEntries, "idempotent inbox acceptance must retain exactly one entry").toHaveLength(1);

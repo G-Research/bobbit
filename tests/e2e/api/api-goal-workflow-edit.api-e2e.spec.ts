@@ -137,7 +137,7 @@ async function waitForRunningVerification(goalId: string, gateId: string): Promi
 }
 
 async function waitForNoRunningVerification(goalId: string, gateId: string): Promise<boolean> {
-	return pollUntil(async () => {
+	const stopped = await pollUntil(async () => {
 		const response = await apiFetch(`/api/goals/${goalId}/verifications/active`);
 		if (!response.ok) return null;
 		const body = await response.json();
@@ -146,6 +146,7 @@ async function waitForNoRunningVerification(goalId: string, gateId: string): Pro
 		);
 		return running ? null : true;
 	}, { timeoutMs: 10_000, intervalMs: 50, label: `verification ${goalId}/${gateId} stopped` });
+	return stopped === true;
 }
 
 test.describe.configure({ mode: "serial" });

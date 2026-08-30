@@ -84,8 +84,8 @@ async function assertMockModelUsesStoredCredential(access: string): Promise<void
 		userPrompt: "Reply with OK",
 		maxTokens: 5,
 		thinkingLevel: "off",
-	}, async (_model: unknown, _context: unknown, options: Record<string, unknown>) => {
-		observedApiKey = options.apiKey;
+	}, async (_model: unknown, _context: unknown, options?: { apiKey?: unknown }) => {
+		observedApiKey = options?.apiKey;
 		return { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" } as any;
 	}, {
 		env: {},

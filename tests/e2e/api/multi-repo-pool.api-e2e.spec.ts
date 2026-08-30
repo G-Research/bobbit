@@ -153,7 +153,7 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		// Poll until branch settles to session/<id8>.
 		const settled = await pollSessionUntil(
 			sessionId,
-			row => typeof row.branch === "string" && row.branch.startsWith("session/"),
+			(row: { branch?: unknown }) => typeof row.branch === "string" && row.branch.startsWith("session/"),
 			15_000,
 		);
 		const branch: string | undefined = settled?.branch;
@@ -193,7 +193,7 @@ test.describe.serial("multi-repo worktree pool E2E", () => {
 		// Settle: re-fetch until the title update has been observed (or timeout).
 		const afterPatch = await pollSessionUntil(
 			sessionId,
-			row => row.title === "Multi-repo lifecycle" || !!row.branch,
+			(row: { title?: unknown; branch?: unknown }) => row.title === "Multi-repo lifecycle" || !!row.branch,
 			2_000,
 		);
 		expect(afterPatch.branch).toBe(branch);

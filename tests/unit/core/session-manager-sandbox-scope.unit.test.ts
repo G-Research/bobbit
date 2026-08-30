@@ -41,15 +41,17 @@ describe("session-manager sandbox scope regressions", () => {
 		assert.match(SESSION_MANAGER, /let restoredSandboxed = ps\.sandboxed === true && !\(ps\.projectId && isSandboxExemptProject\(ps\.projectId\)\);/);
 	});
 
-	it("force-abort respawn honors a false sandbox wiring result", () => {
-		assert.match(SESSION_MANAGER, /const sandboxApplied = await this\.applySandboxWiring\(bridgeOptions, id, \{/);
-		assert.match(SESSION_MANAGER, /if \(!sandboxApplied\) \{[\s\S]*?session\.sandboxed = false;[\s\S]*?update\(id, \{ sandboxed: false \}\);/);
+	it("force-abort respawn fails closed when sandbox wiring is unavailable", () => {
+		const body = methodBody("_forceAbortOwned");
+		assert.match(body, /const sandboxApplied = await this\.applySandboxWiring\(bridgeOptions, id, \{/);
+		assert.match(body, /if \(!sandboxApplied\) \{[\s\S]*?throw new Error\(`Cannot recover sandboxed session \$\{id\}: sandbox realm is unavailable`\);/);
+		assert.doesNotMatch(body, /session\.sandboxed = false|update\(id, \{ sandboxed: false \}\)/);
 	});
 
 	it("direct agents receive scoped gateway credentials from session-manager", () => {
 		assert.match(SESSION_MANAGER, /private mintScopedGatewayToken\([\s\S]*?this\.sandboxTokenStore\.register\(projectId\)[\s\S]*?addSession\(projectId, sessionId\)/);
 		assert.match(SESSION_MANAGER, /const directGatewayEnv = !effectiveSandboxed[\s\S]*?this\.scopedGatewayEnvForDirectAgent\(id, projectId/);
 		assert.match(SESSION_MANAGER, /env: \{ \.\.\.\(opts\?\.env \?\? \{\}\), \.\.\.\(directGatewayEnv \?\? \{\}\) \}/);
-		assert.match(SESSION_MANAGER, /if \(!session\.sandboxed\) this\.applyScopedGatewayCredentials\(bridgeOptions, id, session\.projectId/);
+		assert.match(methodBody("_forceAbortOwned"), /\} else \{\s*this\.applyScopedGatewayCredentials\(bridgeOptions, id, session\.projectId/);
 	});
 });

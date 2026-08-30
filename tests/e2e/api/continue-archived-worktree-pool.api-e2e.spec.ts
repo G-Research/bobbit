@@ -101,13 +101,15 @@ function ensureRuntimeCwdMetadata(jsonlPath: string, cwd: string, sessionId: str
 async function readyPoolEntry(gateway: any, projectId: string): Promise<PoolEntrySnapshot> {
 	const ready = await waitForPool(projectId, 1, 45_000);
 	expect(ready, "project worktree pool should expose a ready entry before continue").toBeGreaterThan(0);
-	return pollUntil(() => {
+	const entry = await pollUntil(() => {
 		const pool = gateway.sessionManager.getWorktreePool(projectId) as any;
-		const entry = pool?.pool?.[0];
-		return typeof entry?.branchName === "string" && typeof entry?.worktreePath === "string"
-			? { branchName: entry.branchName, worktreePath: entry.worktreePath }
+		const candidate = pool?.pool?.[0];
+		return typeof candidate?.branchName === "string" && typeof candidate?.worktreePath === "string"
+			? { branchName: candidate.branchName, worktreePath: candidate.worktreePath }
 			: null;
 	}, { timeoutMs: 10_000, intervalMs: 100, label: "ready pool entry is observable" });
+	if (!entry) throw new Error("ready pool entry disappeared after becoming observable");
+	return entry;
 }
 
 test.describe("Continue-Archived worktree pool", () => {
@@ -115,8 +117,8 @@ test.describe("Continue-Archived worktree pool", () => {
 		const baseDir = realpathSync(tmpdir()) + `/bobbit-e2e-cont-wt-pool-${process.pid}-${Date.now()}`;
 		const repoPath = join(baseDir, "repo");
 		let projectId: string | undefined;
-		let srcId: string | undefined;
-		let newId: string | undefined;
+		let srcId = "";
+		let newId = "";
 
 		try {
 			await initRepo(repoPath);

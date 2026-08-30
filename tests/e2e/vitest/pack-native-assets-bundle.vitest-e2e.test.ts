@@ -49,7 +49,7 @@ type NpmPackEntry = {
 	files: Array<{ path: string; size: number; mode: number }>;
 };
 
-const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
+const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const BUILD_MODULE = pathToFileURL(path.join(REPO_ROOT, "scripts", "pack-native-assets.mjs")).href;
 const COPY_BUILTIN_PACKS = path.join(REPO_ROOT, "scripts", "copy-builtin-packs.mjs");
 const PACK_NAME = "file-explorer";

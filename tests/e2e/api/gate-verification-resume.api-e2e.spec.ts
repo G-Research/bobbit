@@ -251,11 +251,9 @@ test.describe("gate verification resume after restart", () => {
 			// Track terminateSession calls so we can assert timing.
 			const origTerminate = sm.terminateSession.bind(sm);
 			let terminatedAt: number | null = null;
-			let terminatedSessionId: string | null = null;
 			sm.terminateSession = async (sid: string) => {
 				if (sid === reviewerId && terminatedAt === null) {
 					terminatedAt = Date.now();
-					terminatedSessionId = sid;
 				}
 				return origTerminate(sid);
 			};
