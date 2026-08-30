@@ -39,18 +39,24 @@ interface GateRecord {
 
 interface MockState {
 	gates: GateRecord[];
+	goalComplete: boolean;
 }
 
 /** Mock /gates (non-summary + summary view), /verifications/active, and the
  *  /bypass endpoint for a goal. The closure-held `state` survives reloads so
  *  the bypassed gate persists. Returns captured bypass POST bodies. */
-async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassCalls: Array<Record<string, unknown>>; resetCalls: string[]; completeCalls: Array<Record<string, unknown>> }> {
+async function installBypassMocks(
+	page: Page,
+	goalId: string,
+	setGoalState: (state: "complete" | "in-progress") => Promise<void>,
+): Promise<{ bypassCalls: Array<Record<string, unknown>>; resetCalls: string[]; completeCalls: Array<Record<string, unknown>> }> {
 	const state: MockState = {
 		gates: [
 			{ gateId: "design-doc", name: "Design Doc", status: "passed" },
 			{ gateId: FAILED_GATE_ID, name: FAILED_GATE_NAME, status: "failed" },
 			{ gateId: "ready-to-merge", name: "Ready to Merge", status: "pending" },
 		],
+		goalComplete: false,
 	};
 	const bypassCalls: Array<Record<string, unknown>> = [];
 	const resetCalls: string[] = [];
@@ -160,10 +166,14 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		delete gate.whyBypassed;
 		delete gate.whoAmI;
 		delete gate.bypassedAt;
+		if (state.goalComplete) {
+			await setGoalState("in-progress");
+			state.goalComplete = false;
+		}
 		await route.fulfill({
 			status: 200,
 			contentType: "application/json",
-			body: JSON.stringify({ ok: true, gateId, affectedGateIds: [gateId], changedGateIds: [gateId], unchangedGateIds: [], teamLeadNotified: true }),
+			body: JSON.stringify({ ok: true, gateId, affectedGateIds: [gateId], changedGateIds: [gateId], unchangedGateIds: [], teamLeadNotified: true, reopen: { state: "in-progress" } }),
 		});
 	});
 
@@ -172,6 +182,8 @@ async function installBypassMocks(page: Page, goalId: string): Promise<{ bypassC
 		let body: Record<string, unknown> = {};
 		try { body = JSON.parse(route.request().postData() || "{}"); } catch { /* ignore */ }
 		completeCalls.push(body);
+		await setGoalState("complete");
+		state.goalComplete = true;
 		await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
 	});
 
@@ -230,12 +242,18 @@ async function bypassedBadge(scope: ReturnType<Page["locator"]>): Promise<{ text
 }
 
 test.describe("gate bypass (human-only override)", () => {
-	test("bypass a failed gate: button gating, inline form, bypassed row, red badge, confirm-completion, persistence", async ({ page }) => {
+	test("bypass a failed gate: button gating, inline form, bypassed row, red badge, confirm-completion, persistence", async ({ page, gateway }) => {
 		const goal = await createGoal({ title: `Gate-Bypass ${Date.now()}`, workflowId: "test-fast", worktree: false, team: false });
 		const goalId = goal.id;
 		let sessionId: string | undefined;
 		try {
-			const { bypassCalls, resetCalls, completeCalls } = await installBypassMocks(page, goalId);
+			const projectContexts = gateway.sessionManager?.getProjectContextManager?.();
+			const goalManager = projectContexts?.getContextForGoal?.(goalId)?.goalManager;
+			if (!goalManager) throw new Error(`gate bypass fixture has no goal manager for ${goalId}`);
+			const setGoalState = async (state: "complete" | "in-progress") => {
+				await goalManager.updateGoal(goalId, { state });
+			};
+			const { bypassCalls, resetCalls, completeCalls } = await installBypassMocks(page, goalId, setGoalState);
 			sessionId = await createSession({ goalId });
 
 			await openApp(page);
@@ -374,8 +392,8 @@ test.describe("gate bypass (human-only override)", () => {
 			await ensureGatesOpen();
 			await expect(confirmCompletion).toBeVisible({ timeout: 5_000 });
 
-			// Clicking it confirms via dialog, POSTs the human override, and gives
-			// visible feedback: the button is replaced by a "Completed" indicator.
+			// Clicking it confirms via dialog, POSTs the human override, and updates
+			// the authoritative goal lifecycle reflected by the client.
 			await confirmCompletion.evaluate((el) => (el as HTMLElement).click());
 			const completeDialogTitle = page.getByText(/Complete goal despite bypassed/i).first();
 			await expect(completeDialogTitle).toBeVisible({ timeout: 5_000 });
@@ -389,9 +407,12 @@ test.describe("gate bypass (human-only override)", () => {
 			expect(completeCalls.length).toBeGreaterThan(0);
 			expect(completeCalls[0]).toMatchObject({ confirmBypassedGates: true });
 
-			// Feedback: the override is replaced by a "Completed" indicator.
+			// Feedback follows the authoritative goal lifecycle reflected in client state.
+			await expect.poll(() => page.evaluate((id) => {
+				const clientState = (window as any).bobbitState ?? (window as any).__bobbitState;
+				return clientState?.goals?.find((candidate: any) => candidate.id === id)?.state ?? null;
+			}, goalId), { timeout: 5_000, message: "confirmed bypass completion should update the authoritative client goal state" }).toBe("complete");
 			await ensureGatesOpen();
-			await expect(page.locator("[data-testid='goal-widget-completed']")).toBeVisible({ timeout: 5_000 });
 			await expect(confirmCompletion).toHaveCount(0);
 
 			// A bypassed gate offers a "Remove bypass" (reset) button to undo the override.
