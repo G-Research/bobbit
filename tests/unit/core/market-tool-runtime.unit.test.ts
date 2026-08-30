@@ -211,7 +211,7 @@ describe("market pack overlaying a shared builtin group (finding #1)", () => {
 //    PARSED/validated contribution, NOT the raw YAML `renderer:` field. A
 //    STRUCTURALLY-unsafe renderer path (absolute / drive-absolute) is dropped by
 //    parseContributions, so it must NOT be advertised as rendererKind:"pack". A
-//    relative `../../../lib/X.js` path is now ALLOWED (pack-schema-v1 §2.1 — shared
+//    relative `../../lib/X.js` path is now ALLOWED (pack-schema-v1 §2.1 — shared
 //    lib/ modules); containment is enforced at the GET endpoint, not parse time.
 describe("renderer-path validation flows into rendererKind + resolveToolLocation (Fix 2)", () => {
 	// A market-pack root whose path contains a real `market-packs` segment, so the
@@ -228,10 +228,10 @@ describe("renderer-path validation flows into rendererKind + resolveToolLocation
 	// Structurally-unsafe renderer (absolute path) → parseContributions drops it; must degrade.
 	w(path.join(pack, "demo", "evil_tool.yaml"),
 		`name: evil_tool\ndescription: evil\ngroup: demo\nrenderer: /etc/evil.js\n`);
-	// Shared lib/ renderer via `../../../lib/` — now ALLOWED at parse time (§2.1).
+	// Shared lib/ renderer via `../../lib/` — now ALLOWED at parse time (§2.1).
 	w(path.join(pf, ".bobbit", "config", "market-packs", "demo", "lib", "Shared.js"), "export default {};\n");
 	w(path.join(pack, "demo", "lib_tool.yaml"),
-		`name: lib_tool\ndescription: lib\ngroup: demo\nrenderer: ../../../lib/Shared.js\n`);
+		`name: lib_tool\ndescription: lib\ngroup: demo\nrenderer: ../../lib/Shared.js\n`);
 
 	function tm(): InstanceType<typeof ToolManager> {
 		__resetToolScanCache();
@@ -260,11 +260,11 @@ describe("renderer-path validation flows into rendererKind + resolveToolLocation
 		assert.equal(loc!.rendererFile, undefined);
 	});
 
-	it("a `../../../lib/Shared.js` renderer IS allowed (pack-schema-v1 §2.1 shared lib) and resolves as pack", () => {
+	it("a `../../lib/Shared.js` renderer IS allowed (pack-schema-v1 §2.1 shared lib) and resolves as pack", () => {
 		const m = tm();
 		assert.equal(m.getToolByName("lib_tool")!.rendererKind, "pack");
 		const loc = m.resolveToolLocation("lib_tool");
 		assert.equal(loc!.rendererKind, "pack");
-		assert.equal(loc!.rendererFile, "../../../lib/Shared.js");
+		assert.equal(loc!.rendererFile, "../../lib/Shared.js");
 	});
 });
