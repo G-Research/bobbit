@@ -19,9 +19,9 @@ import { waitForHealth, createGoal, deleteGoal, apiFetch } from "../e2e-setup.js
 import {
 	SpecContext,
 	defineStory,
-} from "./spec-framework.js";
-import { CT_02, CT_05, CT_13, CT_15 } from "./spec-contracts.js";
-import { navigateToHash } from "./ui-helpers.js";
+} from "../ui/spec-framework.js";
+import { CT_02, CT_05, CT_15 } from "../ui/spec-contracts.js";
+import { navigateToHash } from "../ui/ui-helpers.js";
 
 // ---------------------------------------------------------------
 // Reproducing-test helpers (composer draft-loss regression).

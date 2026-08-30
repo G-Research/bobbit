@@ -18,7 +18,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, deleteGoal, defaultProjectId, nonGitCwd } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, createSessionViaUI } from "../ui/ui-helpers.js";
 
 const PARENT_SPEC =
 	"Parent goal for the parent-picker eligibility repro — padded to satisfy the spec minimum length validator.";

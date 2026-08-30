@@ -17,8 +17,8 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { waitForHealth, apiFetch, deleteSession } from "../e2e-setup.js";
-import { SpecContext } from "./spec-framework.js";
-import { STORY_PR01, STORY_PR09, STORY_PR10 } from "./story-registry.js";
+import { SpecContext } from "../ui/spec-framework.js";
+import { STORY_PR01, STORY_PR09, STORY_PR10 } from "../ui/story-registry.js";
 
 test.describe("CT-16: Projects organize sessions", () => {
 	let s: SpecContext;

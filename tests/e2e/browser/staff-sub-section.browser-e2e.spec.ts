@@ -12,10 +12,8 @@
 import { type Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
-const STAFF_SECTION_LOCATOR = (page: Page) =>
-	page.locator("[data-testid='sidebar-expanded'] span.uppercase").filter({ hasText: /^Staff$/i });
 const STAFF_HEADER_FOR_PROJECT = (page: Page, projectId: string) =>
 	page.locator(`[data-testid='sidebar-staff-header'][data-nav-id="staff-header:${projectId}"]`).first();
 

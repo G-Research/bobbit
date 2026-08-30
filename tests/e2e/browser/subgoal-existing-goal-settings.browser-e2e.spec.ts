@@ -27,7 +27,7 @@ import {
 	defaultProjectId,
 	nonGitCwd,
 } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

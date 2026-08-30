@@ -14,7 +14,7 @@
  */
 import { test, expect, type Page } from "../gateway-harness.js";
 import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 type StaffRecord = {
 	id: string;

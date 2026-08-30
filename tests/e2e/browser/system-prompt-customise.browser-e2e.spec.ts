@@ -7,7 +7,7 @@
 import { test, expect } from "../gateway-harness.js";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 function userPromptPath(): string {
 	const dir = process.env.BOBBIT_DIR || "";

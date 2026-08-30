@@ -23,7 +23,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, defaultProject } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 test.describe("Staff sandbox indicator", () => {
 	const cleanup: string[] = [];

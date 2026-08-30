@@ -10,10 +10,10 @@
  *   assert → the expected outcomes (tracked)
  *   cleanup → teardown (not tracked)
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../ui/fixtures.js";
 import { apiFetch, waitForHealth } from "../e2e-setup.js";
-import { SpecContext, defineStory } from "./spec-framework.js";
-import { CT_01, CT_02, CT_05, CT_06 } from "./spec-contracts.js";
+import { SpecContext, defineStory } from "../ui/spec-framework.js";
+import { CT_01, CT_02, CT_05, CT_06 } from "../ui/spec-contracts.js";
 
 test.describe("CT-01: Streaming lifecycle", () => {
 	let s: SpecContext;
