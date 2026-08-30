@@ -26,7 +26,7 @@ import {
 	waitForSessionStatus,
 	defaultProject,
 } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 import { pollUntil } from "../test-utils/cleanup.js";
 
 // ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ async function waitForSearchHit(
 ): Promise<any[]> {
 	let lastResults: any[] = [];
 	try {
-		return await pollUntil(
+		return (await pollUntil(
 			async () => {
 				const resp = await apiFetch(`/api/search?q=${encodeURIComponent(query)}&limit=50`);
 				if (!resp.ok) return null;
@@ -54,7 +54,7 @@ async function waitForSearchHit(
 				return predicate(lastResults) ? lastResults : null;
 			},
 			{ timeoutMs, intervalMs: 150, label: `search hit for "${query}"` },
-		);
+		))!;
 	} catch (err) {
 		throw new Error(
 			`waitForSearchHit timed out for "${query}" after ${timeoutMs}ms; last results: ${JSON.stringify(lastResults.map((r) => ({ type: r.type, id: r.id, title: r.title })))} (${(err as Error).message})`,

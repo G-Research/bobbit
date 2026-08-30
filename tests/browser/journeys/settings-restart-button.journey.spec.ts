@@ -1,8 +1,8 @@
-import { test, expect, type Page } from "../gateway-harness.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 const devHarnessTest = test.extend<{}, { enableDevHarnessRestart: boolean }>({
-	enableDevHarnessRestart: [true, { scope: "worker", option: true }],
+	enableDevHarnessRestart: [true, { scope: "worker" }],
 });
 
 async function openSettings(page: Page): Promise<void> {

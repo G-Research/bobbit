@@ -14,9 +14,10 @@
  *     (request carries `?repo=<name>`),
  *   - the aggregated pill survives a reload.
  */
-import { test, expect, type Page, type Route } from "../gateway-harness.js";
-import { createSession, deleteSession } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import type { Route } from "@playwright/test";
+import { test, expect, type Page } from "../../e2e/gateway-harness.js";
+import { createSession, deleteSession } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 function repoEntry(over: Record<string, unknown> = {}) {
 	return {

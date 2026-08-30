@@ -1,6 +1,6 @@
 import { test, expect } from "../gateway-harness.js";
 import { createSession, deleteSession } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 async function installViewerWsProbe(page: import("@playwright/test").Page): Promise<void> {
 	await page.addInitScript(() => {
