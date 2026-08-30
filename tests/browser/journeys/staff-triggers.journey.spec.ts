@@ -25,15 +25,30 @@ type StaffRecord = {
 
 const PROMPT_TEXT = "Investigate the freshly created goal and brief the team.";
 
+function triggersPanel(page: Page) {
+	return page.getByTestId("staff-triggers-tab-panel");
+}
+
+async function activateTriggersTab(page: Page) {
+	await page.getByTestId("staff-edit-tabs").getByRole("button", { name: "Triggers" }).click();
+	const panel = triggersPanel(page);
+	await expect(panel).toBeVisible();
+	return panel;
+}
+
 function triggerSelect(page: Page) {
 	// The trigger editor renders one <select> per trigger card inside the
 	// staff edit form; we only ever add a single trigger in this test so the
 	// first match is the right one.
-	return page.locator('[data-testid="trigger-type-select"]').filter({ hasText: "Goal created" }).first();
+	return triggersPanel(page).locator('[data-testid="trigger-type-select"]').filter({ hasText: "Goal created" }).first();
 }
 
 function triggerPromptTextarea(page: Page) {
-	return page.locator('[data-testid="trigger-prompt-0"]').first();
+	return triggersPanel(page).locator('[data-testid="trigger-prompt-0"]').first();
+}
+
+function triggerPromptError(page: Page) {
+	return triggersPanel(page).locator('[data-testid="trigger-prompt-error-0"]');
 }
 
 function saveButton(page: Page) {
@@ -91,11 +106,12 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 			"STAFF_GOAL_TRIGGER_BROWSER_HEADER: staff edit header should render",
 		).toBeVisible({ timeout: 15_000 });
 
-		// Add a trigger via the "+ Add trigger" button.
-		await page.getByRole("button", { name: "+ Add trigger" }).click();
+		// Add a trigger via the Triggers tab's "+ Add trigger" button.
+		const panel = await activateTriggersTab(page);
+		await panel.getByRole("button", { name: "+ Add trigger" }).click();
 
 		// New trigger defaults to schedule — switch to goal_created.
-		const select = page.locator('[data-testid="trigger-type-select"]').first();
+		const select = panel.locator('[data-testid="trigger-type-select"]').first();
 		await expect(
 			select,
 			"STAFF_GOAL_TRIGGER_BROWSER_SELECT_VISIBLE: trigger type select should render",
@@ -125,11 +141,11 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 
 		// The prompt textarea must be labelled "Wake prompt (required)" and show the inline error.
 		await expect(
-			page.getByText("Wake prompt (required)").first(),
+			panel.getByText("Wake prompt (required)").first(),
 			"STAFF_GOAL_TRIGGER_BROWSER_REQUIRED_LABEL: required-prompt label should render for goal_created",
 		).toBeVisible({ timeout: 5_000 });
 		await expect(
-			page.locator('[data-testid="trigger-prompt-error-0"]'),
+			triggerPromptError(page),
 			"STAFF_GOAL_TRIGGER_BROWSER_INLINE_ERROR: inline error should render while prompt is empty",
 		).toBeVisible({ timeout: 5_000 });
 
@@ -143,7 +159,7 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 		const textarea = triggerPromptTextarea(page);
 		await textarea.fill(PROMPT_TEXT);
 		await expect(
-			page.locator('[data-testid="trigger-prompt-error-0"]'),
+			triggerPromptError(page),
 			"STAFF_GOAL_TRIGGER_BROWSER_ERROR_CLEARED: inline error should clear once prompt is populated",
 		).toHaveCount(0, { timeout: 5_000 });
 		await expect(
@@ -186,6 +202,7 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 		await page.reload();
 		await navigateToHash(page, `#/staff/${staff.id}`);
 		await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
+		await activateTriggersTab(page);
 
 		const reloadedSelect = triggerSelect(page);
 		await expect(
@@ -211,7 +228,7 @@ test.describe("Staff goal lifecycle trigger editor", () => {
 			)
 			.toBe(PROMPT_TEXT);
 		await expect(
-			page.locator('[data-testid="trigger-prompt-error-0"]'),
+			triggerPromptError(page),
 			"STAFF_GOAL_TRIGGER_BROWSER_RELOAD_NO_ERROR: inline error should not appear when prompt persisted",
 		).toHaveCount(0);
 	});

@@ -23,21 +23,24 @@ async function readJson<T>(path: string): Promise<T> {
 	return await res.json() as T;
 }
 
-function accessoryButton(page: import("@playwright/test").Page) {
-	return page.locator(`button[title="${ACCESSORY_LABEL}"]`).filter({ hasText: ACCESSORY_LABEL }).first();
+function accessorySelect(page: import("@playwright/test").Page) {
+	return page.getByTestId("staff-accessory-select");
+}
+
+async function selectAccessory(page: import("@playwright/test").Page): Promise<void> {
+	await accessorySelect(page).click();
+	await page
+		.getByRole("listbox", { name: "Accessory options" })
+		.getByRole("option", { name: ACCESSORY_LABEL, exact: true })
+		.click();
 }
 
 async function expectAccessoryPickerSelection(page: import("@playwright/test").Page): Promise<void> {
-	await expect(accessoryButton(page)).toBeVisible({ timeout: 10_000 });
-	await expect
-		.poll(
-			async () => await accessoryButton(page).evaluate((el) => el.className.toString()),
-			{
-				timeout: 10_000,
-				message: "STAFF_ACCESSORY_BROWSER_PICKER_SELECTION: edit picker should show the saved accessory as selected",
-			},
-		)
-		.toContain("ring-2");
+	await expect(accessorySelect(page)).toBeVisible({ timeout: 10_000 });
+	await expect(
+		accessorySelect(page),
+		"STAFF_ACCESSORY_BROWSER_PICKER_SELECTION: edit picker should show the saved accessory as selected",
+	).toHaveAttribute("data-value", ACCESSORY_ID);
 }
 
 async function expectSidebarAccessoryOverlay(page: import("@playwright/test").Page, staffName: string): Promise<void> {
@@ -86,9 +89,7 @@ test.describe("Staff accessory persistence", () => {
 			await navigateToHash(page, `#/staff/${staff.id}`);
 			await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
 
-			const option = accessoryButton(page);
-			await expect(option).toBeVisible({ timeout: 10_000 });
-			await option.click();
+			await selectAccessory(page);
 			await expectAccessoryPickerSelection(page);
 
 			const saveButton = page.getByRole("button", { name: "Save Changes" });
