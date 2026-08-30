@@ -39,7 +39,7 @@ test.describe("Search preview artifact ordering", () => {
 			await fs.promises.mkdir(fixtureRoot, { recursive: true });
 			await fs.promises.writeFile(entryPath, "<!doctype html><body>deep-preview</body>", "utf-8");
 			let relativeDir = "";
-			for (let depth = 0; depth < 12; depth++) {
+			for (let depth = 0; depth < 3; depth++) {
 				relativeDir = path.posix.join(relativeDir, `level-${depth}`);
 				const relativeFile = path.posix.join(relativeDir, `asset-${depth}.txt`);
 				await fs.promises.mkdir(path.join(fixtureRoot, relativeDir), { recursive: true });

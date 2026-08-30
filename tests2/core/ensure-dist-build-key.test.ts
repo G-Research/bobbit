@@ -313,7 +313,7 @@ describe("dist build callers", () => {
 			"E2E global setup must not bypass the dist mutex with a direct build",
 		);
 
-		const packedConsumer = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "pi-packed-consumer.e2e.spec.ts"), "utf8");
+		const packedConsumer = readFileSync(join(PROJECT_ROOT, "tests", "e2e", "api", "pi-packed-consumer.api-e2e.spec.ts"), "utf8");
 		assert.match(
 			packedConsumer,
 			/const ENSURE_DIST_SCRIPT = join\(PROJECT_ROOT, "scripts", "testing-v2", "ensure-dist\.mjs"\);/,

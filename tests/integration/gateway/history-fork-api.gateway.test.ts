@@ -7,7 +7,6 @@ import { sessionTranscriptHostPath } from "../../../src/server/agent/agent-sessi
 import {
 	apiFetch,
 	nonGitCwd,
-	registerProject,
 } from "../../../tests2/integration/_e2e/e2e-setup.js";
 import {
 	appendPromptAuthorDispatch,
@@ -26,7 +25,6 @@ import {
 	appendCompactionSidecarEntry,
 	readCompactionSidecarEntries,
 } from "../../../src/server/agent/compaction-sidecar.js";
-import { copyGitTemplate } from "../../../tests2/harness/git-template.js";
 import {
 	createSessionTracker,
 	localApiFetch,

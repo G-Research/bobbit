@@ -131,21 +131,6 @@ async function createRemoteStateSession(gateway: any, cwd: string, requestedProj
 	return sessionId;
 }
 
-async function removeSiblingWorktree(runner: any, primary: string, sibling: string): Promise<void> {
-	// Windows can briefly retain handles after the session and websocket close.
-	// Remove the filesystem tree with the shared bounded retry policy, then prune
-	// Git's administrative entry and prove that both halves of teardown settled.
-	const cleanup = await awaitableRm(sibling, { maxAttempts: 5, backoffMs: 50 });
-	expect(cleanup.removed, `sibling worktree cleanup failed after ${cleanup.attempts} attempts: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
-	await runner.execFile("git", ["worktree", "prune", "--expire", "now"], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
-	const listed = await runner.execFile("git", ["worktree", "list", "--porcelain"], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
-	const listedPaths = String(listed.stdout)
-		.split(/\r?\n/)
-		.filter((line: string) => line.startsWith("worktree "))
-		.map((line: string) => line.slice("worktree ".length).replaceAll("\\", "/").toLowerCase());
-	expect(listedPaths).not.toContain(sibling.replaceAll("\\", "/").toLowerCase());
-}
-
 /**
  * Route-level proof that the coordinator is the only remote-read authority.
  * The runner fixture has no network access: GitHub-shaped responses are local
