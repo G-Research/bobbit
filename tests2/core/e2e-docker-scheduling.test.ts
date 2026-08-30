@@ -73,7 +73,7 @@ describe("E2E Docker capability and scheduling", () => {
 	});
 
 	it("keeps the Browser spawn-failure journey Docker-free and occurrence-scoped", () => {
-		const journey = readFileSync("tests2/browser/journeys/bg-spawn-failure.journey.spec.ts", "utf8");
+		const journey = readFileSync("tests/browser/journeys/bg-spawn-failure.journey.spec.ts", "utf8");
 		const harness = readFileSync("tests/e2e/gateway-harness.ts", "utf8");
 		const manager = readFileSync("src/server/agent/bg-process-manager.ts", "utf8");
 		const server = readFileSync("src/server/server.ts", "utf8");

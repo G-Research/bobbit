@@ -13,7 +13,7 @@
       "tests/e2e/ui/plan-tab-gate-status.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+      "tests/browser/journeys/goal-team-gates.journey.spec.ts"
     ]
   },
   {
@@ -29,7 +29,7 @@
       "tests/e2e/ui/plan-tab-archived-children.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+      "tests/browser/journeys/goal-team-gates.journey.spec.ts"
     ]
   },
   {
@@ -45,7 +45,7 @@
       "tests/e2e/ui/plan-tab-gate-status.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-team-gates.journey.spec.ts"
+      "tests/browser/journeys/goal-team-gates.journey.spec.ts"
     ]
   },
   {
@@ -61,7 +61,7 @@
       "tests/e2e/ui/goal-empty-workflows-banner.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -77,7 +77,7 @@
       "tests/e2e/ui/proposal-panel-streaming.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -93,7 +93,7 @@
       "tests/e2e/ui/proposal-panel-streaming.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -109,7 +109,7 @@
       "tests/e2e/ui/proposal-open-all-types.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -125,7 +125,7 @@
       "tests/e2e/ui/unseen-activity.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -141,7 +141,7 @@
       "tests/e2e/ui/dashboard-mutation-pending.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -157,7 +157,7 @@
       "tests/e2e/ui/goal-status-widget.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -173,7 +173,7 @@
       "tests/e2e/ui/team-delegate.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -189,7 +189,7 @@
       "tests/e2e/ui/search-e2e.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -205,7 +205,7 @@
       "tests/e2e/ui/session-actions.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/session-lifecycle.journey.spec.ts"
+      "tests/browser/journeys/session-lifecycle.journey.spec.ts"
     ]
   },
   {
@@ -221,7 +221,7 @@
       "tests/e2e/ui/draft-loss.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -237,7 +237,7 @@
       "tests/e2e/ui/add-project-browse-modal.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-dialog.journey.spec.ts"
     ]
   },
   {
@@ -253,7 +253,7 @@
       "tests/e2e/ui/add-project-browse-modal.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-dialog.journey.spec.ts"
     ]
   },
   {
@@ -269,7 +269,7 @@
       "tests/e2e/ui/add-project-browse-modal.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-dialog.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-dialog.journey.spec.ts"
     ]
   },
   {
@@ -285,7 +285,7 @@
       "tests/e2e/ui/page-title.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -301,7 +301,7 @@
       "tests/e2e/ui/api-error-modal.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -317,7 +317,7 @@
       "tests/e2e/ui/cost-popover-cache-hit.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -333,7 +333,7 @@
       "tests/e2e/ui/goal-dashboard-fanout.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -349,7 +349,7 @@
       "tests/e2e/ui/goal-status-widget.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -365,7 +365,7 @@
       "tests/e2e/ui/proposal-tools.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -381,7 +381,7 @@
       "tests/e2e/ui/at-mention.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+      "tests/browser/journeys/prompt-interaction.journey.spec.ts"
     ]
   },
   {
@@ -397,7 +397,7 @@
       "tests/e2e/ui/stories-sessions.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/stories-registry.journey.spec.ts"
+      "tests/browser/journeys/stories-registry.journey.spec.ts"
     ]
   },
   {
@@ -413,7 +413,7 @@
       "tests/e2e/ui/settings-model-fallback.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -429,7 +429,7 @@
       "tests/e2e/ui/staff-triggers.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/staff-debug.journey.spec.ts"
+      "tests/browser/journeys/staff-debug.journey.spec.ts"
     ]
   },
   {
@@ -445,7 +445,7 @@
       "tests/e2e/ui/add-project-preflight.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-preflight.journey.spec.ts"
     ]
   },
   {
@@ -461,7 +461,7 @@
       "tests/e2e/ui/marketplace.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+      "tests/browser/journeys/marketplace-packs.journey.spec.ts"
     ]
   },
   {
@@ -477,7 +477,7 @@
       "tests/e2e/ui/auto-retry-banner.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -493,7 +493,7 @@
       "tests/e2e/ui/github-trusted-hosts.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -509,7 +509,7 @@
       "tests/e2e/ui/staff-sub-section.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/staff-debug.journey.spec.ts"
+      "tests/browser/journeys/staff-debug.journey.spec.ts"
     ]
   },
   {
@@ -525,7 +525,7 @@
       "tests/e2e/ui/image-model-selector-lock.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -541,7 +541,7 @@
       "tests/e2e/ui/market-activation.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/marketplace-packs.journey.spec.ts"
+      "tests/browser/journeys/marketplace-packs.journey.spec.ts"
     ]
   },
   {
@@ -557,7 +557,7 @@
       "tests/e2e/ui/headquarters.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/stories-registry.journey.spec.ts"
+      "tests/browser/journeys/stories-registry.journey.spec.ts"
     ]
   },
   {
@@ -573,7 +573,7 @@
       "tests/e2e/ui/sidebar-archived-layout.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -589,7 +589,7 @@
       "tests/e2e/ui/role-assistant-new.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -605,7 +605,7 @@
       "tests/e2e/ui/replace-bobbit-text.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -621,7 +621,7 @@
       "tests/e2e/ui/gate-bypass.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -637,7 +637,7 @@
       "tests/e2e/ui/system-prompt-customise.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -653,7 +653,7 @@
       "tests/e2e/ui/staff-role.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/staff-debug.journey.spec.ts"
+      "tests/browser/journeys/staff-debug.journey.spec.ts"
     ]
   },
   {
@@ -669,7 +669,7 @@
       "tests/e2e/ui/subgoal-parent-picker-repro.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -685,7 +685,7 @@
       "tests/e2e/ui/subgoals-experimental-toggle.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -701,7 +701,7 @@
       "tests/e2e/ui/failed-goal-proposal-ux.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -717,7 +717,7 @@
       "tests/e2e/ui/subgoal-nesting-limit.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -733,7 +733,7 @@
       "tests/e2e/ui/goal-proposal-subgoal-prefill.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -749,7 +749,7 @@
       "tests/e2e/ui/workflow-editor.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -765,7 +765,7 @@
       "tests/e2e/ui/settings-maintenance-archived-worktrees.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -781,7 +781,7 @@
       "tests/e2e/ui/goal-role-tabs-wiring.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -797,7 +797,7 @@
       "tests/e2e/ui/add-project-typeahead.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-preflight.journey.spec.ts"
     ]
   },
   {
@@ -814,7 +814,7 @@
       "tests/e2e/ui/workflow-editor.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -830,7 +830,7 @@
       "tests/e2e/ui/prompt-stats-e2e.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -846,7 +846,7 @@
       "tests/e2e/ui/preview-happy-path.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -862,7 +862,7 @@
       "tests/e2e/ui/compaction-persistence.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -878,7 +878,7 @@
       "tests/e2e/ui/search-e2e.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -894,7 +894,7 @@
       "tests/e2e/ui/open-session-new-window.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -910,7 +910,7 @@
       "tests/e2e/ui/at-mention.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+      "tests/browser/journeys/prompt-interaction.journey.spec.ts"
     ]
   },
   {
@@ -926,7 +926,7 @@
       "tests/e2e/ui/goal-metadata.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -942,7 +942,7 @@
       "tests/e2e/ui/sidebar-filters.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -958,7 +958,7 @@
       "tests/e2e/ui/review-pane.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -974,7 +974,7 @@
       "tests/e2e/ui/image-attach-roundtrip.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -990,7 +990,7 @@
       "tests/e2e/ui/workflow-page-scope.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/misc.journey.spec.ts"
+      "tests/browser/journeys/misc.journey.spec.ts"
     ]
   },
   {
@@ -1006,7 +1006,7 @@
       "tests/e2e/ui/ask-user-choices-ui.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+      "tests/browser/journeys/prompt-interaction.journey.spec.ts"
     ]
   },
   {
@@ -1022,7 +1022,7 @@
       "tests/e2e/ui/sidebar-goal-staff.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -1038,7 +1038,7 @@
       "tests/e2e/ui/sidebar-session-actions.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -1054,7 +1054,7 @@
       "tests/e2e/ui/queue-ui.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+      "tests/browser/journeys/prompt-interaction.journey.spec.ts"
     ]
   },
   {
@@ -1070,7 +1070,7 @@
       "tests/e2e/ui/escape-aborts-anywhere.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+      "tests/browser/journeys/prompt-interaction.journey.spec.ts"
     ]
   },
   {
@@ -1086,7 +1086,7 @@
       "tests/e2e/ui/tool-ask-policy.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/prompt-interaction.journey.spec.ts"
+      "tests/browser/journeys/prompt-interaction.journey.spec.ts"
     ]
   },
   {
@@ -1102,7 +1102,7 @@
       "tests/e2e/ui/search-result-navigation.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/sidebar-nav.journey.spec.ts"
+      "tests/browser/journeys/sidebar-nav.journey.spec.ts"
     ]
   },
   {
@@ -1118,7 +1118,7 @@
       "tests/e2e/ui/sidebar-keyboard-nav.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/app-smoke.journey.spec.ts"
+      "tests/browser/journeys/app-smoke.journey.spec.ts"
     ]
   },
   {
@@ -1134,7 +1134,7 @@
       "tests/e2e/ui/stories-goal-routing.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/stories-registry.journey.spec.ts"
+      "tests/browser/journeys/stories-registry.journey.spec.ts"
     ]
   },
   {
@@ -1150,7 +1150,7 @@
       "tests/e2e/ui/subgoal-existing-goal-settings.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -1166,7 +1166,7 @@
       "tests/e2e/ui/settings-agent-dir.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -1182,7 +1182,7 @@
       "tests/e2e/ui/proposal-edit-flow.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -1198,7 +1198,7 @@
       "tests/e2e/ui/add-project-select-all.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-preflight.journey.spec.ts"
     ]
   },
   {
@@ -1214,7 +1214,7 @@
       "tests/e2e/ui/add-project-post-archive.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-preflight.journey.spec.ts"
     ]
   },
   {
@@ -1230,7 +1230,7 @@
       "tests/e2e/ui/archive-child-cascade.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/team-operations.journey.spec.ts"
+      "tests/browser/journeys/team-operations.journey.spec.ts"
     ]
   },
   {
@@ -1246,7 +1246,7 @@
       "tests/e2e/ui/goal-archive-always-on.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -1262,7 +1262,7 @@
       "tests/e2e/ui/goal-form-tooltips.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -1278,7 +1278,7 @@
       "tests/e2e/ui/settings-restart-button.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -1294,7 +1294,7 @@
       "tests/e2e/ui/goal-proposal-revision-autoupdate.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -1310,7 +1310,7 @@
       "tests/e2e/ui/goal-proposal-workflow-tab.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   },
   {
@@ -1326,7 +1326,7 @@
       "tests/e2e/ui/goal-creation.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/goal-editing.journey.spec.ts"
+      "tests/browser/journeys/goal-editing.journey.spec.ts"
     ]
   },
   {
@@ -1342,7 +1342,7 @@
       "tests/e2e/ui/project-assistant.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-settings.journey.spec.ts"
+      "tests/browser/journeys/project-settings.journey.spec.ts"
     ]
   },
   {
@@ -1358,7 +1358,7 @@
       "tests/e2e/ui/add-project-multi-repo-subset.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/project-onboarding-preflight.journey.spec.ts"
+      "tests/browser/journeys/project-onboarding-preflight.journey.spec.ts"
     ]
   },
   {
@@ -1374,7 +1374,7 @@
       "tests/e2e/ui/project-assistant.spec.ts"
     ],
     "expectedV2Catchers": [
-      "tests2/browser/journeys/proposals.journey.spec.ts"
+      "tests/browser/journeys/proposals.journey.spec.ts"
     ]
   }
 ]

@@ -373,9 +373,9 @@ const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
 	"tests/e2e/ui/sidebar-archived-per-project.spec.ts:13",
 	"tests/e2e/ui/sidebar-keyboard-nav.spec.ts:23",
 	"tests/e2e/ui/sidebar-unified-tree.spec.ts:161",
-	"tests2/browser/e2e/file-explorer-pack.spec.ts:351",
+	"tests/e2e/browser/file-explorer-pack.browser-e2e.spec.ts:351",
 	"tests2/browser/fixtures/project-drag-reorder.spec.ts:67",
-	"tests2/browser/journeys/prompt-interaction.journey.spec.ts:166",
+	"tests/browser/journeys/prompt-interaction.journey.spec.ts:166",
 ]);
 function listTestSources(root, extensions) {
 	if (!fs.existsSync(root)) return [];
