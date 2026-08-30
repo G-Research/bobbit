@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test, type GatewayInfo } from "./gateway-harness.js";
+import { expect, test, type GatewayInfo } from "../gateway-harness.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -12,8 +12,8 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 	type WsConnection,
-} from "./e2e-setup.js";
-import { awaitableRm } from "./test-utils/cleanup.js";
+} from "../e2e-setup.js";
+import { awaitableRm } from "../test-utils/cleanup.js";
 
 type ArchivedRow = {
 	id: string;

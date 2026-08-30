@@ -1,11 +1,11 @@
-import { expect, test, type GatewayInfo } from "./gateway-harness.js";
+import { expect, test, type GatewayInfo } from "../gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
 	defaultProject,
 	waitForHealth,
 	waitForSessionStatus,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 
 type TaggedSession = {
 	id: string;

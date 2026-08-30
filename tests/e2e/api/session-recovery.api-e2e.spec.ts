@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 // stale module metadata as false "does not provide an export" startup errors.
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
+const MOCK_AGENT = resolve(__dirname, "..", "mock-agent.mjs");
 
 const E2E_TEMP_ROOT = process.env.BOBBIT_E2E_TMP_ROOT
 	// Docker's `/tmp` is shared across coordinators; use the explicit owned root.
@@ -97,12 +97,12 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
-	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-	const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+	const { setProjectRoot } = await import("../../../dist/server/bobbit-dir.js");
+	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
+	const { createGateway } = await import("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 	registerRpcBridgeFactory((rpcOpts: any) => {
 		if (shouldUseInProcessMock(rpcOpts.cliPath)) return new InProcessMockBridge(rpcOpts);
 		return null;

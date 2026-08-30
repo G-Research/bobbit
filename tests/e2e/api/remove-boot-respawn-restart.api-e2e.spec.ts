@@ -5,7 +5,7 @@
  * teamless across a gateway restart. Restart restoration may restore existing
  * active teams, but it must not create a new team lead for this sessionless goal.
  */
-import { test, expect, type GatewayInfo } from "./gateway-harness.js";
+import { test, expect, type GatewayInfo } from "../gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -14,8 +14,8 @@ import {
 	teardownTeam,
 	waitForHealth,
 	waitForSessionStatus,
-} from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+} from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 interface TeamState {
 	teamLeadSessionId?: string;

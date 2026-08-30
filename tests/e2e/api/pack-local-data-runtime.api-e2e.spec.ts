@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -9,11 +9,11 @@ import {
 	createSession,
 	defaultProject,
 	deleteSession,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 
 const PACK = "pack-local-data";
 const PI_TOOL = "pi_local_data_marker";
-const SOURCE = fileURLToPath(new URL("../../market-packs/_fixtures", import.meta.url));
+const SOURCE = fileURLToPath(new URL("../../../market-packs/_fixtures", import.meta.url));
 const WINNER_PACK = "pi-local-data-same-id";
 const LEGACY_PACK = "pi-legacy-same-id";
 

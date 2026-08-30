@@ -2,9 +2,9 @@
  * Regression: a regular session created in a freshly `git init`-ed repo with
  * no commits must not try `git worktree add ... HEAD` and then archive itself.
  */
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, deleteSession, registerProject } from "./e2e-setup.js";
-import { pollUntil, awaitableRm } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, deleteSession, registerProject } from "../e2e-setup.js";
+import { pollUntil, awaitableRm } from "../test-utils/cleanup.js";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";

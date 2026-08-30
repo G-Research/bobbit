@@ -16,14 +16,14 @@
  * provider is enabled globally in both cases, so the only differentiator is the
  * teamGoalId-resolved metadata.
  */
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, deleteSession, deleteGoal, nonGitCwd } from "./e2e-setup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, createSession, deleteSession, deleteGoal, nonGitCwd } from "../e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
+const fixturePackDir = path.resolve(__dirname, "..", "..", "fixtures", "packs", "provider-demo");
 const PACK_NAME = "provider-demo";
 const SPEC = "E2E provider-hook effective-goal spec — non-placeholder spec text so the goal route accepts it.";
 

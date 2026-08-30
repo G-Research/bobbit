@@ -4,7 +4,7 @@
  * These drive the in-process gateway and mock agent while keeping the target
  * unrestricted by team/delegate ownership, which is the new session_prompt scope.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
@@ -13,8 +13,8 @@ import {
 	nonGitCwd,
 	waitForSessionStatus,
 	type WsConnection,
-} from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+} from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 const LONG_SLEEP_CMD = process.platform === "win32"
 	? "ping -n 60 127.0.0.1 >NUL"

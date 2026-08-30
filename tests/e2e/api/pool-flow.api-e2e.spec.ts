@@ -12,12 +12,12 @@
  *   5. Goal creation also routes through the pool (the goal's persisted
  *      `branch` is the goal branch; the pool replenishes for the next claim).
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 
 // Pool-flow specs need the pre-fill to actually run.
 test.use({ enableWorktreePool: true });
 
-import { apiFetch } from "./e2e-setup.js";
+import { apiFetch } from "../e2e-setup.js";
 import { mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";

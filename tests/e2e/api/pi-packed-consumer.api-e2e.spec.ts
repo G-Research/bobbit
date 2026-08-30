@@ -4,15 +4,15 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { awaitableRm } from "./test-utils/cleanup.js";
+import { awaitableRm } from "../test-utils/cleanup.js";
 import {
 	piPackedConsumerNpmEnv,
 	runPiPackedConsumerCommand,
 	runPiPackedConsumerNpm,
 	type PiPackedConsumerCommandResult,
-} from "./test-utils/pi-packed-consumer-command.js";
+} from "../test-utils/pi-packed-consumer-command.js";
 
-const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const ENSURE_DIST_SCRIPT = join(PROJECT_ROOT, "scripts", "testing-v2", "ensure-dist.mjs");
 const PACKAGE_NAME = (JSON.parse(readFileSync(join(PROJECT_ROOT, "package.json"), "utf8")) as { name: string }).name;
 const PACKAGE_INSTALL_SEGMENTS = PACKAGE_NAME.split("/");

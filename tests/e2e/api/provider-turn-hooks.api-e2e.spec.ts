@@ -19,7 +19,7 @@
  * by the per-turn hooks — recall lands in a hidden custom/user-side message, not
  * the cached system prompt. The turn echoes back the exact submitted bytes.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
@@ -30,7 +30,7 @@ import {
 	waitForCondition,
 	assertStaysFalse,
 	nonGitCwd,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -39,10 +39,10 @@ import {
 	DYNAMIC_CONTEXT_END,
 	DYNAMIC_CONTEXT_START,
 	generateProviderBridgeExtension,
-} from "../../dist/server/agent/provider-bridge-extension.js";
+} from "../../../dist/server/agent/provider-bridge-extension.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const fixturePackDir = path.resolve(__dirname, "..", "fixtures", "packs", "provider-demo");
+const fixturePackDir = path.resolve(__dirname, "..", "..", "fixtures", "packs", "provider-demo");
 const PACK_NAME = "provider-demo";
 
 interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }
@@ -106,13 +106,6 @@ async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: strin
 	const handlers = new Map<string, (event: any) => Promise<any> | any>();
 	extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
 	return handlers;
-}
-
-async function registerGeneratedBeforeAgentStart(sessionId: string, tempDir: string): Promise<(event: any) => Promise<any>> {
-	const handlers = await registerGeneratedBridgeHandlers(sessionId, tempDir);
-	const handler = handlers.get("before_agent_start");
-	expect(typeof handler, "generated bridge registered before_agent_start").toBe("function");
-	return handler as (event: any) => Promise<any>;
 }
 
 async function readContextTrace(sessionId: string, limit?: number): Promise<TraceEntry[]> {

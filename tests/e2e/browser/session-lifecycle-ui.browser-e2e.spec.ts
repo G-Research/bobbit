@@ -7,9 +7,9 @@
  * This test uses the gateway-harness fixture with E2E_SERVE_UI=1 so the
  * gateway serves the built UI. Set SCREENSHOT=1 to capture screenshots.
  */
-import { test, expect } from "./gateway-harness.js";
-import { readE2EToken, apiFetch } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../gateway-harness.js";
+import { readE2EToken, apiFetch } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import type { Page } from "@playwright/test";
 
 const SCREENSHOT = process.env.SCREENSHOT === "1";
