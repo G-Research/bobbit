@@ -7,14 +7,14 @@
  * See docs/design/persist-compaction-history.md \u00a76.3.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
 import {
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
 	readE2EToken,
-} from "../e2e-setup.js";
-import { openApp, navigateToHash, sendMessage } from "./ui-helpers.js";
+} from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash, sendMessage } from "../../../tests2/browser/e2e/ui-helpers.js";
 import fs from "node:fs";
 import path from "node:path";
 

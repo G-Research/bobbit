@@ -11,7 +11,7 @@ import {
 	navigateToHash,
 	openApp,
 	test,
-} from "../_helpers/journey-fixture.js";
+} from "../../../tests2/browser/_helpers/journey-fixture.js";
 
 const PACK = "pack-local-data";
 const SOURCE = fileURLToPath(new URL("../../../market-packs/_fixtures", import.meta.url));

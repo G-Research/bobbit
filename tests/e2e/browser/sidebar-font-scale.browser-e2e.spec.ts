@@ -2,9 +2,9 @@
  * Browser E2E for the sidebar font-size setting.
  */
 import { type Locator } from "@playwright/test";
-import { test, expect, type Page } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProject, deleteGoal, deleteSession } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect, type Page } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, createGoal, defaultProject, deleteGoal, deleteSession } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 const SCALE_KEY = "bobbit:sidebar-font-scale";
 const BASE_PX = 12;

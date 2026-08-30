@@ -6,9 +6,9 @@
  *
  * Uses the crash()/restart() fixture from gateway-harness.ts.
  */
-import { test, expect, type GatewayInfo } from "../gateway-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, seedTeamLeadHeader, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "../_helpers/journey-fixture.js";
+import { test, expect, type GatewayInfo } from "../../../tests2/browser/gateway-harness.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, seedTeamLeadHeader, waitForSessionStatus } from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
 async function crashAndRestart(gateway: GatewayInfo, _page: Page): Promise<void> {

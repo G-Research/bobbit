@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -8,8 +8,8 @@ import {
 	deleteSession,
 	nonGitCwd,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+} from "../../../tests2/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
 
 // Sidebar copy actions exercise the real Clipboard API on the success path.
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });

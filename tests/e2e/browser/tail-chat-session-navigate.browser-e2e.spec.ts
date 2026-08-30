@@ -1,6 +1,6 @@
 /** Full-stack replay/navigation: persisted transcripts land pinned on session hops. */
-import { test, expect } from "./fixtures.js";
-import { createSession, waitForSessionStatus, waitForHealth } from "../e2e-setup.js";
+import { test, expect } from "../../../tests2/browser/e2e/fixtures.js";
+import { createSession, waitForSessionStatus, waitForHealth } from "../../../tests2/browser/e2e-setup.js";
 import {
 	TAIL_PX,
 	disableScrollAnchoring,
@@ -9,7 +9,7 @@ import {
 	openTailSession,
 	seedSessionViaWs,
 	settleFrames,
-} from "./tail-chat-helpers.js";
+} from "../../../tests2/browser/e2e/tail-chat-helpers.js";
 
 test.describe("tail-chat: session navigate lands on latest message", () => {
 	test.beforeAll(async () => {

@@ -9,7 +9,7 @@ import {
 	openApp,
 	test,
 	waitForSessionStatus,
-} from "../_helpers/journey-fixture.js";
+} from "../../../tests2/browser/_helpers/journey-fixture.js";
 
 const ORPHAN_IDS = [
 	"toolu_011XxjFHDfiTyzt8UgF2eVe2",
