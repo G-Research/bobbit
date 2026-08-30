@@ -455,7 +455,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		const agentDir = join(bobbitDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(join(agentDir, "auth.json"), JSON.stringify({
-			anthropic: { type: "oauth", expires: Date.now() + 86_400_000 },
+			anthropic: {
+				type: "oauth",
+				access: "fake-isolated-e2e-access-token",
+				refresh: "fake-isolated-e2e-refresh-token",
+				expires: Date.now() + 86_400_000,
+			},
 		}));
 
 		// Set env BEFORE importing server modules. Playwright workers are
