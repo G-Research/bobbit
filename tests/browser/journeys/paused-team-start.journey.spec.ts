@@ -1,5 +1,5 @@
-import { test, expect, apiFetch, createGoal, deleteGoal, openApp, navigateToHash, waitForSessionStatus } from "./_helpers/journey-fixture.js";
-import { teardownTeam } from "./e2e-setup.js";
+import { test, expect, apiFetch, createGoal, deleteGoal, openApp, navigateToHash, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { teardownTeam } from "../../../tests2/browser/e2e-setup.js";
 
 const teamStartPath = (goalId: string) => new RegExp(`/api/goals/${goalId}/team/start(?:\\?.*)?$`);
 const serverStack = "GoalPausedError: paused goal is paused — spawn rejected\n    at TeamManager._startTeamImpl (team-manager.ts:1874:27)";

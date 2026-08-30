@@ -1,5 +1,5 @@
 import type { BrowserContext, Page, Response } from "@playwright/test";
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "../../../tests2/browser/gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
@@ -7,7 +7,7 @@ import {
 	nonGitCwd,
 	readE2ETokenAsync,
 	waitForSessionStatus,
-} from "./e2e-setup.js";
+} from "../../../tests2/browser/e2e-setup.js";
 
 const COOKIE_NAME = "bobbit_session";
 const LEGACY_COOKIE = "a".repeat(64);
