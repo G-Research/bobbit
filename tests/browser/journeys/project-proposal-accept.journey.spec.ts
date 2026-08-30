@@ -142,11 +142,14 @@ async function projectConfig(projectId: string): Promise<Record<string, unknown>
 }
 
 async function deleteProject(projectId: string | undefined): Promise<void> {
-	if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+	if (!projectId) return;
+	const resp = await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" });
+	const text = await resp.text();
+	expect(resp.status, `delete project ${projectId} failed: ${text}`).toBe(200);
 }
 
 async function deleteProjectsAtRoot(rootPath: string): Promise<void> {
-	const matches = await listProjects().catch(() => []);
+	const matches = await listProjects();
 	for (const project of matches) {
 		if (samePath(project.rootPath, rootPath)) await deleteProject(project.id);
 	}
@@ -513,7 +516,8 @@ test.describe("Journey: real project proposal acceptance", () => {
 		} finally {
 			await deleteProjectsAtRoot(rootPath);
 			await deleteSession(sessionId);
-			rmSync(rootPath, { recursive: true, force: true });
+			const cleanup = await awaitableRm(rootPath);
+			expect(cleanup.removed, `registered project fixture cleanup failed after ${cleanup.attempts} attempts: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 		}
 	});
 
