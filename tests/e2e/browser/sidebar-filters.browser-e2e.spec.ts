@@ -4,7 +4,7 @@
  */
 import { test, expect, type Page } from "../gateway-harness.js";
 import { apiFetch, createSession, deleteSession, nonGitCwd, waitForHealth } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 async function resetFilters(page: Page): Promise<void> {
 	await page.evaluate(() => {

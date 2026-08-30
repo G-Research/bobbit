@@ -11,8 +11,8 @@ import {
 	deleteSession,
 	waitForSessionStatus,
 } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
-import { filtersButton, clickShowArchivedToggle } from "./utils/sidebar-filters.js";
+import { openApp } from "../ui/ui-helpers.js";
+import { filtersButton, clickShowArchivedToggle } from "../ui/utils/sidebar-filters.js";
 
 function suffix(): string {
 	return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

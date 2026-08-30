@@ -3,7 +3,7 @@
  */
 import { test, expect, type GatewayInfo, type Page } from "../gateway-harness.js";
 import { apiFetch, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { openApp } from "../ui/ui-helpers.js";
 
 const TREE_STATE_KEY = "bobbit-sidebar-tree-state:v1";
 const INDENT_KEY = "bobbit:sidebar-tree-indent";
