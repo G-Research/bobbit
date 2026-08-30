@@ -355,7 +355,7 @@ function resetState(options: ResetOptions = {}): void {
 		},
 	});
 	window.location.hash = `#/session/${SESSION_ID}`;
-	localStorage.setItem("gateway.url", window.location.origin);
+	localStorage.setItem("gateway.url", "http://fixture.test");
 	localStorage.setItem("gateway.token", "fixture-token");
 	addFixtureStyle();
 	if (options.hydrateProposals) rehydratePersistedProposals();

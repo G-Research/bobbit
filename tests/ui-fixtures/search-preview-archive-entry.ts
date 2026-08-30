@@ -96,6 +96,7 @@ function makeSession(id: string, modelId: string): any {
 	const el = document.createElement("agent-interface") as any;
 	el.session = makeSession(opts.sessionId || "archived-session-id", opts.modelId || "claude-sonnet-4-20250514");
 	el.readOnly = true;
+	el.archived = true;
 	el.projectId = projectId;
 	el.goalId = opts.goalId || "";
 	el.delegateOf = opts.delegateOf || "";
