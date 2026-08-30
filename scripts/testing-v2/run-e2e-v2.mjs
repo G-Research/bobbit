@@ -221,7 +221,7 @@ export function createCanonicalGroupCInvocation(specs, {
 // Windows). Keep the bound aligned with the global browser-render lease cap.
 export function resolveE2ePlaywrightWorkers(env = process.env) {
 	const requested = Number(env.E2E_V2_PW_WORKERS);
-	if (!Number.isInteger(requested) || requested < 1) return env === process.env && process.platform === "win32" ? 1 : 2;
+	if (!Number.isInteger(requested) || requested < 1) return 2;
 	return Math.min(4, requested);
 }
 
@@ -315,7 +315,7 @@ async function runGroupB(specs, coordinatorEnv) {
 	const retries = resolveE2ERetryCount(coordinatorEnv);
 	// Preserve retries:3 for ordinary workflow use. Retry-free qualification
 	// explicitly passes 0 so no first-attempt failure can be hidden.
-	const pwWorkers = resolveE2ePlaywrightWorkers();
+	const pwWorkers = process.platform === "win32" && process.env.E2E_V2_PW_WORKERS === undefined ? 1 : resolveE2ePlaywrightWorkers();
 	const invocation = createGroupBInvocation(specs, { workers: pwWorkers, retries });
 	return run(invocation.command, invocation.args, {
 		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
