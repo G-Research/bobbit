@@ -5,7 +5,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildVerificationFailureMessage } from "../../src/server/agent/notify-team-lead-failure.ts";
+import { buildVerificationFailureMessage } from "../../../src/server/agent/notify-team-lead-failure.ts";
 
 describe("buildVerificationFailureMessage", () => {
 	it("keeps the unguided failure message byte-for-byte compatible", () => {

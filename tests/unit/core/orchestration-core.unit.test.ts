@@ -23,7 +23,7 @@ import {
 	type OrchestrationSessionView,
 	type OrchestrationSessionLike,
 	type PersistedSessionLike,
-} from "../../src/server/agent/orchestration-core.ts";
+} from "../../../src/server/agent/orchestration-core.ts";
 
 interface FakeSession extends OrchestrationSessionLike {
 	output?: string;

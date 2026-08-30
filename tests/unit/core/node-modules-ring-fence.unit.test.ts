@@ -6,21 +6,21 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as rpcBridgeModule from "../../src/server/agent/rpc-bridge.js";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
-import * as harnessDepsModule from "../../src/server/harness-deps.js";
-import { recoverInterruptedDistPromotion } from "../../scripts/harness-bootstrap.mjs";
+import * as rpcBridgeModule from "../../../src/server/agent/rpc-bridge.js";
+import { resetAgentDirStateForTests } from "../../../src/server/bobbit-dir.js";
+import * as harnessDepsModule from "../../../src/server/harness-deps.js";
+import { recoverInterruptedDistPromotion } from "../../../scripts/harness-bootstrap.mjs";
 import {
 	discardStagedDistBuild,
 	prepareStagedDistBuild,
 	promoteStagedDistBuild,
-} from "../../src/server/harness-build.js";
+} from "../../../src/server/harness-build.js";
 import {
 	applyWatchdogRecoveryDecision,
 	WatchdogRecoveryPolicy,
 	type WatchdogRecoveryActions,
 	type WatchdogRecoveryDecision,
-} from "../../src/server/watchdog.js";
+} from "../../../src/server/watchdog.js";
 
 const POLICY_PREFIX = "NFS_STARTUP_POLICY";
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -129,7 +129,7 @@ function pathIsWithin(candidate: unknown, root: string): boolean {
 }
 
 function repositorySource(relativePath: string): string {
-	const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+	const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 	return fs.readFileSync(path.join(repositoryRoot, relativePath), "utf-8");
 }
 
@@ -492,7 +492,7 @@ describe.skipIf(!desiredContractAvailable)("development harness pre-build valida
 	it.each(["dev:harness", "dev:nord", "dev:watchdog"])(
 		"runs the read-only validator before build:server in the real %s script without dependency repair",
 		(scriptName) => {
-			const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+			const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 			const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf-8")) as {
 				scripts?: Record<string, string>;
 			};
@@ -509,7 +509,7 @@ describe.skipIf(!desiredContractAvailable)("development harness pre-build valida
 	);
 
 	it("routes every dist harness/watchdog load through the stable outside-dist bootstrap", () => {
-		const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 		const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf-8")) as {
 			scripts?: Record<string, string>;
 		};

@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AuthInteraction, Credential, Models, OAuthCredential } from "@earendil-works/pi-ai";
-import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { resetAgentDirStateForTests } from "../../../src/server/bobbit-dir.js";
 
 const piMocks = {
 	login: vi.fn(),
@@ -37,7 +37,7 @@ const {
 	oauthFlowStatus,
 	oauthStart,
 	stopFlowCleanup,
-} = await import("../../src/server/auth/oauth.js");
+} = await import("../../../src/server/auth/oauth.js");
 
 const fakeModels = (): Pick<Models, "login"> => ({
 	login: piMocks.login as unknown as Models["login"],

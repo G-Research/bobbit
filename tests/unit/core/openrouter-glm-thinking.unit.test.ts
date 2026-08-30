@@ -4,7 +4,7 @@ import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import {
 	clampThinkingLevelForModel,
 	resolveThinkingClampModel,
-} from "../../src/server/agent/thinking-level-clamp.ts";
+} from "../../../src/server/agent/thinking-level-clamp.ts";
 
 describe("exact thinking metadata clamp", () => {
 	it("uses exact Pi metadata for a direct built-in", () => {

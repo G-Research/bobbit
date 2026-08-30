@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -25,7 +25,7 @@ const tmp = mkdtempSync(path.join(tmpdir(), "bobbit-oauth-empty-"));
 mkdirSync(path.join(tmp, "agent"), { recursive: true });
 process.env.BOBBIT_AGENT_DIR = path.join(tmp, "agent");
 
-const { oauthCancel, oauthComplete, oauthStart, stopFlowCleanup } = await import("../../src/server/auth/oauth.js");
+const { oauthCancel, oauthComplete, oauthStart, stopFlowCleanup } = await import("../../../src/server/auth/oauth.js");
 const activeFlows = new Map<string, "anthropic" | "openai-codex">();
 const OFFLINE_FETCH: typeof fetch = async () => {
 	throw new Error("OAuth tests must not call a provider");

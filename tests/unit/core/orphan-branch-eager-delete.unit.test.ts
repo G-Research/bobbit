@@ -15,7 +15,7 @@
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { eagerDeleteRemoteSessionBranch } from "../../src/server/agent/session-eager-branch-delete.js";
+import { eagerDeleteRemoteSessionBranch } from "../../../src/server/agent/session-eager-branch-delete.js";
 
 interface Call { args: string[]; cwd: string }
 

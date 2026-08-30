@@ -1,13 +1,13 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
-import { realClock } from "../../src/server/clock.js";
+import { realClock } from "../../../src/server/clock.js";
 import {
 	createCommandSpawnAdapter,
 	hasOwnedTreeSpawnRequest,
 	ownedTreeSpawnOptions,
 	type OwnedTreeControl,
-} from "../../src/server/owned-tree-command-spawn.js";
+} from "../../../src/server/owned-tree-command-spawn.js";
 
 function fakeChild(): ChildProcess {
 	return new EventEmitter() as ChildProcess;

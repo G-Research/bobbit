@@ -14,7 +14,7 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { buildNestingContextSection } from "../../src/server/agent/system-prompt.ts";
+import { buildNestingContextSection } from "../../../src/server/agent/system-prompt.ts";
 
 describe("buildNestingContextSection — subgoals flag gating", () => {
 	it("root + subgoals OFF → no nesting section at all", () => {

@@ -15,8 +15,8 @@
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 
-import { RoleManager } from "../../src/server/agent/role-manager.ts";
-import type { Role } from "../../src/server/agent/role-store.ts";
+import { RoleManager } from "../../../src/server/agent/role-manager.ts";
+import type { Role } from "../../../src/server/agent/role-store.ts";
 
 // Patch createRole to wrap the original but suppress the generateRoleNames call.
 // We save the original, then replace it with a version that does validation + store.put()

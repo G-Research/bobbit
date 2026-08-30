@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -25,8 +25,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import extensionFactory from "../../defaults/tools/images/extension.ts";
-import { withEnv, type EnvPatch } from "../harness/with-env.js";
+import extensionFactory from "../../../defaults/tools/images/extension.ts";
+import { withEnv, type EnvPatch } from "../../../tests2/harness/with-env.js";
 
 type ToolReg = {
 	name: string;
