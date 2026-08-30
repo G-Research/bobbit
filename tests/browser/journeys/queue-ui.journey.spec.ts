@@ -13,9 +13,8 @@ import {
 	apiFetch,
 	statusPredicate,
 	queueLenPredicate,
-	agentEndPredicate,
 } from "../../e2e/e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "../../e2e/ui/ui-helpers.js";
+import { openApp, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");
