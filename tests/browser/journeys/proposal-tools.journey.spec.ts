@@ -9,7 +9,6 @@
  * - Dismiss hides proposal panel, tool block remains visible
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
-import { apiFetch } from "../../e2e/e2e-setup.js";
 import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for proposal panel.
@@ -29,15 +28,6 @@ async function triggerGoalProposal(page: import("@playwright/test").Page) {
 	const titleInput = page.locator("input[placeholder='Goal title']").first();
 	await expect(titleInput).toBeVisible({ timeout: 20_000 });
 	await expect(titleInput).toHaveValue("E2E Test Goal", { timeout: 15_000 });
-}
-
-/** Helper: find and delete a goal by title (best-effort cleanup). */
-async function deleteGoalByTitle(title: string) {
-	const resp = await apiFetch("/api/goals");
-	const data = await resp.json();
-	const goals = data.goals || data;
-	const goal = (goals as any[]).find((g: any) => g.title === title);
-	if (goal) await apiFetch(`/api/goals/${goal.id}`, { method: "DELETE" }).catch(() => {});
 }
 
 test.describe("Proposal tool blocks", () => {
