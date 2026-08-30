@@ -6,7 +6,7 @@
  *   Gap 1: team/prompt to paused goal must return 409 GOAL_PAUSED
  */
 import { vi } from "vitest";
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	defaultProjectId,
@@ -15,7 +15,7 @@ import {
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "./_e2e/e2e-setup.js";
+} from "../../../../tests2/integration/_e2e/e2e-setup.js";
 
 async function setSubgoalsEnabled(enabled: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

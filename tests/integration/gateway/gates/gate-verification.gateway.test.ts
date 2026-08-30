@@ -6,9 +6,9 @@
  *   tests/e2e/gate-resign-cancel.spec.ts
  */
 import assert from "node:assert";
-import { test } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
-import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import { test } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { apiFetch, createGoal, deleteGoal } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { createFakeVerificationCommandRunner } from "../../../../tests2/harness/fake-verification-command-runner.js";
 
 let originalCommandStepRunner: unknown;
 test.beforeAll(({ gateway }) => {

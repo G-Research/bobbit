@@ -3,13 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 
-import type { CommandRunner } from "../../src/server/gateway-deps.js";
-import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
-import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
-import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
-import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.js";
-import { createManualClock, type ManualClock } from "../harness/clock.js";
-import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import type { CommandRunner } from "../../../../src/server/gateway-deps.js";
+import { GateStore, type GateSignal } from "../../../../src/server/agent/gate-store.js";
+import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal-store.js";
+import { VerificationHarness } from "../../../../src/server/agent/verification-harness.js";
+import type { Workflow, WorkflowGate } from "../../../../src/server/agent/workflow-store.js";
+import { createManualClock, type ManualClock } from "../../../../tests2/harness/clock.js";
+import { createFakeVerificationCommandRunner } from "../../../../tests2/harness/fake-verification-command-runner.js";
 
 const GOAL_ID = "gate-resignal-suite-goal";
 const GATE_ID = "slow-gate";

@@ -18,7 +18,7 @@
  * Top-level goal creation (no `parentGoalId`) is UNCHANGED — these tests create
  * the parent via the normal authenticated path and assert it succeeds.
  */
-import { test, expect } from "./_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
 import {
 	apiFetch,
 	rawApiFetch,
@@ -26,7 +26,7 @@ import {
 	defaultProjectId,
 	nonGitCwd,
 	seedTeamLeadHeader,
-} from "./_e2e/e2e-setup.js";
+} from "../../../../tests2/integration/_e2e/e2e-setup.js";
 
 // The in-process gateway (worker-scoped) — needed to seed a team-lead + its
 // capability secret for the authentic-team-lead allow path.

@@ -1,6 +1,6 @@
-import { test, expect } from "./_e2e/in-process-harness.js";
-import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { pollUntil } from "../../../e2e/test-utils/cleanup.js";
 
 let token: string;
 

@@ -8,9 +8,9 @@
  *     has a URL for that goal id (seeded via the in-process server's store).
  *  C. Empty PrStatusStore omits the line cleanly.
  */
-import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, defaultProjectId, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { apiFetch, defaultProjectId, nonGitCwd } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { pollUntil } from "../../../e2e/test-utils/cleanup.js";
 
 async function createGoal(opts?: { title?: string }): Promise<{ id: string; projectId: string }> {
 	const projectId = await defaultProjectId();
