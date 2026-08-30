@@ -26,6 +26,7 @@ type CommittedPlaywrightProject = {
 	testDir: string;
 	testMatch: string[];
 	testIgnore: string[];
+	fullyParallel: boolean;
 };
 
 let root: string;
@@ -92,6 +93,14 @@ function stringLiteral(expression: ts.Expression | undefined, context: string): 
 	return unwrapped.text;
 }
 
+function booleanLiteral(expression: ts.Expression | undefined, context: string): boolean {
+	if (!expression) throw new Error(`${context} is missing`);
+	const unwrapped = unwrapExpression(expression);
+	if (unwrapped.kind === ts.SyntaxKind.TrueKeyword) return true;
+	if (unwrapped.kind === ts.SyntaxKind.FalseKeyword) return false;
+	throw new Error(`${context} must be a boolean literal`);
+}
+
 function stringPatterns(expression: ts.Expression | undefined, context: string): string[] {
 	if (!expression) return [];
 	const unwrapped = unwrapExpression(expression);
@@ -139,6 +148,9 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 	}
 	const config = objectLiteral(configExpression, `${configFile} default export`);
 	const projects = arrayLiteral(property(config, "projects"), `${configFile} projects`);
+	const topLevelFullyParallel = property(config, "fullyParallel") === undefined
+		? false
+		: booleanLiteral(property(config, "fullyParallel"), `${configFile} fullyParallel`);
 	if (configFile === "playwright-e2e.config.ts") {
 		const selection = createE2EPhaseSelection() as Record<string, {
 			name: string; testDir: string; testMatch?: string[]; testIgnore?: string[];
@@ -158,6 +170,9 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 				testDir: selected.testDir,
 				testMatch: selected.testMatch ?? [],
 				testIgnore: selected.testIgnore ?? [],
+				fullyParallel: property(project, "fullyParallel") === undefined
+					? topLevelFullyParallel
+					: booleanLiteral(property(project, "fullyParallel"), `${configFile} projects[${index}].fullyParallel`),
 			};
 		});
 	}
@@ -169,6 +184,9 @@ function committedPlaywrightProjects(configFile: string): CommittedPlaywrightPro
 			testDir: stringLiteral(property(project, "testDir"), `${context}.testDir`),
 			testMatch: stringPatterns(property(project, "testMatch"), `${context}.testMatch`),
 			testIgnore: stringPatterns(property(project, "testIgnore"), `${context}.testIgnore`),
+			fullyParallel: property(project, "fullyParallel") === undefined
+				? topLevelFullyParallel
+				: booleanLiteral(property(project, "fullyParallel"), `${context}.fullyParallel`),
 		};
 	});
 }
@@ -387,6 +405,9 @@ describe("Playwright selector parity", () => {
 		const e2eBrowserCanonical = e2eProjects.find(project => project.name === "browser-canonical")!;
 		const manual = manualProjects.find(project => project.name === "manual-integration")!;
 		const manualCanonical = manualProjects.find(project => project.name === "manual")!;
+		expect(browser.fullyParallel).toBe(false);
+		expect(browserCanonical.fullyParallel).toBe(true);
+		expect(browserE2E.fullyParallel).toBe(false);
 		const discovery = discoverTests();
 		const selected = {
 			browser: selectedRepositoryPaths(browser),
