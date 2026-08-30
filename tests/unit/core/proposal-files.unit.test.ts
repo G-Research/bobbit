@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createMemFs } from "../harness/mem-fs.ts";
+import { createMemFs } from "../../../tests2/harness/mem-fs.ts";
 import {
 	deleteProposalFile,
 	editProposalFile,
@@ -29,7 +29,7 @@ import {
 	writeProposalFile,
 	writeSnapshot,
 	type ProposalType,
-} from "../../src/server/proposals/proposal-files.ts";
+} from "../../../src/server/proposals/proposal-files.ts";
 
 const memoryFs = createMemFs();
 const stateDir = path.resolve("/memfs/proposal-files-test");

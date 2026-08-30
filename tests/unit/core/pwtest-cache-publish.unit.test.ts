@@ -12,9 +12,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
 
-type CacheModule = typeof import("../../scripts/testing-v2/pwtest-cache.js");
+type CacheModule = typeof import("../../../scripts/testing-v2/pwtest-cache.js");
 
 const ROOT = resolve("/memfs/pwtest-cache-publish");
 let fixtureSequence = 0;
@@ -41,7 +41,7 @@ beforeAll(async () => {
 		publishTransformCacheFromEnv,
 		seedTransformCache,
 		seedTransformCacheForRunDir,
-	} = await import("../../scripts/testing-v2/pwtest-cache.js"));
+	} = await import("../../../scripts/testing-v2/pwtest-cache.js"));
 });
 
 afterAll(() => restoreFs());

@@ -3,15 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ConfigCascade } from "../../src/server/agent/config-cascade.js";
-import { EventBuffer } from "../../src/server/agent/event-buffer.js";
-import { RoleManager } from "../../src/server/agent/role-manager.js";
-import { RoleStore, type Role } from "../../src/server/agent/role-store.js";
-import { SessionManager } from "../../src/server/agent/session-manager.js";
-import { scopedToolContext } from "../../src/server/agent/session-setup.js";
-import { ToolGroupPolicyStore } from "../../src/server/agent/tool-group-policy-store.js";
-import { resolveGrantPolicy } from "../../src/server/agent/tool-activation.js";
-import { ToolManager } from "../../src/server/agent/tool-manager.js";
+import { ConfigCascade } from "../../../src/server/agent/config-cascade.js";
+import { EventBuffer } from "../../../src/server/agent/event-buffer.js";
+import { RoleManager } from "../../../src/server/agent/role-manager.js";
+import { RoleStore, type Role } from "../../../src/server/agent/role-store.js";
+import { SessionManager } from "../../../src/server/agent/session-manager.js";
+import { scopedToolContext } from "../../../src/server/agent/session-setup.js";
+import { ToolGroupPolicyStore } from "../../../src/server/agent/tool-group-policy-store.js";
+import { resolveGrantPolicy } from "../../../src/server/agent/tool-activation.js";
+import { ToolManager } from "../../../src/server/agent/tool-manager.js";
 
 const PROJECT_A = "project-a";
 const PROJECT_B = "project-b";

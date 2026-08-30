@@ -11,7 +11,7 @@ import {
   ProjectRegistry,
   type ProjectPathIdentity,
   type RegisteredProject,
-} from "../../src/server/agent/project-registry.js";
+} from "../../../src/server/agent/project-registry.js";
 
 const fixtureDirs: string[] = [];
 

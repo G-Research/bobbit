@@ -14,7 +14,7 @@ import {
   ProjectRegistry,
   SYSTEM_PROJECT_ID,
   type RegisteredProject,
-} from "../../src/server/agent/project-registry.js";
+} from "../../../src/server/agent/project-registry.js";
 
 const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
 let fixtureSequence = 0;

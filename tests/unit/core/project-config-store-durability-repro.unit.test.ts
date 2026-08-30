@@ -4,8 +4,8 @@ import { describe, it } from "vitest";
 import {
 	ProjectConfigPersistenceError,
 	ProjectConfigStore,
-} from "../../src/server/agent/project-config-store.js";
-import { createMemFs } from "../harness/mem-fs.js";
+} from "../../../src/server/agent/project-config-store.js";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 describe("ProjectConfigStore durable publication", () => {
 	it("surfaces a publication failure without changing existing project.yaml bytes", () => {

@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -35,8 +35,8 @@ import {
 	providersDeclareTurnHooks,
 	generateProviderBridgeExtension,
 	BEFORE_COMPACT_TIMEOUT_MS,
-} from "../../src/server/agent/provider-bridge-extension.ts";
-import type { ProviderContribution } from "../../src/server/agent/pack-contributions.ts";
+} from "../../../src/server/agent/provider-bridge-extension.ts";
+import type { ProviderContribution } from "../../../src/server/agent/pack-contributions.ts";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pbx-"));
 let bridgeImportCounter = 0;

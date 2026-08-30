@@ -2,7 +2,7 @@
 // Source: tests/proposal-helpers.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -73,7 +73,7 @@ const fakeDraftStore = new Map<string, unknown>();
 import { describe, it, beforeAll, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 
-const helpers = await import("../../src/app/proposal-helpers.ts");
+const helpers = await import("../../../src/app/proposal-helpers.ts");
 const {
 	isProposalDismissed,
 	markProposalDismissed,
@@ -87,7 +87,7 @@ const {
 	metadataRowsToObject,
 } = helpers;
 
-import type { ProposalType } from "../../src/app/proposal-registry.ts";
+import type { ProposalType } from "../../../src/app/proposal-registry.ts";
 const TYPES = ["goal", "project", "workflow", "role", "tool", "staff"] as unknown as readonly ProposalType[];
 
 describe("proposal-helpers — goal metadata editor", () => {

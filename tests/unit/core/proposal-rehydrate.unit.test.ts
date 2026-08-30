@@ -29,7 +29,7 @@ import {
 	proposalFilePath,
 	readProposalFile,
 	writeProposalFile,
-} from "../../src/server/proposals/proposal-files.ts";
+} from "../../../src/server/proposals/proposal-files.ts";
 
 let stateDir: string;
 

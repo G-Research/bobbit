@@ -14,7 +14,7 @@ import {
 	hasCurrentProposalSlotForSession,
 	isProposalType,
 	type ProposalType,
-} from "../../src/app/proposal-registry.ts";
+} from "../../../src/app/proposal-registry.ts";
 
 describe("PROPOSAL_TYPE_REGISTRY.mergeFields", () => {
 	describe("project", () => {

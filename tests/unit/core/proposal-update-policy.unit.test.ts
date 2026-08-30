@@ -16,7 +16,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { shouldApplyProposalUpdate } from "../../src/app/proposal-update-policy.ts";
+import { shouldApplyProposalUpdate } from "../../../src/app/proposal-update-policy.ts";
 
 describe("proposal-update-policy — shouldApplyProposalUpdate", () => {
 	it("first-emit applies (no slot yet)", () => {

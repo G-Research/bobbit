@@ -16,10 +16,10 @@ import {
 	getPackLocalDataMountStaleness,
 	getSessionPreviewMountStaleness,
 	getStateDirMountStaleness,
-} from "../../src/server/agent/project-sandbox.js";
-import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../src/server/agent/docker-args.js";
-import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
-import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
+} from "../../../src/server/agent/project-sandbox.js";
+import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../../src/server/agent/docker-args.js";
+import { toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
+import { SandboxManager } from "../../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
 

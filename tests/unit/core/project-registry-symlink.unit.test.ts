@@ -8,8 +8,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 
-import { ProjectRegistry, SymlinkProjectRootError } from "../../src/server/agent/project-registry.js";
-import { installScopedMemFs } from "./helpers/scoped-memfs.js";
+import { ProjectRegistry, SymlinkProjectRootError } from "../../../src/server/agent/project-registry.js";
+import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/project-registry-symlink");
 const TARGET = path.join(ROOT, "canonical");

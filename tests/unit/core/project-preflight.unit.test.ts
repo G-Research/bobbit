@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
 
-import { runPreflight, type PreflightContext } from "../../src/server/agent/project-preflight.js";
+import { runPreflight, type PreflightContext } from "../../../src/server/agent/project-preflight.js";
 
 const fs = createFsFromVolume(new Volume()) as unknown as typeof import("node:fs");
 const rawRealpathSync = fs.realpathSync.bind(fs);

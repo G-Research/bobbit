@@ -2,7 +2,7 @@
 // Source: tests/proposal-panel-placeholder.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -21,12 +21,12 @@ guardProcessEnv();
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { installLitDomStub } from "./helpers/dom-stub.js";
+import { installLitDomStub } from "../../../tests2/core/helpers/dom-stub.js";
 
 // lit-html (imported transitively) touches document.* at module init; force a
 // complete DOM stub before the dynamic import so it resolves in the node env.
 installLitDomStub();
-const { renderProposalPanelPlaceholder } = await import("../../src/app/proposal-panel-placeholder.ts");
+const { renderProposalPanelPlaceholder } = await import("../../../src/app/proposal-panel-placeholder.ts");
 
 test("error state renders the error card (not a spinner) with retry/reload", () => {
 	const tr = renderProposalPanelPlaceholder({

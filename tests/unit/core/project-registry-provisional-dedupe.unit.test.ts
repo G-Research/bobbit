@@ -14,7 +14,7 @@ import {
   ProjectRegistry,
   SpecialProjectMutationError,
   SYSTEM_PROJECT_ID,
-} from "../../src/server/agent/project-registry.js";
+} from "../../../src/server/agent/project-registry.js";
 
 const memoryFs = createFsFromVolume(new Volume()) as unknown as typeof fs;
 const fsSpies: Array<{ mockRestore(): void }> = [];
