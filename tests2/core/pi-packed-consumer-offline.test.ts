@@ -19,7 +19,7 @@ import {
 } from "../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
 
 const PACKED_CONSUMER_SOURCE = readFileSync(
-	new URL("../../tests/e2e/pi-packed-consumer.e2e.spec.ts", import.meta.url),
+	new URL("../../tests/e2e/api/pi-packed-consumer.api-e2e.spec.ts", import.meta.url),
 	"utf8",
 );
 const COMMAND_HELPER_SOURCE = readFileSync(
