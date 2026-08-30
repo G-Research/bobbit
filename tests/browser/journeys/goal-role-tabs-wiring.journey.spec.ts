@@ -5,10 +5,10 @@
  * customization must open an editable role editor, and created goals must
  * persist inlineRoles snapshots.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 const ROLES_TAB = "[data-testid='goal-proposal-tab-roles']";
 const ROLES_PANEL = "[data-testid='goal-proposal-panel-roles']";

@@ -6,8 +6,8 @@
  * same conversation must render as a normal rev-backed proposal.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, createSessionViaUI, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 const WORKFLOW_ERROR_RE = /Workflow is required for this project/i;
 

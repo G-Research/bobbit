@@ -44,7 +44,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, deleteGoal, defaultProjectId, createSession, connectWs, signalAndWaitForGate } from "../e2e-setup.js";
-import { openApp, navigateToGoalDashboard } from "./ui-helpers.js";
+import { openApp, navigateToGoalDashboard } from "../ui/ui-helpers.js";
 
 // Fast command for the deterministic alive→completed baseline.
 const FAST_CMD = `node -e "process.exit(0)"`;

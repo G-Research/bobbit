@@ -12,9 +12,9 @@
  *          tests/e2e/ui/pr-walkthrough-panel.spec.ts (launch).
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 const tid = (id: string) => `[data-testid="${id}"]`;
 

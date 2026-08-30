@@ -42,7 +42,7 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
 import { apiFetch, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage } from "../ui/ui-helpers.js";
 
 // Within-file serial: a single end-to-end lifecycle test, but be explicit so a
 // failed run can never leak a half-installed server-scope pack into a retry.

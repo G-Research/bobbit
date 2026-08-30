@@ -6,13 +6,13 @@
  *     the Stop button), even when focus is NOT on the textarea.
  *   - Escape inside the textarea also aborts (existing MessageEditor handler).
  */
-import { test, expect } from "./fixtures.js";
+import { test, expect } from "../../e2e/ui/fixtures.js";
 import {
 	createSession,
 	waitForHealth,
 	waitForSessionStatus,
-} from "../e2e-setup.js";
-import { openApp, sendMessage } from "./ui-helpers.js";
+} from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Escape aborts agent globally", () => {
 	test.beforeAll(async () => {

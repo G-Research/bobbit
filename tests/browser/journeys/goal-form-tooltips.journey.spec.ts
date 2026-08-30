@@ -4,9 +4,9 @@
  * Field-level workflow metadata is covered in tests/e2e/goal-workflow-api.spec.ts;
  * this browser spec keeps the real assistant/form render path only once.
  */
-import { test, expect } from "../gateway-harness.js";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
-import { apiFetch, defaultProjectId } from "../e2e-setup.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
+import { apiFetch, defaultProjectId } from "../../e2e/e2e-setup.js";
 
 test.describe.configure({ timeout: 90_000 });
 

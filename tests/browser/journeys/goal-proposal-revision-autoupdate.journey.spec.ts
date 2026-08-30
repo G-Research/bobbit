@@ -28,9 +28,9 @@
  * Mock-agent triggers: GOAL_PROPOSAL (initial), GOAL_PROPOSAL_REV2 (2nd
  * propose_goal), GOAL_EDITABLE_EDIT (edit_proposal type=goal).
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 const INITIAL_SPEC_TAIL = "It validates the goal creation UI.";
 const INITIAL_SPEC_HEAD = "This is a test goal created via the assistant flow.";

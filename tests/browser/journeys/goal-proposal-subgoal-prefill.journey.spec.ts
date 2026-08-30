@@ -13,9 +13,9 @@
  *   subgoalsAllowed: true, maxNestingDepth: 2,
  *   divergencePolicy: "autonomous", maxConcurrentChildren: 4
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch } from "../e2e-setup.js";
-import { openApp, sendMessage, createSessionViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, createSessionViaUI } from "../../e2e/ui/ui-helpers.js";
 
 async function setSubgoals(value: boolean): Promise<void> {
 	const resp = await apiFetch("/api/preferences", {

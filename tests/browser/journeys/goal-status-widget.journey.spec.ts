@@ -2,9 +2,9 @@
  * Retained spawned-gateway smoke for <goal-status-widget> mounting on real sessions.
  * Popover/action matrices live in tests/goal-status-widget.spec.ts.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, deleteGoal, deleteSession, startTeam, waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, deleteGoal, deleteSession, startTeam, waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 async function installWidgetReadMocks(page: any, goalId: string): Promise<void> {
 	await page.route(new RegExp(`/api/goals/${goalId}/gates(?:\\?.*)?$`), async (route: any) => {

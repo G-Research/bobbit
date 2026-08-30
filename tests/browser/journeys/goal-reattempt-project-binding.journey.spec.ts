@@ -29,9 +29,9 @@
  * Will pass once `goalProposalPanel()` / `goalPreviewPanel()` derives
  * `state.previewProjectId` from the active session's `projectId`.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, defaultProjectId, deleteSession, nonGitCwd } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, defaultProjectId, deleteSession, nonGitCwd } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
 test.describe("Re-attempt goal proposal project binding @repro", () => {
 	test("Create Goal succeeds in re-attempt session and inherits original projectId", async ({ page }) => {

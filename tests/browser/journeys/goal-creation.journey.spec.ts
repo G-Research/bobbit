@@ -2,9 +2,9 @@
  * Goal creation E2E tests: assistant flow with mock agent proposal, API creation,
  * optional steps toggle, and dismiss button behavior.
  */
-import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createGoal, defaultProjectId } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createGoal, defaultProjectId } from "../../e2e/e2e-setup.js";
+import { openApp, createSessionViaUI, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for title input. */
 async function openGoalAssistantProposal(page: import("@playwright/test").Page) {

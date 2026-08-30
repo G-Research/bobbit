@@ -32,10 +32,10 @@
  * assertion. Will pass once `goalDraft.restore` consults
  * `isProposalDismissedTyped` before populating the slot.
  */
-import { test, expect } from "../gateway-harness.js";
+import { test, expect } from "../../e2e/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { waitForSessionStatus } from "../e2e-setup.js";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { waitForSessionStatus } from "../../e2e/e2e-setup.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../e2e/ui/ui-helpers.js";
 
 async function activeSessionId(page: Page): Promise<string> {
 	const sid = await page.evaluate(
