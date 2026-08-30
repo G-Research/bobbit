@@ -4,10 +4,10 @@ import {
 	apiFetch,
 	connectWs,
 	createSession,
-	deleteSession,
 	nonGitCwd,
 	registerProject,
 } from "../e2e-setup.js";
+import { awaitableRm } from "../test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,7 +36,7 @@ interface InstalledPack {
 
 const installed: InstalledPack[] = [];
 const sessions: string[] = [];
-const projectsToRemove: string[] = [];
+const projectsToRemove: Array<{ id: string; rootPath: string }> = [];
 const sourceIds = new Set<string>();
 
 function refOf(row: any): string {
@@ -170,20 +170,37 @@ test.describe.configure({ mode: "serial" });
 
 test.describe("marketplace pi extensions", () => {
 	test.afterEach(async () => {
-		for (const id of sessions.splice(0)) await deleteSession(id).catch(() => {});
-		await apiFetch(`/api/roles/pi-extension-never-role`, { method: "DELETE" }).catch(() => {});
-		await apiFetch(`/api/roles/pi-extension-ask-role`, { method: "DELETE" }).catch(() => {});
+		for (const id of sessions.splice(0).reverse()) {
+			const response = await apiFetch(`/api/sessions/${encodeURIComponent(id)}?purge=true`, { method: "DELETE" });
+			const text = await response.text();
+			expect(response.status, `purge session ${id}: ${text}`).toBe(200);
+		}
+		for (const role of ["pi-extension-never-role", "pi-extension-ask-role"]) {
+			const response = await apiFetch(`/api/roles/${role}`, { method: "DELETE" });
+			const text = await response.text();
+			expect([200, 404], `delete role ${role}: ${text}`).toContain(response.status);
+		}
 		for (const pack of installed.splice(0).reverse()) {
-			await apiFetch("/api/marketplace/installed", {
+			const response = await apiFetch("/api/marketplace/installed", {
 				method: "DELETE",
 				body: JSON.stringify({ scope: pack.scope, packName: pack.packName, ...(pack.projectId ? { projectId: pack.projectId } : {}) }),
-			}).catch(() => {});
+			});
+			const text = await response.text();
+			expect(response.status, `uninstall ${pack.packName}: ${text}`).toBe(204);
 		}
 		for (const sourceId of [...sourceIds]) {
-			await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" }).catch(() => {});
+			const response = await apiFetch(`/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+			const text = await response.text();
+			expect(response.status, `delete source ${sourceId}: ${text}`).toBe(204);
 			sourceIds.delete(sourceId);
 		}
-		for (const dir of projectsToRemove.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+		for (const project of projectsToRemove.splice(0).reverse()) {
+			const response = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" });
+			const text = await response.text();
+			expect(response.status, `delete project ${project.id}: ${text}`).toBe(200);
+			const cleanup = await awaitableRm(project.rootPath);
+			expect(cleanup.removed, `remove project root ${project.rootPath}: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+		}
 	});
 
 	test("real discovery-process canary: install + default enable passes extension args, exposes provenance, and the fixture tool can be used", async ({ gateway }) => {
@@ -287,9 +304,10 @@ test.describe("marketplace pi extensions", () => {
 	test("project-scoped pi-extension tools and session args do not leak across projects", async ({ gateway }) => {
 		const rootA = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-a-"));
 		const rootB = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-ext-b-"));
-		projectsToRemove.push(rootA, rootB);
 		const projectA = await registerProject({ name: `pi-ext-a-${Date.now()}`, rootPath: rootA });
+		projectsToRemove.push({ id: projectA.id, rootPath: rootA });
 		const projectB = await registerProject({ name: `pi-ext-b-${Date.now()}`, rootPath: rootB });
+		projectsToRemove.push({ id: projectB.id, rootPath: rootB });
 
 		await installPack(SCOPE_SOURCE, PROJECT_A_PACK, "project", projectA.id);
 		await installPack(SCOPE_SOURCE, PROJECT_B_PACK, "project", projectB.id);

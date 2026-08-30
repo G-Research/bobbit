@@ -7,7 +7,6 @@ import {
 	connectWs,
 	createSession,
 	defaultProject,
-	deleteSession,
 	messageEndPredicate,
 	secretsDir,
 	type WsConnection,
@@ -212,17 +211,34 @@ async function restartGateway(gateway: GatewayInfo): Promise<void> {
 	await waitForHealth(20_000);
 }
 
+async function deleteSessionStrict(sessionId: string): Promise<void> {
+	const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}?purge=true`, { method: "DELETE" });
+	const text = await response.text();
+	expect(response.status, `purge session ${sessionId}: ${text}`).toBe(200);
+}
+
 test.describe.serial("message author prefix restart projection", () => {
 	test("trusted agent/system prefixes remain raw-only across EventBuffer replay, projection re-entry, search rebuild, and gateway restart", async ({ gateway }) => {
 		test.setTimeout(120_000);
 		const project = await defaultProject();
-		// Fresh E2E state schedules a delayed empty-index rebuild. Let that settle
-		// before the mock's live-only messages begin so this projection test cannot
-		// race a rebuild that read the mock transcript before get_state flushed it.
-		await pollUntil(
-			() => searchLastRebuildAt(project.id),
-			{ timeoutMs: 20_000, intervalMs: 150, label: "initial search rebuild completion" },
-		);
+		// Search stats do not activate an index that has never been used. Start the
+		// initial rebuild explicitly, then cross its completion barrier before the
+		// mock's live-only messages begin.
+		const previousInitialRebuildAt = await searchLastRebuildAt(project.id);
+		const initialRebuildStartedAt = Date.now();
+		const initialRebuild = await apiFetch("/api/search/rebuild", {
+			method: "POST",
+			body: JSON.stringify({ projectId: project.id }),
+		});
+		expect(initialRebuild.status, await initialRebuild.clone().text()).toBe(202);
+		await pollUntil(async () => {
+			const rebuiltAt = await searchLastRebuildAt(project.id);
+			return rebuiltAt !== null
+				&& rebuiltAt >= initialRebuildStartedAt
+				&& (previousInitialRebuildAt === null || rebuiltAt > previousInitialRebuildAt)
+				? rebuiltAt
+				: null;
+		}, { timeoutMs: 20_000, intervalMs: 150, label: "initial search rebuild completion" });
 		const callerId = await createSession({ projectId: project.id });
 		const targetId = await createSession({ projectId: project.id });
 		const nonce = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -414,11 +430,9 @@ test.describe.serial("message author prefix restart projection", () => {
 			restoreStableEcho?.();
 			conn?.close();
 			resumeConn?.close();
-			if (!serverOnline) {
-				await restartGateway(gateway).catch(() => undefined);
-			}
-			await deleteSession(targetId).catch(() => undefined);
-			await deleteSession(callerId).catch(() => undefined);
+			if (!serverOnline) await restartGateway(gateway);
+			await deleteSessionStrict(targetId);
+			await deleteSessionStrict(callerId);
 		}
 	});
 });
