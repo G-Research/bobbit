@@ -61,9 +61,12 @@ async function stubWindowOpen(page: Page): Promise<void> {
 	});
 }
 
-// Session deep links use the hash form (absoluteHashUrl): origin+pathname+search+#/session/<id>.
+// New windows use the reload-safe path form below the runtime mount.
 function expectedSessionDeepLink(page: Page, sessionId: string): Promise<string> {
-	return page.evaluate((id) => `${location.origin}${location.pathname}${location.search}#/session/${id}`, sessionId);
+	return page.evaluate((id) => {
+		const mount = String((window as any).__BOBBIT_BASE_PATH__ ?? "");
+		return `${location.origin}${mount}/session/${encodeURIComponent(id)}`;
+	}, sessionId);
 }
 
 test.describe("Open session in new window (UI)", () => {
