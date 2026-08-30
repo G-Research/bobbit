@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/git-status-widget-multi-repo.spec.ts (v2-dom tier).
 // Mounts the REAL <git-status-widget> Lit component under happy-dom (replacing
