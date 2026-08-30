@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "./_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/settings-models-tab-redesign.spec.ts (v2-dom tier).
 // Renders the REAL renderModelsTab() (src/app/settings-page.ts) into a happy-dom
