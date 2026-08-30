@@ -26,7 +26,7 @@
  * Mirrors the in-process harness import pattern from
  * `tests/e2e/gates-api.spec.ts`.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
@@ -35,8 +35,8 @@ import {
 	rawApiFetch,
 	readE2EToken,
 	seedTeamLeadHeader,
-} from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+} from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 
 let token: string;
 let gitProjectId: string;

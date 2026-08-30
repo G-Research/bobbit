@@ -8,14 +8,14 @@
  * Trimmed to 3 core tests: discovery+connection, tool execution, tool list.
  * Permission grant flow is covered by mcp-tool-permission.spec.ts.
  */
-import { test, expect } from "./gateway-harness.js";
+import { test, expect } from "../gateway-harness.js";
 
 // This spec actually exercises MCP — opt the worker gateway into starting MCP servers.
 test.use({ enableMcp: true });
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readE2EToken, base, bobbitDir, injectDefaultProjectId } from "./e2e-setup.js";
+import { readE2EToken, base, bobbitDir, injectDefaultProjectId } from "../e2e-setup.js";
 
 let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 
@@ -38,7 +38,7 @@ async function apiFetch(path: string, opts: RequestInit = {}): Promise<Response>
 }
 
 // Resolve paths for the mock MCP server
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_SERVER_PATH = resolve(__dirname, "..", "fixtures", "mock-mcp-server.mjs");
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const hqQuery = `projectId=${encodeURIComponent(HEADQUARTERS_PROJECT_ID)}`;

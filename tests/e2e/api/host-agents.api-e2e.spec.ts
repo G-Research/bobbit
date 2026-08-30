@@ -19,13 +19,13 @@
  *     session is NOT visible; no foreign session is reachable),
  *   • the host carries orchestration verbs only — no token / raw fetch.
  */
-import { test, expect } from "./in-process-harness.js";
-import { createSession, deleteSession } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { createSession, deleteSession } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const FIXTURE_PACK_ROOT = resolve(PROJECT_ROOT, "market-packs", "_fixtures", "host-agents-exerciser");
 const FIXTURE_MODULE = resolve(FIXTURE_PACK_ROOT, "lib", "exerciser.mjs");
@@ -33,7 +33,7 @@ const FIXTURE_MODULE = resolve(FIXTURE_PACK_ROOT, "lib", "exerciser.mjs");
 /** Build the LIVE parent ServerHostApi bound to `ownerId`, wired to the gateway's
  *  real OrchestrationCore + a live status reader (exactly as server.ts wires it). */
 async function buildHost(gateway: any, ownerId: string): Promise<any> {
-	const { createServerHostApi } = await import("../../dist/server/extension-host/server-host-api.js");
+	const { createServerHostApi } = await import("../../../dist/server/extension-host/server-host-api.js");
 	return createServerHostApi({
 		sessionId: ownerId,
 		packId: "host-agents-exerciser",
@@ -44,7 +44,7 @@ async function buildHost(gateway: any, ownerId: string): Promise<any> {
 }
 
 async function runFixture(gateway: any, ownerId: string, member: string, arg: unknown): Promise<any> {
-	const { ModuleHost } = await import("../../dist/server/extension-host/module-host-worker.js");
+	const { ModuleHost } = await import("../../../dist/server/extension-host/module-host-worker.js");
 	const host = await buildHost(gateway, ownerId);
 	const workingDir = gateway.sessionManager.getSession(ownerId)?.cwd;
 	const mh = new ModuleHost({ timeoutMs: 30_000 });

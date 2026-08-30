@@ -21,16 +21,16 @@
  * the `api-realpush` project in playwright-e2e.config.ts for env isolation
  * from other workers.
  */
-import { test, expect } from "./in-process-harness-realpush.js";
+import { test, expect } from "../in-process-harness-realpush.js";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
-import { apiFetch } from "./e2e-setup.js";
-import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { apiFetch } from "../e2e-setup.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 
 const execFileAsync = promisify(execFileCb);
 

@@ -35,7 +35,7 @@
  *   The session, RPC bridge, event subscriptions, and verification harness
  *   are all real — only the boot sequence is short-circuited.
  */
-import { test, expect } from "./in-process-harness.js";
+import { test, expect } from "../in-process-harness.js";
 import {
 	assertStaysFalse,
 	createGoal,
@@ -43,7 +43,7 @@ import {
 	deleteGoal,
 	waitForCondition,
 	waitForSessionStatus,
-} from "./e2e-setup.js";
+} from "../e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 

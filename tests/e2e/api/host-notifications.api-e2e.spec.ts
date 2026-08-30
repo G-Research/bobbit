@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { expect, test, type GatewayInfo } from "./gateway-harness.js";
+import { expect, test, type GatewayInfo } from "../gateway-harness.js";
 import {
 	agentEndPredicate,
 	apiFetch,
@@ -15,8 +15,8 @@ import {
 	waitForHealth,
 	waitForSessionStatus,
 	type WsMsg,
-} from "./e2e-setup.js";
-import { awaitableRm, pollUntil } from "./test-utils/cleanup.js";
+} from "../e2e-setup.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 
 type SocketHarness = {
 	messages: WsMsg[];

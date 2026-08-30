@@ -7,8 +7,8 @@
  *  - A repo with no reachable remote leaves base_ref blank (no failure).
  *  - GET /api/projects/:id/base-ref/detect returns { resolved, detected }.
  */
-import { test, expect } from "./in-process-harness.js";
-import { readE2EToken, base, registerProject as registerProjectShared } from "./e2e-setup.js";
+import { test, expect } from "../in-process-harness.js";
+import { readE2EToken, base, registerProject as registerProjectShared } from "../e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

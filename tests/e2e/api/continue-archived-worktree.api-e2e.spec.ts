@@ -29,9 +29,9 @@
  * file should live under the **worktree** slug, not the project-root slug.
  */
 
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, connectWs, agentEndPredicate } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, connectWs, agentEndPredicate } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import { mkdirSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";

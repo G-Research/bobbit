@@ -3,15 +3,15 @@
  * source must claim a ready project worktree-pool entry instead of bypassing
  * the pool and taking the cold createWorktree path.
  */
-import { test, expect } from "./in-process-harness.js";
-import { agentEndPredicate, apiFetch, connectWs, registerProject } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
-import { waitForPool } from "./test-utils/pool-polling.mjs";
+import { test, expect } from "../in-process-harness.js";
+import { agentEndPredicate, apiFetch, connectWs, registerProject } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
+import { waitForPool } from "../test-utils/pool-polling.mjs";
 import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 // This spec intentionally exercises the host-side worktree pool.
 test.use({ enableWorktreePool: true });

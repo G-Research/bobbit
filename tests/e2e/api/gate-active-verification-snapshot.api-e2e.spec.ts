@@ -1,5 +1,5 @@
-import { expect, test } from "./in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "./e2e-setup.js";
+import { expect, test } from "../in-process-harness.js";
+import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../e2e-setup.js";
 
 const GATE_ID = "active-snapshot-gate";
 const LIVE_OUTPUT_CMD = `node -e "for (let i=1;i<=60;i++) console.log('active-live-line-'+i); setTimeout(()=>process.exit(0),30000)"`;

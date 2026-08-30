@@ -32,15 +32,15 @@
  * `gateway.sessionManager`, so the resolver + per-session allow-list are read
  * deterministically in-process rather than through expensive real agents.
  */
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, createSession, defaultProjectStateDir, deleteSession, deleteGoal, nonGitCwd } from "./e2e-setup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, createSession, defaultProjectStateDir, deleteSession, deleteGoal, nonGitCwd } from "../e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const FIXTURE_PACK_DIR = path.resolve(__dirname, "..", "fixtures", "packs", "goal-provisioned-demo");
 const PACK_NAME = "goal-provisioned-demo";
 const MARKER_FILE = ".goal-provisioned-marker.json";

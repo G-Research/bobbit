@@ -2,14 +2,14 @@
  * Regression: Continue-Archived from a worktree-backed source must not depend
  * on the archived source worktree path or source branch still existing.
  */
-import { test, expect } from "./in-process-harness.js";
-import { apiFetch, connectWs, agentEndPredicate, registerProject } from "./e2e-setup.js";
-import { pollUntil } from "./test-utils/cleanup.js";
+import { test, expect } from "../in-process-harness.js";
+import { apiFetch, connectWs, agentEndPredicate, registerProject } from "../e2e-setup.js";
+import { pollUntil } from "../test-utils/cleanup.js";
 import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 test.use({ enableWorktreePool: false });
 

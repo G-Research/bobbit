@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 // no useful same-run speedup; on Windows/Node 24 it intermittently returned
 // stale module metadata as false "does not provide an export" startup errors.
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..");
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
@@ -110,12 +110,12 @@ async function startSeededGateway(opts: SeedOpts): Promise<StartedGateway> {
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const { setProjectRoot, resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
-	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-	const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+	const { setProjectRoot, resetAgentDirStateForTests } = await import("../../../dist/server/bobbit-dir.js");
+	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
+	const { createGateway } = await import("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 	registerRpcBridgeFactory((opts: any) => {
 		if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
 		return null;

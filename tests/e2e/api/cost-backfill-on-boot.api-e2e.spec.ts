@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 	try { module.enableCompileCache?.(workerCacheDir); } catch { /* Node < 22.8 */ }
 }
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const __dirname = fileURLToPath(new URL("..", import.meta.url));
 const MOCK_AGENT = resolve(__dirname, "mock-agent.mjs");
 
 const E2E_TEMP_ROOT_RAW = process.env.BOBBIT_E2E_TMP_ROOT
@@ -127,14 +127,14 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 
 	mkdirSync(join(bobbitDir, "state", "session-prompts"), { recursive: true });
 
-	const bobbitDirMod = await import("../../dist/server/bobbit-dir.js");
+	const bobbitDirMod = await import("../../../dist/server/bobbit-dir.js");
 	const { setProjectRoot } = bobbitDirMod;
 	const prevProjectRoot = bobbitDirMod.getProjectRoot?.();
-	const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
-	const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
-	const { createGateway } = await import("../../dist/server/server.js");
-	const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-	const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+	const { scaffoldBobbitDir } = await import("../../../dist/server/scaffold.js");
+	const { loadOrCreateToken } = await import("../../../dist/server/auth/token.js");
+	const { createGateway } = await import("../../../dist/server/server.js");
+	const { registerRpcBridgeFactory } = await import("../../../dist/server/agent/rpc-bridge.js");
+	const { InProcessMockBridge, shouldUseInProcessMock } = await import("../in-process-mock-bridge.mjs");
 	// registerRpcBridgeFactory is a singleton setter — the in-process-harness
 	// worker fixture installs its own factory at worker startup, so capture
 	// no "previous" reference (the module doesn't expose one) and instead
@@ -157,7 +157,7 @@ async function bootGateway(bobbitDir: string, opts: { freshDir: boolean }): Prom
 	// in the multi-repo & components follow-up.
 	if (opts.freshDir) {
 		try {
-			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("./seed-workflows.js");
+			const { testWorkflows, TEST_DEFAULT_COMPONENT } = await import("../seed-workflows.js");
 			const yaml = await import("yaml");
 			const yamlContent = yaml.stringify({
 				name: "default",
