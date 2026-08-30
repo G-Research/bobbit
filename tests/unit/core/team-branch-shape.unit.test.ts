@@ -26,7 +26,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { toBranchName } from "../../src/server/agent/goal-manager.js";
+import { toBranchName } from "../../../src/server/agent/goal-manager.js";
 
 const TEAM_BRANCH_RE = /^goal\/[0-9a-f]{8}\/[a-z][a-z0-9-]*-[0-9a-f]{4}$/;
 

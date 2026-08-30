@@ -17,7 +17,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT } from "../../src/server/agent/rpc-bridge.ts";
+import { synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT } from "../../../src/server/agent/rpc-bridge.ts";
 
 const IMG = { type: "image", data: "AAAA", mimeType: "image/png" } as const;
 const ATTACH = { kind: "file", name: "doc.pdf" } as const;

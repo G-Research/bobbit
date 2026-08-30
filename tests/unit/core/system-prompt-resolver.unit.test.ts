@@ -8,9 +8,9 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { setProjectRoot, bobbitConfigDir } from "../../src/server/bobbit-dir.js";
-import { resolveSystemPromptPath } from "../../src/server/agent/system-prompt.js";
-import { withEnv } from "../harness/with-env.js";
+import { setProjectRoot, bobbitConfigDir } from "../../../src/server/bobbit-dir.js";
+import { resolveSystemPromptPath } from "../../../src/server/agent/system-prompt.js";
+import { withEnv } from "../../../tests2/harness/with-env.js";
 
 // BOBBIT_DIR / BOBBIT_PI_DIR must not short-circuit setProjectRoot, so every
 // env-reading call runs inside withEnv(CLEARED, ...) which restores on exit

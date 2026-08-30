@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { withEnv } from "../harness/with-env.js";
+import { withEnv } from "../../../tests2/harness/with-env.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "skills-budget-test-"));
 
@@ -30,7 +30,7 @@ let buildSkillsCatalogSection: (skills: any[], budget?: number) => string | unde
 
 beforeAll(async () => {
 	await withEnv({ BOBBIT_DIR: tmpRoot }, async () => {
-		const mod = await import("../../src/server/agent/system-prompt.ts");
+		const mod = await import("../../../src/server/agent/system-prompt.ts");
 		({
 			SKILLS_CATALOG_BUDGET,
 			SKILLS_CATALOG_BUDGET_MIN,

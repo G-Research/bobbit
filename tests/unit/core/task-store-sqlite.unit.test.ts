@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TaskStore, type PersistedTask } from "../../src/server/agent/task-store.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { TaskStore, type PersistedTask } from "../../../src/server/agent/task-store.js";
+import { createMemFs } from "../../../tests2/harness/mem-fs.js";
 
 const roots: string[] = [];
 const stores: TaskStore[] = [];

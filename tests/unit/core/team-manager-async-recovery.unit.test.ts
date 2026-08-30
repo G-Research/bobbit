@@ -3,12 +3,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, vi } from "vitest";
-import { trustedAgentSessionsRoots } from "../../src/server/agent/agent-session-path.ts";
-import { sidecarPathFor, type SessionSidecar } from "../../src/server/agent/session-sidecar.ts";
-import { TeamManager, type TeamRecoverySidecars } from "../../src/server/agent/team-manager.ts";
-import type { TeamRecoveryCheckpointStore } from "../../src/server/agent/team-recovery-checkpoint.ts";
-import { slugDirNameForCwd } from "../../src/server/agent/team-store-consistency.ts";
-import { TeamRecoveryFsFake, microtaskTurns, sessionHeader } from "./team-recovery-test-fake.ts";
+import { trustedAgentSessionsRoots } from "../../../src/server/agent/agent-session-path.ts";
+import { sidecarPathFor, type SessionSidecar } from "../../../src/server/agent/session-sidecar.ts";
+import { TeamManager, type TeamRecoverySidecars } from "../../../src/server/agent/team-manager.ts";
+import type { TeamRecoveryCheckpointStore } from "../../../src/server/agent/team-recovery-checkpoint.ts";
+import { slugDirNameForCwd } from "../../../src/server/agent/team-store-consistency.ts";
+import { TeamRecoveryFsFake, microtaskTurns, sessionHeader } from "../../../tests2/core/team-recovery-test-fake.ts";
 
 interface MemoryTeamEntry {
 	goalId: string;

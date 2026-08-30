@@ -7,7 +7,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assembleSystemPrompt, getPromptSections, initPromptDirs, type PromptParts } from "../../src/server/agent/system-prompt.js";
+import { assembleSystemPrompt, getPromptSections, initPromptDirs, type PromptParts } from "../../../src/server/agent/system-prompt.js";
 
 describe("system prompt working directory section", () => {
 	let tmpDir: string;
