@@ -10,7 +10,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { waitForHealth } from "../e2e-setup.js";
-import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "./ui-helpers.js";
+import { openApp, createSessionViaUI, sendMessage, waitForAgentResponse } from "../ui/ui-helpers.js";
 
 test.describe("Prompt stats E2E", () => {
 	test.describe.configure({ mode: "parallel" });

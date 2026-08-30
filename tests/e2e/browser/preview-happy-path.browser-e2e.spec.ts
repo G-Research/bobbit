@@ -5,8 +5,8 @@
  * Cheaper fixture/API coverage owns fullscreen controls, reopen semantics,
  * archived snapshots, and content-origin details.
  */
-import { test, expect } from "./fixtures.js";
-import { openApp, createSessionViaUI } from "./ui-helpers.js";
+import { test, expect } from "../ui/fixtures.js";
+import { openApp, createSessionViaUI } from "../ui/ui-helpers.js";
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 

@@ -10,7 +10,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
-import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../ui/ui-helpers.js";
 
 /** Helper: open goal assistant, send GOAL_PROPOSAL, wait for proposal panel.
  *

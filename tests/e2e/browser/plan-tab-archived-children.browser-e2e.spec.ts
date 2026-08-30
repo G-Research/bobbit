@@ -19,7 +19,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch, createGoal, defaultProjectId, seedTeamLeadHeader } from "../e2e-setup.js";
-import { openApp, navigateToHash } from "./ui-helpers.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 
 test.describe("Plan tab — archived children", () => {
 	let parentId = "";

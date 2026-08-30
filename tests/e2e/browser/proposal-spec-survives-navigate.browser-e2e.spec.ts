@@ -33,7 +33,7 @@
  */
 import { test, expect } from "../gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "./ui-helpers.js";
+import { openApp, sendMessage, navigateToHash, createGoalAssistantViaUI } from "../ui/ui-helpers.js";
 import { createSession, waitForHealth } from "../e2e-setup.js";
 
 /** Open a goal-assistant session and drive a propose_goal. */
