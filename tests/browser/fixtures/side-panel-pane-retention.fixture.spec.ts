@@ -2,9 +2,9 @@
  * Side-panel pane retention — REAL-BROWSER tier, DESKTOP
  * (design docs/design/keep-side-panels-mounted.md §9 criterion 14 and §9 criteria
  * 7 and 9). The mobile round-trip of §9 criteria 10–13 lives in the sibling spec
- * `side-panel-pane-retention-mobile.spec.ts`; the two files were split because
+ * `side-panel-pane-retention-mobile.fixture.spec.ts`; the two files were split because
  * `tests2/browser` is budget-gated at 60s per spec file and the combined file sat on
- * the cap. Both share the rig in `./side-panel-pane-retention-helpers.js`, which
+ * the cap. Both share the rig in `tests2/browser/fixtures/side-panel-pane-retention-helpers.ts`, which
  * documents why this tier exists at all (the DOM tier cannot load an iframe, focus
  * anything, or measure a box).
  *
@@ -48,7 +48,7 @@ import {
 	sessionIds,
 	settleRender,
 	stampFrameProbe,
-} from "./side-panel-pane-retention-helpers.js";
+} from "../../../tests2/browser/fixtures/side-panel-pane-retention-helpers.js";
 
 registerRetentionBundleBuild();
 
