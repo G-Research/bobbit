@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { SessionStore } from "../../src/server/agent/session-store.ts";
+import { SessionStore } from "../../../src/server/agent/session-store.ts";
 
 describe("pool-claim branch stability across SessionStore reload", () => {
 	it("session row with branch=session/<id8> reloads unchanged", async () => {

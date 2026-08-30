@@ -21,7 +21,7 @@ import {
 	checkPlanRequestSize,
 	checkSpecSize,
 	checkInlineJsonSize,
-} from "../../src/server/agent/nested-goal-routes.ts";
+} from "../../../src/server/agent/nested-goal-routes.ts";
 
 function step(planId: string, spec = "spec"): Record<string, unknown> {
 	return { planId, title: `t-${planId}`, phase: 1, spec, subgoal: { planId, title: `t-${planId}`, spec } };

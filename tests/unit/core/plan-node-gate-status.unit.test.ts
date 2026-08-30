@@ -23,8 +23,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildPlanSteps, type SynthesisGoal } from "../../src/app/plan-synthesis.ts";
-import { resolvePlanNodeChild, type PlanNodeChild } from "../../src/app/plan-node-state.ts";
+import { buildPlanSteps, type SynthesisGoal } from "../../../src/app/plan-synthesis.ts";
+import { resolvePlanNodeChild, type PlanNodeChild } from "../../../src/app/plan-node-state.ts";
 
 function child(over: Partial<SynthesisGoal> & { id: string; title: string }): SynthesisGoal {
 	return {

@@ -2,7 +2,7 @@
 // Source: tests/plan-archived-children.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -27,9 +27,9 @@ guardProcessEnv();
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { computePlanStepsForGoal } from "../../src/app/goal-plan-steps.js";
-import { collectDescendants } from "../../src/server/agent/goal-descendants.js";
-import type { Goal } from "../../src/app/state.js";
+import { computePlanStepsForGoal } from "../../../src/app/goal-plan-steps.js";
+import { collectDescendants } from "../../../src/server/agent/goal-descendants.js";
+import type { Goal } from "../../../src/app/state.js";
 
 function goal(over: Partial<Goal> & { id: string; title: string }): Goal {
 	return {

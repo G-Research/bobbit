@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "./helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +16,7 @@ import {
 	setPlayFinishSoundEnabled,
 	setProjectPlayFinishSoundOverride,
 	type ProjectPlayFinishSoundOverride,
-} from "../../src/app/play-finish-sound.ts";
+} from "../../../src/app/play-finish-sound.ts";
 
 interface CapturedEvent { type: string; detail: unknown }
 interface CapturedFetch { url: string; path: string; init: RequestInit; body: any }
