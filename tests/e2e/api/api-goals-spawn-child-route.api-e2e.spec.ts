@@ -26,21 +26,23 @@
  * Mirrors the in-process harness import pattern from
  * `tests/e2e/gates-api.spec.ts`.
  */
-import { realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test, expect } from "../in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
-	defaultProjectId,
-	gitCwd,
 	rawApiFetch,
 	readE2EToken,
 	registerProject,
 	seedTeamLeadHeader,
 } from "../e2e-setup.js";
-import { pollUntil } from "../test-utils/cleanup.js";
+import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
 
 let token: string;
+let fixtureRoot: string;
 let gitProjectId: string;
 let gitProjectRoot: string;
 // The in-process gateway (worker-scoped) — captured in beforeAll so the
@@ -50,13 +52,18 @@ let gw: any;
 test.beforeAll(async ({ gateway }) => {
 	token = readE2EToken();
 	gw = gateway;
-	const nativeRoot = realpathSync.native(gitCwd());
-	// The fixture repo is nested below the ambient project. Retire that record so
-	// preflight can register the Git root itself as this suite's authority.
-	const ambientProjectId = await defaultProjectId();
-	expect(ambientProjectId).toBeTruthy();
-	const ambientDelete = await apiFetch(`/api/projects/${encodeURIComponent(ambientProjectId!)}`, { method: "DELETE" });
-	expect(ambientDelete.status, await ambientDelete.text()).toBe(200);
+	fixtureRoot = mkdtempSync(join(tmpdir(), "bobbit-spawn-child-route-"));
+	const repoRoot = join(fixtureRoot, "repo");
+	mkdirSync(repoRoot);
+	writeFileSync(join(repoRoot, "README.md"), "# Spawn-child route E2E fixture\n");
+	for (const args of [
+		["init", "--quiet"],
+		["config", "user.name", "Bobbit E2E"],
+		["config", "user.email", "bobbit-e2e@example.test"],
+		["add", "."],
+		["commit", "--quiet", "-m", "init"],
+	]) execFileSync("git", args, { cwd: repoRoot, stdio: "pipe" });
+	const nativeRoot = realpathSync.native(repoRoot);
 	const project = await registerProject({
 		name: `spawn-child-route-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 		rootPath: nativeRoot,
@@ -68,9 +75,14 @@ test.beforeAll(async ({ gateway }) => {
 });
 
 test.afterAll(async () => {
-	if (!gitProjectId) return;
-	const response = await apiFetch(`/api/projects/${encodeURIComponent(gitProjectId)}`, { method: "DELETE" });
-	expect(response.status, await response.text()).toBe(200);
+	if (gitProjectId) {
+		const response = await apiFetch(`/api/projects/${encodeURIComponent(gitProjectId)}`, { method: "DELETE" });
+		expect(response.status, await response.text()).toBe(200);
+	}
+	if (fixtureRoot) {
+		const cleanup = await awaitableRm(fixtureRoot);
+		expect(cleanup.removed, String(cleanup.lastError ?? "fixture cleanup failed")).toBe(true);
+	}
 });
 
 /**
@@ -842,7 +854,15 @@ test.describe("POST /api/goals/:id/spawn-child — S1 capability-secret forgery 
 			expect(body.id).toBeTruthy();
 			childId = body.id;
 		} finally {
-			if (childId) await deleteGoal(childId);
+			if (childId) {
+				await pollUntil(async () => {
+					const response = await apiFetch(`/api/goals/${childId}`);
+					if (response.status !== 200) return null;
+					const child = await response.json();
+					return child.setupStatus === "ready" || child.setupStatus === "error" ? child : null;
+				}, { timeoutMs: 30_000, intervalMs: 100, label: `child ${childId} setup cleanup` });
+				await deleteGoal(childId);
+			}
 			await deleteGoal(parent.id);
 		}
 	});
