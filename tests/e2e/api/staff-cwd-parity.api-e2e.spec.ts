@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { test, expect } from "../in-process-harness.js";
 import { apiFetch, rawApiFetch, registerProject, deleteSession } from "../e2e-setup.js";
 import { pollSessionUntil } from "../test-utils/pool-polling.mjs";
@@ -16,7 +16,15 @@ type StaffCreateResult = {
 };
 
 function canonical(path: string): string {
-	try { return realpathSync(path); } catch { return path; }
+	const full = resolve(path);
+	let prefix = full;
+	for (;;) {
+		try { return resolve(realpathSync.native(prefix), relative(prefix, full)); } catch {
+			const parent = dirname(prefix);
+			if (parent === prefix) return full;
+			prefix = parent;
+		}
+	}
 }
 
 function normalisePath(path: string): string {
@@ -28,9 +36,8 @@ function normalisePath(path: string): string {
 
 function isSameOrUnder(child: string | undefined, parent: string | undefined): boolean {
 	if (!child || !parent) return false;
-	const c = normalisePath(child);
-	const p = normalisePath(parent);
-	return c === p || c.startsWith(`${p}/`);
+	const offset = relative(normalisePath(parent), normalisePath(child));
+	return offset === "" || (!isAbsolute(offset) && offset !== ".." && !offset.startsWith(`..${sep}`));
 }
 
 function makeTempRoot(label: string): string {

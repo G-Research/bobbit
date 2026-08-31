@@ -12,6 +12,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createRunChild } from "../../../tests2/harness/run-isolation.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, "..", "..", "..");
@@ -34,7 +35,7 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		// The seed script expects a normal project workDir. The gateway is started
 		// with BOBBIT_DIR = <workDir>/.bobbit/headquarters so ProjectRegistry reads
 		// the seeded server registry while project stores load from <workDir>/.bobbit/state.
-		const workDir = join(PROJECT_ROOT, `.e2e-inproc-seed-${workerInfo.workerIndex}`);
+		const workDir = createRunChild(`e2e-inproc-seed-${workerInfo.workerIndex}`);
 		const headquartersDir = join(workDir, ".bobbit", "headquarters");
 
 		// Clean slate
@@ -58,6 +59,7 @@ const test = base.extend<{}, { seededGateway: SeededGateway }>({
 		process.env.NODE_ENV = "test";
 		process.env.BOBBIT_SKIP_MCP = "1";
 		process.env.BOBBIT_SKIP_NPM_CI = "1";
+		process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 		process.env.BOBBIT_TEST_NO_PUSH = "1";
 		process.env.BOBBIT_TEST_NO_REMOTE = "1";
 		process.env.BOBBIT_TEST_NO_EXTERNAL = "1";
