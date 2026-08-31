@@ -24,7 +24,7 @@ function makeGitRepo(): string {
 	execFileSync("git", ["checkout", "-B", "master"], { cwd: repo, stdio: "pipe" });
 	execFileSync("git", ["add", "README.md"], { cwd: repo, stdio: "pipe" });
 	execFileSync("git", ["-c", "user.name=Bobbit E2E", "-c", "user.email=e2e@example.test", "commit", "-m", "init"], { cwd: repo, stdio: "pipe" });
-	return realpathSync(repo);
+	return realpathSync.native(repo);
 }
 
 type SettledGoalRecord = {
