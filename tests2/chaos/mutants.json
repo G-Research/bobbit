@@ -58,7 +58,7 @@
     "search": "\t\tthis._enqueue(rootGoalId, childGoalId);\n\t\treturn \"capacity-blocked\";",
     "replace": "\t\tthis._enqueue(rootGoalId, childGoalId);\n\t\treturn \"started\"; // mutant: wrong return value",
     "expectedLegacyCatchers": ["tests/child-team-scheduler.test.ts"],
-    "expectedV2Catchers": ["tests2/core/child-team-scheduler.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/child-team-scheduler.unit.test.ts"]
   },
   {
     "id": "M06-team-idle-nudge-zero",
@@ -138,7 +138,7 @@
     "search": "\t\t\tif (name === \"gh\") throw new Error(\"[fenced-command-runner] blocked gh invocation\");\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") {\n\t\t\t\tif (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);\n\t\t\t\tawait assertGitRemoteAllowed(realCommandRunner, args, options);\n\t\t\t}\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
     "replace": "\t\t\t// if (name === \"gh\") ... // mutant: gh check removed\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") {\n\t\t\t\tif (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);\n\t\t\t\tawait assertGitRemoteAllowed(realCommandRunner, args, options);\n\t\t\t}\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/core/command-runner-fence.test.ts"],
+    "expectedV2Catchers": ["tests/unit/core/command-runner-fence.unit.test.ts"],
     "note": "No legacy catcher — fence is a new v2 seam (demonstrates v2 NEW coverage)"
   },
   {
@@ -149,7 +149,7 @@
     "search": "const NETWORK_GIT_COMMANDS = new Set([\"push\", \"fetch\", \"clone\", \"ls-remote\"]);",
     "replace": "const NETWORK_GIT_COMMANDS = new Set<string>([]); // mutant: allow all git network ops",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/core/command-runner-fence.test.ts"],
+    "expectedV2Catchers": ["tests/unit/core/command-runner-fence.unit.test.ts"],
     "note": "No legacy catcher — fence is a new v2 seam (demonstrates v2 NEW coverage)"
   },
   {
@@ -160,7 +160,7 @@
     "search": "\t\t\t.filter(w => !w.hidden)",
     "replace": "\t\t\t.filter(w => !!w.hidden) // mutant: inverted hidden filter",
     "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
-    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/config-cascade.unit.test.ts"]
   },
   {
     "id": "M16-cascade-hq-normalization-broken",
@@ -170,7 +170,7 @@
     "search": "\treturn projectId === HEADQUARTERS_PROJECT_ID ? undefined : projectId;",
     "replace": "\treturn projectId; // mutant: never normalize HQ to server scope",
     "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
-    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/config-cascade.unit.test.ts"]
   },
   {
     "id": "M17-reducer-wrong-sort",
@@ -180,7 +180,7 @@
     "search": "\t\tif (a._order !== b._order) return a._order - b._order;",
     "replace": "\t\tif (a._order !== b._order) return b._order - a._order; // mutant: reversed",
     "expectedLegacyCatchers": ["tests/message-reducer.test.ts"],
-    "expectedV2Catchers": ["tests2/core/message-reducer.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/message-reducer.unit.test.ts"]
   },
   {
     "id": "M18-reducer-settle-inverted",
@@ -190,7 +190,7 @@
     "search": "\t\t\t\tif (m._origin === \"optimistic\" && m._order > OPTIMISTIC_ORDER_BASE) {",
     "replace": "\t\t\t\tif (m._origin === \"optimistic\" && m._order < OPTIMISTIC_ORDER_BASE) { // mutant: inverted",
     "expectedLegacyCatchers": ["tests/message-reducer.test.ts"],
-    "expectedV2Catchers": ["tests2/core/message-reducer.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/message-reducer.unit.test.ts"]
   },
   {
     "id": "M19-sidebar-inverted-filter",
@@ -271,7 +271,7 @@
     "search": "\t\treturn this.ensureLoaded(staffId).filter((e) => e.state === \"pending\");",
     "replace": "\t\treturn this.ensureLoaded(staffId).filter((e) => e.state !== \"pending\"); // mutant: inverted pending filter",
     "expectedLegacyCatchers": ["tests/inbox-store.test.ts"],
-    "expectedV2Catchers": ["tests2/core/inbox-store.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/inbox-store.unit.test.ts"]
   },
   {
     "id": "M27-semaphore-acquire-offbyone",
@@ -301,7 +301,7 @@
     "search": "\t\tif (step.name === \"Master merged into branch\") {",
     "replace": "\t\tif (step.name !== \"Master merged into branch\") { // mutant: inverted step guard",
     "expectedLegacyCatchers": ["tests/child-ready-to-merge-helper.test.ts"],
-    "expectedV2Catchers": ["tests2/core/child-ready-to-merge-helper.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/child-ready-to-merge-helper.unit.test.ts"]
   },
   {
     "id": "M30-eventbuffer-overflow-offbyone",
@@ -311,7 +311,7 @@
     "search": "\t\tif (this.buffer.length > this.maxSize) {",
     "replace": "\t\tif (this.buffer.length >= this.maxSize) { // mutant: off-by-one eviction",
     "expectedLegacyCatchers": ["tests/event-buffer.test.ts"],
-    "expectedV2Catchers": ["tests2/core/event-buffer.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/event-buffer.unit.test.ts"]
   },
   {
     "id": "M31-eventbuffer-canresume-offbyone",
@@ -321,7 +321,7 @@
     "search": "\t\treturn this.buffer[0].seq <= fromSeq + 1;",
     "replace": "\t\treturn this.buffer[0].seq <= fromSeq; // mutant: off-by-one resume window",
     "expectedLegacyCatchers": ["tests/event-buffer.test.ts"],
-    "expectedV2Catchers": ["tests2/core/event-buffer.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/event-buffer.unit.test.ts"]
   },
   {
     "id": "M32-backoff-exponent-offbyone",
@@ -331,7 +331,7 @@
     "search": "\tconst exponent = Math.min(safeAttempt - 1, 60);",
     "replace": "\tconst exponent = Math.min(safeAttempt, 60); // mutant: off-by-one backoff exponent",
     "expectedLegacyCatchers": ["tests/backoff-delay.test.ts"],
-    "expectedV2Catchers": ["tests2/core/backoff-delay.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/backoff-delay.unit.test.ts"]
   },
   {
     "id": "M33-shortstat-insertions-deletions-swapped",
@@ -341,7 +341,7 @@
     "search": "\t\tinsertions: ins ? parseInt(ins[1], 10) || 0 : 0,\n\t\tdeletions: del ? parseInt(del[1], 10) || 0 : 0,",
     "replace": "\t\tinsertions: del ? parseInt(del[1], 10) || 0 : 0, // mutant: swapped ins/del\n\t\tdeletions: ins ? parseInt(ins[1], 10) || 0 : 0,",
     "expectedLegacyCatchers": ["tests/git-shortstat-parser.test.ts"],
-    "expectedV2Catchers": ["tests2/core/git-shortstat-parser.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/git-shortstat-parser.unit.test.ts"]
   },
   {
     "id": "M34-baseref-remote-prefix-inverted",
@@ -351,7 +351,7 @@
     "search": "\tif (trimmed.startsWith(\"origin/\")) {",
     "replace": "\tif (!trimmed.startsWith(\"origin/\")) { // mutant: negated remote-prefix guard",
     "expectedLegacyCatchers": ["tests/base-ref-parse.test.ts"],
-    "expectedV2Catchers": ["tests2/core/base-ref-parse.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/base-ref-parse.unit.test.ts"]
   },
   {
     "id": "M35-baseref-removed-await",
@@ -361,7 +361,7 @@
     "search": "\t\tconst out = await exec([\"symbolic-ref\", \"refs/remotes/origin/HEAD\"]);",
     "replace": "\t\tconst out = exec([\"symbolic-ref\", \"refs/remotes/origin/HEAD\"]); // mutant: removed await",
     "expectedLegacyCatchers": ["tests/base-ref-parse.test.ts"],
-    "expectedV2Catchers": ["tests2/core/base-ref-parse.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/base-ref-parse.unit.test.ts"]
   },
   {
     "id": "M36-getsortedphases-reversed",
@@ -401,7 +401,7 @@
     "search": "\t\tcase \"server\": return \"server\";",
     "replace": "\t\tcase \"server\": return \"builtin\"; // mutant: wrong origin tag",
     "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
-    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/config-cascade.unit.test.ts"]
   },
   {
     "id": "M40-cascade-workflow-guard-inverted",
@@ -411,7 +411,7 @@
     "search": "\t\tif (!projectId) return [];",
     "replace": "\t\tif (projectId) return []; // mutant: negated workflow guard",
     "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
-    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/config-cascade.unit.test.ts"]
   },
   {
     "id": "M41-cascade-role-find-inverted",
@@ -421,7 +421,7 @@
     "search": "\t\tconst r = roles.find(x => x.name === roleName);",
     "replace": "\t\tconst r = roles.find(x => x.name !== roleName); // mutant: inverted role lookup",
     "expectedLegacyCatchers": ["tests/config-cascade.test.ts"],
-    "expectedV2Catchers": ["tests2/core/config-cascade.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/config-cascade.unit.test.ts"]
   },
   {
     "id": "M42-reducer-synth-seq-offbyone",
@@ -431,7 +431,7 @@
     "search": "\t\t\t\tincoming = { ...incoming, id: `synth:seq:${seq}` };",
     "replace": "\t\t\t\tincoming = { ...incoming, id: `synth:seq:${seq + 1}` }; // mutant: off-by-one synth id",
     "expectedLegacyCatchers": ["tests/message-reducer-dedup.test.ts"],
-    "expectedV2Catchers": ["tests2/core/message-reducer-dedup.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/message-reducer-dedup.unit.test.ts"]
   },
   {
     "id": "M43-reducer-replace-by-id-inverted",
@@ -441,7 +441,7 @@
     "search": "\t\t\t\tconst idx = messages.findIndex((m) => m.id === incoming.id);",
     "replace": "\t\t\t\tconst idx = messages.findIndex((m) => m.id !== incoming.id); // mutant: inverted replace-by-id",
     "expectedLegacyCatchers": ["tests/message-reducer-dedup.test.ts"],
-    "expectedV2Catchers": ["tests2/core/message-reducer-dedup.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/message-reducer-dedup.unit.test.ts"]
   },
   {
     "id": "M44-reducer-s17-alternative-dropped",
@@ -451,7 +451,7 @@
     "search": "\t\t\t\t\t\t\t(extractText(m) === text || reconstructModelText(m) === text),",
     "replace": "\t\t\t\t\t\t\t(extractText(m) === text && reconstructModelText(m) === text), // mutant: dropped OR alternative",
     "expectedLegacyCatchers": ["tests/message-reducer-dedup.test.ts"],
-    "expectedV2Catchers": ["tests2/core/message-reducer-dedup.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/message-reducer-dedup.unit.test.ts"]
   },
   {
     "id": "M45-sidebar-base-indent-wrong-default",
@@ -545,7 +545,7 @@
     "search": "if (!isLoopbackHost(url.hostname)) {",
     "replace": "if (isLoopbackHost(url.hostname)) { // mutant: inverted loopback fence",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/core/fetch-fence.test.ts"],
+    "expectedV2Catchers": ["tests/unit/core/fetch-fence.unit.test.ts"],
     "note": "No legacy catcher — the fetch fence is a new v2 DI seam (demonstrates v2 NEW coverage). Pins fence-per-seam: at least one mutant disables each fence (command-runner: M13/M14; fetch: M53)."
   }
 ]

@@ -20,7 +20,7 @@ import { join, relative } from "node:path";
 import { spawnSync, execSync } from "node:child_process";
 import { discoverTests, REPO_ROOT } from "./test-discovery.mjs";
 
-const GUARD_PATH = "tests2/core/guard-v2.test.ts";
+const GUARD_PATH = "tests/unit/core/guard-v2.unit.test.ts";
 
 const toPosix = (p) => p.replace(/\\/g, "/");
 
@@ -45,7 +45,7 @@ function runCoreChecks(discovery) {
 		violations.push(`GUARD MISSING: ${GUARD_PATH} does not exist.`);
 	}
 	if (!discovery.core.includes(GUARD_PATH)) {
-		violations.push(`GUARD NOT DISCOVERED: ${GUARD_PATH} must follow the tests2/core/**/*.test.ts convention.`);
+		violations.push(`GUARD NOT DISCOVERED: ${GUARD_PATH} must follow the unit-core placement convention.`);
 	}
 	const duplicates = discovery.all.filter((file, index) => discovery.all.indexOf(file) !== index);
 	for (const file of [...new Set(duplicates)].sort()) {
