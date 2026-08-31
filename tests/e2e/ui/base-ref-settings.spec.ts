@@ -95,6 +95,7 @@ async function deleteProjects(projectIds: string[]): Promise<void> {
 test.describe("Settings → Base Ref field", () => {
 	test("first valid edit exposes Save and persists across reload", async ({ page }) => {
 		const projectIds: string[] = [];
+		let cleanupHeldDetect: (() => Promise<void>) | undefined;
 		try {
 			const dir = uniqueProjectDir("happy");
 			await gitInit(dir, { remoteRefs: ["develop"] });
@@ -107,13 +108,60 @@ test.describe("Settings → Base Ref field", () => {
 			expect(initial.ok, `initial base_ref setup failed: ${initial.status}`).toBe(true);
 
 			await openApp(page);
+
+			// The first General render starts from an empty config cache and requests
+			// detection before the stored base_ref arrives. Keep that last possible
+			// incidental render pending while the input event is exercised.
+			let releaseDetect!: () => void;
+			const detectGate = new Promise<void>((resolve) => { releaseDetect = resolve; });
+			let detectHandled = false;
+			let detectReleased = false;
+			let resolveDetectFinished!: () => void;
+			const detectFinished = new Promise<void>((resolve) => { resolveDetectFinished = resolve; });
+			const matchHeldDetect = (url: URL) =>
+				url.pathname === `/api/projects/${project.id}/base-ref/detect`;
+			const heldDetectRoute = async (
+				route: import("@playwright/test").Route,
+				request: import("@playwright/test").Request,
+			) => {
+				if (request.method() !== "GET" || detectHandled) {
+					await route.fallback();
+					return;
+				}
+				detectHandled = true;
+				try {
+					await detectGate;
+					await route.fulfill({
+						status: 200,
+						contentType: "application/json",
+						body: JSON.stringify({ resolved: "master", detected: null }),
+					});
+				} finally {
+					resolveDetectFinished();
+				}
+			};
+			await page.route(matchHeldDetect, heldDetectRoute);
+			cleanupHeldDetect = async () => {
+				if (!detectReleased) {
+					detectReleased = true;
+					releaseDetect();
+				}
+				if (detectHandled) await detectFinished;
+				await page.unroute(matchHeldDetect, heldDetectRoute);
+			};
+
 			const input = await openBaseRefSettings(page, project);
 			await expect(input).toHaveValue("master");
-			await page.waitForLoadState("networkidle");
+			await expect.poll(() => detectHandled, { timeout: 10_000 }).toBe(true);
 
-			// Settle every initial settings request before editing, then prove the
-			// input event itself exposes Save rather than borrowing a later async
-			// config/detection render. This assertion reproduces the original bug.
+			// Settle the other General-tab bootstrap renders. The detect response is
+			// deliberately still held, so old code cannot borrow its later render.
+			const poolStatusRow = page.getByText("Pool Status", { exact: true }).locator("..");
+			await expect(poolStatusRow).not.toContainText("Loading...");
+			const dockerStatusRow = page.getByText("Docker Status", { exact: true }).locator("..");
+			await expect(dockerStatusRow).not.toContainText("Checking...");
+			await expect(page.getByText("Detecting...", { exact: true })).toHaveCount(0);
+
 			const saveButton = page.locator("button").filter({ hasText: /^Save$/ }).first();
 			await expect(saveButton).toHaveCount(0);
 			await input.fill("origin/develop");
@@ -124,6 +172,11 @@ test.describe("Settings → Base Ref field", () => {
 				await saveButton.isVisible(),
 				"BASE_REF_SAVE_CAUSAL_RENDER: first valid edit must expose Save on its own render",
 			).toBe(true);
+
+			// Release the held request only after the causal assertion, and remove the
+			// route before Save/reload so it cannot leak into persistence coverage.
+			await cleanupHeldDetect();
+			cleanupHeldDetect = undefined;
 
 			const payload = await saveBaseRef(page, project.id, 200);
 			expect(payload).toEqual({ base_ref: "origin/develop" });
@@ -136,6 +189,7 @@ test.describe("Settings → Base Ref field", () => {
 			const inputAfter = await openBaseRefSettings(page, project);
 			await expect(inputAfter).toHaveValue("origin/develop");
 		} finally {
+			if (cleanupHeldDetect) await cleanupHeldDetect();
 			await deleteProjects(projectIds);
 		}
 	});
