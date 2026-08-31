@@ -376,9 +376,14 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 	const goals: string[] = [];
 
 	test.beforeAll(async () => {
-		fixtureRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "goal-meta-fs-")));
-		repoPath = path.join(fixtureRoot, "repo");
-		gitInit(repoPath);
+		fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "goal-meta-fs-"));
+		const requestedRepoPath = path.join(fixtureRoot, "repo");
+		gitInit(requestedRepoPath);
+		// On Windows os.tmpdir() can use an 8.3 alias while Git and project
+		// preflight publish the long path. Anchor the fixture to the existing
+		// repository's native identity before GoalManager derives cwd offsets.
+		repoPath = fs.realpathSync.native(requestedRepoPath);
+		fixtureRoot = path.dirname(repoPath);
 
 		// Install through the marketplace lifecycle so the resolver observes the
 		// pack deterministically; activation refreshes the registry after install.
@@ -390,7 +395,11 @@ test.describe.serial("goalProvisioned filesystem treatment across worktrees", ()
 			body: JSON.stringify({ name: `goal-meta-fs-${Date.now()}`, rootPath: repoPath }),
 		});
 		expect(reg.status).toBe(201);
-		projectId = (await reg.json()).id;
+		const registered = await reg.json();
+		expect(fs.realpathSync.native(registered.rootPath)).toBe(repoPath);
+		projectId = registered.id;
+		// All goal requests must use the registry's exact authoritative spelling.
+		repoPath = registered.rootPath;
 	});
 
 	test.afterAll(async () => {

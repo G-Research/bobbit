@@ -24,6 +24,7 @@ import { pollUntil as pollUntilCleanup } from "../test-utils/cleanup.js";
 
 const TIMEOUT_WORKFLOW = `test-verif-timeout-${Date.now()}`;
 const CANCEL_WORKFLOW = `test-verif-cancel-${Date.now()}`;
+let projectId: string;
 
 /**
  * Build a node-only inline payload that prints PARENT_PID and CHILD_PID
@@ -55,7 +56,6 @@ function nodeTreeRun(): string {
 }
 
 async function createWorkflow(id: string, timeout: number): Promise<void> {
-	const projectId = await defaultProjectId();
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
@@ -87,7 +87,7 @@ async function createWorkflow(id: string, timeout: number): Promise<void> {
 }
 
 async function deleteWorkflowSafe(id: string): Promise<void> {
-	await apiFetch(`/api/workflows/${id}`, { method: "DELETE" }).catch(() => {});
+	expect((await apiFetch(`/api/workflows/${id}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" })).ok).toBe(true);
 }
 
 async function getGateState(goalId: string, gateId: string): Promise<any> {
@@ -127,8 +127,9 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 	test.setTimeout(60_000);
 
 	test.beforeAll(async () => {
+		projectId = (await defaultProjectId()) ?? "";
+		expect(projectId).toBeTruthy();
 		await createWorkflow(TIMEOUT_WORKFLOW, 10);
-		await createWorkflow(CANCEL_WORKFLOW, 60);
 	});
 
 	test.afterAll(async () => {
@@ -138,6 +139,7 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 
 	test("step timeout transitions to failed with tree-kill marker and reaps descendants", async () => {
 		const goal = await createGoal({
+			projectId,
 			title: `Verif Timeout ${Date.now()}`,
 			workflowId: TIMEOUT_WORKFLOW,
 			worktree: false,
@@ -185,7 +187,9 @@ test.describe("Verification command-step tree-kill (E2E)", () => {
 	});
 
 	test("cancellation tree-kills the subprocess within ~3s", async () => {
+		await createWorkflow(CANCEL_WORKFLOW, 60);
 		const goal = await createGoal({
+			projectId,
 			title: `Verif Cancel ${Date.now()}`,
 			workflowId: CANCEL_WORKFLOW,
 			worktree: false,

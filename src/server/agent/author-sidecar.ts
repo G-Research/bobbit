@@ -772,15 +772,9 @@ function migrateLegacyAuthorSidecars(legacyStateDir: string): void {
 	}
 }
 
-/**
- * Initialize private v2 storage and migrate reachable v1 plaintext ledgers.
- * Migration failures throw so the gateway never continues with readable prompt
- * plaintext under a project root.
- */
-export function initAuthorSidecarDir(
-	legacyStateDir: string,
-	options: InitAuthorSidecarOptions = {},
-): void {
+function initializePrivateAuthorSidecar(
+	options: InitAuthorSidecarOptions,
+): NodeJS.Platform {
 	const secretsRoot = path.resolve(options.secretsDir ?? serverSecretsDir());
 	const keyMaterial = options.hmacKey ?? loadOrCreateCookieSigningKey(secretsRoot);
 	const nextDir = path.join(secretsRoot, "author-sidecar");
@@ -790,6 +784,38 @@ export function initAuthorSidecarDir(
 		ensurePrivateDirectory(nextDir);
 		sidecarDir = nextDir;
 		promptDigestKey = derivePromptDigestKey(keyMaterial);
+		return previousPlatform;
+	} catch (error) {
+		sidecarDir = undefined;
+		promptDigestKey = undefined;
+		sidecarPlatform = previousPlatform;
+		throw error;
+	}
+}
+
+/**
+ * Initialize only the server-private v2 reader state. This never accepts a
+ * project state path, so worker isolates cannot promote project-owned legacy
+ * plaintext into the trusted provenance ledger.
+ */
+export function initAuthorSidecarReader(
+	options: InitAuthorSidecarOptions = {},
+): void {
+	initializePrivateAuthorSidecar(options);
+}
+
+/**
+ * Initialize private v2 storage and migrate reachable v1 plaintext ledgers.
+ * This server-startup authority must receive only the server-owned state root.
+ * Migration failures throw so the gateway never continues with readable prompt
+ * plaintext under that root.
+ */
+export function initAuthorSidecarDir(
+	legacyStateDir: string,
+	options: InitAuthorSidecarOptions = {},
+): void {
+	const previousPlatform = initializePrivateAuthorSidecar(options);
+	try {
 		migrateLegacyAuthorSidecars(legacyStateDir);
 	} catch (error) {
 		sidecarDir = undefined;
