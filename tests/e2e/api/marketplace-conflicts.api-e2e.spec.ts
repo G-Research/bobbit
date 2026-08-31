@@ -194,44 +194,62 @@ test.describe("Marketplace — install + registry surfacing of conflicts / orpha
 	test("built-in pr-walkthrough: disabling entrypoints drops them + the route deep-link from /api/ext/contributions", async () => {
 		const PACK = "pr-walkthrough";
 
-		const before = (await listContributions()).find((p) => p.packId === PACK);
-		expect(before, "the built-in pr-walkthrough pack must resolve with NO install").toBeTruthy();
-		expect(
-			(before?.entrypoints ?? []).some((e) => e.kind === "route" && e.routeId === PACK),
-			"the kind:route deep-link must be present before disable",
-		).toBe(true);
-		expect((before?.entrypoints ?? []).some((e) => e.kind === "session-menu"), "the session-menu launcher must be present before disable").toBe(true);
-		const listNames = (before?.entrypoints ?? [])
-			.map((e) => e.listName)
-			.filter((name): name is string => typeof name === "string" && name.length > 0);
-		expect(listNames).not.toEqual(expect.arrayContaining(["pr-walkthrough-git-widget", "pr-walkthrough-palette"]));
+		try {
+			// pr-walkthrough ships default-OFF, so opt it in explicitly and start with
+			// every per-entity toggle enabled before exercising entrypoint filtering.
+			const enable = await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({ scope: "server", packName: PACK, disabled: { enabled: true, roles: [], tools: [], skills: [], entrypoints: [] } }),
+			});
+			expect(enable.status, "server-scope activation PUT must enable the built-in pack").toBe(200);
 
-		const put = await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK, disabled: { entrypoints: listNames } }),
-		});
-		expect(put.status, "server-scope activation PUT for the built-in pack must succeed").toBe(200);
+			const before = (await listContributions()).find((p) => p.packId === PACK);
+			expect(before, "the built-in pr-walkthrough pack must resolve with NO install").toBeTruthy();
+			expect(
+				(before?.entrypoints ?? []).some((e) => e.kind === "route" && e.routeId === PACK),
+				"the kind:route deep-link must be present before disable",
+			).toBe(true);
+			expect((before?.entrypoints ?? []).some((e) => e.kind === "session-menu"), "the session-menu launcher must be present before disable").toBe(true);
+			const listNames = (before?.entrypoints ?? [])
+				.map((e) => e.listName)
+				.filter((name): name is string => typeof name === "string" && name.length > 0);
+			expect(listNames).not.toEqual(expect.arrayContaining(["pr-walkthrough-git-widget", "pr-walkthrough-palette"]));
 
-		const after = (await listContributions()).find((p) => p.packId === PACK);
-		expect(after, "the built-in pack row must still emit (panels/routes survive)").toBeTruthy();
-		expect(after?.entrypoints ?? [], "all disabled entrypoints must be dropped").toHaveLength(0);
-		expect(
-			(after?.entrypoints ?? []).some((e) => e.kind === "route" && e.routeId === PACK),
-			"the kind:route deep-link must be dropped on disable",
-		).toBe(false);
-		// Pack-level routes are support for the surviving panel — they are NOT
-		// entrypoints, so they remain even when every entrypoint is disabled.
-		expect(after?.routeNames, "pack-level routes survive entrypoint disable").toEqual(
-			expect.arrayContaining(["bundle", "publish"]),
-		);
+			const put = await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({ scope: "server", packName: PACK, disabled: { enabled: true, entrypoints: listNames } }),
+			});
+			expect(put.status, "server-scope activation PUT for the built-in pack must succeed").toBe(200);
 
-		// Re-enable so the disabled server-scope activation never leaks to a sibling test.
-		await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT",
-			body: JSON.stringify({ scope: "server", packName: PACK, disabled: { entrypoints: [] } }),
-		});
-		const restored = (await listContributions()).find((p) => p.packId === PACK);
-		expect((restored?.entrypoints ?? []).length, "re-enable restores the entrypoints").toBeGreaterThan(0);
+			const after = (await listContributions()).find((p) => p.packId === PACK);
+			expect(after, "the built-in pack row must still emit (panels/routes survive)").toBeTruthy();
+			expect(after?.entrypoints ?? [], "all disabled entrypoints must be dropped").toHaveLength(0);
+			expect(
+				(after?.entrypoints ?? []).some((e) => e.kind === "route" && e.routeId === PACK),
+				"the kind:route deep-link must be dropped on disable",
+			).toBe(false);
+			// Pack-level routes are support for the surviving panel — they are NOT
+			// entrypoints, so they remain even when every entrypoint is disabled.
+			expect(after?.routeNames, "pack-level routes survive entrypoint disable").toEqual(
+				expect.arrayContaining(["bundle", "publish"]),
+			);
+
+			// Keep the explicit opt-in while restoring the entrypoint selection so the
+			// restored-contribution assertion still exercises the enabled pack.
+			await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({ scope: "server", packName: PACK, disabled: { enabled: true, entrypoints: [] } }),
+			});
+			const restored = (await listContributions()).find((p) => p.packId === PACK);
+			expect((restored?.entrypoints ?? []).length, "re-enable restores the entrypoints").toBeGreaterThan(0);
+		} finally {
+			// Always remove the explicit opt-in and restore the shipped default-OFF state.
+			const reset = await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({ scope: "server", packName: PACK, disabled: {} }),
+			});
+			expect(reset.status, "server-scope activation cleanup must restore default-OFF").toBe(200);
+		}
 	});
 
 	test("within-pack hard conflicts install (201) but are DROPPED from registration", async () => {
