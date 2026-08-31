@@ -29,6 +29,7 @@ import { navigateToHash, openApp, sendMessage } from "../ui/ui-helpers.js";
 import {
 	intentId,
 	intentRows,
+	reliableMockCore,
 	userMessageEnds,
 } from "../../../tests2/integration/helpers/reliable-turn-barriers.js";
 
@@ -80,6 +81,7 @@ function hasExactSteerProjection(frame: any, deliveryState: "dispatching" | "unc
 }
 
 async function expectUncertainPills(page: any, identities: readonly DispatchIdentity[]): Promise<void> {
+	await expect(page.locator(".queue-pill")).toHaveCount(identities.length, { timeout: 5_000 });
 	await expect(page.locator(
 		'.queue-pill[data-intent-kind="steer"][data-target-turn="continuation"][data-delivery-state="uncertain"]',
 	)).toHaveCount(identities.length, { timeout: 5_000 });
@@ -121,10 +123,12 @@ test.describe("steer subsystem — errored Stop preserves acknowledged/no-echo a
 		delete process.env.MOCK_STEER_QUEUE_DROP;
 	});
 
-	test("acknowledged steers remain durable, uncertain, and unreplayed after Stop", async ({ page, rec }) => {
+	test("acknowledged steers remain durable, uncertain, and unreplayed after Stop", async ({ page, rec, gateway }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		const conn = await connectWs(sessionId);
+		const core = reliableMockCore(gateway, sessionId);
+		let restoredConn: Awaited<ReturnType<typeof connectWs>> | undefined;
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
@@ -237,8 +241,15 @@ test.describe("steer subsystem — errored Stop preserves acknowledged/no-echo a
 			await expectUncertainPills(page, identities);
 			await expectNoSteerTranscript(page, identities);
 
+			const steerJournalAfterStop = core.commandJournal
+				.filter((entry) => entry.kind === "steer")
+				.map((entry) => ({ ...entry }));
+			expect(steerJournalAfterStop.map((entry) => entry.text).sort()).toEqual([...STEER_TEXTS].sort());
+
 			// 6. One hard reload must reconstruct the same durable outbox identities
-			//    without turning either recovery carrier into hidden transcript content.
+			//    without turning either recovery carrier into hidden transcript content
+			//    or dispatching either accepted occurrence again.
+			const reloadCursor = conn.messageCount();
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await page.waitForFunction((id) => {
 				return window.location.hash.includes(`/session/${id}`)
@@ -247,10 +258,51 @@ test.describe("steer subsystem — errored Stop preserves acknowledged/no-echo a
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 			await expectUncertainPills(page, identities);
 			await expectNoSteerTranscript(page, identities);
+
+			// A fresh attachment supplies the authoritative restored projection and
+			// fences the original observer's cursor scan without an arbitrary wait.
+			restoredConn = await connectWs(sessionId);
+			const restoredProjection = await restoredConn.waitFor((frame) => {
+				if (frame.type !== "queue_update" && frame.type !== "delivery_outbox") return false;
+				const rows = intentRows(frame);
+				return rows.length === identities.length && identities.every((identity) =>
+					rows.filter((row) => intentId(row) === identity.id && row.deliveryState === "uncertain").length === 1,
+				);
+			});
+			const restoredRows = intentRows(restoredProjection);
+			for (const identity of identities) {
+				const matching = restoredRows.filter((row) => intentId(row) === identity.id);
+				expect(matching).toHaveLength(1);
+				expect({ ...matching[0], unsent: matching[0].unsent ?? false }).toMatchObject({
+					text: identity.text,
+					kind: "steer",
+					targetTurn: "continuation",
+					deliveryState: "uncertain",
+					retryable: false,
+					unsent: false,
+					attemptId: identity.attemptId,
+					dispatchEpoch: identity.dispatchEpoch,
+				});
+			}
+
+			const identityIds = new Set(identities.map((identity) => identity.id));
+			const replayedDispatches = conn.messages.slice(reloadCursor).filter((frame) =>
+				intentRows(frame).some((row) =>
+					identityIds.has(intentId(row) ?? "") && row.deliveryState === "dispatching",
+				),
+			);
+			expect(replayedDispatches).toEqual([]);
+
+			const steerJournalAfterReload = core.commandJournal
+				.filter((entry) => entry.kind === "steer")
+				.map((entry) => ({ ...entry }));
+			expect(steerJournalAfterReload.map((entry) => entry.text).sort()).toEqual([...STEER_TEXTS].sort());
+			expect(steerJournalAfterReload).toEqual(steerJournalAfterStop);
 			for (const identity of identities) {
 				expect(userMessageEnds(conn.messages.slice(steerCursor), identity.text)).toHaveLength(0);
 			}
 		} finally {
+			restoredConn?.close();
 			conn.close();
 		}
 	});
