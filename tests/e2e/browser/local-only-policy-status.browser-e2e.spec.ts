@@ -119,7 +119,10 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 				autoStartTeam: false,
 			});
 			goalId = goal.id;
-			expect(realpathSync(goal.repoPath)).toBe(repo);
+			const goalRepoPath = goal.repoPath;
+			expect(typeof goalRepoPath).toBe("string");
+			if (typeof goalRepoPath !== "string") throw new Error("created goal must expose a string repoPath");
+			expect(realpathSync(goalRepoPath)).toBe(repo);
 			expect(goal.worktreePath).toBeTruthy();
 			expect(goal.cwd).toBe(goal.worktreePath);
 			await waitForGoalReady(goalId);
