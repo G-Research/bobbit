@@ -1,38 +1,45 @@
 /**
- * Browser E2E (Tier 2.5) — repro for the bug observed on master after the
- * steer-subsystem rewrite (commit 08dd4424).
+ * Browser E2E (Tier 2.5) — accepted/no-echo steer ambiguity across Stop.
  *
- * Real-session symptom: user runs a long bash, queues two messages, marks
- * them as steered, clicks Stop. The agent appears to receive nothing — the
- * steered texts only get processed once a fresh prompt is sent.
+ * The real Claude bridge can acknowledge a steer before its correlated Pi user
+ * row is durable. If Stop then terminates the active tool turn, acknowledgement
+ * alone cannot prove either delivery or non-delivery. Bobbit must keep each
+ * accepted occurrence visible as non-retryable uncertainty instead of replaying
+ * it and risking duplicate model side effects.
  *
- * Why the default mock path passes (and why this test wires MOCK_ABORT_AS_ERROR=1):
- * the real Claude bridge surfaces an aborted in-flight turn as an assistant
- * `message_end` with `stopReason:"error"` BEFORE the terminal `agent_end`.
- * That sets `session.lastTurnErrored=true`, which gates `drainQueue` off in
- * the `agent_end` handler (session-manager.ts ~line 1715). Steered rows
- * sitting in `promptQueue` therefore stay parked until the next user prompt
- * implicitly unsticks the session.
- *
- * The default mock emits a clean `agent_end` on abort (no error stopReason),
- * so existing tests don't exercise this path. The MOCK_ABORT_AS_ERROR=1 env
- * switches the mock to real-agent-shape abort behaviour.
+ * MOCK_ABORT_AS_ERROR=1 supplies the real-agent abort shape: an assistant
+ * `message_end` with `stopReason:"error"` before terminal `agent_end`.
+ * MOCK_STEER_QUEUE_DROP=always accepts both steer RPCs but suppresses their Pi
+ * user echoes, leaving the durable intent/attempt tuples as the only authority.
  *
  * Run with capture on:
- *   RECORDSCREEN=1 npm run test:e2e -- steer-during-bash-tool.spec.ts
+ *   RECORDSCREEN=1 npm run test:e2e -- steer-during-bash-tool.browser-e2e.spec.ts
  */
 import { test, expect } from "../ui/fixtures.js";
 import {
 	connectWs,
 	createSession,
 	queueLenPredicate,
+	statusPredicate,
 	toolStartPredicate,
 	waitForHealth,
 	waitForSessionStatus,
-	type WsConnection,
-	type WsMsg,
 } from "../e2e-setup.js";
 import { navigateToHash, openApp, sendMessage } from "../ui/ui-helpers.js";
+import {
+	intentId,
+	intentRows,
+	userMessageEnds,
+} from "../../../tests2/integration/helpers/reliable-turn-barriers.js";
+
+const STEER_TEXTS = ["Steer1", "Steer2"] as const;
+
+interface DispatchIdentity {
+	id: string;
+	text: typeof STEER_TEXTS[number];
+	attemptId: string;
+	dispatchEpoch: number;
+}
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");
@@ -63,19 +70,39 @@ async function clickStopIfPresent(page: any): Promise<void> {
 	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
 }
 
-function userMessageIncludes(text: string): (m: WsMsg) => boolean {
-	return (m) => m.type === "event"
-		&& m.data?.type === "message_end"
-		&& m.data?.message?.role === "user"
-		&& JSON.stringify(m.data.message).includes(text);
+function hasExactSteerProjection(frame: any, deliveryState: "dispatching" | "uncertain"): boolean {
+	if (frame?.type !== "queue_update" && frame?.type !== "delivery_outbox") return false;
+	const rows = intentRows(frame);
+	return rows.length === STEER_TEXTS.length
+		&& STEER_TEXTS.every((text) =>
+			rows.filter((row) => row.text === text && row.deliveryState === deliveryState).length === 1,
+		);
 }
 
-async function waitForSteeredEchoes(conn: WsConnection, cursor: number): Promise<void> {
-	await conn.waitForFrom(cursor, userMessageIncludes("Steer1"), 20_000);
-	await conn.waitForFrom(cursor, userMessageIncludes("Steer2"), 20_000);
+async function expectUncertainPills(page: any, identities: readonly DispatchIdentity[]): Promise<void> {
+	await expect(page.locator(
+		'.queue-pill[data-intent-kind="steer"][data-target-turn="continuation"][data-delivery-state="uncertain"]',
+	)).toHaveCount(identities.length, { timeout: 5_000 });
+
+	for (const identity of identities) {
+		const row = page.locator(`.queue-pill[data-intent-id="${identity.id}"]`);
+		await expect(row).toHaveCount(1);
+		await expect(row.locator(".pill-text")).toHaveText(identity.text);
+		await expect(row.getByTestId("intent-status")).toHaveText("Awaiting delivery confirmation");
+		await expect(row.getByRole("button", { name: "Dismiss unconfirmed delivery" })).toBeVisible();
+		await expect(row.getByRole("button", { name: "Retry" })).toHaveCount(0);
+		await expect(row.locator(".steer-btn")).toHaveCount(0);
+	}
 }
 
-test.describe("steer subsystem — queue + steer + abort with errored agent_end", () => {
+async function expectNoSteerTranscript(page: any, identities: readonly DispatchIdentity[]): Promise<void> {
+	for (const identity of identities) {
+		await expect(page.locator(`user-message[data-intent-id="${identity.id}"]`)).toHaveCount(0);
+		await expect(page.locator("user-message").filter({ hasText: identity.text })).toHaveCount(0);
+	}
+}
+
+test.describe("steer subsystem — errored Stop preserves acknowledged/no-echo ambiguity", () => {
 	test.setTimeout(90_000);
 
 	test.beforeAll(async () => {
@@ -83,9 +110,8 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 		// abort handler emits a `message_end` with `stopReason:"error"` before
 		// `agent_end`, mirroring what the real Claude bridge does.
 		process.env.MOCK_ABORT_AS_ERROR = "1";
-		// Make steer delivery deterministic for this abort-reconcile spec: the
-		// steer RPC is accepted, but the mock does not also enqueue its own
-		// follow-up prompt. The server's in-flight steer ledger must recover it.
+		// Accept each steer RPC without emitting its correlated Pi user row. The
+		// resulting post-write ambiguity must remain durable and must not replay.
 		process.env.MOCK_STEER_QUEUE_DROP = "always";
 		await waitForHealth();
 	});
@@ -95,7 +121,7 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 		delete process.env.MOCK_STEER_QUEUE_DROP;
 	});
 
-	test("queued+steered messages must drain after Stop without requiring a fresh user prompt", async ({ page, rec }) => {
+	test("acknowledged steers remain durable, uncertain, and unreplayed after Stop", async ({ page, rec }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		const conn = await connectWs(sessionId);
@@ -136,29 +162,94 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 			await rec.capture("Two messages queued");
 
-			// 3. Mark both as steered.
+			// 3. Promote both rows and capture their authoritative dispatch tuples.
 			const steerCursor = conn.messageCount();
 			await clickAllSteerButtons(page);
+			const dispatchProjection = await conn.waitForFrom(
+				steerCursor,
+				(frame) => hasExactSteerProjection(frame, "dispatching"),
+				10_000,
+			);
+			const dispatchRows = intentRows(dispatchProjection);
 			await expect(page.locator(
 				'.queue-pill[data-intent-kind="steer"][data-delivery-state="dispatching"]',
 			)).toHaveCount(2, { timeout: 5_000 });
 			await expect(page.locator(".queue-pill .steer-btn")).toHaveCount(0);
+
+			for (const row of dispatchRows) {
+				expect({ ...row, unsent: row.unsent ?? false }).toMatchObject({
+					kind: "steer",
+					targetTurn: "continuation",
+					deliveryState: "dispatching",
+					unsent: false,
+				});
+				expect(typeof intentId(row) === "string" && intentId(row)!.length > 0).toBe(true);
+				expect(typeof row.attemptId === "string" && row.attemptId.length > 0).toBe(true);
+				expect(Number.isFinite(row.dispatchEpoch)).toBe(true);
+			}
+			expect(new Set(dispatchRows.map(intentId)).size).toBe(STEER_TEXTS.length);
+			expect(new Set(dispatchRows.map((row) => row.attemptId)).size).toBe(STEER_TEXTS.length);
+			expect(new Set(dispatchRows.map((row) => row.dispatchEpoch)).size).toBe(STEER_TEXTS.length);
+
+			const identities = dispatchRows.map((row) => ({
+				id: intentId(row)!,
+				text: row.text as DispatchIdentity["text"],
+				attemptId: row.attemptId as string,
+				dispatchEpoch: row.dispatchEpoch as number,
+			})).sort((left, right) => left.text.localeCompare(right.text));
+			expect(identities.map((identity) => identity.text)).toEqual([...STEER_TEXTS]);
 			await rec.capture("Both pills steered and dispatched");
 
-			// 4. Stop if the stream is still active. Immediate queued-steer
-			//    dispatch may already have interrupted the mock turn; in that case
-			//    the shortened busy window keeps the fallback path bounded.
+			// 4. Stop from a fresh WS cursor, then join canonical idle and the full
+			//    authoritative uncertainty projection produced by that Stop.
+			const stopCursor = conn.messageCount();
 			await clickStopIfPresent(page);
-			await rec.capture("Stop clicked if still streaming — abort with error stopReason");
+			await conn.waitForFrom(stopCursor, statusPredicate("idle"), 15_000);
+			const uncertainProjection = await conn.waitForFrom(
+				stopCursor,
+				(frame) => hasExactSteerProjection(frame, "uncertain"),
+				15_000,
+			);
+			const uncertainRows = intentRows(uncertainProjection);
+			expect(uncertainRows).toHaveLength(identities.length);
+			for (const identity of identities) {
+				const matching = uncertainRows.filter((row) => intentId(row) === identity.id);
+				expect(matching).toHaveLength(1);
+				expect({ ...matching[0], unsent: matching[0].unsent ?? false }).toMatchObject({
+					text: identity.text,
+					kind: "steer",
+					targetTurn: "continuation",
+					deliveryState: "uncertain",
+					retryable: false,
+					unsent: false,
+					attemptId: identity.attemptId,
+					dispatchEpoch: identity.dispatchEpoch,
+				});
+			}
+			await rec.capture("Stop settled both acknowledged steers as uncertain");
 
-			// 5. Both steered texts must reach the agent without any further user
-			//    input. Queued+steered rows that sat in promptQueue while the
-			//    abort fired must be drained automatically once the bridge settles.
-			//    A failure here means: lastTurnErrored=true is gating drainQueue
-			//    off, and the rows stay parked until a fresh enqueuePrompt does
-			//    the implicit unstick.
-			await waitForSteeredEchoes(conn, steerCursor);
-			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+			// 5. The exact accepted identities remain visible once each and are
+			//    dismiss-only. No correlated Pi user end or transcript carrier may be
+			//    invented for an acknowledged handoff whose actual echo was suppressed.
+			for (const identity of identities) {
+				expect(userMessageEnds(conn.messages.slice(steerCursor), identity.text)).toHaveLength(0);
+			}
+			await expectUncertainPills(page, identities);
+			await expectNoSteerTranscript(page, identities);
+
+			// 6. One hard reload must reconstruct the same durable outbox identities
+			//    without turning either recovery carrier into hidden transcript content.
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await page.waitForFunction((id) => {
+				return window.location.hash.includes(`/session/${id}`)
+					&& (window as any).bobbitState?.selectedSessionId === id;
+			}, sessionId, { timeout: 15_000 });
+			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
+			await expectUncertainPills(page, identities);
+			await expectNoSteerTranscript(page, identities);
+			for (const identity of identities) {
+				expect(userMessageEnds(conn.messages.slice(steerCursor), identity.text)).toHaveLength(0);
+			}
 		} finally {
 			conn.close();
 		}
