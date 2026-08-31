@@ -60,7 +60,6 @@ export async function installProviderDemoFixture(initialDisabled: string[]): Pro
 	let sourceId: string | undefined;
 	let installed = false;
 	let activated = false;
-
 	try {
 		const add = await apiFetch("/api/marketplace/sources", {
 			method: "POST",
@@ -85,14 +84,12 @@ export async function installProviderDemoFixture(initialDisabled: string[]): Pro
 			if (typeof parsed.source?.id !== "string") throw new Error("add provider-demo source returned no source id");
 			sourceId = parsed.source.id;
 		}
-
 		const install = await apiFetch("/api/marketplace/install", {
 			method: "POST",
 			body: JSON.stringify({ sourceId, dirName: PACK_NAME, scope: "server" }),
 		});
 		await expectStatus(install, 201, "install provider-demo");
 		installed = true;
-
 		await setDisabled(initialDisabled);
 		activated = true;
 	} catch (setupError) {
@@ -111,7 +108,6 @@ export async function installProviderDemoFixture(initialDisabled: string[]): Pro
 		}
 		throw setupError;
 	}
-
 	const ownedSourceId = sourceId!;
 	return {
 		setDisabled,
