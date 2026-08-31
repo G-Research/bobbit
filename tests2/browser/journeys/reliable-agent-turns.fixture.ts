@@ -182,6 +182,12 @@ export class ReliableTurnRuntime {
 		return this.nextTool;
 	}
 
+	/** Hold the deterministic RELIABLE_TOOL_HOLD body before its tool end. */
+	holdNextToolBeforeEnd(): CoreBarrierHold {
+		const occurrence = Number(this.core._commandSequence?.prompt ?? 0) + 1;
+		return this.holdCoreBarrier("tool:before-end", occurrence);
+	}
+
 	holdNextCompaction(options: {
 		reason: CompactionHold["reason"];
 		outcome?: CompactionHold["outcome"];
