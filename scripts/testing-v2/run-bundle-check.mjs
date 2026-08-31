@@ -2,7 +2,7 @@
 /**
  * run-bundle-check.mjs — the build-first bundle-size guard lane (`npm run test:bundle`).
  *
- * `tests2/core/bundle-size.test.ts` asserts the UI chunk budgets but does NOT
+ * `tests/unit/core/bundle-size.unit.test.ts` asserts the UI chunk budgets but does NOT
  * build (building on every unit run would double CI time). It reads `dist/ui`,
  * so it is only meaningful immediately after a fresh `vite build` — and it is
  * gated on `BOBBIT_ASSERT_BUNDLE=1` so it can never assert against a STALE dist
@@ -41,7 +41,7 @@ if (buildCode !== 0) {
 }
 const testCode = await run(
 	npx,
-	["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", "tests2/core/bundle-size.test.ts", "tests/unit/core/support-packaging.unit.test.ts"],
+	["vitest", "run", "--config", "vitest.config.ts", "--silent=passed-only", "tests/unit/core/bundle-size.unit.test.ts", "tests/unit/core/support-packaging.unit.test.ts"],
 	{ BOBBIT_ASSERT_BUNDLE: "1" },
 );
 process.exit(testCode);

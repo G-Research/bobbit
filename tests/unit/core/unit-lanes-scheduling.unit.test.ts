@@ -226,9 +226,9 @@ describe("direct unit-stage scheduling", () => {
 		);
 
 		const inventory = [
-			"tests2/core/git-template-handoff-probe-a.test.ts",
-			"tests2/core/git-template-handoff-probe-b.test.ts",
-			"tests2/core/git-template-handoff-probe-c.test.ts",
+			"tests/unit/core/git-template-handoff-probe-a.unit.test.ts",
+			"tests/unit/core/git-template-handoff-probe-b.unit.test.ts",
+			"tests/unit/core/git-template-handoff-probe-c.unit.test.ts",
 		];
 		const descriptor = { path: "/run/git-template/repo", digest: "a".repeat(64) };
 		for (const [env, expectedWorkers] of [
