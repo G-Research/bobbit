@@ -119,7 +119,7 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 				autoStartTeam: false,
 			});
 			goalId = goal.id;
-			expect(goal.repoPath).toBe(repo);
+			expect(realpathSync(goal.repoPath)).toBe(repo);
 			expect(goal.worktreePath).toBeTruthy();
 			expect(goal.cwd).toBe(goal.worktreePath);
 			await waitForGoalReady(goalId);
