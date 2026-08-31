@@ -171,6 +171,29 @@ async function expectBadge(page: Page, relativePath: string, label: RegExp): Pro
 	await expect(badge, `${relativePath} should expose its Git status accessibly`).toHaveAttribute("aria-label", label);
 }
 
+type PersistedExplorerState = {
+	expanded?: unknown;
+	selected?: unknown;
+	view?: unknown;
+	changedOnly?: unknown;
+};
+
+function waitForExplorerStateWrite(
+	page: Page,
+	sessionId: string,
+	matches: (value: PersistedExplorerState) => boolean,
+) {
+	return page.waitForResponse((response) => {
+		if (!response.url().includes("/api/ext/store/put") || response.request().method() !== "POST") return false;
+		try {
+			const body = response.request().postDataJSON() as { key?: unknown; value?: unknown };
+			return body.key === `ui/${sessionId}` && !!body.value && typeof body.value === "object" && matches(body.value as PersistedExplorerState);
+		} catch {
+			return false;
+		}
+	});
+}
+
 test.describe("Journey: built-in file explorer pack", () => {
 	let gitFixture: FixtureProject | undefined;
 	let nonGitFixture: FixtureProject | undefined;
@@ -215,11 +238,14 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(panel.getByRole("region", { name: "Read-only file contents" })).toContainText("opened from recursive path-fragment search");
 		await showTreeIfNarrow(panel);
 		await expect(search).toHaveValue("LEVEL/rep");
+		const clearedSelectionWrite = waitForExplorerStateWrite(page, gitFixture.sessionId, (value) =>
+			value.selected === "copy-source.txt" && value.view === "file" && value.changedOnly === false,
+		);
 		await panel.getByRole("button", { name: "Clear search" }).click();
 		await expect(search).toHaveValue("");
 		await expect(treeItem(page, "copy-source.txt"), "clearing search restores the prior tree selection").toHaveAttribute("aria-selected", "true");
 		await expect(panel.locator(PREVIEW), "clearing search restores the prior preview even when the responsive tree pane is active").toContainText("retained copy source");
-		await page.waitForTimeout(300);
+		expect((await clearedSelectionWrite).ok(), "the restored browse selection must reach the pack store before reload").toBe(true);
 		await page.reload();
 		panel = await waitForExplorer(page);
 		search = panel.getByRole("combobox", { name: "Search files and folders" });
@@ -494,6 +520,12 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await expect(panel.getByRole("region", { name: "Working tree compared with HEAD" })).toContainText("deleted baseline");
 
 		await showTreeIfNarrow(panel);
+		const restoredGitStateWrite = waitForExplorerStateWrite(page, gitFixture.sessionId, (value) =>
+			value.selected === "src/changed.ts"
+				&& value.view === "diff"
+				&& Array.isArray(value.expanded)
+				&& value.expanded.includes("src"),
+		);
 		await treeItem(page, "src/changed.ts").click();
 		await panel.getByRole("tab", { name: "Diff" }).click();
 		write(root!, "new-after-refresh.txt", "created outside Bobbit\n");
@@ -509,7 +541,7 @@ test.describe("Journey: built-in file explorer pack", () => {
 		await waitForSessionStatus(gitFixture.sessionId, "idle", 15_000);
 		await expect(treeItem(page, "new-after-idle.txt"), "the real transition back to idle refreshes the explorer").toBeVisible({ timeout: 15_000 });
 
-		await page.waitForTimeout(300);
+		expect((await restoredGitStateWrite).ok(), "the selected diff and expanded directory must reach the pack store before reload").toBe(true);
 		await page.reload();
 		const restored = await waitForExplorer(page);
 		await expect(treeItem(page, "src")).toHaveAttribute("aria-expanded", "true");
