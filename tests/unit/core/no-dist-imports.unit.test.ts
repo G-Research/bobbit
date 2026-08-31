@@ -7,10 +7,12 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const TESTS_DIR = new URL("../../../tests2/core/", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-const SELF = "no-dist-imports.test.ts";
+const TESTS_DIRS = ["./", "../../../tests2/core/"].map((path) =>
+	new URL(path, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
+);
+const SELF = "no-dist-imports.unit.test.ts";
 const EXCLUDED_DIRS = new Set(["e2e", "fullstack", "manual-integration"]);
-const PATTERN = /from\s+["']\.\.\/(\.\.\/)?dist\//;
+const PATTERN = /from\s+["'](?:\.\.\/)+dist\//;
 
 function collect(dir: string, out: string[] = []): string[] {
 	for (const name of readdirSync(dir)) {
@@ -30,7 +32,7 @@ function collect(dir: string, out: string[] = []): string[] {
 }
 
 test("no test file imports from ../dist/", () => {
-	const files = collect(TESTS_DIR);
+	const files = TESTS_DIRS.flatMap((dir) => collect(dir));
 	const offenders: string[] = [];
 	for (const f of files) {
 		const src = readFileSync(f, "utf8");
