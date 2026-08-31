@@ -652,7 +652,8 @@ test.describe("durable Bobbit browser benchmarks", () => {
 				return remote?.status === "idle" && remote?.isStreaming !== true;
 			}, undefined, { timeout: 20_000 });
 			for (const marker of fixture.settlementMarkers) {
-				await expect(page.getByText(marker, { exact: true }), `${marker} must settle before the live fingerprint`).toBeVisible({ timeout: 20_000 });
+				const proposalPanel = page.locator("[data-testid='goal-proposal-panel-goal']");
+				await expect(proposalPanel.getByText(marker, { exact: true }), `${marker} must settle before the live fingerprint`).toBeVisible({ timeout: 20_000 });
 			}
 			await settle(page);
 
