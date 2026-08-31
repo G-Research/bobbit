@@ -1,7 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { apiFetch } from "../e2e-setup.js";
-
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const FIXTURE_SOURCE = path.resolve(__dirname, "..", "..", "fixtures", "packs");
 const PACK_NAME = "provider-demo";
