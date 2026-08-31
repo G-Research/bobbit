@@ -104,7 +104,7 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 		await waitForSessionStatus(sessionId, "idle");
 		const conn = await connectWs(sessionId);
 		let runtime: ReliableTurnRuntime | undefined;
-		let tool: ReturnType<ReliableTurnRuntime["holdNextTool"]> | undefined;
+		let toolBeforeEnd: ReturnType<ReliableTurnRuntime["holdNextToolBeforeEnd"]> | undefined;
 		let steer1Echo: ReturnType<ReliableTurnRuntime["holdEcho"]> | undefined;
 		let steer2Echo: ReturnType<ReliableTurnRuntime["holdEcho"]> | undefined;
 		let abort: ReturnType<ReliableTurnRuntime["holdNextAbort"]> | undefined;
@@ -122,16 +122,14 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			await rec.capture("Empty composer ready");
 
 			runtime = new ReliableTurnRuntime(gateway, sessionId);
-			tool = runtime.holdNextTool();
+			toolBeforeEnd = runtime.holdNextToolBeforeEnd();
 			const toolCursor = conn.messageCount();
 
-			// Wait for the server-side Bash tool start, not just the early streaming
-			// UI state. The long busy window keeps the turn abortable under broad-suite
-			// load; the per-test timeout is larger so missing steer delivery still fails
-			// on the post-Stop echo/render assertions instead of closing the page first.
-			await sendMessage(page, "STAY_BUSY:30000 working");
+			// Use the mock's named tool boundary so steer promotion may interrupt the
+			// run without allowing its Bash end to race ahead of the later Stop.
+			await sendMessage(page, "RELIABLE_TOOL_HOLD");
 			await conn.waitForFrom(toolCursor, toolStartPredicate("Bash"), 15_000);
-			await tool.entered;
+			await toolBeforeEnd.entered;
 			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await rec.capture("Agent busy — bash tool running");
 
@@ -164,7 +162,12 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			await abort.beforeAgentEnd.entered;
 			await rec.capture("Stop clicked while abort terminal held");
 
-			const toolEnd = await conn.waitForFrom(toolCursor, (message) =>
+			// Capture every Stop authority while the interrupted tool run is still
+			// held. The join remains pending until the barriers below are released.
+			const terminalProjection = runtime.joinAbortTerminalProjection(abort);
+			const toolEndCursor = conn.messageCount();
+			toolBeforeEnd.release();
+			const toolEnd = await conn.waitForFrom(toolEndCursor, (message) =>
 				message.type === "event"
 				&& message.data?.type === "tool_execution_end"
 				&& message.data?.toolName === "Bash"
@@ -176,13 +179,14 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 				isError: true,
 			});
 
-			// Release the already-observed tool boundary before admitting the abort
-			// terminal, then hold terminal idle until its authoritative projection is
-			// reached. Only after that lifecycle settles may either Pi echo continue.
-			tool.release();
+			// The errored tool end is now proven inside the held Stop lifecycle.
+			// Admit the abort terminal, join canonical idle/coordinator removal, and
+			// only then allow either recovered Pi echo to continue.
 			abort.beforeAgentEnd.release();
 			await abort.afterTerminalIdle.entered;
 			abort.afterTerminalIdle.release();
+			await terminalProjection;
+			await steer1Echo.entered;
 			steer1Echo.release();
 			await steer2Echo.entered;
 			steer2Echo.release();
@@ -216,8 +220,8 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 10_000 });
 			await rec.capture("Queue drained, no duplicates");
 		} finally {
+			toolBeforeEnd?.release();
 			abort?.release();
-			tool?.release();
 			steer1Echo?.release();
 			steer2Echo?.release();
 			runtime?.restore();
