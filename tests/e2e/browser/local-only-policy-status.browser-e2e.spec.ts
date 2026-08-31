@@ -50,8 +50,9 @@ async function spawnTeamMember(goalId: string): Promise<{ sessionId: string; bra
 	const statusResp = await apiFetch(`/api/sessions/${sessionId}/git-status`);
 	expect(statusResp.status).toBe(200);
 	const status = await statusResp.json();
-	expect(status.remotePublication).toBe("local-only-policy");
 	expect(status.branch).toMatch(/^goal\/[a-f0-9]{8}\/coder-[a-f0-9]{4}$/);
+	expect(status.hasUpstream).toBe(false);
+	expect(status).not.toHaveProperty("remotePublication");
 	return { sessionId, branch: status.branch };
 }
 
@@ -78,8 +79,8 @@ async function openGitDropdown(page: Page, sessionId: string, branch: string): P
 	await readyButton.click();
 	const dropdown = page.locator("#git-status-dropdown");
 	await expect(dropdown).toBeVisible({ timeout: 5_000 });
-	await expect(dropdown.getByTestId("git-local-only-policy")).toContainText("Local-only by policy", { timeout: 5_000 });
-	await expect(dropdown).toContainText("not published automatically");
+	await expect(dropdown.getByTestId("git-local-only-policy")).toHaveCount(0);
+	await expect(dropdown.getByRole("button", { name: "Push", exact: true })).toHaveCount(0);
 	await page.keyboard.press("Escape");
 	await expect(dropdown).toBeHidden({ timeout: 5_000 });
 }
@@ -99,7 +100,7 @@ async function terminateSessionFromSidebar(page: Page, sessionId: string): Promi
 }
 
 test.describe("local-only sub-agent branch policy (UI)", () => {
-	test("team-member git status shows local-only policy, survives reload, and archives without a remote branch", async ({ page }) => {
+	test("team-member git status stays local-only, survives reload, and archives without a remote branch", async ({ page }) => {
 		test.setTimeout(120_000);
 		const repo = makeGitRepo();
 		const project = await registerProject({ name: `local-only-ui-${Date.now()}`, rootPath: repo });
