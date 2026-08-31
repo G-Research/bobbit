@@ -100,7 +100,6 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 		test.setTimeout(120_000);
 		const repo = makeGitRepo();
 		const project = await registerProject({ name: `local-only-ui-${Date.now()}`, rootPath: repo });
-		expect(project.rootPath).toBe(repo);
 		let goalId = "";
 		let teamLeadId = "";
 		let memberId = "";
@@ -110,6 +109,7 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 		let heldCore: MockBarrierCore | undefined;
 		let capturedSessionId = "";
 		try {
+			expect(project.rootPath).toBe(repo);
 			const goal = await createGoal({
 				title: `Local-only policy UI ${Date.now()}`,
 				cwd: repo,
@@ -118,8 +118,10 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 				worktree: true,
 				autoStartTeam: false,
 			});
-			expect(goal.cwd).toBe(repo);
 			goalId = goal.id;
+			expect(goal.repoPath).toBe(repo);
+			expect(goal.worktreePath).toBeTruthy();
+			expect(goal.cwd).toBe(goal.worktreePath);
 			await waitForGoalReady(goalId);
 			teamLeadId = await startTeam(goalId);
 			await waitForSessionStatus(teamLeadId, "idle", 30_000);
