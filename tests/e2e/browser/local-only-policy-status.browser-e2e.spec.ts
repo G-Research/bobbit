@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "../gateway-harness.js";
@@ -27,13 +27,20 @@ function makeGitRepo(): string {
 	return realpathSync(repo);
 }
 
-async function waitForGoalReady(goalId: string): Promise<void> {
-	await pollUntil(async () => {
+type SettledGoalRecord = {
+	setupStatus: "ready";
+	repoPath: unknown;
+	worktreePath: unknown;
+	cwd: unknown;
+};
+
+async function waitForGoalReady(goalId: string): Promise<SettledGoalRecord> {
+	return await pollUntil(async () => {
 		const resp = await apiFetch(`/api/goals/${goalId}`);
 		if (!resp.ok) return null;
-		const goal = await resp.json();
+		const goal = await resp.json() as { setupStatus?: unknown };
 		if (goal.setupStatus === "error") throw new Error(`goal setup failed: ${JSON.stringify(goal)}`);
-		return goal.setupStatus === "ready" ? goal : null;
+		return goal.setupStatus === "ready" ? goal as SettledGoalRecord : null;
 	}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready` });
 }
 
@@ -110,7 +117,7 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 		let capturedSessionId = "";
 		try {
 			expect(project.rootPath).toBe(repo);
-			const goal = await createGoal({
+			const createdGoal = await createGoal({
 				title: `Local-only policy UI ${Date.now()}`,
 				cwd: repo,
 				projectId: project.id,
@@ -118,14 +125,18 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 				worktree: true,
 				autoStartTeam: false,
 			});
-			goalId = goal.id;
-			const goalRepoPath = goal.repoPath;
-			expect(typeof goalRepoPath).toBe("string");
-			if (typeof goalRepoPath !== "string") throw new Error("created goal must expose a string repoPath");
-			expect(realpathSync.native(goalRepoPath)).toBe(realpathSync.native(repo));
-			expect(goal.worktreePath).toBeTruthy();
-			expect(goal.cwd).toBe(goal.worktreePath);
-			await waitForGoalReady(goalId);
+			goalId = createdGoal.id;
+			const settledGoal = await waitForGoalReady(goalId);
+			const { repoPath, worktreePath, cwd } = settledGoal;
+			expect(typeof repoPath).toBe("string");
+			if (typeof repoPath !== "string") throw new Error("settled goal must expose a string repoPath");
+			expect(typeof worktreePath).toBe("string");
+			if (typeof worktreePath !== "string") throw new Error("settled goal must expose a string worktreePath");
+			expect(typeof cwd).toBe("string");
+			if (typeof cwd !== "string") throw new Error("settled goal must expose a string cwd");
+			expect(existsSync(worktreePath)).toBe(true);
+			expect(realpathSync.native(repoPath)).toBe(realpathSync.native(repo));
+			expect(realpathSync.native(cwd)).toBe(realpathSync.native(worktreePath));
 			teamLeadId = await startTeam(goalId);
 			await waitForSessionStatus(teamLeadId, "idle", 30_000);
 
