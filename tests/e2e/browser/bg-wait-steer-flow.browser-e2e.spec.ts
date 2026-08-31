@@ -67,7 +67,7 @@ test.describe("bash_bg wait + steer — end-to-end user flow", () => {
 		//    bg wait, (b) queue a message, (c) click Steer — queued-steer
 		//    promotion dispatches immediately while the stream is still active.
 		await sendMessage(page, "STAY_BUSY:5000 working");
-		await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+		await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 		await rec.capture("Agent busy — Stop button visible");
 
 		// 2. Spawn a real long-running bg process attached to this session,

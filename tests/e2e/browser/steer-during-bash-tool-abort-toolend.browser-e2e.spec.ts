@@ -68,7 +68,7 @@ async function clickAllSteerButtons(page: any): Promise<void> {
 }
 
 async function clickStopIfPresent(page: any): Promise<void> {
-	const stop = page.locator("button[title='Stop streaming']").first();
+	const stop = page.getByRole("button", { name: "Stop current turn" }).first();
 	if (await stop.count() === 0) return;
 	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
 }
@@ -127,7 +127,7 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			// on the post-Stop echo/render assertions instead of closing the page first.
 			await sendMessage(page, "STAY_BUSY:30000 working");
 			await conn.waitFor(toolStartPredicate("Bash"), 15_000);
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await rec.capture("Agent busy — bash tool running");
 
 			const textarea = page.locator("textarea").first();
