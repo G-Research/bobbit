@@ -495,10 +495,10 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	const expectedHostDirectory = fs.realpathSync(declaredHostDirectory);
 	const expectedContainerDirectory = "/bobbit/local-data/pack-local-data";
 	const runtimeOptions = gateway.sessionManager.getSession(sessionId)?.rpcClient?.options ?? {};
-	const runtimeEnvironment = runtimeOptions.env ?? {};
+	const runtimeEnv = runtimeOptions.env ?? {};
 	const runtimeContainerId = runtimeOptions.containerId;
 	expect(runtimeContainerId, "the sandbox session must own a Docker runtime").toBeTruthy();
-	expect(JSON.parse(runtimeEnvironment.BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({ [PACK]: expectedContainerDirectory });
+	expect(JSON.parse(runtimeEnv.BOBBIT_PACK_LOCAL_DATA_JSON)).toEqual({ [PACK]: expectedContainerDirectory });
 	const containerNode = (script: string) => spawnSync("docker", ["exec", runtimeContainerId, "node", "-e", script], { encoding: "utf8" });
 
 	const containerWrite = containerNode(`require("node:fs").writeFileSync(${JSON.stringify(`${expectedContainerDirectory}/container-marker.txt`)}, "written-in-container")`);
