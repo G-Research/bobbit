@@ -47,7 +47,7 @@ Options:
 
 Unrecognized args are forwarded to: npx vitest run --config vitest.config.ts --reporter=json --outputFile <run>/vitest.json
 Examples:
-  npm run test:v2:profile-hooks -- tests2/core/team-manager-decisions.test.ts
+  npm run test:v2:profile-hooks -- tests/unit/core/team-manager-decisions.unit.test.ts
   npm run test:v2:profile-hooks -- --project v2-integration tests/integration/gateway/gateway-fixture-leak.gateway.test.ts`;
 }
 

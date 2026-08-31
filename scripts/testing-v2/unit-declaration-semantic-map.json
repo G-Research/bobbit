@@ -4,11 +4,11 @@
     "baseName": "accepts path-derived core, dom, integration, isolated, and approved E2E ownership",
     "current": [
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "classifies %s from POSIX and Windows paths"
       },
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "recursively discovers, sorts, and assigns every active convention exactly once"
       }
     ],
@@ -19,11 +19,11 @@
     "baseName": "rejects cross-tagging %s",
     "current": [
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "rejects unsupported or ambiguous placement %s actionably"
       },
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "rejects managed-root suffix mismatches found during traversal"
       }
     ],
@@ -34,11 +34,11 @@
     "baseName": "rejects %s isolated reasons",
     "current": [
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "classifies %s from POSIX and Windows paths"
       },
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "rejects unsupported or ambiguous placement %s actionably"
       }
     ],
@@ -49,7 +49,7 @@
     "baseName": "rejects an isolated reason on a non-isolated project",
     "current": [
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "rejects unsupported or ambiguous placement %s actionably"
       }
     ],
@@ -60,15 +60,15 @@
     "baseName": "preserves duplicate ownership and missing physical ownership validation",
     "current": [
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "recursively discovers, sorts, and assigns every active convention exactly once"
       },
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "does not follow symlinked directories"
       },
       {
-        "file": "tests2/core/test-discovery.test.ts",
+        "file": "tests/unit/core/test-discovery.unit.test.ts",
         "name": "rejects managed-root suffix mismatches found during traversal"
       }
     ],
