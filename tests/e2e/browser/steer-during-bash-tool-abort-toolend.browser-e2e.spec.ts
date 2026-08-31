@@ -47,6 +47,7 @@ import {
 	type WsMsg,
 } from "../e2e-setup.js";
 import { navigateToHash, openApp, sendMessage } from "../ui/ui-helpers.js";
+import { ReliableTurnRuntime } from "../../../tests2/browser/journeys/reliable-agent-turns.fixture.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");
@@ -65,12 +66,6 @@ async function clickAllSteerButtons(page: any): Promise<void> {
 
 		remaining = await buttons.count();
 	}
-}
-
-async function clickStopIfPresent(page: any): Promise<void> {
-	const stop = page.getByRole("button", { name: "Stop current turn" }).first();
-	if (await stop.count() === 0) return;
-	await stop.evaluate((el: HTMLElement) => el.click()).catch(() => { /* already settled */ });
 }
 
 function userMessageIncludes(text: string): (m: WsMsg) => boolean {
@@ -104,10 +99,15 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 		delete process.env.MOCK_STEER_QUEUE_DROP;
 	});
 
-	test("queued+steered messages drain after Stop with tool_execution_end on abort — no duplicates", async ({ page, rec }) => {
+	test("queued+steered messages drain after Stop with tool_execution_end on abort — no duplicates", async ({ page, rec, gateway }) => {
 		const sessionId = await createSession();
 		await waitForSessionStatus(sessionId, "idle");
 		const conn = await connectWs(sessionId);
+		let runtime: ReliableTurnRuntime | undefined;
+		let tool: ReturnType<ReliableTurnRuntime["holdNextTool"]> | undefined;
+		let steer1Echo: ReturnType<ReliableTurnRuntime["holdEcho"]> | undefined;
+		let steer2Echo: ReturnType<ReliableTurnRuntime["holdEcho"]> | undefined;
+		let abort: ReturnType<ReliableTurnRuntime["holdNextAbort"]> | undefined;
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
@@ -121,12 +121,17 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
 			await rec.capture("Empty composer ready");
 
+			runtime = new ReliableTurnRuntime(gateway, sessionId);
+			tool = runtime.holdNextTool();
+			const toolCursor = conn.messageCount();
+
 			// Wait for the server-side Bash tool start, not just the early streaming
 			// UI state. The long busy window keeps the turn abortable under broad-suite
 			// load; the per-test timeout is larger so missing steer delivery still fails
 			// on the post-Stop echo/render assertions instead of closing the page first.
 			await sendMessage(page, "STAY_BUSY:30000 working");
-			await conn.waitFor(toolStartPredicate("Bash"), 15_000);
+			await conn.waitForFrom(toolCursor, toolStartPredicate("Bash"), 15_000);
+			await tool.entered;
 			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await rec.capture("Agent busy — bash tool running");
 
@@ -143,18 +148,50 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			await expect(page.locator(".queue-pill")).toHaveCount(2, { timeout: 5_000 });
 			await rec.capture("Two messages queued");
 
+			steer1Echo = runtime.holdEcho("Steer1");
+			steer2Echo = runtime.holdEcho("Steer2");
 			const steerCursor = conn.messageCount();
 			await clickAllSteerButtons(page);
-			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+			await expect(page.locator(".queue-pill .steer-btn")).toHaveCount(0);
 			await rec.capture("Both pills steered and dispatched");
 
-			await clickStopIfPresent(page);
-			await rec.capture("Stop clicked if still streaming");
+			abort = runtime.holdNextAbort();
+			const stop = page.getByRole("button", { name: "Stop current turn" }).first();
+			await expect(stop).toBeVisible({ timeout: 10_000 });
+			await expect(stop).toBeEnabled();
+			await stop.click();
+			await abort.received;
+			await abort.beforeAgentEnd.entered;
+			await rec.capture("Stop clicked while abort terminal held");
+
+			const toolEnd = await conn.waitForFrom(toolCursor, (message) =>
+				message.type === "event"
+				&& message.data?.type === "tool_execution_end"
+				&& message.data?.toolName === "Bash"
+				&& message.data?.isError === true,
+			15_000);
+			expect(toolEnd.data).toMatchObject({
+				type: "tool_execution_end",
+				toolName: "Bash",
+				isError: true,
+			});
+
+			// Release the already-observed tool boundary before admitting the abort
+			// terminal, then hold terminal idle until its authoritative projection is
+			// reached. Only after that lifecycle settles may either Pi echo continue.
+			tool.release();
+			abort.beforeAgentEnd.release();
+			await abort.afterTerminalIdle.entered;
+			abort.afterTerminalIdle.release();
+			steer1Echo.release();
+			await steer2Echo.entered;
+			steer2Echo.release();
 
 			// Both steered texts must reach the agent without any further user input.
 			// First wait on the authoritative WS echo so delivery failures do not get
 			// misreported as client-render timing, then assert the user-visible rows.
 			await waitForSteeredEchoes(conn, steerCursor);
+			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
 			await expect(
 				page.locator("user-message").filter({ hasText: "Steer1" }).first(),
 			).toBeVisible({ timeout: 10_000 });
@@ -179,6 +216,11 @@ test.describe("steer subsystem — queue + steer + abort with tool_execution_end
 			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 10_000 });
 			await rec.capture("Queue drained, no duplicates");
 		} finally {
+			abort?.release();
+			tool?.release();
+			steer1Echo?.release();
+			steer2Echo?.release();
+			runtime?.restore();
 			conn.close();
 		}
 	});

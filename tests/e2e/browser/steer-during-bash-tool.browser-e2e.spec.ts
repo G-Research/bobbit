@@ -139,7 +139,10 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 			// 3. Mark both as steered.
 			const steerCursor = conn.messageCount();
 			await clickAllSteerButtons(page);
-			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
+			await expect(page.locator(
+				'.queue-pill[data-intent-kind="steer"][data-delivery-state="dispatching"]',
+			)).toHaveCount(2, { timeout: 5_000 });
+			await expect(page.locator(".queue-pill .steer-btn")).toHaveCount(0);
 			await rec.capture("Both pills steered and dispatched");
 
 			// 4. Stop if the stream is still active. Immediate queued-steer
@@ -155,6 +158,7 @@ test.describe("steer subsystem — queue + steer + abort with errored agent_end"
 			//    off, and the rows stay parked until a fresh enqueuePrompt does
 			//    the implicit unstick.
 			await waitForSteeredEchoes(conn, steerCursor);
+			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 5_000 });
 		} finally {
 			conn.close();
 		}
