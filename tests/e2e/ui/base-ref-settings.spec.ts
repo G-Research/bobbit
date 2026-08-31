@@ -59,7 +59,7 @@ async function openBaseRefSettings(page: BrowserPage, project: { id: string; nam
 	return input;
 }
 
-async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus: number): Promise<void> {
+async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus: number): Promise<Record<string, unknown>> {
 	const savePromise = page.waitForResponse(
 		resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
 			resp.request().method() === "PUT" &&
@@ -71,8 +71,12 @@ async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus:
 	await expect(saveButton).toBeVisible({ timeout: 10_000 });
 	await expect(saveButton).toBeEnabled({ timeout: 10_000 });
 	await saveButton.click();
-	await savePromise;
+	const saveResponse = await savePromise;
+	const saveRequest = saveResponse.request();
+	expect(new URL(saveRequest.url()).pathname).toBe(`/api/projects/${projectId}/config`);
+	const payload = saveRequest.postDataJSON?.() ?? JSON.parse(saveRequest.postData() || "{}");
 	await expect(page.locator("button").filter({ hasText: /^Saving\.\.\.$/ })).toHaveCount(0, { timeout: 10_000 });
+	return payload as Record<string, unknown>;
 }
 
 async function expectBaseRefError(page: BrowserPage, expectedText: string) {
@@ -89,18 +93,40 @@ async function deleteProjects(projectIds: string[]): Promise<void> {
 }
 
 test.describe("Settings → Base Ref field", () => {
-	test("persists across reload (happy path)", async ({ page }) => {
+	test("first valid edit exposes Save and persists across reload", async ({ page }) => {
 		const projectIds: string[] = [];
 		try {
 			const dir = uniqueProjectDir("happy");
 			await gitInit(dir, { remoteRefs: ["develop"] });
 			const project = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
 			projectIds.push(project.id);
+			const initial = await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: "master" }),
+			});
+			expect(initial.ok, `initial base_ref setup failed: ${initial.status}`).toBe(true);
 
 			await openApp(page);
 			const input = await openBaseRefSettings(page, project);
+			await expect(input).toHaveValue("master");
+			await page.waitForLoadState("networkidle");
+
+			// Settle every initial settings request before editing, then prove the
+			// input event itself exposes Save rather than borrowing a later async
+			// config/detection render. This assertion reproduces the original bug.
+			const saveButton = page.locator("button").filter({ hasText: /^Save$/ }).first();
+			await expect(saveButton).toHaveCount(0);
 			await input.fill("origin/develop");
-			await saveBaseRef(page, project.id, 200);
+			await page.evaluate(() => new Promise<void>((resolve) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+			}));
+			expect(
+				await saveButton.isVisible(),
+				"BASE_REF_SAVE_CAUSAL_RENDER: first valid edit must expose Save on its own render",
+			).toBe(true);
+
+			const payload = await saveBaseRef(page, project.id, 200);
+			expect(payload).toEqual({ base_ref: "origin/develop" });
 
 			// Reload — value should persist.
 			await page.reload();
