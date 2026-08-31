@@ -266,29 +266,7 @@ afterEach(async () => {
 }, REAL_PROCESS_TEST_TIMEOUT_MS);
 
 describe("bobbit:pack-native-assets build-only alias", () => {
-	it("inlines the Node helper and runs from an installed read-only pack without runtime host edges", async () => {
-		const fixture = createBundleFixture();
-		const api = await loadBuildApi();
-		await buildResolver(api, fixture.packRoot, fixture.sourceFile);
-
-		const installedPack = path.join(fixture.root, "installed", "fixture-pack");
-		fs.cpSync(fixture.packRoot, installedPack, { recursive: true });
-		makeReadOnly(installedPack);
-		const installedBundle = path.join(installedPack, "lib", "resolver.mjs");
-		const installedModule = await import(`${pathToFileURL(installedBundle).href}?fixture=${Date.now()}`) as {
-			resolveFixtureBinding(family: string, runtime: NativeAssetRuntime): string;
-		};
-		const installedFamily = path.join(installedPack, "lib", "native", "database-driver");
-		const resolved = installedModule.resolveFixtureBinding(installedFamily, {
-			platform: "linux",
-			arch: "arm64",
-			glibcVersionRuntime: null,
-		});
-		assert.equal(resolved, path.join(installedFamily, "linux-musl-arm64.node"));
-		assert.equal(path.relative(installedPack, resolved).startsWith(".."), false);
-	}, REAL_PROCESS_TEST_TIMEOUT_MS);
-
-	it("materializes, bundles, copies, packs, installs, and selects all eight assets read-only", async () => {
+	it("materializes all eight assets and verifies a self-contained bundle through read-only release install", async () => {
 		const root = makeTmpDir("pack-native-assets-release-");
 		temporaryRoots.add(root);
 		const projectRoot = path.join(root, "project");

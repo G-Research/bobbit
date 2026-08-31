@@ -264,6 +264,59 @@ async function assertSandboxWholeStaffFork(
 	}
 }
 
+const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
+
+function seedHistoryTranscript(gateway: any, sessionId: string): string {
+	const persisted = gateway.sessionManager.getPersistedSession(sessionId);
+	const live = gateway.sessionManager.getSession(sessionId);
+	if (!persisted?.projectId || !live) throw new Error(`session ${sessionId} must be live and persisted`);
+	const entries = [
+		{
+			type: "session",
+			version: 3,
+			id: `pi-${sessionId}`,
+			timestamp: FIXTURE_TIME,
+			cwd: live.cwd,
+			provider: "fixture-provider",
+		},
+		{
+			type: "message",
+			id: "retained-user",
+			parentId: null,
+			timestamp: FIXTURE_TIME,
+			message: { role: "user", content: [{ type: "text", text: "RETAINED_STAFF_HISTORY" }] },
+		},
+		{
+			type: "message",
+			id: "retained-assistant",
+			parentId: "retained-user",
+			timestamp: FIXTURE_TIME,
+			message: { role: "assistant", content: [{ type: "text", text: "RETAINED_STAFF_ANSWER" }] },
+		},
+		{
+			type: "message",
+			id: "cut-user",
+			parentId: "retained-assistant",
+			timestamp: FIXTURE_TIME,
+			message: { role: "user", content: [{ type: "text", text: "CUT_STAFF_PROMPT" }] },
+		},
+		{
+			type: "message",
+			id: "discarded-assistant",
+			parentId: "cut-user",
+			timestamp: FIXTURE_TIME,
+			message: { role: "assistant", content: [{ type: "text", text: "DISCARDED_STAFF_HISTORY" }] },
+		},
+	];
+	const file = path.join(gateway.bobbitDir, "state", "session-prompts", `${sessionId}-staff-history-fork.jsonl`);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+	live.agentSessionFile = file;
+	gateway.sessionManager.getSessionStore(persisted.projectId).update(sessionId, { agentSessionFile: file });
+	return file;
+}
+
+
 let rpcBridgeModule: any;
 let agentSessionsDir = "";
 
@@ -386,6 +439,38 @@ test.describe.serial("staff session fork identity", () => {
 		expect(sourceSnapshot(await gateway.apiJson(`/api/staff/${source.id}`))).toEqual(sourceSnapshot(sourceBefore));
 		expect((await inbox(gateway, source.id)).map(entry => entry.title)).toEqual(["source only"]);
 		expect((await inbox(gateway, destination.id)).map(entry => entry.title)).toEqual(["destination only"]);
+	});
+
+	test("preserves cut-before-prompt history and binds colliding fork names by ID", async ({ gateway }) => {
+		const collisionName = `Collision ${randomUUID()}`;
+		const source = await createStaff(gateway, { name: collisionName });
+		const decoy = await createStaff(gateway, {
+			name: `Fork: ${collisionName}`,
+			description: "same-name decoy",
+			systemPrompt: "DECOY_PROMPT",
+		});
+		seedHistoryTranscript(gateway, source.currentSessionId);
+
+		const result = await forkSession(gateway, source.currentSessionId, {
+			entryId: "cut-user",
+			newWorktree: false,
+		});
+		expect(result.response.status, JSON.stringify(result.value)).toBe(201);
+		const persisted = gateway.sessionManager.getPersistedSession(result.value.id);
+		const owners = (await listStaff(gateway)).filter((staff: any) => staff.currentSessionId === result.value.id);
+		expect(owners).toHaveLength(1);
+		expect(owners[0].id).toBe(persisted.staffId);
+		expect(owners[0].id).not.toBe(source.id);
+		expect(owners[0].id).not.toBe(decoy.id);
+		expect(owners[0].name).toBe(decoy.name);
+		expect(decoy.currentSessionId).not.toBe(result.value.id);
+		expect(decoy.systemPrompt).toBe("DECOY_PROMPT");
+
+		const transcript = fs.readFileSync(persisted.agentSessionFile, "utf8");
+		expect(transcript).toContain("RETAINED_STAFF_HISTORY");
+		expect(transcript).toContain("RETAINED_STAFF_ANSWER");
+		expect(transcript).not.toContain("CUT_STAFF_PROMPT");
+		expect(transcript).not.toContain("DISCARDED_STAFF_HISTORY");
 	});
 
 	test("rejects host source-first deletion before mutation, then cleans the owner once after borrower deletion", async ({ gateway }) => {
@@ -663,5 +748,137 @@ test.describe.serial("staff session fork identity", () => {
 
 	test("whole-session sandbox staff fork retains legacy host-absolute transcript compatibility", async ({ gateway }) => {
 		await assertSandboxWholeStaffFork(gateway, "legacy-host");
+	});
+	test("reconciles the durable destination identity after a crash between session and staff commits", async ({ gateway }) => {
+		const source = await createStaff(gateway, { name: "Crash reconciliation source" });
+		const sourceBefore = structuredClone(await gateway.apiJson(`/api/staff/${source.id}`));
+		const manager = gateway.sessionManager as any;
+		const staffManager = manager.staffRecordSource as any;
+		const projectId = source.projectId as string;
+		const context = gateway.projectContextManager.getOrCreate(projectId);
+		const destinationStaffId = randomUUID();
+		const destinationSessionId = randomUUID();
+		const destinationName = `Fork: ${source.name}`;
+		const now = Date.now();
+
+		staffManager.prepareForkedStaff(sourceBefore, {
+			id: destinationStaffId,
+			name: destinationName,
+			projectId,
+			sessionId: destinationSessionId,
+		});
+		context.sessionStore.put({
+			id: destinationSessionId,
+			title: destinationName,
+			cwd: source.cwd,
+			agentSessionFile: "",
+			createdAt: now,
+			lastActivity: now,
+			projectId,
+			staffId: destinationStaffId,
+			borrowsWorktree: true,
+		});
+		await context.sessionStore.flushAsync();
+		const staffFile = (context.staffStore as any).storeFile as string;
+		const durableCandidate = JSON.parse(fs.readFileSync(staffFile, "utf8"))
+			.find((staff: any) => staff.id === destinationStaffId);
+		expect(durableCandidate?.forkPublication).toEqual({ version: 1, sessionId: destinationSessionId });
+		expect(staffManager.getStaff(destinationStaffId)).toBeUndefined();
+		expect((await listStaff(gateway, projectId)).some((staff: any) => staff.id === destinationStaffId)).toBe(false);
+
+		try {
+			const reconciled = staffManager.reconcileForkedStaffPublications();
+			expect(reconciled).toEqual({ committed: [destinationStaffId], aborted: [] });
+			const destination = staffManager.getStaff(destinationStaffId);
+			expect(destination).toMatchObject({
+				id: destinationStaffId,
+				name: destinationName,
+				currentSessionId: destinationSessionId,
+				projectId,
+			});
+			expect(destination.forkPublication).toBeUndefined();
+			expect(await inbox(gateway, destinationStaffId)).toEqual([]);
+			expect(await gateway.apiJson(`/api/staff/${source.id}`)).toEqual(sourceBefore);
+		} finally {
+			context.staffStore.remove(destinationStaffId);
+			context.searchIndex?.removeStaff(destinationStaffId);
+			context.sessionStore.remove(destinationSessionId);
+			await context.sessionStore.flushAsync();
+		}
+	});
+
+	test("rolls back a failed launch without changing or deauthorizing the source", async ({ gateway }) => {
+		const source = await createStaff(gateway, { name: "Failed launch source" });
+		const sourceBefore = structuredClone(await gateway.apiJson(`/api/staff/${source.id}`));
+		seedSessionTranscript(gateway, source.currentSessionId);
+		const manager = gateway.sessionManager as any;
+		const originalCreateSession = manager.createSession;
+		let options: any;
+		manager.createSession = async (...args: any[]) => {
+			options = args[4];
+			throw new Error("STAFF_FORK_LAUNCH_FAILURE");
+		};
+		let result: { response: Response; value: any };
+		try {
+			result = await forkSession(gateway, source.currentSessionId, { newWorktree: false });
+		} finally {
+			manager.createSession = originalCreateSession;
+		}
+
+		expect(result.response.status).toBe(500);
+		expect(result.value.error).toContain("STAFF_FORK_LAUNCH_FAILURE");
+		expect(options.staffId, `${FAILURE_MARKER}: even a failed staff fork must reserve a destination-only identity`).not.toBe(source.id);
+		expect(gateway.sessionManager.getSession(options.sessionId)).toBeUndefined();
+		expect(gateway.sessionManager.getPersistedSession(options.sessionId)).toBeUndefined();
+		expect((gateway.sessionManager as any).staffRecordSource.getStaff(options.staffId)).toBeUndefined();
+		expect(gateway.projectContextManager.getOrCreate(source.projectId).staffStore.getIncludingPending(options.staffId)).toBeUndefined();
+		expect(fs.existsSync(options.preExistingAgentSessionFile)).toBe(false);
+		expect(sourceSnapshot(await gateway.apiJson(`/api/staff/${source.id}`))).toEqual(sourceSnapshot(sourceBefore));
+		expect(gateway.sessionManager.getPersistedSession(source.currentSessionId)?.staffId).toBe(source.id);
+	});
+
+	test("publishes nothing when the source transcript cannot be cloned", async ({ gateway }) => {
+		const source = await createStaff(gateway, { name: "Failed transcript clone source" });
+		const sourceBefore = structuredClone(await gateway.apiJson(`/api/staff/${source.id}`));
+		const transcript = seedSessionTranscript(gateway, source.currentSessionId);
+		const transcriptBefore = fs.readFileSync(transcript, "utf8");
+		const staffIdsBefore = new Set((await listStaff(gateway)).map((staff: any) => staff.id));
+		const sessionIdsBefore = new Set(gateway.projectContextManager.getAllLiveSessions().map((session: any) => session.id));
+		const sourcePersisted = gateway.sessionManager.getPersistedSession(source.currentSessionId);
+		const persistedIdsBefore = new Set(gateway.sessionManager.getSessionStore(sourcePersisted.projectId).getAll().map((session: any) => session.id));
+		const manager = gateway.sessionManager as any;
+		const originalRecoverSessionFile = manager.recoverSessionFile;
+		const originalCopyFileSync = fs.copyFileSync;
+		const missingTranscript = path.join(gateway.bobbitDir, "state", "session-prompts", `missing-${randomUUID()}.jsonl`);
+		let destinationTranscript: string | undefined;
+		manager.recoverSessionFile = (persisted: any) => persisted.id === source.currentSessionId
+			? missingTranscript
+			: originalRecoverSessionFile.call(manager, persisted);
+		fs.copyFileSync = ((sourcePath: fs.PathLike, destinationPath: fs.PathLike, mode?: number) => {
+			if (String(sourcePath) === missingTranscript) {
+				destinationTranscript = String(destinationPath);
+				throw new Error("STAFF_FORK_TRANSCRIPT_COPY_FAILURE");
+			}
+			return originalCopyFileSync(sourcePath, destinationPath, mode);
+		}) as typeof fs.copyFileSync;
+
+		let result: { response: Response; value: any };
+		try {
+			result = await forkSession(gateway, source.currentSessionId, { newWorktree: false });
+		} finally {
+			manager.recoverSessionFile = originalRecoverSessionFile;
+			fs.copyFileSync = originalCopyFileSync;
+		}
+
+		expect(result.response.status).toBe(500);
+		expect(result.value.error).toContain("STAFF_FORK_TRANSCRIPT_COPY_FAILURE");
+		expect(destinationTranscript).toBeTruthy();
+		expect(fs.existsSync(destinationTranscript!)).toBe(false);
+		expect(new Set((await listStaff(gateway)).map((staff: any) => staff.id))).toEqual(staffIdsBefore);
+		expect(new Set(gateway.projectContextManager.getAllLiveSessions().map((session: any) => session.id))).toEqual(sessionIdsBefore);
+		expect(new Set(gateway.sessionManager.getSessionStore(sourcePersisted.projectId).getAll().map((session: any) => session.id))).toEqual(persistedIdsBefore);
+		expect(sourceSnapshot(await gateway.apiJson(`/api/staff/${source.id}`))).toEqual(sourceSnapshot(sourceBefore));
+		expect(gateway.sessionManager.getPersistedSession(source.currentSessionId)?.staffId).toBe(source.id);
+		expect(fs.readFileSync(transcript, "utf8")).toBe(transcriptBefore);
 	});
 });

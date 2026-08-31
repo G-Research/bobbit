@@ -1034,8 +1034,7 @@ test.describe("PR walkthrough → host.agents reviewer (API E2E)", () => {
 				childKind: "delegate",
 			});
 			delegateChild = del.sessionId;
-			if (!delegateChild) throw new Error("delegate spawn did not return a session ID");
-			createdSessionIds.push(delegateChild);
+			createdSessionIds.push(del.sessionId);
 
 			// host.agents sees ONLY the host-agents reviewer.
 			const host = buildHost(gateway, owner);

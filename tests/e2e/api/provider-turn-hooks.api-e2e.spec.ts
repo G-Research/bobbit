@@ -9,11 +9,8 @@
  *   - afterTurn        — fired server-side from the agent_end lifecycle seam.
  *   - sessionShutdown  — fired server-side from the archive seam.
  *
- * Fixture-pack install pattern mirrors provider-session-setup.spec.ts: the
- * provider-demo pack is layered as a SERVER-SCOPE market pack under the
- * per-gateway Headquarters config dir on top of the real built-in band (NOT via
- * BOBBIT_BUILTIN_PACKS_DIR, which would clobber sibling specs sharing the
- * worker-scoped in-process gateway).
+ * The provider-demo fixture is installed through the server-scope marketplace
+ * lifecycle so pack ordering and resolver cache invalidation match production.
  *
  * NON-NEGOTIABLE invariant pinned here: the user's message text is never mutated
  * by the per-turn hooks — recall lands in a hidden custom/user-side message, not
@@ -33,55 +30,27 @@ import {
 } from "../e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
+import {
+	installProviderDemoFixture,
+	type ProviderDemoFixture,
+} from "../test-utils/provider-demo-marketplace.js";
 import {
 	DYNAMIC_CONTEXT_END,
 	DYNAMIC_CONTEXT_START,
 	generateProviderBridgeExtension,
 } from "../../../dist/server/agent/provider-bridge-extension.js";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const fixturePackDir = path.resolve(__dirname, "..", "..", "fixtures", "packs", "provider-demo");
-const PACK_NAME = "provider-demo";
-
 interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }
 interface TraceEntry { ts: number; hook: string; sessionId: string; providers: TraceProviderRow[] }
 
-function writeMeta(packDir: string): void {
-	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
-		"sourceUrl: e2e",
-		"sourceRef: local",
-		"commit: test",
-		`packName: ${PACK_NAME}`,
-		"version: 1.0.0",
-		"installedAt: '2026-01-01T00:00:00.000Z'",
-		"updatedAt: '2026-01-01T00:00:00.000Z'",
-		"scope: server",
-	].join("\n") + "\n", "utf-8");
-}
-
-function installPack(headquartersDir: string): string {
-	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
-	fs.rmSync(packDir, { recursive: true, force: true });
-	fs.cpSync(fixturePackDir, packDir, { recursive: true });
-	writeMeta(packDir);
-	return packDir;
-}
-
-async function setProviderDisabled(providers: string[]): Promise<void> {
-	const resp = await apiFetch("/api/marketplace/pack-activation", {
-		method: "PUT",
-		body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: { providers } }),
-	});
-	expect(resp.status).toBe(200);
-}
-
 interface BeforePromptResult { status: number; content: string; tail: string; blocks: Array<Record<string, unknown>> }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<BeforePromptResult> {
+async function callBeforePrompt(sessionId: string, prompt: string, sessionSecret: string): Promise<BeforePromptResult> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt }),
 	});
 	const body = resp.status === 200 ? await resp.json() : {};
@@ -93,7 +62,7 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<Befo
 	};
 }
 
-async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
+async function registerGeneratedBridgeHandlers(sessionId: string, sessionSecret: string, tempDir: string): Promise<Map<string, (event: any) => Promise<any> | any>> {
 	const source = generateProviderBridgeExtension(sessionId);
 	const transpiled = ts.transpileModule(source, {
 		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
@@ -104,7 +73,15 @@ async function registerGeneratedBridgeHandlers(sessionId: string, tempDir: strin
 	const extensionFactory = typeof mod.default === "function" ? mod.default : mod.default?.default;
 	expect(typeof extensionFactory, "generated bridge default export").toBe("function");
 	const handlers = new Map<string, (event: any) => Promise<any> | any>();
-	extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	const hadSessionSecret = Object.prototype.hasOwnProperty.call(process.env, "BOBBIT_SESSION_SECRET");
+	const previousSessionSecret = process.env.BOBBIT_SESSION_SECRET;
+	try {
+		process.env.BOBBIT_SESSION_SECRET = sessionSecret;
+		extensionFactory({ on: (event: string, handler: (event: any) => Promise<any> | any) => handlers.set(event, handler) });
+	} finally {
+		if (hadSessionSecret) process.env.BOBBIT_SESSION_SECRET = previousSessionSecret!;
+		else delete process.env.BOBBIT_SESSION_SECRET;
+	}
 	return handlers;
 }
 
@@ -146,7 +123,7 @@ async function driveTurn(sessionId: string, prompt: string): Promise<string> {
 test.describe("provider per-turn hooks", () => {
 	const sessions: string[] = [];
 	const cwds: string[] = [];
-	let packDir: string;
+	let providerFixture: ProviderDemoFixture | undefined;
 
 	function freshCwd(label: string): string {
 		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), `provider-turn-${label}-`));
@@ -161,34 +138,44 @@ test.describe("provider per-turn hooks", () => {
 		return { id, cwd };
 	}
 
-	test.beforeAll(async ({ gateway }) => {
-		packDir = installPack(gateway.bobbitDir);
-		await setProviderDisabled([]);
+	test.beforeAll(async () => {
+		providerFixture = await installProviderDemoFixture([]);
 	});
 
 	test.afterAll(async () => {
-		await setProviderDisabled([]).catch(() => {});
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		if (providerFixture) await providerFixture.dispose();
 	});
 
 	test.afterEach(async () => {
-		// Disable everything so the next test starts from a known-quiet baseline
-		// and no provider hook fires during teardown deletes.
-		await setProviderDisabled(["demo", "boom", "slow"]).catch(() => {});
-		for (const id of sessions.splice(0)) await deleteSession(id).catch(() => {});
-		for (const cwd of cwds.splice(0)) fs.rmSync(cwd, { recursive: true, force: true });
+		const cleanupErrors: unknown[] = [];
+		const fixture = providerFixture;
+		const stages: Array<() => Promise<void>> = [
+			// Disable everything so no provider hook fires during teardown deletes.
+			...(fixture ? [() => fixture.setDisabled(["demo", "boom", "slow"])] : []),
+			...sessions.splice(0).map((id) => () => deleteSession(id)),
+			...cwds.splice(0).map((cwd) => async () => { fs.rmSync(cwd, { recursive: true, force: true }); }),
+		];
+		for (const stage of stages) {
+			try { await stage(); } catch (error) { cleanupErrors.push(error); }
+		}
+		if (cleanupErrors.length === 1) throw cleanupErrors[0];
+		if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "provider turn-hooks fixture cleanup failed");
 	});
 
-	test("beforePrompt returns dynamic-context message content, then afterTurn fires; both appear in the context trace", async () => {
+	test("beforePrompt returns dynamic-context message content, then afterTurn fires; both appear in the context trace", async ({ gateway }) => {
 		// demo + boom enabled; slow disabled so the happy path stays deterministic.
-		await setProviderDisabled(["slow"]);
+		await providerFixture!.setDisabled(["slow"]);
 		const { id, cwd } = await newSession("happy");
 
 		// sessionSetup is dispatched at creation.
 		expect(readLog(cwd)).toEqual(["sessionSetup"]);
 
 		const promptText = "Summarize the quarterly metrics";
-		const before = await callBeforePrompt(id, promptText);
+		const before = await callBeforePrompt(
+			id,
+			promptText,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+		);
 		expect(before.status).toBe(200);
 
 		// The endpoint returns message content carrying the demo block — and a
@@ -203,7 +190,7 @@ test.describe("provider per-turn hooks", () => {
 		// Metadata-only block summary (no raw content field leaked).
 		const demoBlock = before.blocks.find((b) => b.id === "demo:turn");
 		expect(demoBlock).toBeTruthy();
-		expect(demoBlock!.providerId).toBe("demo");
+		expect(demoBlock!.providerId).toBe("host-hooks");
 		expect(demoBlock!.title).toBe("Demo turn");
 		expect(typeof demoBlock!.tokenEstimate).toBe("number");
 		expect("content" in demoBlock!).toBe(false);
@@ -233,10 +220,14 @@ test.describe("provider per-turn hooks", () => {
 		expect(at!.providers.some((p) => p.id === "demo")).toBe(true);
 	});
 
-	test("generated bridge delivers dynamic context as a hidden custom message and keeps system prompt stable", async () => {
-		await setProviderDisabled(["slow"]);
+	test("generated bridge delivers dynamic context as a hidden custom message and keeps system prompt stable", async ({ gateway }) => {
+		await providerFixture!.setDisabled(["slow"]);
 		const { id, cwd } = await newSession("bridge");
-		const handlers = await registerGeneratedBridgeHandlers(id, cwd);
+		const handlers = await registerGeneratedBridgeHandlers(
+			id,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+			cwd,
+		);
 		const beforeAgentStart = handlers.get("before_agent_start") as (event: any) => Promise<any>;
 		const filterContext = handlers.get("context") as (event: any) => any;
 		expect(typeof beforeAgentStart, "generated bridge registered before_agent_start").toBe("function");
@@ -288,11 +279,12 @@ test.describe("provider per-turn hooks", () => {
 		expect(filtered.messages.at(-1)).toBe(dynamicMessages[1]);
 	});
 
-	test("context-trace honours the limit query param", async () => {
-		await setProviderDisabled(["slow"]);
+	test("context-trace honours the limit query param", async ({ gateway }) => {
+		await providerFixture!.setDisabled(["slow"]);
 		const { id } = await newSession("limit");
+		const sessionSecret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id);
 		// Generate several beforePrompt dispatches (each appends one trace entry).
-		for (let i = 0; i < 3; i++) await callBeforePrompt(id, `turn ${i}`);
+		for (let i = 0; i < 3; i++) await callBeforePrompt(id, `turn ${i}`, sessionSecret);
 
 		const limited = await readContextTrace(id, 2);
 		expect(limited.length).toBeLessThanOrEqual(2);
@@ -300,14 +292,18 @@ test.describe("provider per-turn hooks", () => {
 		expect(limited.at(-1)!.hook).toBe("beforePrompt");
 	});
 
-	test("disabling the provider is a kill switch — no hook fires for the next turn", async () => {
-		await setProviderDisabled(["demo", "boom", "slow"]);
+	test("disabling the provider is a kill switch — no hook fires for the next turn", async ({ gateway }) => {
+		await providerFixture!.setDisabled(["demo", "boom", "slow"]);
 		const { id, cwd } = await newSession("disabled");
 
 		// No sessionSetup ran, so no log file exists at all.
 		expect(fs.existsSync(path.join(cwd, ".provider-demo-log"))).toBe(false);
 
-		const before = await callBeforePrompt(id, "anything");
+		const before = await callBeforePrompt(
+			id,
+			"anything",
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+		);
 		expect(before.status).toBe(200);
 		expect(before.content).toBe("");
 		expect(before.tail).toBe("");
@@ -323,13 +319,17 @@ test.describe("provider per-turn hooks", () => {
 		});
 	});
 
-	test("a hanging provider is bounded by its timeout — endpoint returns empty content with a timeout trace row", async () => {
+	test("a hanging provider is bounded by its timeout — endpoint returns empty content with a timeout trace row", async ({ gateway }) => {
 		// Only the slow (hanging) provider is enabled.
-		await setProviderDisabled(["demo", "boom"]);
+		await providerFixture!.setDisabled(["demo", "boom"]);
 		const { id } = await newSession("hang");
 
 		const t0 = Date.now();
-		const before = await callBeforePrompt(id, "hangs");
+		const before = await callBeforePrompt(
+			id,
+			"hangs",
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(id),
+		);
 		const elapsed = Date.now() - t0;
 
 		expect(before.status).toBe(200);
@@ -348,7 +348,7 @@ test.describe("provider per-turn hooks", () => {
 	});
 
 	test("archiving a session dispatches sessionShutdown", async () => {
-		await setProviderDisabled(["slow"]);
+		await providerFixture!.setDisabled(["slow"]);
 		const { id, cwd } = await newSession("shutdown");
 		expect(readLog(cwd)).toEqual(["sessionSetup"]);
 

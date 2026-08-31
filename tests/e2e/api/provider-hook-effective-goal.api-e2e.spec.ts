@@ -18,40 +18,12 @@
  */
 import { test, expect } from "../in-process-harness.js";
 import { apiFetch, createSession, deleteSession, deleteGoal, nonGitCwd } from "../e2e-setup.js";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+	installProviderDemoFixture,
+	type ProviderDemoFixture,
+} from "../test-utils/provider-demo-marketplace.js";
 
-const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const fixturePackDir = path.resolve(__dirname, "..", "..", "fixtures", "packs", "provider-demo");
-const PACK_NAME = "provider-demo";
 const SPEC = "E2E provider-hook effective-goal spec — non-placeholder spec text so the goal route accepts it.";
-
-function installPack(headquartersDir: string): string {
-	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
-	fs.rmSync(packDir, { recursive: true, force: true });
-	fs.cpSync(fixturePackDir, packDir, { recursive: true });
-	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
-		"sourceUrl: e2e",
-		"sourceRef: local",
-		"commit: test",
-		`packName: ${PACK_NAME}`,
-		"version: 1.0.0",
-		"installedAt: '2026-01-01T00:00:00.000Z'",
-		"updatedAt: '2026-01-01T00:00:00.000Z'",
-		"scope: server",
-	].join("\n") + "\n", "utf-8");
-	return packDir;
-}
-
-/** Disable the named providers pack-wide (server scope) + bust the registry cache. */
-async function setProviderDisabled(providers: string[]): Promise<void> {
-	const resp = await apiFetch("/api/marketplace/pack-activation", {
-		method: "PUT",
-		body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: { providers } }),
-	});
-	expect(resp.status).toBe(200);
-}
 
 async function createGoalRaw(body: Record<string, unknown>): Promise<Record<string, any>> {
 	const resp = await apiFetch("/api/goals", {
@@ -74,9 +46,10 @@ async function createDelegate(parentId: string): Promise<Record<string, any>> {
 	return resp.json();
 }
 
-async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string; tail: string }> {
+async function callBeforePrompt(sessionId: string, prompt: string, sessionSecret: string): Promise<{ status: number; content: string; tail: string }> {
 	const resp = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
+		headers: { "X-Bobbit-Session-Secret": sessionSecret },
 		body: JSON.stringify({ prompt }),
 	});
 	const body = resp.status === 200 ? await resp.json() : {};
@@ -88,25 +61,34 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ st
 }
 
 test.describe.serial("provider hook endpoints resolve the effective goal (teamGoalId)", () => {
-	let packDir: string;
+	let providerFixture: ProviderDemoFixture | undefined;
 	const sessions: string[] = [];
 	const goals: string[] = [];
 
-	test.beforeAll(async ({ gateway }) => {
-		packDir = installPack(gateway.bobbitDir);
+	test.beforeAll(async () => {
 		// demo enabled globally; the throwing/hanging siblings disabled so the
 		// happy path stays deterministic and fast.
-		await setProviderDisabled(["boom", "slow"]);
+		providerFixture = await installProviderDemoFixture(["boom", "slow"]);
 	});
 
 	test.afterAll(async () => {
-		for (const id of sessions.splice(0)) await deleteSession(id).catch(() => {});
-		for (const id of goals.splice(0)) await deleteGoal(id).catch(() => {});
-		await setProviderDisabled([]).catch(() => {});
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		const cleanupErrors: unknown[] = [];
+		const fixture = providerFixture;
+		const stages: Array<() => Promise<void>> = [
+			// Keep every provider quiet while sessionShutdown runs.
+			...(fixture ? [() => fixture.setDisabled(["demo", "boom", "slow"])] : []),
+			...sessions.splice(0).map((id) => () => deleteSession(id)),
+			...goals.splice(0).map((id) => () => deleteGoal(id)),
+			...(fixture ? [() => fixture.dispose()] : []),
+		];
+		for (const stage of stages) {
+			try { await stage(); } catch (error) { cleanupErrors.push(error); }
+		}
+		if (cleanupErrors.length === 1) throw cleanupErrors[0];
+		if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "provider effective-goal fixture cleanup failed");
 	});
 
-	test("delegate (teamGoalId only) under a metadata-disabled goal gets EMPTY content; metadata-less control still fires", async () => {
+	test("delegate (teamGoalId only) under a metadata-disabled goal gets EMPTY content; metadata-less control still fires", async ({ gateway }) => {
 		// Goal whose metadata disables the demo provider for the whole subtree.
 		const disabledGoal = await createGoalRaw({
 			title: "hook-disabled",
@@ -138,7 +120,11 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		const prompt = "Summarize the quarterly metrics";
 
 		// FIX: the endpoint resolves teamGoalId → goal metadata → demo filtered out.
-		const disabled = await callBeforePrompt(disabledDelegate.id, prompt);
+		const disabled = await callBeforePrompt(
+			disabledDelegate.id,
+			prompt,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(disabledDelegate.id),
+		);
 		expect(disabled.status).toBe(200);
 		expect(disabled.content, "demo must be filtered for a delegate whose teamGoalId-goal disables it").toBe("");
 		expect(disabled.tail).toBe("");
@@ -146,7 +132,11 @@ test.describe.serial("provider hook endpoints resolve the effective goal (teamGo
 		// Control delegate (metadata-less goal) still receives the demo block —
 		// proves the endpoint itself works and the filtering is goal-metadata-driven
 		// via teamGoalId, not a global outage.
-		const control = await callBeforePrompt(controlDelegate.id, prompt);
+		const control = await callBeforePrompt(
+			controlDelegate.id,
+			prompt,
+			gateway.sessionManager.sessionSecretStore.getOrCreateSecret(controlDelegate.id),
+		);
 		expect(control.status).toBe(200);
 		expect(control.content).toContain(`DEMO_BEFORE_PROMPT ${prompt}`);
 		expect(control.tail).toContain(control.content);
