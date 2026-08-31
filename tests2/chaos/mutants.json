@@ -48,7 +48,7 @@
     "search": "\t\tthis.sessions.set(session.id, session);\n\t\tthis.saveNow(); // immediate — structural change\n\t\tthis.onIndexUpdate?.(session);",
     "replace": "\t\tthis.sessions.set(session.id, session);\n\t\t// this.saveNow(); // mutant: no persist on put\n\t\tthis.onIndexUpdate?.(session);",
     "expectedLegacyCatchers": ["tests/session-store.test.ts"],
-    "expectedV2Catchers": ["tests2/core/session-store.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/session-store.unit.test.ts"]
   },
   {
     "id": "M05-scheduler-wrong-return",
@@ -68,7 +68,7 @@
     "search": "\tprivate static readonly WORKER_IDLE_NUDGE_DEBOUNCE_MS = 5_000;",
     "replace": "\tprivate static readonly WORKER_IDLE_NUDGE_DEBOUNCE_MS = 0; // mutant: no debounce",
     "expectedLegacyCatchers": ["tests/team-manager-worker-idle-debounce.test.ts"],
-    "expectedV2Catchers": ["tests2/core/team-manager-worker-idle-debounce.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/team-manager-worker-idle-debounce.unit.test.ts"]
   },
   {
     "id": "M07-session-status-no-bump",
@@ -78,7 +78,7 @@
     "search": "\tsession.statusVersion = (session.statusVersion ?? 0) + 1;",
     "replace": "\t// session.statusVersion = (session.statusVersion ?? 0) + 1; // mutant: no bump",
     "expectedLegacyCatchers": ["tests/session-manager-status.test.ts"],
-    "expectedV2Catchers": ["tests2/core/session-manager-status.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/session-manager-status.unit.test.ts"]
   },
   {
     "id": "M08-session-status-skip-broadcast",
@@ -88,7 +88,7 @@
     "search": "\t\tif (client.readyState !== 1) continue;",
     "replace": "\t\tif (true) continue; // mutant: skip all clients",
     "expectedLegacyCatchers": ["tests/session-manager-status.test.ts"],
-    "expectedV2Catchers": ["tests2/core/session-manager-status.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/session-manager-status.unit.test.ts"]
   },
   {
     "id": "M09-branch-wrong-slice",
@@ -98,7 +98,7 @@
     "search": "\t\t.slice(0, 14)",
     "replace": "\t\t.slice(0, 50) // mutant: wrong truncation",
     "expectedLegacyCatchers": ["tests/team-branch-shape.test.ts"],
-    "expectedV2Catchers": ["tests2/core/team-branch-shape.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/team-branch-shape.unit.test.ts"]
   },
   {
     "id": "M10-worktree-slug-wrong-replace",
@@ -108,7 +108,7 @@
     "search": "\treturn branch.replace(/\\//g, \"-\");",
     "replace": "\treturn branch.replace(/\\./g, \"-\"); // mutant: wrong char replaced",
     "expectedLegacyCatchers": ["tests/worktree-paths.test.ts"],
-    "expectedV2Catchers": ["tests2/core/worktree-paths.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/worktree-paths.unit.test.ts"]
   },
   {
     "id": "M11-push-safety-bypass",
@@ -118,7 +118,7 @@
     "search": "\tconst tokens = shellTokenize(command);\n\tconst protectedBranches = protectedBranchSet(vars);",
     "replace": "\tif (true) return { ok: true }; // mutant: bypass all checks\n\tconst tokens = shellTokenize(command);\n\tconst protectedBranches = protectedBranchSet(vars);",
     "expectedLegacyCatchers": ["tests/verification-push-guard.test.ts"],
-    "expectedV2Catchers": ["tests2/core/verification-push-guard.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/verification-push-guard.unit.test.ts"]
   },
   {
     "id": "M12-step-timeout-no-unit",
@@ -128,7 +128,7 @@
     "search": "\treturn isComponentUnitCommand ? DEFAULT_UNIT_COMMAND_STEP_TIMEOUT_SEC : DEFAULT_COMMAND_STEP_TIMEOUT_SEC;",
     "replace": "\treturn DEFAULT_COMMAND_STEP_TIMEOUT_SEC; // mutant: no unit-command special case",
     "expectedLegacyCatchers": ["tests/verification-harness-command-scheduling.test.ts"],
-    "expectedV2Catchers": ["tests2/core/verification-harness-command-scheduling.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/verification-harness-command-scheduling.unit.test.ts"]
   },
   {
     "id": "M13-fence-gh-bypass",
@@ -200,7 +200,7 @@
     "search": "\tconst liveSessions = dedupeSessionsById(sortSessions(input.sessions.filter(s => !s.archived)));",
     "replace": "\tconst liveSessions = dedupeSessionsById(sortSessions(input.sessions.filter(s => !!s.archived))); // mutant",
     "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
-    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/sidebar-tree-builder.unit.test.ts"]
   },
   {
     "id": "M20-gate-status-no-live-renderer",
@@ -281,7 +281,7 @@
     "search": "\t\tif (this._value > 0) {\n\t\t\tthis._value--;\n\t\t\treturn;\n\t\t}",
     "replace": "\t\tif (this._value >= 0) { // mutant: off-by-one — hands out permits past capacity\n\t\t\tthis._value--;\n\t\t\treturn;\n\t\t}",
     "expectedLegacyCatchers": ["tests/semaphore.test.ts"],
-    "expectedV2Catchers": ["tests2/core/semaphore.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/semaphore.unit.test.ts"]
   },
   {
     "id": "M28-semaphore-overrelease-offbyone",
@@ -291,7 +291,7 @@
     "search": "\t\tif (this._value >= this._capacity) {",
     "replace": "\t\tif (this._value > this._capacity) { // mutant: off-by-one — over-release no longer throws",
     "expectedLegacyCatchers": ["tests/semaphore.test.ts"],
-    "expectedV2Catchers": ["tests2/core/semaphore.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/semaphore.unit.test.ts"]
   },
   {
     "id": "M29-child-rtm-master-step-inverted",
@@ -371,7 +371,7 @@
     "search": "\treturn [...groups.keys()].sort((a, b) => a - b);",
     "replace": "\treturn [...groups.keys()].sort((a, b) => b - a); // mutant: reversed phase order",
     "expectedLegacyCatchers": ["tests/verification-logic.test.ts"],
-    "expectedV2Catchers": ["tests2/core/verification-logic.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/verification-logic.unit.test.ts"]
   },
   {
     "id": "M37-canskipallsteps-offbyone",
@@ -381,7 +381,7 @@
     "search": "\treturn cache.size >= activeSteps.length && activeSteps.every(s => cache.has(s.name));",
     "replace": "\treturn cache.size > activeSteps.length && activeSteps.every(s => cache.has(s.name)); // mutant: off-by-one",
     "expectedLegacyCatchers": ["tests/verification-logic.test.ts"],
-    "expectedV2Catchers": ["tests2/core/verification-logic.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/verification-logic.unit.test.ts"]
   },
   {
     "id": "M38-computeallpassed-inverted-boolean",
@@ -391,7 +391,7 @@
     "search": "\treturn results.every(r => r.skipped || r.passed);",
     "replace": "\treturn results.every(r => r.skipped && r.passed); // mutant: inverted OR->AND",
     "expectedLegacyCatchers": ["tests/verification-logic.test.ts"],
-    "expectedV2Catchers": ["tests2/core/verification-logic.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/verification-logic.unit.test.ts"]
   },
   {
     "id": "M39-cascade-server-origin-wrong",
@@ -461,7 +461,7 @@
     "search": "const DEFAULT_BASE_INDENT_PX = SIDEBAR_TREE_BASE_INDENT_PX;",
     "replace": "const DEFAULT_BASE_INDENT_PX = 3; // mutant: wrong default base indent",
     "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
-    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/sidebar-tree-builder.unit.test.ts"]
   },
   {
     "id": "M46-sidebar-nested-indent-wrong-default",
@@ -471,7 +471,7 @@
     "search": "const DEFAULT_NESTED_GOAL_INDENT_PX = SIDEBAR_TREE_INDENT_DEFAULT_PX;",
     "replace": "const DEFAULT_NESTED_GOAL_INDENT_PX = 9; // mutant: wrong default nested indent",
     "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
-    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/sidebar-tree-builder.unit.test.ts"]
   },
   {
     "id": "M47-sidebar-clamp-minmax-swapped",
@@ -481,7 +481,7 @@
     "search": "MIN_NESTED_GOAL_INDENT_PX, MAX_NESTED_GOAL_INDENT_PX, DEFAULT_BASE_INDENT_PX",
     "replace": "MAX_NESTED_GOAL_INDENT_PX, MIN_NESTED_GOAL_INDENT_PX, DEFAULT_BASE_INDENT_PX",
     "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
-    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/sidebar-tree-builder.unit.test.ts"]
   },
   {
     "id": "M48-sidebar-livegoals-inverted",
@@ -491,7 +491,7 @@
     "search": "\tconst liveGoals = projectGoals.filter(g => !g.archived);",
     "replace": "\tconst liveGoals = projectGoals.filter(g => !!g.archived); // mutant: inverted archived filter",
     "expectedLegacyCatchers": ["tests/sidebar-tree-builder.test.ts"],
-    "expectedV2Catchers": ["tests2/core/sidebar-tree-builder.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/sidebar-tree-builder.unit.test.ts"]
   },
   {
     "id": "M49-bash-renderer-description-inverted",
