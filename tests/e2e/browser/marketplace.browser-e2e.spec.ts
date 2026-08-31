@@ -387,7 +387,7 @@ test.describe("Marketplace UI", () => {
 		await expect(page.locator('[data-testid="market-browse-controls"]')).toBeVisible({ timeout: 15_000 });
 		await expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
 		await expect(trigger).toHaveAttribute("aria-expanded", "false");
-		await expect(summary).toContainText("Showing 5 packages from 3 sources");
+		await expect(summary).toContainText("Showing 6 packages from 3 sources");
 		await openBrowseSourcesMenu(page);
 		const menu = page.locator('[data-testid="market-source-menu"]');
 		const sourceOptions = page.locator('[data-testid="market-source-option"]');
@@ -397,7 +397,7 @@ test.describe("Marketplace UI", () => {
 		await expect(sourceOptions).toHaveCount(3);
 		await expect(page.locator('[data-testid="market-source-count"]')).toHaveCount(3);
 		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "1 package" })).toHaveCount(2);
-		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "3 packages" })).toHaveCount(1);
+		await expect(page.locator('[data-testid="market-source-count"]').filter({ hasText: "4 packages" })).toHaveCount(1);
 		await expect(sourceCheckboxes).toHaveCount(3);
 		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(3);
 
@@ -434,8 +434,8 @@ test.describe("Marketplace UI", () => {
 		await page.locator('[data-testid="market-source-select-all"]').click();
 		await expect(menu).toBeVisible();
 		await expect.poll(async () => page.locator('[data-testid="market-source-checkbox"]:checked').count(), { timeout: 10_000 }).toBe(3);
-		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(5);
-		await expect(summary).toContainText("Showing 5 packages from 3 sources");
+		await expect(page.locator('[data-testid="market-browse-pack"]')).toHaveCount(6);
+		await expect(summary).toContainText("Showing 6 packages from 3 sources");
 
 		await page.keyboard.press("Escape");
 		await expect(trigger).toHaveAttribute("aria-expanded", "false");
