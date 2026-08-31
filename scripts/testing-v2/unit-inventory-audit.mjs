@@ -373,7 +373,7 @@ const E2E_FIXTURE_PATH_GRANDFATHER = Object.freeze([
 	"tests/e2e/ui/sidebar-keyboard-nav.spec.ts:23",
 	"tests/e2e/ui/sidebar-unified-tree.spec.ts:161",
 	"tests2/browser/e2e/file-explorer-pack.spec.ts:351",
-	"tests2/browser/fixtures/project-drag-reorder.spec.ts:67",
+	"tests/browser/fixtures/project-drag-reorder.fixture.spec.ts:67",
 	"tests2/browser/journeys/prompt-interaction.journey.spec.ts:166",
 ]);
 function listTestSources(root, extensions) {
@@ -392,6 +392,7 @@ function listTestSources(root, extensions) {
 }
 const e2eBrowserSources = [
 	...listTestSources("tests/e2e", [".ts", ".mjs"]),
+	...listTestSources("tests/browser", [".ts"]),
 	...listTestSources("tests2/browser", [".ts"]),
 ];
 const allE2eFixtureViolations = e2eBrowserSources
