@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "../gateway-harness.js";
@@ -122,9 +122,7 @@ test.describe("local-only sub-agent branch policy (UI)", () => {
 			const goalRepoPath = goal.repoPath;
 			expect(typeof goalRepoPath).toBe("string");
 			if (typeof goalRepoPath !== "string") throw new Error("created goal must expose a string repoPath");
-			const repoIdentity = statSync(repo, { bigint: true });
-			const goalRepoIdentity = statSync(goalRepoPath, { bigint: true });
-			expect([goalRepoIdentity.dev, goalRepoIdentity.ino]).toEqual([repoIdentity.dev, repoIdentity.ino]);
+			expect(realpathSync.native(goalRepoPath)).toBe(realpathSync.native(repo));
 			expect(goal.worktreePath).toBeTruthy();
 			expect(goal.cwd).toBe(goal.worktreePath);
 			await waitForGoalReady(goalId);
