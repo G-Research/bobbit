@@ -210,7 +210,7 @@
     "search": "\t\tconst shouldRenderLiveVerification = !!(latestSignal && verification && goalId2 && resolvedGateId && signalId);",
     "replace": "\t\tconst shouldRenderLiveVerification = false; // mutant: never render live verification",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/dom/gate-status-renderer.test.ts"],
+    "expectedV2Catchers": ["tests/dom/gate-status-renderer.dom.test.ts"],
     "note": "Renderer legacy coverage is a Playwright browser spec (tests/gate-status-renderer.spec.ts) that runs in the browser tier, NOT the node chaos harness — so it is intentionally not listed here to avoid a false-positive kill from a tsx import error. The v2 dom-tier catcher runs the REAL renderer under happy-dom."
   },
   {
@@ -501,7 +501,7 @@
     "search": "\t\t\t? (params.description",
     "replace": "\t\t\t? (!params.description // mutant: inverted description guard",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/dom/bash-renderer-description.test.ts"],
+    "expectedV2Catchers": ["tests/dom/bash-renderer-description.dom.test.ts"],
     "note": "Renderer legacy coverage is a Playwright browser spec (tests/bash-renderer-description.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL BashRenderer under happy-dom."
   },
   {
@@ -512,7 +512,7 @@
     "search": "\t\t(content as any)._truncated === true",
     "replace": "\t\t(content as any)._truncated !== true // mutant: inverted truncation detection",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/dom/write-renderer-truncated.test.ts"],
+    "expectedV2Catchers": ["tests/dom/write-renderer-truncated.dom.test.ts"],
     "note": "Renderer legacy coverage is a Playwright browser spec (tests/write-renderer-truncated.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL WriteRenderer under happy-dom."
   },
   {
@@ -523,7 +523,7 @@
     "search": "\tif (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;",
     "replace": "\tif (bytes >= 1_048_576) return `${(bytes / 1024).toFixed(1)} MB`; // mutant: wrong MB divisor",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/dom/write-renderer-truncated.test.ts"],
+    "expectedV2Catchers": ["tests/dom/write-renderer-truncated.dom.test.ts"],
     "note": "Renderer legacy coverage is a Playwright browser spec (tests/write-renderer-truncated.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL WriteRenderer under happy-dom."
   },
   {
@@ -534,7 +534,7 @@
     "search": "signalStatus === \"passed\" || signalStatus === \"failed\" ? signalStatus : undefined",
     "replace": "signalStatus === \"failed\" ? signalStatus : undefined",
     "expectedLegacyCatchers": [],
-    "expectedV2Catchers": ["tests2/dom/gate-status-renderer.test.ts"],
+    "expectedV2Catchers": ["tests/dom/gate-status-renderer.dom.test.ts"],
     "note": "Renderer legacy coverage is a Playwright browser spec (tests/gate-status-renderer.spec.ts) that runs in the browser tier, not the node chaos harness; the v2 dom-tier catcher renders the REAL GateStatusRenderer under happy-dom."
   },
   {
