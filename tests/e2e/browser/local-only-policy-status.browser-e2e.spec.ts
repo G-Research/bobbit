@@ -35,13 +35,15 @@ type SettledGoalRecord = {
 };
 
 async function waitForGoalReady(goalId: string): Promise<SettledGoalRecord> {
-	return await pollUntil(async () => {
+	const settledGoal = await pollUntil(async () => {
 		const resp = await apiFetch(`/api/goals/${goalId}`);
 		if (!resp.ok) return null;
 		const goal = await resp.json() as { setupStatus?: unknown };
 		if (goal.setupStatus === "error") throw new Error(`goal setup failed: ${JSON.stringify(goal)}`);
 		return goal.setupStatus === "ready" ? goal as SettledGoalRecord : null;
 	}, { timeoutMs: 60_000, intervalMs: 250, label: `goal ${goalId} setup ready` });
+	if (!settledGoal) throw new Error(`goal ${goalId} setup readiness poll returned no record`);
+	return settledGoal;
 }
 
 type MockBarrierCore = {
