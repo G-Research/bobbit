@@ -965,12 +965,15 @@ function renderWorktreeSection(
 					placeholder=${baseRefBlank && resolvedRef ? resolvedRef : "origin/master (default)"}
 					.value=${baseRefValue}
 					@input=${(e: Event) => {
-						pendingChanges.base_ref = (e.target as HTMLInputElement).value;
-						// Clear stale inline error as soon as the user edits the field.
-						if (_baseRefErrors.has(projectId)) {
-							_baseRefErrors.delete(projectId);
-							renderApp();
-						}
+						const hadPendingBaseRef = Object.prototype.hasOwnProperty.call(pendingChanges, "base_ref");
+						const previousValue = hadPendingBaseRef ? pendingChanges.base_ref : baseRefValue;
+						const nextValue = (e.target as HTMLInputElement).value;
+						pendingChanges.base_ref = nextValue;
+						// The first edit changes Save visibility. Later edits only need a render
+						// when another visible base-ref affordance changes.
+						const clearedError = _baseRefErrors.delete(projectId);
+						const blanknessChanged = !String(previousValue).trim() !== !nextValue.trim();
+						if (!hadPendingBaseRef || clearedError || blanknessChanged) renderApp();
 					}}
 				/>
 			</div>
