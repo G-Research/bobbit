@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const TESTS_DIRS = ["./", "../../../tests2/core/"].map((path) =>
+const TESTS_DIRS = ["./", "../isolated/", "../../../tests2/core/"].map((path) =>
 	new URL(path, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"),
 );
 const SELF = "no-dist-imports.unit.test.ts";
