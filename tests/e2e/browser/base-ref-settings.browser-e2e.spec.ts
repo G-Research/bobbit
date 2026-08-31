@@ -16,6 +16,45 @@ import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
 
 type BrowserPage = Parameters<typeof openApp>[0];
 
+async function holdFirstGetRequest(page: BrowserPage, matches: (url: URL) => boolean) {
+	let releaseRequest!: () => void;
+	const requestGate = new Promise<void>((resolve) => { releaseRequest = resolve; });
+	let handled = false;
+	let released = false;
+	let resolveFinished!: () => void;
+	const finished = new Promise<void>((resolve) => { resolveFinished = resolve; });
+	const handler = async (
+		route: import("@playwright/test").Route,
+		request: import("@playwright/test").Request,
+	) => {
+		if (request.method() !== "GET" || handled) {
+			await route.fallback();
+			return;
+		}
+		handled = true;
+		try {
+			await requestGate;
+			await route.continue();
+		} finally {
+			resolveFinished();
+		}
+	};
+	await page.route(matches, handler);
+
+	let cleanupPromise: Promise<void> | undefined;
+	return {
+		isHandled: () => handled,
+		cleanup: () => cleanupPromise ??= (async () => {
+			if (!released) {
+				released = true;
+				releaseRequest();
+			}
+			if (handled) await finished;
+			await page.unroute(matches, handler);
+		})(),
+	};
+}
+
 // Base repo comes from the immutable committed template (master + README.md +
 // .gitattributes + one commit); tags and fake remote refs stay real git.
 async function gitInit(dir: string, opts?: { tags?: string[]; remoteRefs?: string[] }): Promise<void> {
@@ -59,7 +98,7 @@ async function openBaseRefSettings(page: BrowserPage, project: { id: string; nam
 	return input;
 }
 
-async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus: number): Promise<void> {
+async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus: number): Promise<Record<string, unknown>> {
 	const savePromise = page.waitForResponse(
 		resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
 			resp.request().method() === "PUT" &&
@@ -71,8 +110,12 @@ async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus:
 	await expect(saveButton).toBeVisible({ timeout: 10_000 });
 	await expect(saveButton).toBeEnabled({ timeout: 10_000 });
 	await saveButton.click();
-	await savePromise;
+	const saveResponse = await savePromise;
+	const saveRequest = saveResponse.request();
+	expect(new URL(saveRequest.url()).pathname).toBe(`/api/projects/${projectId}/config`);
+	const payload = saveRequest.postDataJSON?.() ?? JSON.parse(saveRequest.postData() || "{}");
 	await expect(page.locator("button").filter({ hasText: /^Saving\.\.\.$/ })).toHaveCount(0, { timeout: 10_000 });
+	return payload as Record<string, unknown>;
 }
 
 async function expectBaseRefError(page: BrowserPage, expectedText: string) {
@@ -89,18 +132,71 @@ async function deleteProjects(projectIds: string[]): Promise<void> {
 }
 
 test.describe("Settings → Base Ref field", () => {
-	test("persists across reload (happy path)", async ({ page }) => {
+	test("first valid edit exposes Save and persists across reload", async ({ page }) => {
 		const projectIds: string[] = [];
+		let cleanupHeldRequests: (() => Promise<void>) | undefined;
 		try {
 			const dir = uniqueProjectDir("happy");
 			await gitInit(dir, { remoteRefs: ["develop"] });
 			const project = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
 			projectIds.push(project.id);
+			const initial = await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: "master" }),
+			});
+			expect(initial.ok, `initial base_ref setup failed: ${initial.status}`).toBe(true);
 
 			await openApp(page);
+
+			// The first General render starts from an empty config cache and requests
+			// detection before the stored base_ref arrives. Settings also loads harness
+			// status on its first render. Hold both requests so neither can lend the old
+			// input handler an unrelated render after the edit.
+			const heldDetect = await holdFirstGetRequest(
+				page,
+				(url) => url.pathname === `/api/projects/${project.id}/base-ref/detect`,
+			);
+			const heldHarnessStatus = await holdFirstGetRequest(
+				page,
+				(url) => url.pathname === "/api/harness-status",
+			);
+			cleanupHeldRequests = async () => {
+				await Promise.all([heldDetect.cleanup(), heldHarnessStatus.cleanup()]);
+			};
+
 			const input = await openBaseRefSettings(page, project);
+			await expect(input).toHaveValue("master");
+			await expect.poll(() => heldDetect.isHandled(), { timeout: 10_000 }).toBe(true);
+			await expect.poll(() => heldHarnessStatus.isHandled(), { timeout: 10_000 }).toBe(true);
+
+			// Settle every other bounded Settings/General bootstrap render. The app-info
+			// header, config, pool, Docker, and host-token loaders have all completed;
+			// detect and harness status remain deliberately held through the assertion.
+			await expect(page.getByTestId("settings-app-version")).toBeVisible({ timeout: 10_000 });
+			const poolStatusRow = page.getByText("Pool Status", { exact: true }).locator("..");
+			await expect(poolStatusRow).not.toContainText("Loading...");
+			const dockerStatusRow = page.getByText("Docker Status", { exact: true }).locator("..");
+			await expect(dockerStatusRow).not.toContainText("Checking...");
+			await expect(page.getByText("Detecting...", { exact: true })).toHaveCount(0);
+
+			const saveButton = page.locator("button").filter({ hasText: /^Save$/ }).first();
+			await expect(saveButton).toHaveCount(0);
 			await input.fill("origin/develop");
-			await saveBaseRef(page, project.id, 200);
+			await page.evaluate(() => new Promise<void>((resolve) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+			}));
+			expect(
+				await saveButton.isVisible(),
+				"BASE_REF_SAVE_CAUSAL_RENDER: first valid edit must expose Save on its own render",
+			).toBe(true);
+
+			// Continue the held requests to their real endpoints only after the causal
+			// assertion, then remove both routes before Save/reload persistence coverage.
+			await cleanupHeldRequests();
+			cleanupHeldRequests = undefined;
+
+			const payload = await saveBaseRef(page, project.id, 200);
+			expect(payload).toEqual({ base_ref: "origin/develop" });
 
 			// Reload — value should persist.
 			await page.reload();
@@ -110,6 +206,7 @@ test.describe("Settings → Base Ref field", () => {
 			const inputAfter = await openBaseRefSettings(page, project);
 			await expect(inputAfter).toHaveValue("origin/develop");
 		} finally {
+			if (cleanupHeldRequests) await cleanupHeldRequests();
 			await deleteProjects(projectIds);
 		}
 	});
