@@ -20,7 +20,7 @@ async function loadDirectServerEntry(): Promise<typeof import("../../../src/serv
 	// The configured umbrella lives at <cache>/entries/tests/support/harnesses/shared/*.mjs.
 	// Resolve its sibling direct entry from the manifest instead of relying on a
 	// source import collected before Vitest's resolver has established bundle mode.
-	const cacheDir = resolve(dirname(bundlePath), "..", "..", "..");
+	const cacheDir = resolve(dirname(bundlePath), "..", "..", "..", "..", "..");
 	const manifest = JSON.parse(readFileSync(join(cacheDir, "manifest.json"), "utf8")) as PrebundleManifest;
 	const emittedServer = manifest.entries["src/server/server.ts"];
 	if (!emittedServer) throw new Error("server prebundle manifest is missing src/server/server.ts");

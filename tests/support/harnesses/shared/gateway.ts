@@ -21,7 +21,7 @@
 import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type WebSocket from "ws";
 
 import type { GatewayDeps } from "../../../../src/server/gateway-deps.js";
@@ -34,8 +34,14 @@ import { createFakeVerificationCommandRunner } from "./fake-verification-command
 import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
 import { createRunChild, getRunRoot } from "./run-isolation.js";
 
+type ResolvePath = (...paths: string[]) => string;
+
+export function resolveGatewayRepositoryRoot(harnessDir: string, resolvePath: ResolvePath = resolve): string {
+	return resolvePath(harnessDir, "..", "..", "..", "..");
+}
+
 const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
-const REPO_ROOT = resolve(HARNESS_DIR, "..", "..");
+const REPO_ROOT = resolveGatewayRepositoryRoot(HARNESS_DIR);
 const MOCK_AGENT = resolve(REPO_ROOT, "tests", "e2e", "mock-agent.mjs");
 const apiProfileRecords: Array<{ method: string; path: string; status: number; durationMs: number; endedAt: number }> = [];
 let apiProfileExitRegistered = false;
@@ -91,7 +97,7 @@ const BUILTIN_PACK_SKIP_DIRS = new Set(["src", "node_modules"]);
 // unit/integration test loads a native built-in route. Avoid copying universal
 // native payloads into every fork: release/native E2E owns those real bytes.
 const BUILTIN_PACK_SKIP_RELATIVE_DIRS = new Set(["lib/native"]);
-const MOCK_BRIDGE_SPECIFIER = new URL("../../../../tests/e2e/in-process-mock-bridge.mjs", import.meta.url).href;
+const MOCK_BRIDGE_SPECIFIER = pathToFileURL(resolve(REPO_ROOT, "tests", "e2e", "in-process-mock-bridge.mjs")).href;
 
 // Keep write-heavy temp dirs off the repo tree so isGitRepo() never fires and
 // sessions do not auto-create worktrees. The run root is inherited from the
