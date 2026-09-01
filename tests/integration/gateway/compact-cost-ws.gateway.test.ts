@@ -1,4 +1,4 @@
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
@@ -7,7 +7,7 @@ import {
 	waitForSessionStatus,
 	type WsConnection,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
 
 const TOTAL_COST = 2.5;

@@ -9,7 +9,7 @@
  *   - get_messages response served to clients has large snapshots replaced by a truncated stub,
  *     so the full payload never flows through the WS history channel.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
@@ -17,7 +17,7 @@ import {
 	connectWs,
 	waitForSessionStatus,
 	agentEndPredicate,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const MARKER = "__preview_snapshot_v1__\n";
 

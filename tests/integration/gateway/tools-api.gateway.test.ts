@@ -8,11 +8,11 @@
  * PUT tests modify YAML files in tools/<group>/. We backup and restore
  * the specific YAML files that are modified by PUT tests.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { __setToolModuleLoadProbeForTesting } from "../../../src/server/agent/tool-extension-preflight.js";
-import { readE2EToken, base, bobbitDir } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { readE2EToken, base, bobbitDir } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let _tok: string; function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }
 

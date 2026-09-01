@@ -1,5 +1,5 @@
-import { test as base, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
+import { test as base, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { enableTsWorkerResolver } from "../../../tests/support/helpers/unit/enable-ts-worker.js";
 import {
 	apiFetch,
 	createSession,
@@ -9,7 +9,7 @@ import {
 	messageEndPredicate,
 	waitForCondition,
 	nonGitCwd,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

@@ -3,9 +3,9 @@
 // that replaces the Playwright worker fixture. Consolidates the API-only slices
 // of the session-lifecycle browser specs (the visual journey stays in tier 2).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { getGateway, type GatewayFixture, type EntityCounts } from "../../../tests2/harness/gateway.js";
-import { createScope, type TestScope } from "../../../tests2/harness/scope.js";
-import { assertNoLeaks, snapshotEntities } from "../../../tests2/harness/leak-detector.js";
+import { getGateway, type GatewayFixture, type EntityCounts } from "../../../tests/support/harnesses/shared/gateway.js";
+import { createScope, type TestScope } from "../../../tests/support/harnesses/shared/scope.js";
+import { assertNoLeaks, snapshotEntities } from "../../../tests/support/harnesses/shared/leak-detector.js";
 
 let gw: GatewayFixture;
 let scope: TestScope;

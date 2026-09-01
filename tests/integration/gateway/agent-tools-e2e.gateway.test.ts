@@ -4,8 +4,8 @@
  * Tests verify session lifecycle (streaming/idle/abort) and tool invocations
  * (Bash, Write, Read, Edit) via the mock agent's deterministic responses.
  */
-import "../../../tests2/integration/_e2e/fake-cmd-setup.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import "../../../tests/support/harnesses/integration/gateway/fake-cmd-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -16,8 +16,8 @@ import {
 	statusPredicate,
 	toolStartPredicate,
 	agentEndPredicate,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { attachLocalMockAgentClock, type LocalMockAgentClock } from "../../../tests2/integration/helpers/local-mock-agent-clock.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { attachLocalMockAgentClock, type LocalMockAgentClock } from "../../../tests/support/helpers/integration/gateway/local-mock-agent-clock.js";
 
 test.setTimeout(30_000);
 

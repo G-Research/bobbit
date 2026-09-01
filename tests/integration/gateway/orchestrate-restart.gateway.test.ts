@@ -15,14 +15,14 @@
  * shared `team_wait`.
  */
 import { readFileSync } from "node:fs";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, deleteSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, deleteSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	createSessionTracker,
 	nextUserMessage,
 	seedSessionTranscript,
 	waitForSessionIdle,
-} from "../../../tests2/integration/helpers/session-fixtures.js";
+} from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 
 test.describe.configure({ mode: "serial" });
 

@@ -20,13 +20,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { resetAndInstallFakeCommandStepTestState, trackFakeCommandStepConnection } from "../../../tests2/integration/_e2e/fake-cmd-setup.js";
+import { resetAndInstallFakeCommandStepTestState, trackFakeCommandStepConnection } from "../../../tests/support/harnesses/integration/gateway/fake-cmd-setup.js";
 import { GateStore, type GateSignal } from "../../../src/server/agent/gate-store.js";
 import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
-import { createManualClock, type ManualClock } from "../../../tests2/harness/clock.js";
+import { createManualClock, type ManualClock } from "../../../tests/support/harnesses/shared/clock.js";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../../src/server/agent/verification-command-runner.js";
 import type { TrackedChild } from "../../../src/server/agent/spawn-tree.js";
 

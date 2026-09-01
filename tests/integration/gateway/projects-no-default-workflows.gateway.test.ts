@@ -5,8 +5,8 @@
  *
  * See docs/internals.md and the "No default workflow scaffold" design doc.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../../tests/e2e/test-utils/cleanup.js";
 import fs from "node:fs";
 import os from "node:os";

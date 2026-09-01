@@ -1,6 +1,5 @@
 // Migrated from tests/e2e/ui/pr-walkthrough-trust-prompt.spec.ts (v2 browser/e2e tier).
-// Full-gateway browser E2E — carried over verbatim (relative harness/helper
-// specifiers resolve identically from tests2/browser/e2e/).
+// Full-gateway browser E2E using the canonical support harness and helpers.
 /**
  * Browser E2E — PR Walkthrough LAUNCH trust prompt (design
  * docs/design/pr-walkthrough-gh-posting.md §4b). When a walkthrough launch resolves
@@ -24,10 +23,10 @@
  *   - decline → NO retry, readable cancel message, host NOT persisted.
  *   - a default host (no HOST_NOT_TRUSTED from `run`) never prompts.
  */
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/browser/gateway-harness.js";
 import type { Page, Route } from "@playwright/test";
-import { apiFetch, waitForSessionStatus } from "../../../tests2/browser/e2e-setup.js";
-import { openApp, createSessionViaUI } from "../../../tests2/browser/e2e/ui-helpers.js";
+import { apiFetch, waitForSessionStatus } from "../../../tests/support/harnesses/browser/e2e-setup.js";
+import { openApp, createSessionViaUI } from "../../../tests/support/helpers/browser/e2e/ui-helpers.js";
 
 const RUN_ROUTE_RE = /\/api\/ext\/route\/run\b/;
 const TRUST_CHECK_ROUTE_RE = /\/api\/github\/trusted-hosts\/check\b/;

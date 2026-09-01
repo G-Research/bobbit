@@ -19,8 +19,8 @@
  *   - Server-side validation (Agent B B7): prompt > 8192 chars → 400;
  *     n outside [1,4] → 400.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base, apiFetch, connectWs, createSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base, apiFetch, connectWs, createSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const headers = () => ({
 	Authorization: `Bearer ${readE2EToken()}`,

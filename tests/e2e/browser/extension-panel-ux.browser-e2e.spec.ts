@@ -1,6 +1,5 @@
 // Migrated from tests/e2e/ui/extension-panel-ux.spec.ts (v2 browser/e2e tier).
-// Full-gateway browser E2E — carried over verbatim (relative harness/helper
-// specifiers resolve identically from tests2/browser/e2e/).
+// Full-gateway browser E2E using the canonical support harness and helpers.
 /**
  * Extension Panel UX Polish — browser E2E coverage for the launcher-host +
  * side-panel behaviours changed by this goal:
@@ -12,9 +11,9 @@
  *     fills to the bottom edge; split/collapsed modes keep the composer.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "../../../tests2/browser/e2e-setup.js";
-import { openApp, navigateToHash } from "../../../tests2/browser/e2e/ui-helpers.js";
+import { test, expect } from "../../../tests/support/harnesses/browser/gateway-harness.js";
+import { apiFetch, createSession, nonGitCwd } from "../../../tests/support/harnesses/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../../tests/support/helpers/browser/e2e/ui-helpers.js";
 
 const FEEDBACK = '[data-testid="launcher-feedback"]';
 const DISMISS = '[data-testid="launcher-feedback-dismiss"]';

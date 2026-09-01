@@ -1,4 +1,4 @@
-import { expect, test } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { expect, test } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 
 test.describe("POST /api/sessions/:id/provider-hooks/before-compact", () => {
 	test("forwards a string span to the lifecycle hook and rejects non-string spans", async ({ gateway, scope }) => {

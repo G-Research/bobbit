@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, normalize, resolve } from "node:path";
-import type { CommandRunner } from "../../../src/server/gateway-deps.js";
+import type { CommandRunner } from "../../../../../src/server/gateway-deps.js";
 import { installCommandRunnerInterceptor } from "./command-runner-dispatcher.js";
 
 type RepoState = {
@@ -20,7 +20,7 @@ type MaintenanceGitGlobalState = {
 	modelInstallCounts: Map<symbol, number>;
 };
 
-const GLOBAL_STATE_KEY = Symbol.for("bobbit.tests2.maintenance-git-model.state");
+const GLOBAL_STATE_KEY = Symbol.for("bobbit.tests.maintenance-git-model.state");
 
 function globalState(): MaintenanceGitGlobalState {
 	const scope = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: MaintenanceGitGlobalState };

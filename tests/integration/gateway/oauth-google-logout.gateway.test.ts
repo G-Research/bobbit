@@ -18,10 +18,10 @@
  * access/refresh token, so logout's best-effort upstream revoke is skipped
  * (the mocked-fetch revoke path is covered by tests/oauth-google.test.ts).
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 let globalAuthPath: typeof import("../../../src/server/bobbit-dir.js").globalAuthPath;
 

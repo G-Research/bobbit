@@ -1,12 +1,12 @@
 import path from "node:path";
 
-import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
-import { createGoal, deleteGoal } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { createGoal, deleteGoal } from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { GateStore, type GateSignal } from "../../../../src/server/agent/gate-store.js";
 import type { WorkflowGate } from "../../../../src/server/agent/workflow-store.js";
 import { buildGateVerificationSnapshot } from "../../../../src/server/gate-verification-snapshot.js";
-import type { GatewayFixture } from "../../../../tests2/harness/gateway.js";
-import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
+import type { GatewayFixture } from "../../../../tests/support/harnesses/shared/gateway.js";
+import { createMemFs } from "../../../../tests/support/harnesses/shared/mem-fs.js";
 
 /**
  * Pins the synchronous gate-signal ordering without launching verification work:

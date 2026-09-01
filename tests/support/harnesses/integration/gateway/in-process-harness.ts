@@ -5,7 +5,7 @@
  * `test("…", async ({ gateway }) => …)` structure unchanged.
  *
  * Instead of a per-worker Playwright fixture, `gateway` is the fork-scoped
- * singleton from tests2/harness/gateway.ts (booted once per fork). Each
+ * singleton from tests/support/harnesses/shared/gateway.ts (booted once per fork). Each
  * `test.describe` block is automatically wrapped with:
  *   - a per-describe entity-leak guard (snapshot at describe start, assert at
  *     describe end — runs AFTER the spec's own afterAll cleanup); and
@@ -30,9 +30,9 @@ import {
 	it as vIt,
 	expect as vExpect,
 } from "vitest";
-import { exportGatewayApiProfileForTests, exportProductionProfileForTests, type EntityCounts, type GatewayFixture } from "../../harness/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../harness/leak-detector.js";
-import { createScope, type TestScope } from "../../harness/scope.js";
+import { exportGatewayApiProfileForTests, exportProductionProfileForTests, type EntityCounts, type GatewayFixture } from "../../shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../shared/leak-detector.js";
+import { createScope, type TestScope } from "../../shared/scope.js";
 import { currentScope, ensureGateway, gatewaySync, setScope } from "./runtime.js";
 
 // Playwright's retrying `await expect(fn).toPass({ timeout })` matcher — vitest
@@ -115,7 +115,7 @@ function injectHeadquartersDiscoveryUrl(input: RequestInfo | URL, init?: Request
 	if (input instanceof URL) return parsed;
 	return new Request(parsed.href, input);
 }
-const FETCH_PATCH_KEY = Symbol.for("bobbit.tests2.discoveryProjectIdFetchPatch");
+const FETCH_PATCH_KEY = Symbol.for("bobbit.tests.discoveryProjectIdFetchPatch");
 const globalWithPatch = globalThis as typeof globalThis & { [FETCH_PATCH_KEY]?: true };
 if (!globalWithPatch[FETCH_PATCH_KEY]) {
 	const originalFetch = globalThis.fetch.bind(globalThis);
@@ -216,7 +216,7 @@ interface IntegrationHarnessState {
 	expectedStoreReaders: WeakMap<object, Map<string, unknown>>;
 }
 
-const HARNESS_STATE_KEY = Symbol.for("bobbit.tests2.integrationHarnessState");
+const HARNESS_STATE_KEY = Symbol.for("bobbit.tests.integrationHarnessState");
 
 type HarnessGlobal = typeof globalThis & { [key: symbol]: IntegrationHarnessState | undefined };
 

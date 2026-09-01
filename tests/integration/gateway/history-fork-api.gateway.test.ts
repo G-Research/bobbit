@@ -2,12 +2,12 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { sessionTranscriptHostPath } from "../../../src/server/agent/agent-session-path.js";
 import {
 	apiFetch,
 	nonGitCwd,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
@@ -28,9 +28,9 @@ import {
 import {
 	createSessionTracker,
 	localApiFetch,
-} from "../../../tests2/integration/helpers/session-fixtures.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
-import { SandboxSessionFilesystem } from "../../../tests2/harness/sandbox-session-filesystem.js";
+} from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
+import { SandboxSessionFilesystem } from "../../../tests/support/harnesses/shared/sandbox-session-filesystem.js";
 import {
 	FIXTURE_TIME,
 	historyFork,

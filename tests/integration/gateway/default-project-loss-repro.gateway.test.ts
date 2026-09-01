@@ -6,8 +6,8 @@
  * project-resolution 400. After the harness fix, these helpers should
  * re-create or re-resolve the default project and succeed.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 

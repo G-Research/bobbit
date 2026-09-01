@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { MAX_REVIEW_PAYLOAD_REQUEST_BYTES } from "../../../src/server/review-payload-store.js";
-import { apiFetch, createSession, deleteSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { apiFetch, createSession, deleteSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function reviewBody(markdownByFile: string[], overrides: Record<string, unknown> = {}) {
 	return {

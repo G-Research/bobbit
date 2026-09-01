@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { localApiFetch } from "../../../tests2/integration/helpers/session-fixtures.js";
+import { localApiFetch } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 
 export const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";
 

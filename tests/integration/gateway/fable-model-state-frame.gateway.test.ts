@@ -14,14 +14,14 @@
  * inferMeta) backs every broadcast site, so both the on-selection frame and
  * the reconnect-rehydration frame carry Fable's authoritative metadata.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
 	connectWs,
 	type WsConnection,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
 
 const FABLE_MAP = { off: null, xhigh: "xhigh", max: "max" } as const;

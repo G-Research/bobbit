@@ -14,8 +14,8 @@
  * Uses `rawApiFetch` to bypass the harness's auto-projectId-injection so
  * we hit the bare server contract.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, rawApiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, rawApiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

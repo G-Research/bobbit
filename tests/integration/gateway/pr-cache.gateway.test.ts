@@ -9,14 +9,14 @@
 // keeps that assertion and additionally proves the named behaviour — the
 // pr_status_changed broadcast reaches connected clients — via a session WS
 // (broadcastToAll fans out to every authenticated socket regardless of session).
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
 	createSession,
 	deleteSession,
 	nonGitCwd,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test("server broadcasts pr_status_changed on PR creation detection", async () => {
 	// Create a goal with a branch.

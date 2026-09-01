@@ -10,10 +10,10 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
-import { startCustomGateway, type CustomGatewayHandle } from "../../../tests2/integration/_e2e/custom-gateway.js";
+import { startCustomGateway, type CustomGatewayHandle } from "../../../tests/support/harnesses/integration/gateway/custom-gateway.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";
 const HEADQUARTERS_PROJECT_NAME = "Headquarters";

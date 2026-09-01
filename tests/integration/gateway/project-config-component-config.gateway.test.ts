@@ -9,8 +9,8 @@
  *   3. GET /api/projects/:id/qa-testing-config returns `{ configured: boolean }`,
  *      true iff some component has a non-empty `config.qa_start_command`.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

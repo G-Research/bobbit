@@ -11,14 +11,14 @@
  *
  * See design: "Cache-Hit Metric".
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
 	deleteSession,
 	connectWs,
 	WsConnection,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 // Both tests share a single session + WS connection created in beforeAll:
 // the first test drives a prompt that populates the cost tracker, the second

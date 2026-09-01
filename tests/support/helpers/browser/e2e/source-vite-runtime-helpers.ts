@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess, type StdioOptions } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { spawnTracked, type TrackedChild } from "../../../src/server/agent/spawn-tree.js";
+import { spawnTracked, type TrackedChild } from "../../../../../src/server/agent/spawn-tree.js";
 
 export type SourceProcessTreeAuthority = Pick<TrackedChild, "killTree" | "ownershipReady" | "waitForTreeExit">;
 

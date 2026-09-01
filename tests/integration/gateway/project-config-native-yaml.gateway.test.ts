@@ -17,8 +17,8 @@
  *   4. Loading a legacy-format fixture parses correctly and a single save
  *      rewrites it in native form.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";

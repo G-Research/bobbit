@@ -1,6 +1,6 @@
 // v2-native — Clear-policy inbox wake integration across staff and session owners.
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";

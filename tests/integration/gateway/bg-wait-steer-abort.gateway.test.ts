@@ -8,11 +8,11 @@
  */
 import { EventEmitter } from "node:events";
 import { writeFileSync } from "node:fs";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
 import { readAuthorSidecar } from "../../../src/server/agent/author-sidecar.js";
-import { reliableMockCore } from "../../../tests2/integration/helpers/reliable-turn-barriers.js";
+import { reliableMockCore } from "../../../tests/support/helpers/integration/gateway/reliable-turn-barriers.js";
 
 interface FakeBgChild extends EventEmitter {
 	pid: number;

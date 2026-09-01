@@ -33,8 +33,8 @@
  *     every doc id we insert and explicitly `deleteByIds` in afterEach so
  *     the index returns to a known-clean state before the next test.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { randomBytes } from "node:crypto";
 
 async function getProjectId(): Promise<string> {

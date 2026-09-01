@@ -1,10 +1,10 @@
 /**
  * API/data-path coverage split out of tests/e2e/ui/multi-repo-flow.spec.ts.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

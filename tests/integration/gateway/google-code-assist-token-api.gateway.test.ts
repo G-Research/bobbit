@@ -13,8 +13,8 @@
  * The success path (token + project) is exercised by unit tests over
  * getGoogleAccessToken/ensureCodeAssistProject and the manual-integration suite.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, apiFetch, createSession, deleteSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, apiFetch, createSession, deleteSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.beforeAll(() => { readE2EToken(); });
 

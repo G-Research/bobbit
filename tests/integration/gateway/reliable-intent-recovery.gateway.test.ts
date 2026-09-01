@@ -1,4 +1,4 @@
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	connectWs,
 	createSession,
@@ -6,8 +6,8 @@ import {
 	statusPredicate,
 	type WsConnection,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { restoreWithLocalMockAgentClock } from "../../../tests2/integration/helpers/local-mock-agent-clock.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { restoreWithLocalMockAgentClock } from "../../../tests/support/helpers/integration/gateway/local-mock-agent-clock.js";
 import {
 	frameHasIntentIds,
 	intentId,
@@ -15,7 +15,7 @@ import {
 	latestIntentProjection,
 	reliableMockCore,
 	userMessageEnds,
-} from "../../../tests2/integration/helpers/reliable-turn-barriers.js";
+} from "../../../tests/support/helpers/integration/gateway/reliable-turn-barriers.js";
 
 const SAME_TEXT = "RELIABLE_IDENTICAL_STEER";
 const MANUAL_PROMPT_ID = "intent-manual-prompt-0001";

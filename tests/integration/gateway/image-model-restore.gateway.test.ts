@@ -20,8 +20,8 @@
  * existing unit-level test `tests/grant-policy.test.ts → "restore-style
  * roleless sessions load generate_image and exclude blocked Nano Banana MCP"`.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, connectWs, createSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.setTimeout(20_000);
 

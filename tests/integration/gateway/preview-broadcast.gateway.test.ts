@@ -4,14 +4,14 @@
  * Verifies that when the preview flag is toggled via REST PATCH,
  * a `preview_changed` message is broadcast to all connected WS clients.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
 	deleteSession,
 	connectWs,
 	WsConnection,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let sessionId: string;
 let wsConn: WsConnection;

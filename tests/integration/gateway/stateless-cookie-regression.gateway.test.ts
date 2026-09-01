@@ -3,7 +3,7 @@ import http from "node:http";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
-import { getGateway } from "../../../tests2/harness/gateway.js";
+import { getGateway } from "../../../tests/support/harnesses/shared/gateway.js";
 
 const REGRESSION = "STATELESS_COOKIE_REGRESSION";
 const COOKIE_WRITE_SETTLE_MS = 250;

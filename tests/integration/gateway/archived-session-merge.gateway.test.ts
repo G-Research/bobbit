@@ -13,8 +13,8 @@
  *   4. Verify paginated archived fetch also returns them in archivedDelegates
  *   5. This proves the client merge can safely combine both responses without loss
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 /** Terminate (archive) a session via DELETE. */
 async function terminateSession(id: string): Promise<void> {

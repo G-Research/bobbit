@@ -10,8 +10,8 @@
  * verify that both the normal and archived fetch paths return the
  * delegate information.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createSession, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 /**
  * Create a delegate session for a parent session via the REST API.

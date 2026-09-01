@@ -5,8 +5,8 @@
  * Browser specs keep real user journeys. Field-level workflow shape and seeded
  * optional-step metadata are pinned here to keep the browser tier smaller.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function uniqueWorkflowId(): string {
 	return `goal-workflow-api-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

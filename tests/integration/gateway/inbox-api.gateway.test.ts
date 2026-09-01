@@ -11,8 +11,8 @@
  * Uses the in-process gateway harness. Each enqueue produces a distinct entry
  * (no coalescing) so the tests can assert ordering and per-entry transitions.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, defaultProject, readE2EToken } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, defaultProject, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 async function createStaff(name: string) {
 	const project = await defaultProject();

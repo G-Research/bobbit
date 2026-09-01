@@ -7,8 +7,8 @@
  * locally-defined `apiFetch`/`base()` would see an unbooted gateway. Keeping the
  * state in one module guarantees a single source of truth per fork.
  */
-import { getGateway, type GatewayFixture } from "../../harness/gateway.js";
-import type { TestScope } from "../../harness/scope.js";
+import { getGateway, type GatewayFixture } from "../../shared/gateway.js";
+import type { TestScope } from "../../shared/scope.js";
 
 let _gw: GatewayFixture | undefined;
 let _scope: TestScope | undefined;
@@ -19,7 +19,7 @@ export async function ensureGateway(): Promise<GatewayFixture> {
 }
 
 export function gatewaySync(): GatewayFixture {
-	if (!_gw) throw new Error("[tests2/e2e-compat] gateway not booted — call helpers from within the compat `test`/hooks (they await getGateway first)");
+	if (!_gw) throw new Error("[tests/e2e-compat] gateway not booted — call helpers from within the compat `test`/hooks (they await getGateway first)");
 	return _gw;
 }
 

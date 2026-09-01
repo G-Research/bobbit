@@ -23,8 +23,8 @@ import {
 } from "../../../src/server/agent/uploaded-attachment-store.js";
 import { broadcastStatus } from "../../../src/server/agent/session-status.js";
 import type { PersistedTask } from "../../../src/server/agent/task-store.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 /** Bypass the integration harness's mutation observer: every fixture mutation in
  * this file is test-owned in-memory state and is restored before its afterEach. */

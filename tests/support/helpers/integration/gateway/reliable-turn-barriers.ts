@@ -1,4 +1,4 @@
-import type { WsMsg } from "../_e2e/e2e-setup.js";
+import type { WsMsg } from "../../../harnesses/integration/gateway/e2e-setup.js";
 
 export interface ReliableMockCore {
 	readonly env: Record<string, string | undefined>;

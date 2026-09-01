@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 
-import { expect } from "./_e2e/in-process-harness.js";
-import { apiFetch } from "./_e2e/e2e-setup.js";
+import { expect } from "../../../harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../harnesses/integration/gateway/e2e-setup.js";
 
 export const GENERAL_ROLE = "general";
 export const CUSTOM_ROLE = "default-role-project-fixture";

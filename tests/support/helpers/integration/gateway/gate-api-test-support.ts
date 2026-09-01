@@ -2,15 +2,15 @@ import {
 	armNextFakeCommandStepSpawn,
 	resetAndInstallFakeCommandStepTestState,
 	trackFakeCommandStepConnection,
-} from "../_e2e/fake-cmd-setup.js";
-import { test } from "../_e2e/in-process-harness.js";
-import { apiFetch, ensureGateway, type WsConnection } from "../_e2e/e2e-setup.js";
+} from "../../../harnesses/integration/gateway/fake-cmd-setup.js";
+import { test } from "../../../harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, ensureGateway, type WsConnection } from "../../../harnesses/integration/gateway/e2e-setup.js";
 
 interface ProcessGateApiState {
 	workflowBaseline?: Map<string, unknown>;
 }
 
-const STATE_KEY = Symbol.for("bobbit.tests2.gateApiTestSupport");
+const STATE_KEY = Symbol.for("bobbit.tests.gateApiTestSupport");
 const processState = globalThis as typeof globalThis & { [STATE_KEY]?: ProcessGateApiState };
 const state = processState[STATE_KEY] ??= {};
 

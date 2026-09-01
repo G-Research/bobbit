@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { dirname, join } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 
-import { currentScope } from "../_e2e/runtime.js";
+import { currentScope } from "../../../harnesses/integration/gateway/runtime.js";
 
 export function localApiFetch(
 	gateway: { baseURL: string; token: string },

@@ -4,7 +4,7 @@
  * Ported faithfully from tests/e2e/host-agents-sandbox-inheritance.spec.ts
  * (source of truth) onto the Test Suite v2 fork-scoped gateway fixture +
  * in-process mock bridge. The host.agents namespace SHAPE + source-filtered
- * scoping is unit-covered by tests2/core/host-agents-scope.test.ts (FakeView);
+ * scoping is unit-covered by tests/unit/core/host-agents-scope.unit.test.ts (FakeView);
  * this port preserves the REAL-STACK sub-behaviours the triage flagged as lost:
  *   • a host.agents child inherits the bound session's sandbox + project scope
  *     + CURRENT model (plain lifecycle),
@@ -17,9 +17,9 @@
  * bound session's sandbox + project (credential) scope and never grants a
  * capability the owner lacks. Deterministic mock agent → e2e phase, not manual.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { createSession, deleteSession, connectWs } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { createSession, deleteSession, connectWs } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 let createServerHostApi: typeof import("../../../src/server/extension-host/server-host-api.js").createServerHostApi;
 

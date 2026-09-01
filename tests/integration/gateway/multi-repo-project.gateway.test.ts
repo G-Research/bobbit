@@ -4,8 +4,8 @@
  * See docs/design/multi-repo-components.md §8.5 / §9.2.
  */
 import { describe, it } from "vitest";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, readE2EToken, base, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, readE2EToken, base, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

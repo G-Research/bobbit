@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../../tests/e2e/test-utils/cleanup.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 import { createCommandSpawnAdapter } from "../../../src/server/owned-tree-command-spawn.js";
 
 let serverModule: any;

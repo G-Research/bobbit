@@ -7,7 +7,7 @@
  *
  * No Docker required — tests intercept at the `applySandboxWiring` boundary.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";

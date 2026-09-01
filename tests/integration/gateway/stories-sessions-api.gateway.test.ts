@@ -12,12 +12,12 @@ import {
 	resolveSessionWorktreeOptions,
 	type SessionWorktreeOptions,
 } from "../../../src/server/session-worktree-options.js";
-import { ensureGateway } from "../../../tests2/integration/_e2e/runtime.js";
+import { ensureGateway } from "../../../tests/support/harnesses/integration/gateway/runtime.js";
 import {
 	apiFetch,
 	connectWs,
 	harnessDefaultProjectRoot,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 type StoryProject = {
 	id: string;

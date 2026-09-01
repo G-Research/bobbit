@@ -4,7 +4,7 @@ import type {
 	ExecFileResult,
 	ExecFileSyncOptions,
 	SpawnOptions,
-} from "../../../src/server/gateway-deps.js";
+} from "../../../../../src/server/gateway-deps.js";
 
 type ExecFileNext = () => Promise<ExecFileResult>;
 type ExecFileSyncNext = () => Buffer | string;
@@ -44,7 +44,7 @@ type DispatcherGlobalState = {
 	methodInstallations: WeakMap<object, Map<PropertyKey, MethodInstallation>>;
 };
 
-const GLOBAL_STATE_KEY = Symbol.for("bobbit.tests2.command-runner-dispatcher.state");
+const GLOBAL_STATE_KEY = Symbol.for("bobbit.tests.command-runner-dispatcher.state");
 
 function globalState(): DispatcherGlobalState {
 	const scope = globalThis as typeof globalThis & { [GLOBAL_STATE_KEY]?: Partial<DispatcherGlobalState> };

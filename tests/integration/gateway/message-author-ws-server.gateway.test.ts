@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { vi } from "vitest";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
@@ -10,8 +10,8 @@ import {
 	defaultProject,
 	messageEndPredicate,
 	type WsConnection,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { gatewaySync } from "../../../tests2/integration/_e2e/runtime.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { gatewaySync } from "../../../tests/support/harnesses/integration/gateway/runtime.js";
 import {
 	prepareVisibleAgentEvent,
 } from "../../../src/server/agent/session-manager.js";
@@ -19,7 +19,7 @@ import {
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../../src/server/agent/author-sidecar.js";
-import { attachLocalMockAgentClock } from "../../../tests2/integration/helpers/local-mock-agent-clock.js";
+import { attachLocalMockAgentClock } from "../../../tests/support/helpers/integration/gateway/local-mock-agent-clock.js";
 
 const HUMAN_PROMPT = "AUTHOR_HUMAN_LIVE_SNAPSHOT_RECONNECT";
 const STAFF_PROMPT = "AUTHOR_STAFF_RENAME_LIVE_SNAPSHOT";

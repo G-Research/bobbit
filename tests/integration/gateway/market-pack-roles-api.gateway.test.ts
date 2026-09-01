@@ -1,5 +1,5 @@
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, defaultProject, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, defaultProject, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { fileURLToPath } from "node:url";
 
 const SOURCE_DIR = fileURLToPath(new URL("../../fixtures/market-sources/market-role-fixture-src", import.meta.url));

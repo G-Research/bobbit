@@ -5,13 +5,13 @@
  * singleton boots.
  */
 import { EventEmitter } from "node:events";
-import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../../src/server/agent/verification-command-runner.js";
-import type { TrackedChild } from "../../../src/server/agent/spawn-tree.js";
-import type { ManualClock } from "../../harness/clock.js";
-import { interpretFakeCommand } from "../../harness/fake-verification-command-runner.js";
+import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../../../../src/server/agent/verification-command-runner.js";
+import type { TrackedChild } from "../../../../../src/server/agent/spawn-tree.js";
+import type { ManualClock } from "../../shared/clock.js";
+import { interpretFakeCommand } from "../../shared/fake-verification-command-runner.js";
 import type { WsConnection } from "./e2e-setup.js";
 
-const FAKE_CMD_STEP_KEY = Symbol.for("bobbit.tests2.fakeCommandStepEnabled");
+const FAKE_CMD_STEP_KEY = Symbol.for("bobbit.tests.fakeCommandStepEnabled");
 type FakeCommandStepGlobal = typeof globalThis & {
 	__BOBBIT_V2_FAKE_CMD_STEP__?: boolean;
 	[FAKE_CMD_STEP_KEY]?: true;
@@ -70,7 +70,7 @@ interface FakeCommandStepGateway {
 	};
 }
 
-const STATE_KEY = Symbol.for("bobbit.tests2.fakeCommandStepState");
+const STATE_KEY = Symbol.for("bobbit.tests.fakeCommandStepState");
 const processState = globalThis as typeof globalThis & { [STATE_KEY]?: FakeCommandStepState };
 const state = processState[STATE_KEY] ??= {
 	runners: new WeakMap(),

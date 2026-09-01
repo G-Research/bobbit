@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WorktreeInventoryService } from "../../../../src/server/agent/worktree-inventory.js";
 import type { PersistedSession } from "../../../../src/server/agent/session-store.js";
 import type { CommandRunner } from "../../../../src/server/gateway-deps.js";
-import { MaintenanceGitModel } from "../../../../tests2/integration/helpers/maintenance-git-model.js";
+import { MaintenanceGitModel } from "../../../../tests/support/helpers/integration/gateway/maintenance-git-model.js";
 
 const projectId = "archived-selectors-project";
 const clockNow = 1_750_000_000_000;

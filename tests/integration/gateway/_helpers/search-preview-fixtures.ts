@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
-import { base, readE2EToken } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { base, readE2EToken } from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const SIGNED_COOKIE_VALUE = String.raw`v1\.[1-9]\d*\.[1-9]\d*\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}`;
 

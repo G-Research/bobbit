@@ -6,10 +6,10 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { CommandRunner } from "../../../src/server/gateway-deps.js";
-import { copyGitTemplate } from "../../harness/git-template.js";
-import { test, expect } from "../_e2e/in-process-harness.js";
-import { readE2EToken, apiFetch as gatewayApiFetch, createSession, deleteSession, registerProject } from "../_e2e/e2e-setup.js";
+import type { CommandRunner } from "../../../../../src/server/gateway-deps.js";
+import { copyGitTemplate } from "../../../harnesses/shared/git-template.js";
+import { test, expect } from "../../../harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, apiFetch as gatewayApiFetch, createSession, deleteSession, registerProject } from "../../../harnesses/integration/gateway/e2e-setup.js";
 import { installMethodInterceptor } from "./command-runner-dispatcher.js";
 import { MaintenanceGitModel } from "./maintenance-git-model.js";
 

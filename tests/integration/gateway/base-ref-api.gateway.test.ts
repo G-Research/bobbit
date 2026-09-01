@@ -1,16 +1,16 @@
 /**
  * API E2E — representative PUT /api/projects/:id/config validation for `base_ref`.
  *
- * Pure grammar/error-shape inventory lives in tests2/core/base-ref-validation.test.ts.
+ * Pure grammar/error-shape inventory lives in tests/unit/core/base-ref-validation.unit.test.ts.
  * This file keeps route-level coverage for persistence plus git-backed tag,
  * sandbox, local-branch, multi-repo, and warning paths. Keep related route
  * checks batched: the in-process integration cleanup runs after every test, so
  * splitting pure scenario permutations here materially increases suite time.
  */
 import { it } from "vitest";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

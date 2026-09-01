@@ -2,7 +2,7 @@
 // Uses the fork-scoped gateway fixture instead of the Playwright in-process
 // harness; no entities are created so no scope() cleanup is needed.
 import { beforeAll, describe, expect, it } from "vitest";
-import { getGateway, type GatewayFixture } from "../../../tests2/harness/gateway.js";
+import { getGateway, type GatewayFixture } from "../../../tests/support/harnesses/shared/gateway.js";
 
 let gw: GatewayFixture;
 beforeAll(async () => { gw = await getGateway(); });

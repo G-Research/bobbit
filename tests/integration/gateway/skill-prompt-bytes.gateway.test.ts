@@ -12,11 +12,11 @@
  * is byte-equal (handler.ts now passes modelText to enqueuePrompt which
  * dispatches it via rpcClient.prompt verbatim).
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 test.setTimeout(15_000);
 

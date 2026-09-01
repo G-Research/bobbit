@@ -15,7 +15,7 @@ import {
 	registerArchivedSession,
 	TOKEN,
 	type RunningGateway,
-} from "../../../tests2/integration/helpers/base-path-gateway-fixture.js";
+} from "../../../tests/support/helpers/integration/gateway/base-path-gateway-fixture.js";
 
 describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, manifest, and sockets", () => {
 	let running: RunningGateway;

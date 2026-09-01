@@ -9,18 +9,18 @@
  */
 import { vi } from "vitest";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	connectWs,
 	createSession,
 	deleteSession,
 	queueLenPredicate,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,
 } from "../../../src/server/agent/author-sidecar.js";
-import { restoreWithLocalMockAgentClock } from "../../../tests2/integration/helpers/local-mock-agent-clock.js";
+import { restoreWithLocalMockAgentClock } from "../../../tests/support/helpers/integration/gateway/local-mock-agent-clock.js";
 
 const STEER_TEXT = "RESTART_M1\nRESTART_M2";
 const AGENT_STEER_TEXT = "RESTART_AGENT_ACCOUNTABLE_STEER";

@@ -17,8 +17,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { bobbitDir, rawApiFetch, readE2EToken } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { bobbitDir, rawApiFetch, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let bogusCwd: string;
 const createdSessionIds: string[] = [];

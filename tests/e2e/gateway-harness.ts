@@ -30,7 +30,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
-import { createRunChild, getRunRoot, installRunIsolation } from "../../tests2/harness/run-isolation.js";
+import { createRunChild, getRunRoot, installRunIsolation } from "../../tests/support/harnesses/shared/run-isolation.js";
 
 installRunIsolation();
 
@@ -321,7 +321,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// legacy e2e config) and fully fail-open: any import/acquire error proceeds
 	// without a lease. Its own large fixture timeout covers a long queue wait — the
 	// wait is charged here, NOT against the 60 s gateway/test timeouts. Cap in
-	// tests2/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
+	// tests/support/data/quality/budgets/budget-caps.json ("browser"). See docs/testing-v2/concurrency-proof.md.
 	browserRenderLease: [async ({}, use) => {
 		let release: () => void = () => {};
 		if (process.env.BOBBIT_V2_BROWSER_LEASE === "1") {

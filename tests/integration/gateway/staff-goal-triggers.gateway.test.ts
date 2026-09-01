@@ -20,9 +20,9 @@ import { deflateSync, inflateSync } from "node:zlib";
 import { TriggerEngine } from "../../../src/server/agent/staff-trigger-engine.js";
 import { RemoteStateCoordinator } from "../../../src/server/remote-state-coordinator.js";
 import type { Clock, CommandRunner } from "../../../src/server/gateway-deps.js";
-import { copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, defaultProject, readE2EToken } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, defaultProject, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 async function createStaffWithTrigger(opts: {
 	name: string;

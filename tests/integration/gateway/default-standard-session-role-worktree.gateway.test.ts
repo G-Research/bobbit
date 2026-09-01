@@ -2,9 +2,9 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	GENERAL_PROMPT_MARKER,
 	GENERAL_ROLE,
@@ -21,7 +21,7 @@ import {
 	removeProjectRole,
 	sessionIdsBySurface,
 	type CreatedSession,
-} from "../../../tests2/integration/default-standard-session-role-helper.js";
+} from "../../../tests/support/helpers/integration/gateway/default-standard-session-role-helper.js";
 
 let worktreeProject: { id: string; rootPath: string };
 let worktreeFixtureRoot = "";

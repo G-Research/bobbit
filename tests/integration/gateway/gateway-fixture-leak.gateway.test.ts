@@ -8,8 +8,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { assertNoLeaks, snapshotEntities } from "../../../tests2/harness/leak-detector.js";
-import { createScope } from "../../../tests2/harness/scope.js";
+import { assertNoLeaks, snapshotEntities } from "../../../tests/support/harnesses/shared/leak-detector.js";
+import { createScope } from "../../../tests/support/harnesses/shared/scope.js";
 
 type Counts = { sessions: number; goals: number; projects: number };
 

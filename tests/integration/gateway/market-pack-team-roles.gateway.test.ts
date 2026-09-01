@@ -15,8 +15,8 @@
  * Runs against the fork-scoped in-process gateway; helpers/harness are the
  * v2-integration equivalents of the legacy in-process-harness surface.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, startTeam, deleteGoal, teardownTeam, createSession, deleteSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, startTeam, deleteGoal, teardownTeam, createSession, deleteSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { fileURLToPath } from "node:url";
 
 const SOURCE_DIR = fileURLToPath(new URL("../../fixtures/market-sources/market-role-fixture-src", import.meta.url));

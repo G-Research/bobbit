@@ -29,14 +29,14 @@
  * Goal spec §Acceptance criteria #7. Mirrors the unit test in
  * tests/preview-extension.test.ts but exercises the live server endpoint.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
 	defaultProjectId,
 	deleteSession,
 	nonGitCwd,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import fs from "node:fs";
 import { buildPreviewSnapshotV3Block, parseSnapshot } from "../../../defaults/tools/html/snapshot.ts";
 

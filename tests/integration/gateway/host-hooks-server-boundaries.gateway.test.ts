@@ -14,12 +14,12 @@ import {
 } from "../../../src/server/extension-host/host-notification-dispatcher.js";
 import type { HostNotification } from "../../../src/shared/extension-host/host-hooks.js";
 import { wireProjectHostNotificationBoundaries } from "../../../src/server/server.js";
-import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
-import { getGateway, type EntityCounts, type GatewayFixture } from "../../../tests2/harness/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../../tests2/harness/leak-detector.js";
-import { createRunChild, removeOwnedRunChild } from "../../../tests2/harness/run-isolation.js";
-import { createScope, type TestScope } from "../../../tests2/harness/scope.js";
+import { enableTsWorkerResolver } from "../../../tests/support/helpers/unit/enable-ts-worker.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
+import { getGateway, type EntityCounts, type GatewayFixture } from "../../../tests/support/harnesses/shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../../tests/support/harnesses/shared/leak-detector.js";
+import { createRunChild, removeOwnedRunChild } from "../../../tests/support/harnesses/shared/run-isolation.js";
+import { createScope, type TestScope } from "../../../tests/support/harnesses/shared/scope.js";
 
 const contexts: ProjectContext[] = [];
 const contextRoots: string[] = [];

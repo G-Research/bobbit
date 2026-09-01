@@ -8,9 +8,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { localApiFetch, trackGoal, trackProject } from "../../../tests2/integration/helpers/session-fixtures.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { localApiFetch, trackGoal, trackProject } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 
 /** Create a fresh, isolated temp directory usable as a project rootPath. */
 function mkTempDir(label: string): string {

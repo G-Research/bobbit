@@ -5,14 +5,14 @@
  * via getArchivedMessages. In the new per-project container model, session
  * logs are bind-mounted from the host, so no container path remapping is needed.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	nonGitCwd,
 	connectWs,
 	agentEndPredicate,
 	waitForSessionStatus,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.describe("Sandbox session archive", () => {
 	test("archived messages accessible after session termination", async ({ gateway }) => {

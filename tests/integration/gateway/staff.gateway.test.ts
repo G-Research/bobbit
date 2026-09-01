@@ -1,8 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, defaultProject, apiFetch, connectWs, createSession, deleteSession, registerProject, type WsConnection } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, defaultProject, apiFetch, connectWs, createSession, deleteSession, registerProject, type WsConnection } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 /**
  * End-to-end tests for the Staff Agents feature (persistent session model).

@@ -10,8 +10,8 @@
  */
 import path from "node:path";
 
-import { ConfigCascade, normalizeConfigProjectId } from "../../../src/server/agent/config-cascade.js";
-import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
+import { ConfigCascade, normalizeConfigProjectId } from "../../../../../src/server/agent/config-cascade.js";
+import { PreferencesStore } from "../../../../../src/server/agent/preferences-store.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -20,11 +20,11 @@ import {
 	isSystemProject,
 	type ProjectRegistry,
 	type RegisteredProject,
-} from "../../../src/server/agent/project-registry.js";
-import { resolveProjectForRequest } from "../../../src/server/agent/resolve-project.js";
-import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.js";
-import { createManualClock } from "../../harness/clock.js";
-import { createMemFs, type MemFs } from "../../harness/mem-fs.js";
+} from "../../../../../src/server/agent/project-registry.js";
+import { resolveProjectForRequest } from "../../../../../src/server/agent/resolve-project.js";
+import { SessionStore, type PersistedSession } from "../../../../../src/server/agent/session-store.js";
+import { createManualClock } from "../../shared/clock.js";
+import { createMemFs, type MemFs } from "../../shared/mem-fs.js";
 
 const SAME_ROOT_PROJECT_ID = "same-root-normal-project";
 const SAME_ROOT_PROJECT_NAME = "Original Same Root Project";

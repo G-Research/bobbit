@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	loadServerTestRuntime,
 	resetServerTestRuntimeForTests,
 	serverRuntimeMode,
-} from "../../../tests2/harness/server-runtime.js";
+} from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 interface PrebundleManifest {
 	entries: Record<string, string>;
@@ -17,7 +17,7 @@ async function loadDirectServerEntry(): Promise<typeof import("../../../src/serv
 	const bundlePath = process.env.BOBBIT_V2_SERVER_PREBUNDLE;
 	if (!bundlePath) return import("../../../src/server/server.js");
 
-	// The configured umbrella lives at <cache>/entries/tests2/harness/*.mjs.
+	// The configured umbrella lives at <cache>/entries/tests/support/harnesses/shared/*.mjs.
 	// Resolve its sibling direct entry from the manifest instead of relying on a
 	// source import collected before Vitest's resolver has established bundle mode.
 	const cacheDir = resolve(dirname(bundlePath), "..", "..", "..");

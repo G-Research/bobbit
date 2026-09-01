@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
 import { createE2EPhaseSelection } from "./scripts/test-phase-config.mjs";
-import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
+import { capturePlaywrightBrowserRegistry, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests/support/harnesses/shared/run-isolation.js";
 
 const phaseSelection = createE2EPhaseSelection();
 
@@ -121,15 +121,11 @@ export default {
 	},
 	projects: [
 		{
-			...phaseSelection.api,
+			...phaseSelection.apiCanonical,
 			// In-process API workers still boot a full gateway and shell out to git in
 			// several specs. On Windows, 4 concurrent gateways under verification load
 			// produced fixture setup retries and 900s broad-suite timeouts; 2 preserves
 			// parallelism while avoiding the hot contention cluster.
-			workers: 2,
-		},
-		{
-			...phaseSelection.apiCanonical,
 			workers: 2,
 		},
 		{
@@ -143,18 +139,6 @@ export default {
 			// See tests/e2e/in-process-harness-realpush.ts.
 			...phaseSelection.apiRealpush,
 			workers: 1,
-			fullyParallel: false,
-		},
-		{
-			...phaseSelection.browser,
-			workers: 3,
-			// Serialise browser specs within the project. Each browser worker
-			// is gateway + Chromium + UI static serve — even at workers=3, cross-
-			// worker contention on Windows FS / Defender still produced 3–4 flakes
-			// per run. fullyParallel=false confines parallelism to the 3 workers
-			// (one spec per worker, sequential within-spec), which empirically
-			// eliminates a flake cluster. API project stays fullyParallel: true
-			// (inherited from top-level).
 			fullyParallel: false,
 		},
 	],

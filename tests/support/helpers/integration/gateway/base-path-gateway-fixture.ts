@@ -17,15 +17,15 @@ import {
 	resetAgentDirStateForTests,
 	setProjectRoot,
 	type AgentDirRuntimeState,
-} from "../../../src/server/bobbit-dir.js";
-import { initAuthorSidecarDir } from "../../../src/server/agent/author-sidecar.js";
-import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../../src/server/gateway-deps.js";
-import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
-import { loopbackForBind } from "../../../src/server/cli-loopback.js";
-import { createGateway, type GatewayConfig } from "../../../src/server/server.js";
-import { createRunChild, removeOwnedRunChild } from "../../harness/run-isolation.js";
+} from "../../../../../src/server/bobbit-dir.js";
+import { initAuthorSidecarDir } from "../../../../../src/server/agent/author-sidecar.js";
+import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../../../../src/server/gateway-deps.js";
+import { scaffoldBobbitDir } from "../../../../../src/server/scaffold.js";
+import { loopbackForBind } from "../../../../../src/server/cli-loopback.js";
+import { createGateway, type GatewayConfig } from "../../../../../src/server/server.js";
+import { createRunChild, removeOwnedRunChild } from "../../../harnesses/shared/run-isolation.js";
 
-const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../../../..", import.meta.url)));
 // This test branch is developed in parallel with the gateway foundation branch.
 // The required shared module is the activation sentinel: the suites run after
 // the branches merge, while remaining compilable in the test-only worktree.

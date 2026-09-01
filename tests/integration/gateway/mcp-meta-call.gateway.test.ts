@@ -13,11 +13,11 @@
  * are spawned. We construct a real McpManager and seed its private state
  * (clients/toolDefs/configs) — mirrors `tests/mcp-failure-isolation.test.ts`.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, base, readE2EToken, createSession, defaultProjectId } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, base, readE2EToken, createSession, defaultProjectId } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import path from "node:path";
-import type { GatewayFixture as GatewayInfo } from "../../../tests2/harness/gateway.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import type { GatewayFixture as GatewayInfo } from "../../../tests/support/harnesses/shared/gateway.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 // ─── Stub MCP plumbing ─────────────────────────────────────────────────
 

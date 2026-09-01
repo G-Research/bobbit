@@ -22,8 +22,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { vi } from "vitest";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { gatewaySync } from "../../../tests2/integration/_e2e/runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { gatewaySync } from "../../../tests/support/harnesses/integration/gateway/runtime.js";
 import {
 	apiFetch,
 	base,
@@ -34,7 +34,7 @@ import {
 	readE2EToken,
 	registerProject,
 	toolStartPredicate,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 async function postSubmit(sessionId: string, toolUseId: string, answers: any) {
 	return fetch(`${base()}/api/internal/user-question/submit`, {

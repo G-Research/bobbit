@@ -12,7 +12,7 @@
  *
  * Optimized: tests run in parallel (each creates its own session).
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	createSession,
 	deleteSession,
@@ -20,7 +20,7 @@ import {
 	statusPredicate,
 	queueLenPredicate,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.setTimeout(30_000);
 

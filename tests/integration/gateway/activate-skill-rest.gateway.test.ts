@@ -14,8 +14,8 @@
 //
 // Uses the v2-integration compat shim (fork-scoped gateway) so the body stays
 // semantically identical to the legacy Playwright in-process harness.
-import "../../../tests2/integration/_e2e/fake-cmd-setup.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import "../../../tests/support/harnesses/integration/gateway/fake-cmd-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,7 +24,7 @@ import {
 	deleteSession,
 	apiFetch,
 	registerProject,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function freshCwd(label: string): string {
 	const dir = path.join(os.tmpdir(), `bobbit-skill-v2-${label}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
