@@ -104,6 +104,19 @@ afterEach(() => {
 });
 
 describe("browser-chaos.mjs worktree teardown is junction-safe (node_modules-wipe reproducing test)", () => {
+	it("loads the canonical browser chaos manifest", () => {
+		const manifestPath = path.resolve("tests/support/data/quality/chaos/browser-mutants.json");
+		const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Array<{
+			file: string;
+			expectedV2Catchers: string[];
+		}>;
+		expect(manifest.length).toBeGreaterThan(0);
+		for (const mutant of manifest) {
+			expect(mutant.file).toMatch(/^src\//);
+			for (const catcher of mutant.expectedV2Catchers) expect(catcher).toMatch(/^tests\/browser\/journeys\/.+\.journey\.spec\.ts$/);
+		}
+	});
+
 	it("unlinkReparsePoint removes only the link and preserves the external junction target", () => {
 		expect(
 			typeof (browserChaos as Record<string, unknown>).unlinkReparsePoint,

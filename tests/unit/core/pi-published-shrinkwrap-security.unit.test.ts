@@ -27,7 +27,7 @@ interface LockSource {
 }
 
 const FIXTURE_ROOT = fileURLToPath(
-	new URL("../../../tests2/core/fixtures/pi-published-shrinkwrap-security/", import.meta.url),
+	new URL("../../../tests/support/fixtures/unit/security/pi-published-shrinkwrap-security/", import.meta.url),
 );
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 

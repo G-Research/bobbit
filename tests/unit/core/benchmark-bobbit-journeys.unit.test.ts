@@ -129,6 +129,16 @@ function passingJourney(cases = ["alpha", "beta"]) {
 }
 
 describe("benchmark journey CLI and scheduling contract", () => {
+	it("resolves canonical checkout-side quality support without a legacy fallback", async () => {
+		const canonical = path.resolve("tests", "support", "data", "quality", "coverage", "v2-baseline-spec.json");
+		assert.equal(existsSync(canonical), true);
+		assert.equal(canonical.replaceAll("\\", "/").endsWith("tests/support/data/quality/coverage/v2-baseline-spec.json"), true);
+		assert.equal(existsSync(path.resolve("tests2", "v2-baseline-spec.json")), false);
+		const baseline = JSON.parse(await readFile(canonical, "utf8"));
+		assert.ok(baseline.stories > 0);
+		assert.ok(baseline.contracts > 0);
+	});
+
 	it("accepts only fixed journeys and bounded benchmark controls", () => {
 		const defaults = parseArgs(["--journey", "session-open"]);
 		assert.equal(defaults.warmups, DEFAULT_WARMUPS);

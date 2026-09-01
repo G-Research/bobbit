@@ -59,12 +59,11 @@ function selectFiles(...directories) {
 		.sort();
 }
 
-// Canonical fixture/journey suites and their transitional fixture consumers run
-// under playwright-v2; real-browser fidelity runs under playwright-e2e.
+// Canonical fixture/journey suites run under playwright-v2; real-browser
+// fidelity runs under playwright-e2e.
 const fixtureAndJourneyFiles = selectFiles(
 	["tests", "browser", "fixtures"],
 	["tests", "browser", "journeys"],
-	["tests2", "browser", "fixtures"],
 );
 const browserE2eFiles = selectFiles(["tests", "e2e", "browser"]);
 const selected = [...fixtureAndJourneyFiles, ...browserE2eFiles].sort();

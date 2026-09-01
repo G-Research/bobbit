@@ -54,7 +54,7 @@ const TOTAL_CORES = Number(process.env.BOBBIT_V2_TOTAL_CORES) || cpus().length;
 
 function budgetsConcurrency() {
 	try {
-		const b = JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "budgets.json"), "utf8"));
+		const b = JSON.parse(readFileSync(join(REPO_ROOT, "tests", "support", "data", "quality", "budgets", "budgets.json"), "utf8"));
 		return b.concurrency || {};
 	} catch {
 		return {};
@@ -64,7 +64,7 @@ function budgetsConcurrency() {
 const BUDGET_CONC = budgetsConcurrency();
 const WALL_BUDGET_S = Number(process.env.CONCURRENCY_PROOF_WALL_S) || (Number.isFinite(BUDGET_CONC.perRunMaxWallMs) ? Math.round(BUDGET_CONC.perRunMaxWallMs / 1000) : 600);
 
-// Concurrency target comes from tests2/budgets.json (concurrency.runs); env
+// Concurrency target comes from tests/support/data/quality/budgets/budgets.json (concurrency.runs); env
 // override for experiments. Capped at 3 for this 24-core box (5-way is a
 // gateway-boot capacity limit deferred to a spin-off — see budgets.json note).
 const TARGET_RUNS = Number.isFinite(BUDGET_CONC.runs) ? BUDGET_CONC.runs : 3;

@@ -97,6 +97,20 @@ afterEach(() => {
 });
 
 describe("chaos.mjs worktree teardown is junction-safe (node_modules-wipe reproducing test)", () => {
+	it("loads the canonical chaos manifest with canonical source and catcher paths", () => {
+		const manifestPath = path.resolve("tests/support/data/quality/chaos/mutants.json");
+		const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as Array<{
+			file: string;
+			expectedV2Catchers: string[];
+		}>;
+		expect(manifest.length).toBeGreaterThan(0);
+		expect(manifest.some(mutant => mutant.file === "tests/support/harnesses/shared/fenced-command-runner.ts")).toBe(true);
+		for (const mutant of manifest) {
+			expect(mutant.file).not.toMatch(/^tests2\//);
+			for (const catcher of mutant.expectedV2Catchers) expect(catcher).not.toMatch(/^tests2\//);
+		}
+	});
+
 	it("unlinkReparsePoint removes only the link and preserves the external junction target", () => {
 		expect(
 			typeof (chaos as Record<string, unknown>).unlinkReparsePoint,

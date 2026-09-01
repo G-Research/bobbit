@@ -8,7 +8,7 @@
  * consolidation: for each mutant in browser-only code (src/ui/**, src/app/** UI
  * paths), it runs BOTH
  *   - the targeted LEGACY browser spec (tests/e2e/ui/*.spec.ts, playwright-e2e), and
- *   - the replacement v2 JOURNEY (tests2/browser/journeys/*.journey.spec.ts, playwright-v2),
+ *   - the canonical journey (tests/browser/journeys/*.journey.spec.ts, playwright-v2),
  * and records caught/missed with test-name attribution. The acceptance bar:
  * every mutant the legacy browser suite catches MUST also be caught by the
  * replacement journey. A legacy-caught-but-journey-missed mutant is a REAL hole
@@ -161,14 +161,14 @@ const VITE_ENTRY = path.join(PRIMARY_NODE_MODULES, "vite", "bin", "vite.js");
 // docs/testing-v2/node-modules-corruption-rca.md.
 const BROWSER_CHAOS_ROOT = path.join(os.tmpdir(), `bobbit-browser-chaos-root-${process.pid}-${Date.now()}`);
 
-// --corpus <name> selects tests2/chaos/browser-mutants-<name>.json and suffixes
+// --corpus <name> selects tests/support/data/quality/chaos/browser-mutants-<name>.json and suffixes
 // the report paths with -<name>, so two coders can run DISJOINT corpus files +
 // reports in parallel without clobbering each other. Default (no --corpus) uses
 // the canonical browser-mutants.json and unsuffixed report paths.
 const _corpusArgIdx = process.argv.indexOf("--corpus");
 const CORPUS_NAME = _corpusArgIdx !== -1 ? (process.argv[_corpusArgIdx + 1] || "").trim() : "";
 const _corpusSuffix = CORPUS_NAME ? `-${CORPUS_NAME}` : "";
-const MUTANTS_FILE = path.join(REPO_ROOT, "tests2", "chaos", `browser-mutants${_corpusSuffix}.json`);
+const MUTANTS_FILE = path.join(REPO_ROOT, "tests", "support", "data", "quality", "chaos", `browser-mutants${_corpusSuffix}.json`);
 const REPORT_JSON = path.join(REPO_ROOT, ".profiles", "chaos", `browser-comparison-report${_corpusSuffix}.json`);
 const REPORT_MD = path.join(REPO_ROOT, ".profiles", "chaos", `browser-comparison-report${_corpusSuffix}.md`);
 const REPORT_MD_DOCS = path.join(REPO_ROOT, "docs", "testing-v2", `browser-chaos-report${_corpusSuffix}.md`);
@@ -783,14 +783,14 @@ function generateMarkdown(results, meta) {
 
 	L.push("## Methodology");
 	L.push("");
-	L.push("- Each mutant is a single search/replace in a browser-only `src/` file (see `tests2/chaos/browser-mutants.json`).");
+	L.push("- Each mutant is a single search/replace in a browser-only `src/` file (see `tests/support/data/quality/chaos/browser-mutants.json`).");
 	L.push("- Applied in ONE ephemeral `git worktree add --detach` shared across the campaign; the node_modules junction is unlinked before any recursive delete (junction-safe teardown).");
 	L.push("- Browser tests run against BUILT `dist`, so each mutant rebuilds only its dist target(s) (`build:ui` / `build:server`); a previously-mutated target is rebuilt from clean source before the next mutant.");
 	L.push("- A mutation that does not compile is `invalid` (never a kill); a run that crashes before tests is `error` (never a kill).");
 	L.push("- `caught` requires a NAMED failing test in the Playwright JSON report — a bare non-zero exit is an error, not a kill.");
 	L.push("- After each mutant the source file is reverted and a clean-tree assertion confirms no mutant leaks into the branch.");
 	L.push("");
-	L.push(`*Corpus: tests2/chaos/browser-mutants.json  |  Runner: scripts/testing-v2/browser-chaos.mjs*`);
+	L.push(`*Corpus: tests/support/data/quality/chaos/browser-mutants.json  |  Runner: scripts/testing-v2/browser-chaos.mjs*`);
 	return L.join("\n");
 }
 

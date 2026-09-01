@@ -18,7 +18,7 @@
     "search": "gateStates.filter(g => g.status === \"passed\" || g.status === \"bypassed\").map(g => g.gateId),",
     "replace": "gateStates.filter(g => g.status === \"passed\").map(g => g.gateId), // mutant: bypass-ignored",
     "expectedLegacyCatchers": ["tests/gate-dependency-enforcement.test.ts"],
-    "expectedV2Catchers": ["tests2/core/gate-dependency-enforcement.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/gates/gate-dependency-enforcement.unit.test.ts"]
   },
   {
     "id": "M02-gate-cascade-inverted",
@@ -28,7 +28,7 @@
     "search": "\t\t\tif (gate && gate.status !== \"pending\") {",
     "replace": "\t\t\tif (gate && gate.status === \"pending\") { // mutant: inverted condition",
     "expectedLegacyCatchers": ["tests/gate-store-logic.test.ts"],
-    "expectedV2Catchers": ["tests2/core/gate-store-logic.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/gates/gate-store-logic.unit.test.ts"]
   },
   {
     "id": "M03-gate-no-signal-push",
@@ -38,7 +38,7 @@
     "search": "\t\tgate.signals.push(signal);\n\t\tgate.updatedAt = Date.now();\n\t\tthis.save();",
     "replace": "\t\t// gate.signals.push(signal); // mutant: dropped signal push\n\t\tgate.updatedAt = Date.now();\n\t\tthis.save();",
     "expectedLegacyCatchers": ["tests/gate-store-logic.test.ts"],
-    "expectedV2Catchers": ["tests2/core/gate-store-logic.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/gates/gate-store-logic.unit.test.ts"]
   },
   {
     "id": "M04-session-store-no-persist",
@@ -133,7 +133,7 @@
   {
     "id": "M13-fence-gh-bypass",
     "area": "di-fence",
-    "file": "tests2/harness/fenced-command-runner.ts",
+    "file": "tests/support/harnesses/shared/fenced-command-runner.ts",
     "description": "DI-fence: gh invocation no longer blocked in execFile — the test-only gh fence is disabled.",
     "search": "\t\t\tif (name === \"gh\") throw new Error(\"[fenced-command-runner] blocked gh invocation\");\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") {\n\t\t\t\tif (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);\n\t\t\t\tawait assertGitRemoteAllowed(realCommandRunner, args, options);\n\t\t\t}\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
     "replace": "\t\t\t// if (name === \"gh\") ... // mutant: gh check removed\n\t\t\tif (name === \"docker\" || name === \"podman\") throw new Error(`[fenced-command-runner] blocked ${name} invocation`);\n\t\t\tif (name === \"git\") {\n\t\t\t\tif (shouldShortCircuitGitDiscovery(args, options)) throw nonRepositoryGitError(args, options);\n\t\t\t\tawait assertGitRemoteAllowed(realCommandRunner, args, options);\n\t\t\t}\n\t\t\treturn realCommandRunner.execFile(file, args, options);",
@@ -144,7 +144,7 @@
   {
     "id": "M14-fence-network-git-allowed",
     "area": "di-fence",
-    "file": "tests2/harness/fenced-command-runner.ts",
+    "file": "tests/support/harnesses/shared/fenced-command-runner.ts",
     "description": "DI-fence: NETWORK_GIT_COMMANDS cleared — git push/fetch/clone/ls-remote all allowed through the fence.",
     "search": "const NETWORK_GIT_COMMANDS = new Set([\"push\", \"fetch\", \"clone\", \"ls-remote\"]);",
     "replace": "const NETWORK_GIT_COMMANDS = new Set<string>([]); // mutant: allow all git network ops",
@@ -221,7 +221,7 @@
     "search": "\t\tthis.generation++;\n\t\texisting.archived = true;\n\t\texisting.archivedAt = Date.now();\n\t\tthis.save();",
     "replace": "\t\tthis.generation++;\n\t\t// existing.archived = true; // mutant: archive flag never set\n\t\texisting.archivedAt = Date.now();\n\t\tthis.save();",
     "expectedLegacyCatchers": ["tests/goal-trigger-dispatcher.test.ts"],
-    "expectedV2Catchers": ["tests2/core/goal-trigger-dispatcher.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/goals/goal-trigger-dispatcher.unit.test.ts"]
   },
   {
     "id": "M22-aggregate-gate-status-wrong-failed",
@@ -231,7 +231,7 @@
     "search": "\tif (gates.some(g => g.status === \"failed\")) return \"failed\";",
     "replace": "\tif (gates.some(g => g.status === \"failed\")) return \"pending\"; // mutant: wrong status",
     "expectedLegacyCatchers": ["tests/goal-descendants-enrichment.test.ts"],
-    "expectedV2Catchers": ["tests2/core/goal-descendants-enrichment.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/goals/goal-descendants-enrichment.unit.test.ts"]
   },
   {
     "id": "M23-gatesummary-bypassed-as-passed",
@@ -241,7 +241,7 @@
     "search": "\tconst bypassed = summaryGates.filter(gate => gate.status === \"bypassed\").length;",
     "replace": "\tconst bypassed = summaryGates.filter(gate => gate.status === \"passed\").length; // mutant: counts passed as bypassed",
     "expectedLegacyCatchers": ["tests/gate-status-summary.test.ts"],
-    "expectedV2Catchers": ["tests2/core/gate-status-summary.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/gates/gate-status-summary.unit.test.ts"]
   },
   {
     "id": "M24-gatesummary-passed-inverted",
@@ -251,7 +251,7 @@
     "search": "\t\tpassed: summaryGates.filter(gate => gate.status === \"passed\").length,",
     "replace": "\t\tpassed: summaryGates.filter(gate => gate.status !== \"passed\").length, // mutant: inverted passed predicate",
     "expectedLegacyCatchers": ["tests/gate-status-summary.test.ts"],
-    "expectedV2Catchers": ["tests2/core/gate-status-summary.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/gates/gate-status-summary.unit.test.ts"]
   },
   {
     "id": "M25-plan-mutation-prune-inverted",
@@ -261,7 +261,7 @@
     "search": "\t\t\t\tconst kept = list.filter(m => m.expiresAt > now);",
     "replace": "\t\t\t\tconst kept = list.filter(m => m.expiresAt < now); // mutant: inverted expiry check",
     "expectedLegacyCatchers": ["tests/plan-mutation-store.test.ts"],
-    "expectedV2Catchers": ["tests2/core/plan-mutation-store.test.ts"]
+    "expectedV2Catchers": ["tests/unit/core/plan-mutation-store.unit.test.ts"]
   },
   {
     "id": "M26-inbox-listpending-inverted",
@@ -540,7 +540,7 @@
   {
     "id": "M53-fence-fetch-loopback-inverted",
     "area": "di-fence",
-    "file": "tests2/harness/fenced-fetch.ts",
+    "file": "tests/support/harnesses/shared/fenced-fetch.ts",
     "description": "DI-fence: inverted loopback guard — the fenced fetch would BLOCK loopback hosts and ALLOW non-loopback ones, disabling the fail-closed outbound-HTTP fence (a test could reach the network).",
     "search": "if (!isLoopbackHost(url.hostname)) {",
     "replace": "if (isLoopbackHost(url.hostname)) { // mutant: inverted loopback fence",
