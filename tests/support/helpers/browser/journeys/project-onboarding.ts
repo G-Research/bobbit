@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { createRunChild } from "../../harness/run-isolation.js";
+import { createRunChild } from "../../../harnesses/shared/run-isolation.js";
 import { apiFetch, expect } from "./journey-fixture.js";
 
 /** Stable selectors from tests/e2e/ui/add-project-helpers.ts */

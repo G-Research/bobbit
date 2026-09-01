@@ -9,7 +9,7 @@ import {
 	test,
 	waitForAgentResponse,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 const PORTRAIT = { width: 375, height: 667 };
 const LANDSCAPE = { width: 900, height: 667 };

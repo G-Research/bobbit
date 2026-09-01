@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { waitForStableScroll } from "../../../tests2/browser/_helpers/stable-wait.js";
+import { waitForStableScroll } from "../../support/helpers/browser/journeys/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/fixtures/collapse-scroll-bugs.html")}`;
 

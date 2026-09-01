@@ -9,7 +9,7 @@ import {
 	sendMessage,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 interface CapturedAuthors {
 	user: { kind: string; id: string; label: string };

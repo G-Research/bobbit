@@ -6,8 +6,8 @@ import {
 	widgetState,
 	type RemoteStateScenario,
 	type SnapshotState,
-} from "../../../tests2/browser/journeys/remote-state-coordinator.fixture.js";
-import { expect, test } from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/remote-state-coordinator.fixture.js";
+import { expect, test } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 /**
  * Covers last-good failure handling, dual-client recovery, late REST ordering,

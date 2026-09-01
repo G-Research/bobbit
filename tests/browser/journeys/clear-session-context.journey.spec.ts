@@ -5,12 +5,12 @@ import {
 	expect,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	editor,
 	openSessionPage,
 	submit,
-} from "../../../tests2/browser/journeys/reliable-agent-turns.fixture.js";
+} from "../../support/helpers/browser/journeys/reliable-agent-turns.fixture.js";
 
 const SEGMENT_A_PLAIN = "CLEAR_SEGMENT_A_PLAIN";
 const SEGMENT_A_TOOL = "CLEAR_SEGMENT_A_TOOL please use bash";

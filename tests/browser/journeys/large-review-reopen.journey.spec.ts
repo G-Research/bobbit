@@ -9,7 +9,7 @@ import {
 	sendMessage,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	LARGE_REVIEW_DELAYED_TRIGGER,
 	LARGE_REVIEW_ID,
@@ -27,7 +27,7 @@ import {
 	waitForLargeReviewReceipt,
 	selectedReviewModel,
 	workspaceReviewSource,
-} from "../../../tests2/browser/fixtures/large-review-payload-fixture.js";
+} from "../../support/helpers/browser/fixtures/large-review-payload-fixture.js";
 
 const REVIEW_TABS = '.goal-tab-pill[data-panel-tab-kind="review"]';
 const REGRESSION = "LARGE_REVIEW_DURABLE_REOPEN";

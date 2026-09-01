@@ -22,7 +22,7 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { waitForFrames } from "../../../tests2/browser/_helpers/stable-wait.js";
+import { waitForFrames } from "../../support/helpers/browser/journeys/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/fixtures/agent-interface-scroll-hardening.html")}`;
 

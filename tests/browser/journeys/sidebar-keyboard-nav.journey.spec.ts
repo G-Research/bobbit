@@ -1,7 +1,7 @@
 /**
  * Sidebar keyboard navigation representative real-app smoke.
  * The exhaustive visible-row/order/wrap/archive matrix lives in the file://
- * fixture at tests2/browser/fixtures/sidebar-keyboard-nav-fixture.spec.ts.
+ * fixture at tests/browser/fixtures/sidebar-keyboard-nav-fixture.fixture.spec.ts.
  */
 import { test, expect, type Page } from "../../e2e/gateway-harness.js";
 import {

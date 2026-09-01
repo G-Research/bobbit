@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Locator } from "@playwright/test";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, expect, navigateToHash, openApp, registerProject, test, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, expect, navigateToHash, openApp, registerProject, test, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 type GitFixture = {
 	root: string;

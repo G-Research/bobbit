@@ -22,7 +22,7 @@ export default function globalSetup() {
 		} catch { /* ignore */ }
 	}
 
-	const projectRoot = join(import.meta.dirname, "..");
+	const projectRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 	// Disable external services in browser tests.
 	process.env.NODE_ENV = "test";

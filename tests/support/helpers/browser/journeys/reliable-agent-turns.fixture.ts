@@ -1,6 +1,6 @@
 import type { BrowserContext, Locator, Page } from "@playwright/test";
-import type { GatewayInfo } from "../gateway-harness.js";
-import { expect, navigateToHash, openApp } from "../_helpers/journey-fixture.js";
+import type { GatewayInfo } from "../../../harnesses/browser/gateway-harness.js";
+import { expect, navigateToHash, openApp } from "./journey-fixture.js";
 
 /** A deterministic test seam: arrival is observable separately from release. */
 export class TurnBarrier {

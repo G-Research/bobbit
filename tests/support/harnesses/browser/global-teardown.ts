@@ -18,8 +18,8 @@
  * tests/e2e/e2e-teardown.ts itself is NOT modified so legacy e2e runs are
  * unaffected.
  */
-import legacyTeardown from "../tests/e2e/e2e-teardown.js";
-import { publishTransformCacheFromEnv } from "../scripts/testing-v2/pwtest-cache.js";
+import legacyTeardown from "../../../e2e/e2e-teardown.js";
+import { publishTransformCacheFromEnv } from "../../../../scripts/testing-v2/pwtest-cache.js";
 
 export default async function globalTeardown(): Promise<void> {
 	try {

@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { test, expect, apiFetch, defaultProject, openApp } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, apiFetch, defaultProject, openApp } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 type StaffRecord = {
 	id: string;

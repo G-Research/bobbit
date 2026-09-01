@@ -6,7 +6,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import { awaitableRm } from "../../../tests/e2e/test-utils/cleanup.js";
 import { sendMessage, createSessionViaUI } from "../../../tests/e2e/ui/ui-helpers.js";
 

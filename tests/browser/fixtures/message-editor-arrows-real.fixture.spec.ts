@@ -41,7 +41,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "../../../tests2/browser/fixtures/fixtures/build-bundle.js";
+import { buildBundle } from "../../support/helpers/browser/fixtures/fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/message-editor-arrows-real.html");
 const BUNDLE = path.resolve("tests/fixtures/message-editor-arrows-real-bundle.js");

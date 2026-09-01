@@ -1,12 +1,12 @@
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "../../../tests2/browser/e2e-setup.js";
-import { navigateToHash, openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
+} from "../../support/harnesses/browser/e2e-setup.js";
+import { navigateToHash, openApp } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 const MUTATING_TOOLS = ["write", "edit", "bash", "bash_bg"] as const;
 

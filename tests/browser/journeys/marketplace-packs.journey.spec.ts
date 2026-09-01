@@ -4,7 +4,7 @@
  * Consolidated from: artifacts-pack, terminal-pack, pr-walkthrough-pack, etc.
  * Note: the marketplace route is #/market, not #/settings/marketplace.
  */
-import { test, expect, navigateToHash, openApp } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, navigateToHash, openApp } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 async function openMarketplace(page: import("@playwright/test").Page): Promise<void> {
 	await openApp(page);

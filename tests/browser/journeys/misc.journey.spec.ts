@@ -1,8 +1,8 @@
 /**
  * Journey: Misc: session chrome, notifications, retry state, and responsive smoke.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { apiFetch, defaultProject } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { apiFetch, defaultProject } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import { createUploadedAttachmentExtension } from "../../../defaults/tools/attachments/extension.js";
 
 test.describe("Journey: Notification Policy", () => {

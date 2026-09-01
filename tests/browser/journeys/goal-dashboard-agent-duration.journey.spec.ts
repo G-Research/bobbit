@@ -9,8 +9,8 @@ import {
 	openApp,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { startTeam, teardownTeam } from "../../../tests2/browser/e2e-setup.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { startTeam, teardownTeam } from "../../support/harnesses/browser/e2e-setup.js";
 
 function leadCard(page: Page): Locator {
 	return page.locator(".agent-card").filter({ hasText: "LEAD" }).first();

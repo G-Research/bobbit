@@ -4,7 +4,7 @@
  * through browser-safe pi-ai routes, and session restore after transcript parsing.
  */
 import type { Page } from "@playwright/test";
-import { test, expect, openApp, navigateToHash, apiFetch, createSession, deleteSession, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, apiFetch, createSession, deleteSession, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 interface ApiModel {
 	id: string;

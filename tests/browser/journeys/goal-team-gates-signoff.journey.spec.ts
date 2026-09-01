@@ -13,7 +13,7 @@ import {
   createSession,
   deleteSession,
   waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 // Browser journey for the gate-card human sign-off handoff. The transcript is
 // seeded with a real gate_inspect response from the running gateway so the test

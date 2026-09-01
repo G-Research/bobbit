@@ -1,7 +1,7 @@
 /**
  * Journey: Goal → Team → Gates — v2 browser smoke
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 test.describe("Journey: Goal → Team → Gates", () => {
 	test("goal dashboard renders its title and sidebar edge after navigation", async ({ page }) => {

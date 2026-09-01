@@ -1,9 +1,9 @@
 /**
  * Journey: Proposal controls: API errors and goal-role customization.
  */
-import { test, expect, openApp } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { sendMessage, defaultProjectId } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { createGoalAssistantViaUI } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect, openApp } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { sendMessage, defaultProjectId } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { createGoalAssistantViaUI } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 // Ported from api-error-modal.spec.ts (audit: misc GAP): a createGoal 400 must
 // surface the server error text + stack disclosure in the error modal.

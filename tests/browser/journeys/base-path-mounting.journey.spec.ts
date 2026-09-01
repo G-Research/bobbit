@@ -2,8 +2,8 @@ import type { Page, Request as PlaywrightRequest, Response as PlaywrightResponse
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import QRCode from "qrcode";
-import { test, expect } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import type { GatewayInfo } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import type { GatewayInfo } from "../../support/harnesses/browser/gateway-harness.js";
 
 const BASE_PATH = "/team/bobbit";
 const ENTRY = "mounted-preview.html";

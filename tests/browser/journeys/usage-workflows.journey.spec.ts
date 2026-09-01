@@ -1,9 +1,9 @@
 /**
  * Journey: Usage and workflows: prompt statistics, costs, and workflow settings.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { sendMessage, apiFetch, createGoal, deleteGoal, defaultProjectId } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { rawApiFetch } from "../../../tests2/browser/e2e-setup.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { sendMessage, apiFetch, createGoal, deleteGoal, defaultProjectId } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { rawApiFetch } from "../../support/harnesses/browser/e2e-setup.js";
 
 // Ported from prompt-stats-e2e.spec.ts (audit: misc GAP / BR51): after an agent
 // response, the stats bar must show the model name, a context-usage tooltip

@@ -10,7 +10,7 @@ import {
 	row,
 	test,
 	trigger,
-} from "../../../tests2/browser/fixtures/sidebar-actions-menu-fixture-support.js";
+} from "../../support/helpers/browser/fixtures/sidebar-actions-menu-fixture-support.js";
 
 const { loadFixture } = installSidebarActionsFixture("sidebar-actions-menu-mobile-fixture-bundle.js");
 

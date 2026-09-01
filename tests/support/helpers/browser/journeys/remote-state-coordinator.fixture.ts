@@ -14,7 +14,7 @@ import {
 	openApp,
 	registerProject,
 	waitForSessionStatus,
-} from "../_helpers/journey-fixture.js";
+} from "./journey-fixture.js";
 
 interface RemoteFixture {
 	root: string;

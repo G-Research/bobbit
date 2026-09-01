@@ -14,8 +14,8 @@ import {
 	createGoal,
 	deleteGoal,
 	apiFetch,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { seedTeamLeadHeader } from "../../../tests2/browser/e2e-setup.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { seedTeamLeadHeader } from "../../support/harnesses/browser/e2e-setup.js";
 
 type SchedulerRecovery = {
 	kind: "child" | "root";

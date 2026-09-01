@@ -11,11 +11,11 @@ import {
   apiFetch,
   deleteSession,
   waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
   startTeam,
   teardownTeam,
-} from "../../../tests2/browser/e2e-setup.js";
+} from "../../support/harnesses/browser/e2e-setup.js";
 
 // Resetting a gate is also a goal lifecycle mutation when the team has already
 // completed. Pin the user-visible, cross-tab path rather than relying only on
