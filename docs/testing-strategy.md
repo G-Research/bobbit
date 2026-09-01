@@ -1,6 +1,6 @@
 # Testing strategy
 
-> **Current transition.** New tests use the canonical `tests/` hierarchy below. Existing `tests2/` and legacy `tests/` suites remain discoverable until their bounded migration cohorts land. Do not copy their paths for new tests. The migration plans and measurements under [`docs/testing-v2/`](testing-v2/) remain historical unless they explicitly identify themselves as current.
+> **Current layout.** The single-root cutover is complete: runnable suites use only the canonical `tests/` hierarchy, while imported-only support lives under `tests/support/`. The migration plans and measurements under [`docs/testing-v2/`](testing-v2/) are historical unless they explicitly identify themselves as current.
 
 ## The phase invariant (read this first)
 
@@ -18,7 +18,7 @@ There is no scheduled daily lane or `test:daily` command. Real-fidelity automate
 
 ### Complete lanes are the feedback model
 
-Local development and workflow qualification use the same complete lane commands. Direct execution avoids a second dependency model that could drift from the test inventory, while preserving each lane's existing worker, retry, fixture, and isolation behavior.
+Local development and workflow qualification use the same complete lane commands. Direct execution avoids a second dependency model that could drift from convention discovery, while preserving each lane's existing worker, retry, fixture, and isolation behavior.
 
 Run `npm run test:unit` for the normal edit loop. Add the complete browser or E2E lane when the change crosses those boundaries, and run every phase required by the workflow before merge. Manual integration remains explicitly opt-in because it uses real LLMs, agents, and Docker.
 
@@ -41,27 +41,23 @@ Choose the cheapest lane that proves the behavior. New runnable tests must use o
 | API, MCP, port, restart, or Docker fidelity without a browser | `tests/e2e/api/**/*.api-e2e.spec.ts` | E2E Group B / Playwright |
 | Real browser plus process, restart, pack, or Docker fidelity | `tests/e2e/browser/**/*.browser-e2e.spec.ts` | E2E Group C / Playwright |
 | Real model, agent, credential, or external-service behavior | `tests/manual/**/*.manual.spec.ts` | manual / Playwright |
-| Non-runnable harnesses, helpers, fixtures, data, or templates | `tests/support/{harnesses,helpers,fixtures,data,templates}/<lane>/**` or lane-local `_helpers/**` | imported only |
+| Non-runnable harnesses, helpers, fixtures, data, templates, or package fixtures | `tests/support/{harnesses,helpers,fixtures,data,templates}/<purpose-or-lane>/**` or an established lane-local `_helpers/**` | imported only; excluded from runnable discovery |
 
 The distinction between `tests/browser/` and `tests/e2e/browser/` is fidelity, not whether a UI is visible. Use browser E2E only when real process, restart, Docker, pack, or comparable system fidelity defines the test. An API E2E must not request browser fixtures; move it to browser E2E if it needs `page`, `browser`, or `context`. Manual tests never enter an automated lane.
 
 Semantic suffixes are ownership, not descriptive decoration. `*.isolated.test.ts` is for unavoidable singleton or environment isolation. E2E suffixes are for real-fidelity boundaries. Support code must not have a runnable suffix.
 
-### Transitional compatibility
+### Canonical-only discovery
 
-The layout policy composes canonical discovery with compatibility conventions so migration does not reduce coverage:
+Canonical semantic destinations under `tests/` are the sole runnable owners. Convention discovery reads those destinations deterministically and assigns each runnable path exactly once; it has no transitional lookup, registry, per-file allowlist, checked-in inventory, or compatibility fallback.
 
-- `tests2/{core,dom,integration}/` and its isolated or E2E suffixes continue to feed the existing Vitest projects;
-- `tests2/browser/`, including its E2E subtree, continues to feed the existing Playwright projects;
-- legacy top-level Node E2E, `tests/e2e/` Playwright E2E, and `tests/manual-integration/` patterns continue to use their current runners.
+`tests/support/` is purpose-first imported support, not another test lane. Group shared code beneath `harnesses/`, `helpers/`, `fixtures/`, `data/`, or `templates/`, then by the owning purpose or lane. Use lane-local `_helpers/` only when support is genuinely specific to that lane and the local convention is already established. Neither support location may contain a runnable suffix.
 
-Compatibility conventions exist only for files already in those roots. Newly added, copied, renamed, or untracked tests must use a canonical pattern. The compatibility layer can be removed when the policy census reports no runnable files outside canonical destinations; it does not contain per-file exceptions.
-
-At the foundation census, 1,425 runnable-shaped files matched an existing lane convention and 191 did not. These are migration-planning snapshots, not a maintained inventory. `npm run test:layout` reports current legacy and unowned totals without failing solely because a pre-existing file is outside the canonical hierarchy.
+Former transitional and legacy runnable paths have no owner. Discovery and layout validation fail closed with an actionable canonical pattern instead of silently selecting them.
 
 ### Layout validation
 
-`npm run test:layout` validates Git-introduced paths, including add/copy/rename destinations, plus untracked test-shaped files. It rejects wrong directories or suffixes, ambiguous runner imports, browser/API boundary violations, duplicate ownership, runnable helpers, case-fold collisions, and unsafe paths. Diagnostics include the canonical destination. Git path input is NUL-safe, and both POSIX and Windows separators normalize to repository-relative paths. `npm run check` includes this validation.
+`npm run test:layout` validates the complete Git-tracked and untracked runnable-shaped set. It rejects every path outside a canonical semantic destination, as well as wrong suffixes, ambiguous runner imports, browser/API boundary violations, duplicate ownership, runnable support files, case-fold collisions, and unsafe paths. Diagnostics include the canonical destination. Git path input is NUL-safe, and both POSIX and Windows separators normalize to repository-relative paths. `npm run check` includes this fail-closed validation.
 
 ### Create a test
 
@@ -81,22 +77,13 @@ npm run test:new -- api-e2e restart/session-recovery
 
 Valid semantics are `unit-core`, `unit-isolated`, `dom`, `gateway-integration`, `browser-fixture`, `browser-journey`, `node-e2e`, `vitest-e2e`, `api-e2e`, `browser-e2e`, and `manual`. Names are repository-relative stems such as `agent/status-policy`; traversal, absolute paths, invalid names, and collisions are refused. The generated placeholder must be implemented before committing.
 
-### Migration plan
+### Cutover status
 
-Move tests in small, rename-oriented PRs based on then-current `main`. Each cohort must preserve runner selection and coverage, and must not include product fixes or broad documentation cleanup.
-
-**Current shared-support migration status.** The proposal fixture cohort now lives at `tests/support/fixtures/unit/proposals/{goal-route-fixture,project-fixture}.ts`. Remaining support/harness cohorts are unit helpers, fixtures, and the general unit harness; browser helpers and assets; integration helpers and harnesses; E2E support; and manual support. Migrate each remaining cohort in a separate bounded PR.
-
-1. **Shared support and harnesses** — move non-runnable helpers, fixtures, data, and harnesses into `tests/support/` or lane-local `_helpers/` directories.
-2. **Bounded unit-core cohorts** — migrate small, reviewable groups into `tests/unit/core/`, preserving behavior before starting the next group.
-3. **DOM and gateway integration** — migrate the happy-dom and in-process gateway cohorts into `tests/dom/` and `tests/integration/gateway/`.
-4. **Browser fixtures and journeys** — separate deterministic fixture coverage from visible mock-gateway journeys under `tests/browser/{fixtures,journeys}/`.
-5. **E2E and manual lanes** — migrate Node, Vitest, API, browser, and manual coverage; reconcile every currently unowned runnable-shaped file with explicit equivalence or restored-coverage evidence.
-6. **Final single-root cutover** — after the census reaches zero outside canonical destinations, remove `tests2/`, transitional discovery, redundant semantic inventory machinery, and stale current guidance.
+The single-root migration and final support cutover are complete. Canonical convention discovery is now the only runnable owner, and all non-runnable support uses the purpose-first `tests/support/` topology or an established lane-local `_helpers/` directory. The transitional classifier and discovery paths, semantic per-file map, unit inventory audit, and `test:unit:inventory` command have been removed because directory-and-suffix conventions now provide the same ownership guarantee without a second policy source.
 
 ### Foundation provenance
 
-This policy, validator, scaffold, and canonical hierarchy are selectively adapted from closed PR [#1256](https://github.com/G-Research/bobbit/pull/1256). Unlike that PR, this foundation keeps both existing roots and all independent quality tooling, moves no suites, and does not rewrite historical documents. PRs #1257, #1258, and #1263 already removed affected-test selection, fixed browser filtering, and replaced the manual test map with convention discovery; this work builds on those changes rather than reintroducing their machinery.
+This policy, validator, scaffold, and canonical hierarchy were selectively adapted from closed PR [#1256](https://github.com/G-Research/bobbit/pull/1256). At the foundation stage, Bobbit intentionally kept the existing roots and all independent quality tooling while moving no suites. PRs #1257, #1258, and #1263 had already removed affected-test selection, fixed browser filtering, and replaced the manual test map with convention discovery. The subsequent foundation and migration sequence preserved that tooling and runner behavior; the completed final cutover now removes the second root and its superseded discovery and inventory machinery without rewriting historical documents.
 
 The unit phase uses one Vitest coordinator with a fixed three-worker cap.
 `VITEST_MAX_WORKERS` may lower the cap only. The normal `retry: 3` / `retries: 3`
@@ -708,7 +695,7 @@ If a test needs a new fact, add a named outcome helper to `tail-chat-helpers.ts`
 
 ## Manual Integration Tests
 
-Full-stack resilience tests that use real agents and real Docker containers — no mocks. Defined in `tests/manual-integration/session-resilience.spec.ts`, configured by `playwright-manual.config.ts`. **Not included in `npm test`, `npm run test:unit`, or `npm run test:e2e`.**
+Full-stack resilience tests that use real agents and real Docker containers — no mocks. Defined in `tests/manual/session-resilience.manual.spec.ts`, configured by `playwright-manual.config.ts`. **Not included in `npm test`, `npm run test:unit`, or `npm run test:e2e`.**
 
 ```bash
 npm run test:manual                 # Headless, API assertions only (~5 min)
@@ -725,9 +712,9 @@ MANUAL_TEST_MODEL=openai-codex/gpt-5.5 MANUAL_TEST_THINKING_LEVEL=max \
 
 `BOBBIT_MANUAL_INHERIT_SERVER_CONFIG=1` reads the parent process `BOBBIT_DIR`, copies only model/provider preferences (`default.*Model`, `default.*ThinkingLevel`, `providerKey.*`, `allowSessionModelFallback`, AI Gateway/custom-provider settings) plus Pi agent auth/config files (`agent/auth.json`, `settings.json`, `models.json`, `google-code-assist.json`) into each isolated manual gateway. It does **not** point tests at the live directory and does not copy sessions, goals, projects, gateway tokens, or TLS material. Explicit `MANUAL_TEST_MODEL` / `MANUAL_TEST_THINKING_LEVEL` still win over inherited session defaults.
 
-### Real-LLM tests live under `tests/manual-integration/`
+### Real-LLM tests live under `tests/manual/`
 
-Any test that needs a real LLM call lives under `tests/manual-integration/` and runs only via `npm run test:manual` (real agent / Docker). There is **no** separate real-LLM e2e config or `test:e2e:real` script — those were retired so the only gate-exempt path is `tests/manual-integration/**` (see the phase invariant at the top of this doc). Compaction's manual `/compact` and auto/threshold paths are both covered deterministically (mock agent, no LLM) by the `@live-compaction-affordance` tests in `tests/e2e/ui/pre-compaction-history.spec.ts`. The former real-LLM manual specs (`compaction.spec.ts`, `compaction-pressure.spec.ts`) were removed because they seeded auth by copying a static `auth.json` OAuth snapshot whose short-lived access token expired mid-run (`invalid_grant`), so they could not authenticate reliably. See [compaction.md](compaction.md) for the feature-level walkthrough.
+Any test that needs a real LLM call lives under `tests/manual/` with the `*.manual.spec.ts` suffix and runs only via `npm run test:manual` (real agent / Docker). There is **no** separate real-LLM E2E config or `test:e2e:real` script; the canonical manual lane is the only gate-exempt path (see the phase invariant at the top of this doc). Compaction's manual `/compact` and auto/threshold paths are both covered deterministically (mock agent, no LLM) by the `@live-compaction-affordance` tests in `tests/e2e/browser/pre-compaction-history.browser-e2e.spec.ts`. The former real-LLM manual specs (`compaction.spec.ts`, `compaction-pressure.spec.ts`) were removed because they seeded auth by copying a static `auth.json` OAuth snapshot whose short-lived access token expired mid-run (`invalid_grant`), so they could not authenticate reliably. See [compaction.md](compaction.md) for the feature-level walkthrough.
 
 **Prerequisites**: `npm run build`, a working agent CLI in PATH (claude, etc.), Docker running for sandbox tests.
 
@@ -762,8 +749,8 @@ Any test that needs a real LLM call lives under `tests/manual-integration/` and 
 
 The canary for `--tools` allowlist regressions has two layers, both pinning the post-`fdfee7c5` activation contract:
 
-- **Unit contract pin** — `tests2/core/tool-activation-contract.test.ts`. Runs in seconds inside tier-1 under `npm run test:unit` (v2); asserts `computeToolActivationArgs()` emits `--no-builtin-tools`, `--no-extensions`, the `_builtins/extension.ts` re-register shim, and the sorted `BOBBIT_BUILTIN_TOOLS` env list, with no stray `--tools` flag.
-- **Manual-integration canary** — `tests/manual-integration/agent-tool-use.spec.ts`. Real agent in a sandboxed session, seven scenarios covering pi builtins (bash, edit, find), the steer/interrupt path, a tool-error path, a Bobbit extension tool (`web_fetch`), and an MCP meta-tool (`mcp_describe`). Tool-card assertions are tool-name-specific (`data-tool-name="<name>"` on the shared wrapper in `src/ui/components/Messages.ts`); substitute tools that produce the same visible side-effect no longer pass.
+- **Unit contract pin** — `tests/unit/core/tool-activation-contract.unit.test.ts`. Runs in seconds inside tier-1 under `npm run test:unit`; asserts `computeToolActivationArgs()` emits `--no-builtin-tools`, `--no-extensions`, the `_builtins/extension.ts` re-register shim, and the sorted `BOBBIT_BUILTIN_TOOLS` env list, with no stray `--tools` flag.
+- **Manual-integration canary** — `tests/manual/agent-tool-use.manual.spec.ts`. Real agent in a sandboxed session, seven scenarios covering pi builtins (bash, edit, find), the steer/interrupt path, a tool-error path, a Bobbit extension tool (`web_fetch`), and an MCP meta-tool (`mcp_describe`). Tool-card assertions are tool-name-specific (`data-tool-name="<name>"` on the shared wrapper in `src/ui/components/Messages.ts`); substitute tools that produce the same visible side-effect no longer pass.
 
 Run the unit pin on every commit and the integration canary before and after any `@earendil-works/pi-*` version bump. See [testing-coverage.md — Agent tool-use canary](testing-coverage.md#agent-tool-use-canary-two-layers) for the full scenario list, rationale, and the recipe for adding a new tool category.
 
@@ -790,10 +777,10 @@ and high-fanout support-graph transforms. Vitest transformed modules use a separ
 PID-scoped cache, allowing projects in one coordinator to share work without letting
 simultaneous coordinators race on writable metadata.
 
-**Isolation audits.** The tier-1 runtime spawn guard blocks `child_process`; the unit
-inventory audit also rejects direct value imports. The inventory audit pins exact
-execution ownership and scans mutable paths in shared-worker projects for a real
-cross-process owner token rather than timestamp-only names.
+**Isolation audits.** The tier-1 runtime spawn guard blocks `child_process`.
+Canonical convention discovery pins exact execution ownership without a semantic
+per-file map, while focused isolation tests require mutable paths in shared-worker
+projects to use a real cross-process owner token rather than timestamp-only names.
 
 Browser and E2E phases retain their own resource and retry policies. Do not infer
 those policies from the unit gate's fixed worker cap or `retry: 3`; the current
@@ -856,7 +843,7 @@ suite-layout layers:
   steps, and explicit sequencing should use different `phase` values.
   Component-linked `command: unit` steps also default to 1200s when no explicit
   timeout is set; other command steps keep the generic 300s default. Pinned by
-  `tests2/core/verification-harness-command-scheduling.test.ts`.
+  `tests/unit/core/verification-harness-command-scheduling.unit.test.ts`.
 - **Activate-skill renderer fixture readiness.** The fixture used to let
   fully-parallel workers rebuild the same esbuild output file in place. A worker
   could load the bundle while another had truncated but not finished writing it,

@@ -1,9 +1,9 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // Reproducer: a pre-v0.17.0 (unmarked) Bobbit `providers.aigw` publication must be
 // adopted on the ordinary model-registry read path, so live gateway discovery resumes
 // and upstream-provider provenance is restored without any separate refresh call.
 
-import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, beforeEach, describe, it, vi } from "vitest";

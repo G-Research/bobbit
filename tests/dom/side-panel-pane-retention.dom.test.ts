@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Desktop side-panel pane retention (docs/design/keep-side-panels-mounted.md).
 //
@@ -8,7 +8,7 @@ __syncBeforeAll(() => __syncCE());
 // split↔fullscreen, session switch and tab switch, while still being destroyed
 // for real on tab close, pack uninstall, session archive and LRU eviction.
 //
-// IFRAME IDENTITY: `tests2/dom/pack-panels-reconcile.test.ts` documents that
+// IFRAME IDENTITY: `tests/dom/pack-panels-reconcile.dom.test.ts` documents that
 // happy-dom cannot execute a pack panel's Blob-URL ESM import, so a REAL pack
 // panel never reaches `panel.render()` here and never emits an iframe. We
 // therefore stub the single projection chokepoint `renderPackPanelContent` with

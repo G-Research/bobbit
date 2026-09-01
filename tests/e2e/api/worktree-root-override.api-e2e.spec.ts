@@ -14,7 +14,7 @@ import path from "node:path";
 
 import { worktreeRoot, branchContainer } from "../../../src/server/skills/worktree-paths.js";
 import { createWorktree, createWorktreeSet, cleanupWorktree } from "../../../src/server/skills/git.js";
-import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
 
 // Repos come from the immutable committed template (master + README.md +
 // .gitattributes + one commit); nothing here asserts on tree contents.

@@ -7,8 +7,8 @@
  * routes). Tests exercising the 400-projectId-required path use `rawApiFetch`
  * (see workflows-project-scope.spec.ts).
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, nonGitCwd, apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, nonGitCwd, apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
 
 /** Helper: minimal valid v2 workflow body (gates-based) */

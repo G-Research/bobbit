@@ -1,6 +1,6 @@
 // Migrated from tests/pr-walkthrough-run-trust-gate.test.ts (v2-core tier).
 // node:test default import mapped to the vitest named `test` by hand; relative
-// specifiers repointed for tests2/core/.
+// specifiers repointed for tests/unit/core/.
 /**
  * Unit test for the pack `run` route trust pre-check (design §4b.2).
  *

@@ -1,6 +1,6 @@
 // Migrated from tests/pr-walkthrough-trust-client.test.ts (v2-core tier).
 // node:test named imports mapped to vitest; relative specifiers repointed for
-// tests2/core/. Pure logic (injected fetch/confirm/ensureTrusted seams), node env.
+// tests/unit/core/. Pure logic (injected fetch/confirm/ensureTrusted seams), node env.
 /**
  * Unit tests for the CLIENT PR-walkthrough trust flow
  * (`src/app/pr-walkthrough-trust.ts`, design docs/design/pr-walkthrough-gh-posting.md

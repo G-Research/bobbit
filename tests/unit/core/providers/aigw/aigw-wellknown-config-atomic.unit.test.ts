@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // AIGW atomic models/configuration failure coverage.
 
 import { describe, it, beforeEach, afterEach } from "vitest";
@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import {
 	configureAigw, resetAgentDirStateForTests, startDiscoveryServer,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("configureAigw — atomic persistence", () => {
 	let tmpAgentDir: string;

@@ -9,7 +9,7 @@ import { GoalStore, type PersistedGoal } from "../../../src/server/agent/goal-st
 import { buildVerificationFailureMessage } from "../../../src/server/agent/notify-team-lead-failure.js";
 import { VerificationHarness } from "../../../src/server/agent/verification-harness.js";
 import type { Workflow, WorkflowGate } from "../../../src/server/agent/workflow-store.js";
-import { createFakeVerificationCommandRunner } from "../../../tests2/harness/fake-verification-command-runner.js";
+import { createFakeVerificationCommandRunner } from "../../../tests/support/harnesses/shared/fake-verification-command-runner.js";
 
 const GATE_ID = "implementation";
 const START_TIME = 1_700_000_000_000;

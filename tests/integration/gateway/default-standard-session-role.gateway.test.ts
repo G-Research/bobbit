@@ -1,5 +1,5 @@
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, defaultProject, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, defaultProject, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const REPRO = "DEFAULT_STANDARD_ROLE_MISMATCH";
 const GENERAL_ROLE = "general";

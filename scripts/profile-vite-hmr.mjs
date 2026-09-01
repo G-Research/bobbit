@@ -77,10 +77,10 @@ export function usage() {
 function copyFixture(fixtureRoot) {
 	fs.rmSync(fixtureRoot, { recursive: true, force: true });
 	fs.mkdirSync(fixtureRoot, { recursive: true });
-	for (const directory of ["src", "public", "docs", "tests2"]) {
+	for (const directory of ["src", "public", "docs", "tests"]) {
 		fs.cpSync(path.join(REPO_ROOT, directory), path.join(fixtureRoot, directory), { recursive: true });
 	}
-	for (const file of ["index.html", "tsconfig.json", "tsconfig.web.json", "tsconfig.server.json", "tsconfig.tests2.json"]) {
+	for (const file of ["index.html", "tsconfig.json", "tsconfig.web.json", "tsconfig.server.json", "tsconfig.tests.json"]) {
 		fs.copyFileSync(path.join(REPO_ROOT, file), path.join(fixtureRoot, file));
 	}
 
@@ -230,7 +230,7 @@ async function runProfile(options) {
 		appendProbe(singleTarget, `(globalThis as any).__BOBBIT_HMR_PROFILE_STAGE__ = "app-1";`);
 		await new Promise((resolve) => setTimeout(resolve, 150));
 		appendProbe(
-			path.join(options.fixtureRoot, "tests2", "browser", "fixtures", "session-actions.spec.ts"),
+			path.join(options.fixtureRoot, "tests", "browser", "fixtures", "session-actions.fixture.spec.ts"),
 			`// staggered HMR noise: class="bg-[#123456]"`,
 		);
 		await new Promise((resolve) => setTimeout(resolve, 150));

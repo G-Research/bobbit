@@ -1,6 +1,6 @@
 // v2-native — exact-registered partition for the deliberate ModuleHost worker OOM.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
-import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests/support/helpers/unit/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 

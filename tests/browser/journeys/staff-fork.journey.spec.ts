@@ -10,7 +10,7 @@ import {
 	test,
 	waitForAgentResponse,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 type StaffRecord = {
 	id: string;

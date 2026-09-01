@@ -2,8 +2,8 @@
  * E2E test to capture the exact event order when a prompt is sent.
  * Goal: understand if there's a window where user message_end can be lost.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { createSession, connectWs, agentEndPredicate } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { createSession, connectWs, agentEndPredicate } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test("capture event order after prompt", async () => {
 	const sessionId = await createSession();

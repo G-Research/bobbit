@@ -1,7 +1,7 @@
 import fs from "node:fs";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, base, createSession, deleteSession, readE2EToken } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, base, createSession, deleteSession, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import * as previewArtifacts from "../../../src/server/preview/artifacts.js";
 import * as previewMount from "../../../src/server/preview/mount.js";
 import { deferred, onceAsync, readPreviewEvents, under } from "./_helpers/search-preview-fixtures.js";

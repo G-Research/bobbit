@@ -3,7 +3,7 @@
  * pack-contribution conflicts and orphan/UI-only packs (built-in-first-party-packs
  * design §10, item-0 #734 fixture cleanup).
  *
- * These assertions cover the layer the loader UNIT tests (tests2/core/pack-contributions.test.ts,
+ * These assertions cover the layer the loader UNIT tests (tests/unit/core/pack-contributions.unit.test.ts,
  * which drive loadPackContributions over inline temp dirs) CANNOT: the live
  * marketplace install ledger + the PackContributionRegistry as surfaced by
  * GET /api/ext/contributions. Install and registration are two distinct layers —

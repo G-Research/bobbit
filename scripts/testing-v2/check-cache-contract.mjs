@@ -36,8 +36,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const TYPESCRIPT = join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
 const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
-const CACHE_NAMES = ["check-server.tsbuildinfo", "check-web.tsbuildinfo", "check-tests2.tsbuildinfo"];
-const EXPECTED_CHECK = "shx mkdir -p .profiles && tsc -p tsconfig.server.json --noEmit --incremental --tsBuildInfoFile .profiles/check-server.tsbuildinfo && tsc -p tsconfig.web.json --noEmit --incremental --tsBuildInfoFile .profiles/check-web.tsbuildinfo && tsc -p tsconfig.tests2.json --noEmit --incremental --tsBuildInfoFile .profiles/check-tests2.tsbuildinfo";
+const CACHE_NAMES = ["check-server.tsbuildinfo", "check-web.tsbuildinfo", "check-tests.tsbuildinfo"];
+const EXPECTED_CHECK = "npm run test:layout && shx mkdir -p .profiles && tsc -p tsconfig.server.json --noEmit --incremental --tsBuildInfoFile .profiles/check-server.tsbuildinfo && tsc -p tsconfig.web.json --noEmit --incremental --tsBuildInfoFile .profiles/check-web.tsbuildinfo && tsc -p tsconfig.tests.json --noEmit --incremental --tsBuildInfoFile .profiles/check-tests.tsbuildinfo";
 const fixtureOnly = process.argv.slice(2).includes("--fixture-only");
 // On Windows, prefer System32\tar.exe (bsdtar) over msys/Git Bash GNU tar.
 // GNU tar can interpret native drive paths as remote hosts; bsdtar accepts them.
@@ -100,12 +100,12 @@ function checkOne(fixture, name) {
 
 /** The direct-argv equivalent of the package script's `&&` chain. */
 function checkAll(fixture) {
-  for (const name of ["server", "web", "tests2"]) checkOne(fixture, name);
+  for (const name of ["server", "web", "tests"]) checkOne(fixture, name);
 }
 
 /** Run the same left-to-right chain but return its first failure for assertions. */
 function checkAllResult(fixture) {
-  for (const name of ["server", "web", "tests2"]) {
+  for (const name of ["server", "web", "tests"]) {
     const result = run(process.execPath, checkArgs(`tsconfig.${name}.json`, `check-${name}.tsbuildinfo`), fixture, { expect: "any", label: `${name} sequential check` });
     if (result.status !== 0) return result;
   }
@@ -156,13 +156,13 @@ function seedFixture(fixture) {
   write(fixture, "server/imported.ts", "export const imported = 'available';\n");
   write(fixture, "server/index.ts", "import { imported } from './imported.js';\nimport { shared, type SharedValue } from '../shared/value.js';\nimport type { DependencyShape } from 'fixture-dependency';\nconst serverValue: SharedValue = { label: 'ok' };\nconst dependencyValue: DependencyShape = { value: imported };\nvoid shared; void serverValue; void dependencyValue;\n");
   write(fixture, "web/index.ts", "import { shared, type SharedValue } from '../shared/value.js';\nconst webValue: SharedValue = { label: 'ok' };\nvoid shared; void webValue;\n");
-  write(fixture, "tests2/index.ts", "import { shared, type SharedValue } from '../shared/value.js';\nconst testsValue: SharedValue = { label: 'ok' };\nvoid shared; void testsValue;\n");
-  write(fixture, "tests2/config-marker.ts", "const configMarker: string = null;\nvoid configMarker;\n");
+  write(fixture, "tests/index.ts", "import { shared, type SharedValue } from '../shared/value.js';\nconst testsValue: SharedValue = { label: 'ok' };\nvoid shared; void testsValue;\n");
+  write(fixture, "tests/config-marker.ts", "const configMarker: string = null;\nvoid configMarker;\n");
   const config = (module, include, strict = true) => JSON.stringify({ compilerOptions: { target: "ES2022", module, moduleResolution: module === "Node16" ? "Node16" : "bundler", strict, skipLibCheck: true, noEmit: true }, include }, null, 2) + "\n";
   write(fixture, "tsconfig.server.json", config("Node16", ["server/**/*.ts", "shared/**/*.ts"]));
   write(fixture, "tsconfig.web.json", config("ES2022", ["web/**/*.ts", "shared/**/*.ts"]));
   // Start non-strict so changing this config makes config-marker newly invalid.
-  write(fixture, "tsconfig.tests2.json", config("ES2022", ["tests2/**/*.ts", "shared/**/*.ts"], false));
+  write(fixture, "tsconfig.tests.json", config("ES2022", ["tests/**/*.ts", "shared/**/*.ts"], false));
 }
 
 function warmFixture(fixture) {
@@ -180,22 +180,22 @@ function append(path, contents) {
 function runCompilerFixture(fixture) {
   warmFixture(fixture);
 
-  // A server failure must prevent web/tests2 checks from running, exactly as && does.
+  // A server failure must prevent web/tests checks from running, exactly as && does.
   append(join(fixture, "server/index.ts"), "\ntype serverChainMarker = { readonly marker: 'server' }; const serverChainValue: serverChainMarker = 1;\n");
   append(join(fixture, "web/index.ts"), "\ntype webShouldNotRunMarker = { readonly marker: 'web' }; const webShouldNotRunValue: webShouldNotRunMarker = 1;\n");
   const stopped = checkAllResult(fixture);
   assert(stopped.output.includes("serverChainMarker"), `server fail-fast marker absent:\n${stopped.output}`);
   assert(!stopped.output.includes("webShouldNotRunMarker"), "server failure did not stop before web check");
 
-  for (const [name, marker] of [["server", "serverWarmMarker"], ["web", "webWarmMarker"], ["tests2", "tests2WarmMarker"]]) {
+  for (const [name, marker] of [["server", "serverWarmMarker"], ["web", "webWarmMarker"], ["tests", "testsWarmMarker"]]) {
     warmFixture(fixture);
-    const dir = name === "tests2" ? "tests2" : name;
+    const dir = name === "tests" ? "tests" : name;
     append(join(fixture, dir, "index.ts"), `\ntype ${marker} = { readonly marker: '${marker}' }; const ${marker}Value: ${marker} = 1;\n`);
     expectFailure(() => run(process.execPath, checkArgs(`tsconfig.${name}.json`, `check-${name}.tsbuildinfo`), fixture, { expect: "nonzero", label: `${name} post-warm error` }), marker);
   }
 
   // A cache must not freeze the include glob: newly added sources are checked too.
-  for (const name of ["server", "web", "tests2"]) {
+  for (const name of ["server", "web", "tests"]) {
     warmFixture(fixture);
     const file = `${name}/warm-new-file.ts`;
     write(fixture, file, `const newFile: number = '${name}';\nvoid newFile;\n`);
@@ -212,15 +212,15 @@ function runCompilerFixture(fixture) {
 
   warmFixture(fixture);
   write(fixture, "shared/value.ts", "export interface SharedValue { label: number }\nexport const shared: SharedValue = { label: 1 };\n");
-  for (const name of ["server", "web", "tests2"]) {
-    expectFailure(() => run(process.execPath, checkArgs(`tsconfig.${name}.json`, `check-${name}.tsbuildinfo`), fixture, { expect: "nonzero", label: `${name} shared type check` }), `${name === "tests2" ? "tests2" : name}/index.ts`);
+  for (const name of ["server", "web", "tests"]) {
+    expectFailure(() => run(process.execPath, checkArgs(`tsconfig.${name}.json`, `check-${name}.tsbuildinfo`), fixture, { expect: "nonzero", label: `${name} shared type check` }), `${name === "tests" ? "tests" : name}/index.ts`);
   }
 
   warmFixture(fixture);
-  const testsConfig = JSON.parse(readFileSync(join(fixture, "tsconfig.tests2.json"), "utf8"));
+  const testsConfig = JSON.parse(readFileSync(join(fixture, "tsconfig.tests.json"), "utf8"));
   testsConfig.compilerOptions.strict = true;
-  writeFileSync(join(fixture, "tsconfig.tests2.json"), `${JSON.stringify(testsConfig, null, 2)}\n`);
-  expectFailure(() => run(process.execPath, checkArgs("tsconfig.tests2.json", "check-tests2.tsbuildinfo"), fixture, { expect: "nonzero", label: "config change check" }), "config-marker.ts");
+  writeFileSync(join(fixture, "tsconfig.tests.json"), `${JSON.stringify(testsConfig, null, 2)}\n`);
+  expectFailure(() => run(process.execPath, checkArgs("tsconfig.tests.json", "check-tests.tsbuildinfo"), fixture, { expect: "nonzero", label: "config change check" }), "config-marker.ts");
 
   for (const cache of CACHE_NAMES) {
     const name = cache.slice("check-".length, -".tsbuildinfo".length);
@@ -249,9 +249,9 @@ function assertStaticContract(repo) {
   const pkg = JSON.parse(readFileSync(join(repo, "package.json"), "utf8"));
   assert(normalized(pkg.scripts?.check ?? "") === EXPECTED_CHECK, "package.json check must be the approved canonical sequential cache command");
   const build = pkg.scripts?.["build:server"] ?? "";
-  assert(!/(?:\.profiles|check-(?:server|web|tests2)\.tsbuildinfo|--incremental|--tsBuildInfoFile)/.test(build), "build:server must not consume check caches or incremental settings");
+  assert(!/(?:\.profiles|check-(?:server|web|tests)\.tsbuildinfo|--incremental|--tsBuildInfoFile)/.test(build), "build:server must not consume check caches or incremental settings");
   const serverConfig = readFileSync(join(repo, "tsconfig.server.json"), "utf8");
-  assert(!/(?:incremental|tsBuildInfoFile|check-(?:server|web|tests2)\.tsbuildinfo)/.test(serverConfig), "canonical tsconfig.server.json must not own check cache settings");
+  assert(!/(?:incremental|tsBuildInfoFile|check-(?:server|web|tests)\.tsbuildinfo)/.test(serverConfig), "canonical tsconfig.server.json must not own check cache settings");
 }
 
 function archiveHead(destination) {
@@ -327,7 +327,7 @@ function assertBuildArtifacts(repo) {
 
 function runRepositoryFidelity(repo) {
   assertStaticContract(repo);
-  // The tests2 graph intentionally resolves generated server declarations.
+  // The tests graph intentionally resolves generated server declarations.
   runNpm(["run", "build:server"], repo, { label: "repository prerequisite build:server" });
   remove(join(repo, ".profiles"));
   runNpm(["run", "check"], repo, { label: "repository cold check" });

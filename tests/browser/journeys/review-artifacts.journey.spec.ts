@@ -1,8 +1,8 @@
 /**
  * Journey: Review artifacts: review commenting, attachments, preview, and compaction.
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { sendMessage, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { sendMessage, apiFetch } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import fs from "node:fs";
 import path from "node:path";
 

@@ -17,9 +17,9 @@
  * 400/404 cases below still use the REST endpoint to lock the wire shape.
  */
 import type { AuthInteraction, Credential, Models } from "@earendil-works/pi-ai";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 let oauthStart: typeof import("../../../src/server/auth/oauth.js").oauthStart;
 let oauthCancel: typeof import("../../../src/server/auth/oauth.js").oauthCancel;

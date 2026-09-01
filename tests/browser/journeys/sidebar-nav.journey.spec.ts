@@ -3,9 +3,9 @@
  * Covers: session switching, sidebar highlight, search/filter
  * Consolidated from: sidebar-navigation.spec.ts, sidebar-filters.spec.ts
  */
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, createGoal, deleteGoal } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import { filtersButton, clickShowArchivedToggle, openFiltersPopover } from "../../../tests/e2e/ui/utils/sidebar-filters.js";
-import { createGoalAssistantViaUI } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { createGoalAssistantViaUI } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 test.describe("Journey: Sidebar Navigation", () => {
 	test("sidebar and new-session button visible on load", async ({ page }) => {

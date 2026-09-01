@@ -17,7 +17,7 @@ import {
 	createSession,
 	deleteSession,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 let _projCounter = 0;
 function uniqueProjectDir(): string {

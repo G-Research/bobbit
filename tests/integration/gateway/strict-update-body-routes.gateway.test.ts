@@ -6,11 +6,11 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getGateway, type EntityCounts, type GatewayFixture } from "../../../tests2/harness/gateway.js";
-import { assertNoLeaks, snapshotEntities } from "../../../tests2/harness/leak-detector.js";
-import { createScope, type TestScope } from "../../../tests2/harness/scope.js";
+import { getGateway, type EntityCounts, type GatewayFixture } from "../../../tests/support/harnesses/shared/gateway.js";
+import { assertNoLeaks, snapshotEntities } from "../../../tests/support/harnesses/shared/leak-detector.js";
+import { createScope, type TestScope } from "../../../tests/support/harnesses/shared/scope.js";
 import { STRICT_UPDATE_BODY_KEYS } from "../../../src/server/strict-body.js";
-import { seedTeamLeadHeader } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { seedTeamLeadHeader } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 /**
  * This is the request-contract source of truth the strict-body helper must

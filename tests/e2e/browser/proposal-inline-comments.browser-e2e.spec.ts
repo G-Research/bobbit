@@ -14,9 +14,9 @@
  * directly into `proposalBackend` and dispatching `annotation-change`,
  * which is exactly what the popover does on submit.
  */
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/browser/gateway-harness.js";
 import type { Page } from "@playwright/test";
-import { openApp, sendMessage, createGoalAssistantViaUI } from "../../../tests2/browser/e2e/ui-helpers.js";
+import { openApp, sendMessage, createGoalAssistantViaUI } from "../../../tests/support/helpers/browser/e2e/ui-helpers.js";
 
 /**
  * Open the goal-assistant panel (which is the commentable goal preview

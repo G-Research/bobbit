@@ -1,6 +1,6 @@
-import { expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import WebSocket from "ws";
-import { test } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { test } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
@@ -12,7 +12,7 @@ import {
 	wsBase,
 	type WsConnection,
 	type WsMsg,
-} from "../../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const FANOUT_WS_READY_TIMEOUT_MS = 30_000;
 const FANOUT_WS_EVENT_TIMEOUT_MS = 60_000;

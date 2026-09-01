@@ -1,13 +1,13 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Pagination contract: list-style bobbit_read operations return bounded pages by
 // default, preserve ancillary fields, and add normalized pagination metadata even
 // when the gateway endpoint itself returns an unpaged array.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 let tools: Map<string, CapturedTool>;
 

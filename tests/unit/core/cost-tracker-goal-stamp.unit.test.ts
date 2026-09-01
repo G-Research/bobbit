@@ -17,7 +17,7 @@ import path from "node:path";
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker } from "../../../src/server/agent/cost-tracker.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const stateDir = path.resolve("/memfs/cost-tracker-goal-stamp/state");

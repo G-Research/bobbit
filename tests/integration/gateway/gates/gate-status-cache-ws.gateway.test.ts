@@ -7,8 +7,8 @@ import {
 	wireGateStatusGenerationInvalidation,
 	type GateStatusChangedEvent,
 } from "../../../../src/server/gate-status-broadcast.js";
-import { createManualClock, type ManualClock } from "../../../../tests2/harness/clock.js";
-import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
+import { createManualClock, type ManualClock } from "../../../../tests/support/harnesses/shared/clock.js";
+import { createMemFs } from "../../../../tests/support/harnesses/shared/mem-fs.js";
 
 // Preserve the migrated Playwright declaration identity without importing the
 // gateway-backed compatibility harness.

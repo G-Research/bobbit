@@ -5,10 +5,10 @@
  * when `sessionId` is supplied, and must NOT be found when enumerating an
  * unrelated cwd without a session.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import fs from "node:fs";
 import path from "node:path";
-import { createSession, deleteSession, apiFetch, rawApiFetch, nonGitCwd, defaultProjectId, harnessDefaultProjectRoot } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { createSession, deleteSession, apiFetch, rawApiFetch, nonGitCwd, defaultProjectId, harnessDefaultProjectRoot } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function freshDir(label: string): string {
 	const dir = path.join(

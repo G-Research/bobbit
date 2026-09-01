@@ -24,7 +24,7 @@
 // under-counted the caret's row by one. This model has no such collapse — it is
 // MORE correct than the real browser — so the defect is structurally invisible
 // here and CANNOT be pinned at this tier. The authoritative regression evidence
-// is tests2/browser/fixtures/message-editor-arrows-real.spec.ts, which drives the
+// is tests/browser/fixtures/message-editor-arrows-real.fixture.spec.ts, which drives the
 // REAL <message-editor> against Chromium's layout engine.
 //
 // What this file does own: the intended ARITHMETIC. The replica counts the
@@ -231,7 +231,7 @@ describe("Arrow keys with visual row detection", () => {
 
 	// --- caret-row geometry regression (arithmetic tier) ----------------------
 	// Real-layout proof lives in
-	// tests2/browser/fixtures/message-editor-arrows-real.spec.ts.
+	// tests/browser/fixtures/message-editor-arrows-real.fixture.spec.ts.
 
 	it("story 21: leading newlines — only offset 0 is the top row (goal-spec repro buffer)", () => {
 		const { textarea, state } = fx;

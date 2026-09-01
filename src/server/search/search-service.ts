@@ -388,8 +388,8 @@ export class SearchService {
 function testPrebundledWorkerUrl(runtimeBundle: string | undefined): URL | null {
 	if (!runtimeBundle) return null;
 	try {
-		// `runtimeBundle` is `<cache>/entries/tests2/harness/<runtime>.mjs`.
-		const cacheDir = path.resolve(path.dirname(runtimeBundle), "../../..");
+		// `runtimeBundle` is `<cache>/entries/tests/support/harnesses/shared/<runtime>.mjs`.
+		const cacheDir = path.resolve(path.dirname(runtimeBundle), "../../../../..");
 		const manifest = JSON.parse(fs.readFileSync(path.join(cacheDir, "manifest.json"), "utf-8")) as {
 			entries?: Record<string, string>;
 		};

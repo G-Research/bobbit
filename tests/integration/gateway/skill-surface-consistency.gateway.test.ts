@@ -15,13 +15,13 @@
  * skill. A second project Q (without that skill) proves scope isolation: Q's
  * autocomplete must NOT surface P's skill.
  *
- * Follows tests2/integration/slash-skill-e2e.test.ts: waitForHealth +
+ * Follows tests/integration/gateway/slash-skill-e2e.gateway.test.ts: waitForHealth +
  * registerProject + apiFetch, with a DEDICATED per-worker tmp rootPath per
  * project so the 5s discoverSlashSkills cache (keyed on cwd) cannot mask a
  * freshly-written SKILL.md.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { waitForHealth, apiFetch, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { waitForHealth, apiFetch, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";

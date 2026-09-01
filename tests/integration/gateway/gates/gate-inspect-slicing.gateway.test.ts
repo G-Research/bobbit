@@ -4,13 +4,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { GateStore } from "../../../../src/server/agent/gate-store.js";
 import { buildGateVerificationSnapshot } from "../../../../src/server/gate-verification-snapshot.js";
-import type { GatewayFixture } from "../../../../tests2/harness/gateway.js";
-import { createFakeVerificationCommandRunner } from "../../../../tests2/harness/fake-verification-command-runner.js";
-import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
+import type { GatewayFixture } from "../../../../tests/support/harnesses/shared/gateway.js";
+import { createFakeVerificationCommandRunner } from "../../../../tests/support/harnesses/shared/fake-verification-command-runner.js";
+import { createMemFs } from "../../../../tests/support/harnesses/shared/mem-fs.js";
 
 const VERIFY_LOG_OUTPUT = Array.from({ length: 160 }, (_, i) => {
 	const line = i + 1;

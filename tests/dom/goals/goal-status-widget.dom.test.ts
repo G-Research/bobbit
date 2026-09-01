@@ -8,7 +8,7 @@
 // dispatches).
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { GATE_STATUS_CLIENT_EVENT } from "../../../src/app/gate-status-events.js";
-import { syncCustomElements } from "../../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements } from "../../../tests/support/helpers/dom/setup/custom-elements.js";
 
 // The custom-elements bridge keeps explicit registration deterministic. Import
 // session-manager first to initialize the pack-panels ⇄ session-manager cycle

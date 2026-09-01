@@ -24,7 +24,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { afterAll, beforeAll, test } from "vitest";
 import {
 	apiFetch,
@@ -32,7 +32,7 @@ import {
 	deleteSession as deleteE2ESession,
 	ensureGateway,
 	rawApiFetch,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	MINIMAL_PROPOSAL_WORKFLOWS,
 	TARGET_ONLY_WORKFLOWS,

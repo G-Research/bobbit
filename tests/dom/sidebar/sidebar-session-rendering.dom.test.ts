@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/sidebar-session-rendering.spec.ts (v2-dom tier).
 // `terseRelativeTime` and `formatSessionAge` are imported REAL from

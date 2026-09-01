@@ -3,8 +3,8 @@
  * Covers: journey-team-delegate, journey-dashboard-fanout
  * Consolidated from: archive-child-cascade, team-delegate-*, dashboard-fanout-*, etc.
  */
-import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { seedTeamLeadHeader, startTeam, teardownTeam, nonGitCwd } from "../../../tests2/browser/e2e-setup.js";
+import { test, expect, openApp, navigateToHash, createGoal, deleteGoal, createSession, deleteSession, waitForSessionStatus, apiFetch } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { seedTeamLeadHeader, startTeam, teardownTeam, nonGitCwd } from "../../support/harnesses/browser/e2e-setup.js";
 
 test.describe("Journey: Team Delegate", () => {
 	test("goal dashboard accessible for team delegate context", async ({ page }) => {

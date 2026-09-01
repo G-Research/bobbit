@@ -31,7 +31,7 @@ import {
 	intentRows,
 	reliableMockCore,
 	userMessageEnds,
-} from "../../../tests2/integration/helpers/reliable-turn-barriers.js";
+} from "../../../tests/support/helpers/integration/gateway/reliable-turn-barriers.js";
 
 const STEER_TEXTS = ["Steer1", "Steer2"] as const;
 

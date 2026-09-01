@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	base,
@@ -13,14 +13,14 @@ import {
 	startTeam,
 	teardownTeam,
 	type WsConnection,
-} from "../../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../../e2e/test-utils/cleanup.js";
 import {
 	signalAndWaitForAuthoredGateWithFakeCommandBarrier,
 	trackGateApiConnection,
 	useGateApiTestSupport,
 	waitForAuthoredGateStatus,
-} from "../../../../tests2/integration/helpers/gate-api-test-support.js";
+} from "../../../../tests/support/helpers/integration/gateway/gate-api-test-support.js";
 
 useGateApiTestSupport();
 

@@ -5,9 +5,9 @@
  * These tests require a running gateway to test aigw configure/discover flow.
  */
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import http from "node:http";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.describe("GET /api/models with AI Gateway", () => {
 	const MOCK_MODELS = {

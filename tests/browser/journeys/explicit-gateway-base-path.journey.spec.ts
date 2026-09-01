@@ -1,6 +1,6 @@
 import type { Page, Request as PlaywrightRequest, WebSocket as PlaywrightWebSocket } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import type { GatewayInfo } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import type { GatewayInfo } from "../../support/harnesses/browser/gateway-harness.js";
 
 const GATEWAY_PATH = "/team/gw";
 

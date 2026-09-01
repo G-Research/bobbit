@@ -22,7 +22,7 @@ import type {
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 
 guardProcessEnv();
 
@@ -33,7 +33,7 @@ const { SessionManager } = await import("../../../src/server/agent/session-manag
 const { subscribeToEvents } = await import("../../../src/server/agent/session-setup.ts");
 const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
-const { createManualClock } = await import("../../../tests2/harness/clock.js");
+const { createManualClock } = await import("../../../tests/support/harnesses/shared/clock.js");
 
 const managers: any[] = [];
 

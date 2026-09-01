@@ -22,7 +22,7 @@ import fs from "node:fs";
 
 import { McpManager } from "../../../src/server/mcp/mcp-manager.ts";
 import type { McpToolDef, McpToolResult, McpServerConfig } from "../../../src/server/mcp/mcp-types.ts";
-import { installScopedMemoryFs } from "../../../tests2/core/helpers/scoped-memory-fs.ts";
+import { installScopedMemoryFs } from "../../../tests/support/helpers/unit/scoped-memory-fs.ts";
 
 let restoreFs: (() => void) | undefined;
 beforeAll(() => { restoreFs = installScopedMemoryFs(); });

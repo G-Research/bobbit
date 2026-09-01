@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { createSessionTracker, localApiFetch } from "../../../tests2/integration/helpers/session-fixtures.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { createSessionTracker, localApiFetch } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 
 const sessions = createSessionTracker();
 const FIXTURE_TIME = "2026-08-11T12:00:00.000Z";

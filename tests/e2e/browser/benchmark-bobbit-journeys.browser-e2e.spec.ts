@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/browser/gateway-harness.js";
 import {
 	apiFetch,
 	base,
@@ -10,8 +10,8 @@ import {
 	deleteSession,
 	readE2ETokenAsync,
 	waitForSessionStatus,
-} from "../../../tests2/browser/e2e-setup.js";
-import { openApp, sendMessage } from "../../../tests2/browser/e2e/ui-helpers.js";
+} from "../../../tests/support/harnesses/browser/e2e-setup.js";
+import { openApp, sendMessage } from "../../../tests/support/helpers/browser/e2e/ui-helpers.js";
 import { runSessionOpenSample } from "../../../scripts/benchmarks/session-open.mjs";
 import {
 	EVENT_STREAM_DONE_MARKER,

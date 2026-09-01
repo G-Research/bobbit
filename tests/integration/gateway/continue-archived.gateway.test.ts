@@ -11,15 +11,15 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
 	createSession as createSessionFromHarness,
 	messageEndPredicate,
 	nonGitCwd,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
@@ -27,7 +27,7 @@ import {
 	readAuthorSidecar,
 } from "../../../src/server/agent/author-sidecar.js";
 import { LOCAL_USER_AUTHOR } from "../../../src/shared/message-author.js";
-import { attachLocalMockAgentClock } from "../../../tests2/integration/helpers/local-mock-agent-clock.js";
+import { attachLocalMockAgentClock } from "../../../tests/support/helpers/integration/gateway/local-mock-agent-clock.js";
 import {
 	createSessionTracker,
 	localApiFetch,
@@ -35,7 +35,7 @@ import {
 	seedSessionTranscript,
 	trackGoal,
 	waitForSessionIdle,
-} from "../../../tests2/integration/helpers/session-fixtures.js";
+} from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -1,9 +1,9 @@
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { initializeAgentDirRuntime, resetAgentDirRuntimeForTests } from "../../../src/server/agent-dir-config.js";
-import { apiFetch, bobbitDir } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { apiFetch, bobbitDir } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.describe.configure({ mode: "serial" });
 

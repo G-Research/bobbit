@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -41,7 +41,7 @@ import type { ContextTraceStore } from "../../../src/server/agent/context-trace-
 import type { ProviderContribution } from "../../../src/server/agent/pack-contributions.js";
 import type { PackContributionRegistry } from "../../../src/server/extension-host/pack-contribution-registry.js";
 import { makeTmpDir } from "../../../tests/helpers/tmp.js";
-import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
+import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 const CONTAINER_WORKTREE = "/workspace-wt/goal-g1-coder-x";
 

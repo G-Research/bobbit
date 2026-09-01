@@ -6,8 +6,8 @@ import { GoalManager } from "../../../src/server/agent/goal-manager.ts";
 import { GoalStore } from "../../../src/server/agent/goal-store.ts";
 import { createWorktree, createWorktreeSet } from "../../../src/server/skills/git.ts";
 import type { CommandRunner, ExecFileOptions } from "../../../src/server/gateway-deps.ts";
-import { installMemoryFs } from "../../../tests2/core/helpers/memory-fs-spies.js";
-import type { MemFs } from "../../../tests2/harness/mem-fs.js";
+import { installMemoryFs } from "../../../tests/support/helpers/unit/memory-fs-spies.js";
+import type { MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memoryFs: MemFs;
 let restoreFs: () => void;

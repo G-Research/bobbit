@@ -15,7 +15,7 @@ import path from "node:path";
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { InboxStore, type InboxEntry } from "../../../src/server/agent/inbox-store.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 // Every InboxStore runs over the shared in-memory fsImpl; each test gets a
 // unique state dir for isolation. `memfs` is the injected seam under test.

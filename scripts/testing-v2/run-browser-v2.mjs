@@ -64,7 +64,7 @@ export function playwrightCommandArgs(forwardedArgs = []) {
 		"test",
 		"--config", "playwright-v2.config.ts",
 		...forwardedArgs,
-		"--project", "browser-v2", "browser-canonical",
+		"--project", "browser-canonical",
 	];
 }
 

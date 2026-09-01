@@ -8,10 +8,10 @@
 // Uses the fork-scoped gateway fixture. The src-booted gateway resolves the
 // shipped default via config.builtinsDir (repo-root defaults/), so `created`
 // works without a dist build.
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { apiFetch, bobbitDir, base } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { apiFetch, bobbitDir, base } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 // Run serially — tests share the user system-prompt.md file.
 test.describe.configure({ mode: "serial" });

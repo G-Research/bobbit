@@ -4,9 +4,9 @@ import { dirname, join, relative, resolve } from "node:path";
 import { vi } from "vitest";
 import type { CommandRunner } from "../../../src/server/gateway-deps.js";
 import { awaitableRm, pollUntil } from "../test-utils/cleanup.js";
-import { copyGitTemplate, prepareGitTemplate } from "../../../tests2/harness/git-template.js";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, deleteGoal, registerProject, teardownTeam } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { copyGitTemplate, prepareGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, deleteGoal, registerProject, teardownTeam } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 // The E2E Vitest lane defaults to 30s. Give this real-Git lifecycle file the
 // same budget as the integration lane so Windows process and filesystem

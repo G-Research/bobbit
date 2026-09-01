@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // Generated AIGW connection-time DNS rebinding guard coverage.
 
 import { describe, it, afterEach } from "vitest";
@@ -12,7 +12,7 @@ import { pathToFileURL } from "node:url";
 import {
 	GATEWAY, replaceAigwProviderDnsGuardHosts, resetAgentDirStateForTests,
 	writeAigwDnsGuardExtension, writeAigwModelsJson,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("generated AIGW DNS guard", () => {
 	afterEach(() => replaceAigwProviderDnsGuardHosts([]));

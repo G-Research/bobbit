@@ -47,7 +47,7 @@ import {
 	type WsMsg,
 } from "../e2e-setup.js";
 import { navigateToHash, openApp, sendMessage } from "../ui/ui-helpers.js";
-import { ReliableTurnRuntime } from "../../../tests2/browser/journeys/reliable-agent-turns.fixture.js";
+import { ReliableTurnRuntime } from "../../../tests/support/helpers/browser/journeys/reliable-agent-turns.fixture.js";
 
 async function clickAllSteerButtons(page: any): Promise<void> {
 	const buttons = page.locator(".queue-pill .steer-btn");

@@ -4,7 +4,7 @@ import { GoalStore, type PersistedGoal } from "../../../../src/server/agent/goal
 import { GateStore } from "../../../../src/server/agent/gate-store.js";
 import { GateResetCoordinator } from "../../../../src/server/agent/gate-reset-intent.js";
 import type { Workflow } from "../../../../src/server/agent/workflow-store.js";
-import { createMemFs, type MemFs } from "../../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../../tests/support/harnesses/shared/mem-fs.js";
 
 const workflow: Workflow = {
 	id: "reset-wal",

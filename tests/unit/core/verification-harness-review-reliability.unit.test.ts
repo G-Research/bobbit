@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 //
 // REPRODUCING TEST for the "Fix LLM review reliability" goal (Issue Analysis
 // gate). Pins two invariants that CURRENT HEAD violates:

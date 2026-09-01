@@ -8,8 +8,8 @@
  * sandbox-recovery-docker.spec.ts and runs via test:manual.
  */
 import { EventEmitter } from "node:events";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function installFakeBgRuntime(manager: any): () => void {
 	const original = {

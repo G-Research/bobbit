@@ -5115,7 +5115,7 @@ export class VerificationHarness {
 								// pre-generated `stepSessionId` (already broadcast via
 								// gate_verification_step_started); attempts 2..N mint a new id and
 								// re-broadcast the lineage so the UI can follow retired→new.
-								// See tests2/core/verification-harness-review-reliability.test.ts.
+								// See tests/unit/core/verification-harness-review-reliability.unit.test.ts.
 								let attemptSessionId = stepSessionId;
 								for (let attempt = 1; ; attempt++) {
 									finalAttempt = attempt;

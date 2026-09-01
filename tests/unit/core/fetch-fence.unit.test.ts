@@ -1,6 +1,6 @@
 import http from "node:http";
 import { describe, expect, it } from "vitest";
-import { createFencedFetch } from "../../../tests2/harness/fenced-fetch.js";
+import { createFencedFetch } from "../../../tests/support/harnesses/shared/fenced-fetch.js";
 
 describe("fenced fetch", () => {
 	it("rejects non-loopback hosts", async () => {

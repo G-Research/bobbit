@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 delete process.env.PI_OAUTH_CALLBACK_HOST;
 

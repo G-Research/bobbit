@@ -3,9 +3,9 @@
  * Broad side-panel workspace matrices live in tests/ui-fixtures/dynamic-panel-workspace-fixture.spec.ts.
  */
 import type { Page } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
-import { apiFetch, createSession, nonGitCwd } from "../../../tests2/browser/e2e-setup.js";
-import { openApp, navigateToHash } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
+import { apiFetch, createSession, nonGitCwd } from "../../support/harnesses/browser/e2e-setup.js";
+import { openApp, navigateToHash } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 

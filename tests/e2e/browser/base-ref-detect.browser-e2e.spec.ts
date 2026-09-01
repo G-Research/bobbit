@@ -15,8 +15,8 @@ import { openApp, navigateToHash } from "../ui/ui-helpers.js";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 type BrowserPage = Parameters<typeof openApp>[0];
 

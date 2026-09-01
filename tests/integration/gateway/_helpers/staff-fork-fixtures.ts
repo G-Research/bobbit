@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 
 export const FAILURE_MARKER = "STAFF_FORK_IDENTITY_ISOLATION";
 

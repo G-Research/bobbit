@@ -4,7 +4,7 @@
  * Ported faithfully from tests/e2e/team-delegate.spec.ts (source of truth) onto
  * the Test Suite v2 fork-scoped gateway fixture + in-process mock bridge. The
  * scoping / authz surface of that spec is already covered by
- * tests2/core/orchestration-core.test.ts; this port preserves the sub-behaviours
+ * tests/unit/core/orchestration-core.unit.test.ts; this port preserves the sub-behaviours
  * the triage flagged as GENUINE-LOSS:
  *   • blocking one-shot delegate → spawn → wait → collected output → auto-dismiss,
  *   • parallel blocking delegate WAITS FOR ALL children,
@@ -16,8 +16,8 @@
  * delegate child auto-runs its instructions prompt and the mock responds "OK",
  * so blocking flows settle in milliseconds (never test:manual).
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession, connectWs, defaultProject, type WsConnection } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createSession, deleteSession, connectWs, defaultProject, type WsConnection } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	promptAuthorBindingMatchesText,
 	readAuthorSidecar,

@@ -3,9 +3,9 @@
  * Verifies that the bobbit blob in archived sessions is desaturated (grayscale)
  * and has all CSS animations stopped.
  */
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
-import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../../tests2/browser/e2e-setup.js";
-import { openApp, sendMessage, waitForAgentResponse } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
+import { createSession, deleteSession, apiFetch, waitForSessionStatus } from "../../support/harnesses/browser/e2e-setup.js";
+import { openApp, sendMessage, waitForAgentResponse } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 test.describe("Archived session blob", () => {
 	test("blob has archived class, grayscale filter, and no animations", async ({ page }) => {

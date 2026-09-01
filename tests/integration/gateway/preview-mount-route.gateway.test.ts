@@ -18,7 +18,7 @@ import { handlePreviewRequest, pickEntry } from "../../../src/server/preview/con
 import * as previewArtifacts from "../../../src/server/preview/artifacts.js";
 import * as previewMount from "../../../src/server/preview/mount.js";
 import { _resetPreviewThemeSnapshotCache } from "../../../src/server/preview/theme-snapshot.js";
-import { installScopedMemFs, type NodeFs } from "../../../tests2/core/helpers/scoped-memfs.js";
+import { installScopedMemFs, type NodeFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 // Preserve the migrated Playwright declaration identity without importing the
 // gateway-backed compatibility harness.

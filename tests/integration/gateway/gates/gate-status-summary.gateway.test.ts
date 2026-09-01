@@ -1,10 +1,10 @@
 // Select the fork-local fake runner before either harness import can boot the
 // process-global gateway; file collection order must not select the real runner.
-import { resetAndInstallFakeCommandStepTestState } from "../../../../tests2/integration/_e2e/fake-cmd-setup.js";
+import { resetAndInstallFakeCommandStepTestState } from "../../../../tests/support/harnesses/integration/gateway/fake-cmd-setup.js";
 
-import { expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
-import { test } from "../../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { test } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, defaultProjectId, deleteGoal } from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const GATE_ID = "slow-gate";
 const SLOW_CMD = `node -e "setTimeout(()=>process.exit(0),30000)"`;

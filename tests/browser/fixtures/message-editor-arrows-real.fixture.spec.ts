@@ -6,7 +6,7 @@
  * `white-space: pre-wrap` content generates no extra line box, so a mirror
  * <div>'s offsetHeight under-counts the caret's row by one whenever the caret
  * sits at column 0 of a line that is not the first. happy-dom has NO layout
- * engine (offsetHeight is always 0), and tests2/dom/message-editor-arrows.test.ts
+ * engine (offsetHeight is always 0), and tests/dom/message-editor-arrows.dom.test.ts
  * substitutes a row model that is MORE correct than the real browser — so the
  * bug is structurally invisible below Chromium. This spec bundles the REAL
  * src/ui/components/MessageEditor.ts and drives it in Chromium.
@@ -41,7 +41,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "../../../tests2/browser/fixtures/fixtures/build-bundle.js";
+import { buildBundle } from "../../support/helpers/browser/fixtures/fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/message-editor-arrows-real.html");
 const BUNDLE = path.resolve("tests/fixtures/message-editor-arrows-real-bundle.js");

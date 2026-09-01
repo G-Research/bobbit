@@ -1,7 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../../../tests2/browser/fixtures/build-bundle.js";
+import { buildBundle } from "../../support/helpers/browser/fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const FIXTURE_ORIGIN = "http://fixture.localhost";

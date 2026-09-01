@@ -5,8 +5,8 @@
  * the agent spawn fails (e.g. Docker ENOENT). This prevents session loss
  * on gateway restart.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, injectDefaultProjectId } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, injectDefaultProjectId } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let _tok: string;
 function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }

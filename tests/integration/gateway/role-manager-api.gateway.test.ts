@@ -3,8 +3,8 @@
  *
  * Tests run against an isolated gateway with its own BOBBIT_DIR.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.afterEach(async () => {
 	for (const name of ["model-test-role", "model-test-role-2"]) {

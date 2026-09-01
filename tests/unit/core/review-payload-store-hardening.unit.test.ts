@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { existsSync } from "node:fs";
@@ -24,7 +24,7 @@ import {
 	setReviewPayloadRootForTesting,
 	sweepReviewPayloads,
 } from "../../../src/server/review-payload-store.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const otherSessionId = "22222222-2222-4222-8222-222222222222";

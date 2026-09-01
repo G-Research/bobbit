@@ -5,7 +5,7 @@
 // Headquarters runtime no-worktree invariants: projectId=headquarters must behave
 // as an explicit no-worktree/data scope even when callers request worktrees or the
 // cwd is a git repository.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, beforeAll, describe, it, vi } from "vitest";

@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
 import {
 	apiFetch,
 	base,
@@ -11,8 +11,8 @@ import {
 	startTeam,
 	teardownTeam,
 	waitForSessionStatus,
-} from "../../../tests2/browser/e2e-setup.js";
-import { navigateToHash, openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
+} from "../../support/harnesses/browser/e2e-setup.js";
+import { navigateToHash, openApp } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 test.use({ permissions: ["clipboard-read", "clipboard-write"] });
 test.describe.configure({ mode: "serial" });

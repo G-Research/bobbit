@@ -1,13 +1,13 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Archive visibility contract: agent-facing bobbit_read list/search operations
 // hide archived rows by default, while preserving explicit archive opt-ins.
 // list_goals never exposes the REST-only archivedSessions enrichment.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, beforeAll, vi } from "vitest";
-import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 import { SearchService } from "../../../src/server/search/search-service.js";
 
 let tools: Map<string, CapturedTool>;

@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, it, vi } from "vitest";
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 import { generateToolResultErrorBridgeExtension } from "../../../src/server/agent/tool-result-error-bridge-extension.ts";
 
 guardProcessEnv();

@@ -18,9 +18,8 @@
  *             `tsx --test`.
  *   Group B — API/process Playwright E2E specs, including canonical api-e2e.
  *             Run via the legacy playwright-e2e config at retries:3 (or 0 when qualifying).
- *   Group C — real-browser fidelity: transitional tests2/browser/e2e specs use
- *             playwright-v2 project `browser-v2-e2e`; canonical browser-e2e specs
- *             use playwright-e2e project `browser-canonical`.
+ *   Group C — canonical real-browser fidelity specs, run through the
+ *             playwright-e2e `browser-canonical` project.
  *   Group D — Vitest real-fidelity suites explicitly classified `vitest-e2e`;
  *             run in the isolated `v2-e2e-vitest` project.
  *
@@ -153,7 +152,6 @@ export function detectDockerSandboxCapability(probe = probeDocker) {
 /** Specs whose Docker-backed cases require the local sandbox image. */
 const DOCKER_GATED = ["tests/e2e/api/sandbox-recovery.api-e2e.spec.ts"];
 const TSX_CLI = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
-const PLAYWRIGHT_CLI = join(REPO_ROOT, "node_modules", "playwright", "cli.js");
 const PLAYWRIGHT_E2E_WRAPPER = join(REPO_ROOT, "scripts", "run-playwright-e2e.mjs");
 
 function localNodeInvocation(entryPoint, args, dependency, {
@@ -185,20 +183,6 @@ export function createGroupBInvocation(specs, {
 	execPath,
 } = {}) {
 	return localNodeInvocation(wrapper, [...specs, `--workers=${workers}`, `--retries=${retries}`], "Playwright E2E wrapper", { exists, execPath });
-}
-
-/** Build transitional Group C's shell-free local Playwright invocation. */
-export function createTransitionalGroupCInvocation({
-	workers = 2,
-	retryFree = false,
-	playwrightCli = PLAYWRIGHT_CLI,
-	exists,
-	execPath,
-} = {}) {
-	return localNodeInvocation(playwrightCli, [
-		"test", "--config", "playwright-v2.config.ts", "--project", "browser-v2-e2e",
-		`--workers=${workers}`, ...(retryFree ? ["--retries=0"] : []),
-	], "Playwright CLI", { exists, execPath });
 }
 
 /** Build canonical Group C's shell-free wrapper invocation. */
@@ -257,8 +241,8 @@ function run(command, args, { env = {}, label } = {}) {
 	});
 }
 
-// Fail-closed external-service env for ALL groups (belt-and-braces on top of the
-// e2e config's own defaults; the browser-v2-e2e config does not set them itself).
+// Fail-closed external-service env for ALL groups (belt-and-braces on top of each
+// owning runner's defaults).
 //
 // NO_EXTERNAL + NO_REMOTE => skipNonLocalRemoteGit: any git op against a
 // NON-local remote (real origin / GitHub) and all outbound non-loopback HTTP are
@@ -325,46 +309,23 @@ async function runGroupB(specs, coordinatorEnv) {
 
 async function runGroupC(specs, coordinatorEnv) {
 	if (specs.length === 0) return { label: "C/browser", code: 0, wallMs: 0, skipped: true };
-	const transitionalSpecs = specs.filter((spec) => spec.startsWith("tests2/browser/e2e/"));
-	const canonicalSpecs = specs.filter((spec) => spec.startsWith("tests/e2e/browser/"));
-	if (transitionalSpecs.length + canonicalSpecs.length !== specs.length) {
-		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its browser E2E conventions" };
+	if (!specs.every((spec) => spec.startsWith("tests/e2e/browser/"))) {
+		return { label: "C/browser-fidelity", code: 1, wallMs: 0, error: "Group C contains a path outside its canonical browser E2E convention" };
 	}
 
 	const pwWorkersC = resolveE2ePlaywrightWorkers();
 	const retryArgs = isRetryFreeQualification(coordinatorEnv) ? ["--retries=0"] : [];
-	let wallMs = 0;
-
-	if (transitionalSpecs.length > 0) {
-		// Keep the transitional project invocation whole: Playwright's variadic
-		// --project option would otherwise consume positional file filters.
-		const invocation = createTransitionalGroupCInvocation({
-			workers: pwWorkersC,
-			retryFree: retryArgs.length > 0,
-		});
-		const transitional = await run(invocation.command, invocation.args, {
-			env: composeE2EChildEnvironment(coordinatorEnv, EXTERNAL_FREE_ENV),
-			label: "C/adapter-browser",
-		});
-		wallMs += transitional.wallMs;
-		if (transitional.code !== 0) return { ...transitional, wallMs };
-	}
-
-	if (canonicalSpecs.length > 0) {
-		const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
-		const invocation = createCanonicalGroupCInvocation(canonicalSpecs, {
-			workers: pwWorkersC,
-			retryFree: retryArgs.length > 0,
-		});
-		const canonical = await run(invocation.command, invocation.args, {
-			env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
-			label: "C/canonical-browser",
-		});
-		wallMs += canonical.wallMs;
-		if (canonical.code !== 0) return { ...canonical, wallMs };
-	}
-
-	return { label: "C/browser-fidelity", code: 0, wallMs };
+	const nestedEnv = createNestedE2EEnvironment(coordinatorEnv);
+	const invocation = createCanonicalGroupCInvocation(specs, {
+		workers: pwWorkersC,
+		retryFree: retryArgs.length > 0,
+	});
+	const canonical = await run(invocation.command, invocation.args, {
+		env: composeE2EChildEnvironment(nestedEnv, EXTERNAL_FREE_ENV),
+		label: "C/canonical-browser",
+	});
+	if (canonical.code !== 0) return canonical;
+	return { label: "C/browser-fidelity", code: 0, wallMs: canonical.wallMs };
 }
 
 export function groupDVitestArgs(env = process.env) {

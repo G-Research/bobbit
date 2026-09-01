@@ -1,7 +1,7 @@
 /**
  * Project assistant UX journeys — consolidated.
  *
- * API basics coverage lives in tests2/integration/project-assistant-api.test.ts.
+ * API basics coverage lives in tests/integration/gateway/project-assistant-api.gateway.test.ts.
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
 import { apiFetch, deleteSession } from "../../e2e/e2e-setup.js";
@@ -340,5 +340,5 @@ test.describe("Project assistant UX (consolidated)", () => {
 		try { rmSync(dir, { recursive: true, force: true }); } catch { /* ok */ }
 	});
 
-	// API basics — session types and provisional flag — moved to tests2/integration/project-assistant-api.test.ts.
+	// API basics — session types and provisional flag — moved to tests/integration/gateway/project-assistant-api.gateway.test.ts.
 });

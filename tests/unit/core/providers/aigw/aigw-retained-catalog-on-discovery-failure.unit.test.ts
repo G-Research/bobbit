@@ -1,7 +1,7 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // Retained AIGW catalog availability during transient discovery failures.
 
-import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, beforeEach, describe, it, vi } from "vitest";

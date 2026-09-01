@@ -15,8 +15,8 @@
  *   2. A `ready` child with `autoStartTeam:false` does NOT (control — the
  *      auto-start branch is gated on autoStartTeam).
  */
-import { test, expect } from "../../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, assertStaysFalse, deleteGoal, nonGitCwd, waitForCondition } from "../../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, assertStaysFalse, deleteGoal, nonGitCwd, waitForCondition } from "../../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let harness: any;
 /** childGoalIds passed to the spied requestChildStart. */

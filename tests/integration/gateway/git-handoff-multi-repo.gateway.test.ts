@@ -3,8 +3,8 @@
  *
  * See docs/design/multi-repo-components.md §6.1 / §9.2.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let token: string;
 const headers = () => ({ Authorization: `Bearer ${token}`, "Content-Type": "application/json" });

@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
-import * as maintenance from "../../../../tests2/integration/helpers/maintenance-api-support.js";
-import type { MaintenanceGitSnapshot } from "../../../../tests2/integration/helpers/maintenance-git-model.js";
+import * as maintenance from "../../../../tests/support/helpers/integration/gateway/maintenance-api-support.js";
+import type { MaintenanceGitSnapshot } from "../../../../tests/support/helpers/integration/gateway/maintenance-git-model.js";
 
 const {
 	test, expect, apiFetch, expectArchivedScanShape, expectArchivedCleanupShape,

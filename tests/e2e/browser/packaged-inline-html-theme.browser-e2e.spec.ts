@@ -20,7 +20,7 @@ import {
 	writePackedAgent,
 	type CommandResult,
 	type RunningCli,
-} from "../../../tests2/browser/e2e/packaged-runtime-helpers.js";
+} from "../../../tests/support/helpers/browser/e2e/packaged-runtime-helpers.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
 const PACKAGE_NAME = (JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { name: string }).name;

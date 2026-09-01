@@ -52,16 +52,16 @@ Retained spawned-gateway browser E2E should prove integration wiring that fixtur
 - Tool renderer registration: \`tests/browser/journeys/children-tool-renderers.journey.spec.ts\`.
 - Ask-user choices lifecycle and finalization: \`tests/browser/journeys/ask-user-choices-ui.journey.spec.ts\`.
 - Proposal/review panel integration: \`tests/browser/journeys/proposal-open-all-types.journey.spec.ts\`, \`tests/browser/journeys/proposal-tools.journey.spec.ts\`, \`tests/browser/journeys/review-pane.journey.spec.ts\`.
-- Preview and dynamic side-panel integration: \`tests/browser/journeys/preview-happy-path.journey.spec.ts\`, \`tests2/browser/fixtures/side-panel-tabs.spec.ts\`, \`tests2/browser/fixtures/dynamic-chat-tabs.spec.ts\`.
+- Preview and dynamic side-panel integration: \`tests/browser/journeys/preview-happy-path.journey.spec.ts\`, \`tests/browser/fixtures/side-panel-tabs.fixture.spec.ts\`, \`tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts\`.
 - Status and stats widgets with server-fed data: \`tests/browser/journeys/goal-status-widget.journey.spec.ts\`, \`tests/browser/journeys/cost-popover-cache-hit.journey.spec.ts\`, \`tests/browser/journeys/prompt-stats-e2e.journey.spec.ts\`.
 
 ### Scroll and geometry surfaces
 
 - Real streaming tail-follow: \`tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts\`.
 - Session-navigation replay bottom-pin: \`tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts\`.
-- Jump-to-last-prompt mobile/header integration: \`tests2/browser/fixtures/jump-to-last-prompt.spec.ts\`.
-- Narrow-width pill overflow integration: \`tests2/browser/fixtures/pill-overflow-promotion.spec.ts\`.
-- Mobile review viewport integration: \`tests2/browser/fixtures/mobile-review-commenting.spec.ts\`.
+- Jump-to-last-prompt mobile/header integration: \`tests/browser/fixtures/jump-to-last-prompt.fixture.spec.ts\`.
+- Narrow-width pill overflow integration: \`tests/browser/fixtures/pill-overflow-promotion.fixture.spec.ts\`.
+- Mobile review viewport integration: \`tests/browser/fixtures/mobile-review-commenting.fixture.spec.ts\`.
 
 ### Sidebar surfaces
 

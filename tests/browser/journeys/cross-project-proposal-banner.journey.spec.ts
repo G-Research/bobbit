@@ -29,7 +29,7 @@
  *        project is owned by the server task; those banner assertions do not
  *        depend on it.)
  */
-import { test, expect, openApp, createSessionViaUI, registerProject, apiFetch, deleteGoal, defaultProjectId } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, createSessionViaUI, registerProject, apiFetch, deleteGoal, defaultProjectId } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import type { Page } from "@playwright/test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -247,7 +247,7 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			.toBe("registered");
 		// The `projectId` routing key is never persisted into project config on
 		// accept (buildProjectConfigDiff excludes it) — pinned by the focused unit
-		// test tests2/core/project-proposal-diff.test.ts.
+		// test tests/unit/core/project-proposal-diff.unit.test.ts.
 	});
 
 	test("STALE MODE (PR #1005 P1): a project slot re-evaluates mode when a LATER revision adds a cross-project target", async ({ page }) => {

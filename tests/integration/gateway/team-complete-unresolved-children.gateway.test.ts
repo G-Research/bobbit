@@ -13,7 +13,7 @@
  * Mirrors the in-process harness import pattern from
  * tests/e2e/api-goals-spawn-child-route.spec.ts.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	deleteGoal,
@@ -21,7 +21,7 @@ import {
 	rawApiFetch,
 	readE2EToken,
 	seedTeamLeadHeader,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
 
 let token: string;

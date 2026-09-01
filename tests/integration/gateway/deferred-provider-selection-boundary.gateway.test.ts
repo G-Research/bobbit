@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import http from "node:http";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const CUSTOM_MODEL_ID = "kimi-coding/claude-opus-5";
 

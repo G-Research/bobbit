@@ -9,7 +9,7 @@
 // agent processes boot.
 //
 // The projectless-session MCP fail-closed sub-behaviour is ported separately in
-// tests2/core/session-mcp-projectless-fail-closed.test.ts (pure unit).
+// tests/unit/core/session-mcp-projectless-fail-closed.unit.test.ts (pure unit).
 import { beforeAll, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -26,9 +26,9 @@ import type { ProjectContextManager } from "../../../src/server/agent/project-co
 import { resolveProjectForRequest, validateExecutionCwd } from "../../../src/server/agent/resolve-project.js";
 import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.js";
 import { validateToken } from "../../../src/server/auth/token.js";
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
-import { createManualClock, type ManualClock } from "../../../tests2/harness/clock.js";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
+import { createManualClock, type ManualClock } from "../../../tests/support/harnesses/shared/clock.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 guardProcessEnv();
 

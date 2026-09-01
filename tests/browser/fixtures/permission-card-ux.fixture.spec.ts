@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "../../../tests2/browser/fixtures/fixtures/build-bundle.js";
+import { buildBundle } from "../../support/helpers/browser/fixtures/fixtures/build-bundle.js";
 
 const FIXTURE = path.resolve("tests/fixtures/permission-card-ux.html");
 const ENTRY = path.resolve("tests/fixtures/permission-card-ux-entry.ts");

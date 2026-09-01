@@ -1,16 +1,16 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Credential/URL resolution for the bobbit extension: env creds, state-file
 // fallback, absent-creds (logs + no registration, no throw), and baseUrl
 // trailing-slash trimming.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadBobbitTools, stubFetch } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 function clearCreds() {
 	delete process.env.BOBBIT_TOKEN;

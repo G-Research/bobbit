@@ -20,8 +20,8 @@ import { waitForPool, pollSessionUntil, pollSessionUntilArchived } from "../test
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 // Repos come from the immutable committed template (master + README.md +
 // .gitattributes + one commit); nothing in this spec asserts on tree contents.

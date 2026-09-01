@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PromptQueue } from "../../../src/server/agent/prompt-queue.js";
-import { intentRow } from "../../../tests2/core/helpers/reliable-intent-fixture.js";
+import { intentRow } from "../../../tests/support/helpers/unit/reliable-intent-fixture.js";
 
 function queueApi(queue: PromptQueue): any {
 	return queue as any;

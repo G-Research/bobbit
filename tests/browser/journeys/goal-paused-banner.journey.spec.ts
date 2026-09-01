@@ -7,7 +7,7 @@
  *   3. Disappears after clicking Resume.
  *   4. Never shown for sessions with no goal.
  */
-import { test, expect, openApp, navigateToHash, createSession, createGoal, deleteSession, deleteGoal, apiFetch, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, navigateToHash, createSession, createGoal, deleteSession, deleteGoal, apiFetch, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
 
 test.describe("Journey: Goal Paused Banner (UI)", () => {
 	test.skip("shows banner with Resume button when goal is paused; disappears on resume", async ({ page }) => {

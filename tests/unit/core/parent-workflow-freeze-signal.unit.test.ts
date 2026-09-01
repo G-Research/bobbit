@@ -25,7 +25,7 @@ import { ProjectConfigStore } from "../../../src/server/agent/project-config-sto
 import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
 import { computePlanFreezeUpdate } from "../../../src/server/agent/parent-workflow-freeze.ts";
 import type { PersistedGoal } from "../../../src/server/agent/goal-store.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const tmpRoot = path.resolve("/memfs/freeze-signal/work");

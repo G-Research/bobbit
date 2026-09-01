@@ -1,7 +1,7 @@
 /**
  * API-only sidebar data-path coverage migrated out of browser E2E.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -9,7 +9,7 @@ import {
 	startTeam,
 	teardownTeam,
 	waitForSessionStatus,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.describe("Sidebar API data paths", () => {
 	const goalIds: string[] = [];

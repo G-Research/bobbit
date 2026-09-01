@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import type { GatewayInfo } from "../../../tests2/browser/gateway-harness.js";
+import type { GatewayInfo } from "../../support/harnesses/browser/gateway-harness.js";
 import {
 	apiFetch,
 	createSession,
@@ -13,8 +13,8 @@ import {
 	test,
 	waitForAgentResponse,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { harnessDefaultProjectRoot, projectStateDirForRoot } from "../../../tests2/browser/e2e-setup.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { harnessDefaultProjectRoot, projectStateDirForRoot } from "../../support/harnesses/browser/e2e-setup.js";
 
 const RETIRED_MODEL = {
 	provider: "retired-browser-provider",

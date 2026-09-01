@@ -17,7 +17,7 @@
  *
  * Design doc: docs/design/editable-proposals.md §6.4, §9.1.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch as harnessApiFetch,
 	connectWs,
@@ -28,13 +28,13 @@ import {
 	registerProject,
 	seedTeamLeadHeader,
 	waitForSessionStatus,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { MAX_GOAL_SPEC_LENGTH, MAX_GOAL_TITLE_LENGTH } from "../../../src/server/agent/goal-candidate-validator.js";
 import { getProposalTypePlugin } from "../../../src/server/proposals/proposal-types.js";
-import { copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
 
 let sessionId: string;
 

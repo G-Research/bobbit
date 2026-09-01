@@ -2,7 +2,7 @@
 /**
  * Chaos comparison proof runner — Test Suite v2.
  *
- * Applies each mutant from tests2/chaos/mutants.json to a clean ephemeral
+ * Applies each mutant from tests/support/data/quality/chaos/mutants.json to a clean ephemeral
  * git worktree, runs the targeted legacy + v2 tests, and records caught/missed.
  *
  * Usage:
@@ -159,7 +159,7 @@ function resolveTsxEntry() {
   return null; // tsx not installed here — legacy tier cannot run
 }
 const TSX_ENTRY = resolveTsxEntry();
-const MUTANTS_FILE = path.join(REPO_ROOT, "tests2", "chaos", "mutants.json");
+const MUTANTS_FILE = path.join(REPO_ROOT, "tests", "support", "data", "quality", "chaos", "mutants.json");
 const REPORT_JSON = path.join(REPO_ROOT, ".profiles", "chaos", "comparison-report.json");
 const REPORT_MD = path.join(REPO_ROOT, "docs", "testing-v2", "chaos-report.md");
 
@@ -847,7 +847,7 @@ async function runFullV2SampleOne(mutant, baseline) {
     const listedFired = newFailingFiles.some(f => listed.has(f));
     const newCatchers = listedFired
       ? []
-      : newFailingFiles.filter(f => f.startsWith("tests2/") && !listed.has(f));
+      : newFailingFiles.filter(f => f.startsWith("tests/") && !listed.has(f));
     console.log(`  full-v2: ${killed ? "KILLED" : "SURVIVED"} by ${newFailingFiles.length} NEW file(s) vs baseline` +
       (newCatchers.length ? ` (+${newCatchers.length} non-listed)` : "") + `  (${((Date.now() - start) / 1000).toFixed(1)}s)`);
     return {
@@ -930,7 +930,7 @@ function generateMarkdownReport(results, runMeta) {
   const v2CatchesAllLegacyCaught = realGaps.length === 0;
   lines.push(`- **No REAL v2 coverage gap (every legacy-caught mutant the v2 test RAN on is caught):** ${v2CatchesAllLegacyCaught ? "✅ PASS" : "❌ FAIL"}`);
   if (realGaps.length > 0) {
-    lines.push(`  - ❌ ${realGaps.length} REAL v2 coverage gap(s) — the v2 test ran and MISSED. Add a \`tests2/\` test that catches each, then re-run that mutant (never delete/alter the mutant):`);
+    lines.push(`  - ❌ ${realGaps.length} REAL v2 coverage gap(s) — the v2 test ran and MISSED. Add a test in the matching canonical \`tests/\` lane that catches each, then re-run that mutant (never delete/alter the mutant):`);
     for (const r of realGaps) {
       lines.push(`    - **${r.id}** (${r.area}): ${r.description} — legacy caught via \`${(r.legacyCatchers[0] || "?")}\`, v2 = missed`);
     }
@@ -1006,7 +1006,7 @@ function generateMarkdownReport(results, runMeta) {
     lines.push(`| ${area} | ${areaResults.length} | ${lc} | ${vc} | ${inc || "—"} | ${realMiss || "—"} | ${geqOk ? (inc ? "✅*" : "✅") : "❌"} |`);
   }
   lines.push("");
-  lines.push(`**Per-area v2 ≥ legacy (runnable):** ${allAreasGeq ? "✅ PASS (no area has a real v2 miss; ✅* = has env-inconclusive to re-run in a complete-install env)" : "❌ FAIL (an area has a REAL v2 miss — add a tests2/ test and re-run)"}`);
+  lines.push(`**Per-area v2 ≥ legacy (runnable):** ${allAreasGeq ? "✅ PASS (no area has a real v2 miss; ✅* = has env-inconclusive to re-run in a complete-install env)" : "❌ FAIL (an area has a REAL v2 miss — add a test in the matching canonical tests/ lane and re-run)"}`);
   lines.push(`**Per-area legacy-caught ⊆ v2-caught (excluding env-inconclusive):** ${allLegacyNoMiss ? "✅ PASS (no legacy-caught mutant is genuinely missed by v2)" : "❌ FAIL (a legacy-caught mutant is genuinely missed by v2)"}`);
   lines.push("");
 
@@ -1072,7 +1072,7 @@ function generateMarkdownReport(results, runMeta) {
   // Methodology
   lines.push("## Methodology");
   lines.push("");
-  lines.push("- Each mutant is a single search/replace change to a `src/` or `tests2/harness/` file");
+  lines.push("- Each mutant is a single search/replace change to a `src/` or `tests/support/harnesses/` file");
   lines.push("- Applied in an ephemeral git worktree (`git worktree add --detach`), never leaking to the branch");
   lines.push("- Targeted test runs (one file each for legacy and v2) — not full-suite × mutant");
   lines.push("- `caught` = test file exits non-0; `missed` = test file exits 0 (bug not detected)");
@@ -1080,7 +1080,7 @@ function generateMarkdownReport(results, runMeta) {
   lines.push("- **Test-name attribution:** the specific failing test case is parsed from the runner output (Vitest JSON report for v2, TAP `not ok` lines for legacy) — an unattributed kill is a FAIL criterion");
   lines.push("- **Full-v2 sample (R8):** ≥5 random killed mutants are additionally re-run against the entire core+dom tier; a kill by a non-listed test still counts and back-fills `expectedV2Catchers`");
   lines.push("");
-  lines.push(`*Run by: ${runMeta.runner || "chaos.mjs"}  |  Corpus: tests2/chaos/mutants.json*`);
+  lines.push(`*Run by: ${runMeta.runner || "chaos.mjs"}  |  Corpus: tests/support/data/quality/chaos/mutants.json*`);
 
   return lines.join("\n");
 }

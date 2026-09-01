@@ -16,8 +16,8 @@
  *      been removed). The toggle-on case (`Enabled`) cannot be exercised
  *      end-to-end here because saving a `sandboxed: true` staff requires
  *      Docker — covered at the data-model layer by
- *      tests2/core/staff-sandboxed-persistence.test.ts and at the API layer by
- *      tests2/integration/staff.test.ts.
+ *      tests/unit/core/staff-sandboxed-persistence.unit.test.ts and at the API layer by
+ *      tests/integration/gateway/staff.gateway.test.ts.
  *
  * Pattern mirrors tests/browser/fixtures/settings-admin-fixture.fixture.spec.ts for navigation + reload.
  */

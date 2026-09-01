@@ -12,7 +12,7 @@ import {
 } from "../../../src/server/agent/notification-staff-dispatcher.js";
 import { StaffManager } from "../../../src/server/agent/staff-manager.js";
 import { StaffStore, type PersistedStaff } from "../../../src/server/agent/staff-store.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const cleanupDirs: string[] = [];
 afterAll(() => {

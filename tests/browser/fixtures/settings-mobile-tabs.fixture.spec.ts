@@ -1,5 +1,5 @@
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
-import { openApp, navigateToHash } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
+import { openApp, navigateToHash } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 test.describe("Settings mobile tabs", () => {
 	test("tab bar scrolls horizontally so right-side tabs are reachable", async ({ page }) => {

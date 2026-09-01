@@ -1,8 +1,8 @@
 /**
  * E2E tests for POST /api/projects/detect and GET /api/browse-directory endpoints.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, bobbitDir } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, bobbitDir } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { existsSync, mkdirSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 

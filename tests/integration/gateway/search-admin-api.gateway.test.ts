@@ -2,9 +2,9 @@
  * E2E tests for the search admin + maintenance REST endpoints.
  */
 import { rmSync } from "node:fs";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { createRunChild } from "../../../tests2/harness/run-isolation.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { createRunChild } from "../../../tests/support/harnesses/shared/run-isolation.js";
 import { SearchUnavailableError } from "../../../src/server/search/search-service.js";
 
 let token: string;

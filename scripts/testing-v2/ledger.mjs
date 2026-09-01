@@ -146,14 +146,14 @@ const DEFAULT_BROWSER_LEASE_TIMEOUT_MS = 1_200_000; // 20 min
 const LEASE_POLL_MS = 150; // base backoff between saturated-pool retries (jittered)
 
 const LEDGER_FILE_DIR = dirname(fileURLToPath(import.meta.url));
-const BUDGET_CAPS_PATH = join(LEDGER_FILE_DIR, "..", "..", "tests2", "budget-caps.json");
+const BUDGET_CAPS_PATH = join(LEDGER_FILE_DIR, "..", "..", "tests", "support", "data", "quality", "budgets", "budget-caps.json");
 
 /** Per-pool max-hold backstop for the sweep (dead holders are always reclaimed). */
 function leaseMaxHoldMs(pool) {
 	return pool === "browser" ? BROWSER_LEASE_MAX_HOLD_MS : LEASE_MAX_HOLD_MS;
 }
 
-/** Read a committed per-pool cap from tests2/budget-caps.json (missing → null). */
+/** Read a committed per-pool cap from tests/support/data/quality/budgets/budget-caps.json (missing → null). */
 function budgetCapFromFile(pool) {
 	try {
 		const parsed = JSON.parse(readFileSync(BUDGET_CAPS_PATH, "utf8"));
@@ -662,7 +662,7 @@ function writeLeases(state) {
 /**
  * Resolve the concurrent-holder cap for a lease pool.
  *
- * Priority: opts.cap (tests) > env override (tuning) > tests2/budget-caps.json
+ * Priority: opts.cap (tests) > env override (tuning) > tests/support/data/quality/budgets/budget-caps.json
  * (committed static value) > built-in default. The env override lets the
  * authoritative measurement ramp a cap without editing the committed file each
  * run; the file is the source of truth between calibrations.

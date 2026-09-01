@@ -11,9 +11,9 @@ import {
   defaultProjectId,
   createSession,
   deleteSession,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { connectWs, signalAndWaitForGate } from "../../../tests2/browser/e2e-setup.js";
-import { navigateToGoalDashboard } from "../../../tests2/browser/fixtures/ui-helpers.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { connectWs, signalAndWaitForGate } from "../../support/harnesses/browser/e2e-setup.js";
+import { navigateToGoalDashboard } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 // ── Behavioral assertions ported from the master gate-verification-UX specs ──
 // Sources: tests/e2e/ui/gate-list-slim-projection.spec.ts (Issue #1) and

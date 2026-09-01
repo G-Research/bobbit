@@ -10,8 +10,8 @@ import { waitForPool } from "../test-utils/pool-polling.mjs";
 import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, normalize } from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 // This spec intentionally exercises the host-side worktree pool.
 test.use({ enableWorktreePool: true });

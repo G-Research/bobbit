@@ -14,7 +14,7 @@
  * - error-pattern-verification.spec.ts (expect:failure pipeline — 1 integration test)
  * - llm-review-verification.spec.ts (LLM review skip path)
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
@@ -25,8 +25,8 @@ import {
 	signalAndWaitForGate,
 	type WsConnection,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { createFakeVerificationCommandRunner } from "../../../tests2/harness/fake-verification-command-runner.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { createFakeVerificationCommandRunner } from "../../../tests/support/harnesses/shared/fake-verification-command-runner.js";
 
 const VERIFICATION_WS_TIMEOUT_MS = 60_000;
 const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;

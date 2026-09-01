@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { expect, test } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, harnessDefaultProjectRoot } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { expect, test } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, harnessDefaultProjectRoot } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function archivedIds(body: any, prefix: string): string[] {
 	return (body.archivedDelegates as any[])

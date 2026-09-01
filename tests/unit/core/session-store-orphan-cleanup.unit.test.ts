@@ -2,7 +2,7 @@
  * Orphan-cleanup regression tests backed by the FsLike seam.
  *
  * Real recursive filesystem traversal is pinned in
- * tests2/integration/session-store-real-fs.test.ts.
+ * tests/integration/gateway/session-store-real-fs.gateway.test.ts.
  */
 import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
@@ -16,7 +16,7 @@ import {
 	type AsyncOrphanDirectory,
 	type AsyncOrphanScanFs,
 } from "../../../src/server/agent/orphan-cleanup.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 type SessionStoreMemFs = MemFs & {
 	openSync(file: PathLike, flags: string): number;

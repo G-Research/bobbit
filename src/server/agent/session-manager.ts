@@ -3076,7 +3076,7 @@ function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
  *  container), so a retryable agent_end must never reach clients via
  *  `emitSessionEvent` or settle a wait/abort listener as final. Shared by every
  *  `rpcClient.onEvent` emit path so the suppression contract stays consistent.
- *  Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts. */
+ *  Pinned by tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts. */
 export function isRetryableAgentEnd(event: unknown): boolean {
 	return !!event
 		&& typeof event === "object"
@@ -12455,7 +12455,7 @@ export class SessionManager {
 	/**
 	 * Emit a live agent event to clients, suppressing retryable Pi agent_end
 	 * events while forwarding completed compaction events independently.
-	 * Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
+	 * Pinned by tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts.
 	 */
 	private prepareVisibleAgentEvent(session: SessionInfo, event: unknown): unknown {
 		const prepared = prepareVisibleAgentEvent(session, event, this.messageAuthorDependencies(session));

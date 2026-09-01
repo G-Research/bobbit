@@ -1,5 +1,5 @@
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

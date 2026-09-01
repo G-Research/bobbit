@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // AIGW provider DNS admission and active-host lifecycle coverage.
 
 import { describe, it, afterEach } from "vitest";
@@ -9,7 +9,7 @@ import path from "node:path";
 import {
 	GATEWAY, filterValidatedProviderUrls, getAigwProviderDnsGuardHosts, removeAigw,
 	replaceAigwProviderDnsGuardHosts, resetAgentDirStateForTests, translateWellKnown,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("AIGW DNS admission lifecycle", () => {
 	afterEach(() => replaceAigwProviderDnsGuardHosts([]));

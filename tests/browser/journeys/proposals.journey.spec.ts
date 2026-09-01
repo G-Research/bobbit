@@ -7,10 +7,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, expect, openApp, navigateToHash, createSession, deleteSession, createGoal, deleteGoal, waitForSessionStatus, apiFetch, defaultProjectId, registerProject } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { createSessionViaUI, sendMessage } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { nonGitCwd } from "../../../tests2/browser/e2e-setup.js";
-import { createGoalAssistantViaUI } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect, openApp, navigateToHash, createSession, deleteSession, createGoal, deleteGoal, waitForSessionStatus, apiFetch, defaultProjectId, registerProject } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { createSessionViaUI, sendMessage } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { nonGitCwd } from "../../support/harnesses/browser/e2e-setup.js";
+import { createGoalAssistantViaUI } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 async function authenticateMockProposalTools(
 	page: import("@playwright/test").Page,

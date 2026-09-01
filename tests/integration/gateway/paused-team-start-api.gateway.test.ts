@@ -4,7 +4,7 @@
  * a lead, and must remain safe when the same start is requested repeatedly.
  */
 import { vi } from "vitest";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	connectWs,
@@ -15,7 +15,7 @@ import {
 	rawApiFetch,
 	teardownTeam,
 	waitForSessionStatus,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 type Goal = { id: string; state: string; paused?: boolean; archived?: boolean };
 type StartBody = { sessionId?: string; title?: string; error?: string; code?: string; goalId?: string; stack?: string };

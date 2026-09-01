@@ -2,7 +2,7 @@
 // direct Vitest process with a fixed, environment-lowerable worker cap.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { dirname, extname, join, posix, relative, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { afterAll, beforeAll, describe, it, vi } from "vitest";
@@ -10,7 +10,8 @@ import { discoverTests } from "../../../scripts/testing-v2/test-discovery.mjs";
 import {
 	GitTemplateHandoffReporter,
 	type GitTemplateHandoffCertifier,
-} from "../../../tests2/harness/git-template-handoff-proof.js";
+} from "../../../tests/support/harnesses/shared/git-template-handoff-proof.js";
+import { resolveGatewayRepositoryRoot } from "../../../tests/support/harnesses/shared/gateway.js";
 
 type ProjectConfig = {
 	test: {
@@ -45,7 +46,7 @@ type LoadedConfig = {
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const CONFIG_PATH = resolve(REPO_ROOT, "vitest.config.ts");
-const HARNESS_ROOT = resolve(REPO_ROOT, "tests2", "harness");
+const HARNESS_ROOT = resolve(REPO_ROOT, "tests", "support", "harnesses", "shared");
 const LEDGER_PATH = resolve(REPO_ROOT, "scripts", "testing-v2", "ledger.mjs");
 const packageJson = JSON.parse(
 	readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
@@ -155,6 +156,33 @@ afterAll(restoreEnvironment);
 function projects(config: LoadedConfig): ProjectConfig["test"][] {
 	return config.default.test.projects.map((project) => project.test);
 }
+
+describe("shared gateway repository paths", () => {
+	it("resolves the relocated harness root with POSIX and Windows spellings", () => {
+		assert.equal(
+			resolveGatewayRepositoryRoot("/checkout/tests/support/harnesses/shared", posix.resolve),
+			"/checkout",
+		);
+		assert.equal(
+			resolveGatewayRepositoryRoot("C:\\checkout\\tests\\support\\harnesses\\shared", win32.resolve),
+			"C:\\checkout",
+		);
+	});
+
+	it("locates every repository-owned gateway boot asset from the checkout root", () => {
+		const repositoryRoot = resolveGatewayRepositoryRoot(HARNESS_ROOT);
+		assert.equal(repositoryRoot, resolve(REPO_ROOT));
+		for (const asset of [
+			["defaults"],
+			["market-packs", "file-explorer"],
+			["tests", "e2e", "mock-agent.mjs"],
+			["tests", "e2e", "in-process-mock-bridge.mjs"],
+		]) {
+			const assetPath = resolve(repositoryRoot, ...asset);
+			assert.equal(existsSync(assetPath), true, `gateway boot asset must exist: ${relative(repositoryRoot, assetPath)}`);
+		}
+	});
+});
 
 describe("direct unit-stage scheduling", () => {
 	it("runs test:unit as one direct Vitest command with no lane or ledger import", () => {

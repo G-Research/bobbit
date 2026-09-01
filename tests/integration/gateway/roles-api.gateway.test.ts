@@ -5,8 +5,8 @@
  * The server reads roles from .e2e-bobbit-<id>/config/roles/ — completely
  * separate from the real repo's roles. No backup/restore needed.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, base } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, base } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../../tests/e2e/test-utils/cleanup.js";
 
 const HEADQUARTERS_PROJECT_ID = "headquarters";

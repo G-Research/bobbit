@@ -26,7 +26,7 @@ import { createFsFromVolume, Volume } from "memfs";
 
 import { BgProcessManager, type SpawnFn, type BgEnv, type BgPaths, type TailerFactory, type Tailer } from "../../../src/server/agent/bg-process-manager.ts";
 import type { BgProcessStore, PersistedBgProcess, UpdatableBgFields } from "../../../src/server/agent/bg-process-store.ts";
-import { createManualClock } from "../../../tests2/harness/clock.js";
+import { createManualClock } from "../../../tests/support/harnesses/shared/clock.js";
 import shellExtension from "../../../defaults/tools/shell/extension.ts";
 import type { ServerMessage } from "../../../src/server/ws/protocol.ts";
 

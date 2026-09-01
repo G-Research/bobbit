@@ -5,12 +5,12 @@
  * then tests configure → status → model discovery end-to-end.
  */
 
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { apiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { apiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { configureAigwRuntimeFlags } from "../../../src/server/agent/aigw-manager.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));

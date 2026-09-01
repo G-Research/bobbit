@@ -2,7 +2,7 @@
 // -triage PARTIAL: projectless-session MCP fail-closed). Faithful port of the
 // pure-unit "session MCP manager resolution fails closed for projectless sessions"
 // case — same assertions, vitest + fork env-guard.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { test } from "vitest";

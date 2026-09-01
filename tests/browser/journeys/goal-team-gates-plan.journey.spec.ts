@@ -9,8 +9,8 @@ import {
   createGoal,
   deleteGoal,
   apiFetch,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { seedTeamLeadHeader } from "../../../tests2/browser/e2e-setup.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { seedTeamLeadHeader } from "../../support/harnesses/browser/e2e-setup.js";
 
 // Behavioral assertions ported from plan-tab-gate-status.spec.ts
 test.describe("Journey: Plan-Tab Gate-Status — behavioral assertions", () => {

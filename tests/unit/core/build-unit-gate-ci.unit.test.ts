@@ -121,7 +121,7 @@ describe("native CI qualification workflows", () => {
 		assert.deepEqual(
 			steps[typeCheckIndex]?.env,
 			{ NODE_OPTIONS: "--max-old-space-size=4096" },
-			"type-checking must have enough heap for the complete tests2 program on native CI",
+			"type-checking must have enough heap for the complete test program on native CI",
 		);
 		assert.equal(unitGates.length, 1, "workflow must run the unit suite once");
 		assert.equal(steps[typeCheckIndex + 1]?.name, "Unit gate", "unit gate must start immediately after type-checking");

@@ -1,12 +1,12 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Operation dispatch: path building (ids, query, probe/action selectors,
 // cascade), body building, and HTTP method correctness per representative op.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadBobbitTools, stubFetch, type CapturedTool, type FetchCall } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch, type CapturedTool, type FetchCall } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 let tools: Map<string, CapturedTool>;
 

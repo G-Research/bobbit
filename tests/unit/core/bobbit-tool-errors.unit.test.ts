@@ -1,13 +1,13 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Error surfacing: non-2xx { error, code } bodies render as one readable line
 // with the machine code and HTTP status; 204/empty bodies normalize to a
 // success shape.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 let tools: Map<string, CapturedTool>;
 

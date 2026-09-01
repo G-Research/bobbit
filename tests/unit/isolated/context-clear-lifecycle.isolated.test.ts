@@ -1,13 +1,13 @@
 // v2-native — focused clear transaction, fencing, and rollback coverage.
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { makeTmpDir } from "../../helpers/tmp.ts";
-import { createManualClock } from "../../../tests2/harness/clock.js";
+import { createManualClock } from "../../../tests/support/harnesses/shared/clock.js";
 
 const tmpRoot = makeTmpDir("context-clear-lifecycle-");
 const stateDir = path.join(tmpRoot, "state");

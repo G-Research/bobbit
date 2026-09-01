@@ -4,7 +4,7 @@
  * Creates a test skill file in the session's cwd, then verifies the server
  * expands the skill content in the prompt text before dispatching to the agent.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	createSession,
 	deleteSession,
@@ -13,10 +13,10 @@ import {
 	defaultProjectId,
 	harnessDefaultProjectRoot,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { attachLocalMockAgentClock, type LocalMockAgentClock } from "../../../tests2/integration/helpers/local-mock-agent-clock.js";
+import { attachLocalMockAgentClock, type LocalMockAgentClock } from "../../../tests/support/helpers/integration/gateway/local-mock-agent-clock.js";
 
 // Use a DEDICATED, unique cwd per worker (NOT the shared nonGitCwd) so the
 // slash-skill discovery cache cannot return a previously-cached empty skill

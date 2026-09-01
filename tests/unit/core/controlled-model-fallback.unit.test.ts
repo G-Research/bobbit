@@ -2,7 +2,7 @@
 // Source: tests/controlled-model-fallback.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -30,7 +30,7 @@ import {
 import { generateImage } from "../../../src/server/agent/image-generation.js";
 import { fallbackProviderAllowlistFromPrefs, resolveHostAgentProviderEnv } from "../../../src/server/agent/host-tokens.js";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 // The selector-only harnesses below intentionally isolate tryAutoSelectModel.
 // These two boundary tests instead run through the real SessionManager spawn

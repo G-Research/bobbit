@@ -106,7 +106,7 @@ npm run check                   # type-check server + web + tests against fresh 
 Rules:
 - Runtime registry audits are deliberately outside the release process. Do not run `npm audit` or `audit:packed-consumer` as release gates; mutable advisory data must not change eligibility for an unchanged commit.
 - Do not run `test:unit`, `test:browser`, or `test:e2e` locally as release pre-flight. The release PR's required GitHub checks own all three suites across the supported runner matrix.
-- Build must precede `check` because `tsconfig.tests2.json` follows intentional imports of emitted `dist/server/*.js` declarations.
+- Build must precede `check` because `tsconfig.tests.json` follows intentional imports of emitted `dist/server/*.js` declarations.
 - If a local pre-flight step or required GitHub check fails, fix the failure or abort the release; do not retry hoping it is flaky.
 
 Use `bash_bg` for the build if it may run long so output stays inspectable.

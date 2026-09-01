@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
-import { getGateway, type GatewayFixture } from "../../../tests2/harness/gateway.js";
-import { createScope } from "../../../tests2/harness/scope.js";
-import { loadServerTestRuntime } from "../../../tests2/harness/server-runtime.js";
+import { getGateway, type GatewayFixture } from "../../../tests/support/harnesses/shared/gateway.js";
+import { createScope } from "../../../tests/support/harnesses/shared/scope.js";
+import { loadServerTestRuntime } from "../../../tests/support/harnesses/shared/server-runtime.js";
 
 const COOKIE_NAME = "bobbit_session";
 const COOKIE_SIGNING_KEY_FILE = "cookie-signing-key";

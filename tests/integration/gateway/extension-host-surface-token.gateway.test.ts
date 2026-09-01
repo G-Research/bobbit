@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, base, createSession, deleteSession, readE2EToken } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, base, createSession, deleteSession, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "../../../src/server/cors.js";
 
 const SERVER_FILE = fileURLToPath(new URL("../../../src/server/server.ts", import.meta.url));

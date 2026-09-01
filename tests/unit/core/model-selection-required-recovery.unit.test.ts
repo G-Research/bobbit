@@ -1,7 +1,7 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // Failing-first cold-restore reproducer for a persisted model retired from the selectable catalog.
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
 import { makeTmpDir } from "../../../tests/helpers/tmp.ts";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const tmpRoot = makeTmpDir("model-selection-required-recovery-");
 const stateDir = path.join(tmpRoot, "state");

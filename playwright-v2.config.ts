@@ -6,7 +6,7 @@
  *   - retries: 3 for normal developer workflow; retry-free qualification uses
  *     BOBBIT_V2_RETRY_FREE=1 without changing the default safety net
  *   - Worker count from the shared ledger (cap 4)
- *   - testDir: tests2/browser
+ *   - Canonical browser fixtures and journeys only
  *   - Per-coordinator result artifacts under the owned run root
  *   - One stable ignored JSON summary for the budget gate
  *   - Global setup: build dist if missing
@@ -19,7 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { seedTransformCacheForRunDir } from "./scripts/testing-v2/pwtest-cache.js";
 import { captureMachineGlobalLedgerDirectory } from "./scripts/run-playwright-e2e.mjs";
 import { TEST_LAYOUT } from "./scripts/testing/layout-policy.mjs";
-import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests2/harness/run-isolation.js";
+import { capturePlaywrightBrowserRegistry, createRunArtifactDirectory, getRunRoot, installRunIsolation, isOwnedRunPath } from "./tests/support/harnesses/shared/run-isolation.js";
 
 // The browser harness redirects TMPDIR below. Preserve the intentional
 // machine-global concurrency ledger before that isolation takes effect.
@@ -96,7 +96,7 @@ function prepareV2RuntimeCaches(): void {
 	// (`<base>/pwtest-transform-cache-v2/latest`). Entries are content-hashed so
 	// reuse is safe; per-run dirs only isolate WRITES. Fail-open: any copy error
 	// just means a cold cache. The matching publish happens in
-	// tests2/browser-global-teardown.ts.
+	// tests/support/harnesses/browser/global-teardown.ts.
 	seedTransformCacheForRunDir(runCacheRoot);
 }
 
@@ -112,7 +112,7 @@ process.env.BOBBIT_V2_GATEWAY_BOOT_LEASE = "1";
 
 // GLOBAL CONCURRENCY BUDGET (browser-render lease): cap the TOTAL number of
 // Chromium browser workers rendering the app at once across ALL concurrent runs
-// (scripts/testing-v2/ledger.mjs, pool "browser", cap in tests2/budget-caps.json).
+// (scripts/testing-v2/ledger.mjs, pool "browser", cap in tests/support/data/quality/budgets/budget-caps.json).
 // The gateway-harness worker fixture acquires a browser slot at worker startup
 // (before booting its gateway) and holds it for the worker's whole life; queued
 // workers WAIT holding nothing. This directly targets the sustained multi-browser
@@ -157,8 +157,8 @@ export default {
 		[process.stdout.isTTY ? "list" : "line"],
 		["json", { outputFile: playwrightBudgetReport }],
 	] as Array<[string, unknown?]>,
-	globalSetup: "./tests2/browser-global-setup.ts",
-	globalTeardown: "./tests2/browser-global-teardown.ts",
+	globalSetup: "./tests/support/harnesses/browser/global-setup.ts",
+	globalTeardown: "./tests/support/harnesses/browser/global-teardown.ts",
 	use: {
 		video: "off",
 		trace: "off",
@@ -176,31 +176,10 @@ export default {
 	},
 	projects: [
 		{
-			name: "browser-v2",
-			testDir: "./tests2/browser",
-			testMatch: ["**/*.spec.ts"],
-			testIgnore: ["**/e2e/**"], // real-fidelity e2e:v2 specs; run only via `test:e2e:v2` (project browser-v2-e2e), never in tier-2 `test:v2`
-			use: {
-				browserName: "chromium" as const,
-			},
-		},
-		{
 			name: "browser-canonical",
 			testDir: "./tests/browser",
 			testMatch: canonicalBrowserMatches,
 			fullyParallel: true,
-			use: {
-				browserName: "chromium" as const,
-			},
-		},
-		{
-			// Real-fidelity browser lane (adapter specs + crash/restart journey).
-			// Run only via `test:e2e:v2` — NOT part of tier-2 `test:v2`.
-			// Inherits normal retries:3; BOBBIT_V2_RETRY_FREE=1 makes this lane
-			// retry-free for concurrent first-attempt qualification.
-			name: "browser-v2-e2e",
-			testDir: "./tests2/browser/e2e",
-			testMatch: ["**/*.spec.ts"],
 			use: {
 				browserName: "chromium" as const,
 			},

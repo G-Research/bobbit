@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // Pure AIGW well-known translation, filtering, collision, pricing, and default-seeding coverage.
 
 import { describe, it } from "vitest";
@@ -7,7 +7,7 @@ import {
 	GATEWAY, byId, collectAigwProviderDnsHosts, createAigwGuardedLookup, loadFixture,
 	normalizeAigwPricing, normalizeWellKnownCost, seedDefaultModelsFromWellKnown,
 	translateWellKnown,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("translateWellKnown — provider → pi-ai api mapping", () => {
 	it("routes @ai-sdk/openai to openai-responses on its own /openai/v1 baseURL with bare ids", () => {

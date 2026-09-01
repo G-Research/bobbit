@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, rawApiFetch } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, rawApiFetch } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 function restartSentinelPath(bobbitDir: string): string {
 	return join(bobbitDir, "state", "gateway-restart");

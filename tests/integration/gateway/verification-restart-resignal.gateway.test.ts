@@ -36,8 +36,8 @@
  * contains the signalId) and again at step 4 (HTTP 409
  * "Verification already in progress for this commit").
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";

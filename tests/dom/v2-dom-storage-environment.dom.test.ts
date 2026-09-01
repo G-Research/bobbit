@@ -4,7 +4,7 @@ import {
 	__resetGatewayConnectionForTests,
 	gatewayFetch,
 } from "../../src/app/gateway-fetch.js";
-import { installDomStorage, restoreDomStorage } from "../../tests2/harness/v2-dom-environment.js";
+import { installDomStorage, restoreDomStorage } from "../../tests/support/harnesses/unit/v2-dom-environment.js";
 
 type StorageProperty = "localStorage" | "sessionStorage";
 

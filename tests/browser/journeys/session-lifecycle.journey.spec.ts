@@ -4,8 +4,8 @@
  *         reload persistence, fork via sidebar, sidebar actions menu, copy-link action.
  * Consolidated from: fork-session-history, copy-session-link, sidebar-session-actions, etc.
  */
-import { test, expect, openApp, navigateToHash, createSession, createSessionViaUI, deleteSession, waitForSessionStatus } from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { base } from "../../../tests2/browser/e2e-setup.js";
+import { test, expect, openApp, navigateToHash, createSession, createSessionViaUI, deleteSession, waitForSessionStatus } from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { base } from "../../support/harnesses/browser/e2e-setup.js";
 
 // ---------------------------------------------------------------------------
 // Selectors used across multiple tests

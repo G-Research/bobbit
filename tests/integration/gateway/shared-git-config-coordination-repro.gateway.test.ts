@@ -13,7 +13,7 @@ import { expect, test } from "vitest";
 import { realCommandRunner, type CommandRunner } from "../../../src/server/gateway-deps.js";
 import { createWorktree } from "../../../src/server/skills/git.js";
 import { canonicalGitCommonDir } from "../../../src/server/skills/repository-mutation-coordinator.js";
-import { copyGitTemplate, prepareGitTemplate } from "../../../tests2/harness/git-template.js";
+import { copyGitTemplate, prepareGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
 
 const REPRO = "SHARED_GIT_CONFIG_COORDINATION_REPRO";
 const INCIDENT_LOCK = "could not lock config file .git/config: File exists";

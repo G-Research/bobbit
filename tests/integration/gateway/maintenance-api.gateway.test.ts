@@ -2,8 +2,8 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 import type { CommandRunner } from "../../../src/server/gateway-deps.js";
 import { WorktreeInventoryService } from "../../../src/server/agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "../../../src/server/maintenance/cleanup-worktrees-request.js";
-import * as maintenance from "../../../tests2/integration/helpers/maintenance-api-support.js";
-import { MaintenanceGitModel } from "../../../tests2/integration/helpers/maintenance-git-model.js";
+import * as maintenance from "../../../tests/support/helpers/integration/gateway/maintenance-api-support.js";
+import { MaintenanceGitModel } from "../../../tests/support/helpers/integration/gateway/maintenance-git-model.js";
 
 const {
 	test, expect, apiFetch,

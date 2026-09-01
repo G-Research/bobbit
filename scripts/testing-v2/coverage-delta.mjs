@@ -11,7 +11,7 @@
  * Two modes:
  *
  *   (default) baseline mode — compares the current v2 coverage-summary.json
- *     against a COMMITTED per-file baseline (tests2/v2-baseline-coverage-per-file.json).
+ *     against a COMMITTED per-file baseline (tests/support/data/quality/coverage/v2-baseline-coverage-per-file.json).
  *     First run writes the baseline and exits 0. Subsequent runs report any file
  *     whose line or branch pct dropped vs baseline (beyond tolerance), plus files
  *     that vanished from coverage entirely. A git-history honesty check refuses a
@@ -38,6 +38,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { spawnSync, execSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "./test-discovery.mjs";
 
 const toPosix = (p) => p.replace(/\\/g, "/");
@@ -69,7 +70,11 @@ function parseArgs(argv) {
 // ─── Paths ─────────────────────────────────────────────────────────────────────
 
 const DEFAULT_SUMMARY = join(REPO_ROOT, ".profiles", "testing-v2", "coverage", "coverage-summary.json");
-const PER_FILE_BASELINE = join(REPO_ROOT, "tests2", "v2-baseline-coverage-per-file.json");
+export const PER_FILE_BASELINE = join(REPO_ROOT, "tests", "support", "data", "quality", "coverage", "v2-baseline-coverage-per-file.json");
+
+export function loadCommittedPerFileCoverageBaseline() {
+	return JSON.parse(readFileSync(PER_FILE_BASELINE, "utf8"));
+}
 const OUT_DIR = join(REPO_ROOT, ".profiles", "testing-v2");
 const OUT_JSON = join(OUT_DIR, "coverage-delta.json");
 const OUT_MD = join(OUT_DIR, "coverage-delta.md");
@@ -356,7 +361,7 @@ function renderMarkdown(report) {
 	L.push("- Coverage is V8 (`@vitest/coverage-v8`) per-file `coverage-summary.json` from the tier-1 vitest run.");
 	L.push("- `pp` = percentage-points (absolute pct difference), not a relative change.");
 	L.push("- A file present in the baseline but absent from current coverage is a **full loss** (its only exercising test may have been retired in the browser consolidation).");
-	L.push("- Baseline mode compares against the committed `tests2/v2-baseline-coverage-per-file.json`; a git-history honesty check refuses a silently bar-lowered baseline.");
+	L.push("- Baseline mode compares against the committed `tests/support/data/quality/coverage/v2-baseline-coverage-per-file.json`; a git-history honesty check refuses a silently bar-lowered baseline.");
 	L.push("- A/B mode (`--baseline A --current B`) compares two `coverage-summary.json` files directly (e.g. legacy suite vs v2).");
 	L.push("");
 	return L.join("\n");
@@ -433,7 +438,7 @@ function main() {
 		process.exit(0);
 	}
 
-	const baselineRaw = JSON.parse(readFileSync(PER_FILE_BASELINE, "utf8"));
+	const baselineRaw = loadCommittedPerFileCoverageBaseline();
 	const baselineMap = new Map(Object.entries(baselineRaw.files || {}).map(([rel, d]) => [rel, {
 		lines: pickMetric(d.lines), branches: pickMetric(d.branches),
 	}]));
@@ -490,4 +495,4 @@ function finish(report, opts, honesty = []) {
 	process.exit(0);
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

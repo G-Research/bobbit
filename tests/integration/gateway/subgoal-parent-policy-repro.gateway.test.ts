@@ -23,7 +23,7 @@
  * is encoded structurally: the unblock comes ONLY from editing the PARENT's
  * own policy (PATCH on the parent id), never from any flag on the child body.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	rawApiFetch,
@@ -31,7 +31,7 @@ import {
 	defaultProjectId,
 	nonGitCwd,
 	seedTeamLeadHeader,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let gw: any;
 let humanCookie = "";

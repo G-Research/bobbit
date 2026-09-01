@@ -6,13 +6,13 @@
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { test, expect, openApp, apiFetch } from "../../../tests2/browser/_helpers/journey-fixture.js";
+import { test, expect, openApp, apiFetch } from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	ADD_PROJECT,
 	clearAddedProjects,
 	openAddProjectDialog,
 	uniqueDir,
-} from "../../../tests2/browser/_helpers/project-onboarding.js";
+} from "../../support/helpers/browser/journeys/project-onboarding.js";
 
 test.describe("Journey: Project Onboarding — preflight and typeahead", () => {
 	test.afterEach(async () => {

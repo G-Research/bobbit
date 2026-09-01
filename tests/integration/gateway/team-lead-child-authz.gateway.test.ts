@@ -17,8 +17,8 @@
  * Goal-MEMBER operations (the normal `/team/*` path) are unaffected — the authz
  * guards the own-child fallback ONLY.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, rawApiFetch, startTeam, teardownTeam } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, rawApiFetch, startTeam, teardownTeam } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 /** Spawn a non-blocking own child of `ownerId` (apiFetch auto-injects the owner's secret on /orchestrate/). */
 async function spawnOwnChild(ownerId: string, instructions: string): Promise<string> {

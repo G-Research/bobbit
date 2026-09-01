@@ -2,17 +2,17 @@ import { join } from "node:path";
 import { defineConfig } from "vitest/config";
 import { discoverTests } from "./scripts/testing-v2/test-discovery.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
-import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
+import UnitFileBudgetReporter from "./tests/support/harnesses/unit/unit-file-budget-reporter.js";
 import GitTemplateHandoffReporter, {
 	GIT_TEMPLATE_HANDOFF_PROOF_ENV,
-} from "./tests2/harness/git-template-handoff-proof.js";
+} from "./tests/support/harnesses/shared/git-template-handoff-proof.js";
 import {
 	GIT_TEMPLATE_DIGEST_ENV,
 	GIT_TEMPLATE_PATH_ENV,
 	prepareGitTemplate,
 	type GitTemplateDescriptor,
-} from "./tests2/harness/git-template.js";
-import { getRunRoot, installRunIsolation, isRunRootOwner } from "./tests2/harness/run-isolation.js";
+} from "./tests/support/harnesses/shared/git-template.js";
+import { getRunRoot, installRunIsolation, isRunRootOwner } from "./tests/support/harnesses/shared/run-isolation.js";
 
 // Must run before server prebundling and test collection so workers inherit
 // only run-owned discovery roots and the credential-neutral environment.
@@ -82,9 +82,9 @@ const shared = {
 		fsModuleCachePath: MODULE_CACHE_PATH,
 	},
 };
-const tier1SetupFiles = ["tests2/harness/tier1-spawn-guard.ts"];
+const tier1SetupFiles = ["tests/support/harnesses/unit/tier1-spawn-guard.ts"];
 // Per-file reset of leaking dir singletons for the isolate:false projects.
-const fileBoundaryRunner = "tests2/harness/file-boundary-runner.ts";
+const fileBoundaryRunner = "tests/support/harnesses/unit/file-boundary-runner.ts";
 
 const coverage = {
 	provider: "v8" as const,
@@ -156,7 +156,7 @@ export default defineConfig({
 					environment: "happy-dom",
 					pool: "threads" as const,
 					isolate: true,
-					setupFiles: [...tier1SetupFiles, "tests2/harness/v2-dom-environment.ts"],
+					setupFiles: [...tier1SetupFiles, "tests/support/harnesses/unit/v2-dom-environment.ts"],
 					include: discovery.dom,
 				},
 			},

@@ -9,7 +9,7 @@ import {
 	getFreePort,
 	promptSession,
 	readToken,
-} from "../../../tests2/browser/e2e/packaged-runtime-helpers.js";
+} from "../../../tests/support/helpers/browser/e2e/packaged-runtime-helpers.js";
 import {
 	captureSourceProcess,
 	processFailure,
@@ -22,7 +22,7 @@ import {
 	type RunningSourceProcess,
 	type SourceProcessTreeAuthority,
 	type StopSourceProcessOptions,
-} from "../../../tests2/browser/e2e/source-vite-runtime-helpers.js";
+} from "../../../tests/support/helpers/browser/e2e/source-vite-runtime-helpers.js";
 import { _trackedCount, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
@@ -464,7 +464,7 @@ test.describe("source Vite inline HTML theme runtime", () => {
 	});
 
 	test("source-runtime cleanup contains no synchronous Windows process-tree utility", async () => {
-		const source = await readFile(new URL("../../../tests2/browser/e2e/source-vite-runtime-helpers.ts", import.meta.url), "utf8");
+		const source = await readFile(new URL("../../../tests/support/helpers/browser/e2e/source-vite-runtime-helpers.ts", import.meta.url), "utf8");
 		expect(source).not.toMatch(/spawnSync|taskkill/i);
 		expect(source).toContain("spawnTracked(file, args, options)");
 		expect(source.match(/return startOwnedSourceProcess\(/g)).toHaveLength(2);

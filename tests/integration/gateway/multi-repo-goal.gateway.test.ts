@@ -5,8 +5,8 @@
  * distinct component roots. Per-repository worktree fidelity lives in E2E;
  * this tier-1 route case explicitly disables worktree provisioning.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base, registerProject } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base, registerProject } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

@@ -5,8 +5,8 @@
  * q must filter the full archived corpus before pagination, not the current
  * page after normal archived pagination.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createGoal, defaultProjectId, deleteGoal, nonGitCwd } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createGoal, defaultProjectId, deleteGoal, nonGitCwd } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const REPRO = "ARCHIVED_QUERY_SEARCH_REPRO";
 const QUERY = "coverage";

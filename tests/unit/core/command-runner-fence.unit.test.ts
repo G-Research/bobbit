@@ -14,9 +14,9 @@ import {
 } from "../../../src/server/owned-tree-command-spawn.js";
 import { resolveWorktreeSupport } from "../../../src/server/agent/worktree-support.js";
 import { VerificationHarness } from "../../../src/server/agent/verification-harness.js";
-import { createFencedCommandRunner } from "../../../tests2/harness/fenced-command-runner.js";
-import { installMemoryFs } from "../../../tests2/core/helpers/memory-fs-spies.js";
-import type { MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createFencedCommandRunner } from "../../../tests/support/harnesses/shared/fenced-command-runner.js";
+import { installMemoryFs } from "../../../tests/support/helpers/unit/memory-fs-spies.js";
+import type { MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const nativeExistsSync = fs.existsSync.bind(fs);
 const nativeMkdtempSync = fs.mkdtempSync.bind(fs);
@@ -28,7 +28,7 @@ type NativeExecFile = typeof import("node:child_process").execFile;
 type NativeExecFileSync = typeof import("node:child_process").execFileSync;
 type NativeSpawn = typeof import("node:child_process").spawn;
 type SpawnGuardState = { originals?: { execFile?: NativeExecFile; execFileSync?: NativeExecFileSync; spawn?: NativeSpawn } };
-const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests.tier1-spawn-guard-state");
 
 /** Narrow real-process delegate for this fence's own end-to-end containment regression. */
 function preservedNativeCommandRunner(): CommandRunner {

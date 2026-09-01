@@ -265,8 +265,6 @@ function normalizeFileSummary(file) {
 function normalizeFile(file) {
 	if (typeof file !== "string" || !file) return null;
 	const normalized = toPosix(file);
-	if (normalized.includes("/tests2/")) return normalized.slice(normalized.indexOf("/tests2/") + 1);
-	if (normalized.startsWith("tests2/")) return normalized;
 	return rel(resolve(REPO_ROOT, file));
 }
 
@@ -473,7 +471,7 @@ async function selfTest(opts) {
 	writeFileSync(jsonPath, JSON.stringify({
 		testResults: [
 			{
-				name: join(REPO_ROOT, "tests2", "core", "alpha.test.ts"),
+				name: join(REPO_ROOT, "tests", "unit", "core", "alpha.unit.test.ts"),
 				status: "passed",
 				startTime: 1000,
 				endTime: 1750,
@@ -483,7 +481,7 @@ async function selfTest(opts) {
 				],
 			},
 			{
-				name: join(REPO_ROOT, "tests2", "integration", "beta.test.ts"),
+				name: join(REPO_ROOT, "tests", "integration", "gateway", "beta.gateway.test.ts"),
 				status: "failed",
 				duration: 1200,
 				assertionResults: [{ fullName: "beta fails", status: "failed", duration: 900 }],

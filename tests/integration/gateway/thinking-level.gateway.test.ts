@@ -5,13 +5,13 @@
  * - set_thinking_level WS command is handled without error
  * - Persisted Opus 5/xhigh is authoritative in fallback state frames
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	createSession,
 	connectWs,
 	type WsConnection,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { pollUntil } from "../../e2e/test-utils/cleanup.js";
 
 const OPUS_5 = { provider: "anthropic", id: "claude-opus-5", thinkingLevel: "xhigh" } as const;

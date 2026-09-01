@@ -15,7 +15,7 @@ import {
 	joinPosix,
 	microtaskTurns,
 	sessionHeader,
-} from "../../../tests2/core/team-recovery-test-fake.ts";
+} from "../../../tests/support/helpers/unit/team-recovery-test-fake.ts";
 
 const SESSIONS_ROOT = "/agent/sessions";
 const TEAM_CWD = "/worktrees/goal-alpha";

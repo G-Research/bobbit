@@ -11,14 +11,14 @@
  * Run with:
  *   npm run build:server && npx playwright test tests/e2e/task-git-fields.spec.ts --config playwright-e2e.config.ts
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
 	deleteGoal,
 	startTeam,
 	teardownTeam,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.setTimeout(60_000);
 

@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "vite/client"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true
+  },
+  "include": [
+    "tests/support/**/*.ts",
+    "tests/unit/core/**/*.unit.test.ts",
+    "tests/unit/isolated/**/*.isolated.test.ts",
+    "tests/dom/**/*.dom.test.ts",
+    "tests/integration/gateway/**/*.gateway.test.ts",
+    "tests/browser/fixtures/**/*.fixture.spec.ts",
+    "tests/browser/journeys/**/*.journey.spec.ts",
+    "tests/e2e/node/**/*.node-e2e.test.ts",
+    "tests/e2e/vitest/**/*.vitest-e2e.test.ts",
+    "tests/e2e/api/**/*.api-e2e.spec.ts",
+    "tests/e2e/browser/**/*.browser-e2e.spec.ts",
+    "src/app/qrcode.d.ts",
+    "src/ui/speech-recognition.d.ts"
+  ]
+}

@@ -1,13 +1,13 @@
 import { vi } from "vitest";
-import { expect, test } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { expect, test } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createGoal,
 	createSession,
 	startTeam,
 	waitForSessionStatus,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
-import { seedSessionTranscript } from "../../../tests2/integration/helpers/session-fixtures.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
+import { seedSessionTranscript } from "../../../tests/support/helpers/integration/gateway/session-fixtures.js";
 
 test.setTimeout(60_000);
 

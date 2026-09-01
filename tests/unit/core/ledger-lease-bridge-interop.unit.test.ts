@@ -4,7 +4,7 @@
 // browser tier AND the vitest tier AND concurrent runs. If someone changes one
 // side's ledger dir / lock rule / leases shape / cap resolution without the
 // other, this test fails — see the INVARIANT note in ledger-lease-bridge.mjs.
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,7 +13,7 @@ import { describe, it, beforeAll, afterAll } from "vitest";
 import {
 	runFixtureCommandWithBackend,
 	type FixtureCommandBackend,
-} from "../../../tests2/harness/spawn-with-retry.js";
+} from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 // The production ledger deliberately lives under the OS temp root so all
 // workflow runs on one machine share its caps. This fixture must never use
@@ -31,7 +31,7 @@ const LEDGER_MODULE_URL = pathToFileURL(
 ).href;
 type NativeSpawn = typeof import("node:child_process").spawn;
 type SpawnGuardState = { originals?: { spawn?: NativeSpawn } };
-const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests.tier1-spawn-guard-state");
 const LEDGER_CHILD_SCRIPT = `
 const ledger = await import(process.env.BOBBIT_TEST_LEDGER_MODULE_URL);
 const reservation = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 16 });
@@ -184,7 +184,13 @@ describe("ledger-lease-bridge ↔ ledger.mjs interop", () => {
 
 	it("resolves identical caps (budget-caps.json, env override, opts.cap)", async () => {
 		const { ledger, bridge } = await loadBoth();
+		const canonicalCapsPath = resolve("tests", "support", "data", "quality", "budgets", "budget-caps.json");
+		const canonicalCaps = JSON.parse(readFileSync(canonicalCapsPath, "utf8"));
+		assert.equal(canonicalCaps["gateway-boot"], 4);
+		assert.equal(canonicalCaps.browser, 4);
+		assert.equal(canonicalCapsPath.replaceAll("\\", "/").endsWith("tests/support/data/quality/budgets/budget-caps.json"), true);
 		delete process.env.BOBBIT_V2_MAX_BROWSER;
+		assert.equal(ledger.leaseCap("browser"), canonicalCaps.browser, "ledger must consume the canonical browser cap");
 		assert.equal(bridge.leaseCap("browser"), ledger.leaseCap("browser"), "budget-caps.json browser cap must match");
 		assert.equal(bridge.leaseCap("gateway-boot"), ledger.leaseCap("gateway-boot"), "gateway-boot cap must match");
 		process.env.BOBBIT_V2_MAX_BROWSER = "7";

@@ -19,9 +19,9 @@ import {
 	registerProject,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 
-const SOURCE_DIR = fileURLToPath(new URL("../../../tests2/browser/fixtures/host-notifications", import.meta.url));
+const SOURCE_DIR = fileURLToPath(new URL("../../support/fixtures/browser/packs/host-notifications", import.meta.url));
 const PACK_NAME = "host-notifications-fixture";
 const PANEL = '[data-testid="host-notifications-fixture-panel"]';
 

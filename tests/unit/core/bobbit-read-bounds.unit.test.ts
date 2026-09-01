@@ -1,10 +1,10 @@
-// v2-native — focused bobbit_read response-bound regressions. Discovered from its `tests2/core` path.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+// v2-native — focused bobbit_read response-bound regressions. Discovered from canonical `tests/unit/core` path.
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { COMPACT_TEXT_PREVIEW_CHARS } from "../../../defaults/tools/bobbit/compact-projection.ts";
-import { loadBobbitTools, stubFetch, type CapturedTool, type FetchCall } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch, type CapturedTool, type FetchCall } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 let tools: Map<string, CapturedTool>;
 

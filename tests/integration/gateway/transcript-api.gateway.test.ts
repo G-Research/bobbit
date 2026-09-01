@@ -1,6 +1,6 @@
 /** E2E coverage for exact-session diagnostics and transcript reads. */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base, createSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base, createSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -221,7 +221,7 @@ test.describe("GET /api/sessions/:id/transcript", () => {
 		fs.mkdirSync(otherRoot, { recursive: true });
 		// Use the shared helper so rootPath is canonicalized (handles the macOS
 		// /var → /private/var tmpdir symlink) and acceptCanonical:true is set.
-		const { registerProject } = await import("../../../tests2/integration/_e2e/e2e-setup.js");
+		const { registerProject } = await import("../../../tests/support/harnesses/integration/gateway/e2e-setup.js");
 		const otherProj = await registerProject({
 			name: "other",
 			rootPath: otherRoot,

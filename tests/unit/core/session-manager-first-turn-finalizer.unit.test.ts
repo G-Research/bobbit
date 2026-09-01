@@ -6,7 +6,7 @@ import { it } from "vitest";
 import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import { SessionStore } from "../../../src/server/agent/session-store.ts";
-import { createManualClock } from "../../../tests2/harness/clock.js";
+import { createManualClock } from "../../../tests/support/harnesses/shared/clock.js";
 
 function deferred() {
 	let resolve!: () => void;

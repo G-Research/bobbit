@@ -1,6 +1,6 @@
 /**
  * Minimal full-stack smoke for archived sidebar rendering.
- * Matrix coverage lives in tests2/browser/fixtures/sidebar-archived-fixture.spec.ts.
+ * Matrix coverage lives in tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts.
  */
 import { test, expect } from "../../e2e/gateway-harness.js";
 import {

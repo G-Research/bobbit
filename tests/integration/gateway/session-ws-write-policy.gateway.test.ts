@@ -1,13 +1,13 @@
 import { vi } from "vitest";
 import { TaskManager } from "../../../src/server/agent/task-manager.js";
-import { expect, test } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { expect, test } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	connectWs,
 	createSession,
 	deleteSession,
 	type WsConnection,
 	waitForSessionStatus,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 type Deferred<T> = {
 	promise: Promise<T>;

@@ -5,8 +5,8 @@
  * to be installed or running. They test configuration, validation, and status
  * endpoints that work regardless of Docker availability.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { readE2EToken, base, nonGitCwd, injectDefaultProjectId } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 let _tok: string;
 function TOKEN() { if (!_tok) _tok = readE2EToken(); return _tok; }

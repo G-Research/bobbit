@@ -18,7 +18,7 @@ import type { PrWalkthroughJobRecord } from "../../../src/server/pr-walkthrough/
 import {
 	installPrWalkthroughBundleStoreHarness,
 	type PrWalkthroughBundleStoreHarness,
-} from "../../../tests2/core/helpers/pr-walkthrough-bundle-store-read-window-harness.ts";
+} from "../../../tests/support/helpers/unit/pr-walkthrough-bundle-store-read-window-harness.ts";
 
 let harness: PrWalkthroughBundleStoreHarness;
 

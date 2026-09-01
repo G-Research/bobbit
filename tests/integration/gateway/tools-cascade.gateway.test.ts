@@ -6,8 +6,8 @@
  *
  * Uses the in-process harness (API-only, no browser).
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, bobbitDir } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, bobbitDir } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import { mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 

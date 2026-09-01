@@ -1,5 +1,5 @@
 // Test entry for the REAL <message-editor> caret-row geometry regression
-// (tests2/browser/fixtures/message-editor-arrows-real.spec.ts).
+// (tests/browser/fixtures/message-editor-arrows-real.fixture.spec.ts).
 //
 // Why a NEW fixture pair instead of reusing message-editor-ime.html:
 //  - the IME/size-guard fixture never renders history and never fixes the

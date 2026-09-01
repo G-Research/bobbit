@@ -36,8 +36,8 @@
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { rawApiFetch, defaultProjectId, readE2EToken } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { rawApiFetch, defaultProjectId, readE2EToken } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.beforeAll(() => {
 	// Sanity — the in-process harness must be up.

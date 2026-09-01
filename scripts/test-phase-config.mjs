@@ -37,23 +37,6 @@ function canonicalMatch(semantic) {
 /** Pure Playwright path selection shared by the E2E config and phase invariant. */
 export function createE2EPhaseSelection() {
 	return {
-		api: {
-			name: "api",
-			testDir: "./tests/e2e",
-			testIgnore: [
-				"**/ui/**",
-				"**/session-lifecycle-ui*",
-				"**/mcp-tool-permission*",
-				"**/mcp-integration*",
-				"**/per-project-config-dirs*",
-				"**/port-auto-increment*",
-				"**/api/**",
-				"**/browser/**",
-				"**/node/**",
-				"**/vitest/**",
-				"**/goal-archive-branch-cleanup*",
-			],
-		},
 		apiCanonical: {
 			name: "api-canonical",
 			testDir: "./tests/e2e/api",
@@ -69,19 +52,6 @@ export function createE2EPhaseSelection() {
 			name: "api-realpush",
 			testDir: "./tests/e2e/api",
 			testMatch: ["**/goal-archive-branch-cleanup.api-e2e.spec.ts"],
-		},
-		browser: {
-			name: "browser",
-			testDir: "./tests/e2e",
-			testMatch: [
-				"**/ui/*.spec.ts",
-				"**/session-lifecycle-ui*.spec.ts",
-				"**/mcp-tool-permission*.spec.ts",
-				"**/mcp-integration*.spec.ts",
-				"**/per-project-config-dirs*.spec.ts",
-				"**/port-auto-increment*.spec.ts",
-			],
-			testIgnore: ["**/api/**", "**/browser/**"],
 		},
 	};
 }

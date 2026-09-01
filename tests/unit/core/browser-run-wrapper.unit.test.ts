@@ -65,10 +65,10 @@ describe("browser-v2 coordinator wrapper", () => {
     }
   });
 
-  it("places positional test-file filters before Playwright's variadic project option", () => {
+  it("places positional test-file filters before Playwright's project option", () => {
     const forwarded = [
-      "tests2/browser/message-editor.spec.ts",
-      "tests2/browser/workflow-editor.spec.ts",
+      "tests/browser/journeys/message-editor.journey.spec.ts",
+      "tests/browser/journeys/workflow-editor.journey.spec.ts",
     ];
 
     expect(playwrightCommandArgs(forwarded)).toEqual([
@@ -76,21 +76,21 @@ describe("browser-v2 coordinator wrapper", () => {
       "test",
       "--config", "playwright-v2.config.ts",
       ...forwarded,
-      "--project", "browser-v2", "browser-canonical",
+      "--project", "browser-canonical",
     ]);
   });
 
   it("preserves mixed caller filters and flags in order before the configured project", () => {
     const forwarded = [
-      "tests2/browser/message-editor.spec.ts",
+      "tests/browser/journeys/message-editor.journey.spec.ts",
       "--grep", "cross-os coordinator",
       "--workers=2",
       "--headed",
     ];
     const args = playwrightCommandArgs(forwarded);
 
-    expect(args.slice(4, -3)).toEqual(forwarded);
-    expect(args.slice(-3)).toEqual(["--project", "browser-v2", "browser-canonical"]);
+    expect(args.slice(4, -2)).toEqual(forwarded);
+    expect(args.slice(-2)).toEqual(["--project", "browser-canonical"]);
   });
 
   it("does not inject a retry policy while preserving an explicit caller policy", () => {
@@ -99,6 +99,6 @@ describe("browser-v2 coordinator wrapper", () => {
     const forwarded = ["--retries=0", "--workers=2"];
     const args = playwrightCommandArgs(forwarded);
     expect(args.filter((arg: string) => arg.startsWith("--retries"))).toEqual(["--retries=0"]);
-    expect(args.slice(4, -3)).toEqual(forwarded);
+    expect(args.slice(4, -2)).toEqual(forwarded);
   });
 });

@@ -8,7 +8,7 @@ import {
 } from "../../../src/server/agent/goal-store.js";
 import { HostNotificationDispatcher } from "../../../src/server/extension-host/host-notification-dispatcher.js";
 import type { HostNotification } from "../../../src/shared/extension-host/host-hooks.js";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const stores: GoalStore[] = [];
 

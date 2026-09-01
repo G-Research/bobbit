@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 //
 // Failing-first verifier lifecycle coverage for Retry Reviewer Resume.
 // These tests pin that llm-review and agent-qa verifier sessions are recovered

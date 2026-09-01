@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { GoalManager } from "../../../../src/server/agent/goal-manager.js";
 import { GoalStore } from "../../../../src/server/agent/goal-store.js";
 import type { Workflow, WorkflowStore } from "../../../../src/server/agent/workflow-store.js";
-import { createMemFs } from "../../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../../tests/support/harnesses/shared/mem-fs.js";
 
 const NO_WORKFLOWS_MSG =
 	"This project has no workflows configured. Run project setup or generate workflows from Settings → project tab.";

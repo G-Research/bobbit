@@ -21,7 +21,7 @@ const DIRECTOR_ROLE = readFileSync(new URL("../../../market-packs/performance-op
 const INSTALL_SKILL = readFileSync(new URL("../../../market-packs/performance-optimisation/skills/install-performance-optimisation/SKILL.md", import.meta.url), "utf8");
 const BUILD_SOURCE = readFileSync(new URL("../../../scripts/build-market-packs.mjs", import.meta.url), "utf8");
 const COPY_SOURCE = readFileSync(new URL("../../../scripts/copy-builtin-packs.mjs", import.meta.url), "utf8");
-const HARNESS_SOURCE = readFileSync(new URL("../../../tests2/harness/gateway.ts", import.meta.url), "utf8");
+const HARNESS_SOURCE = readFileSync(new URL("../../../tests/support/harnesses/shared/gateway.ts", import.meta.url), "utf8");
 
 describe("performance optimisation first-party pack", () => {
 	it("ships opt-in with three roles, local data, tools, installation skill, a singleton panel, and mediated routes", () => {

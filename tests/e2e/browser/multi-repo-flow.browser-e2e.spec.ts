@@ -12,8 +12,8 @@ import { openApp } from "../ui/ui-helpers.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
-import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests/support/harnesses/shared/git-template.js";
+import { runFixtureCommand } from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 // Base repo comes from the immutable committed template (master + README.md +
 // .gitattributes + one commit); the bare-clone origin wiring stays real git.

@@ -4,7 +4,7 @@
  * PI-21b: Verify "aborting" status is broadcast during abort grace period.
  * PI-25: Verify steered/queued messages survive abort and are processed.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
@@ -17,7 +17,7 @@ import {
 	waitForCondition,
 	type WsConnection,
 	type WsMsg,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 import {
 	frameHasIntentIds,
 	intentId,
@@ -25,7 +25,7 @@ import {
 	latestIntentProjection,
 	reliableMockCore,
 	userMessageEnds,
-} from "../../../tests2/integration/helpers/reliable-turn-barriers.js";
+} from "../../../tests/support/helpers/integration/gateway/reliable-turn-barriers.js";
 
 // Longer than the test timeout: these turns should only end via abort, never
 // because the worker was paused long enough for the mock sleep to finish.

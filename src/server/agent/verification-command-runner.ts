@@ -17,7 +17,7 @@
  *
  * SAFETY (D4 "every seam defaults to real"): the default is the real durable
  * implementation, byte-for-byte the previous spawn behaviour. The fake lives
- * ONLY under tests2/ and is reachable ONLY when a test fixture explicitly
+ * only under tests/support/ and is reachable only when a test fixture explicitly
  * injects it via GatewayDeps.commandStepRunner. Production (`cli.ts`) passes no
  * runner, so `realVerificationCommandRunner` is always used there. The fake
  * never fabricates a verdict for the durable path — a runner that cannot

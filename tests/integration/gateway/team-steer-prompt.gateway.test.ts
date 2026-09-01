@@ -4,14 +4,14 @@
  * Verifies: validation (400), membership enforcement (403),
  * steer status check (409), prompt dispatch behavior.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
 import {
 	apiFetch,
 	createSession,
 	deleteSession,
 	createGoal,
 	deleteGoal,
-} from "../../../tests2/integration/_e2e/e2e-setup.js";
+} from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 test.setTimeout(45_000);
 

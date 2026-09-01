@@ -5,8 +5,8 @@
  * The provider before-prompt hook refreshes the persisted prompt-sections JSON;
  * that refresh must not reconstruct the prompt without the delegate task.
  */
-import { test, expect } from "../../../tests2/integration/_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession } from "../../../tests2/integration/_e2e/e2e-setup.js";
+import { test, expect } from "../../../tests/support/harnesses/integration/gateway/in-process-harness.js";
+import { apiFetch, createSession, deleteSession } from "../../../tests/support/harnesses/integration/gateway/e2e-setup.js";
 
 const PROMPT_REFRESH_ASSERTION = "Expected refreshed delegate prompt sections to retain durable delegate instructions";
 

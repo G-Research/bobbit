@@ -4,8 +4,8 @@
  * Cases PPS-01..PPS-07 from docs/design/proposal-panel-streaming-ux.md §4.2.
  * Drives the mock agent's `STAY_BUSY:propose_<type>:<n>` prompt prefix.
  */
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
-import { openApp, createSessionViaUI, sendMessage } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
+import { openApp, createSessionViaUI, sendMessage } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 /** Trigger a streaming proposal in a fresh regular (non-assistant) session. */
 async function startStreamingProposal(
