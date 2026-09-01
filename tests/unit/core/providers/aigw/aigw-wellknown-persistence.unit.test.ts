@@ -10,7 +10,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
 	GATEWAY, loadFixture, normalizeAigwModelString, removeAigwModelsJson, resetAgentDirStateForTests,
 	translateWellKnown, writeAigwModelsJson,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("writeAigwModelsJson — authoritative per-model api/baseUrl", () => {
 	let tmpAgentDir: string;

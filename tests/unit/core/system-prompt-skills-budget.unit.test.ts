@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { withEnv } from "../../../tests2/harness/with-env.js";
+import { withEnv } from "../../../tests/support/harnesses/shared/with-env.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "skills-budget-test-"));
 

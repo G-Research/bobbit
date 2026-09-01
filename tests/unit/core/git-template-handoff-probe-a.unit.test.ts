@@ -1,3 +1,3 @@
-import { registerGitTemplateHandoffProbe } from "../../../tests2/core/helpers/git-template-handoff-probe.js";
+import { registerGitTemplateHandoffProbe } from "../../../tests/support/helpers/unit/git-template-handoff-probe.js";
 
 registerGitTemplateHandoffProbe("a");

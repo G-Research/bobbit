@@ -15,7 +15,7 @@ import {
 	drainMicrotasksUntil,
 	sidecarJson,
 	sidecarPath,
-} from "../../../tests2/harness/cost-recovery-fakes.ts";
+} from "../../../tests/support/harnesses/shared/cost-recovery-fakes.ts";
 
 const ROOT = path.resolve("/virtual/cost-agent-sessions");
 

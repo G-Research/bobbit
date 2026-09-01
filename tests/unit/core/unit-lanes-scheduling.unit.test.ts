@@ -10,7 +10,7 @@ import { discoverTests } from "../../../scripts/testing-v2/test-discovery.mjs";
 import {
 	GitTemplateHandoffReporter,
 	type GitTemplateHandoffCertifier,
-} from "../../../tests2/harness/git-template-handoff-proof.js";
+} from "../../../tests/support/harnesses/shared/git-template-handoff-proof.js";
 
 type ProjectConfig = {
 	test: {

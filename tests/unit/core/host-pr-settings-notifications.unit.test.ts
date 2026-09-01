@@ -11,7 +11,7 @@ import {
 	ProjectConfigStore,
 	type ProjectSettingsChangedFact,
 } from "../../../src/server/agent/project-config-store.js";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 function siblingTemp(file: string, candidate: string): boolean {
 	return path.dirname(candidate) === path.dirname(file)

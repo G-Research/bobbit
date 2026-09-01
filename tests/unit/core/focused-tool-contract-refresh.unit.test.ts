@@ -17,8 +17,8 @@ import { initPromptDirs } from "../../../src/server/agent/system-prompt.ts";
 import { ToolManager, __resetToolScanCache } from "../../../src/server/agent/tool-manager.ts";
 import { readAgentTranscript, TranscriptReaderError } from "../../../src/server/agent/transcript-reader.ts";
 import { generateToolResultErrorBridgeExtension } from "../../../src/server/agent/tool-result-error-bridge-extension.ts";
-import { loadBobbitTools } from "../../../tests2/core/helpers/bobbit-harness.ts";
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.ts";
+import { loadBobbitTools } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.ts";
 
 guardProcessEnv();
 

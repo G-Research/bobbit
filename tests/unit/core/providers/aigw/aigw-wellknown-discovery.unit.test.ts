@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import {
 	configureAigwRuntimeFlags, discoverAigwModels, fetchWellKnownConfig, startDiscoveryServer,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("discoverAigwModels — fallback option-1 (no well-known probe under guards)", () => {
 	function startMock(models: Array<{ id: string }>): Promise<{ url: string; close: () => Promise<void>; paths: () => string[] }> {

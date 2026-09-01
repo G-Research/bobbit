@@ -22,8 +22,8 @@ import { BOBBIT_PACK_LOCAL_DATA_ENV } from "../../../src/server/agent/pack-local
 import { packLocalDataDockerExecArgs, registerRpcBridgeFactory } from "../../../src/server/agent/rpc-bridge.ts";
 import { ToolManager, type ScopedToolContext } from "../../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
-import { installMemoryFs } from "../../../tests2/core/helpers/memory-fs-spies.js";
-import type { MemFs } from "../../../tests2/harness/mem-fs.js";
+import { installMemoryFs } from "../../../tests/support/helpers/unit/memory-fs-spies.js";
+import type { MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memoryFs: MemFs;
 let restoreFs: () => void;

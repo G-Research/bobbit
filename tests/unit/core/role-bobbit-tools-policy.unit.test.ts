@@ -10,7 +10,7 @@
 //     policy. (`support` drives a running Bobbit on the user's behalf — see the
 //     Support Assistant goal / defaults/roles/support.yaml.)
 // This test pins that surface so a role edit can't silently widen it.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";

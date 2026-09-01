@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 
 guardProcessEnv();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "host-session-notifications-"));

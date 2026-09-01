@@ -1,11 +1,11 @@
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import reviewExtension from "../../../defaults/tools/review/extension.ts";
-import { getGateway } from "../../../tests2/harness/gateway.js";
-import { createScope } from "../../../tests2/harness/scope.js";
+import { getGateway } from "../../../tests/support/harnesses/shared/gateway.js";
+import { createScope } from "../../../tests/support/harnesses/shared/scope.js";
 import { configureAigwRuntimeFlags } from "../../../src/server/agent/aigw-manager.js";
 import { invalidateModelCache } from "../../../src/server/agent/model-registry.js";
 import {

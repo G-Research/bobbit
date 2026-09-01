@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/review-tool-active-guard.spec.ts (v2-dom tier).
 // The legacy esbuild file:// fixture instantiated two REAL RemoteAgents and

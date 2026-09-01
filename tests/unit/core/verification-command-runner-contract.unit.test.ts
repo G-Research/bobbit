@@ -11,7 +11,7 @@ import {
 	type VerificationCommandRunner,
 	type VerificationCommandSpawnSpec,
 } from "../../../src/server/agent/verification-command-runner.js";
-import { createFakeVerificationCommandRunner, interpretFakeCommand } from "../../../tests2/harness/fake-verification-command-runner.js";
+import { createFakeVerificationCommandRunner, interpretFakeCommand } from "../../../tests/support/harnesses/shared/fake-verification-command-runner.js";
 import { resolveGatewayDeps } from "../../../src/server/gateway-deps.js";
 
 interface Observed {

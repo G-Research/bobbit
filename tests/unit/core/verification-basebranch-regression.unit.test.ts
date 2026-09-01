@@ -10,7 +10,7 @@ import path from "node:path";
 import { inspect } from "node:util";
 import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
 import { VerificationHarness } from "../../../src/server/agent/verification-harness.ts";
-import { installScopedMemoryFs } from "../../../tests2/core/helpers/scoped-memory-fs.ts";
+import { installScopedMemoryFs } from "../../../tests/support/helpers/unit/scoped-memory-fs.ts";
 
 let restoreFs: (() => void) | undefined;
 beforeAll(() => { restoreFs = installScopedMemoryFs(); });

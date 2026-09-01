@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/search/snippet-highlight.spec.ts (v2-dom tier).
 // Pure-logic unit test for the REAL `highlight` from src/server/search/snippet.ts.

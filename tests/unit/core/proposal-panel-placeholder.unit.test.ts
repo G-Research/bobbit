@@ -2,7 +2,7 @@
 // Source: tests/proposal-panel-placeholder.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -21,7 +21,7 @@ guardProcessEnv();
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { installLitDomStub } from "../../../tests2/core/helpers/dom-stub.js";
+import { installLitDomStub } from "../../../tests/support/helpers/unit/dom-stub.js";
 
 // lit-html (imported transitively) touches document.* at module init; force a
 // complete DOM stub before the dynamic import so it resolves in the node env.

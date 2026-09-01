@@ -7,7 +7,7 @@ import {
 	__setToolModuleLoadProbeForTesting,
 	preflightConfigExtensionFile,
 } from "../../../src/server/agent/tool-extension-preflight.js";
-import { createTier1SpawnGuardController, installTier1ToolModuleLoadProbe } from "../../../tests2/harness/tier1-spawn-guard.js";
+import { createTier1SpawnGuardController, installTier1ToolModuleLoadProbe } from "../../../tests/support/harnesses/unit/tier1-spawn-guard.js";
 
 const APIS = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"] as const;
 type Api = (typeof APIS)[number];

@@ -2,7 +2,7 @@
 //
 // Acceptance coverage for compact-by-default Bobbit output, bounded verbose
 // reads, and the projection catalogue's drift guard.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import * as Value from "typebox/value";
@@ -18,7 +18,7 @@ import {
 	loadBobbitTools,
 	stubFetch,
 	type CapturedTool,
-} from "../../../tests2/core/helpers/bobbit-harness.ts";
+} from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 let tools: Map<string, CapturedTool>;
 

@@ -1,13 +1,13 @@
 // v2-native — executable cold/live recovery coverage for lazy clear generations.
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { makeTmpDir } from "../../helpers/tmp.ts";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const tmpRoot = makeTmpDir("context-clear-recovery-");
 const stateDir = path.join(tmpRoot, "state");

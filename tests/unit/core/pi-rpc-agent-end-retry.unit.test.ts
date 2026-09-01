@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 
 guardProcessEnv();
 
@@ -17,7 +17,7 @@ const { subscribeToEvents } = await import("../../../src/server/agent/session-se
 const { PromptQueue } = await import("../../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../../src/server/agent/event-buffer.ts");
 const { initCompactionSidecarDir, purgeCompactionSidecar, readCompactionSidecarEntries } = await import("../../../src/server/agent/compaction-sidecar.ts");
-const { createManualClock } = await import("../../../tests2/harness/clock.js");
+const { createManualClock } = await import("../../../tests/support/harnesses/shared/clock.js");
 
 initCompactionSidecarDir(tmpRoot);
 

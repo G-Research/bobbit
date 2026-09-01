@@ -6,7 +6,7 @@
 //     tool policies (orchestrate: allow, admin: ask), and session_prompt: allow.
 //   • SUPPORT_ASSISTANT_PROMPT carries the confirmation-first instruction.
 //   • assistantRoleForType maps support -> support, everything else -> assistant.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";

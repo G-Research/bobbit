@@ -85,7 +85,7 @@ function resolverCacheKey(plugin) {
 	return generator();
 }
 
-const testSources = walkTestFiles(join(REPO_ROOT, "tests2")).map((testFile) => ({
+const testSources = walkTestFiles(join(REPO_ROOT, "tests")).map((testFile) => ({
 	testFile,
 	source: readFileSync(testFile, "utf8"),
 }));
@@ -158,7 +158,7 @@ for (const sourceEntry of DOM_WEB_ENTRIES) {
 	assert.equal(nodeResolver.resolveId(request), null, `${sourceEntry} must remain source-mockable in node projects`);
 }
 
-const domSetup = domResolver.resolveId(join(REPO_ROOT, "tests2", "dom", "_setup", "custom-elements.js"));
+const domSetup = domResolver.resolveId(join(REPO_ROOT, "tests", "support", "helpers", "dom", "setup", "custom-elements.js"));
 assert.ok(domSetup && typeof domSetup === "object", "DOM setup must resolve through the prebundle");
 assert.equal(domSetup.external, false, "DOM decorators must execute in every isolated happy-dom runner");
 

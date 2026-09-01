@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, describe, it } from "vitest";
@@ -17,7 +17,7 @@ import { PreferencesStore } from "../../../src/server/agent/preferences-store.js
 import { invalidateModelCache, type ApiModel } from "../../../src/server/agent/model-registry.js";
 import { generateGoalSummaryTitle, generateSessionTitle } from "../../../src/server/agent/title-generator.js";
 import { completeModelText, testModelPreference } from "../../../src/server/agent/model-completion.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const previousSkipTitleGen = process.env.BOBBIT_SKIP_TITLE_GEN;
 const previousAgentDir = process.env.BOBBIT_AGENT_DIR;

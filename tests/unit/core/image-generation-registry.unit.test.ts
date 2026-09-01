@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -15,7 +15,7 @@ import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvail
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
 import { globalAuthPath } from "../../../src/server/bobbit-dir.js";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../../tests/helpers/agent-dir.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 function withPrefs<T>(fn: (prefs: PreferencesStore) => T): T {
 	const memfs = createMemFs();

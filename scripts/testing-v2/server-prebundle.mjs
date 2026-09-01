@@ -65,14 +65,15 @@ function testSupportSourceFiles(repoRoot) {
 	const roots = [
 		join(repoRoot, "tests", "helpers"),
 		join(repoRoot, "tests", "e2e", "test-utils"),
-		join(repoRoot, "tests2", "harness"),
-		join(repoRoot, "tests2", "core", "helpers"),
-		join(repoRoot, "tests2", "dom", "_setup"),
-		join(repoRoot, "tests2", "integration", "_e2e"),
-		join(repoRoot, "tests2", "integration", "helpers"),
+		join(repoRoot, "tests", "support", "harnesses", "shared"),
+		join(repoRoot, "tests", "support", "harnesses", "unit"),
+		join(repoRoot, "tests", "support", "helpers", "unit"),
+		join(repoRoot, "tests", "support", "helpers", "dom", "setup"),
+		join(repoRoot, "tests", "support", "harnesses", "integration", "gateway"),
+		join(repoRoot, "tests", "support", "helpers", "integration", "gateway"),
 	];
 	return roots.flatMap((root) => existsSync(root) ? walkFiles(root, /\.ts$/) : [])
-		.filter((file) => !/\.(?:test|spec)\.ts$/.test(file));
+		.filter((file) => !file.endsWith(".d.ts") && !/\.(?:test|spec)\.ts$/.test(file));
 }
 
 /**
@@ -115,7 +116,7 @@ function prebundleSourceEntries(repoRoot) {
 
 export function computeServerPrebundleKey(repoRoot = REPO_ROOT) {
 	const hash = createHash("sha256");
-	const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
+	const runtimeEntry = join(repoRoot, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts");
 	const files = [
 		...bundledRepoSourceFiles(repoRoot, [runtimeEntry, ...prebundleSourceEntries(repoRoot)]),
 		join(repoRoot, "tsconfig.server.json"),
@@ -148,8 +149,8 @@ export function validateServerPrebundleManifest(manifest, key, readArtifact) {
 	try {
 		if (manifest.schema !== BUNDLE_SCHEMA || manifest.key !== key) return false;
 		if (typeof manifest.runtime !== "string" || !manifest.entries || !manifest.files) return false;
-		if (typeof manifest.entries["tests2/harness/server-runtime-entry.ts"] !== "string") return false;
-		if (manifest.runtime !== manifest.entries["tests2/harness/server-runtime-entry.ts"]) return false;
+		if (typeof manifest.entries["tests/support/harnesses/shared/server-runtime-entry.ts"] !== "string") return false;
+		if (manifest.runtime !== manifest.entries["tests/support/harnesses/shared/server-runtime-entry.ts"]) return false;
 		if ((manifest.files[manifest.runtime]?.bytes ?? 0) < 1024) return false;
 		if (manifest.entryCount !== Object.keys(manifest.entries).length || manifest.entryCount < 2) return false;
 		if (manifest.fileCount !== Object.keys(manifest.files).length || manifest.fileCount < manifest.entryCount * 2) return false;
@@ -196,11 +197,12 @@ function sourceUrlPlugin(repoRoot) {
 		normalizeServerSourcePath(join(repoRoot, "defaults", "tools")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests", "helpers")) + "/",
 		normalizeServerSourcePath(join(repoRoot, "tests", "e2e", "test-utils")) + "/",
-		normalizeServerSourcePath(join(repoRoot, "tests2", "harness")) + "/",
-		normalizeServerSourcePath(join(repoRoot, "tests2", "core", "helpers")) + "/",
-		normalizeServerSourcePath(join(repoRoot, "tests2", "dom", "_setup")) + "/",
-		normalizeServerSourcePath(join(repoRoot, "tests2", "integration", "_e2e")) + "/",
-		normalizeServerSourcePath(join(repoRoot, "tests2", "integration", "helpers")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "support", "harnesses", "shared")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "support", "harnesses", "unit")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "support", "helpers", "unit")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "support", "helpers", "dom", "setup")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "support", "harnesses", "integration", "gateway")) + "/",
+		normalizeServerSourcePath(join(repoRoot, "tests", "support", "helpers", "integration", "gateway")) + "/",
 	];
 	return {
 		name: "bobbit-source-import-meta-url",
@@ -227,7 +229,7 @@ function sourceUrlPlugin(repoRoot) {
 }
 
 function runtimeEntryNamespaces(repoRoot) {
-	const source = readFileSync(join(repoRoot, "tests2", "harness", "server-runtime-entry.ts"), "utf8");
+	const source = readFileSync(join(repoRoot, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts"), "utf8");
 	return [...source.matchAll(/^export \* as ([A-Za-z_$][\w$]*) from /gm)].map((match) => match[1]).sort();
 }
 
@@ -341,7 +343,7 @@ export async function ensureServerTestPrebundle({ repoRoot = REPO_ROOT, cacheRoo
 		const tempDir = join(cacheRoot, `.tmp-${key}-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
-			const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
+			const runtimeEntry = join(repoRoot, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts");
 			const sourceEntries = prebundleSourceEntries(repoRoot);
 			const entryPoints = Object.fromEntries(
 				[runtimeEntry, ...sourceEntries].map((source) => [entryName(source, repoRoot), source]),
@@ -418,11 +420,12 @@ function manifestKeyForSource(sourcePath, repoRoot, entries) {
 		|| key.startsWith("defaults/tools/")
 		|| key.startsWith("tests/helpers/")
 		|| key.startsWith("tests/e2e/test-utils/")
-		|| key.startsWith("tests2/harness/")
-		|| key.startsWith("tests2/core/helpers/")
-		|| key.startsWith("tests2/dom/_setup/")
-		|| key.startsWith("tests2/integration/_e2e/")
-		|| key.startsWith("tests2/integration/helpers/");
+		|| key.startsWith("tests/support/harnesses/shared/")
+		|| key.startsWith("tests/support/harnesses/unit/")
+		|| key.startsWith("tests/support/helpers/unit/")
+		|| key.startsWith("tests/support/helpers/dom/setup/")
+		|| key.startsWith("tests/support/harnesses/integration/gateway/")
+		|| key.startsWith("tests/support/helpers/integration/gateway/");
 	if (!supported) return undefined;
 	if (entries[key]) return key;
 	if (extname(key) === ".js") {
@@ -487,7 +490,7 @@ export function serverPrebundleResolver(prebundle, { repoRoot = REPO_ROOT, webEn
 			const webEntry = key.startsWith("src/app/") || key.startsWith("src/ui/");
 			if (webEntry && !webEntries) return null;
 			const output = entries[key];
-			const isolatedModule = key.startsWith("tests2/dom/_setup/") || webEntry;
+			const isolatedModule = key.startsWith("tests/support/helpers/dom/setup/") || webEntry;
 			return {
 				id: pathToFileURL(join(cacheDir, ...output.split("/"))).href,
 				// DOM setup and the narrow web graph must execute against every fresh

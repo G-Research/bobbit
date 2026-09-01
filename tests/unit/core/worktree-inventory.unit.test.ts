@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { WorktreeInventoryService, classifyPoolReclaimCandidate, isContainerInternalWorktreePath, type WorktreeInventoryFs } from "../../../src/server/agent/worktree-inventory.ts";
 import type { CommandRunner } from "../../../src/server/gateway-deps.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 function makeCtx(rootPath: string, opts?: { worktreeRoot?: string; liveSessions?: any[]; archivedSessions?: any[]; goals?: any[]; teams?: any[]; staff?: any[]; components?: any[]; filesystem?: MemFs | typeof fs }) {
 	return {
