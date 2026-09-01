@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
 import { makeTmpDir } from "../../../tests/helpers/tmp.ts";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 import { PromptQueue } from "../../../src/server/agent/prompt-queue.ts";
 
 const tmpRoot = makeTmpDir("runtime-model-zombie-recovery-");

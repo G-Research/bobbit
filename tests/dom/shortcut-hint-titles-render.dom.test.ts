@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/shortcut-hint-titles-render.spec.ts (v2-dom tier).
 // Pins the boot-order fix in src/app/main.ts::initApp(): a lit `title` binding of

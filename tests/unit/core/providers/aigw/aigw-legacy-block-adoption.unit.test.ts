@@ -3,7 +3,7 @@
 // adopted on the ordinary model-registry read path, so live gateway discovery resumes
 // and upstream-provider provenance is restored without any separate refresh call.
 
-import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { afterEach, beforeEach, describe, it, vi } from "vitest";

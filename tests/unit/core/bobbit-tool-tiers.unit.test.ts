@@ -3,7 +3,7 @@
 // Tier separation: each YAML declares its own `group` + `grantPolicy` defaults,
 // and the on-wire `operation` union of each tool matches both the dispatched
 // operation catalogue (drift guard vs code) and the design §5 catalogue.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -15,7 +15,7 @@ import {
 	operationUnion,
 	BOBBIT_OPERATIONS,
 	type CapturedTool,
-} from "../../../tests2/core/helpers/bobbit-harness.ts";
+} from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..", "..");

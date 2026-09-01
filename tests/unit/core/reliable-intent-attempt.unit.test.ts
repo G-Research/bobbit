@@ -12,7 +12,7 @@ import {
 	flushMicrotasks,
 	makeReliableIntentHarness,
 	type ReliableIntentHarness,
-} from "../../../tests2/core/helpers/reliable-intent-fixture.js";
+} from "../../../tests/support/helpers/unit/reliable-intent-fixture.js";
 
 const TEST_MODEL_TEXT_DIGEST = "A".repeat(43);
 const harnesses: ReliableIntentHarness[] = [];

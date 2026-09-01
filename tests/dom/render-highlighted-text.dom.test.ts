@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/render-highlighted-text.spec.ts (v2-dom tier).
 // The legacy fixture mirrored the pure helpers in plain JS; this port imports

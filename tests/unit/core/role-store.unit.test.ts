@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { RoleStore, validateModelString, validateThinkingLevel } from "../../../src/server/agent/role-store.ts";
-import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
+import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/role-store");
 let fixtureSequence = 0;

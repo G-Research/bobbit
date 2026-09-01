@@ -3,8 +3,8 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-manual
 // Review: test-context helper (t.skip/t.todo/...) — vitest has no per-context equivalent | mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
-import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests/support/helpers/unit/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 

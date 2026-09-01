@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { CostTracker, deriveCacheHitRate } from "../../../src/server/agent/cost-tracker.ts";
 import { ProjectContext } from "../../../src/server/agent/project-context.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memfs: MemFs;
 const stateDir = path.resolve("/memfs/cost-tracker/state");

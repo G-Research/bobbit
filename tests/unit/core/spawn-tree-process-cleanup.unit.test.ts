@@ -7,7 +7,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../../src/server/agent/spawn-tree.js";
 import { VerificationHarness, type ActiveVerification } from "../../../src/server/agent/verification-harness.js";
-import { createManualClock } from "../../../tests2/harness/clock.js";
+import { createManualClock } from "../../../tests/support/harnesses/shared/clock.js";
 
 const SPAWN_TREE_SOURCE = readFileSync(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
 
@@ -21,7 +21,7 @@ type NativeSpawn = typeof import("node:child_process").spawn;
  * lifecycle path must prove it was reaped before that fallback can matter.
  */
 type GuardState = { originals?: { spawn?: NativeSpawn } };
-const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests.tier1-spawn-guard-state");
 
 const PROCESS_TREE_PROBE = String.raw`
 import assert from "node:assert/strict";
@@ -29,7 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
-import { createManualClock } from ${JSON.stringify(new URL("../../../tests2/harness/clock.ts", import.meta.url).href)};
+import { createManualClock } from ${JSON.stringify(new URL("../../../tests/support/harnesses/shared/clock.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
 const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";

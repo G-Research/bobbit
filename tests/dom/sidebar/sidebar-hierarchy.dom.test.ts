@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/sidebar-hierarchy.spec.ts (v2-dom tier).
 // FIDELITY NOTE: the legacy file:// fixture drove a bespoke categorization /

@@ -4,7 +4,7 @@ import {
 	runFixtureCommandWithBackend,
 	type FixtureCommandBackend,
 	type FixtureCommandProcess,
-} from "../../../tests2/harness/spawn-with-retry.js";
+} from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 interface FakeOutcome {
 	stdout?: string;

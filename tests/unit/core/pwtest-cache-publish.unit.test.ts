@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
+import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 type CacheModule = typeof import("../../../scripts/testing-v2/pwtest-cache.js");
 

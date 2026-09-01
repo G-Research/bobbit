@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import {
 	configureAigw, resetAgentDirStateForTests, startDiscoveryServer,
-} from "../../../../../tests2/core/helpers/aigw-wellknown-test-helpers.js";
+} from "../../../../../tests/support/helpers/unit/aigw-wellknown-test-helpers.js";
 
 describe("configureAigw — atomic persistence", () => {
 	let tmpAgentDir: string;

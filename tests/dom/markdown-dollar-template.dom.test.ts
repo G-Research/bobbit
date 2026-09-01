@@ -4,7 +4,7 @@
 // + inline code preserve `^${foo}$`), KaTeX math rendering for the supported
 // delimiters, and the link-scheme sanitizer allow/deny list.
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { syncCustomElements } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 
 const REPRO_MARKDOWN = [
 	"## Header",

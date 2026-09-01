@@ -44,7 +44,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.ts";
 import { backfillStaffIds } from "../../../src/server/agent/staff-backfill.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.ts";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.ts";
 // NOTE: we cannot `await import("../../../src/server/agent/session-setup.ts")` because
 // it runtime-imports `session-manager.ts`, which transitively pulls in
 // `flexsearch` — Node 25 ESM rejects under `tsx --test`. Instead we exercise

@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { SessionStore } from "../../../src/server/agent/session-store.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const SRC_ROOT = path.resolve(process.cwd(), "src", "server", "agent");
 

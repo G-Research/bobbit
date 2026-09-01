@@ -13,7 +13,7 @@ import { ColorStore } from "../../../src/server/agent/color-store.ts";
 import { sessionFileDelete, sessionSidecarDelete } from "../../../src/server/agent/session-fs.ts";
 import { sidecarPathFor } from "../../../src/server/agent/session-sidecar.ts";
 import { TeamStore, type PersistedTeamEntry } from "../../../src/server/agent/team-store.ts";
-import { installScopedMemFs, type NodeFs } from "../../../tests2/core/helpers/scoped-memfs.js";
+import { installScopedMemFs, type NodeFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/deletion-tombstones");
 let fixtureSequence = 0;

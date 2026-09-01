@@ -1,5 +1,5 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
-import { syncCustomElements as __syncCE } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements as __syncCE } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 // Migrated from tests/notification-policy.spec.ts (v2-dom tier).
 // The legacy spec bundled a file:// entry that exposed __seed/__check/__checkSplit/

@@ -50,12 +50,12 @@ function writeFakeRepo(root: string): void {
 	mkdirSync(join(root, "src", "shared"), { recursive: true });
 	mkdirSync(join(root, "src", "foundation"), { recursive: true });
 	mkdirSync(join(root, "src", "ui"), { recursive: true });
-	mkdirSync(join(root, "tests2", "harness"), { recursive: true });
+	mkdirSync(join(root, "tests", "support", "harnesses", "shared"), { recursive: true });
 	writeFileSync(join(root, "src", "server", "server.ts"), BASE_SERVER);
 	writeFileSync(join(root, "src", "shared", "value.ts"), BASE_SHARED);
 	writeFileSync(join(root, "src", "foundation", "value.ts"), BASE_FOUNDATION);
 	writeFileSync(join(root, "src", "ui", "unrelated.ts"), BASE_UI);
-	writeFileSync(join(root, "tests2", "harness", "server-runtime-entry.ts"), "export * as server from '../../src/server/server.js';\n");
+	writeFileSync(join(root, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts"), "export * as server from '../../../../src/server/server.js';\n");
 	writeFileSync(join(root, "tsconfig.server.json"), "{}\n");
 	writeFileSync(join(root, "package-lock.json"), "{}\n");
 }
@@ -71,13 +71,16 @@ function schema3Fixture(key: string): ArtifactFixture {
 	const contents: Record<string, string> = {
 		"entries/runtime.mjs": "r".repeat(2048),
 		"entries/server.mjs": "e".repeat(256),
+		"entries/dom-setup.mjs": "d".repeat(256),
 		"chunks/shared.mjs": "c".repeat(256),
 		"entries/runtime.mjs.map": "{\"version\":3,\"sources\":[\"runtime.ts\"]}\n",
 		"entries/server.mjs.map": "{\"version\":3,\"sources\":[\"server.ts\"]}\n",
+		"entries/dom-setup.mjs.map": "{\"version\":3,\"sources\":[\"custom-elements.ts\"]}\n",
 		"chunks/shared.mjs.map": "{\"version\":3,\"sources\":[\"shared.ts\"]}\n",
 	};
 	const entries = {
-		"tests2/harness/server-runtime-entry.ts": "entries/runtime.mjs",
+		"tests/support/harnesses/shared/server-runtime-entry.ts": "entries/runtime.mjs",
+		"tests/support/helpers/dom/setup/custom-elements.ts": "entries/dom-setup.mjs",
 		"src/server/server.ts": "entries/server.mjs",
 	};
 	const files = Object.fromEntries(Object.keys(contents).sort().map((relativeFile) => [
@@ -87,7 +90,7 @@ function schema3Fixture(key: string): ArtifactFixture {
 	const manifest: Record<string, any> = {
 		schema: 3,
 		key,
-		runtime: entries["tests2/harness/server-runtime-entry.ts"],
+		runtime: entries["tests/support/harnesses/shared/server-runtime-entry.ts"],
 		entries,
 		files,
 		entryCount: Object.keys(entries).length,
@@ -148,9 +151,9 @@ afterAll(() => {
 
 describe.sequential("server test prebundle cache", () => {
 	it("shares the runtime-only repository source closure resolver", () => {
-		const runtimeEntry = join(repoRoot, "tests2", "harness", "server-runtime-entry.ts");
+		const runtimeEntry = join(repoRoot, "tests", "support", "harnesses", "shared", "server-runtime-entry.ts");
 		const serverEntry = join(repoRoot, "src", "server", "server.ts");
-		assert.equal(resolveBundledSource("../../src/server/server.js", runtimeEntry, repoRoot), serverEntry);
+		assert.equal(resolveBundledSource("../../../../src/server/server.js", runtimeEntry, repoRoot), serverEntry);
 		assert.deepEqual(
 			serverRuntimeRepoSourceFiles(repoRoot),
 			bundledRepoSourceFiles(repoRoot, [runtimeEntry]),
@@ -162,7 +165,10 @@ describe.sequential("server test prebundle cache", () => {
 		const closure = serverRuntimeRepoSourceFiles(ACTUAL_REPO_ROOT);
 		assert.equal(closure.every(isAbsolute), true, "the reusable closure must return absolute paths");
 		const files = new Set(closure.map((file: string) => relative(ACTUAL_REPO_ROOT, file).replace(/\\/g, "/")));
-		assert.equal(files.has("tests2/harness/server-runtime-entry.ts"), true);
+		assert.equal(files.has("tests/support/harnesses/shared/server-runtime-entry.ts"), true);
+		assert.equal(existsSync(join(ACTUAL_REPO_ROOT, "tests", "support", "helpers", "dom", "setup", "custom-elements.ts")), true);
+		assert.equal(existsSync(join(ACTUAL_REPO_ROOT, "tests", "support", "data", "dom", "quarantine", "README.md")), true);
+		assert.equal(existsSync(join(ACTUAL_REPO_ROOT, "tests2", "dom", "_setup", "custom-elements.ts")), false);
 		assert.equal(files.has("src/server/server.ts"), true);
 		assert.equal(files.has("src/shared/base-path.ts"), true, "a transitive src/shared runtime dependency must be included");
 		assert.equal(files.has("src/server/cli.ts"), false, "an unrelated server entry must not enter the runtime closure");
@@ -266,7 +272,7 @@ describe.sequential("server test prebundle cache", () => {
 		const entries = manifest.entries as Record<string, string>;
 		const files = manifest.files as Record<string, { bytes: number; sha256: string }>;
 		assert.equal(manifest.schema, 3);
-		assert.equal(manifest.runtime, entries["tests2/harness/server-runtime-entry.ts"]);
+		assert.equal(manifest.runtime, entries["tests/support/harnesses/shared/server-runtime-entry.ts"]);
 		assert.equal(typeof entries["src/server/server.ts"], "string");
 		assert.equal(manifest.entryCount, Object.keys(entries).length);
 		assert.equal(manifest.fileCount, Object.keys(files).length);
@@ -286,5 +292,10 @@ describe.sequential("server test prebundle cache", () => {
 		assert.ok(resolved && typeof resolved === "object");
 		assert.equal(resolved.external, true);
 		assert.match(resolved.id, /\/entries\/server\.mjs$/i);
+
+		const domSetup = plugin.resolveId(String.raw`C:\Users\Case\Repo\tests\support\helpers\dom\setup\custom-elements.js`, undefined);
+		assert.ok(domSetup && typeof domSetup === "object");
+		assert.equal(domSetup.external, false);
+		assert.match(domSetup.id, /\/entries\/dom-setup\.mjs$/i);
 	});
 });

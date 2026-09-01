@@ -2,8 +2,8 @@
 // Source: tests/lifecycle-hub.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
-import { enableTsWorkerResolver } from "../../../tests2/core/helpers/enable-ts-worker.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
+import { enableTsWorkerResolver } from "../../../tests/support/helpers/unit/enable-ts-worker.js";
 guardProcessEnv();
 enableTsWorkerResolver();
 // Re-assert the worker .js->.ts resolver at RUN time (not just collect time):

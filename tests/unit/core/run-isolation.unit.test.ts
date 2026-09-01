@@ -20,8 +20,8 @@ import {
   removeOwnedRunChild,
   RUN_ROOT_ENV,
   RUN_ROOT_OWNER_ENV,
-} from "../../../tests2/harness/run-isolation.js";
-import { withEnv } from "../../../tests2/harness/with-env.js";
+} from "../../../tests/support/harnesses/shared/run-isolation.js";
+import { withEnv } from "../../../tests/support/harnesses/shared/with-env.js";
 import {
   createE2ERunPaths,
   createIsolatedE2EEnvironment,
@@ -532,7 +532,7 @@ describe("unit run isolation", () => {
   });
 
   it("keeps the gateway fixtures beneath the inherited run root", () => {
-    const source = readFileSync("tests2/harness/gateway.ts", "utf8");
+    const source = readFileSync("tests/support/harnesses/shared/gateway.ts", "utf8");
     expect(source).toContain('from "./run-isolation.js"');
     expect(source).toContain("createRunChild");
     expect(source).toContain("getRunRoot");

@@ -13,7 +13,7 @@ import {
 	flushMicrotasks,
 	makeReliableIntentHarness,
 	type ReliableIntentHarness,
-} from "../../../tests2/core/helpers/reliable-intent-fixture.js";
+} from "../../../tests/support/helpers/unit/reliable-intent-fixture.js";
 
 const harnesses: ReliableIntentHarness[] = [];
 let authorStateDir = "";

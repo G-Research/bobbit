@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { archiveProjectBobbitDir, ArchiveError, GATEWAY_OWNED_FILES, isPreserved } from "../../../src/server/agent/bobbit-archive.js";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const REAL_FS_CANARY = "EXDEV from fs.renameSync triggers copy+unlink fallback";
 const PATCHED_FS_METHODS = ["existsSync", "statSync", "readdirSync", "mkdirSync", "writeFileSync", "readFileSync", "lstatSync", "renameSync", "rmSync", "copyFileSync"] as const;

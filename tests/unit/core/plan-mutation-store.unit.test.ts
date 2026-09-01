@@ -17,7 +17,7 @@ import {
 	type PendingMutation,
 } from "../../../src/server/agent/plan-mutation-store.ts";
 import type { Clock } from "../../../src/server/gateway-deps.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const stateDir = path.resolve("/memfs/plan-mutation-store/state");
 let memfs: MemFs;

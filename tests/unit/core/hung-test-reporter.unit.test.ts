@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -14,7 +14,7 @@ import { afterAll, test } from "vitest";
 
 // The reporter is plain ESM; import() accepts the resolved file:// URL directly,
 // which loads identically on Windows and POSIX.
-const reporterUrl = new URL("../../../tests2/core/helpers/hung-test-reporter.mjs", import.meta.url).href;
+const reporterUrl = new URL("../../../tests/support/helpers/unit/hung-test-reporter.mjs", import.meta.url).href;
 const { default: hungTestReporter } = await import(reporterUrl);
 
 const tmpDirs: string[] = [];

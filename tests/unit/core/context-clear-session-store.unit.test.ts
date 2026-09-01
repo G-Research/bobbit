@@ -4,7 +4,7 @@ import type { PathLike, PathOrFileDescriptor, WriteFileOptions } from "node:fs";
 import { beforeEach, describe, it } from "vitest";
 import { SessionStore, type PersistedSession } from "../../../src/server/agent/session-store.ts";
 import type { ContextClearBoundary } from "../../../src/server/agent/context-clear-boundary.ts";
-import { createMemFs, type MemFs } from "../../../tests2/harness/mem-fs.ts";
+import { createMemFs, type MemFs } from "../../../tests/support/harnesses/shared/mem-fs.ts";
 
 type SessionStoreMemFs = MemFs & {
 	openSync(file: PathLike, flags: string): number;

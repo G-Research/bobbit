@@ -5,7 +5,7 @@
 //   • package.json `files` includes docs/ and src/.
 //   • `npm pack --dry-run --json` lists at least one docs/ and one src/ entry.
 //   • resolveBundledDocsDir()/resolveBundledSrcDir() return existing directories.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import fs from "node:fs";

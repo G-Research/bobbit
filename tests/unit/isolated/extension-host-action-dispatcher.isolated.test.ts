@@ -22,7 +22,7 @@ import {
 	type ActionToolLocationResolver,
 } from "../../../src/server/extension-host/action-dispatcher.ts";
 import type { InvokeRequest, ModuleHost } from "../../../src/server/extension-host/module-host-worker.ts";
-import { installScopedMemoryFs } from "../../../tests2/core/helpers/scoped-memory-fs.ts";
+import { installScopedMemoryFs } from "../../../tests/support/helpers/unit/scoped-memory-fs.ts";
 import { makeTmpDir } from "../../helpers/tmp.ts";
 
 type InvokeFake = (request: InvokeRequest, timeoutMs?: number) => unknown | Promise<unknown>;

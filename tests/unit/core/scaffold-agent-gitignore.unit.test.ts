@@ -9,8 +9,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
-import { withEnv } from "../../../tests2/harness/with-env.js";
-import { installScopedMemFs } from "../../../tests2/core/helpers/scoped-memfs.js";
+import { withEnv } from "../../../tests/support/harnesses/shared/with-env.js";
+import { installScopedMemFs } from "../../../tests/support/helpers/unit/scoped-memfs.js";
 
 const ROOT = path.resolve("/memfs/scaffold-agent-gitignore");
 let restoreFs: () => void;

@@ -4,7 +4,7 @@
 // mid-stream updates are coalesced, final content is always accurate, and the
 // throttle snapshot resets across distinct messages.
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { syncCustomElements } from "../../tests2/dom/_setup/custom-elements.js";
+import { syncCustomElements } from "../../tests/support/helpers/dom/setup/custom-elements.js";
 
 // Under vitest pool:forks + isolate:false each test file runs in its OWN
 // happy-dom window while the module graph is cached across files — so a

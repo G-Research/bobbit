@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "../../../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -13,7 +13,7 @@ import { completeModelText, testModelPreference, type ModelCompletionDependencie
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "../../../../../src/server/agent/model-probe-result.js";
 import { PreferencesStore } from "../../../../../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, type ApiModel } from "../../../../../src/server/agent/model-registry.js";
-import { createMemFs } from "../../../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../../../tests/support/harnesses/shared/mem-fs.js";
 
 let agentDir: string | undefined;
 

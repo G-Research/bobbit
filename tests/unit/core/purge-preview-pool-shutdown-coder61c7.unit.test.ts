@@ -8,7 +8,7 @@ import {
 	initializeBootProjectPools,
 	shutdownCpuDiagnostics,
 } from "../../../src/server/server.ts";
-import { createManualClock } from "../../../tests2/harness/clock.ts";
+import { createManualClock } from "../../../tests/support/harnesses/shared/clock.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 

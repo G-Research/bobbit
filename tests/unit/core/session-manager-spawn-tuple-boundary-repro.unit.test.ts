@@ -1,4 +1,4 @@
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
@@ -7,7 +7,7 @@ import http from "node:http";
 import path from "node:path";
 import { afterAll, afterEach, describe, it, vi } from "vitest";
 import { makeTmpDir } from "../../helpers/tmp.ts";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 const tmpRoot = makeTmpDir("session-manager-spawn-tuple-boundary-");
 const stateDir = path.join(tmpRoot, "state");

@@ -3,7 +3,7 @@
 //
 // Direct agents may receive a scoped gateway token minted by SessionManager.
 // They must never fall back to the gateway admin token in env.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it } from "vitest";
@@ -11,8 +11,8 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { resolveDirectGatewayEnv } from "../../../src/server/agent/rpc-bridge.ts";
-import { installMemoryFs } from "../../../tests2/core/helpers/memory-fs-spies.js";
-import type { MemFs } from "../../../tests2/harness/mem-fs.js";
+import { installMemoryFs } from "../../../tests/support/helpers/unit/memory-fs-spies.js";
+import type { MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memoryFs: MemFs;
 let restoreFs: () => void;

@@ -33,7 +33,7 @@ import { ProjectConfigStore } from "../../../src/server/agent/project-config-sto
 import { InlineWorkflowStore } from "../../../src/server/agent/workflow-store.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../../src/server/agent/nested-goal-routes.ts";
 import type { CookieStore } from "../../../src/server/auth/cookie.ts";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 import { SessionSecretStore } from "../../../src/server/auth/session-secret.ts";
 import type { GoalCandidateDeps } from "../../../src/server/agent/goal-candidate-validator.ts";
 

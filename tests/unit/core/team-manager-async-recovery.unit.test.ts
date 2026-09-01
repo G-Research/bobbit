@@ -8,7 +8,7 @@ import { sidecarPathFor, type SessionSidecar } from "../../../src/server/agent/s
 import { TeamManager, type TeamRecoverySidecars } from "../../../src/server/agent/team-manager.ts";
 import type { TeamRecoveryCheckpointStore } from "../../../src/server/agent/team-recovery-checkpoint.ts";
 import { slugDirNameForCwd } from "../../../src/server/agent/team-store-consistency.ts";
-import { TeamRecoveryFsFake, microtaskTurns, sessionHeader } from "../../../tests2/core/team-recovery-test-fake.ts";
+import { TeamRecoveryFsFake, microtaskTurns, sessionHeader } from "../../../tests/support/helpers/unit/team-recovery-test-fake.ts";
 
 interface MemoryTeamEntry {
 	goalId: string;

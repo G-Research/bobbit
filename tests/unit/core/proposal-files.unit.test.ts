@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createMemFs } from "../../../tests2/harness/mem-fs.ts";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.ts";
 import {
 	deleteProposalFile,
 	editProposalFile,

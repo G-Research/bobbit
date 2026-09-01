@@ -3,11 +3,11 @@
 // Runtime validation: unknown operation and missing required params (including
 // the mandatory projectId for create_goal/create_session) return an error
 // result WITHOUT issuing a fetch.
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests2/core/helpers/bobbit-harness.ts";
+import { loadBobbitTools, stubFetch, type CapturedTool } from "../../../tests/support/helpers/unit/bobbit-harness.ts";
 
 let tools: Map<string, CapturedTool>;
 

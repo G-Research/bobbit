@@ -21,7 +21,7 @@ import {
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 type SpawnGuardState = { originals?: { spawn?: NativeSpawn } };
-const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests.tier1-spawn-guard-state");
 
 const BASE_FILES: Record<string, string> = {
 	"src/server/cli.ts": "export const cli = 1;\n",

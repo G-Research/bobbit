@@ -3,7 +3,7 @@
 // Bucket: v2-core | Method: codemod | Classification: needs-withEnv
 // Review: mutates process.env — wrap in withEnv(patch, fn) to restore in finally
 
-import { guardProcessEnv } from "../../../tests2/core/helpers/env-guard.js";
+import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 
 /**
@@ -32,7 +32,7 @@ import { tmpdir } from "node:os";
 import { PreferencesStore } from "../../../src/server/agent/preferences-store.js";
 import { clearOAuthCache, getAvailableModels, invalidateModelCache, isOAuthCapableProvider } from "../../../src/server/agent/model-registry.js";
 import { getGoogleCodeAssistModels } from "../../../src/server/agent/google-code-assist-models.js";
-import { createMemFs } from "../../../tests2/harness/mem-fs.js";
+import { createMemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../../tests/helpers/agent-dir.js";
 
 const prevAgentDir = process.env.BOBBIT_AGENT_DIR;
