@@ -1,5 +1,5 @@
-import "../../../../src/ui/components/review/ReviewDocument.js";
-import "../../../../src/ui/components/review/ReviewPane.js";
+import "../../../../../../src/ui/components/review/ReviewDocument.js";
+import "../../../../../../src/ui/components/review/ReviewPane.js";
 
 type ReviewFile = { fileId: string; title: string; markdown: string };
 type ReviewGroup = {

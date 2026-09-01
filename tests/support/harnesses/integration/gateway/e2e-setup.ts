@@ -263,7 +263,7 @@ async function maybeAutoSeedWorkflows(path: string, method: string, requestBody:
 	try { projectId = ((await response.clone().json()) as { id?: string })?.id; } catch { return; }
 	if (!projectId) return;
 	try {
-		const { testWorkflows } = await import("../../../tests/e2e/seed-workflows.js");
+		const { testWorkflows } = await import("../../../../e2e/seed-workflows.js");
 		await fetch(`${base()}/api/projects/${projectId}/config`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
