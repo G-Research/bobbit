@@ -39,7 +39,6 @@ import {
   createGroupAInvocation,
   createGroupBInvocation,
   createNestedE2EEnvironment,
-  createTransitionalGroupCInvocation,
   groupDVitestArgs,
   resolveE2ERetryCount,
 } from "../../../scripts/testing-v2/run-e2e-v2.mjs";
@@ -455,7 +454,6 @@ describe("unit run isolation", () => {
       createGroupAInvocation([groupAPath], { execPath, exists }),
       createGroupBInvocation([groupBPath], { execPath, exists }),
       createCanonicalGroupCInvocation([groupCPath], { execPath, exists }),
-      createTransitionalGroupCInvocation({ execPath, exists }),
       createPlaywrightE2EInvocation([groupBPath], { execPath, exists }),
     ];
 
@@ -467,12 +465,12 @@ describe("unit run isolation", () => {
     expect(invocations[0].args).toContain(groupAPath);
     expect(invocations[1].args).toContain(groupBPath);
     expect(invocations[2].args).toContain(groupCPath);
-    expect(invocations[4].args).toContain(groupBPath);
+    expect(invocations[3].args).toContain(groupBPath);
     for (const [invocation, path] of [
       [invocations[0], groupAPath],
       [invocations[1], groupBPath],
       [invocations[2], groupCPath],
-      [invocations[4], groupBPath],
+      [invocations[3], groupBPath],
     ] as const) {
       expect(invocation.args.filter((arg: string) => arg === path)).toHaveLength(1);
     }
@@ -482,8 +480,6 @@ describe("unit run isolation", () => {
     const missing = () => false;
     expect(() => createGroupAInvocation(["tests/e2e/node/example.node-e2e.test.ts"], { exists: missing }))
       .toThrow(/tsx CLI is unavailable.*npm ci/);
-    expect(() => createTransitionalGroupCInvocation({ exists: missing }))
-      .toThrow(/Playwright CLI is unavailable.*npm ci/);
     expect(() => createPlaywrightE2EInvocation([], { exists: missing }))
       .toThrow(/Playwright CLI is unavailable.*npm ci/);
   });
@@ -538,10 +534,10 @@ describe("unit run isolation", () => {
     expect(source).toContain("getRunRoot");
 
     const basePathSource = readFileSync(
-      "tests2/integration/helpers/base-path-gateway-fixture.ts",
+      "tests/support/helpers/integration/gateway/base-path-gateway-fixture.ts",
       "utf8",
     );
-    expect(basePathSource).toContain('from "../../harness/run-isolation.js"');
+    expect(basePathSource).toContain('from "../../../harnesses/shared/run-isolation.js"');
     expect(basePathSource).toContain('createRunChild("base-path-gateway")');
     expect(basePathSource.match(/removeOwnedRunChild\(root\)/g)).toHaveLength(2);
     expect(basePathSource).toMatch(

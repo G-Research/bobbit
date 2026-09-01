@@ -176,31 +176,10 @@ export default {
 	},
 	projects: [
 		{
-			name: "browser-v2",
-			testDir: "./tests2/browser",
-			testMatch: ["**/*.spec.ts"],
-			testIgnore: ["**/e2e/**"], // real-fidelity e2e:v2 specs; run only via `test:e2e:v2` (project browser-v2-e2e), never in tier-2 `test:v2`
-			use: {
-				browserName: "chromium" as const,
-			},
-		},
-		{
 			name: "browser-canonical",
 			testDir: "./tests/browser",
 			testMatch: canonicalBrowserMatches,
 			fullyParallel: true,
-			use: {
-				browserName: "chromium" as const,
-			},
-		},
-		{
-			// Real-fidelity browser lane (adapter specs + crash/restart journey).
-			// Run only via `test:e2e:v2` — NOT part of tier-2 `test:v2`.
-			// Inherits normal retries:3; BOBBIT_V2_RETRY_FREE=1 makes this lane
-			// retry-free for concurrent first-attempt qualification.
-			name: "browser-v2-e2e",
-			testDir: "./tests2/browser/e2e",
-			testMatch: ["**/*.spec.ts"],
 			use: {
 				browserName: "chromium" as const,
 			},

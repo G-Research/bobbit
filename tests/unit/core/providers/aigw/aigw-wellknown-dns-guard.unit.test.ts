@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // Generated AIGW connection-time DNS rebinding guard coverage.
 
 import { describe, it, afterEach } from "vitest";

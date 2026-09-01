@@ -45,7 +45,7 @@ type LoadedConfig = {
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const CONFIG_PATH = resolve(REPO_ROOT, "vitest.config.ts");
-const HARNESS_ROOT = resolve(REPO_ROOT, "tests2", "harness");
+const HARNESS_ROOT = resolve(REPO_ROOT, "tests", "support", "harnesses", "shared");
 const LEDGER_PATH = resolve(REPO_ROOT, "scripts", "testing-v2", "ledger.mjs");
 const packageJson = JSON.parse(
 	readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),

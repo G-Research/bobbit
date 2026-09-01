@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 //
 // Reproducing test (TDD red) for the "Git widget 'Checking git…' flash" goal
 // (32cd6b4f). Targets the NEW pure module `src/app/git-repo-cache.ts` that the

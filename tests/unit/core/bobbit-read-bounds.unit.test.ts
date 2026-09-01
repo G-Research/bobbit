@@ -1,4 +1,4 @@
-// v2-native — focused bobbit_read response-bound regressions. Discovered from its `tests2/core` path.
+// v2-native — focused bobbit_read response-bound regressions. Discovered from canonical `tests/unit/core` path.
 import { guardProcessEnv } from "../../../tests/support/helpers/unit/env-guard.js";
 guardProcessEnv();
 

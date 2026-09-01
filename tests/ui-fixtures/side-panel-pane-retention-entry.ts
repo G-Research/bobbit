@@ -1,4 +1,4 @@
-// Fixture entry for `tests2/browser/fixtures/side-panel-pane-retention.spec.ts`
+// Fixture entry for `tests/browser/fixtures/side-panel-pane-retention.fixture.spec.ts`
 // (design docs/design/keep-side-panels-mounted.md — real-browser criterion 14,
 // plus criteria 7/9 and the mobile round-trip of criteria 10–11).
 //

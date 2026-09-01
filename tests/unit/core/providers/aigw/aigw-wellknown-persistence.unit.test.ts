@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // AIGW models.json persistence and conservative ID migration coverage.
 
 import { describe, it, beforeEach, afterEach } from "vitest";

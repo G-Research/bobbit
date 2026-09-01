@@ -1,9 +1,9 @@
 /**
  * Pins the content-addressed dist build cache (scripts/testing-v2/ensure-dist.mjs)
- * used by test:e2e:v2 and tests2/browser-global-setup.ts: changed build inputs
+ * used by test:e2e:v2 and the browser global setup: changed build inputs
  * must change the key, and validation must fail closed on a missing/stale
  * manifest or missing build artifacts so a stale dist can never be silently
- * tested. Modeled on tests2/core/server-prebundle-cache.test.ts; uses an owned
+ * tested. Modeled on tests/unit/core/server-prebundle-cache.unit.test.ts; uses an owned
  * temp fixture and real child processes with a synthetic build — never npm.
  */
 import assert from "node:assert/strict";

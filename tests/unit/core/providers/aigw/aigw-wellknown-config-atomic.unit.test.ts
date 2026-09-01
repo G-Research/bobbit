@@ -1,4 +1,4 @@
-// v2-native — NOT a migrated legacy test. Discovered from its `tests2/core` path.
+// v2-native — NOT a migrated legacy test. Discovered from canonical `tests/unit/core` path.
 // AIGW atomic models/configuration failure coverage.
 
 import { describe, it, beforeEach, afterEach } from "vitest";

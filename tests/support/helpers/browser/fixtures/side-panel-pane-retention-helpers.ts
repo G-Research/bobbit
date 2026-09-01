@@ -4,7 +4,7 @@
  * `side-panel-pane-retention-mobile.spec.ts` mobile slider).
  *
  * WHY THIS TIER EXISTS. The DOM tier
- * (`tests2/dom/side-panel-pane-retention.test.ts`, `tests2/dom/mobile-pane-retention.test.ts`)
+ * (`tests/dom/side-panel-pane-retention.dom.test.ts`, `tests/dom/mobile-pane-retention.dom.test.ts`)
  * stubs the pack-panel projection and asserts the class/style contract. It CANNOT
  * prove the claim the feature exists for: happy-dom never loads an iframe
  * document, has no focus/`inert`/accessibility model, and returns 0 from

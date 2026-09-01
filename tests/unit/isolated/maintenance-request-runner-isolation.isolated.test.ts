@@ -17,7 +17,7 @@ import type { CommandRunner, ExecFileOptions, GatewayDeps } from "../../../src/s
 import { realClock, realFs } from "../../../src/server/gateway-deps.js";
 import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
 import { createGateway } from "../../../src/server/server.js";
-import { MaintenanceGitModel } from "../../../tests2/integration/helpers/maintenance-git-model.js";
+import { MaintenanceGitModel } from "../../../tests/support/helpers/integration/gateway/maintenance-git-model.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const TOKEN = "maintenance-request-runner-isolation-token";

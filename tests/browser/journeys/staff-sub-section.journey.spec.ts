@@ -7,7 +7,7 @@
  *
  * Browser coverage is consolidated into the real user-facing flows here. The
  * pure PATCH /api/staff/:id project reassignment data path is covered by the
- * API E2E suite in tests2/integration/staff-patch-reassign.test.ts.
+ * API E2E suite in tests/integration/gateway/staff-patch-reassign.gateway.test.ts.
  */
 import { type Page } from "@playwright/test";
 import { test, expect } from "../../e2e/gateway-harness.js";

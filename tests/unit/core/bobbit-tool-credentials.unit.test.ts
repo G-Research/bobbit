@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Credential/URL resolution for the bobbit extension: env creds, state-file
 // fallback, absent-creds (logs + no registration, no throw), and baseUrl

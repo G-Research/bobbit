@@ -111,7 +111,7 @@ export function activeBuiltinFirstPartyPackEntries(
 // scan, and flows through the same `invalidateResolverCaches()` path. Cache the
 // raw scan per dir and drop it via `invalidateBuiltinPackScanCache()`.
 //
-// Pinned by tests2/core/pack-list-scan-cache.test.ts.
+// Pinned by tests/unit/core/pack-list-scan-cache.unit.test.ts.
 const __builtinScanCache = new Map<string, PackEntry[]>();
 
 /** Drop the built-in pack scan cache. Wired into `invalidateResolverCaches()`

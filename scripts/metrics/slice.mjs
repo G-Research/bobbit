@@ -88,7 +88,7 @@ if (executeSelections) {
 				"--config", "playwright-v2.config.ts",
 				"--reporter=json",
 				...fixtureAndJourneyFiles,
-				"--project", "browser-v2", "browser-canonical",
+				"--project", "browser-canonical",
 			],
 			{ env: { PLAYWRIGHT_JSON_OUTPUT_NAME: fixtureJourneyReport } },
 		);

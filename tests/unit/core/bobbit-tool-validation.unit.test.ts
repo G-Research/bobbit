@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Runtime validation: unknown operation and missing required params (including
 // the mandatory projectId for create_goal/create_session) return an error

@@ -13,7 +13,7 @@ import { describe, it, beforeAll, afterAll } from "vitest";
 import {
 	runFixtureCommandWithBackend,
 	type FixtureCommandBackend,
-} from "../../../tests2/harness/spawn-with-retry.js";
+} from "../../../tests/support/harnesses/shared/spawn-with-retry.js";
 
 // The production ledger deliberately lives under the OS temp root so all
 // workflow runs on one machine share its caps. This fixture must never use
@@ -31,7 +31,7 @@ const LEDGER_MODULE_URL = pathToFileURL(
 ).href;
 type NativeSpawn = typeof import("node:child_process").spawn;
 type SpawnGuardState = { originals?: { spawn?: NativeSpawn } };
-const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests2.tier1-spawn-guard-state");
+const SPAWN_GUARD_STATE = Symbol.for("bobbit.tests.tier1-spawn-guard-state");
 const LEDGER_CHILD_SCRIPT = `
 const ledger = await import(process.env.BOBBIT_TEST_LEDGER_MODULE_URL);
 const reservation = ledger.reserveWorkerSlots("vitest", { coalesceMs: 0, totalCores: 16 });

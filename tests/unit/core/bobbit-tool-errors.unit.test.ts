@@ -1,4 +1,4 @@
-// v2-native — bobbit gateway tool suite. Discovered from its `tests2/core` path.
+// v2-native — bobbit gateway tool suite. Discovered from canonical `tests/unit/core` path.
 //
 // Error surfacing: non-2xx { error, code } bodies render as one readable line
 // with the machine code and HTTP status; 204/empty bodies normalize to a

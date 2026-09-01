@@ -7,7 +7,7 @@
  *
  * Real filesystem fidelity for fd write + rename semantics, no stray .tmp files,
  * and backup recovery after corrupt primary is pinned in
- * tests2/integration/session-store-real-fs.test.ts.
+ * tests/integration/gateway/session-store-real-fs.gateway.test.ts.
  */
 import { beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";

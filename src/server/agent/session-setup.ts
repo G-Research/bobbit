@@ -1232,7 +1232,7 @@ export function subscribeToEvents(
 		// even with willRetry:true: that flag means Pi retries the surrounding turn
 		// after compaction has completed. This mirrors SessionManager's
 		// emitAgentEvent() so every rpcClient.onEvent path shares one contract.
-		// Pinned by tests2/core/pi-rpc-agent-end-retry.test.ts.
+		// Pinned by tests/unit/core/pi-rpc-agent-end-retry.unit.test.ts.
 		if (!isRetryableAgentEnd(preparedEvent)) {
 			const truncated = truncateLargeToolContent(preparedEvent);
 			emitSessionEvent(session, truncated);
