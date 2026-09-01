@@ -114,56 +114,6 @@ export function isRunnableTestPath(filePath) {
 	return typeof filePath === "string" && RUNNABLE_SUFFIX_RE.test(normalizeTestPath(filePath));
 }
 
-/**
- * Temporary execution conventions retained until every runnable file reaches a
- * canonical destination. These are conventions, never per-file records.
- */
-export const TRANSITIONAL_TEST_ROOTS = Object.freeze([
-	"tests2/core",
-	"tests2/dom",
-	"tests2/integration",
-	"tests2/browser",
-	"tests/e2e",
-	"tests/manual-integration",
-	"tests/*.e2e.test.ts",
-]);
-
-function transitionalPlacementError(filePath, remedy) {
-	throw new Error(`Unsupported transitional test placement ${JSON.stringify(filePath)}. ${remedy}`);
-}
-
-/** Return the legacy discovery leaf for a pre-cutover path, or null. */
-export function classifyTransitionalTestPath(filePath) {
-	const normalized = normalizeTestPath(filePath);
-	if (/^(?:\/|[A-Za-z]:)/.test(normalized) || normalized.split("/").includes("..")) {
-		transitionalPlacementError(normalized, "Use a repository-relative path without '..' traversal.");
-	}
-	if (!/\.(?:test|spec)\.ts$/.test(normalized)) return null;
-	const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
-	const isolated = basename.includes(".isolated.");
-	const e2e = basename.includes(".e2e.");
-	if (isolated && e2e) transitionalPlacementError(normalized, "Use exactly one semantic suffix: '*.isolated.test.ts' or '*.e2e.test.ts'.");
-
-	if (/^tests2\/(?:core|integration)\/.+\.isolated\.test\.ts$/.test(normalized)) return "isolated";
-	if (/^tests2\/(?:core|integration)\/.+\.e2e\.test\.ts$/.test(normalized)) return "vitestE2E";
-	if (/^tests2\/core\/.+\.test\.ts$/.test(normalized)) return "core";
-	if (/^tests2\/dom\/.+\.test\.ts$/.test(normalized)) {
-		if (isolated || e2e) transitionalPlacementError(normalized, "Semantic Vitest tests belong in tests2/core or tests2/integration.");
-		return "dom";
-	}
-	if (/^tests2\/integration\/.+\.test\.ts$/.test(normalized)) return "integration";
-	if (/^tests2\/browser\/e2e\/.+\.spec\.ts$/.test(normalized)) return "browserE2E";
-	if (/^tests2\/browser\/.+\.spec\.ts$/.test(normalized)) return "browser";
-	if (/^tests\/[^/]+\.e2e\.test\.ts$/.test(normalized)) return "e2eNode";
-	if (/^tests\/e2e\/.+\.e2e\.spec\.ts$/.test(normalized)) return "e2ePlaywright";
-	if (/^tests\/manual-integration\/.+\.(?:test|spec)\.ts$/.test(normalized)) return "manual";
-
-	if (/^tests2\/(?:core|dom|integration)(?:\/|$)/.test(normalized)) transitionalPlacementError(normalized, "Vitest tests here must use '*.test.ts'; Playwright journeys belong in tests/browser/journeys.");
-	if (/^tests2\/browser(?:\/|$)/.test(normalized)) transitionalPlacementError(normalized, "Browser journeys must use '*.spec.ts'; API/Vitest tests belong in canonical Vitest directories.");
-	if (normalized.startsWith("tests2/")) transitionalPlacementError(normalized, "Use a canonical destination under tests/.");
-	return null;
-}
-
 export function isDirectTestsRootExecutablePath(filePath) {
 	if (typeof filePath !== "string") return false;
 	const normalized = normalizeTestPath(filePath);

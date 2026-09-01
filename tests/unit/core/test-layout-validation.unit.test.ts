@@ -49,6 +49,13 @@ describe("test layout diagnostics", () => {
 			expectedPattern: "tests/dom/**/*.dom.test.ts",
 		});
 		expect(validateTestPath("tests/unknown/panel.test.ts")[0]?.code).toBe("unclassified-test");
+		for (const formerPath of ["tests2/core/panel.test.ts", "tests2\\browser\\panel.spec.ts"]) {
+			const diagnostic = validateTestPath(formerPath)[0];
+			expect(diagnostic?.code).toBe("unclassified-test");
+			expect(diagnostic?.message).toContain("npm run test:new -- <semantic> <name>");
+			expect(diagnostic?.message).toContain("tests/unit/core/**/*.unit.test.ts");
+			expect(diagnostic?.message).toContain("tests/browser/journeys/**/*.journey.spec.ts");
+		}
 	});
 
 	it("rejects incompatible runner module references across TypeScript syntax", () => {

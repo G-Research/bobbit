@@ -15,7 +15,6 @@ import {
 	scaffoldTestSource,
 } from "../../../scripts/testing/create-test.mjs";
 import { TEST_LAYOUT, validateTestPath } from "../../../scripts/testing/layout-policy.mjs";
-import { collectIntroducedPaths } from "../../../scripts/testing-v2/unit-inventory-git.mjs";
 
 type Convention = { semantic: string; directory: string; suffix: string };
 type Diagnostic = { code: string };
@@ -25,7 +24,7 @@ afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("transitional test layout guard", () => {
+describe("canonical test layout guard", () => {
 	it("uses NUL-safe Git output for tracked and untracked repository files", () => {
 		const execFile = vi.fn(() => Buffer.from("tests/dom/a b.dom.test.ts\0tests/dom/line\nb.dom.test.ts\0")) as unknown as typeof execFileSync;
 		expect(listRepositoryFiles("repo-root", execFile)).toEqual([
@@ -38,46 +37,28 @@ describe("transitional test layout guard", () => {
 		);
 	});
 
-	it("admits add, copy, and rename destinations plus untracked paths without newline splitting", () => {
-		const calls: string[][] = [];
-		const introduced = collectIntroducedPaths((args: string[]) => {
-			calls.push(args);
-			return Buffer.from(args[0] === "diff"
-				? "tests/dom/copied.dom.test.ts\0tests/dom/line\nrenamed.dom.test.ts\0"
-				: "tests/dom/untracked.dom.test.ts\0");
-		}, { mergeBase: "0123456789abcdef0123456789abcdef01234567" });
-		expect(calls[0]).toEqual(["diff", "--no-renames", "--diff-filter=A", "--name-only", "-z", expect.any(String), "--"]);
-		expect(introduced).toEqual([
-			"tests/dom/copied.dom.test.ts",
-			"tests/dom/line\nrenamed.dom.test.ts",
-			"tests/dom/untracked.dom.test.ts",
-		]);
-	});
-
-	it("reports legacy paths without failing them, while rejecting newly introduced paths", () => {
+	it("fails closed for every unowned runnable path in the complete inventory", () => {
 		const allPaths = [
 			"tests2/core/existing.test.ts",
 			"tests/legacy.test.ts",
 			"tests/dom/good.dom.test.ts",
+			"tests/wrong/panel.dom.test.ts",
 		];
-		expect(countLayoutState(allPaths)).toEqual({ canonical: 1, transitional: 1, unowned: 1, runnable: 3 });
-		expect(collectLayoutDiagnostics({
-			root: "synthetic-root",
-			allPaths,
-			introducedPaths: [],
-			fileExists: () => true,
-			readSource: () => 'import { it } from "vitest";',
-		})).toEqual([]);
+		expect(countLayoutState(allPaths)).toEqual({ canonical: 1, unowned: 3, runnable: 4 });
 
 		const diagnostics = collectLayoutDiagnostics({
 			root: "synthetic-root",
 			allPaths,
-			introducedPaths: ["tests2/core/new.test.ts", "tests/wrong/panel.dom.test.ts"],
 			fileExists: () => true,
 			readSource: () => 'import { it } from "vitest";',
 		});
-		expect(diagnostics.map(({ code }: Diagnostic) => code)).toEqual(["wrong-directory", "unclassified-test"]);
+		expect(diagnostics.map(({ code }: Diagnostic) => code)).toEqual([
+			"unclassified-test",
+			"direct-tests-root-executable",
+			"wrong-directory",
+		]);
 		expect(formatLayoutDiagnostics(diagnostics)).toContain("tests/dom/**/*.dom.test.ts");
+		expect(formatLayoutDiagnostics(diagnostics)).toContain("npm run test:new -- <semantic> <name>");
 	});
 
 	it("rejects a canonical admission that dynamically loads the wrong runner", () => {
@@ -85,7 +66,6 @@ describe("transitional test layout guard", () => {
 		const diagnostics = collectLayoutDiagnostics({
 			root: "synthetic-root",
 			allPaths: [filePath],
-			introducedPaths: [filePath],
 			fileExists: () => true,
 			readSource: () => 'const runner = await import("node:test");',
 		});
