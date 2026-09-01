@@ -1,0 +1,301 @@
+/**
+ * Browser E2E — Settings → General → "Base Ref" field.
+ *
+ * Covers persistence happy path plus inline error rendering for each
+ * validation row (tag, grammar, sandbox-local, multi-repo missing).
+ * See docs/design/base-ref.md.
+ */
+import { test, expect } from "../gateway-harness.js";
+import { apiFetch } from "../e2e-setup.js";
+import { openApp, navigateToHash } from "../ui/ui-helpers.js";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { prepareGitTemplate, copyGitTemplate } from "../../../tests2/harness/git-template.js";
+import { runFixtureCommand } from "../../../tests2/harness/spawn-with-retry.js";
+
+type BrowserPage = Parameters<typeof openApp>[0];
+
+async function holdFirstGetRequest(page: BrowserPage, matches: (url: URL) => boolean) {
+	let releaseRequest!: () => void;
+	const requestGate = new Promise<void>((resolve) => { releaseRequest = resolve; });
+	let handled = false;
+	let released = false;
+	let resolveFinished!: () => void;
+	const finished = new Promise<void>((resolve) => { resolveFinished = resolve; });
+	const handler = async (
+		route: import("@playwright/test").Route,
+		request: import("@playwright/test").Request,
+	) => {
+		if (request.method() !== "GET" || handled) {
+			await route.fallback();
+			return;
+		}
+		handled = true;
+		try {
+			await requestGate;
+			await route.continue();
+		} finally {
+			resolveFinished();
+		}
+	};
+	await page.route(matches, handler);
+
+	let cleanupPromise: Promise<void> | undefined;
+	return {
+		isHandled: () => handled,
+		cleanup: () => cleanupPromise ??= (async () => {
+			if (!released) {
+				released = true;
+				releaseRequest();
+			}
+			if (handled) await finished;
+			await page.unroute(matches, handler);
+		})(),
+	};
+}
+
+// Base repo comes from the immutable committed template (master + README.md +
+// .gitattributes + one commit); tags and fake remote refs stay real git.
+async function gitInit(dir: string, opts?: { tags?: string[]; remoteRefs?: string[] }): Promise<void> {
+	await prepareGitTemplate();
+	copyGitTemplate(dir);
+	const head = (await runFixtureCommand("git", ["rev-parse", "HEAD"], { cwd: dir })).stdout.trim();
+	for (const t of opts?.tags ?? []) {
+		await runFixtureCommand("git", ["tag", t], { cwd: dir });
+	}
+	for (const r of opts?.remoteRefs ?? []) {
+		const refPath = join(dir, ".git", "refs", "remotes", "origin", r);
+		mkdirSync(join(refPath, ".."), { recursive: true });
+		writeFileSync(refPath, head + "\n");
+	}
+}
+
+function uniqueProjectDir(prefix: string): string {
+	return mkdtempSync(join(tmpdir(), `bobbit-baseref-ui-${prefix}-`));
+}
+
+async function createProject(name: string, rootPath: string, components?: Array<{ name: string; repo: string }>): Promise<{ id: string; name: string }> {
+	const body: Record<string, unknown> = { name, rootPath };
+	if (components) body.components = components;
+	const resp = await apiFetch("/api/projects", {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	expect(resp.ok, `project create failed: ${resp.status}`).toBe(true);
+	const proj = await resp.json();
+	return { id: proj.id, name };
+}
+
+async function openBaseRefSettings(page: BrowserPage, project: { id: string; name: string }) {
+	await navigateToHash(page, `#/settings/${project.id}/general`);
+	// The base-ref input is shared by every project settings page. Wait for the
+	// project-specific heading so fills/saves cannot race against the previous
+	// settings render after only the hash has changed.
+	await expect(page.locator("h3").filter({ hasText: project.name }).first()).toBeVisible({ timeout: 10_000 });
+	const input = page.locator("[data-testid='base-ref-input']");
+	await expect(input).toBeVisible({ timeout: 10_000 });
+	return input;
+}
+
+async function saveBaseRef(page: BrowserPage, projectId: string, expectedStatus: number): Promise<Record<string, unknown>> {
+	const savePromise = page.waitForResponse(
+		resp => resp.url().includes(`/api/projects/${projectId}/config`) &&
+			resp.request().method() === "PUT" &&
+			resp.status() === expectedStatus,
+	);
+	// Wait for the Save button to be present and enabled before clicking so the
+	// click cannot land on a disabled/re-rendering button under browser load.
+	const saveButton = page.locator("button").filter({ hasText: /^Save$/ }).first();
+	await expect(saveButton).toBeVisible({ timeout: 10_000 });
+	await expect(saveButton).toBeEnabled({ timeout: 10_000 });
+	await saveButton.click();
+	const saveResponse = await savePromise;
+	const saveRequest = saveResponse.request();
+	expect(new URL(saveRequest.url()).pathname).toBe(`/api/projects/${projectId}/config`);
+	const payload = saveRequest.postDataJSON?.() ?? JSON.parse(saveRequest.postData() || "{}");
+	await expect(page.locator("button").filter({ hasText: /^Saving\.\.\.$/ })).toHaveCount(0, { timeout: 10_000 });
+	return payload as Record<string, unknown>;
+}
+
+async function expectBaseRefError(page: BrowserPage, expectedText: string) {
+	const errBox = page.locator("[data-testid='base-ref-error']");
+	await expect.poll(async () => (await errBox.textContent())?.trim() ?? "", { timeout: 10_000 })
+		.toContain(expectedText);
+	return errBox;
+}
+
+async function deleteProjects(projectIds: string[]): Promise<void> {
+	await Promise.all(projectIds.map(projectId =>
+		apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {}),
+	));
+}
+
+test.describe("Settings → Base Ref field", () => {
+	test("first valid edit exposes Save and persists across reload", async ({ page }) => {
+		const projectIds: string[] = [];
+		let cleanupHeldRequests: (() => Promise<void>) | undefined;
+		try {
+			const dir = uniqueProjectDir("happy");
+			await gitInit(dir, { remoteRefs: ["develop"] });
+			const project = await createProject(`baseref-ui-happy-${Date.now()}`, dir);
+			projectIds.push(project.id);
+			const initial = await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ base_ref: "master" }),
+			});
+			expect(initial.ok, `initial base_ref setup failed: ${initial.status}`).toBe(true);
+
+			await openApp(page);
+
+			// The first General render starts from an empty config cache and requests
+			// detection before the stored base_ref arrives. Settings also loads harness
+			// status on its first render. Hold both requests so neither can lend the old
+			// input handler an unrelated render after the edit.
+			const heldDetect = await holdFirstGetRequest(
+				page,
+				(url) => url.pathname === `/api/projects/${project.id}/base-ref/detect`,
+			);
+			const heldHarnessStatus = await holdFirstGetRequest(
+				page,
+				(url) => url.pathname === "/api/harness-status",
+			);
+			cleanupHeldRequests = async () => {
+				await Promise.all([heldDetect.cleanup(), heldHarnessStatus.cleanup()]);
+			};
+
+			const input = await openBaseRefSettings(page, project);
+			await expect(input).toHaveValue("master");
+			await expect.poll(() => heldDetect.isHandled(), { timeout: 10_000 }).toBe(true);
+			await expect.poll(() => heldHarnessStatus.isHandled(), { timeout: 10_000 }).toBe(true);
+
+			// Settle every other bounded Settings/General bootstrap render. The app-info
+			// header, config, pool, Docker, and host-token loaders have all completed;
+			// detect and harness status remain deliberately held through the assertion.
+			await expect(page.getByTestId("settings-app-version")).toBeVisible({ timeout: 10_000 });
+			const poolStatusRow = page.getByText("Pool Status", { exact: true }).locator("..");
+			await expect(poolStatusRow).not.toContainText("Loading...");
+			const dockerStatusRow = page.getByText("Docker Status", { exact: true }).locator("..");
+			await expect(dockerStatusRow).not.toContainText("Checking...");
+			await expect(page.getByText("Detecting...", { exact: true })).toHaveCount(0);
+
+			const saveButton = page.locator("button").filter({ hasText: /^Save$/ }).first();
+			await expect(saveButton).toHaveCount(0);
+			await input.fill("origin/develop");
+			await page.evaluate(() => new Promise<void>((resolve) => {
+				requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+			}));
+			expect(
+				await saveButton.isVisible(),
+				"BASE_REF_SAVE_CAUSAL_RENDER: first valid edit must expose Save on its own render",
+			).toBe(true);
+
+			// Continue the held requests to their real endpoints only after the causal
+			// assertion, then remove both routes before Save/reload persistence coverage.
+			await cleanupHeldRequests();
+			cleanupHeldRequests = undefined;
+
+			const payload = await saveBaseRef(page, project.id, 200);
+			expect(payload).toEqual({ base_ref: "origin/develop" });
+
+			// Reload — value should persist.
+			await page.reload();
+			await expect(
+				page.locator("button").filter({ hasText: "Settings" }).first(),
+			).toBeVisible({ timeout: 15_000 });
+			const inputAfter = await openBaseRefSettings(page, project);
+			await expect(inputAfter).toHaveValue("origin/develop");
+		} finally {
+			if (cleanupHeldRequests) await cleanupHeldRequests();
+			await deleteProjects(projectIds);
+		}
+	});
+
+	test("renders validation errors and clears stale inline errors", async ({ page }) => {
+		// This test drives four project navigations plus four git-backed
+		// validation saves in one browser context; under parallel E2E load the
+		// default 30s budget is too tight. Give it headroom rather than relying
+		// on Playwright's retry to mask a slow-but-correct run.
+		test.setTimeout(90_000);
+		const projectIds: string[] = [];
+		try {
+			const tagDir = uniqueProjectDir("tag");
+			await gitInit(tagDir, { tags: ["v1.2.3"] });
+			const tagProject = await createProject(`baseref-ui-tag-${Date.now()}`, tagDir);
+			projectIds.push(tagProject.id);
+
+			const grammarDir = uniqueProjectDir("grammar");
+			await gitInit(grammarDir);
+			const grammarProject = await createProject(`baseref-ui-grammar-${Date.now()}`, grammarDir);
+			projectIds.push(grammarProject.id);
+
+			const sandboxDir = uniqueProjectDir("sandbox");
+			await gitInit(sandboxDir);
+			const sandboxProject = await createProject(`baseref-ui-sandbox-${Date.now()}`, sandboxDir);
+			projectIds.push(sandboxProject.id);
+			// Pre-set sandbox=docker via API so the UI only needs to drive base_ref.
+			const putRes = await apiFetch(`/api/projects/${sandboxProject.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ sandbox: "docker" }),
+			});
+			expect(putRes.ok).toBe(true);
+
+			const root = uniqueProjectDir("multi");
+			const repoA = join(root, "api");
+			const repoB = join(root, "web");
+			const repoC = join(root, "shared");
+			await gitInit(repoA, { remoteRefs: ["develop"] });
+			await gitInit(repoB); // missing origin/develop
+			await gitInit(repoC); // missing origin/develop
+			const multiProject = await createProject(
+				`baseref-ui-multi-${Date.now()}`,
+				root,
+				[
+					{ name: "api", repo: "api" },
+					{ name: "web", repo: "web" },
+					{ name: "shared", repo: "shared" },
+				],
+			);
+			projectIds.push(multiProject.id);
+
+			await openApp(page);
+
+			let input = await openBaseRefSettings(page, tagProject);
+			await input.fill("v1.2.3");
+			await saveBaseRef(page, tagProject.id, 400);
+			let errBox = await expectBaseRefError(
+				page,
+				"base_ref must be a branch ref, not a tag. Tags can't be used as git upstreams. Got: v1.2.3",
+			);
+
+			// Typing into the input clears the inline error immediately.
+			await input.fill("master");
+			await expect(input).toHaveValue("master");
+			await expect(errBox).toHaveCount(0, { timeout: 10_000 });
+
+			input = await openBaseRefSettings(page, grammarProject);
+			await input.fill("feature foo");
+			await saveBaseRef(page, grammarProject.id, 400);
+			errBox = await expectBaseRefError(page, "base_ref must be a valid branch name. Got: feature foo");
+
+			input = await openBaseRefSettings(page, sandboxProject);
+			await input.fill("master");
+			await saveBaseRef(page, sandboxProject.id, 400);
+			errBox = await expectBaseRefError(
+				page,
+				"base_ref must be a remote ref (origin/...) for sandboxed projects. The container has separate ref visibility from the host. Got: master",
+			);
+
+			input = await openBaseRefSettings(page, multiProject);
+			await input.fill("origin/develop");
+			await saveBaseRef(page, multiProject.id, 400);
+			errBox = await expectBaseRefError(page, "base_ref 'origin/develop' is not present in 2 of 3 component repos");
+			const bullets = errBox.locator("li");
+			await expect(bullets).toHaveCount(2);
+			await expect(bullets.filter({ hasText: "web" })).toContainText("ref not found");
+			await expect(bullets.filter({ hasText: "shared" })).toContainText("ref not found");
+		} finally {
+			await deleteProjects(projectIds);
+		}
+	});
+});

@@ -7,45 +7,45 @@
   "memoryMaxIncreaseRatio": 1.75,
   "memoryMaxIncreaseBytes": 536870912,
   "retainedSmokeFiles": [
-    "tests/e2e/ui/children-tool-renderers.spec.ts",
-    "tests/e2e/ui/ask-user-choices-ui.spec.ts",
-    "tests/e2e/ui/proposal-open-all-types.spec.ts",
-    "tests/e2e/ui/proposal-tools.spec.ts",
-    "tests/e2e/ui/review-pane.spec.ts",
-    "tests/e2e/ui/preview-happy-path.spec.ts",
-    "tests/e2e/ui/side-panel-tabs.spec.ts",
-    "tests/e2e/ui/dynamic-chat-tabs.spec.ts",
-    "tests/e2e/ui/goal-status-widget.spec.ts",
-    "tests/e2e/ui/cost-popover-cache-hit.spec.ts",
-    "tests/e2e/ui/prompt-stats-e2e.spec.ts",
-    "tests/e2e/ui/tail-chat-real-stream.spec.ts",
-    "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
-    "tests/e2e/ui/jump-to-last-prompt.spec.ts",
-    "tests/e2e/ui/pill-overflow-promotion.spec.ts",
-    "tests/e2e/ui/mobile-review-commenting.spec.ts",
-    "tests/e2e/ui/stories-sidebar.spec.ts",
-    "tests/e2e/ui/sidebar-filters.spec.ts",
-    "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
-    "tests/e2e/ui/sidebar-archived-layout.spec.ts",
-    "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
-    "tests/e2e/ui/sidebar-navigation.spec.ts",
-    "tests/e2e/ui/sidebar-staff-loading.spec.ts",
-    "tests/e2e/ui/search-e2e.spec.ts",
-    "tests/e2e/ui/search-result-navigation.spec.ts",
-    "tests/e2e/ui/sidebar-actions-menu.spec.ts"
+    "tests/browser/journeys/children-tool-renderers.journey.spec.ts",
+    "tests/browser/journeys/ask-user-choices-ui.journey.spec.ts",
+    "tests/browser/journeys/proposal-open-all-types.journey.spec.ts",
+    "tests/browser/journeys/proposal-tools.journey.spec.ts",
+    "tests/browser/journeys/review-pane.journey.spec.ts",
+    "tests/browser/journeys/preview-happy-path.journey.spec.ts",
+    "tests2/browser/fixtures/side-panel-tabs.spec.ts",
+    "tests2/browser/fixtures/dynamic-chat-tabs.spec.ts",
+    "tests/browser/journeys/goal-status-widget.journey.spec.ts",
+    "tests/browser/journeys/cost-popover-cache-hit.journey.spec.ts",
+    "tests/browser/journeys/prompt-stats-e2e.journey.spec.ts",
+    "tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts",
+    "tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts",
+    "tests2/browser/fixtures/jump-to-last-prompt.spec.ts",
+    "tests2/browser/fixtures/pill-overflow-promotion.spec.ts",
+    "tests2/browser/fixtures/mobile-review-commenting.spec.ts",
+    "tests/browser/journeys/stories-sidebar.journey.spec.ts",
+    "tests/browser/journeys/sidebar-filters.journey.spec.ts",
+    "tests/browser/journeys/sidebar-keyboard-nav.journey.spec.ts",
+    "tests/browser/journeys/sidebar-archived-layout.journey.spec.ts",
+    "tests/browser/journeys/sidebar-archived-per-project.journey.spec.ts",
+    "tests/browser/journeys/sidebar-navigation.journey.spec.ts",
+    "tests/browser/journeys/sidebar-staff-loading.journey.spec.ts",
+    "tests/browser/journeys/search-e2e.journey.spec.ts",
+    "tests/e2e/browser/search-result-navigation.browser-e2e.spec.ts",
+    "tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts"
   ],
   "retainedSmokeCoverage": [
     {
-      "file": "tests/e2e/ui/children-tool-renderers.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/children-tool-renderers.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "goal_spawn_child renderer.*real app"
       ]
     },
     {
-      "file": "tests/e2e/ui/ask-user-choices-ui.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/ask-user-choices-ui.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "composite widget lifecycle.*reload persistence",
@@ -55,16 +55,16 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/proposal-open-all-types.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/proposal-open-all-types.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "Role proposal.*openable.*rehydrates.*dismisses"
       ]
     },
     {
-      "file": "tests/e2e/ui/proposal-tools.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/proposal-tools.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "goal proposal tool card renders.*persists.*reopens",
@@ -72,24 +72,24 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/review-pane.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/review-pane.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "opens review pane.*approves"
       ]
     },
     {
-      "file": "tests/e2e/ui/preview-happy-path.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/preview-happy-path.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "opens mounted preview.*refreshes iframe"
       ]
     },
     {
-      "file": "tests/e2e/ui/side-panel-tabs.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests2/browser/fixtures/side-panel-tabs.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "Chat is never.*persisted tab",
@@ -97,24 +97,24 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/dynamic-chat-tabs.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests2/browser/fixtures/dynamic-chat-tabs.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "goal assistant proposal.*HTML preview.*side-panel tabs"
       ]
     },
     {
-      "file": "tests/e2e/ui/goal-status-widget.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/goal-status-widget.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "pill is visible.*survives reload.*narrow viewport"
       ]
     },
     {
-      "file": "tests/e2e/ui/cost-popover-cache-hit.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/cost-popover-cache-hit.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "goal-dashboard cost popover.*cacheHitRate.*survives reload",
@@ -122,8 +122,8 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/prompt-stats-e2e.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/prompt-stats-e2e.journey.spec.ts",
+      "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "model name.*context bar.*cost.*visible",
@@ -133,24 +133,24 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/tail-chat-real-stream.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts",
+      "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "STREAM_BURST:2 stays pinned.*post-refresh DOM"
       ]
     },
     {
-      "file": "tests/e2e/ui/tail-chat-session-navigate.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts",
+      "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "A .* B .* A: replayed transcripts.*bottom-pinned"
       ]
     },
     {
-      "file": "tests/e2e/ui/jump-to-last-prompt.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests2/browser/fixtures/jump-to-last-prompt.spec.ts",
+      "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "empty transcript: controls are hidden",
@@ -158,80 +158,80 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/pill-overflow-promotion.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests2/browser/fixtures/pill-overflow-promotion.spec.ts",
+      "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "narrow mode renders overflow.*promotes hidden pills"
       ]
     },
     {
-      "file": "tests/e2e/ui/mobile-review-commenting.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests2/browser/fixtures/mobile-review-commenting.spec.ts",
+      "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "mobile annotation creation flow.*persists after reload"
       ]
     },
     {
-      "file": "tests/e2e/ui/stories-sidebar.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/stories-sidebar.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "Filter search narrows concurrently created sessions"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-filters.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/sidebar-filters.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "Show Read OFF hides.*search bypasses"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-keyboard-nav.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/sidebar-keyboard-nav.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "Ctrl.*Arrow journey.*routes goal/session"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-archived-layout.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/sidebar-archived-layout.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "Show Archived reveals archived session/goal.*hides on toggle off"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-archived-per-project.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/sidebar-archived-per-project.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "desktop renders archived goals.*owning projects"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-navigation.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/sidebar-navigation.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "session navigation highlights active row.*rapid switching"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-staff-loading.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/sidebar-staff-loading.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "shows bobbit-loader immediately"
       ]
     },
     {
-      "file": "tests/e2e/ui/search-e2e.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/browser/journeys/search-e2e.journey.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "sidebar filter matches session and goal titles",
@@ -241,16 +241,16 @@
       ]
     },
     {
-      "file": "tests/e2e/ui/search-result-navigation.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/e2e/browser/search-result-navigation.browser-e2e.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "every result type navigates without modal"
       ]
     },
     {
-      "file": "tests/e2e/ui/sidebar-actions-menu.spec.ts",
-      "metric": "e2e-browser",
+      "file": "tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts",
+      "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
         "desktop session and goal action-menu smokes.*quick actions wired"

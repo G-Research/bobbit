@@ -3381,7 +3381,11 @@ export class MockAgentCore {
 	async _seedProposal(type, args) {
 		const creds = this._gatewayCreds();
 		if (!creds) return undefined;
-		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/seed`, { args });
+		const body = await this._gatewayPost(
+			`/api/sessions/${creds.sessionId}/proposal/${type}/seed`,
+			{ args },
+			{ "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" },
+		);
 		return body && typeof body === "object" ? body : undefined;
 	}
 
@@ -3391,7 +3395,7 @@ export class MockAgentCore {
 		const body = await this._gatewayPost(`/api/sessions/${creds.sessionId}/proposal/${type}/edit`, {
 			old_text: oldText,
 			new_text: newText,
-		});
+		}, { "X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "" });
 		return body && typeof body === "object" && typeof body.rev === "number" ? body.rev : undefined;
 	}
 
