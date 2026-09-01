@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { waitForStableScroll, waitForFrames } from "../../../tests2/browser/_helpers/stable-wait.js";
+import { waitForStableScroll, waitForFrames } from "../../support/helpers/browser/journeys/stable-wait.js";
 
 const TEST_PAGE = `file://${path.resolve("tests/mobile-scroll-keyboard.html")}`;
 

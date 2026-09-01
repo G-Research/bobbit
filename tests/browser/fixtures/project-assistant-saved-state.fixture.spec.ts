@@ -14,9 +14,9 @@
  *   5. Click Terminate → confirm → session deleted, navigated to landing.
  */
 import type { Locator, Page } from "@playwright/test";
-import { test, expect } from "../../../tests2/browser/gateway-harness.js";
-import { apiFetch, defaultProjectId } from "../../../tests2/browser/e2e-setup.js";
-import { openApp } from "../../../tests2/browser/fixtures/ui-helpers.js";
+import { test, expect } from "../../support/harnesses/browser/gateway-harness.js";
+import { apiFetch, defaultProjectId } from "../../support/harnesses/browser/e2e-setup.js";
+import { openApp } from "../../support/helpers/browser/fixtures/ui-helpers.js";
 
 const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";

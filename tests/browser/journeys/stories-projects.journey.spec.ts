@@ -6,7 +6,7 @@
  *
  * Focus: projects organize sessions and survive page reload.
  * Full project UI flows (add-project wizard, assistant, removal) are
- * tested in tests2/browser/fixtures/add-project-flow.spec.ts and
+ * tested in tests/browser/fixtures/add-project-flow.fixture.spec.ts and
  * tests/e2e/browser/project-assistant.browser-e2e.spec.ts.
  * These tests cover the CT-16 contract: sidebar grouping and reload persistence.
  *

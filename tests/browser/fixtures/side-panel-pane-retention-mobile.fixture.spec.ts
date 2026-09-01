@@ -2,9 +2,9 @@
  * Side-panel pane retention — REAL-BROWSER tier, MOBILE SLIDER
  * (design docs/design/keep-side-panels-mounted.md §9 criteria 10–13 and the mobile
  * half of criterion 14). Split out of `side-panel-pane-retention.fixture.spec.ts` because
- * `tests2/browser` is budget-gated at 60s per spec file and the combined file sat on
+ * The browser lane is budget-gated at 60s per spec file and the combined file sat on
  * the cap; the desktop and cold-switch describes stayed there. Both files share the
- * rig in `tests2/browser/fixtures/side-panel-pane-retention-helpers.ts`, which documents why this tier
+ * rig in `tests/support/helpers/browser/fixtures/side-panel-pane-retention-helpers.ts`, which documents why this tier
  * exists at all (the DOM tier cannot load an iframe, focus anything, or measure a
  * box).
  *
@@ -46,7 +46,7 @@ import {
 	sessionIds,
 	settleRender,
 	stampFrameProbe,
-} from "../../../tests2/browser/fixtures/side-panel-pane-retention-helpers.js";
+} from "../../support/helpers/browser/fixtures/side-panel-pane-retention-helpers.js";
 
 registerRetentionBundleBuild();
 

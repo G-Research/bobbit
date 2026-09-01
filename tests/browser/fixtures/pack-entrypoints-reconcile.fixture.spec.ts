@@ -23,7 +23,7 @@
  */
 import { test, expect } from "@playwright/test";
 import path from "node:path";
-import { buildBundle } from "../../../tests2/browser/fixtures/fixtures/build-bundle";
+import { buildBundle } from "../../support/helpers/browser/fixtures/fixtures/build-bundle";
 
 const FIXTURE = path.resolve("tests/fixtures/pack-entrypoints-reconcile.html");
 const BUNDLE = path.resolve("tests/fixtures/pack-entrypoints-reconcile-bundle.js");

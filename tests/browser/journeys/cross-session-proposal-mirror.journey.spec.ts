@@ -21,7 +21,7 @@
  *
  * This spec creates a plain session (NOT a role/tool/staff assistant) and drives
  * the unified path directly — the exact path a server "seed" broadcast takes
- * (same technique as tests2/browser/e2e/proposal-inline-comments.spec.ts). It
+ * (same technique as tests/e2e/browser/proposal-inline-comments.browser-e2e.spec.ts). It
  * then asserts the form-mirror is populated and the primary submit is
  * enabled/rendered.
  *
@@ -37,7 +37,7 @@ import {
 	deleteSession,
 	defaultProjectId,
 	navigateToHash,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
 // Deterministic bug repro — a failure here is the bug, not a flake budget.

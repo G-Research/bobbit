@@ -11,18 +11,18 @@ import {
 	registerProject,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { readE2EToken } from "../../../tests2/browser/e2e-setup.js";
-import { getFreePort } from "../../../tests2/browser/e2e/packaged-runtime-helpers.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { readE2EToken } from "../../support/harnesses/browser/e2e-setup.js";
+import { getFreePort } from "../../support/helpers/browser/e2e/packaged-runtime-helpers.js";
 import {
 	startSourceVite,
 	stopSourceProcess,
 	waitForSourceVite,
 	type RunningSourceProcess,
-} from "../../../tests2/browser/e2e/source-vite-runtime-helpers.js";
+} from "../../support/helpers/browser/e2e/source-vite-runtime-helpers.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-const SOURCE_DIR = fileURLToPath(new URL("../../../tests2/browser/fixtures/pack-hot-reload", import.meta.url));
+const SOURCE_DIR = fileURLToPath(new URL("../../support/fixtures/browser/packs/pack-hot-reload", import.meta.url));
 const PACK_NAME = "pack-hot-reload-fixture";
 const TOOL_NAME = "pack_hot_reload_probe";
 const PANEL_ID = "hot-reload-fixture.detail";

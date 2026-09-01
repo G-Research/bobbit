@@ -28,7 +28,7 @@
  * the page-driving/read helpers. Every assertion lives in the spec files, so the
  * desktop/mobile split is a pure move of tests, not of expectations.
  *
- * WHY THE SPLIT EXISTS. `tests2/browser` is budget-gated at 60s per spec file
+ * WHY THE SPLIT EXISTS. The browser lane is budget-gated at 60s per spec file
  * (`scripts/testing-v2/assert-budget.*`). The single combined file measured ~28s warm
  * / ~50s cold, i.e. sitting on the cap, so the mobile describe was moved to a sibling
  * spec. Both files share this rig; neither duplicates an assertion.
@@ -36,7 +36,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
-import { buildBundle } from "../fixtures/build-bundle.js";
+import { buildBundle } from "./build-bundle.js";
 
 export const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 export const FIXTURE_ORIGIN = "http://fixture.localhost";

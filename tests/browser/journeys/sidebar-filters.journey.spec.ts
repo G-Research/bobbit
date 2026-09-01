@@ -1,6 +1,6 @@
 /**
  * Retained full-stack smoke for sidebar filter/search integration.
- * Exhaustive filter/search matrices live in tests2/browser/fixtures/sidebar-filter-search-fixture.spec.ts.
+ * Exhaustive filter/search matrices live in tests/browser/fixtures/sidebar-filter-search-fixture.fixture.spec.ts.
  */
 import { test, expect, type Page } from "../../e2e/gateway-harness.js";
 import { apiFetch, createSession, deleteSession, nonGitCwd, waitForHealth } from "../../e2e/e2e-setup.js";

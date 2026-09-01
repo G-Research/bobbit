@@ -7,7 +7,7 @@ import {
 	expect,
 	test,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
 import {
 	ReliableTurnRuntime,
 	captureIntentIds,
@@ -24,7 +24,7 @@ import {
 	transcriptIntent,
 	transcriptIntentOrder,
 	waitForRemoteStatus,
-} from "../../../tests2/browser/journeys/reliable-agent-turns.fixture.js";
+} from "../../support/helpers/browser/journeys/reliable-agent-turns.fixture.js";
 
 const BUSY = "STAY_BUSY:60000 RELIABLE_TURN_BARRIER";
 

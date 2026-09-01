@@ -9,8 +9,8 @@ import {
 	test,
 	waitForAgentResponse,
 	waitForSessionStatus,
-} from "../../../tests2/browser/_helpers/journey-fixture.js";
-import { waitForStableScroll } from "../../../tests2/browser/_helpers/stable-wait.js";
+} from "../../support/helpers/browser/journeys/journey-fixture.js";
+import { waitForStableScroll } from "../../support/helpers/browser/journeys/stable-wait.js";
 
 const DESKTOP = { width: 1280, height: 800 };
 const MOBILE = { width: 360, height: 720 };

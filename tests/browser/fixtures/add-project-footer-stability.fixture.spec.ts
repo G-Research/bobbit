@@ -9,7 +9,7 @@
  * Failure prints the offending transition + which axis shifted by how many
  * pixels so the regression source is obvious.
  */
-import { test, expect, type Page } from "../../../tests2/browser/gateway-harness.js";
+import { test, expect, type Page } from "../../support/harnesses/browser/gateway-harness.js";
 import { rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -20,7 +20,7 @@ import {
 	clearProjects,
 	waitForPreflight,
 	preflightAvailable,
-} from "../../../tests2/browser/fixtures/add-project-helpers.js";
+} from "../../support/helpers/browser/fixtures/add-project-helpers.js";
 
 interface Rect { x: number; y: number; width: number; height: number }
 const TOL = 1; // sub-pixel rendering tolerance
