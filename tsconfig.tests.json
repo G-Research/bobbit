@@ -18,7 +18,7 @@
     "noEmit": true
   },
   "include": [
-    "tests2/**/*.ts",
+    "tests/support/**/*.ts",
     "tests/unit/core/**/*.unit.test.ts",
     "tests/unit/isolated/**/*.isolated.test.ts",
     "tests/dom/**/*.dom.test.ts",

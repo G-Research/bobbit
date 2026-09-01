@@ -23,25 +23,14 @@ const RETIRED_IMPLEMENTATION = [
 	"runner.mjs",
 ] as const;
 
-const RETIRED_TESTS = [
-	"tests2/core/affected-correctness-harness.test.ts",
-	"tests2/core/affected-doc-classification.test.ts",
-	"tests2/core/affected-reader-inventory.test.ts",
-	"tests2/core/affected-runner-cli.test.ts",
-	"tests2/core/affected-runner-git-cli.test.ts",
-	"tests2/core/affected-runner-no-escape.test.ts",
-	"tests2/core/affected-test-classification.test.ts",
-	"tests2/core/affected-test-runner.test.ts",
-	"tests2/integration/affected-runner-boundary.test.ts",
-] as const;
-
 const RETIRED_MAP_FILES = [
 	"scripts/testing-v2/test-map-execution.mjs",
 	"scripts/testing-v2/gen-inventory.mjs",
 	"scripts/testing-v2/codemod.mjs",
 	"scripts/testing-v2/lib-census.mjs",
-	"tests2/tests-map.json",
-	"tests2/codemod-report.json",
+	"scripts/testing-v2/check-inventory.mjs",
+	"scripts/testing-v2/unit-inventory-audit.mjs",
+	"scripts/testing-v2/unit-declaration-semantic-map.json",
 ] as const;
 
 function repoPath(...parts: string[]): string {
@@ -56,14 +45,15 @@ describe("complete test lane entrypoints", () => {
 		}
 	});
 
-	it("keeps retired package, test, and map-only entrypoints absent", () => {
+	it("keeps retired package and inventory entrypoints absent", () => {
 		assert.deepEqual(
 			Object.keys(packageJson.scripts).filter((name) => /^test:affected(?::|$)/.test(name)),
 			[],
 		);
-		const discovered = new Set(discoverTests().all);
-		for (const path of RETIRED_TESTS) assert.equal(discovered.has(path), false, `${path} must stay retired`);
+		assert.equal("test:unit:inventory" in packageJson.scripts, false);
 		for (const path of RETIRED_MAP_FILES) assert.equal(existsSync(repoPath(...path.split("/"))), false, `${path} must stay retired`);
+		const discovery = discoverTests();
+		assert.equal(discovery.canonical, discovery.all);
 	});
 
 	it("dispatches the existing complete lanes and aggregate exactly", () => {
