@@ -23,12 +23,12 @@ Orient here, then `rg` for the symbol.
 
 - **Server REST/WS**: `src/server/` — REST in `server.ts::handleApiRoute()`, WS in `src/server/ws/`.
 - **Agent runtime**: `src/server/agent/` — sessions, manager, status, steer, respawn, store, project context. See [docs/bg-process-persistence.md](docs/bg-process-persistence.md) for `bash_bg`.
-- **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Descriptions budget-pinned by `tests2/core/tool-description-budget.test.ts`.
+- **MCP / tools**: `src/server/mcp/`, `defaults/tools/<group>/` (project overrides under `.bobbit/config/tools/<group>/`). Descriptions budget-pinned by `tests/unit/core/tool-description-budget.unit.test.ts`.
 - **Skills**: `.claude/skills/<name>/SKILL.md`.
 - **Roles/tools/skills resolution**: unified `PackResolver` over one ordered pack list in `src/server/agent/pack-*.ts`; built-in packs in `market-packs/`. See [docs/marketplace.md](docs/marketplace.md).
 - **UI shell**: `src/app/` — state, render, message-reducer, dialogs, follow-tail.
 - **UI components**: `src/ui/` — components, `tools/renderers/`, `lazy/`.
-- **Tests (v2)**: path/suffix determines runner ownership. See [docs/testing-strategy.md](docs/testing-strategy.md).
+- **Tests**: canonical directory plus semantic suffix determines runner ownership. See [docs/testing-strategy.md](docs/testing-strategy.md).
 - **Docs**: `docs/` (reference + design notes), `docs/design/` (per-feature design docs), `docs/debugging.md` (full diagnostic checklists), `docs/internals.md` (config cascade, sandbox, search, MCP).
 
 ## Before editing anything non-trivial
@@ -44,7 +44,8 @@ Treat every new branch, state owner, transformation, API, or abstraction as defe
 
 ## Testing
 
-- **Test authoring** — use `npm run test:new -- <semantic> <name>` for canonical `tests/{unit,dom,integration,browser,e2e,manual}/` placement and suffixes. `test:layout` enforces conventions without a registry; `tests2/` and legacy paths are transitional. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
+- **Test authoring** — use `npm run test:new -- <semantic> <name>`; runnable suites belong only in canonical `tests/{unit,dom,integration,browser,e2e,manual}/` destinations, where directory plus semantic suffix owns the runner and `test:layout` fails closed elsewhere. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
+- **Test support** — put imported-only fixtures, data, helpers, harnesses, templates, and package fixtures in the purpose-first `tests/support/` topology; support code must not use a runnable suffix. See [docs/testing-strategy.md](docs/testing-strategy.md#test-placement-and-automatic-discovery).
 - **Test isolation** — every automated coordinator owns its run root; qualify retry-free. See [docs/testing-v2/cross-os-test-authoring.md](docs/testing-v2/cross-os-test-authoring.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
 - **Never junction/symlink a worktree's `node_modules` into a shared or primary tree.** See [docs/testing-v2/node-modules-corruption-rca.md](docs/testing-v2/node-modules-corruption-rca.md).
