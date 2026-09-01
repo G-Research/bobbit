@@ -4,7 +4,7 @@
 // suites), and files over tiers.tier2.perSpecMaxMs are violations unless
 // grandfathered (then warn-only). Pure functions — no fs, no subprocesses.
 import { describe, expect, it } from "vitest";
-import { evaluatePerSpecBudget, perSpecWallFromReport } from "../../../scripts/testing-v2/assert-budget.mjs";
+import { evaluatePerSpecBudget, perSpecWallFromReport, readBudgets } from "../../../scripts/testing-v2/assert-budget.mjs";
 
 type SyntheticSuite = {
 	file?: string;
@@ -42,6 +42,14 @@ const budget = {
 	perSpecMaxMs: 60_000,
 	perSpecGrandfather: { "e2e/grandfathered.spec.ts": 88_000 },
 };
+
+describe("quality budget support", () => {
+	it("loads the committed canonical budget caps through the real consumer", () => {
+		const budgets = readBudgets();
+		expect(budgets.tiers.tier2.perSpecMaxMs).toBe(60_000);
+		expect(budgets.concurrency).toMatchObject({ runs: 3, reps: 3, retries: 0 });
+	});
+});
 
 describe("perSpecWallFromReport", () => {
 	it("sums per-file durations including retries and nested suites, normalising separators", () => {

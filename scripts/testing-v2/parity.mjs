@@ -18,6 +18,7 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { spawnSync, execSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { discoverTests, REPO_ROOT } from "./test-discovery.mjs";
 
 const GUARD_PATH = "tests/unit/core/guard-v2.unit.test.ts";
@@ -184,12 +185,20 @@ function summariseSpecData(specData) {
 
 // ─── Baseline helpers ─────────────────────────────────────────────────────────
 
-const COVERAGE_BASELINE_PATH = join(REPO_ROOT, "tests2", "v2-baseline-coverage.json");
-const SPEC_BASELINE_PATH = join(REPO_ROOT, "tests2", "v2-baseline-spec.json");
+export const QUALITY_COVERAGE_ROOT = join(REPO_ROOT, "tests", "support", "data", "quality", "coverage");
+export const COVERAGE_BASELINE_PATH = join(QUALITY_COVERAGE_ROOT, "v2-baseline-coverage.json");
+export const SPEC_BASELINE_PATH = join(QUALITY_COVERAGE_ROOT, "v2-baseline-spec.json");
 
 function loadBaseline(path) {
 	if (!existsSync(path)) return null;
 	return JSON.parse(readFileSync(path, "utf8"));
+}
+
+export function loadQualityBaselines() {
+	return {
+		coverage: loadBaseline(COVERAGE_BASELINE_PATH),
+		spec: loadBaseline(SPEC_BASELINE_PATH),
+	};
 }
 
 function saveBaseline(path, data) {
@@ -322,8 +331,7 @@ function runScopeAll(opts = {}) {
 
 	// ── Step 4: Load/compare baselines ───────────────────────────────────────
 	let firstRun = false;
-	const coverageBaseline = loadBaseline(COVERAGE_BASELINE_PATH);
-	const specBaseline = loadBaseline(SPEC_BASELINE_PATH);
+	const { coverage: coverageBaseline, spec: specBaseline } = loadQualityBaselines();
 
 	if (!coverageBaseline || !specBaseline) {
 		firstRun = true;
@@ -502,4 +510,4 @@ function main() {
 	process.exit(0);
 }
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

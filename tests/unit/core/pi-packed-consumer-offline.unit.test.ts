@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import {
+	existsSync,
 	mkdtempSync,
 	readFileSync,
 	readdirSync,
@@ -35,6 +36,7 @@ const WORKFLOW_SOURCE = readFileSync(
 	"utf8",
 );
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+const PACKAGE_MANIFEST = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { files: string[] };
 
 type WorkflowStep = {
 	name: string;
@@ -88,6 +90,15 @@ function invokeTimer(callback: (() => void) | undefined, message: string): void 
 }
 
 describe("packed-consumer offline install contract", () => {
+	it("resolves checkout-only support before creating a clean packed consumer", () => {
+		const supportRoot = join(REPO_ROOT, "tests", "support");
+		const canonicalBudget = join(supportRoot, "data", "quality", "budgets", "budgets.json");
+		assert.equal(existsSync(canonicalBudget), true);
+		assert.equal(canonicalBudget.replaceAll("\\", "/").endsWith("tests/support/data/quality/budgets/budgets.json"), true);
+		assert.equal(PACKAGE_MANIFEST.files.some(entry => entry.replaceAll("\\", "/").startsWith("tests/support")), false,
+			"repository test support must remain excluded from the published package");
+	});
+
 	it("prewarms the restored cache on every E2E OS before the normal gate", () => {
 		const workflow = YAML.parse(WORKFLOW_SOURCE) as Workflow;
 		const e2e = workflow.jobs.e2e;
