@@ -609,12 +609,13 @@ export class ToolManager {
 		return resolveStandaloneToolEntries(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 	}
 
-	private hydrateResolvedEntry(entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>): BaseToolInfo {
+	private hydrateResolvedEntry(
+		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>,
+		sourceBaseDir: string | undefined,
+		candidates: BaseToolInfo[] | undefined,
+	): BaseToolInfo {
 		const identity = entry.name.toLowerCase();
-		const sourceBaseDir = entry.source?.baseDir
-			|| (entry.origin.path ? path.join(entry.origin.path, "tools") : undefined);
-		if (sourceBaseDir) {
-			const candidates = scanToolsDirCached(sourceBaseDir, sourceBaseDir);
+		if (sourceBaseDir && candidates) {
 			const exactFile = entry.source?.filePath;
 			const hydrated = candidates.find((candidate) =>
 				exactFile ? path.resolve(candidate.filePath) === path.resolve(exactFile) : candidate.name === entry.name,
@@ -647,7 +648,30 @@ export class ToolManager {
 		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
 		tool: BaseToolInfo;
 	}> {
-		return this.resolvedEntries().map((entry) => ({ entry, tool: this.hydrateResolvedEntry(entry) }));
+		const entries = this.resolvedEntries();
+		const scans = new Map<string, { baseDir: string; tools: BaseToolInfo[] }>();
+		const sources = entries.map((entry) => {
+			const configuredBaseDir = entry.source?.baseDir
+				|| (entry.origin.path ? path.join(entry.origin.path, "tools") : undefined);
+			if (!configuredBaseDir) return undefined;
+
+			const baseDir = path.resolve(configuredBaseDir);
+			const key = process.platform === "win32" ? baseDir.toLowerCase() : baseDir;
+			let scan = scans.get(key);
+			if (!scan) {
+				scan = { baseDir, tools: scanToolsDirCached(baseDir, baseDir) };
+				scans.set(key, scan);
+			}
+			return scan;
+		});
+
+		return entries.map((entry, index) => {
+			const source = sources[index];
+			return {
+				entry,
+				tool: this.hydrateResolvedEntry(entry, source?.baseDir, source?.tools),
+			};
+		});
 	}
 
 	private resolveYamlSnapshot(): BaseToolInfo[] {
