@@ -46,18 +46,24 @@ function gitWorktreeListOutput(repoPath: string, entries: Array<{ path: string; 
  */
 function makePool(opts: {
 	repoPath: string;
-	liveWorktrees: Array<{ path: string; branch?: string }>;
+	liveWorktrees: Array<{ path: string; branch?: string }> | (() => Array<{ path: string; branch?: string }>);
 	recordStore: MemoryPoolRecordStore;
 	projectId?: string;
 	components?: Component[];
 	realpathNativeImpl?: (value: string) => Promise<string>;
 }) {
 	const mutations: string[][] = [];
+	const cleanupCalls: Array<{ repoPath: string; worktreePath: string; branchName?: string }> = [];
 	const commandRunner: CommandRunner = {
 		execFile: async (_file, args) => {
 			if (args[0] === "worktree" && args[1] === "list") {
-				return { stdout: gitWorktreeListOutput(opts.repoPath, opts.liveWorktrees), stderr: "" };
+				const liveWorktrees = typeof opts.liveWorktrees === "function" ? opts.liveWorktrees() : opts.liveWorktrees;
+				return { stdout: gitWorktreeListOutput(opts.repoPath, liveWorktrees), stderr: "" };
 			}
+			if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+				return { stdout: path.join(opts.repoPath, ".git"), stderr: "" };
+			}
+			if (args[0] === "for-each-ref") return { stdout: "", stderr: "" };
 			mutations.push([...args]);
 			return { stdout: "", stderr: "" };
 		},
@@ -70,10 +76,13 @@ function makePool(opts: {
 		resolveRepoToplevelImpl: async () => opts.repoPath,
 		realpathNativeImpl: opts.realpathNativeImpl ?? (async value => path.resolve(value)),
 		componentsResolver: opts.components ? () => opts.components! : undefined,
+		cleanupWorktreeImpl: async (cleanupRepoPath, worktreePath, branchName) => {
+			cleanupCalls.push({ repoPath: cleanupRepoPath, worktreePath, branchName });
+		},
 		recordStore: opts.recordStore,
 		projectId: opts.projectId ?? PROJECT_ID,
 	});
-	return { pool, mutations };
+	return { pool, mutations, cleanupCalls };
 }
 
 describe("durable worktree pool records", () => {
@@ -171,6 +180,54 @@ describe("worktree pool reuses recorded entries across a restart", () => {
 		}
 	});
 
+	it("revokes an adopted entry without mutation when its branch changes after initialization", async () => {
+		const recordStore = new MemoryPoolRecordStore();
+		const branchName = "pool/_pool-raced123";
+		let currentBranch = branchName;
+		recordStore.replace(PROJECT_ID, repoPath, [
+			{ branchName, worktreePath: poolPath, createdAt: Date.now() },
+		]);
+		const { pool, mutations, cleanupCalls } = makePool({
+			repoPath,
+			liveWorktrees: () => [{ path: poolPath, branch: currentBranch }],
+			recordStore,
+		});
+		try {
+			await pool.initialize();
+			currentBranch = "feature/mine";
+			assert.equal(await pool.claim("session/must-fall-back"), null);
+			assert.deepEqual(recordStore.read(PROJECT_ID).entries, [], "stale authority must be revoked");
+			assert.deepEqual(mutations, [], "revalidation failure must precede every Git mutation");
+			assert.deepEqual(cleanupCalls, [], "claim-failure cleanup must not touch the contested worktree");
+		} finally {
+			await pool.stop();
+		}
+	});
+
+	it("revalidates adopted entries before explicit drain cleanup", async () => {
+		for (const changedAfterInitialize of [false, true]) {
+			const recordStore = new MemoryPoolRecordStore();
+			const branchName = "pool/_pool-drain123";
+			let currentBranch = branchName;
+			recordStore.replace(PROJECT_ID, repoPath, [
+				{ branchName, worktreePath: poolPath, createdAt: Date.now() },
+			]);
+			const { pool, mutations, cleanupCalls } = makePool({
+				repoPath,
+				liveWorktrees: () => [{ path: poolPath, branch: currentBranch }],
+				recordStore,
+			});
+			await pool.initialize();
+			if (changedAfterInitialize) currentBranch = "feature/mine";
+			await pool.drain();
+			assert.deepEqual(recordStore.read(PROJECT_ID).entries, [], "drain must revoke restart authority first");
+			assert.equal(cleanupCalls.length, changedAfterInitialize ? 0 : 1, changedAfterInitialize
+				? "a changed adopted worktree must be left untouched"
+				: "an unchanged adopted worktree remains explicitly drainable");
+			assert.deepEqual(mutations, [], "the injected cleanup is the only valid drain mutation");
+		}
+	});
+
 	it("stops listing an entry once it is claimed, so a restart cannot hand it out twice", async () => {
 		const recordStore = new MemoryPoolRecordStore();
 		recordStore.replace(PROJECT_ID, repoPath, [
@@ -220,10 +277,12 @@ describe("multi-repository pool adoption", () => {
 	const components: Component[] = members.map(member => ({ name: member.repo, repo: member.repo }));
 
 	function createMultiPool(recordStore: MemoryPoolRecordStore, overrides?: {
-		webBranch?: string;
+		webBranch?: string | (() => string);
 		failWebList?: boolean;
 	}) {
 		const mutationCommands: string[][] = [];
+		const filesystemRenames: Array<{ oldPath: string; newPath: string }> = [];
+		const cleanupCalls: Array<{ repoPath: string; worktreePath: string; branchName?: string }> = [];
 		const commandRunner: CommandRunner = {
 			execFile: async (_file, args, options) => {
 				if (args[0] === "rev-parse" && args[1] === "--show-toplevel") {
@@ -232,13 +291,18 @@ describe("multi-repository pool adoption", () => {
 				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "HEAD") {
 					return { stdout: "abc123", stderr: "" };
 				}
+				if (args[0] === "rev-parse" && args.includes("--git-common-dir")) {
+					return { stdout: path.join(String(options?.cwd), ".git"), stderr: "" };
+				}
 				if (args[0] === "worktree" && args[1] === "list") {
 					if (options?.cwd === members[1]!.repoPath && overrides?.failWebList) throw new Error("list failed");
 					const member = members.find(candidate => candidate.repoPath === options?.cwd);
 					if (!member) throw new Error(`unexpected worktree list cwd: ${options?.cwd}`);
-					const branch = member.repo === "web" ? overrides?.webBranch ?? branchName : branchName;
+					const configuredWebBranch = typeof overrides?.webBranch === "function" ? overrides.webBranch() : overrides?.webBranch;
+					const branch = member.repo === "web" ? configuredWebBranch ?? branchName : branchName;
 					return { stdout: gitWorktreeListOutput(member.repoPath, [{ path: member.worktreePath, branch }]), stderr: "" };
 				}
+				if (args[0] === "for-each-ref") return { stdout: "", stderr: "" };
 				mutationCommands.push([...args]);
 				return { stdout: "", stderr: "" };
 			},
@@ -250,10 +314,14 @@ describe("multi-repository pool adoption", () => {
 			commandRunner,
 			resolveRepoToplevelImpl: async () => root,
 			realpathNativeImpl: async value => path.resolve(value),
+			fsImpl: { rename: async (oldPath, newPath) => { filesystemRenames.push({ oldPath, newPath }); } },
+			cleanupWorktreeImpl: async (repoPath, worktreePath, cleanupBranchName) => {
+				cleanupCalls.push({ repoPath, worktreePath, branchName: cleanupBranchName });
+			},
 			recordStore,
 			projectId: PROJECT_ID,
 		});
-		return { pool, mutationCommands };
+		return { pool, mutationCommands, filesystemRenames, cleanupCalls };
 	}
 
 	function recordedStore(): MemoryPoolRecordStore {
@@ -271,6 +339,36 @@ describe("multi-repository pool adoption", () => {
 		} finally {
 			await pool.stop();
 		}
+	});
+
+	it("revokes a complete adopted set without mutation when one member changes after initialization", async () => {
+		const store = recordedStore();
+		let webBranch = branchName;
+		const { pool, mutationCommands, filesystemRenames, cleanupCalls } = createMultiPool(store, { webBranch: () => webBranch });
+		await pool.initialize();
+		try {
+			webBranch = "feature/mine";
+			assert.equal(await pool.claim("session/must-fall-back"), null);
+			assert.deepEqual(store.read(PROJECT_ID).entries, [], "the complete set's authority must be revoked");
+			assert.deepEqual(mutationCommands, [], "no member may mutate when one exact match changed");
+			assert.deepEqual(filesystemRenames, [], "all-or-nothing validation must precede the container rename");
+			assert.deepEqual(cleanupCalls, [], "claim-failure cleanup must not touch any contested member");
+		} finally {
+			await pool.stop();
+		}
+	});
+
+	it("skips complete-set drain cleanup when one adopted member changes", async () => {
+		const store = recordedStore();
+		let webBranch = branchName;
+		const { pool, mutationCommands, filesystemRenames, cleanupCalls } = createMultiPool(store, { webBranch: () => webBranch });
+		await pool.initialize();
+		webBranch = "feature/mine";
+		await pool.drain();
+		assert.deepEqual(store.read(PROJECT_ID).entries, []);
+		assert.deepEqual(mutationCommands, []);
+		assert.deepEqual(filesystemRenames, []);
+		assert.deepEqual(cleanupCalls, [], "drain must leave every member untouched after an all-or-nothing mismatch");
 	});
 
 	it("rejects missing, extra, or reordered members before worktree mutation", async () => {
