@@ -69,6 +69,45 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 	});
 });
 
+test("Refresh agent posts to the selected session and reports success or failure", async ({ page }) => {
+	const ids = await loadFixture(page);
+
+	await openMenu(page, "session", ids.session);
+	await item(page, "refresh-agent").click();
+	await expect.poll(() => page.evaluate((sessionId) =>
+		(window as any).__sidebarActionsRequests.filter((request: any) =>
+			request.method === "POST" && request.url.endsWith(`/api/sessions/${sessionId}/restart`)).length, ids.session),
+	).toBe(1);
+	await expect(page.getByTestId("header-toast")).toContainText("Agent refreshed");
+
+	await page.evaluate(() => { (window as any).__sidebarActionsRestartStatus = 500; });
+	await openMenu(page, "session", ids.session);
+	await item(page, "refresh-agent").click();
+	await expect.poll(() => page.evaluate((sessionId) =>
+		(window as any).__sidebarActionsRequests.filter((request: any) =>
+			request.method === "POST" && request.url.endsWith(`/api/sessions/${sessionId}/restart`)).length, ids.session),
+	).toBe(2);
+	await expect(page.getByTestId("header-toast")).toContainText(/Refresh agent failed/i);
+});
+
+test("New staff marks session creation pending before its request resolves", async ({ page }) => {
+	await loadFixture(page);
+	await page.evaluate(() => { (window as any).__sidebarActionsHoldStaffCreate = true; });
+
+	await page.locator("button[title='New staff agent']").click();
+	await expect.poll(() => page.evaluate(() => (window as any).__bobbitState.creatingSession)).toBe(true);
+	await expect.poll(() => page.evaluate(() =>
+		(window as any).__sidebarActionsRequests.find((request: any) =>
+			request.method === "POST" && request.url.endsWith("/api/sessions"))?.body),
+	).toMatchObject({
+		assistantType: "staff",
+		projectId: "sidebar-actions-fixture-project",
+		cwd: "/tmp/sidebar-actions-fixture",
+	});
+
+	await page.evaluate(() => { (window as any).__sidebarActionsReleaseStaffCreate?.(); });
+});
+
 test("dismissal closes on outside click, Escape, route change, item selection, repeated toggle, and direct switch", async ({ page }) => {
 	const ids = await loadFixture(page);
 
