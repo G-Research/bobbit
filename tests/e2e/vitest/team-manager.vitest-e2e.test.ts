@@ -383,7 +383,8 @@ describe("TeamManager", () => {
 
 			assert.deepEqual(createSession.mock.calls[0]?.[1], [],
 				"TeamManager must defer winning-provider resolution to the session pipeline");
-			assert.deepEqual(session.runtimeArgs, ["--extension", projectExtension]);
+			const capturedSession = sm.getSession(session.id) as { runtimeArgs: string[] };
+			assert.deepEqual(capturedSession.runtimeArgs, ["--extension", projectExtension]);
 			assert.deepEqual(projectToolManager.resolveToolExtensionPath.mock.calls, [["team_spawn", "extension.ts"]]);
 			assert.equal(serverToolManager.resolveToolExtensionPath.mock.calls.length, 0,
 				"a project-owned goal must not consult the server ToolManager");
@@ -438,7 +439,8 @@ describe("TeamManager", () => {
 
 			assert.deepEqual(createSession.mock.calls[0]?.[1], [],
 				"TeamManager must defer winning-provider resolution to the session pipeline");
-			assert.deepEqual(session.runtimeArgs, ["--extension", serverExtension]);
+			const capturedSession = sm.getSession(session.id) as { runtimeArgs: string[] };
+			assert.deepEqual(capturedSession.runtimeArgs, ["--extension", serverExtension]);
 			assert.deepEqual(serverToolManager.resolveToolExtensionPath.mock.calls, [["team_spawn", "extension.ts"]]);
 		});
 
