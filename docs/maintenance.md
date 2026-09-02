@@ -78,15 +78,15 @@ Additional guards:
 - branch-only leftovers for archived sessions are treated as already cleaned for worktree cleanup;
 - non-object canonical cleanup bodies are rejected instead of being treated as a legacy orphan cleanup request.
 
-Pool-shaped leftovers discovered at startup are reported diagnostically rather than adopted or automatically cleaned; only entries created and held by the current in-memory pool are claimable.
+Pool-shaped leftovers discovered at startup are reported diagnostically rather than adopted or automatically cleaned. A pool may re-adopt only entries authorized by its exact durable record in `state/worktree-pools.json` and revalidated against Git; shape alone is never authority.
 
 ### Startup and graceful shutdown
 
-Boot scanning is non-destructive for discovered worktrees. Branch prefixes, worktree-root placement, and Git metadata can explain a diagnostic row, but cannot authorize repair, cleanup, or pool adoption.
+Boot scanning is non-destructive for discovered worktrees. Branch prefixes, worktree-root placement, and Git metadata can explain a diagnostic row, but cannot authorize repair, cleanup, or pool adoption. Re-adoption additionally requires the pool's v1 durable project/repository/path/branch record. Single-repository entries must match `git worktree list` exactly. Multi-repository entries are all-or-nothing: every unique member must still match the current component repository, expected container-relative path, and that repository's exact Git path and branch. Any live persisted or runtime session reference excludes the entry. Invalid, malformed, future-version, mismatched, or unrecorded entries are left untouched and their adoption authority is dropped.
 
-During orderly gateway shutdown, Bobbit fences new work, waits for boot initialization, snapshots the live pools, and starts `stop()` on all of them before any drain. Each stop and drain is bounded to 15 seconds. A successfully stopped pool locally drains only ready entries still held by that instance; a successful claim has already left the pool and survives as its session or goal worktree. Tracked cleanup after a failed claim and all single-/multi-repo drain cleanup skip remote Git operations.
+During orderly gateway shutdown, Bobbit fences new work, waits for boot initialization, stops every pool with a 15-second bound, and flushes the durable record. It does not drain ready entries; the next start can revalidate and reuse them. Successful claims already left both the pool and its durable record and survive under session or goal ownership. A stop or record-flush failure is logged without blocking later teardown.
 
-A stop failure or timeout skips that pool's drain. A drain failure or timeout may also leave an entry, but neither blocks later pools or the remaining shutdown phases. Crashes and forced termination can likewise leave pool-shaped worktrees. On the next boot those leftovers remain ownership-unverified **Needs attention** diagnostics; Bobbit does not adopt or automatically remove them.
+`WorktreePool.drain()` remains the explicit project-deletion path. It revokes durable pool ownership before locally deleting only entries held by that pool; tracked claim-failure and drain cleanup never performs remote Git operations. Crashes and forced exits may leave unrecorded or unverifiable worktrees, which remain non-actionable **Needs attention** diagnostics.
 
 ### Legacy compatibility
 

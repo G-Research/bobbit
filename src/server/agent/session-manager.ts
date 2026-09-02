@@ -1,5 +1,5 @@
-import type { Clock, CommandRunner } from "../gateway-deps.js";
-import { realClock, realCommandRunner } from "../gateway-deps.js";
+import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
+import { realClock, realCommandRunner, realFs } from "../gateway-deps.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import {
 	LOCAL_USER_AUTHOR,
@@ -127,7 +127,7 @@ import {
 	successfulPostedAskToolUseId,
 } from "./ask-user-choices-dismissal.js";
 import { activeTranscriptBranch, parseTranscript } from "./transcript-tree.js";
-import { isWorktreePathReferencedByLiveSession, isWorktreePathReferencedByLiveSessionForCleanup, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
+import { collectLiveSessionWorktreePaths, isWorktreePathReferencedByLiveSession, isWorktreePathReferencedByLiveSessionForCleanup, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { SessionSecretStore } from "../auth/session-secret.js";
 import { redactSensitive } from "../auth/redact.js";
@@ -212,6 +212,7 @@ import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type Orches
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import { WorktreePool } from "./worktree-pool.js";
+import { MemoryPoolRecordStore, WorktreePoolRecordStore, type PoolRecordSink } from "./worktree-pool-record.js";
 import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
 import {
@@ -3421,6 +3422,10 @@ export interface SessionManagerOptions {
 	remoteGitPolicy?: RemoteGitPolicy;
 	testPreparingDelayMs?: string;
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
+	/** Filesystem seam used only by the durable pool ownership record. */
+	worktreePoolRecordFs?: FsLike;
+	/** Optional record-store override; unit tests normally use the in-memory store. */
+	worktreePoolRecordStore?: PoolRecordSink;
 	/**
 	 * Gateway state directory used to resolve the per-gateway `session-prompts`
 	 * scratch dir. Threaded so prompt persistence is isolated per gateway rather
@@ -3603,6 +3608,7 @@ export class SessionManager {
 	private packLocalDataBindingsResolver: PackLocalDataBindingsResolver | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
+	private readonly worktreePoolRecords: PoolRecordSink;
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
@@ -5667,6 +5673,12 @@ export class SessionManager {
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
 		this.stateDir = options?.stateDir ?? bobbitStateDir();
+		// Production gateways always provide their state directory. Direct unit-test
+		// managers without one stay in memory and cannot write into the checkout.
+		this.worktreePoolRecords = options?.worktreePoolRecordStore
+			?? (options?.stateDir
+				? new WorktreePoolRecordStore(options.worktreePoolRecordFs ?? realFs, this.stateDir, this.clock)
+				: new MemoryPoolRecordStore());
 		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
 		this.previewPurgeOperation = options?.previewPurgeOperation ?? (async (_sessionId, operation) => operation());
@@ -7141,15 +7153,23 @@ export class SessionManager {
 		// `resolveRemotePrimary` behaviour (see `docs/design/base-ref.md` §7).
 		// `setupTimeoutResolver` reads `worktree_setup_timeout_ms` so the project
 		// default applies to per-component setup during pool prebuild.
-		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot, commandRunner: this.commandRunner, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime });
+		const pool = new WorktreePool({ repoPath, targetSize, componentsResolver, worktreeRoot, baseRefResolver, setupTimeoutResolver, projectRoot, commandRunner: this.commandRunner, remotePolicy: this.remoteGitPolicy, worktreeSetupRuntime: this.worktreeSetupRuntime, recordStore: this.worktreePoolRecords, projectId });
 		this.worktreePools.set(projectId, pool);
 
 		// Collect worktree paths owned by active sessions so the pool doesn't
 		// reclaim them as orphaned pool entries on restart.
-		const activeWorktreePaths = new Set<string>();
-		for (const s of this.sessions.values()) {
-			if (s.worktreePath) activeWorktreePaths.add(s.worktreePath);
-		}
+		const runtimeRecords: WorktreeReferenceRecord[] = [...this.sessions.values()].map(session => ({
+			id: session.id,
+			worktreePath: session.worktreePath,
+			cwd: session.cwd,
+			repoWorktrees: session.repoWorktrees
+				? Object.fromEntries(session.repoWorktrees.map(worktree => [worktree.repo, worktree.worktreePath]))
+				: undefined,
+		}));
+		const activeWorktreePaths = collectLiveSessionWorktreePaths([
+			...this.getAllPersistedSessionsForWorktreeGuard(),
+			...runtimeRecords,
+		]);
 
 		let initialization!: Promise<void>;
 		initialization = pool.initialize(activeWorktreePaths)
@@ -7189,6 +7209,11 @@ export class SessionManager {
 		return this.worktreePools;
 	}
 
+	/** Durable ownership records shared by every project pool. */
+	getWorktreePoolRecordStore(): PoolRecordSink {
+		return this.worktreePoolRecords;
+	}
+
 	/** Drain and remove a project's worktree pool (for project deletion). */
 	async removeWorktreePool(projectId: string): Promise<void> {
 		if (projectId === HEADQUARTERS_PROJECT_ID) {
@@ -7200,6 +7225,7 @@ export class SessionManager {
 			await pool.drain();
 			this.worktreePools.delete(projectId);
 		}
+		this.worktreePoolRecords.forget(projectId);
 	}
 
 	async initMcp(cwd: string): Promise<void> {

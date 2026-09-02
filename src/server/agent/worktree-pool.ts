@@ -2,7 +2,8 @@
  * Pre-creates git worktrees so new sessions / goals can claim one instantly
  * instead of waiting 10-30s for `git worktree add` + setup.
  *
- * On startup, the pool fills to `targetSize` (default 2) in the background.
+ * On startup, the pool revalidates its exact durable ownership records, adopts
+ * complete matches, then fills the shortfall to `targetSize` in the background.
  * When a session or goal claims a worktree, the pool renames the branch,
  * moves the directory to its conventional path, and starts replenishing.
  *
@@ -39,7 +40,9 @@ import {
 	repositoryMutationCoordinator,
 	type RepositoryMutationCoordinator,
 } from "../skills/repository-mutation-coordinator.js";
-import { isBobbitPoolBranch, type WorktreePoolSnapshot } from "./worktree-inventory.js";
+import { isBobbitPoolBranch, parseGitWorktreeList, type WorktreePoolSnapshot } from "./worktree-inventory.js";
+import { normalizeWorktreeHostPath } from "./worktree-reference-guard.js";
+import type { PoolEntryRecord, PoolRecordSink } from "./worktree-pool-record.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY } from "./bounded-async-work.js";
 
@@ -142,6 +145,10 @@ export interface WorktreePoolOptions {
 	resolveRepoToplevelImpl?: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
 	/** Test seam; production uses the process-wide canonical common-dir coordinator. */
 	repositoryMutationCoordinator?: RepositoryMutationCoordinator;
+	/** Exact durable ownership records used to reuse entries across restarts. */
+	recordStore?: PoolRecordSink;
+	/** Project key within `recordStore`; required when a record store is supplied. */
+	projectId?: string;
 }
 
 /** Whether a branch name belongs to a pool entry (current or legacy form). */
@@ -269,6 +276,8 @@ export class WorktreePool {
 	private readonly cleanupWorktreeImpl: typeof cleanupWorktree;
 	private readonly resolveRepoToplevelImpl: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
 	private readonly repositoryMutationCoordinator: RepositoryMutationCoordinator;
+	private readonly recordStore?: PoolRecordSink;
+	private readonly projectId?: string;
 	private pathsResolved = false;
 	private pathsResolution?: Promise<void>;
 	private initializationStarted = false;
@@ -329,6 +338,8 @@ export class WorktreePool {
 		this.cleanupWorktreeImpl = opts.cleanupWorktreeImpl ?? cleanupWorktree;
 		this.resolveRepoToplevelImpl = opts.resolveRepoToplevelImpl ?? resolveRepoToplevel;
 		this.repositoryMutationCoordinator = opts.repositoryMutationCoordinator ?? repositoryMutationCoordinator;
+		this.recordStore = opts.recordStore;
+		this.projectId = opts.projectId;
 	}
 
 	private execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
@@ -450,12 +461,10 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Resolve repository paths, then begin background fill. Startup discovery is
-	 * deliberately non-adopting: branch/path shape cannot prove pool ownership.
-	 * Concurrent callers share one operation. Until it settles, `claim()` returns
-	 * the normal cold-path fallback (`null`).
+	 * Resolve repository paths, revalidate exact durable ownership records, then
+	 * begin background fill. Branch/path shape alone is never adoption authority.
 	 */
-	initialize(_activeWorktreePaths?: Set<string>): Promise<void> {
+	initialize(activeWorktreePaths?: Set<string>): Promise<void> {
 		if (this.stopped) return Promise.resolve();
 		if (this.initialized) {
 			this.replenish();
@@ -469,6 +478,12 @@ export class WorktreePool {
 		this.initializationStarted = true;
 		const operation = (async () => {
 			await this.resolveRepositoryPaths();
+			if (this.stopped) return;
+			try {
+				await this.adoptRecordedEntries(activeWorktreePaths);
+			} catch (error) {
+				console.warn("[worktree-pool] Adoption failed; continuing with a cold pool:", error);
+			}
 			if (this.stopped) return;
 			this.initialized = true;
 			this.replenish();
@@ -486,8 +501,8 @@ export class WorktreePool {
 	/**
 	 * Start filling the pool in the background. Call once after startup.
 	 *
-	 * @param activeWorktreePaths — Retained for caller compatibility. Startup no
-	 *   longer discovers or adopts filesystem/Git worktrees from this input.
+	 * @param activeWorktreePaths Exact live-session references that exclude an
+	 *   otherwise valid durable record; never a source of adoption authority.
 	 */
 	startFilling(activeWorktreePaths?: Set<string>): void {
 		if (this.stopped) return;
@@ -605,6 +620,9 @@ export class WorktreePool {
 			if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:claim", performance.now() - diagStart, counters);
 		};
 		const entry = this.pool.shift();
+		// Once removed, ownership transfers to the session/goal lifecycle. Publish
+		// before any Git mutation so a crash cannot leave stale pool authority.
+		if (entry) this.recordEntries();
 		if (!entry) {
 			if (counters) counters.empty = 1;
 			recordClaimTimer();
@@ -1002,6 +1020,7 @@ export class WorktreePool {
 					}
 
 					this.pool.push(entry);
+					this.recordEntries();
 					if (counters) counters.entriesCreated++;
 					console.log(`[worktree-pool] Ready${multi ? " (multi-repo)" : ""}: ${branchName} (pool: ${this.pool.length}/${this.targetSize})`);
 				} catch (err) {
@@ -1020,7 +1039,142 @@ export class WorktreePool {
 		}
 	}
 
-	/** Push a pre-existing pool entry into the in-memory pool. Used by the boot sweeper. */
+	private recordEntries(): void {
+		if (!this.recordStore || !this.projectId) return;
+		const entries: PoolEntryRecord[] = this.pool.map(entry => ({
+			branchName: entry.branchName,
+			worktreePath: entry.worktreePath,
+			...(entry.worktrees ? { worktrees: entry.worktrees.map(worktree => ({ ...worktree })) } : {}),
+			createdAt: entry.createdAt,
+		}));
+		try {
+			this.recordStore.replace(this.projectId, this.repoPath, entries);
+		} catch (error) {
+			console.warn("[worktree-pool] Failed to record pool entries:", error);
+		}
+	}
+
+	/**
+	 * Adopt only entries backed by this project's durable record and an exact,
+	 * current Git path/branch match in every repository. Any live-session path
+	 * overlap rejects the complete entry. Rejected paths are never mutated.
+	 */
+	private async adoptRecordedEntries(activeWorktreePaths?: Set<string>): Promise<void> {
+		if (!this.recordStore || !this.projectId) return;
+		const recorded = this.recordStore.read(this.projectId);
+		if (recorded.entries.length === 0) return;
+
+		if (!recorded.repoPath
+			|| normalizeWorktreeHostPath(recorded.repoPath) !== normalizeWorktreeHostPath(this.repoPath)) {
+			console.log(`[worktree-pool] Discarding ${recorded.entries.length} recorded entry(ies): repository path changed`);
+			this.recordStore.replace(this.projectId, this.repoPath, []);
+			return;
+		}
+
+		const active = [...(activeWorktreePaths ?? [])]
+			.map(candidate => normalizeWorktreeHostPath(candidate))
+			.filter((candidate): candidate is string => !!candidate);
+		const conflictsWithLiveSession = (candidatePath: string): boolean => {
+			const candidate = normalizeWorktreeHostPath(candidatePath);
+			if (!candidate) return true;
+			return active.some(reference =>
+				reference === candidate
+				|| reference.startsWith(`${candidate}/`)
+				|| candidate.startsWith(`${reference}/`),
+			);
+		};
+
+		const components = this.componentsResolver?.() ?? [];
+		const configuredRepos = [...new Set(components.map(component => component.repo))];
+		const expectsMultiRepo = configuredRepos.some(repo => repo !== ".");
+		const gitLists = new Map<string, Promise<Map<string, string | undefined>>>();
+		const listGitWorktrees = (repoPath: string): Promise<Map<string, string | undefined>> => {
+			const key = normalizeWorktreeHostPath(repoPath) ?? repoPath;
+			let pending = gitLists.get(key);
+			if (!pending) {
+				pending = this.execGit(["worktree", "list", "--porcelain"], { cwd: repoPath, timeout: 10_000 })
+					.then(({ stdout }) => new Map(parseGitWorktreeList(stdout.toString()).map(worktree => [
+						normalizeWorktreeHostPath(worktree.path) ?? "",
+						worktree.branch,
+					])));
+				gitLists.set(key, pending);
+			}
+			return pending;
+		};
+		const gitMatches = async (repoPath: string, worktreePath: string, branchName: string): Promise<boolean> => {
+			const normalized = normalizeWorktreeHostPath(worktreePath);
+			if (!normalized) return false;
+			try {
+				const worktrees = await listGitWorktrees(repoPath);
+				return worktrees.has(normalized) && worktrees.get(normalized) === branchName;
+			} catch (error) {
+				console.warn(`[worktree-pool] Could not verify recorded worktree in ${repoPath}; leaving it untouched:`, error);
+				return false;
+			}
+		};
+
+		const adopted: PoolEntry[] = [];
+		const adoptedPaths = new Set<string>();
+		const adoptedBranches = new Set<string>();
+		let rejected = 0;
+		for (const entry of recorded.entries) {
+			let usable = isPoolBranch(entry.branchName) && !conflictsWithLiveSession(entry.worktreePath);
+			if (usable && entry.worktrees) {
+				const repoNames = entry.worktrees.map(worktree => worktree.repo);
+				const repoPaths = entry.worktrees.map(worktree => normalizeWorktreeHostPath(worktree.repoPath));
+				const worktreePaths = entry.worktrees.map(worktree => normalizeWorktreeHostPath(worktree.worktreePath));
+				const configuredIndexes = repoNames.map(repo => configuredRepos.indexOf(repo));
+				usable = expectsMultiRepo
+					&& entry.worktrees.length > 0
+					&& new Set(repoNames).size === repoNames.length
+					&& repoPaths.every((repoPath, index) => !!repoPath && repoPaths.indexOf(repoPath) === index)
+					&& worktreePaths.every((worktreePath, index) => !!worktreePath && worktreePaths.indexOf(worktreePath) === index)
+					&& configuredIndexes.every((index, position) => index >= 0 && (position === 0 || index > configuredIndexes[position - 1]!));
+				for (const worktree of entry.worktrees) {
+					const expectedRepoPath = path.join(this.repoPath, worktree.repo === "." ? "" : worktree.repo);
+					const expectedWorktreePath = path.join(entry.worktreePath, worktree.repo === "." ? "" : worktree.repo);
+					const normalizedContainer = normalizeWorktreeHostPath(entry.worktreePath);
+					const normalizedExpectedWorktree = normalizeWorktreeHostPath(expectedWorktreePath);
+					const liesWithinContainer = !!normalizedContainer && !!normalizedExpectedWorktree
+						&& (worktree.repo === "."
+							? normalizedExpectedWorktree === normalizedContainer
+							: normalizedExpectedWorktree.startsWith(`${normalizedContainer}/`));
+					usable = usable
+						&& liesWithinContainer
+						&& normalizeWorktreeHostPath(worktree.repoPath) === normalizeWorktreeHostPath(expectedRepoPath)
+						&& normalizeWorktreeHostPath(worktree.worktreePath) === normalizedExpectedWorktree
+						&& !conflictsWithLiveSession(worktree.worktreePath)
+						&& await gitMatches(worktree.repoPath, worktree.worktreePath, entry.branchName);
+				}
+			} else if (usable) {
+				usable = !expectsMultiRepo && await gitMatches(this.repoPath, entry.worktreePath, entry.branchName);
+			}
+			const normalizedEntryPath = normalizeWorktreeHostPath(entry.worktreePath);
+			if (!usable || !normalizedEntryPath || adoptedPaths.has(normalizedEntryPath) || adoptedBranches.has(entry.branchName)) {
+				rejected++;
+				continue;
+			}
+			adoptedPaths.add(normalizedEntryPath);
+			adoptedBranches.add(entry.branchName);
+			adopted.push({
+				branchName: entry.branchName,
+				worktreePath: entry.worktreePath,
+				...(entry.worktrees ? { worktrees: entry.worktrees.map(worktree => ({ ...worktree })) } : {}),
+				createdAt: entry.createdAt,
+			});
+		}
+
+		this.pool.push(...adopted);
+		// Drop every stale/mismatched record. This only revokes adoption authority;
+		// it never authorizes repair or deletion of the referenced directory.
+		this.recordEntries();
+		if (adopted.length > 0 || rejected > 0) {
+			console.log(`[worktree-pool] Reused ${adopted.length} pre-built worktree(s) from the previous run`
+				+ (rejected ? ` (${rejected} invalid record(s) left untouched)` : ""));
+		}
+	}
+
+	/** Test seam for an explicitly supplied same-process entry; never persisted as restart authority. */
 	registerExternalEntry(branchName: string, worktreePath: string): void {
 		if (this.stopped || !isPoolBranch(branchName)) return;
 		// Avoid duplicates
@@ -1033,8 +1187,8 @@ export class WorktreePool {
 
 	/**
 	 * Clean up only the entries still held by this pool instance (worktree remove
-	 * + local branch delete). Called during graceful gateway shutdown and explicit
-	 * project removal (`removeWorktreePool`).
+	 * + local branch delete). Used for explicit project removal; graceful gateway
+	 * shutdown stops and retains ready entries instead.
 	 */
 	async drain(): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
@@ -1046,6 +1200,8 @@ export class WorktreePool {
 		// entries for a pool being torn down.
 		await this.stop();
 		const entries = this.pool.splice(0);
+		// Revoke restart adoption authority before destructive cleanup starts.
+		this.recordEntries();
 		if (entries.length === 0) {
 			if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:drain", performance.now() - diagStart, { entries: 0, skippedEmpty: 1 });
 			return;
