@@ -4,7 +4,8 @@ import path from "node:path";
 import { parse, parseDocument } from "yaml";
 import { fileURLToPath } from "node:url";
 import type { GrantPolicy } from "./role-store.js";
-import { profile } from "./profiling.js";
+import { PackResolver, ToolLoader } from "./pack-resolver.js";
+import type { EntityType, LoadedEntity, PackEntry, ResolvedEntity } from "./pack-types.js";
 import { parseContributions, computeRendererKind, type ToolContributions } from "./tool-contributions.js";
 import { __resetToolExtensionPreflightDiagnostics, isIgnoredToolGroupDir, logToolExtensionDiagnostic, preflightConfigBobbitExtension, preflightConfigExtensionFile, type ToolExtensionDiagnostic } from "./tool-extension-preflight.js";
 
@@ -181,9 +182,11 @@ function defaultBuiltinToolsDir(): string {
  */
 function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	const tools: BaseToolInfo[] = [];
+	const seen = new Set<string>();
 
 	try {
-		const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+		const entries = fs.readdirSync(toolsDir, { withFileTypes: true })
+			.sort((a, b) => a.name.localeCompare(b.name));
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
@@ -191,14 +194,16 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 			const groupDir = entry.name;
 			const groupPath = path.join(toolsDir, groupDir);
 			try {
-				const files = fs.readdirSync(groupPath, { withFileTypes: true });
+				const files = fs.readdirSync(groupPath, { withFileTypes: true })
+					.sort((a, b) => a.name.localeCompare(b.name));
 				for (const file of files) {
 					if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
 					const filePath = path.join(groupPath, file.name);
 					try {
 						const raw = fs.readFileSync(filePath, "utf-8");
 						const data = parse(raw);
-						if (data && typeof data === "object" && data.name) {
+						if (data && typeof data === "object" && typeof data.name === "string" && !seen.has(data.name.toLowerCase())) {
+							seen.add(data.name.toLowerCase());
 							tools.push({
 								name: data.name,
 								description: data.description || "",
@@ -232,7 +237,8 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 			try {
 				const raw = fs.readFileSync(filePath, "utf-8");
 				const data = parse(raw);
-				if (data && typeof data === "object" && data.name) {
+				if (data && typeof data === "object" && typeof data.name === "string" && !seen.has(data.name.toLowerCase())) {
+					seen.add(data.name.toLowerCase());
 					tools.push({
 						name: data.name,
 						description: data.description || "",
@@ -399,14 +405,11 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
  * that powers `/api/tools` (design §3.2). Runtime resolution and the config
  * API therefore return the SAME tool set for any pack arrangement (finding #1).
  *
- * The ONE legacy exception, preserved byte-identical, is the builtin ↔ user
- * `toolsDir` pair: if the user layer defines a group, it shadows that ENTIRE
- * same-named group in the BUILTIN layer (the pre-cascade two-layer behavior
- * pinned by `tests/e2e/tools-cascade.spec.ts` etc.). This whole-group replace
- * is identical to a by-name merge in practice because customizing a builtin
- * tool copies the WHOLE group into `toolsDir` first (see `updateToolMetadata`).
+ * Every layer is a pure **by-name overlay**: a partial higher-priority group
+ * leaves unrelated lower-priority siblings available. This is the same merge
+ * contract used by ConfigCascade in production.
  *
- * Market-pack layers are pure **by-name overlays**: they add new tools and may
+ * Market-pack layers add new tools and may
  * override an individual same-named tool, but NEVER shadow the rest of a
  * builtin/user group. So installing a market pack that touches a shared group
  * (e.g. `tools/shell/extra.yaml`) can never drop builtin tools like `bash`.
@@ -416,7 +419,7 @@ function toolDependsOnInvalidGroupExtension(tool: BaseToolInfo, invalidGroupExte
  * docs/design/pack-based-marketplace.md §3.2 / finding #1.
  */
 function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
-	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir, marketRoots));
+	return resolveStandaloneToolEntries(toolsDir, builtinToolsDir, marketRoots).map((entry) => entry.item);
 }
 
 // Exact shipped Agent-group snapshots that metadata customization copied into
@@ -448,76 +451,80 @@ function isHistoricalUnmodifiedAgentGroup(toolsDir: string): boolean {
 	}
 }
 
-function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
-	// Ordered layers, low→high priority. The builtin layer is lowest, the
-	// scope's own user `toolsDir` overlay is highest, market-pack tool roots sit
-	// in between (caller orders them server < global-user < project, design §3.2).
-	// Each market layer carries its pack-activation `disabledTools` set so a
-	// disabled pack tool is dropped at winner selection — mirroring the
-	// ConfigCascade activation filter so runtime and `/api/tools` never split-brain.
-	const layers: Array<{ dir: string; isBuiltin: boolean; disabledTools?: Set<string> }> = [];
-	if (builtinToolsDir) layers.push({ dir: builtinToolsDir, isBuiltin: true });
-	for (const r of marketRoots) {
-		// Whole inactive/default-disabled packs remain classified for diagnostics via
-		// getInactiveToolContribution(), but must not register any active providers.
-		if (r.inactiveReason) continue;
-		layers.push({
-			dir: r.dir,
-			isBuiltin: false,
-			disabledTools: r.disabledTools && r.disabledTools.length > 0 ? new Set(r.disabledTools) : undefined,
+function resolvedEntrySource(tool: BaseToolInfo): LoadedEntity<unknown> {
+	return {
+		name: tool.name,
+		item: tool,
+		source: { baseDir: tool.baseDir, filePath: tool.filePath },
+	};
+}
+
+/**
+ * Adapt legacy standalone roots into the authoritative PackResolver primitive.
+ * Production managers receive ConfigCascade entries instead; this path exists for
+ * focused tests and embedders which construct ToolManager directly.
+ */
+function resolveStandaloneToolEntries(
+	toolsDir: string,
+	builtinToolsDir?: string,
+	marketRoots: MarketToolRoot[] = [],
+): ResolvedEntity<BaseToolInfo>[] {
+	const entries: PackEntry[] = [];
+	if (builtinToolsDir) {
+		const tools = scanToolsDirCached(builtinToolsDir, builtinToolsDir);
+		entries.push({
+			id: "builtin",
+			kind: "builtin",
+			scope: "builtin",
+			path: path.dirname(builtinToolsDir),
+			readOnly: true,
+			layout: "defaults-tree",
+			preloaded: { tools: tools.map(resolvedEntrySource) },
 		});
 	}
-	layers.push({ dir: toolsDir, isBuiltin: false }); // user `toolsDir` (highest)
-	const userIdx = layers.length - 1;
 
-	const invalidUserGroupExtensions = new Set<string>();
-	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir)) {
-		logToolExtensionDiagnostic(diagnostic);
-		invalidUserGroupExtensions.add(diagnostic.groupDir);
+	marketRoots.forEach((root, index) => {
+		if (root.inactiveReason) return;
+		const tools = scanToolsDirCached(root.dir, root.dir);
+		entries.push({
+			id: `legacy:market:${index}`,
+			kind: "legacy-implicit",
+			scope: "project",
+			path: path.dirname(root.dir),
+			readOnly: true,
+			layout: "defaults-tree",
+			preloaded: { tools: tools.map(resolvedEntrySource) },
+		});
+	});
+
+	let userTools = scanToolsDirCached(toolsDir, toolsDir);
+	if (isHistoricalUnmodifiedAgentGroup(toolsDir)) {
+		userTools = userTools.filter((tool) => tool.groupDir !== "agent");
 	}
-	const invalidUserToolGroups = new Set<string>(invalidUserGroupExtensions);
-	const ignoreHistoricalAgentGroup = isHistoricalUnmodifiedAgentGroup(toolsDir);
-	const scanned = layers.map((l, idx) => {
-		let tools = scanToolsDirCached(l.dir, l.dir);
-		if (idx !== userIdx) return tools;
-		if (ignoreHistoricalAgentGroup) tools = tools.filter((tool) => tool.groupDir !== "agent");
-		for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) invalidUserToolGroups.add(diagnostic.groupDir);
-		return filterInvalidConfigTools(tools, invalidUserGroupExtensions);
+	const invalidGroupExtensions = new Set<string>();
+	for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(toolsDir, userTools)) {
+		logToolExtensionDiagnostic(diagnostic);
+		invalidGroupExtensions.add(diagnostic.groupDir);
+	}
+	userTools = filterInvalidConfigTools(userTools, invalidGroupExtensions);
+	entries.push({
+		id: "user:project",
+		kind: "user",
+		scope: "project",
+		path: path.dirname(toolsDir),
+		readOnly: false,
+		layout: "defaults-tree",
+		preloaded: { tools: userTools.map(resolvedEntrySource) },
 	});
 
-	// Builtin ↔ user whole-group replace (legacy, ONLY this pair): a group the
-	// USER layer defines fully shadows the SAME group in the BUILTIN layer.
-	// Market layers neither own nor are shadowed by groups — they overlay by
-	// tool NAME only (design §3.2 / finding #1). If any config tool/extension in
-	// the group failed preflight, disable whole-group shadowing so lower-priority
-	// builtins can still provide per-tool fallbacks while valid config tools keep
-	// winning by name.
-	const userGroups = new Set<string>();
-	for (const t of scanned[userIdx]) if (t.groupDir && !invalidUserToolGroups.has(t.groupDir)) userGroups.add(t.groupDir);
-
-	// Resolve the winner per tool name (higher layer wins — matches the
-	// PackResolver), but emit in first-seen low→high order so prompt/doc output
-	// order is stable (builtins first).
-	const winner = new Map<string, BaseToolInfo>();
-	const order: string[] = [];
-	scanned.forEach((tools, idx) => {
-		const isBuiltin = layers[idx].isBuiltin;
-		const disabledTools = layers[idx].disabledTools;
-		for (const t of tools) {
-			// Builtin tool in a group the user owns ⇒ whole-group shadowed.
-			if (isBuiltin && t.groupDir && userGroups.has(t.groupDir)) continue;
-			// pack-schema-v1 §7: a market-pack tool disabled via pack_activation
-			// drops out, so a lower-priority same-name tool (an earlier market
-			// layer or the builtin) becomes the resolved winner — exactly as the
-			// ConfigCascade does for the `/api/tools` listing. Builtins are never
-			// toggleable (no disabledTools set), so they are unaffected.
-			if (disabledTools && disabledTools.has(t.name)) continue;
-			if (!winner.has(t.name)) order.push(t.name);
-			winner.set(t.name, t); // higher layer overwrites lower by name
-		}
-	});
-
-	return order.map((n) => winner.get(n)!);
+	const filter = (entry: PackEntry, _type: EntityType, name: string): boolean => {
+		if (!entry.id.startsWith("legacy:market:")) return true;
+		const index = Number(entry.id.slice("legacy:market:".length));
+		const disabled = marketRoots[index]?.disabledTools ?? [];
+		const identity = name.toLowerCase();
+		return !disabled.some((candidate) => candidate.toLowerCase() === identity);
+	};
+	return new PackResolver(entries, [new ToolLoader()], filter).resolve<BaseToolInfo>("tools");
 }
 
 /** Recursively copy a directory, overwriting matching files while retaining extras. */
@@ -551,8 +558,8 @@ export function copyToolGroupWithSharedDependencies(sourceToolsDir: string, targ
 
 /**
  * Manages tool definitions and metadata.
- * Tool definitions are loaded from tools/<group>/*.yaml on every read.
- * Supports a two-layer cascade: builtinToolsDir (read-only) → toolsDir (overrides).
+ * Production reads hydrate ConfigCascade's authoritative PackResolver winners;
+ * standalone construction adapts its roots through that same resolver.
  */
 export class ToolManager {
 	private externalTools = new Map<string, { name: string; description: string; summary?: string; group: string; docs?: string; provider: ToolProvider }>();
@@ -568,10 +575,91 @@ export class ToolManager {
 	 * See docs/design/pack-based-marketplace.md §3.2 / finding #1.
 	 */
 	private marketRootsProvider?: () => Array<string | MarketToolRoot>;
+	private resolvedToolEntriesProvider?: () => ResolvedEntity<ToolInfo>[];
 
 	constructor(configDir: string, builtinToolsDir?: string) {
 		this.toolsDir = path.join(configDir, "tools");
 		this.builtinToolsDir = builtinToolsDir ?? defaultBuiltinToolsDir();
+	}
+
+	/**
+	 * Bind this manager to ConfigCascade's live authoritative YAML winners.
+	 * The provider is deliberately evaluated on every effective read so file,
+	 * customization, marketplace, and activation changes need no second cache.
+	 */
+	setResolvedToolEntriesProvider(provider: () => ResolvedEntity<ToolInfo>[]): void {
+		this.resolvedToolEntriesProvider = provider;
+	}
+
+	private resolvedEntries(): Array<ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>> {
+		if (this.resolvedToolEntriesProvider) return this.resolvedToolEntriesProvider();
+		return resolveStandaloneToolEntries(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+	}
+
+	private hydrateResolvedEntry(entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>): BaseToolInfo {
+		const identity = entry.name.toLowerCase();
+		const sourceBaseDir = entry.source?.baseDir
+			|| (entry.origin.path ? path.join(entry.origin.path, "tools") : undefined);
+		if (sourceBaseDir) {
+			const candidates = scanToolsDirCached(sourceBaseDir, sourceBaseDir);
+			const exactFile = entry.source?.filePath;
+			const hydrated = candidates.find((candidate) =>
+				exactFile ? path.resolve(candidate.filePath) === path.resolve(exactFile) : candidate.name === entry.name,
+			) ?? candidates.find((candidate) => candidate.name.toLowerCase() === identity);
+			if (hydrated) return hydrated;
+		}
+
+		// Preloaded adapters used by a few embedders may not have a physical root.
+		// Preserve the authoritative item's catalogue fields without selecting a
+		// different layer; runtime-only provider/contribution data is unavailable.
+		const item = entry.item as ToolInfo;
+		return {
+			name: item.name,
+			description: item.description,
+			group: item.group,
+			renderer: item.rendererFile,
+			docs: item.docs,
+			detail_docs: item.detail_docs,
+			grantPolicy: item.grantPolicy,
+			params: item.params,
+			groupDir: "",
+			filePath: entry.source?.filePath ?? "",
+			baseDir: sourceBaseDir ?? "",
+			contributions: { renderer: item.rendererFile, reserved: {} },
+		};
+	}
+
+	/** One read-consistent, source-aware YAML snapshot. */
+	private resolveHydratedSnapshot(): Array<{
+		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>;
+		tool: BaseToolInfo;
+	}> {
+		return this.resolvedEntries().map((entry) => ({ entry, tool: this.hydrateResolvedEntry(entry) }));
+	}
+
+	private resolveYamlSnapshot(): BaseToolInfo[] {
+		return this.resolveHydratedSnapshot().map(({ tool }) => tool);
+	}
+
+	private diagnosticEntry(
+		entry: ResolvedEntity<ToolInfo> | ResolvedEntity<BaseToolInfo>,
+		hydrated: BaseToolInfo,
+	): ResolvedEntity<ToolInfo> {
+		return {
+			...(entry as ResolvedEntity<ToolInfo>),
+			source: {
+				baseDir: hydrated.baseDir,
+				...(hydrated.filePath ? { filePath: hydrated.filePath } : {}),
+			},
+		};
+	}
+
+	/** Return the authoritative winner record for provenance diagnostics. */
+	getResolvedToolEntry(name: string): ResolvedEntity<ToolInfo> | undefined {
+		const identity = name.toLowerCase();
+		const resolved = this.resolveHydratedSnapshot()
+			.find(({ entry }) => entry.name.toLowerCase() === identity);
+		return resolved ? this.diagnosticEntry(resolved.entry, resolved.tool) : undefined;
 	}
 
 	private configGroupHasInvalidExtension(groupDir: string): boolean {
@@ -688,6 +776,23 @@ export class ToolManager {
 	getExtensionPath(groupDir: string, filename: string): string {
 		const baseDir = this.getToolGroupBaseDir(groupDir);
 		return path.join(baseDir, groupDir, filename);
+	}
+
+	/**
+	 * Resolve an extension relative to the exact winning tool definition.
+	 * Prefer the winner's declared bobbit-extension filename; a fallback is useful
+	 * for fixed group support modules which have no provider declaration.
+	 */
+	resolveToolExtensionPath(toolName: string, fallbackFilename?: string): string | undefined {
+		const identity = toolName.toLowerCase();
+		const tool = this.resolveYamlSnapshot().find((candidate) => candidate.name.toLowerCase() === identity);
+		if (!tool) return undefined;
+		const bobbitExtension = tool.provider?.type === "bobbit-extension";
+		const filename = bobbitExtension
+			? (tool.provider?.extension ?? fallbackFilename ?? "extension.ts")
+			: fallbackFilename;
+		if (!filename) return undefined;
+		return path.resolve(tool.baseDir, tool.groupDir, filename);
 	}
 
 	/**
@@ -885,7 +990,7 @@ export class ToolManager {
 
 	/** Returns all tools, re-scanning the YAML directory on every call. */
 	getAvailableTools(scopedContext?: ScopedToolContext): ToolInfo[] {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		const result: ToolInfo[] = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
@@ -936,7 +1041,7 @@ export class ToolManager {
 				return { name: ext.name, description: ext.description, group: ext.group, docs: ext.docs, detail_docs: undefined, hasRenderer: false, rendererFile: undefined, grantPolicy: undefined, providers: pi?.providers };
 			}
 		}
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
 		if (base) {
 			const pi = this.scopedPiToolGroups(scopedContext).get(nameLower);
@@ -964,7 +1069,7 @@ export class ToolManager {
 	 * Called at startup and rematerialized alongside prompt docs when definitions change.
 	 */
 	generateDetailDocs(stateDir: string): void {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		this.materializeDetailDocs(stateDir, tools);
 	}
 
@@ -1004,15 +1109,16 @@ export class ToolManager {
 	 * If `toolNames` is provided, only includes those tools; otherwise includes all.
 	 */
 	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext): string {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		if (stateDir) this.materializeDetailDocs(stateDir, tools);
+		const requested = toolNames ? new Set(toolNames.map((name) => name.toLowerCase())) : undefined;
 
 		type Entry = { name: string; summary: string; params?: string[] };
 		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();
 		const included = new Set<string>();
 
 		for (const tool of tools) {
-			if (toolNames && !toolNames.includes(tool.name)) continue;
+			if (requested && !requested.has(tool.name.toLowerCase())) continue;
 			const group = tool.group;
 			const summary = tool.summary ?? tool.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: tool.groupDir, entries: [] });
@@ -1022,7 +1128,7 @@ export class ToolManager {
 
 		// Include external tools (e.g. MCP) — no params, no inlined docs.
 		for (const ext of this.externalTools.values()) {
-			if (toolNames && !toolNames.includes(ext.name)) continue;
+			if (requested && !requested.has(ext.name.toLowerCase())) continue;
 			const group = ext.group;
 			const summary = ext.summary ?? ext.description;
 			if (!grouped.has(group)) grouped.set(group, { groupDir: '', entries: [] });
@@ -1032,7 +1138,7 @@ export class ToolManager {
 
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
 			if (included.has(entry.runtimeName.toLowerCase())) continue;
-			if (toolNames && !toolNames.includes(entry.runtimeName)) continue;
+			if (requested && !requested.has(entry.runtimeName.toLowerCase())) continue;
 			const info = this.piToolInfoFromGroup(entry);
 			if (!grouped.has(info.group)) grouped.set(info.group, { groupDir: '', entries: [] });
 			grouped.get(info.group)!.entries.push({ name: info.name, summary: info.description });
@@ -1085,10 +1191,11 @@ export class ToolManager {
 
 	/** Returns the provider info for a tool, or undefined if not found. */
 	getToolProvider(name: string, scopedContext?: ScopedToolContext): ToolProvider | undefined {
-		const ext = this.externalTools.get(name);
+		const identity = name.toLowerCase();
+		const ext = [...this.externalTools.values()].find((candidate) => candidate.name.toLowerCase() === identity);
 		if (ext) return ext.provider;
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const base = tools.find((t) => t.name === name);
+		const tools = this.resolveYamlSnapshot();
+		const base = tools.find((t) => t.name.toLowerCase() === identity);
 		if (base?.provider) return base.provider;
 		const pi = this.scopedPiToolGroups(scopedContext).get(name.toLowerCase());
 		const provider = pi?.providers[0];
@@ -1097,8 +1204,8 @@ export class ToolManager {
 
 	/**
 	 * Resolve the WINNING tool's on-disk location + extension-host contribution
-	 * metadata, sourced from `loadToolDefinitions()` so it honors the SAME pack
-	 * precedence/shadowing every other resolution uses (design §4b). Unlike
+	 * metadata, sourced from the hydrated authoritative snapshot so it honors the
+	 * SAME pack precedence/shadowing every other resolution uses (design §4b). Unlike
 	 * `getToolProviders()` (which gates on `provider:` for the MCP/extension
 	 * activation path), this returns location for ANY scanned tool — a pack tool
 	 * declaring `renderer:`/`actions:` needs NO `provider:` to be served/dispatched.
@@ -1113,9 +1220,10 @@ export class ToolManager {
 		actionNames?: string[];
 	} | undefined {
 		const nameLower = name.toLowerCase();
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const base = tools.find((t) => t.name.toLowerCase() === nameLower);
-		if (!base) return undefined;
+		const match = this.resolveHydratedSnapshot()
+			.find(({ entry }) => entry.name.toLowerCase() === nameLower);
+		if (!match) return undefined;
+		const base = match.tool;
 		const c = base.contributions;
 		return {
 			baseDir: base.baseDir,
@@ -1132,7 +1240,7 @@ export class ToolManager {
 
 	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
 	getToolProviders(scopedContext?: ScopedToolContext): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		const tools = this.resolveYamlSnapshot();
 		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
 		for (const tool of tools) {
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
