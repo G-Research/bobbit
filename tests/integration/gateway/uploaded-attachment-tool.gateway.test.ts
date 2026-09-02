@@ -3,8 +3,14 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { ToolManager } from "../../../src/server/agent/tool-manager.js";
 import { computeToolActivationArgs, tagAllowedTools } from "../../../src/server/agent/tool-activation.js";
+import {
+	TOOL_EXTENSION_ADAPTER_MANIFEST,
+	TOOL_EXTENSION_TARGETS_ENV,
+	type ToolExtensionAdapterManifest,
+} from "../../../src/server/agent/tool-extension-activation.js";
 import {
 	persistUploadedAttachmentOccurrence,
 	setUploadedAttachmentRootForTesting,
@@ -39,7 +45,7 @@ describe("uploaded attachment remote-agent tool integration", () => {
 		fs.rmSync(temp, { recursive: true, force: true });
 	});
 
-	it("is discovered by the real YAML registry and activated for an allowed session", () => {
+	it("is discovered by the real YAML registry and activated for an allowed session", async () => {
 		const configDir = path.join(temp, "config");
 		fs.mkdirSync(configDir, { recursive: true });
 		const builtinTools = path.resolve("defaults", "tools");
@@ -48,10 +54,35 @@ describe("uploaded attachment remote-agent tool integration", () => {
 		expect(provider).toMatchObject({ type: "bobbit-extension", extension: "extension.ts" });
 
 		const activation = computeToolActivationArgs(tagAllowedTools(["session_attachment"], manager), manager);
-		const attachmentExtensionIndex = activation.args.findIndex((value, index) =>
-			activation.args[index - 1] === "--extension" && value.replaceAll("\\", "/").endsWith("/attachments/extension.ts"),
-		);
-		expect(attachmentExtensionIndex).toBeGreaterThan(0);
+		const targetPath = path.join(builtinTools, "attachments", "extension.ts");
+		const targetUrl = pathToFileURL(fs.realpathSync.native(targetPath)).href;
+		const targets = JSON.parse(activation.env[TOOL_EXTENSION_TARGETS_ENV] ?? "{}") as Record<string, string>;
+		const target = Object.entries(targets).find(([, url]) => url === targetUrl);
+		expect(target, "filtered activation must retain the authoritative attachment target").toBeDefined();
+		const [adapterId] = target!;
+		const extensionPaths = activation.args.filter((_value, index) => activation.args[index - 1] === "--extension");
+		expect(extensionPaths).not.toContain(targetPath);
+		const adapterPath = extensionPaths.find((candidate) => {
+			const manifestPath = path.join(path.dirname(candidate), TOOL_EXTENSION_ADAPTER_MANIFEST);
+			if (!fs.existsSync(manifestPath)) return false;
+			const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ToolExtensionAdapterManifest;
+			return manifest.adapterId === adapterId;
+		});
+		expect(adapterPath, "activation must pass the winner-filtered adapter to Pi").toBeDefined();
+		const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(adapterPath!), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf8")) as ToolExtensionAdapterManifest;
+		expect(manifest.allowedToolNames).toEqual(["session_attachment"]);
+
+		let registered: any;
+		const previousTargets = process.env[TOOL_EXTENSION_TARGETS_ENV];
+		try {
+			process.env[TOOL_EXTENSION_TARGETS_ENV] = activation.env[TOOL_EXTENSION_TARGETS_ENV];
+			const adapter = await import(pathToFileURL(adapterPath!).href);
+			adapter.default({ registerTool: (tool: unknown) => { registered = tool; } });
+		} finally {
+			if (previousTargets === undefined) delete process.env[TOOL_EXTENSION_TARGETS_ENV];
+			else process.env[TOOL_EXTENSION_TARGETS_ENV] = previousTargets;
+		}
+		expect(registered?.name).toBe("session_attachment");
 	});
 
 	it("registers a callable tool that sends only a session-bound bounded read request", async () => {

@@ -11,6 +11,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  TOOL_EXTENSION_ADAPTER_MANIFEST,
+  TOOL_EXTENSION_TARGETS_ENV,
+  type ToolExtensionAdapterManifest,
+} from "../../../src/server/agent/tool-extension-activation.ts";
 
 const {
   McpManager,
@@ -923,7 +929,12 @@ describe("SessionManager scoped MCP manager creation", () => {
       "  extension: extension.ts",
       "",
     ].join("\n"));
-    fs.writeFileSync(path.join(toolGroupDir, "extension.ts"), "export default function extension() {}\n");
+    fs.writeFileSync(path.join(toolGroupDir, "extension.ts"), [
+      "export default function extension(pi) {",
+      "  pi.registerTool({ name: 'project_scan_reconcile', execute: async () => 'project scanner callable' });",
+      "}",
+      "",
+    ].join("\n"));
 
     const projectId = "project-tool-route";
     fs.writeFileSync(path.join(registryStateDir, "projects.json"), JSON.stringify([{
@@ -1046,7 +1057,34 @@ describe("SessionManager scoped MCP manager creation", () => {
         projectId,
       );
       const extensionPath = path.join(toolGroupDir, "extension.ts");
-      assert.ok(activation.args.includes(extensionPath), `expected callable activation to include ${extensionPath}`);
+      const extensionUrl = pathToFileURL(fs.realpathSync.native(extensionPath)).href;
+      const targets = JSON.parse(activation.env[TOOL_EXTENSION_TARGETS_ENV] ?? "{}") as Record<string, string>;
+      const target = Object.entries(targets).find(([, url]) => url === extensionUrl);
+      assert.ok(target, `expected filtered activation to retain authoritative target ${extensionPath}`);
+      const [adapterId] = target;
+      const extensionArgs = activation.args.filter((_value: string, index: number) => activation.args[index - 1] === "--extension");
+      assert.equal(extensionArgs.includes(extensionPath), false, "raw project marketplace extension must not reach Pi argv");
+      const adapterPath = extensionArgs.find((candidate: string) => {
+        const manifestPath = path.join(path.dirname(candidate), TOOL_EXTENSION_ADAPTER_MANIFEST);
+        if (!fs.existsSync(manifestPath)) return false;
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ToolExtensionAdapterManifest;
+        return manifest.adapterId === adapterId;
+      });
+      assert.ok(adapterPath, `expected callable activation to include the filtered adapter for ${extensionPath}`);
+      const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(adapterPath), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf8")) as ToolExtensionAdapterManifest;
+      assert.deepEqual(manifest.allowedToolNames, ["project_scan_reconcile"]);
+
+      const registered = new Map<string, any>();
+      const previousTargets = process.env[TOOL_EXTENSION_TARGETS_ENV];
+      try {
+        process.env[TOOL_EXTENSION_TARGETS_ENV] = activation.env[TOOL_EXTENSION_TARGETS_ENV];
+        const adapter = await import(pathToFileURL(adapterPath).href);
+        adapter.default({ registerTool: (tool: any) => registered.set(tool.name, tool) });
+      } finally {
+        if (previousTargets === undefined) delete process.env[TOOL_EXTENSION_TARGETS_ENV];
+        else process.env[TOOL_EXTENSION_TARGETS_ENV] = previousTargets;
+      }
+      assert.equal(await registered.get("project_scan_reconcile")?.execute(), "project scanner callable");
     } finally {
       await pcm.closeAll();
       fs.rmSync(root, { recursive: true, force: true });

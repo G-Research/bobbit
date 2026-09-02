@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import * as Value from "typebox/value";
@@ -13,6 +14,11 @@ import agentExtension from "../../../defaults/tools/agent/extension.ts";
 import bobbitExtension from "../../../defaults/tools/bobbit/extension.ts";
 import { registerRpcBridgeFactory } from "../../../src/server/agent/rpc-bridge.ts";
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
+import {
+	TOOL_EXTENSION_ADAPTER_MANIFEST,
+	TOOL_EXTENSION_TARGETS_ENV,
+	type ToolExtensionAdapterManifest,
+} from "../../../src/server/agent/tool-extension-activation.ts";
 import { initPromptDirs } from "../../../src/server/agent/system-prompt.ts";
 import { ToolManager, __resetToolScanCache } from "../../../src/server/agent/tool-manager.ts";
 import { readAgentTranscript, TranscriptReaderError } from "../../../src/server/agent/transcript-reader.ts";
@@ -452,8 +458,25 @@ describe("focused tool contract refresh", () => {
 			return {
 				async start() {
 					const extensions = (options.args ?? []).flatMap((arg: string, index: number, args: string[]) => arg === "--extension" ? [args[index + 1]] : []);
-					assert.ok(extensions.includes(toolManager.getExtensionPath("bobbit", "extension.ts")));
-					assert.ok(extensions.includes(toolManager.getExtensionPath("agent", "extension.ts")));
+					const targets = JSON.parse(options.env?.[TOOL_EXTENSION_TARGETS_ENV] ?? "{}") as Record<string, string>;
+					const assertFilteredTarget = (targetPath: string, allowedToolNames: string[]) => {
+						const targetUrl = pathToFileURL(fs.realpathSync.native(targetPath)).href;
+						const target = Object.entries(targets).find(([, url]) => url === targetUrl);
+						assert.ok(target, `filtered activation must retain authoritative target ${targetPath}`);
+						const [adapterId] = target;
+						assert.equal(extensions.includes(targetPath), false, "raw winning extension must not reach Pi argv");
+						const adapterPath = extensions.find((candidate: string) => {
+							const manifestPath = path.join(path.dirname(candidate), TOOL_EXTENSION_ADAPTER_MANIFEST);
+							if (!fs.existsSync(manifestPath)) return false;
+							const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as ToolExtensionAdapterManifest;
+							return manifest.adapterId === adapterId;
+						});
+						assert.ok(adapterPath, `filtered adapter for ${targetPath} must reach Pi argv`);
+						const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(adapterPath), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf8")) as ToolExtensionAdapterManifest;
+						assert.deepEqual(manifest.allowedToolNames, allowedToolNames);
+					};
+					assertFilteredTarget(toolManager.getExtensionPath("bobbit", "extension.ts"), ["bobbit_read"]);
+					assertFilteredTarget(toolManager.getExtensionPath("agent", "extension.ts"), ["read_session"]);
 					assert.equal(extensions.includes(path.join(historicalAgentDir, "extension.ts")), false);
 					validationBridge(pi);
 					bobbitExtension(pi);
