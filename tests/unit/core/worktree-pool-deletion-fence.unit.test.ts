@@ -55,7 +55,11 @@ function dormantFixture(options: {
 	failRepoRoot?: boolean;
 } = {}) {
 	const projectId = options.projectId ?? "deleted-project";
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-delete-"));
+	const lexicalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-delete-"));
+	// Hosted Windows can expose os.tmpdir() through RUNNER~1. Use its native
+	// spelling so this fake-Git fixture does not accidentally exercise the
+	// separately covered linked-worktree alias cleanup protocol.
+	const root = fs.realpathSync.native(lexicalRoot);
 	tempRoots.push(root);
 	const repoPath = path.join(root, "repo");
 	const worktreePath = path.join(root, "worktrees", "pool-_pool-recorded");
