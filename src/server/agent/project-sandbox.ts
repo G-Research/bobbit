@@ -26,6 +26,7 @@ import {
 	projectSandboxVolumeCreateArgs,
 	projectSandboxVolumeNames,
 	SANDBOX_STATE_MOUNTS,
+	sandboxStateMountHostPath,
 	validatedE2ERunId,
 	type PackLocalDataMountPlan,
 } from "./docker-args.js";
@@ -283,11 +284,10 @@ export function getStateDirMountStaleness(
 	expected: StateDirMountExpectation & { sessionId?: string },
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
-	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
+	for (const stateMount of SANDBOX_STATE_MOUNTS) {
+		const { sub, readOnly } = stateMount;
 		const destination = `/bobbit-state/${sub}`;
-		const hostPath = sub === "sessions" && expected.sessionId
-			? sessionStateSessionsRoot(expected.stateDir, expected.sessionId)
-			: path.join(expected.stateDir, sub);
+		const hostPath = sandboxStateMountHostPath(stateMount, expected.stateDir, expected.sessionId);
 		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
 		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
 		const compatible = stateMounts.some((mount) => {
