@@ -1127,6 +1127,20 @@ function waitForConfigLockRetry(attempt: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, 25 * (attempt + 1)));
 }
 
+const WORKTREE_REMOVAL_ATTEMPTS = 4;
+
+function isTransientWorktreeRemovalContention(err: unknown): boolean {
+	const code = (err as NodeJS.ErrnoException | null)?.code;
+	if (code === "EACCES" || code === "EBUSY" || code === "ENOTEMPTY" || code === "EPERM") return true;
+	return /(?:permission denied|access is denied|being used by another process|resource busy|directory not empty)/i.test(gitErrorText(err));
+}
+
+function waitForWorktreeRemovalRetry(attempt: number): Promise<void> {
+	// Hosted Windows can briefly retain checkout handles after agent shutdown.
+	// Four attempts keep the purge barrier bounded to 350 ms of backoff.
+	return new Promise(resolve => setTimeout(resolve, 50 * (2 ** attempt)));
+}
+
 async function readBranchUpstream(
 	worktreePath: string,
 	branchName: string,
@@ -1492,44 +1506,57 @@ export async function cleanupWorktree(
 	let removalError: unknown;
 
 	// Snapshot construction performs native alias, porcelain, and marker I/O.
-	// Revalidate after all of it, immediately before Git can recursively remove
-	// the registered path, so a replacement generation never reaches Git.
-	if (snapshot) await assertWorktreeCleanupSnapshotCurrent(snapshot);
-
-	try {
-		// Existing aliases use Git's authoritative porcelain spelling. Missing
-		// coordinates retain the established operation-first cleanup behavior.
-		await runGit(["worktree", "remove", removalPath, "--force"], {
-			cwd: repoPath,
-		});
-	} catch (err) {
-		removalError = err;
-		// Preserve the old missing-repository warning/early return without making
-		// every successful cleanup pay a check-then-act race.
-		if (!await pathExists(repoPath)) {
-			console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
-			return;
-		}
-
-		// Keep an exact linked-worktree snapshot intact after a failed Git removal
-		// so the operation stays retryable and the postcondition below can reject.
-		// The basename fallback remains only for legacy missing/fake coordinates
-		// that have no filesystem identity snapshot.
-		if (!snapshot) {
-			const trimmedWorktreePath = worktreePath.trim();
-			const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
-				? path.basename(path.resolve(trimmedWorktreePath))
-				: "";
-			if (safeName) {
-				const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
-				try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
+	// Revalidate immediately before every destructive attempt. A transient
+	// Windows handle failure may be retried, but an ABA replacement at the same
+	// path can never reach a later Git command.
+	for (let attempt = 0; attempt < WORKTREE_REMOVAL_ATTEMPTS; attempt++) {
+		if (snapshot) await assertWorktreeCleanupSnapshotCurrent(snapshot);
+		try {
+			// Existing aliases use Git's authoritative porcelain spelling. Missing
+			// coordinates retain the established operation-first cleanup behavior.
+			await runGit(["worktree", "remove", removalPath, "--force"], {
+				cwd: repoPath,
+			});
+			removalError = undefined;
+			break;
+		} catch (err) {
+			removalError = err;
+			// Preserve the old missing-repository warning/early return without making
+			// every successful cleanup pay a check-then-act race.
+			if (!await pathExists(repoPath)) {
+				console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
+				return;
 			}
+
+			// Retry only a real linked-worktree generation. Missing/fake coordinates
+			// have no identity fence, and arbitrary Git failures are not transient.
+			if (!snapshot
+				|| !isTransientWorktreeRemovalContention(err)
+				|| attempt === WORKTREE_REMOVAL_ATTEMPTS - 1
+				|| !await pathRemainsStrict(snapshot.removalPath)) {
+				break;
+			}
+			await waitForWorktreeRemovalRetry(attempt);
+		}
+	}
+
+	// Keep an exact linked-worktree snapshot intact after a failed Git removal so
+	// the postcondition below can reject. The basename fallback remains only for
+	// legacy missing/fake coordinates that have no filesystem identity snapshot.
+	if (removalError && !snapshot) {
+		const trimmedWorktreePath = worktreePath.trim();
+		const safeName = trimmedWorktreePath && trimmedWorktreePath !== "." && trimmedWorktreePath !== ".."
+			? path.basename(path.resolve(trimmedWorktreePath))
+			: "";
+		if (safeName) {
+			const adminPath = path.join(repoPath, ".git", "worktrees", safeName);
+			try { await removeTargetedTree(adminPath); } catch { /* best-effort */ }
 		}
 	}
 
 	// Git can report a successful removal before the checkout directory has fully
-	// disappeared (notably on hosted Windows runners). Preserve one Git remove
-	// command, then recover only the root generation captured before Git acted.
+	// disappeared (notably on hosted Windows runners). After Git succeeds, recover
+	// only the root generation captured before Git acted.
 	// A replacement at the same linked-worktree pathname is not residue: the
 	// bounded remover's expected-root fence rejects it without deleting anything.
 	// Missing/fake coordinates retain their established operation-first recovery.

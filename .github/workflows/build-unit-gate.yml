@@ -55,7 +55,7 @@ jobs:
       - name: Unit gate
         run: npm run test:unit
         env:
-          VITEST_MAX_WORKERS: '3'
+          VITEST_MAX_WORKERS: '2'
 
   browser:
     name: Browser (${{ matrix.os }}, Node 22.19.0)
@@ -142,10 +142,10 @@ jobs:
           PI_AGENT_VERSION=$(node -p "require('./package.json').dependencies['@earendil-works/pi-coding-agent']")
           docker build --build-arg "PI_AGENT_VERSION=$PI_AGENT_VERSION" -t bobbit-agent docker/
 
+      # Keep the runner's group-aware defaults: Windows serializes the process-heavy
+      # relocate/API group while canonical browser E2E still uses two workers.
       - name: E2E gate
         run: npm run test:e2e
-        env:
-          E2E_V2_PW_WORKERS: '2'
 
   release-contract:
     name: Release contract

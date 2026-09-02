@@ -128,8 +128,8 @@ describe("native CI qualification workflows", () => {
 		assert.equal(unitGates[0]?.run, "npm run test:unit", "branch checks use the normal Vitest retry policy");
 		assert.deepEqual(
 			unitGates[0]?.env,
-			{ VITEST_MAX_WORKERS: "3" },
-			"every native runner must use the standard fixed Vitest worker count",
+			{ VITEST_MAX_WORKERS: "2" },
+			"every native runner must use the conservative two-worker Vitest count",
 		);
 	});
 
@@ -184,9 +184,11 @@ describe("native CI qualification workflows", () => {
 			BOBBIT_V2_PLAYWRIGHT_WORKERS: "2",
 		}, "every native runner must use two Browser workers");
 		assert.deepEqual(jobs.e2e.strategy.matrix, { os: expectedOs });
-		assert.deepEqual(stepByName(jobs.e2e.steps, "E2E gate").env, {
-			E2E_V2_PW_WORKERS: "2",
-		}, "every native runner must use two Playwright-backed E2E workers");
+		assert.equal(
+			stepByName(jobs.e2e.steps, "E2E gate").env,
+			undefined,
+			"E2E must retain the runner's group-aware defaults: Windows B=1/C=2; other runners B=2/C=2",
+		);
 	});
 
 	it("builds the version-matched sandbox image only for Linux E2E coverage", () => {
