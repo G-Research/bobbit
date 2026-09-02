@@ -18,6 +18,7 @@ import {
 	getStateDirMountStaleness,
 } from "../../../src/server/agent/project-sandbox.js";
 import { packLocalDataContainerDirectory, projectSandboxVolumeNames, type PackLocalDataMountPlan } from "../../../src/server/agent/docker-args.js";
+import { bobbitStateDir } from "../../../src/server/bobbit-dir.js";
 import { toDockerPath } from "../../../src/server/agent/rpc-bridge.js";
 import { SandboxManager } from "../../../src/server/agent/sandbox-manager.js";
 
@@ -45,6 +46,7 @@ function requiredStateMounts(stateDir: string) {
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
 		mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge", false, "ro"),
 		mount(path.join(stateDir, "aigw-dns-guard"), "/bobbit-state/aigw-dns-guard", false, "ro"),
+		mount(path.join(bobbitStateDir(), "tool-extension-activation"), "/bobbit-state/tool-extension-activation", false, "ro"),
 	];
 }
 
@@ -335,12 +337,37 @@ describe("SandboxManager pack local-data refresh", () => {
 });
 
 describe("ProjectSandbox state mount staleness", () => {
-	it("accepts the current required state mounts including read-only generated extension dirs", () => {
+	it("accepts the current required state mounts including the Headquarters-backed adapter dir", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir);
+		const adapterMount = mounts.find((entry) => entry.Destination === "/bobbit-state/tool-extension-activation");
 
-		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
-
+		assert.equal(adapterMount?.Source, path.join(bobbitStateDir(), "tool-extension-activation"));
+		assert.notEqual(adapterMount?.Source, path.join(stateDir, "tool-extension-activation"));
+		const result = getStateDirMountStaleness(mounts, { stateDir });
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("marks pre-upgrade containers stale when the Headquarters-backed adapter mount is missing", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/tool-extension-activation");
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /tool-extension-activation/);
+	});
+
+	it("rejects a project-local source for the Headquarters-backed adapter mount", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/tool-extension-activation"
+			? mount(path.join(stateDir, "tool-extension-activation"), entry.Destination, false, "ro")
+			: entry);
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /tool-extension-activation/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {
