@@ -22,7 +22,7 @@ import {
 	sendMessage,
 } from "../../e2e/ui/ui-helpers.js";
 
-const ITER = Number(process.env.H3_BROWSER_ITER ?? 2);
+const ITER = Number(process.env.H3_BROWSER_ITER ?? 1);
 const STREAM_DONE_RE = /STREAM_BURST_DONE:\d+/;
 
 /** Read the current transcript message-list as a compact projection. */

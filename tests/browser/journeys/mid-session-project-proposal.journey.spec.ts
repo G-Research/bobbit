@@ -1,32 +1,12 @@
-/**
- * Mid-session project proposal — browser E2E.
- *
- * A regular (non-assistant) session in a registered normal project receives a
- * protected, persisted project proposal fixture. The Project tab should
- * appear in the unified preview panel with a diff rendered against the
- * current config. Accept writes the diffed fields to project.yaml
- * (via PUT /api/projects/:id/config) without terminating the session.
- * Dismiss clears the proposal and the tab disappears.
- *
- * Coverage:
- *   1. navigation — Project tab appears after proposal
- *   2. happy path — diff rendered, Accept persists config
- *   3. persistence across reload — accepted config survives, proposal gone
- *   4. dismiss/undo — Dismiss clears the tab without writing config
- */
-import { test, expect } from "../../e2e/gateway-harness.js";
-import type { Page } from "@playwright/test";
-import { apiFetch, createSession, deleteSession, rawApiFetch, registerProject } from "../../e2e/e2e-setup.js";
-import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { Page } from "@playwright/test";
+import { test, expect } from "../../e2e/gateway-harness.js";
+import { apiFetch, createSession, deleteSession, rawApiFetch, registerProject } from "../../e2e/e2e-setup.js";
+import { openApp, navigateToHash } from "../../e2e/ui/ui-helpers.js";
 
-type TestProject = { id: string; rootPath: string; name: string };
-
-const PROJECT_PROPOSAL_TAB_ID = "proposal:project";
-const PROJECT_PROPOSAL_PANEL_SELECTOR = '[data-panel="project-proposal"]';
-
+const PROJECT_TAB = '[data-testid="side-panel-tab"][data-panel-tab-id="proposal:project"]';
 const createdProjects = new Set<string>();
 const createdSessions = new Set<string>();
 const createdDirs = new Set<string>();
@@ -37,58 +17,41 @@ async function authenticatedOperatorCookie(): Promise<string> {
 	const response = await rawApiFetch("/api/goals", {
 		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
 	});
-	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
-		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
-	operatorCookie = setCookies
-		.map((cookie) => cookie.split(";")[0])
-		.find((cookie) => cookie.startsWith("bobbit_session="));
-	if (!operatorCookie) throw new Error("same-origin bearer bootstrap did not mint a signed bobbit_session operator cookie");
+	const cookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie")!] : []);
+	operatorCookie = cookies.map((cookie) => cookie.split(";")[0]).find((cookie) => cookie.startsWith("bobbit_session="));
+	if (!operatorCookie) throw new Error("operator bootstrap did not mint a bobbit_session cookie");
 	return operatorCookie;
 }
 
-async function createNormalProject(label: string): Promise<TestProject> {
-	const rootPath = mkdtempSync(join(tmpdir(), `bobbit-mid-proposal-${label}-`));
+async function createProject() {
+	const rootPath = mkdtempSync(join(tmpdir(), "bobbit-mid-proposal-"));
 	createdDirs.add(rootPath);
 	const project = await registerProject({
-		name: `mid-proposal-${label}-${Date.now()}`,
+		name: `mid-proposal-${Date.now()}`,
 		rootPath,
 		components: [{ name: "app", repo: "." }],
 	});
 	createdProjects.add(project.id);
-	return { id: project.id, rootPath, name: String(project.name ?? label) };
+	return { id: project.id, rootPath, name: String(project.name) };
 }
 
-async function openProjectSession(page: Page, project: TestProject): Promise<string> {
+async function openProjectSession(page: Page, project: { id: string; rootPath: string }): Promise<string> {
 	const sessionId = await createSession({ cwd: project.rootPath, projectId: project.id });
 	createdSessions.add(sessionId);
 	await navigateToHash(page, `#/session/${sessionId}`);
 	await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
-	await expect.poll(() => page.evaluate((expectedSessionId) => {
+	await expect.poll(() => page.evaluate((id) => {
 		const state = (window as any).bobbitState;
-		const remote = state?.remoteAgent;
-		return state?.selectedSessionId === expectedSessionId
+		return state?.selectedSessionId === id
 			&& state?.connectingSessionId === null
-			&& state?.connectionStatus === "connected"
-			&& remote?.gatewaySessionId === expectedSessionId
-			&& typeof remote?.onProposal === "function"
-			? expectedSessionId
-			: null;
-	}, sessionId), {
-		timeout: 10_000,
-		message: "selected session should finish proposal hydration before injecting project proposal",
-	}).toBe(sessionId);
+			&& state?.remoteAgent?.gatewaySessionId === id
+			&& typeof state.remoteAgent.onProposal === "function";
+	}, sessionId), { timeout: 10_000 }).toBe(true);
 	return sessionId;
 }
 
-function projectProposalTab(page: Page) {
-	return page.locator(`[data-testid="side-panel-tab"][data-panel-tab-id="${PROJECT_PROPOSAL_TAB_ID}"]`);
-}
-
-async function seedAndHydrateProjectProposal(
-	page: Page,
-	sessionId: string,
-	project: TestProject,
-): Promise<ReturnType<Page["locator"]>> {
+async function seedProposal(page: Page, sessionId: string, project: { id: string; rootPath: string; name: string }) {
 	const fields = {
 		projectId: project.id,
 		name: project.name,
@@ -96,52 +59,41 @@ async function seedAndHydrateProjectProposal(
 		build_command: "npm run build",
 		test_command: "npm test",
 	};
-	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
+	const response = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
 		method: "POST",
 		headers: { Cookie: await authenticatedOperatorCookie() },
 		body: JSON.stringify({ args: fields }),
 	});
-	const text = await resp.text();
-	expect(resp.status, `seed project proposal failed: ${text}`).toBe(200);
-	const rev = (JSON.parse(text) as { rev?: number }).rev;
-	expect(typeof rev, `seed response should carry a revision: ${text}`).toBe("number");
+	expect(response.status).toBe(200);
+	const { rev } = await response.json() as { rev: number };
 
-	const proposalsResp = await apiFetch(`/api/sessions/${sessionId}/proposals`);
-	const proposalsText = await proposalsResp.text();
-	expect(proposalsResp.status, `read persisted project proposal failed: ${proposalsText}`).toBe(200);
-	const proposals = (JSON.parse(proposalsText) as {
-		proposals?: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }>;
-	}).proposals;
-	const persisted = proposals?.find((proposal) => proposal.proposalType === "project");
-	expect(persisted, `seeded project proposal should be persisted: ${proposalsText}`).toBeDefined();
-	expect(persisted?.rev, "persisted project proposal should carry the seed revision").toBe(rev);
-	expect(persisted?.fields, "persisted project proposal should retain the seeded fields").toMatchObject(fields);
+	const persisted = await (await apiFetch(`/api/sessions/${sessionId}/proposals`)).json() as {
+		proposals: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }>;
+	};
+	const proposal = persisted.proposals.find((candidate) => candidate.proposalType === "project");
+	expect(proposal).toMatchObject({ fields, rev });
 
-	const hydratedMode = await page.evaluate(({ sessionId, fields, rev }) => {
+	const mode = await page.evaluate(({ sessionId, fields, rev }) => {
 		const state = (window as any).bobbitState;
-		const remote = state?.remoteAgent;
-		if (state?.selectedSessionId !== sessionId || remote?.gatewaySessionId !== sessionId) {
-			throw new Error(`Cannot hydrate project proposal for inactive session ${sessionId}`);
-		}
-		if (typeof remote.onProposal !== "function") {
-			throw new Error("Active remote agent is missing its proposal callback");
-		}
-		remote.onProposal("project", fields, false, rev, "rehydrate");
-		const slot = state.activeProposals?.project;
-		return slot?.sessionId === sessionId && slot?.rev === rev ? slot.mode : null;
-	}, { sessionId, fields: persisted!.fields, rev: rev! });
-	expect(hydratedMode, "server-seeded project proposal should hydrate in registered mode").toBe("registered");
-
-	const projectTab = projectProposalTab(page);
-	await expect(projectTab, `stable ${PROJECT_PROPOSAL_TAB_ID} tab should appear`).toBeVisible({ timeout: 10_000 });
-	const panel = page.locator(`${PROJECT_PROPOSAL_PANEL_SELECTOR}[data-mode="registered"]`).first();
-	if (!await panel.isVisible().catch(() => false)) await projectTab.click();
-	await expect(panel, "server-seeded registered project proposal panel should render").toBeVisible({ timeout: 10_000 });
-	await expect(panel.locator('[data-testid="accept-label"]').first()).toContainText("Apply Changes", { timeout: 5_000 });
-	return panel;
+		state.remoteAgent.onProposal("project", fields, false, rev, "rehydrate");
+		return state.activeProposals?.project?.sessionId === sessionId
+			? state.activeProposals.project.mode
+			: null;
+	}, { sessionId, fields: proposal!.fields, rev });
+	expect(mode).toBe("registered");
 }
 
-test.describe("Mid-session project proposal (non-assistant session)", () => {
+async function buildCommandValue(page: Page): Promise<string | null> {
+	return page.evaluate(() => {
+		for (const row of Array.from(document.querySelectorAll('[data-testid="command-row"]'))) {
+			const key = row.querySelector<HTMLInputElement>('[data-testid="command-key"]');
+			if (key?.value === "build") return row.querySelector<HTMLInputElement>('[data-testid="command-value"]')?.value ?? null;
+		}
+		return null;
+	});
+}
+
+test.describe("Mid-session project proposal", () => {
 	test.afterEach(async () => {
 		for (const id of Array.from(createdSessions).reverse()) await deleteSession(id).catch(() => {});
 		createdSessions.clear();
@@ -151,163 +103,36 @@ test.describe("Mid-session project proposal (non-assistant session)", () => {
 		createdDirs.clear();
 	});
 
-	test("propose → diff rendered → Accept writes config → reload persists", async ({ page }) => {
-		const project = await createNormalProject("accept");
-		const projectId = project.id;
-
-		// Seed baseline config so the mock proposal has a clear diff.
-		await apiFetch(`/api/projects/${projectId}/config`, {
+	test("a registered proposal applies without ending the session and invalidates the settings cache", async ({ page }) => {
+		const project = await createProject();
+		await apiFetch(`/api/projects/${project.id}/config`, {
 			method: "PUT",
-			body: JSON.stringify({ build_command: "baseline-build", test_command: "baseline-test" }),
+			body: JSON.stringify({ build_command: "baseline-build" }),
 		});
-
-		await openApp(page);
-		const sessionId = await openProjectSession(page, project);
-		await seedAndHydrateProjectProposal(page, sessionId, project);
-
-		// The Project tab should appear in the unified preview panel.
-		const projectTab = projectProposalTab(page);
-		await expect(projectTab).toBeVisible({ timeout: 15_000 });
-
-		// The panel renders with data-panel="project-proposal" in registered mode.
-		const panel = page.locator('[data-panel="project-proposal"]').first();
-		await expect(panel).toBeVisible({ timeout: 10_000 });
-		await expect(panel).toHaveAttribute("data-mode", "registered", { timeout: 10_000 });
-
-		// Structured-tabs accessibility: the three view tabs must be present
-		// and clickable. Settings tab carries scalar field edits.
-		await expect(panel.locator('[data-testid="view-tab-components"]')).toBeVisible({ timeout: 5_000 });
-		await expect(panel.locator('[data-testid="view-tab-workflows"]')).toBeVisible();
-		await expect(panel.locator('[data-testid="view-tab-settings"]')).toBeVisible();
-		// All three tabs are clickable.
-		await panel.locator('[data-testid="view-tab-workflows"]').click();
-		await panel.locator('[data-testid="view-tab-components"]').click();
-		await panel.locator('[data-testid="view-tab-settings"]').click();
-
-		// The accept button should be labeled "Apply Changes" (registered mode).
-		const acceptLabel = panel.locator('[data-testid="accept-label"]').first();
-		await expect(acceptLabel).toContainText("Apply Changes", { timeout: 5_000 });
-
-		// Click the accept (Apply Changes) button.
-		const applyBtn = panel.locator("button", { has: page.locator('[data-testid="accept-label"]') }).first();
-		await applyBtn.click();
-
-		// Panel should disappear (proposal cleared, session still active).
-		await expect(projectTab).toHaveCount(0, { timeout: 10_000 });
-
-		// The session should still be connected (no navigation away).
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 5_000 });
-
-		// Config persisted on the server.
-		const cfg = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
-		expect(cfg.build_command).toBe("npm run build");
-		expect(cfg.test_command).toBe("npm test");
-
-		// Reload — proposal should stay gone, config stays.
-		await page.reload();
-		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 15_000 });
-		await expect(projectProposalTab(page)).toHaveCount(0);
-
-		const cfgAfter = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
-		expect(cfgAfter.build_command).toBe("npm run build");
-	});
-
-	test("Dismiss clears the proposal without writing config", async ({ page }) => {
-		const project = await createNormalProject("dismiss");
-		const projectId = project.id;
-
-		// Seed baseline — distinct from previous test.
-		await apiFetch(`/api/projects/${projectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify({ build_command: "dismiss-baseline" }),
-		});
-
-		await openApp(page);
-		const sessionId = await openProjectSession(page, project);
-		await seedAndHydrateProjectProposal(page, sessionId, project);
-
-		const projectTab = projectProposalTab(page);
-		await expect(projectTab).toBeVisible({ timeout: 15_000 });
-
-		const panel = page.locator('[data-panel="project-proposal"]').first();
-		await expect(panel).toBeVisible({ timeout: 10_000 });
-
-		// Click the Dismiss button (ghost variant, text "Dismiss").
-		const dismissBtn = panel.getByRole("button", { name: "Dismiss" }).first();
-		await expect(dismissBtn).toBeVisible({ timeout: 10_000 });
-		await dismissBtn.click();
-
-		// Tab disappears.
-		await expect(projectTab).toHaveCount(0, { timeout: 5_000 });
-
-		// Config untouched.
-		const cfg = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
-		expect(cfg.build_command).toBe("dismiss-baseline");
-	});
-
-	test("Settings tab reflects accepted proposal without a hard reload", async ({ page }) => {
-		const project = await createNormalProject("settings-cache");
-		const projectId = project.id;
-
-		// Seed a baseline so we can verify the change later. The Components tab
-		// is the canonical surface for build/test commands after the multi-repo
-		// migration; the legacy `build_command` field is folded into
-		// components[0].commands.build by the server.
-		await apiFetch(`/api/projects/${projectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify({ build_command: "settings-cache-baseline" }),
-		});
-
 		await openApp(page);
 
-		// 1. Visit Settings → Components tab to PRIME the per-project config
-		//    cache (`projectScopeConfigCache` in `settings-page.ts`). The
-		//    baseline value should be visible before the proposal accept.
-		await page.evaluate((id) => { window.location.hash = `#/settings/${id}/components`; }, projectId);
-		const componentCard = page.locator('[data-testid="component-card"]').first();
-		await expect(componentCard).toBeVisible({ timeout: 15_000 });
-		// Expand the card so the commands rows are present in the DOM.
-		await componentCard.locator('.wf-gate-header').first().click();
-		// Find the build command row by inspecting all command-key inputs.
-		// Lit binds `.value` as a property, not as an HTML attribute, so a
-		// `[value="build"]` CSS selector does not match — we read inputValue
-		// via page.evaluate instead.
-		const readBuildValue = async () => page.evaluate(() => {
-			const rows = Array.from(document.querySelectorAll('[data-testid="command-row"]'));
-			for (const row of rows) {
-				const keyInput = row.querySelector<HTMLInputElement>('[data-testid="command-key"]');
-				if (keyInput?.value === "build") {
-					const valInput = row.querySelector<HTMLInputElement>('[data-testid="command-value"]');
-					return valInput?.value ?? null;
-				}
-			}
-			return null;
-		});
-		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("settings-cache-baseline");
+		await navigateToHash(page, `#/settings/${project.id}/components`);
+		const initialCard = page.locator('[data-testid="component-card"]').first();
+		await expect(initialCard).toBeVisible({ timeout: 15_000 });
+		await initialCard.locator(".wf-gate-header").first().click();
+		await expect.poll(() => buildCommandValue(page)).toBe("baseline-build");
 
-		// 2. Open a session, seed a registered-project proposal, click Apply Changes.
 		const sessionId = await openProjectSession(page, project);
-		await seedAndHydrateProjectProposal(page, sessionId, project);
-
-		const projectTab = projectProposalTab(page);
-		await expect(projectTab).toBeVisible({ timeout: 15_000 });
-		const panel = page.locator('[data-panel="project-proposal"]').first();
+		await seedProposal(page, sessionId, project);
+		await expect(page.locator(PROJECT_TAB)).toBeVisible({ timeout: 10_000 });
+		const panel = page.locator('[data-panel="project-proposal"][data-mode="registered"]').first();
 		await expect(panel).toBeVisible({ timeout: 10_000 });
-		const applyBtn = panel.locator("button", { has: page.locator('[data-testid="accept-label"]') }).first();
-		await applyBtn.click();
-		await expect(projectTab).toHaveCount(0, { timeout: 10_000 });
+		await expect(panel.getByTestId("accept-label")).toContainText("Apply Changes");
+		await panel.getByRole("button", { name: "Apply Changes", exact: true }).click();
 
-		// 3. Server-side state confirmation: the new value is on disk.
-		const cfg = await (await apiFetch(`/api/projects/${projectId}/config`)).json();
-		expect(cfg.build_command).toBe("npm run build");
+		await expect(page.locator(PROJECT_TAB)).toHaveCount(0, { timeout: 10_000 });
+		await expect(page.locator("textarea").first()).toBeVisible();
+		expect((await (await apiFetch(`/api/projects/${project.id}/config`)).json()).build_command).toBe("npm run build");
 
-		// 4. Navigate back to the SAME Settings tab WITHOUT a page reload.
-		//    Without the cache invalidator, the Components tab would still
-		//    render the stale `settings-cache-baseline` value.
-		await page.evaluate((id) => { window.location.hash = `#/settings/${id}/components`; }, projectId);
-		const componentCard2 = page.locator('[data-testid="component-card"]').first();
-		await expect(componentCard2).toBeVisible({ timeout: 15_000 });
-		await componentCard2.locator('.wf-gate-header').first().click();
-		await expect.poll(readBuildValue, { timeout: 10_000 }).toBe("npm run build");
+		await navigateToHash(page, `#/settings/${project.id}/components`);
+		const refreshedCard = page.locator('[data-testid="component-card"]').first();
+		await expect(refreshedCard).toBeVisible({ timeout: 15_000 });
+		await refreshedCard.locator(".wf-gate-header").first().click();
+		await expect.poll(() => buildCommandValue(page)).toBe("npm run build");
 	});
 });

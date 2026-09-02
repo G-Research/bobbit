@@ -1,5 +1,6 @@
-import { render } from "lit";
+import { html, render } from "lit";
 import { commitGatewayConnection } from "../../src/app/gateway-fetch.js";
+import { headerToast } from "../../src/app/header-toast.js";
 import { renderSidebar, isProjectExpanded, toggleProjectExpanded } from "../../src/app/sidebar.js";
 import {
 	expandedGoals,
@@ -139,9 +140,12 @@ function sessionFor(id: string | undefined): GatewaySession | undefined {
 window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const request = input instanceof Request ? input : null;
 	const headers = new Headers(init?.headers ?? request?.headers);
+	const method = init?.method ?? request?.method ?? "GET";
+	const requestBody = typeof init?.body === "string" ? JSON.parse(init.body) : null;
 	(window as any).__sidebarActionsRequests.push({
 		url: requestUrl(input),
-		method: init?.method ?? request?.method ?? "GET",
+		method,
+		body: requestBody,
 		credentials: init?.credentials ?? request?.credentials ?? null,
 		authorization: headers.get("Authorization"),
 	});
@@ -156,8 +160,21 @@ window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (path.startsWith("/api/goals?")) return response({ goals: GOALS.map((goal) => ({ ...goal })) });
 	if (path === `/api/goals/${GOAL_ID}/github-link`) return response({ available: false, reason: "no-branch" });
 	if (path.startsWith(`/api/goals/${GOAL_ID}/gates`)) return response({ passed: 0, total: 0, gates: [] });
+	if (path === "/api/sessions" && method === "POST" && requestBody?.assistantType === "staff") {
+		if ((window as any).__sidebarActionsHoldStaffCreate) {
+			await new Promise<void>((resolve) => { (window as any).__sidebarActionsReleaseStaffCreate = resolve; });
+		}
+		return response({ ...STANDARD_SESSION, assistantType: "staff" }, 201);
+	}
 	if (path.startsWith("/api/sessions?") || path === "/api/sessions") {
 		return response({ sessions: SESSIONS.map((session) => ({ ...session })), archivedDelegates: [], total: SESSIONS.length, hasMore: false, nextCursor: null });
+	}
+	const restartMatch = path.match(/^\/api\/sessions\/([^/]+)\/restart$/);
+	if (restartMatch) {
+		const status = Number((window as any).__sidebarActionsRestartStatus) || 200;
+		return status >= 400
+			? response({ error: "forced fixture restart failure" }, status)
+			: response({ ok: true, sessionId: decodeURIComponent(restartMatch[1]) });
 	}
 	const forkMatch = path.match(/^\/api\/sessions\/([^/]+)\/fork$/);
 	if (forkMatch) {
@@ -202,7 +219,7 @@ function nextFrames(frames = 2): Promise<void> {
 function renderFixture(): void {
 	const app = document.getElementById("app");
 	if (!app) throw new Error("#app missing");
-	render(renderSidebar(), app);
+	render(html`${headerToast()}${renderSidebar()}`, app);
 }
 
 function installClipboardFallback(): void {
@@ -229,6 +246,9 @@ async function resetFixture(): Promise<void> {
 	(window as any).__sidebarActionsForkBodies = [];
 	(window as any).__sidebarActionsExecCopies = [];
 	(window as any).__sidebarActionsOpenedUrls = [];
+	(window as any).__sidebarActionsRestartStatus = 200;
+	(window as any).__sidebarActionsHoldStaffCreate = false;
+	(window as any).__sidebarActionsReleaseStaffCreate = null;
 	localStorage.setItem("bobbit-show-archived", "false");
 	localStorage.setItem("bobbit-show-busy", "true");
 	localStorage.setItem("bobbit-show-read", "true");

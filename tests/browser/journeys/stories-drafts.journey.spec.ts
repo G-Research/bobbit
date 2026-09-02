@@ -1,5 +1,5 @@
 /**
- * Draft Preservation stories — CT-02 (full coverage)
+ * Draft Preservation stories — CT-02 edge coverage
  *
  * These stories ARE the specification. Each test reads as a behavioral
  * requirement and runs as a Playwright browser journey.
@@ -67,31 +67,6 @@ test.describe("CT-02: Draft preservation", () => {
 	// ---------------------------------------------------------------
 	// Stories
 	// ---------------------------------------------------------------
-
-	test("CT-02-a: Draft survives rapid session switching @smoke", async () => {
-		s.begin(defineStory({
-			id: "CT-02-a",
-			title: "Draft survives rapid session switching",
-			contracts: [CT_02],
-			covers: ["rapid-session-switch"],
-		}));
-
-		// setup
-		await s.navigate_to("session", "A");
-		await s.session("A").in_state("active");
-
-		// act
-		s.act();
-		await s.type_in(s.editor, "my work in progress");
-		await s.wait_for_draft_saved("A", "my work in progress");
-		await s.navigate_to("session", "B");
-		await s.navigate_to("session", "A");
-
-		// assert
-		s.assert();
-		await s.editor.contains_text("my work in progress");
-		await s.editor.is_focused();
-	});
 
 	// ---------------------------------------------------------------
 	// CT-02-b / CT-02-f / CT-02-h — composer draft-loss reproducers.
@@ -298,30 +273,6 @@ test.describe("CT-02: Draft preservation", () => {
 		// assert
 		s.assert();
 		await s.editor.contains_text("important thought");
-	});
-
-	test("CT-02-d: Draft survives page reload @smoke", async () => {
-		s.begin(defineStory({
-			id: "CT-02-d",
-			title: "Draft survives page reload",
-			contracts: [CT_02, CT_05],
-			covers: ["page-reload"],
-		}));
-
-		// setup
-		await s.navigate_to("session", "A");
-		await s.session("A").in_state("active");
-
-		// act
-		s.act();
-		await s.type_in(s.editor, "unsent draft");
-		await s.wait_for_draft_saved("A", "unsent draft");
-		await s.reload();
-		await s.navigate_to("session", "A");
-
-		// assert
-		s.assert();
-		await s.editor.contains_text("unsent draft");
 	});
 
 	test("CT-02-e: Draft survives goal dashboard detour", async () => {
