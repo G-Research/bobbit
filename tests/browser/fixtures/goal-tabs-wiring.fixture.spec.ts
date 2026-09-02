@@ -105,19 +105,25 @@ async function sendGoalProposal(
 		core.releaseBarrier(receiptBoundary);
 		await completed;
 
-		const persisted = await page.evaluate(async ({ sid, title }) => {
-			const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposals`, { credentials: "include" });
-			const text = await response.text();
-			const proposals = response.ok
-				? (JSON.parse(text) as { proposals?: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }> }).proposals
-				: undefined;
-			const proposal = proposals?.find((candidate) => candidate.proposalType === "goal" && candidate.fields?.title === title);
-			return { status: response.status, text, proposal };
-		}, { sid: sessionId!, title: expectedTitle });
-		expect(persisted.status, `read persisted goal proposal failed: ${persisted.text}`).toBe(200);
-		expect(persisted.proposal, `expected persisted goal proposal titled ${expectedTitle}: ${persisted.text}`).toBeDefined();
-		expect(persisted.proposal?.rev, "persisted goal proposal should carry its server revision").toBeGreaterThan(0);
-		persistedRev = persisted.proposal!.rev;
+		let persisted: { status: number; text: string; proposal?: { rev: number } } | undefined;
+		await expect.poll(async () => {
+			persisted = await page.evaluate(async ({ sid, title }) => {
+				const response = await fetch(`/api/sessions/${encodeURIComponent(sid)}/proposals`, { credentials: "include" });
+				const text = await response.text();
+				const proposals = response.ok
+					? (JSON.parse(text) as { proposals?: Array<{ proposalType: string; fields: Record<string, unknown>; rev: number }> }).proposals
+					: undefined;
+				const proposal = proposals?.find((candidate) => candidate.proposalType === "goal" && candidate.fields?.title === title);
+				return { status: response.status, text, proposal };
+			}, { sid: sessionId!, title: expectedTitle });
+			return { status: persisted.status, found: persisted.proposal !== undefined };
+		}, {
+			timeout: 20_000,
+			intervals: [50, 100, 250],
+			message: `proposal persistence must publish ${expectedTitle} after its tool event`,
+		}).toEqual({ status: 200, found: true });
+		expect(persisted!.proposal?.rev, `persisted goal proposal should carry its server revision: ${persisted!.text}`).toBeGreaterThan(0);
+		persistedRev = persisted!.proposal!.rev;
 	} finally {
 		core.releaseBarrier(receiptBoundary);
 		core.releaseBarrier(completionBoundary);

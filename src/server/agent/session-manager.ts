@@ -19404,9 +19404,10 @@ export class SessionManager {
 			}
 		}
 
-		// Adopted multi-repo cleanup is all-or-nothing. If any component is still
+		// Adopted cleanup is a strict completion barrier. If any component is still
 		// referenced, retain the archived owner record so a later purge can clean
 		// every component and the shared container exactly once.
+		const canonicalAdoptedWorkspaceOwner = this.isCanonicalAdoptedWorkspaceOwner(ps);
 		if (await this.adoptedWorkspaceHasLiveReference(ps)) {
 			console.warn(`[session-manager] Refusing to purge adopted workspace owner ${ps.id}: another live session still references a component`);
 			return;
@@ -19535,12 +19536,14 @@ export class SessionManager {
 							} catch { /* removed */ }
 						} catch (err) {
 							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
+							if (canonicalAdoptedWorkspaceOwner) throw err;
 						}
 					});
 					try {
 						await removeEmptyWorktreeSetContainer(ps.worktreePath, Object.values(ps.repoWorktrees));
 					} catch (err) {
 						console.error(`[session-manager] Failed to remove multi-repo branch container for ${ps.id}: ${ps.worktreePath}`, err);
+						if (canonicalAdoptedWorkspaceOwner) throw err;
 					}
 				} else if (!await isWorktreePathReferencedByLiveSessionForCleanup(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
@@ -19549,6 +19552,23 @@ export class SessionManager {
 				}
 			} catch (err) {
 				console.error(`[session-manager] Failed to cleanup worktree for ${ps.id}:`, err);
+				if (canonicalAdoptedWorkspaceOwner) {
+					throw new Error(`Cannot purge canonical adopted workspace owner ${ps.id}: worktree cleanup did not complete`, { cause: err });
+				}
+			}
+
+			if (canonicalAdoptedWorkspaceOwner) {
+				const canonicalPaths = new Set([ps.worktreePath, ...Object.values(ps.repoWorktrees ?? {})]);
+				for (const canonicalPath of canonicalPaths) {
+					try {
+						await fsp.lstat(canonicalPath);
+					} catch (err) {
+						const code = (err as NodeJS.ErrnoException).code;
+						if (code === "ENOENT" || code === "ENOTDIR") continue;
+						throw err;
+					}
+					throw new Error(`Cannot purge canonical adopted workspace owner ${ps.id}: worktree remains at ${canonicalPath}`);
+				}
 			}
 		} else if (goalOwnsTeamLeadWorktrees) {
 			console.log(`[session-manager] Skipping goal-owned component worktree cleanup for purged team lead ${ps.id}.`);

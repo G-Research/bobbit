@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import YAML from "yaml";
 import {
+	lockedTarballsMissingFromRepository,
 	prewarmPackedConsumerCache,
 	runOwnedCommand,
 } from "../../../scripts/testing-v2/prewarm-packed-consumer-cache.mjs";
@@ -120,9 +121,9 @@ describe("packed-consumer offline install contract", () => {
 		assert.equal(steps[gateIndex]?.run, "npm run test:e2e", "the workflow must retain the normal retry-enabled suite command");
 	});
 
-	it("builds, packs, and fully installs the exact real tarball with bounded owned processes", () => {
+	it("builds and resolves the exact real tarball without materializing a preparatory node_modules tree", () => {
 		const source = PREWARM_SOURCE;
-		assert.ok(source.indexOf("await ensureDist();") < source.indexOf("await mkdtemp("),
+		assert.ok(source.indexOf('measured("build"') < source.indexOf("await mkdtemp("),
 			"the joined build must precede the one disposable root");
 		assert.match(source, /const packDir = join\(tempRoot, "pack"\);\s*const consumerDir = join\(tempRoot, "consumer"\);/s);
 		assert.match(source, /"pack",\s*"--ignore-scripts",\s*"--json",\s*"--pack-destination",\s*packDir/s);
@@ -130,27 +131,29 @@ describe("packed-consumer offline install contract", () => {
 		assert.match(source, /basename\(entry\.filename\) !== entry\.filename/,
 			"npm pack's filename must identify one file directly inside the owned pack directory");
 		assert.match(source, /const tarball = await stat\(tarballPath\)/,
-			"the exact emitted tarball must exist before installation");
-		assert.match(source, /"install",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*tarballPath/s);
-		assert.doesNotMatch(source, /["']--(?:offline|prefer-offline|package-lock-only|registry|cache)["']/,
-			"prewarm must be one full online install into the inherited cache");
+			"the exact emitted tarball must exist before dependency resolution");
+		assert.match(source, /"install",\s*"--package-lock-only",\s*"--ignore-scripts",\s*"--no-audit",\s*"--no-fund",\s*tarballPath/s);
+		assert.match(source, /"cache", "add", \.\.\.batch/,
+			"tarballs selected beyond the repository lock must be added without installing them");
 		assert.doesNotMatch(source, /copyFile|symlink|npm-shrinkwrap\.json|bundleDependencies/,
 			"prewarm must not seed or copy an installed dependency graph");
 		assert.match(source, /const PACK_TIMEOUT_MS = 3 \* 60_000;/);
-		assert.match(source, /const INSTALL_TIMEOUT_MS = process\.platform === "win32" \? 15 \* 60_000 : 10 \* 60_000;/);
+		assert.match(source, /const LOCK_RESOLUTION_TIMEOUT_MS = 5 \* 60_000;/);
+		assert.match(source, /const CACHE_BATCH_SIZE = 32;/);
 		assert.match(source, /export const OWNERSHIP_ESTABLISHMENT_TIMEOUT_MS = 30_000;/);
 		assert.match(source, /await Promise\.race\(\[\s*tracked\.ownershipReady,/s,
 			"spawn-time ownership must have a separate setup deadline before execution timing");
 		assert.match(source, /tracked\.killTree\("SIGKILL"\);/);
 		assert.match(source, /await tracked\.waitForTreeExit\(treeExitTimeoutMs\)/);
-		assert.match(source, /await rm\(tempRoot, \{ recursive: true, force: true, maxRetries: 6, retryDelay: 250 \}\);/,
-			"the one owned root must always be removed in finally");
+		assert.match(source, /measured\("cleanup", \(\) => rm\(tempRoot, \{ recursive: true, force: true, maxRetries: 6, retryDelay: 250 \}\)\)/,
+			"the one owned root must always be removed and timed in finally");
 	});
 
-	it("uses a fresh empty consumer while inheriting cache, registry, auth, and config", async () => {
+	it("resolves a fresh empty consumer and caches only newly selected tarballs", async () => {
 		const tempParent = mkdtempSync(join(tmpdir(), "bobbit-prewarm-pin-"));
 		const calls: Array<{ args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }> = [];
 		const order: string[] = [];
+		const selectedUrl = "https://registry.example.test/new-dependency/-/new-dependency-1.2.3.tgz";
 		try {
 			await prewarmPackedConsumerCache({
 				repoRoot: REPO_ROOT,
@@ -177,47 +180,94 @@ describe("packed-consumer offline install contract", () => {
 							stdout: JSON.stringify([{ name: "@gresearch/bobbit", filename: "bobbit-1.0.0.tgz" }]),
 						});
 					}
-					order.push("install");
-					const manifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
-					assert.deepEqual(manifest, {
-						name: "bobbit-packed-cache-prewarm",
-						version: "1.0.0",
-						private: true,
-					});
-					assert.deepEqual(readdirSync(options.cwd), ["package.json"],
-						"the preparatory consumer must begin without a lock or installed tree");
+					if (args.includes("--package-lock-only")) {
+						order.push("resolve");
+						const manifest = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
+						assert.deepEqual(manifest, {
+							name: "bobbit-packed-cache-prewarm",
+							version: "1.0.0",
+							private: true,
+						});
+						assert.deepEqual(readdirSync(options.cwd), ["package.json"],
+							"dependency resolution must begin without a lock or installed tree");
+						writeFileSync(join(options.cwd, "package-lock.json"), JSON.stringify({
+							name: "bobbit-packed-cache-prewarm",
+							version: "1.0.0",
+							lockfileVersion: 3,
+							packages: {
+								"": { name: "bobbit-packed-cache-prewarm", version: "1.0.0" },
+								"node_modules/new-dependency": {
+									version: "1.2.3",
+									resolved: selectedUrl,
+									integrity: "sha512-fixture",
+								},
+							},
+						}));
+						return commandResult(command, args);
+					}
+					order.push("cache");
 					return commandResult(command, args);
 				},
 			});
 
-			assert.deepEqual(order, ["ensure-dist", "pack", "install"]);
-			assert.equal(calls.length, 2);
+			assert.deepEqual(order, ["ensure-dist", "pack", "resolve", "cache"]);
+			assert.equal(calls.length, 3);
 			assert.deepEqual(calls[0]?.args.slice(1), [
 				"pack", "--ignore-scripts", "--json", "--pack-destination", calls[0]?.args.at(-1),
 			]);
 			assert.deepEqual(calls[1]?.args.slice(1, -1), [
-				"install", "--ignore-scripts", "--no-audit", "--no-fund",
+				"install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund",
 			]);
 			assert.equal(dirname(calls[1]!.args.at(-1)!), calls[0]!.args.at(-1));
+			assert.deepEqual(calls[2]?.args, ["npm-cli.js", "cache", "add", selectedUrl]);
 			assert.equal(calls[0]?.timeoutMs, 3 * 60_000);
-			assert.equal(calls[1]?.timeoutMs, process.platform === "win32" ? 15 * 60_000 : 10 * 60_000);
+			assert.equal(calls[1]?.timeoutMs, 5 * 60_000);
+			assert.equal(calls[2]?.timeoutMs, 3 * 60_000);
 			const inherited: Record<string, string> = {
 				npm_config_cache: "inherited-cache",
 				npm_config_registry: "https://registry.example.test/",
 				npm_config_userconfig: "inherited-userconfig",
 				NODE_AUTH_TOKEN: "inherited-auth",
 			};
-			for (const [key, value] of Object.entries(inherited)) {
-				assert.equal(calls[1]?.env[key], value);
+			for (const call of calls.slice(1)) {
+				for (const [key, value] of Object.entries(inherited)) assert.equal(call.env[key], value);
+				assert.equal(call.env.npm_config_package_lock, undefined);
+				assert.equal(call.env.npm_lifecycle_event, undefined);
+				assert.equal(call.env.npm_package_name, undefined);
+				assert.equal(call.env.INIT_CWD, call.cwd);
 			}
-			assert.equal(calls[1]?.env.npm_config_package_lock, undefined);
-			assert.equal(calls[1]?.env.npm_lifecycle_event, undefined);
-			assert.equal(calls[1]?.env.npm_package_name, undefined);
-			assert.equal(calls[1]?.env.INIT_CWD, calls[1]?.cwd);
 			assert.deepEqual(readdirSync(tempParent), [], "successful prewarm must remove its disposable root");
 		} finally {
 			rmSync(tempParent, { recursive: true, force: true });
 		}
+	});
+
+	it("deduplicates missing tarballs and excludes incompatible native packages", () => {
+		const shared = "https://registry.example.test/shared/-/shared-1.0.0.tgz";
+		const any = "https://registry.example.test/any/-/any-1.0.0.tgz";
+		const windows = "https://registry.example.test/native/-/native-win32-1.0.0.tgz";
+		const linux = "https://registry.example.test/native/-/native-linux-1.0.0.tgz";
+		const scalarWindows = "https://registry.example.test/scalar/-/scalar-win32-1.0.0.tgz";
+		const lock = (packages: Record<string, unknown>) => ({ lockfileVersion: 3, packages });
+		const repository = lock({
+			"node_modules/shared": { version: "1.0.0", resolved: shared },
+		});
+		const consumer = lock({
+			"node_modules/a": { version: "1.0.0", resolved: shared },
+			"node_modules/a/node_modules/shared": { version: "1.0.0", resolved: shared },
+			"node_modules/any": { version: "1.0.0", resolved: any, os: ["any"] },
+			"node_modules/native-win32": { version: "1.0.0", resolved: windows, os: ["win32"], cpu: ["x64"] },
+			"node_modules/native-linux": { version: "1.0.0", resolved: linux, os: ["linux"], cpu: ["x64"] },
+			"node_modules/scalar-win32": { version: "1.0.0", resolved: scalarWindows, os: "win32", cpu: "x64" },
+		});
+		assert.deepEqual(
+			lockedTarballsMissingFromRepository(consumer, repository, { platform: "win32", arch: "x64" }),
+			[any, windows, scalarWindows],
+		);
+		assert.deepEqual(
+			lockedTarballsMissingFromRepository(consumer, repository, { platform: "linux", arch: "x64", libc: "glibc" }),
+			[any, linux],
+		);
 	});
 
 	it.each([
@@ -227,7 +277,7 @@ describe("packed-consumer offline install contract", () => {
 			expected: /npm pack must report exactly one result/,
 		},
 		{
-			label: "install failure",
+			label: "lock resolution failure",
 			pack: { stdout: JSON.stringify([{ name: "@gresearch/bobbit", filename: "bobbit-1.0.0.tgz" }]) },
 			expected: /exited 17/,
 		},
@@ -247,7 +297,7 @@ describe("packed-consumer offline install contract", () => {
 						}
 						return commandResult(command, args, pack);
 					}
-					return commandResult(command, args, { code: 17, stderr: "injected install failure" });
+					return commandResult(command, args, { code: 17, stderr: "injected lock resolution failure" });
 				},
 			}), expected);
 			assert.deepEqual(readdirSync(tempParent), [], "failed prewarm must remove its disposable root");
