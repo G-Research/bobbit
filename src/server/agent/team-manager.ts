@@ -283,7 +283,7 @@ export function formatElapsed(sinceMs: number): string {
 	return `${h}h ${m}m`;
 }
 
-// Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
+// Team lead extension path is resolved lazily from the winning team_spawn definition.
 import { TaskManager } from "./task-manager.js";
 import type { DismissResult, OrchestrationCore } from "./orchestration-core.js";
 
@@ -2700,7 +2700,7 @@ export class TeamManager {
 			?.getContextForGoal(goalId)?.toolManager;
 		const extensionToolManager = projectToolManager ?? this.config.toolManager;
 		if (extensionToolManager) {
-			teamLeadExtPath = extensionToolManager.getExtensionPath("team", "extension.ts");
+			teamLeadExtPath = extensionToolManager.resolveToolExtensionPath("team_spawn", "extension.ts");
 		} else {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
 			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");

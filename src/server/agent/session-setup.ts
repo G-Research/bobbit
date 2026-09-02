@@ -223,16 +223,16 @@ export function resolveMarketplacePiExtensionActivation(
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
-/** Resolve goal tools extension path via the cascade (lazy, not module-level). */
+/** Resolve goal tools extension path from the winning task_create definition. */
 function resolveGoalToolsExtPath(ctx: PipelineContext): string {
-	if (ctx.toolManager) return ctx.toolManager.getExtensionPath("tasks", "extension.ts");
+	if (ctx.toolManager) return ctx.toolManager.resolveToolExtensionPath("task_create", "extension.ts");
 	// Fallback: use deprecated TOOLS_DIR for backward compat
 	return path.join(TOOLS_DIR, "tasks", "extension.ts");
 }
 
-/** Resolve proposal tools extension path via the cascade (lazy, not module-level). */
+/** Resolve proposal tools extension path from the winning propose_goal definition. */
 function resolveProposalToolsExtPath(ctx: PipelineContext): string {
-	if (ctx.toolManager) return ctx.toolManager.getExtensionPath("proposals", "extension.ts");
+	if (ctx.toolManager) return ctx.toolManager.resolveToolExtensionPath("propose_goal", "extension.ts");
 	return path.join(TOOLS_DIR, "proposals", "extension.ts");
 }
 

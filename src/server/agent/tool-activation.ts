@@ -5,7 +5,7 @@
  * 1. **Builtin tools** (pi-coding-agent built-in): read, bash, edit, write, grep, find, ls
  *    → Controlled via `--tools` flag
  * 2. **Bobbit extensions** (.bobbit/config/tools/<group>/extension.ts): delegate, browser_*, web_*, task_*, gate_*, team_*, bash_bg
- *    → Resolved from .bobbit/config/tools/<groupDir>/extension.ts, controlled via `--extension` flag
+ *    → Resolved beside each winning tool definition, controlled via `--extension` flag
  *    → Goal/team extensions are also added separately by session-manager (duplicates are harmless)
  *
  * Provider info is read from .bobbit/config/tools/<group>/*.yaml via ToolManager instead of hardcoded maps.
@@ -1387,8 +1387,9 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 			}
 			if (provider.type === "builtin" && provider.tool) {
 				if (provider.tool === "bash") {
-					// bash comes from shell/extension.ts, not from the file-builtins set.
-					extensionPaths.add(toolManager.getExtensionPath("shell", "extension.ts"));
+					// bash comes from the extension beside the winning bash definition,
+					// not from the file-builtins set.
+					extensionPaths.add(toolManager.resolveToolExtensionPath("bash", "extension.ts"));
 					continue;
 				}
 				if (FILE_TOOL_BUILTIN_NAMES.has(provider.tool)) {
