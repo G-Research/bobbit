@@ -7,6 +7,7 @@ import {
 } from "../../../src/server/server.ts";
 import { SessionManager } from "../../../src/server/agent/session-manager.ts";
 import type { WorktreePool } from "../../../src/server/agent/worktree-pool.ts";
+import type { PoolRecordSink } from "../../../src/server/agent/worktree-pool-record.ts";
 
 describe("gateway shutdown is idempotent", () => {
 	it("shares one production teardown across concurrent and late callers", async () => {
@@ -81,20 +82,24 @@ describe("graceful worktree-pool shutdown", () => {
 		assert.equal(flushed, 1);
 	});
 
-	it("drains and forgets ownership on explicit project deletion", async () => {
+	it("orders an existing live-pool deletion as drain, forget, then durable flush", async () => {
 		const events: string[] = [];
+		const records: PoolRecordSink = {
+			replace() { assert.fail("an existing live-pool deletion must not reconstruct ownership"); },
+			read() { return { entries: [] }; },
+			forget(projectId: string) { events.push(`forget:${projectId}`); },
+			async flush() { events.push("flush"); },
+		};
+		const manager = new SessionManager({ worktreePoolRecordStore: records });
 		const pool = { async drain() { events.push("drain"); } } as WorktreePool;
-		const manager = Object.create(SessionManager.prototype) as SessionManager;
-		Object.assign(manager as unknown as Record<string, unknown>, {
-			worktreePools: new Map([["project-1", pool]]),
-			worktreePoolRecords: {
-				forget(projectId: string) { events.push(`forget:${projectId}`); },
-			},
-		});
+		manager.getAllWorktreePools().set("project-1", pool);
+		try {
+			await manager.removeWorktreePool("project-1");
 
-		await manager.removeWorktreePool("project-1");
-
-		assert.deepEqual(events, ["drain", "forget:project-1"]);
-		assert.equal(manager.getWorktreePool("project-1"), null);
+			assert.deepEqual(events, ["drain", "forget:project-1", "flush"]);
+			assert.equal(manager.getWorktreePool("project-1"), null);
+		} finally {
+			await manager.shutdown();
+		}
 	});
 });
