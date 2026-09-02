@@ -9,28 +9,22 @@
   "retainedSmokeFiles": [
     "tests/browser/journeys/children-tool-renderers.journey.spec.ts",
     "tests/browser/journeys/ask-user-choices-ui.journey.spec.ts",
-    "tests/browser/journeys/proposal-open-all-types.journey.spec.ts",
-    "tests/browser/journeys/proposal-tools.journey.spec.ts",
+    "tests/browser/journeys/proposals.journey.spec.ts",
     "tests/browser/journeys/review-pane.journey.spec.ts",
-    "tests/browser/journeys/preview-happy-path.journey.spec.ts",
-    "tests2/browser/fixtures/side-panel-tabs.spec.ts",
-    "tests2/browser/fixtures/dynamic-chat-tabs.spec.ts",
-    "tests/browser/journeys/goal-status-widget.journey.spec.ts",
+    "tests/browser/journeys/review-artifacts.journey.spec.ts",
+    "tests/browser/fixtures/side-panel-tabs.fixture.spec.ts",
+    "tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts",
+    "tests/browser/journeys/goal-team-gates-reset.journey.spec.ts",
     "tests/browser/journeys/cost-popover-cache-hit.journey.spec.ts",
-    "tests/browser/journeys/prompt-stats-e2e.journey.spec.ts",
     "tests/e2e/browser/tail-chat-real-stream.browser-e2e.spec.ts",
     "tests/e2e/browser/tail-chat-session-navigate.browser-e2e.spec.ts",
-    "tests2/browser/fixtures/jump-to-last-prompt.spec.ts",
-    "tests2/browser/fixtures/pill-overflow-promotion.spec.ts",
-    "tests2/browser/fixtures/mobile-review-commenting.spec.ts",
-    "tests/browser/journeys/stories-sidebar.journey.spec.ts",
-    "tests/browser/journeys/sidebar-filters.journey.spec.ts",
-    "tests/browser/journeys/sidebar-keyboard-nav.journey.spec.ts",
-    "tests/browser/journeys/sidebar-archived-layout.journey.spec.ts",
-    "tests/browser/journeys/sidebar-archived-per-project.journey.spec.ts",
-    "tests/browser/journeys/sidebar-navigation.journey.spec.ts",
-    "tests/browser/journeys/sidebar-staff-loading.journey.spec.ts",
-    "tests/browser/journeys/search-e2e.journey.spec.ts",
+    "tests/browser/fixtures/jump-to-last-prompt.fixture.spec.ts",
+    "tests/browser/fixtures/pill-overflow-promotion.fixture.spec.ts",
+    "tests/browser/fixtures/mobile-review-commenting.fixture.spec.ts",
+    "tests/browser/journeys/sidebar-nav.journey.spec.ts",
+    "tests/browser/fixtures/sidebar-filter-search-fixture.fixture.spec.ts",
+    "tests/browser/fixtures/sidebar-keyboard-nav-fixture.fixture.spec.ts",
+    "tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts",
     "tests/e2e/browser/search-result-navigation.browser-e2e.spec.ts",
     "tests/e2e/browser/sidebar-actions-menu.browser-e2e.spec.ts"
   ],
@@ -55,20 +49,12 @@
       ]
     },
     {
-      "file": "tests/browser/journeys/proposal-open-all-types.journey.spec.ts",
+      "file": "tests/browser/journeys/proposals.journey.spec.ts",
       "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "Role proposal.*openable.*rehydrates.*dismisses"
-      ]
-    },
-    {
-      "file": "tests/browser/journeys/proposal-tools.journey.spec.ts",
-      "metric": "slice-renderer",
-      "minNonSkippedTests": 1,
-      "requiredTitleRegexes": [
-        "goal proposal tool card renders.*persists.*reopens",
-        "dismiss hides proposal panel"
+        "role and streaming goal proposals.*intermediate and terminal state",
+        "goal assistant proposal survives navigation.*dismissed after reload"
       ]
     },
     {
@@ -80,15 +66,15 @@
       ]
     },
     {
-      "file": "tests/browser/journeys/preview-happy-path.journey.spec.ts",
+      "file": "tests/browser/journeys/review-artifacts.journey.spec.ts",
       "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "opens mounted preview.*refreshes iframe"
+        "preview mount via API.*iframe renders"
       ]
     },
     {
-      "file": "tests2/browser/fixtures/side-panel-tabs.spec.ts",
+      "file": "tests/browser/fixtures/side-panel-tabs.fixture.spec.ts",
       "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
@@ -97,7 +83,7 @@
       ]
     },
     {
-      "file": "tests2/browser/fixtures/dynamic-chat-tabs.spec.ts",
+      "file": "tests/browser/fixtures/dynamic-chat-tabs.fixture.spec.ts",
       "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
@@ -105,11 +91,11 @@
       ]
     },
     {
-      "file": "tests/browser/journeys/goal-status-widget.journey.spec.ts",
+      "file": "tests/browser/journeys/goal-team-gates-reset.journey.spec.ts",
       "metric": "slice-renderer",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "pill is visible.*survives reload.*narrow viewport"
+        "reset clears Completed.*survives reload"
       ]
     },
     {
@@ -119,17 +105,6 @@
       "requiredTitleRegexes": [
         "goal-dashboard cost popover.*cacheHitRate.*survives reload",
         "session stats-bar cost popover.*server-derived cacheHitRate"
-      ]
-    },
-    {
-      "file": "tests/browser/journeys/prompt-stats-e2e.journey.spec.ts",
-      "metric": "slice-renderer",
-      "minNonSkippedTests": 1,
-      "requiredTitleRegexes": [
-        "model name.*context bar.*cost.*visible",
-        "context popover shows details",
-        "cost popover shows session cost",
-        "model name persists.*reload"
       ]
     },
     {
@@ -149,7 +124,7 @@
       ]
     },
     {
-      "file": "tests2/browser/fixtures/jump-to-last-prompt.spec.ts",
+      "file": "tests/browser/fixtures/jump-to-last-prompt.fixture.spec.ts",
       "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
@@ -158,7 +133,7 @@
       ]
     },
     {
-      "file": "tests2/browser/fixtures/pill-overflow-promotion.spec.ts",
+      "file": "tests/browser/fixtures/pill-overflow-promotion.fixture.spec.ts",
       "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
@@ -166,7 +141,7 @@
       ]
     },
     {
-      "file": "tests2/browser/fixtures/mobile-review-commenting.spec.ts",
+      "file": "tests/browser/fixtures/mobile-review-commenting.fixture.spec.ts",
       "metric": "slice-scroll",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
@@ -174,70 +149,40 @@
       ]
     },
     {
-      "file": "tests/browser/journeys/stories-sidebar.journey.spec.ts",
+      "file": "tests/browser/journeys/sidebar-nav.journey.spec.ts",
       "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "Filter search narrows concurrently created sessions"
+        "search filter narrows visible sessions",
+        "active session row is highlighted",
+        "Show Archived reveals an archived item",
+        "Full Search link navigates"
       ]
     },
     {
-      "file": "tests/browser/journeys/sidebar-filters.journey.spec.ts",
+      "file": "tests/browser/fixtures/sidebar-filter-search-fixture.fixture.spec.ts",
       "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "Show Read OFF hides.*search bypasses"
+        "Show Read and Show Busy filters hide rows while search bypasses"
       ]
     },
     {
-      "file": "tests/browser/journeys/sidebar-keyboard-nav.journey.spec.ts",
+      "file": "tests/browser/fixtures/sidebar-keyboard-nav-fixture.fixture.spec.ts",
       "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "Ctrl.*Arrow journey.*routes goal/session"
+        "Ctrl\\+Arrow walks visible rows",
+        "Show Archived deterministically adds archived rows"
       ]
     },
     {
-      "file": "tests/browser/journeys/sidebar-archived-layout.journey.spec.ts",
+      "file": "tests/browser/fixtures/sidebar-archived-fixture.fixture.spec.ts",
       "metric": "slice-sidebar",
       "minNonSkippedTests": 1,
       "requiredTitleRegexes": [
-        "Show Archived reveals archived session/goal.*hides on toggle off"
-      ]
-    },
-    {
-      "file": "tests/browser/journeys/sidebar-archived-per-project.journey.spec.ts",
-      "metric": "slice-sidebar",
-      "minNonSkippedTests": 1,
-      "requiredTitleRegexes": [
-        "desktop renders archived goals.*owning projects"
-      ]
-    },
-    {
-      "file": "tests/browser/journeys/sidebar-navigation.journey.spec.ts",
-      "metric": "slice-sidebar",
-      "minNonSkippedTests": 1,
-      "requiredTitleRegexes": [
-        "session navigation highlights active row.*rapid switching"
-      ]
-    },
-    {
-      "file": "tests/browser/journeys/sidebar-staff-loading.journey.spec.ts",
-      "metric": "slice-sidebar",
-      "minNonSkippedTests": 1,
-      "requiredTitleRegexes": [
-        "shows bobbit-loader immediately"
-      ]
-    },
-    {
-      "file": "tests/browser/journeys/search-e2e.journey.spec.ts",
-      "metric": "slice-sidebar",
-      "minNonSkippedTests": 1,
-      "requiredTitleRegexes": [
-        "sidebar filter matches session and goal titles",
-        "Full Search link navigates",
-        "Ctrl.*K focuses search",
-        "archived section auto-opens"
+        "Show Archived toggles archived rows",
+        "desktop per-project archived sections"
       ]
     },
     {

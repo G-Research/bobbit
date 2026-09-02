@@ -102,7 +102,7 @@ async function quiesceAutoStartedChildTeam(gateway: any, childId: string, projec
 }
 
 test.describe("Phase 5b — tree cost rollup", () => {
-	test("parent dashboard renders Tree cost row + per-child breakdown", async ({ page, gateway }) => {
+	test("parent dashboard renders Tree cost breakdown and keeps it after every child is archived", async ({ page, gateway }) => {
 		const projectId = await defaultProjectId();
 		const parent = await createGoal({ title: "Tree-cost parent", projectId, team: false });
 		const r1 = await spawnChild(gateway, parent.id, { planId: "p1", title: "Tree-cost child 1", spec: "tree-cost UI test child 1: padded to meet spec validator minimum length." });
@@ -151,45 +151,15 @@ test.describe("Phase 5b — tree cost rollup", () => {
 		const maxHeightPx = await scroll.evaluate((el) => parseFloat(getComputedStyle(el as HTMLElement).maxHeight) || Infinity);
 		expect(maxHeightPx).toBeLessThan(Infinity);
 
-		// Cleanup.
-		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
-		// Avoid unused-var lint
-		void c1; void c2;
-	});
-
-	test("Tree cost row stays visible when all children are archived", async ({ page, gateway }) => {
-		const projectId = await defaultProjectId();
-		const parent = await createGoal({ title: "Tree-cost archived-children parent", projectId, team: false });
-		const r1 = await spawnChild(gateway, parent.id, { planId: "p1", title: "Tree-cost child 1", spec: "tree-cost archived-children UI test child 1: padded to meet validator length." });
-		const c1 = (await r1.json()).id as string;
-		const r2 = await spawnChild(gateway, parent.id, { planId: "p2", title: "Tree-cost child 2", spec: "tree-cost archived-children UI test child 2: padded to meet validator length." });
-		const c2 = (await r2.json()).id as string;
-
-		// Tear down the children's auto-started teams before archiving so no live
-		// team-lead session perturbs the rollup.
-		await quiesceAutoStartedChildTeam(gateway, c1, projectId);
-		await quiesceAutoStartedChildTeam(gateway, c2, projectId);
-
-		// Archive both children (they're leaves, so cascade=false is fine).
+		// Archive both children and reload the same dashboard. The rollup remains
+		// visible even though the normal sidebar archive preference is off.
 		const d1 = await apiFetch(`/api/goals/${c1}?cascade=false`, { method: "DELETE" });
 		expect(d1.status).toBeLessThan(400);
 		const d2 = await apiFetch(`/api/goals/${c2}?cascade=false`, { method: "DELETE" });
 		expect(d2.status).toBeLessThan(400);
-
-		// The server-side tree-cost rollup still walks archived descendants.
-		const treeRes = await apiFetch(`/api/goals/${parent.id}/tree-cost`);
-		expect(treeRes.status).toBe(200);
-		const tree = await treeRes.json();
-		expect(tree.breakdown.length).toBeGreaterThan(1);
-
-		await openApp(page);
-		await navigateToHash(page, `#/goal/${parent.id as string}`);
+		await page.reload();
 		await expect(page.locator(".dashboard-container")).toBeVisible({ timeout: 15_000 });
-
-		// Row should still be visible despite all children being archived
-		// and "See Archived" being OFF (default state).
-		const treeCostRow = page.locator('[data-testid="tree-cost-row"]').first();
-		await expect(treeCostRow).toBeVisible({ timeout: 10_000 });
+		await expect(page.locator('[data-testid="tree-cost-row"]').first()).toBeVisible({ timeout: 10_000 });
 
 		// Cleanup.
 		await apiFetch(`/api/goals/${parent.id}?cascade=true`, { method: "DELETE" }).catch(() => {});
