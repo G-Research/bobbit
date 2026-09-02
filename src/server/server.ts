@@ -2302,7 +2302,12 @@ export function wireProjectHostNotificationBoundaries(ctx: ProjectContext): void
 
 interface ShutdownWorktreePool {
 	stop(): Promise<void>;
-	drain(): Promise<void>;
+}
+
+/** One process owns one teardown promise; every caller observes that outcome. */
+export function createGatewayShutdownOnce(): (shutdown: () => Promise<void>) => Promise<void> {
+	let once: Promise<void> | undefined;
+	return shutdown => (once ??= shutdown());
 }
 
 const SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS = 15_000;
@@ -2346,41 +2351,39 @@ function runShutdownOperation(
 	});
 }
 
-/** Stop every current pool before draining any of them, isolating failures per pool. */
-export async function drainWorktreePoolsForShutdown(
+/** Stop every pool, retain its ready entries, then flush durable ownership. */
+export async function stopWorktreePoolsForShutdown(
 	pools: ReadonlyMap<string, ShutdownWorktreePool>,
+	recordStore?: { flush(): Promise<void> },
 	timeoutMs = SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS,
 ): Promise<void> {
 	const snapshot = Array.from(pools.entries());
 	const stopResults = await Promise.all(
 		snapshot.map(([, pool]) => runShutdownOperation(() => pool.stop(), timeoutMs)),
 	);
-
 	for (let index = 0; index < snapshot.length; index++) {
-		const [projectId, pool] = snapshot[index]!;
-		const stopResult = stopResults[index]!;
-		if (stopResult.status === "rejected") {
-			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, stopResult.reason); } catch { /* best-effort */ }
-			continue;
-		}
-		if (stopResult.status === "timeout") {
+		const projectId = snapshot[index]![0];
+		const result = stopResults[index]!;
+		if (result.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, result.reason); } catch { /* best-effort */ }
+		} else if (result.status === "timeout") {
 			try { console.warn(`[shutdown] worktree pool stop timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
-			continue;
 		}
-
-		const drainResult = await runShutdownOperation(() => pool.drain(), timeoutMs);
-		if (drainResult.status === "rejected") {
-			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, drainResult.reason); } catch { /* best-effort */ }
-		} else if (drainResult.status === "timeout") {
-			try { console.warn(`[shutdown] worktree pool drain timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+	}
+	if (recordStore) {
+		const result = await runShutdownOperation(() => recordStore.flush(), timeoutMs);
+		if (result.status === "rejected") {
+			try { console.warn("[shutdown] worktree pool record flush failed:", result.reason); } catch { /* best-effort */ }
+		} else if (result.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool record flush timed out after ${timeoutMs}ms`); } catch { /* best-effort */ }
 		}
 	}
 }
 
 /**
- * Keep boot-time diagnostic discovery ahead of pool initialization so the
- * sweeper observes one stable pre-fill inventory. Neither phase adopts or
- * mutates worktrees discovered only from Git/path shape.
+ * Keep diagnostic discovery ahead of pool initialization so the sweeper sees
+ * one stable pre-fill inventory. Initialization may adopt exact durable records;
+ * neither phase derives authority from Git/path shape.
  */
 export async function coordinateBootWorktreeLifecycle(
 	runSweepDiscoveryPhase: () => Promise<void>,
@@ -2827,6 +2830,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		remoteGitPolicy,
 		testPreparingDelayMs: gatewayRuntimeFlags.testPreparingDelayMs,
 		worktreeSetupRuntime,
+		worktreePoolRecordFs: gatewayDeps.fsImpl,
 		previewPurgeOperation: previewOperations.purge,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
@@ -5158,6 +5162,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		throw new Error(`All ports ${config.port}-${maxPort} in use`);
 	};
 
+	const shutdownOnce = createGatewayShutdownOnce();
 	return {
 		server,
 		deps: gatewayDeps,
@@ -5649,62 +5654,67 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				throw error;
 			}
 		},
-		async shutdown() {
-			const shutdownStart = Date.now();
-			bootMark(`SHUTDOWN ${new Date().toISOString()}`);
-			// Phase timer: log each teardown phase so a slow shutdown is diagnosable
-			// from the logs without a profiler. Cheap (Date.now + one appended line).
-			const phase = makePhaseTimer("[shutdown]");
-			try {
-				// Stop accepting NEW connections AND forcibly terminate existing
-				// keep-alive connections BEFORE we tear down the state stores.
-				// Without this, an HTTP/1.1 keep-alive connection from the client
-				// can still deliver a request to handleApiRoute mid-shutdown (e.g.
-				// during the awaits below), after projectContextManager.closeAll()
-				// has emptied the contexts map — producing spurious `Goal "X" not
-				// found in any project` errors. It also matters for the test
-				// crash/restart path: a stale keep-alive connection on the OLD
-				// server's accept() fd survives port reuse and routes new requests
-				// to the OLD (already torn down) handler closure. Forcibly closing
-				// connections forces clients to reconnect to the NEW server.
-				try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
-				server.close();
-				gatewayDeps.clock.clearInterval(cleanupInterval);
-				triggerEngine.stop();
-				inboxNudger.stop();
-				notificationStaffDispatcher.stop();
-				wss.close();
-				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
-				// and await them before tearing down stores or allowing restart.
-				await phase("oauth-flows", () => shutdownOAuthFlows());
-				if (bootBackgroundTask) {
-					await phase("boot-background", () => bootBackgroundTask!);
+		shutdown() {
+			return shutdownOnce(async () => {
+				const shutdownStart = Date.now();
+				bootMark(`SHUTDOWN ${new Date().toISOString()}`);
+				// Phase timer: log each teardown phase so a slow shutdown is diagnosable
+				// from the logs without a profiler. Cheap (Date.now + one appended line).
+				const phase = makePhaseTimer("[shutdown]");
+				try {
+					// Stop accepting NEW connections AND forcibly terminate existing
+					// keep-alive connections BEFORE we tear down the state stores.
+					// Without this, an HTTP/1.1 keep-alive connection from the client
+					// can still deliver a request to handleApiRoute mid-shutdown (e.g.
+					// during the awaits below), after projectContextManager.closeAll()
+					// has emptied the contexts map — producing spurious `Goal "X" not
+					// found in any project` errors. It also matters for the test
+					// crash/restart path: a stale keep-alive connection on the OLD
+					// server's accept() fd survives port reuse and routes new requests
+					// to the OLD (already torn down) handler closure. Forcibly closing
+					// connections forces clients to reconnect to the NEW server.
+					try { (server as { closeAllConnections?: () => void }).closeAllConnections?.(); } catch { /* best-effort */ }
+					server.close();
+					gatewayDeps.clock.clearInterval(cleanupInterval);
+					triggerEngine.stop();
+					inboxNudger.stop();
+					notificationStaffDispatcher.stop();
+					wss.close();
+					// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
+					// and await them before tearing down stores or allowing restart.
+					await phase("oauth-flows", () => shutdownOAuthFlows());
+					if (bootBackgroundTask) {
+						await phase("boot-background", () => bootBackgroundTask!);
+					}
+					// Retain ready entries and durably publish their exact ownership so a
+					// later gateway can revalidate and reuse them. Explicit project removal
+					// remains the destructive drain path.
+					await phase("worktree-pools", () => stopWorktreePoolsForShutdown(
+						sessionManager.getAllWorktreePools(),
+						sessionManager.getWorktreePoolRecordStore(),
+					));
+					await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
+					await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
+					shutdownEventLoopLagMonitor();
+					try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
+					await phase("session-manager", () => sessionManager.shutdown());
+					const ownedTaskStore = standaloneTaskStore;
+					if (ownedTaskStore) {
+						await phase("standalone-task-store", () => ownedTaskStore.close());
+					}
+					await phase("project-contexts", () => projectContextManager.closeAll());
+					if (sandboxManager) {
+						await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
+					}
+					await phase("sandbox-network", () => sessionManager.cleanupSandboxNetwork());
+					bootLog(`[shutdown] complete in ${Date.now() - shutdownStart}ms`);
+				} catch (err) {
+					bootLog(`[shutdown] aborted after ${Date.now() - shutdownStart}ms: ${err instanceof Error ? err.message : String(err)}`);
+					throw err;
+				} finally {
+					restoreExplicitRpcBridgeFactory();
 				}
-				// Only drain ready entries held by these live pool instances. Claimed
-				// worktrees have already left their pools, and stale disk entries are
-				// never discovered or adopted during shutdown.
-				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
-				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
-				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
-				shutdownEventLoopLagMonitor();
-				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				await phase("session-manager", () => sessionManager.shutdown());
-				const ownedTaskStore = standaloneTaskStore;
-				if (ownedTaskStore) {
-					await phase("standalone-task-store", () => ownedTaskStore.close());
-				}
-				await phase("project-contexts", () => projectContextManager.closeAll());
-				if (sandboxManager) {
-					await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
-				}
-				await phase("sandbox-network", () => sessionManager.cleanupSandboxNetwork());
-				bootLog(`[shutdown] complete in ${Date.now() - shutdownStart}ms`);
-			} catch (err) {
-				bootLog(`[shutdown] aborted after ${Date.now() - shutdownStart}ms: ${err instanceof Error ? err.message : String(err)}`);
-				throw err;
-			} finally {
-				restoreExplicitRpcBridgeFactory();
-			}
+			});
 		},
 	};
 	} catch (error) {

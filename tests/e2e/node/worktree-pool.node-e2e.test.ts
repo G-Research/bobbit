@@ -17,9 +17,10 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { WorktreePool, isPoolBranch } from "../../../src/server/agent/worktree-pool.ts";
+import { MemoryPoolRecordStore, WorktreePoolRecordStore, type PoolRecordSink } from "../../../src/server/agent/worktree-pool-record.ts";
 import { RECOVERY_IO_CONCURRENCY } from "../../../src/server/agent/bounded-async-work.ts";
 import type { Component } from "../../../src/server/agent/project-config-store.ts";
-import type { CommandRunner, ExecFileResult } from "../../../src/server/gateway-deps.ts";
+import { realFs, type CommandRunner, type ExecFileResult } from "../../../src/server/gateway-deps.ts";
 import { makeTmpDir } from "../../helpers/tmp.ts";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -655,9 +656,7 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 	});
 });
 
-describe.skip("Retired restart round-trip: pool worktrees are not adopted by shape", () => {
-	// Startup now leaves stale pool-shaped worktrees untouched rather than
-	// adopting them without durable ownership proof.
+describe("Restart round-trip: exact durable pool ownership", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
 	before(() => {
@@ -671,69 +670,68 @@ describe.skip("Retired restart round-trip: pool worktrees are not adopted by sha
 		else process.env.BOBBIT_SKIP_NPM_CI = originalSkipNpm;
 	});
 
-	it("a fresh pool reclaims the worktrees an abandoned (undrained) pool left behind", async () => {
+	it("a real fill publication never promotes an external in-memory entry", async () => {
 		const repo = await makeRepo();
+		const projectId = "external-fill-project";
+		const memoryStore = new MemoryPoolRecordStore();
+		const fillPublished = deferred<void>();
+		const recordStore: PoolRecordSink = {
+			replace: (id, repoPath, entries) => {
+				memoryStore.replace(id, repoPath, entries);
+				if (id === projectId && entries.length === 1) fillPublished.resolve(undefined);
+			},
+			read: id => memoryStore.read(id),
+			forget: id => memoryStore.forget(id),
+			flush: () => memoryStore.flush(),
+		};
+		const externalPath = path.join(path.dirname(repo), "external-pool-entry");
+		const pool = new WorktreePool({ repoPath: repo, targetSize: 2, recordStore, projectId });
+		pool.registerExternalEntry("pool/_pool-external", externalPath);
 		try {
-			// Boot #1: fill the pool to two ready worktrees.
-			const pool1 = new WorktreePool({ repoPath: repo, targetSize: 2 });
-			pool1.startFilling();
-			for (let i = 0; i < 100 && pool1.size < 2; i++) await new Promise(r => setTimeout(r, 100));
-			assert.equal(pool1.size, 2, "pool should fill to two entries on first boot");
-			const firstBootPaths = pool1.snapshotEntries().entries.map(e => e.worktreePath).sort();
-			const firstBootBranches = pool1.snapshotEntries().entries.map(e => e.branchName).sort();
-
-			// Shutdown WITHOUT draining: simply abandon the in-memory pool object.
-			// The worktrees remain on disk (this is the invariant under test).
-			for (const p of firstBootPaths) {
-				assert.ok(fs.existsSync(p), `worktree ${p} must survive an undrained shutdown`);
-			}
-
-			// Boot #2: a fresh pool over the same repo reclaims — no rebuild.
-			const pool2 = new WorktreePool({ repoPath: repo, targetSize: 2 });
-			await (pool2 as any).reclaimOrphaned();
-			const secondBootPaths = pool2.snapshotEntries().entries.map(e => e.worktreePath).sort();
-			const secondBootBranches = pool2.snapshotEntries().entries.map(e => e.branchName).sort();
-
-			assert.deepEqual(secondBootPaths, firstBootPaths, "second boot must reclaim the exact worktrees left in place");
-			assert.deepEqual(secondBootBranches, firstBootBranches, "second boot must reclaim the same pool branches (no new ones built)");
+			await pool.initialize();
+			await awaitBarrier(fillPublished.promise, "the fill-created entry publication");
+			assert.equal(pool.size, 2, "the real fill should replenish alongside the compatible external entry");
+			const recorded = recordStore.read(projectId).entries;
+			assert.equal(recorded.length, 1, "only the fill-created entry is durable");
+			assert.notEqual(recorded[0]?.worktreePath, externalPath);
 		} finally {
+			await pool.stop();
 			await rmRepo(repo);
 		}
 	});
-});
 
-describe("Regression: gateway shutdown drains current-instance worktree pools", () => {
-	it("wires the worktree-pool drain phase after boot settles and before project contexts close", () => {
-		const serverTs = fs.readFileSync(path.resolve(__dirname, "..", "..", "..", "src", "server", "server.ts"), "utf-8");
-		// Brace-match the shutdown() body (opening `{` to its matching close) so we
-		// scan exactly the method — not a fixed-size window that can spill into the
-		// next declaration or truncate as shutdown() grows. Inner braces
-		// (template `${…}`, arrow bodies) are balanced, so depth-counting lands on
-		// the true close.
-		const start = serverTs.indexOf("async shutdown()");
-		assert.ok(start >= 0, "shutdown() method must exist in server.ts");
-		const braceStart = serverTs.indexOf("{", start);
-		assert.ok(braceStart > start, "shutdown() opening brace not found");
-		let depth = 0, end = -1;
-		for (let i = braceStart; i < serverTs.length; i++) {
-			const c = serverTs[i];
-			if (c === "{") depth++;
-			else if (c === "}" && --depth === 0) { end = i; break; }
+	it("reuses the exact worktrees retained by graceful stop and flush", async () => {
+		const repo = await makeRepo();
+		const stateDir = makeTmpDir("bobbit-pool-record-state-");
+		const projectId = "restart-project";
+		let pool2: WorktreePool | undefined;
+		try {
+			const firstStore = new WorktreePoolRecordStore(realFs, stateDir, undefined, 0);
+			const pool1 = new WorktreePool({ repoPath: repo, targetSize: 2, recordStore: firstStore, projectId });
+			await pool1.initialize();
+			for (let i = 0; i < 100 && pool1.size < 2; i++) await new Promise(r => setTimeout(r, 100));
+			assert.equal(pool1.size, 2, "pool should fill to two entries on first boot");
+			const firstBootPaths = pool1.snapshotEntries().entries.map(entry => entry.worktreePath).sort();
+			const firstBootBranches = pool1.snapshotEntries().entries.map(entry => entry.branchName).sort();
+
+			await pool1.stop();
+			await firstStore.flush();
+			for (const worktreePath of firstBootPaths) assert.ok(fs.existsSync(worktreePath));
+
+			const secondStore = new WorktreePoolRecordStore(realFs, stateDir);
+			pool2 = new WorktreePool({ repoPath: repo, targetSize: 2, recordStore: secondStore, projectId });
+			await pool2.initialize();
+			const secondBootPaths = pool2.snapshotEntries().entries.map(entry => entry.worktreePath).sort();
+			const secondBootBranches = pool2.snapshotEntries().entries.map(entry => entry.branchName).sort();
+
+			assert.deepEqual(secondBootPaths, firstBootPaths);
+			assert.deepEqual(secondBootBranches, firstBootBranches);
+			assert.equal(fs.existsSync(path.resolve("worktree-pools.json")), false, "record must not be written to cwd");
+		} finally {
+			await pool2?.drain();
+			await rmRepo(repo);
+			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
-		assert.ok(end > braceStart, "shutdown() closing brace not found");
-		const body = serverTs.slice(braceStart, end + 1);
-
-		assert.match(
-			body,
-			/phase\("worktree-pools", \(\) => drainWorktreePoolsForShutdown\(sessionManager\.getAllWorktreePools\(\)\)\)/,
-			"shutdown() must drain the current manager's live pool instances through the bounded helper phase",
-		);
-		const bootBackgroundPhase = body.indexOf('phase("boot-background"');
-		const worktreePoolPhase = body.indexOf('phase("worktree-pools"');
-		const projectContextsPhase = body.indexOf('phase("project-contexts"');
-		assert.ok(bootBackgroundPhase >= 0, "shutdown() must settle boot initialization before draining pools");
-		assert.ok(worktreePoolPhase > bootBackgroundPhase, "pool drain must run after boot initialization settles");
-		assert.ok(projectContextsPhase > worktreePoolPhase, "pool drain must run before project contexts close");
 	});
 });
 
