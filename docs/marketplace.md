@@ -17,6 +17,8 @@ This version makes **the pack directory itself the unit of truth**:
 
 There is no separate ledger. The pack directory plus its generated `.pack-meta.yaml` *is* the install record. Uninstall removes exactly what install added, because they are the same directory. A schema-2 pack's declared [Pack Local Data](extension-host-authoring.md#project-local-data-localdata--schema-2) is deliberately outside that install directory and is preserved as extension/user-owned project data.
 
+<a id="authoritative-tool-resolution"></a>
+
 ## Core concept: one resolver over one ordered list
 
 A **pack is just a directory** laid out like Bobbit's shipped `defaults/` tree:
@@ -39,16 +41,21 @@ including **no `tools/` at all** (a UI-only pack). See the
 [Extension Host authoring guide](extension-host-authoring.md) and the
 [V1 schema design](design/pack-schema-v1-rationalisation.md).
 
-A single `PackResolver` walks **one ordered list of packs**, low→high priority, and produces resolved entities — each tagged with the pack it came from. **Precedence is position in the list**: a name defined by a higher-priority pack shadows the same name in a lower one. That shadow is exactly what the marketplace flags as a conflict.
+A single `PackResolver` primitive walks an ordered list of packs from low to high priority and merges case-insensitive entity names. A later definition shadows the earlier definition as a whole; the winner keeps its authored spelling and every shadow remains attached as provenance for conflict diagnostics.
 
-Everything Bobbit resolves for these three entity types is a pack in that one list:
+Packs enter these lists as:
 
-- **Builtin pack** — what Bobbit ships (`dist/server/defaults/`), lowest priority, read-only.
-- **User packs** — each scope's existing `roles/ tools/ skills/` config dir. This is where *creating* or *customizing* an entity writes, and *reverting* deletes. Back-compat is automatic because these are the same directories the config stores already used.
-- **Market packs** — installed from a source into a scope's `market-packs/<pack-name>/`.
-- **Legacy-implicit packs** — the hard-coded skill scan dirs (`.claude/skills`, `~/.bobbit/skills`, etc.) and any skills directories registered via the legacy `config_directories` key, mapped into entries in the same list so existing overrides resolve identically.
+- **Monolithic builtins** — what Bobbit ships in its defaults tree, lowest priority and read-only.
+- **Built-in first-party packs** — shipped pack directories resolved in place above monolithic builtins and below configurable scopes.
+- **User packs** — each scope's existing `roles/`, `tools/`, and `skills/` config directories. Creating or customizing an entity writes here; reverting deletes the override.
+- **Market packs** — installed into a scope's `market-packs/<pack-name>/`, ordered within that scope by `pack_order`.
+- **Legacy-implicit skill packs** — existing skill scan directories mapped into the skill list for compatibility.
 
-Unifying these into one resolver replaced two separate mechanisms — `ConfigCascade` (roles/tools) and `slash-skills.ts` (skills) — that each had their own precedence rules. See [Architecture](#architecture-developer) below.
+For **tool YAML**, `ConfigCascade.resolveToolsEntries()` owns the complete list and is the sole production winner selector. Its exact order is monolithic builtin → built-in first-party packs → server market/user → global-user market/user → selected-project market/user. Within each configurable scope, the user pack follows its market packs, so an ordinary customization wins without being copied into every project. `projectId=headquarters` removes the project band and uses the server/Headquarters stores. If a self-managed project and server scope expose the same physical market root, the first lower-scope occurrence is kept and the duplicate is skipped.
+
+Filtering happens before merge. An inactive whole pack or disabled concrete tool contributes no candidate, allowing the same lower definition to reappear in both catalogue and runtime. Mutable user-tool extensions also pass pre-merge validation; an invalid higher-scope definition is diagnosed and omitted instead of masking a usable lower winner. Merge remains by tool name, not group, so overriding one YAML in a group does not remove lower-priority siblings.
+
+Roles and skills also use `PackResolver`, with their own list-building adapters. Tool group policies, Marketplace MCP runtime managers, and AGENTS/CLAUDE.md prompt assembly retain their dedicated resolution paths. See [Architecture](#architecture-developer) below.
 
 Marketplace MCP support is additive. Schema-2 packs may declare `contents.mcp` and ship `mcp/<name>.yaml|yml|json` files, and MCP Gateway sources browse as provider-scoped virtual packs that materialize to the same schema-2 pack layout when installed. Existing manual MCP config files still load through `McpManager` and override Marketplace definitions with the same runtime server name. AGENTS/CLAUDE.md prompt assembly (`system-prompt.ts`) remains separate and is not pack-installable.
 
@@ -373,16 +380,25 @@ Policy rules are deliberately minimal:
 
 ### Docker and sandbox behavior
 
-Sandboxed sessions need both a container mount and an argument remap. Bobbit mounts marketplace pack roots read-only into agent containers:
+Sandboxed sessions need both a narrow read-only mount and an exact path remap. The container contract exposes only the roots from which an authoritative tool target may come:
 
-| Scope | Container prefix |
+| Source | Container prefix |
 |---|---|
-| Built-in packs | `/market-packs-builtin` |
-| Server installs | `/market-packs-server` |
-| Global-user installs | `/market-packs-global-user` |
-| Project installs | `/market-packs-project` |
+| Generated winner-filtered adapters | `/bobbit-state/tool-extension-activation` |
+| Ordinary server user tools | `/tools` |
+| Ordinary global-user tools | `/tools-global-user` |
+| Ordinary project user tools | `/tools-project` |
+| Monolithic builtin tools | `/tools-builtin` |
+| Built-in first-party packs | `/market-packs-builtin` |
+| Server market packs | `/market-packs-server` |
+| Global-user market packs | `/market-packs-global-user` |
+| Project market packs | `/market-packs-project` |
 
-Long-lived project containers receive these mounts when the container is created, even if no pack is installed yet, because Docker cannot add bind mounts later. At spawn time, Bobbit rewrites marketplace pi-extension `--extension` host paths to the matching container prefix. If no safe mapping exists, Bobbit records `remap-failed`, skips that extension for the sandboxed spawn, and keeps the activation row visible with the diagnostic.
+The generated adapter-state mount is always read-only, preventing a sandbox from changing an artifact reused by another session. Ordinary user-tool and pack roots are also read-only; project tool roots are passed explicitly because a sandbox cwd such as `/workspace-wt` cannot identify the host configuration directory. Scope roots are created and mounted when the long-lived container is created, before a later customization or install needs them.
+
+At spawn, Bobbit remaps the adapter's target URL through the same mount table used to create and inspect the container. Only a local file under a declared root is accepted. Invalid target JSON/URLs, remote hosts, encoded separators, unknown roots, or missing mappings fail closed: the raw shared extension is never substituted. The container's mount inspection requires exactly one correctly sourced read-only bind for each ordinary-tool scope plus a compatible read-only adapter-state bind. Missing, writable, duplicate, or wrong-source ordinary-tool binds, and missing or mismatched adapter state, mark the container stale so normal sandbox recovery recreates it before reuse.
+
+Standalone Marketplace Pi extensions use the corresponding pack-root mapping directly. If no safe mapping exists, Bobbit records `remap-failed`, skips that extension for the sandboxed spawn, and keeps its activation row visible for diagnosis.
 
 ## Marketplace MCP
 
@@ -1079,7 +1095,7 @@ A **no-tools pack** omits `tools/` entirely and ships only `pack.yaml` + `panels
 
 ### Precedence, project scoping, and cache invalidation
 
-- **Pack precedence / shadowing** — renderers and actions resolve through the **same precedence** as every other tool (`buildPackList` / `PackResolver` / `ToolManager`: builtin < market packs in `pack_order` < user pack, per scope). A pack that shadows a same-named built-in interactive tool wins the **renderer too** (the UI registers it with `{ override: true }`), so it gets behavioral parity — pack actions *and* pack renderer, never a split-brain mix.
+- **Pack precedence / shadowing** — renderers and actions use the winning `ConfigCascade.resolveToolsEntries()` record hydrated by `ToolManager`; they do not resolve modules through a parallel pack scan. A pack that shadows a same-named built-in interactive tool therefore wins the **renderer too** (the UI registers it with `{ override: true }`), yielding its action and renderer together rather than a split-brain mix.
 - **Project scoping** — both the renderer endpoint and the action endpoint resolve through the **session's project-scoped** tool manager (falling back to the server-level one when there is no project), so a project-scope pack — or a project pack shadowing a global tool — serves and dispatches its own winner. The client threads the active `projectId` into the renderer fetch so the browser loads the same winner the `/api/tools` metadata reported.
 - **Cache invalidation (synchronous)** — install, update, uninstall, pack-order changes, and activation-toggle PUTs all call `invalidateResolverCaches()`, which drops the loaded-actions/routes-module caches, the route registry, the **pack-contribution registry**, channel declarations, and the tool-scan cache synchronously. The next action/route/channel call picks up (or 404s) the freshly installed/updated/removed/toggled handler with **no server restart and no client reload** — the UI re-fetches `/api/tools` (renderers) and `/api/ext/contributions` (panels + entrypoints + channels) and reconciles its registries (re-registering pack contributions, restoring displaced built-ins on uninstall) live.
 
@@ -1151,27 +1167,31 @@ The resolver is a single, type-agnostic pipeline (`src/server/agent/pack-resolve
 
 Key types are in `src/server/agent/pack-types.ts`: `PackManifest`, `PackMeta`, `PackEntry`, `EntityLoader<T>`, `ResolvedEntity<T>`, and the `scopePaths()` helper that both resolution and install derive paths from.
 
-### `buildPackList` — the legacy→unified mapping
+### List-building adapters
 
-`src/server/agent/pack-list.ts::buildPackList()` is the crux: it constructs the one ordered list from today's inputs so that, with zero market packs installed, resolution is **byte-for-byte identical** to the old `ConfigCascade` + `slash-skills.ts` + `config_directories` behavior. It:
+Tool and skill discovery share `PackResolver`, but do not share identical input sources:
 
-- pushes the builtin pack (lowest);
-- for each scope (`server`, `global-user`, `project`) pushes that scope's market packs (ordered by `pack_order[scope]`) then its user pack;
-- appends the legacy-implicit skill band (custom `config_directories` skill dirs, `.claude/commands`, `~/.bobbit/skills`, `~/.claude/skills`, `.bobbit/skills`, `.claude/skills`) in the exact legacy precedence order, all above market packs so a market-pack skill can never shadow a user/legacy skill;
-- reads the legacy `config_directories` / `disabled_config_directories` keys **only** to build this list — after construction, no roles/tools/skills code path scans directories independently of the resolver.
+- `ConfigCascade.resolveToolsEntries()` constructs the authoritative tool list from the injected builtin/server stores, first-party and installed pack entries, validated global-user files, and the selected project context. It owns tool precedence for both configuration and runtime.
+- `buildPackList()` constructs the skills list, including legacy-implicit directories such as custom `config_directories` and Claude/Bobbit skill roots. `disabled_config_directories` removes disabled skill roots before resolution.
+- `discoverSlashSkills()` and `getSkillDirectories()` project the winning skill entries, then apply skill-specific invocation filtering, sorting, source labels, and caching.
 
-> **One deliberate behavior change:** `disabled_config_directories` was previously inert for resolution (only written, never read on the resolve path). The unified resolver now honors it — a disabled skill dir is omitted from the list. This is a documented fix, covered by a new unit test, not a byte-identical claim.
-
-### Adapters
-
-The two old resolvers became thin adapters over `PackResolver`, preserving their public API:
-
-- `config-cascade.ts` — `resolveRoles()` / `resolveTools()` now build the pack list and resolve through it (interleaving installed market packs). `resolveWorkflows()` and `resolveToolGroupPolicies()` are **untouched** — those non-installable types keep their existing implementations (there are no workflow/policy loaders).
-- `slash-skills.ts` — `discoverSlashSkills()` / `getSkillDirectories()` build the skills segment and resolve through `PackResolver`, then apply the unchanged `userInvocable` filter, alphabetical sort, and TTL cache. The `source` field (`project|personal|legacy|built-in|custom`) is derived from the winning entry for API/UI back-compat.
+`resolveWorkflows()` and `resolveToolGroupPolicies()` remain dedicated non-installable resolution paths. Keeping list construction near each entity's real sources avoids pretending that unrelated discovery rules are identical, while `PackResolver` remains the common precedence primitive.
 
 ### Runtime tool resolution
 
-The resolver tags tool *metadata* with its origin pack, but tools are also loaded at agent runtime by `ToolManager`. `tool-manager.ts` mirrors the same precedence: builtin (lowest) < market-pack `tool/` roots (low→high) < the scope's own user `toolsDir` (highest). Market-pack tool roots are pure **by-name overlays** — they add tools and may override by name but neither own nor are shadowed as a whole group. With zero market roots this collapses to the original two-layer cascade, so runtime resolution matches the API. Market tools are read-only (writes never land in `market-packs/`).
+`ToolManager` does not mirror or reimplement production precedence. Each server/project manager is bound to the appropriate live `ConfigCascade.resolveToolsEntries()` provider, then hydrates the exact winning entries into a `ToolReadGeneration`. The generation is immutable for one bounded request or session lifecycle operation and inherited by nested reads; unrelated concurrent work gets its own generation. A following operation resolves live configuration again, so customization, activation, install, update, uninstall, and ordering changes do not wait for a TTL.
+
+Every YAML consumer projects from that generation: `/api/tools` list/detail, `getAvailableTools()` and case-insensitive `getToolByName()`, effective allowlists and `resolveGrantPolicy()`, prompt and detail docs, provider/extension selection, guard generation, and renderer/action/surface-token location. The public API exposes scope plus pack provenance and immediate override scope; the underlying resolved record also retains the exact pack/file source and ordered shadows for tests and diagnostics.
+
+Dynamic external and discovered Pi definitions are fallback-only. They can supply a name absent from YAML, and Pi provider provenance can augment a winning row, but they cannot replace the YAML policy, provider, renderer, action, or source through another winner algorithm. Explicit role tool/group policy remains above the winning YAML policy. Existing persisted MCP hierarchy, tool-group defaults, and final fallback keep their established ordering.
+
+### Winner-filtered Bobbit extensions
+
+A Bobbit extension module can register multiple tools, so loading the winning tool's raw group module would reintroduce shadowed sibling implementations. `computeToolActivationArgs()` instead groups allowed winning names by canonical physical target and generates a content-addressed adapter. The adapter imports the captured target but forwards `registerTool` only for the canonical names owned by that target's plan. Pi's `--extension` arguments name adapters, not shared source modules.
+
+The adjacent adapter manifest records the target identity and aliases, allowed names, adapter id, and source hash. Runtime target URLs travel separately through `BOBBIT_TOOL_EXTENSION_TARGETS`. Canonical target capture happens once when the plan is built, so a later lexical-path or symlink change cannot redirect publication. Adapter source and manifest publish by temporary-directory rename and are byte-validated before every reuse; there is no process-memory adapter cache or TTL. A missing mapping, target mismatch, publication failure, or corrupt content address fails closed without adding the raw extension.
+
+Initial setup, cold restore, role replacement, and respawn all use this planner. Bobbit-owned lifecycle requirements are added by canonical name to the same winner-filtered plan: `propose_goal` for assistants, `task_create` for goal sessions, and `team_spawn` for team leads. They still pass through the resolved policy and generated guard.
 
 ### Install engine
 
