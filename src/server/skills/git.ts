@@ -1135,6 +1135,10 @@ function isTransientWorktreeRemovalContention(err: unknown): boolean {
 	return /(?:permission denied|access is denied|being used by another process|resource busy|directory not empty)/i.test(gitErrorText(err));
 }
 
+function isMissingWorktreeRegistration(err: unknown): boolean {
+	return /\bis not a working tree\b/i.test(gitErrorText(err));
+}
+
 function waitForWorktreeRemovalRetry(attempt: number): Promise<void> {
 	// Hosted Windows can briefly retain checkout handles after agent shutdown.
 	// Four attempts keep the purge barrier bounded to 350 ms of backoff.
@@ -1526,6 +1530,18 @@ export async function cleanupWorktree(
 			if (!await pathExists(repoPath)) {
 				console.warn(`[git] Cannot clean up worktree: repoPath does not exist: ${repoPath}`);
 				return;
+			}
+
+			// Git can unregister a linked worktree before Windows releases the final
+			// checkout handle. A retry then reports "is not a working tree" even though
+			// only the captured filesystem generation remains. Accept that state only
+			// after the exact captured admin entry is absent; the root identity fence and
+			// bounded targeted remover below still protect against ABA replacement.
+			if (snapshot
+				&& isMissingWorktreeRegistration(err)
+				&& !await pathRemainsStrict(snapshot.adminPath)) {
+				removalError = undefined;
+				break;
 			}
 
 			// Retry only a real linked-worktree generation. Missing/fake coordinates

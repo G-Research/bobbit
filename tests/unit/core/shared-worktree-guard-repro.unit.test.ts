@@ -460,6 +460,79 @@ describe("shared worktree guard reproductions", () => {
 		}
 	});
 
+	it("removes exact Windows residue after Git unregisters before reporting handle contention", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-unregistered-residue-"));
+		try {
+			const repo = makeRepo(tmp);
+			const worktree = path.join(tmp, "repo-wt", "unregistered-residue");
+			const adminPath = path.join(repo, ".git", "worktrees", path.basename(worktree));
+			const branch = "goal/unregistered-residue";
+			makeWorktree(repo, worktree);
+			let removalAttempts = 0;
+			let branchDeleteCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (command, args, options) => {
+					if (args[0] === "worktree" && args[1] === "remove") {
+						removalAttempts++;
+						if (removalAttempts === 1) {
+							fs.rmSync(adminPath, { recursive: true, force: true });
+							registeredWorktrees(repo).delete(fakePathKey(worktree));
+							throw Object.assign(new Error("git worktree remove failed"), {
+								stderr: "error: failed to delete worktree: Permission denied",
+							});
+						}
+						throw Object.assign(new Error("git worktree remove failed"), {
+							stderr: `fatal: '${worktree}' is not a working tree`,
+						});
+					}
+					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls++;
+					return fakeGitRunner.execFile(command, args, options);
+				},
+			};
+
+			await cleanupWorktree(repo, worktree, branch, true, runner, { skipRemotePush: true });
+
+			assert.equal(removalAttempts, 2, "cleanup must reconcile Git's partial first attempt");
+			assert.equal(branchDeleteCalls, 1, "branch deletion must wait for exact residue removal");
+			assert.equal(fs.existsSync(worktree), false);
+			assert.equal(fs.existsSync(adminPath), false);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an unregistered report while the captured admin entry still exists", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-still-registered-"));
+		try {
+			const repo = makeRepo(tmp);
+			const worktree = path.join(tmp, "repo-wt", "still-registered");
+			const adminPath = path.join(repo, ".git", "worktrees", path.basename(worktree));
+			makeWorktree(repo, worktree);
+			let branchDeleteCalls = 0;
+			const runner: CommandRunner = {
+				execFile: async (command, args, options) => {
+					if (args[0] === "worktree" && args[1] === "remove") {
+						throw Object.assign(new Error("git worktree remove failed"), {
+							stderr: `fatal: '${worktree}' is not a working tree`,
+						});
+					}
+					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls++;
+					return fakeGitRunner.execFile(command, args, options);
+				},
+			};
+
+			await assert.rejects(
+				cleanupWorktree(repo, worktree, "goal/still-registered", true, runner, { skipRemotePush: true }),
+				/admin directory remains.*git remove failed/i,
+			);
+			assert.equal(branchDeleteCalls, 0);
+			assert.equal(fs.existsSync(worktree), true);
+			assert.equal(fs.existsSync(adminPath), true);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("retains an adopted owner when bounded worktree deletion retries are exhausted", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-adopted-failure-"));
 		try {
