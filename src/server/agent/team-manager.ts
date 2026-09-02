@@ -2700,7 +2700,8 @@ export class TeamManager {
 			?.getContextForGoal(goalId)?.toolManager;
 		const extensionToolManager = projectToolManager ?? this.config.toolManager;
 		if (extensionToolManager) {
-			teamLeadExtPath = extensionToolManager.resolveToolExtensionPath("team_spawn", "extension.ts");
+			teamLeadExtPath = extensionToolManager.resolveToolExtensionPath?.("team_spawn", "extension.ts")
+				?? extensionToolManager.getExtensionPath("team", "extension.ts");
 		} else {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
 			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");

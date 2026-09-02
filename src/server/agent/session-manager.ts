@@ -5784,21 +5784,30 @@ export class SessionManager {
 	/** Resolve goal tools extension from the session project's winning task_create definition. */
 	private getGoalToolsExtensionPath(projectId?: string): string {
 		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) return toolManager.resolveToolExtensionPath("task_create", "extension.ts");
+		if (toolManager) {
+			return toolManager.resolveToolExtensionPath?.("task_create", "extension.ts")
+				?? toolManager.getExtensionPath("tasks", "extension.ts");
+		}
 		return path.join(bobbitConfigDir(), "tools", "tasks", "extension.ts");
 	}
 
 	/** Resolve team lead extension from the session project's winning team_spawn definition. */
 	private getTeamLeadExtensionPath(projectId?: string): string {
 		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) return toolManager.resolveToolExtensionPath("team_spawn", "extension.ts");
+		if (toolManager) {
+			return toolManager.resolveToolExtensionPath?.("team_spawn", "extension.ts")
+				?? toolManager.getExtensionPath("team", "extension.ts");
+		}
 		return path.join(bobbitConfigDir(), "tools", "team", "extension.ts");
 	}
 
 	/** Resolve proposal tools extension from the session project's winning propose_goal definition. */
 	private getProposalToolsExtensionPath(projectId?: string): string {
 		const toolManager = this.getToolManagerForProject(projectId);
-		if (toolManager) return toolManager.resolveToolExtensionPath("propose_goal", "extension.ts");
+		if (toolManager) {
+			return toolManager.resolveToolExtensionPath?.("propose_goal", "extension.ts")
+				?? toolManager.getExtensionPath("proposals", "extension.ts");
+		}
 		return path.join(bobbitConfigDir(), "tools", "proposals", "extension.ts");
 	}
 
