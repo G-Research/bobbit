@@ -7,7 +7,11 @@ import path from "node:path";
 import { BuiltinConfigProvider } from "../../../src/server/agent/builtin-config.js";
 import { ConfigCascade } from "../../../src/server/agent/config-cascade.js";
 import type { PackEntry, PackScope, ResolvedEntity } from "../../../src/server/agent/pack-types.js";
-import { resolveGrantPolicy } from "../../../src/server/agent/tool-activation.js";
+import {
+	computeEffectiveAllowedTools,
+	computeToolActivationArgs,
+	resolveGrantPolicy,
+} from "../../../src/server/agent/tool-activation.js";
 import { ToolManager, __resetToolScanCache, type ToolInfo } from "../../../src/server/agent/tool-manager.js";
 
 const cleanupRoots: string[] = [];
@@ -408,7 +412,7 @@ describe("tool resolution parity", () => {
 		assert.match(fixture.projectManager.getToolDocsForPrompt(["session_prompt"]), /server winning summary/);
 	});
 
-	it("uses the project winner for mixed-case lookup while role policy remains authoritative", () => {
+	it("uses one mixed-case YAML winner across external fallback, policy, providers, and activation", () => {
 		const fixture = createFixture({
 			server: layerTool("server"),
 			project: {
@@ -417,20 +421,110 @@ describe("tool resolution parity", () => {
 				providerExtension: "session_prompt-extension.ts",
 			},
 		});
+		fixture.projectManager.registerExternalTools([
+			{
+				name: "session_prompt",
+				description: "colliding external loser",
+				group: "MCP: collision",
+				provider: { type: "mcp", server: "collision", mcpTool: "session_prompt" },
+			},
+			{
+				name: "External_Only",
+				description: "external fallback control",
+				group: "MCP: collision",
+				provider: { type: "mcp", server: "collision", mcpTool: "external_only" },
+			},
+		]);
+
 		const catalogue = catalogueEntry(fixture, "SESSION_PROMPT");
 		const runtime = fixture.projectManager.getToolByName("sEsSiOn_PrOmPt");
+		const canonicalRows = fixture.projectManager.getAvailableTools()
+			.filter((tool) => tool.name.toLowerCase() === "session_prompt");
+		const providers = fixture.projectManager.getToolProviders();
 
 		assert.equal(catalogue.name, "Session_Prompt", "winner must retain its declared spelling");
 		assert.equal(catalogue.origin.id, "user:project");
 		assert.equal(catalogue.origin.scope, "project");
 		assert.deepEqual(catalogue.shadows.map((entry) => entry.id), ["builtin", "user:server"]);
+		assert.deepEqual(canonicalRows.map((tool) => [tool.name, tool.description]), [["Session_Prompt", "project session prompt"]]);
 		assert.equal(runtime?.name, "Session_Prompt");
 		assert.equal(fixture.projectManager.getAllToolNames().filter((name) => name.toLowerCase() === "session_prompt").length, 1);
+		assert.equal(fixture.projectManager.getToolProvider("SESSION_PROMPT")?.type, "bobbit-extension");
+		assert.equal([...providers.keys()].filter((name) => name.toLowerCase() === "session_prompt").length, 1);
+		assert.equal(providers.get("Session_Prompt")?.type, "bobbit-extension");
 		assertRuntimeWinner(fixture, "SESSION_PROMPT", "mixed-case detail/provider/location lookup must use the project winner");
 
 		assert.equal(resolveGrantPolicy("Session_Prompt", runtime?.group, undefined, fixture.projectManager), "ask");
-		assert.equal(resolveGrantPolicy("Session_Prompt", runtime?.group, { toolPolicies: { Session_Prompt: "allow" } }, fixture.projectManager), "allow");
-		assert.equal(resolveGrantPolicy("Session_Prompt", runtime?.group, { toolPolicies: { Session_Prompt: "never" } }, fixture.projectManager), "never");
+		assert.equal(resolveGrantPolicy("Session_Prompt", runtime?.group, { toolPolicies: { session_prompt: "allow" } }, fixture.projectManager), "allow");
+		assert.equal(resolveGrantPolicy("Session_Prompt", runtime?.group, { toolPolicies: { session_prompt: "never" } }, fixture.projectManager), "never");
+		assert.ok(computeEffectiveAllowedTools(
+			fixture.projectManager,
+			{ toolPolicies: { session_prompt: "allow" } },
+		).some((tool) => tool.name === "Session_Prompt"));
+		assert.ok(!computeEffectiveAllowedTools(
+			fixture.projectManager,
+			{ toolPolicies: { session_prompt: "never" } },
+		).some((tool) => tool.name.toLowerCase() === "session_prompt"));
+
+		const activation = computeToolActivationArgs(
+			[{ kind: "yaml", name: "session_prompt" }],
+			fixture.projectManager,
+		);
+		const expectedExtension = path.resolve(
+			fixture.projectConfigDir,
+			"tools",
+			"agent",
+			"session_prompt-extension.ts",
+		);
+		assert.ok(activation.args.includes(expectedExtension), "lowercase allowlist must activate the mixed-case winner extension");
+		assert.equal(activation.args.some((arg) => arg.includes("collision")), false, "external loser must not leak into activation");
+
+		assert.equal(fixture.projectManager.getToolByName("external_only")?.description, "external fallback control");
+		assert.equal(fixture.projectManager.getToolProvider("EXTERNAL_ONLY")?.type, "mcp");
+		assert.equal(fixture.projectManager.getAvailableTools().filter((tool) => tool.name.toLowerCase() === "external_only").length, 1);
+	});
+
+	it("omits an invalid global-user extension before merge and retains bounded lower provenance", () => {
+		const invalid = createFixture({
+			server: layerTool("server-valid", "ask"),
+			globalUser: layerTool("global-invalid", "allow"),
+		});
+		const invalidExtension = path.join(
+			invalid.globalUserBase,
+			".bobbit",
+			"config",
+			"tools",
+			"agent",
+			"session_prompt-extension.ts",
+		);
+		writeFile(invalidExtension, "import './missing-global-helper.js';\nexport default function extension() {}\n");
+		__resetToolScanCache();
+
+		const winner = catalogueEntry(invalid);
+		const diagnostics = invalid.cascade.getToolDiagnostics("normal-project");
+		assert.equal(winner.origin.id, "user:server");
+		assert.equal(winner.origin.scope, "server");
+		assert.deepEqual(winner.shadows.map((entry) => entry.id), ["builtin"]);
+		assert.equal(invalid.projectManager.getToolByName("SESSION_PROMPT")?.description, "server-valid session prompt");
+		assert.equal(invalid.projectManager.getToolProvider("session_prompt")?.type, "bobbit-extension");
+		assert.equal(path.resolve(invalid.projectManager.resolveToolLocation("session_prompt")!.baseDir), path.resolve(path.join(invalid.serverConfigDir, "tools")));
+		assert.equal(diagnostics.length, 1, "one invalid global definition must emit one bounded diagnostic");
+		assert.equal(diagnostics[0].scope, "global-user");
+		assert.equal(diagnostics[0].toolName, "session_prompt");
+		assert.match(diagnostics[0].message, /missing-global-helper|session_prompt-extension/i);
+		const activation = computeToolActivationArgs([{ kind: "yaml", name: "session_prompt" }], invalid.projectManager);
+		assert.ok(activation.args.includes(path.join(invalid.serverConfigDir, "tools", "agent", "session_prompt-extension.ts")));
+		assert.equal(activation.args.includes(invalidExtension), false);
+
+		const valid = createFixture({
+			server: layerTool("server-valid", "ask"),
+			globalUser: layerTool("global-valid", "allow"),
+		});
+		const validWinner = catalogueEntry(valid);
+		assert.equal(validWinner.origin.id, "user:global-user");
+		assert.equal(validWinner.origin.scope, "global-user");
+		assert.equal(valid.projectManager.getToolByName("session_prompt")?.description, "global-valid session prompt");
+		assert.deepEqual(valid.cascade.getToolDiagnostics("normal-project"), []);
 	});
 
 	it("keeps unrelated builtin siblings when a higher layer only overrides one tool in the group", () => {
