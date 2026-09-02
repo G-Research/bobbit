@@ -78,9 +78,9 @@ Prereqs read: [pack-based-marketplace.md](pack-based-marketplace.md) (PackResolv
 
 2. **Server actions.** A pack tool ships `tools/<group>/actions.js` exporting
    `export const actions = { retry: async (ctx, args) => {…} }`. The gateway resolves the
-   winning module through the **same precedence** `ToolManager` already uses
-   (`resolveToolLocation()` → `{baseDir, groupDir, actionsModule}`, provider-independent),
-   caches it keyed by resolved path+mtime,
+   module from the authoritative `ConfigCascade.resolveToolsEntries()` winner hydrated by
+   the scoped `ToolManager` (`resolveToolLocation()` → `{baseDir, groupDir, actionsModule}`,
+   provider-independent), then caches it keyed by resolved path+mtime,
    and invalidates synchronously inside the existing `invalidateResolverCaches()`. Endpoint
    `POST /api/tools/:tool/actions/:action` with body `{ sessionId, toolUseId, args }`.
 
@@ -830,16 +830,13 @@ audit are the durable boundary regardless of client realm.
   directives. Documented here so Phase 2 doesn't reopen it.)
 
 - **Gateway endpoint** `GET /api/tools/:tool/renderer?projectId=<id>` (`server.ts::handleApiRoute`):
-  resolve the tool's winning `{baseDir, groupDir, rendererFile, rendererKind}` via
-  `resolveToolLocation(tool)` on the PROJECT-scoped tool manager when a `projectId` query
-  param is present (`(projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager`
-  — the same `?? toolManager` fallback as `GET /api/tools`, via the shared
-  `resolveActionToolManager` helper). This avoids a split-brain where a project-scope pack
-  (or a project pack shadowing a same-named global tool) would serve the wrong global
-  renderer; the client threads its active `projectId` into the renderer Blob fetch so it
-  resolves the SAME winner the `/api/tools` metadata reported. Resolution is a
-  provider-INDEPENDENT lookup sourced from `loadToolDefinitions` (a pack renderer needs NO
-  `provider:`); require
+  require and normalize the same project scope as `/api/tools`, then resolve
+  `{baseDir, groupDir, rendererFile, rendererKind}` through that scope's `ToolManager`.
+  `resolveToolLocation(tool)` reads the manager's hydrated authoritative catalogue entry,
+  so metadata and renderer location cannot select different pack/file winners. Headquarters
+  normalizes to server scope; an unknown normal project fails rather than falling back to a
+  global renderer. The client threads its active `projectId` into the renderer Blob fetch.
+  Resolution is provider-independent (a pack renderer needs no `provider:`); require
   `rendererKind === "pack"`; read the file at
   `path.join(baseDir, groupDir, rendererFile)` (re-validate the path stays within
   `baseDir/groupDir` — reject traversal); respond `200 text/javascript` with
@@ -1049,7 +1046,7 @@ audit are the durable boundary regardless of client realm.
 
 ### 4b. Actions module resolution + endpoint + dispatch
 
-**Module resolution (mirror ToolManager precedence).** A new
+**Module resolution (consume the authoritative tool winner).**
 `src/server/extension-host/action-dispatcher.ts`:
 
 ```ts
@@ -1083,20 +1080,14 @@ export class ActionDispatcher {
 }
 ```
 
-Resolution uses `resolveToolLocation(tool)` (a provider-INDEPENDENT lookup that
-resolves through the full builtin < market < user cascade in `loadToolDefinitions`) to
-obtain `baseDir` + `groupDir` + the `actions.module` path (default `"actions.js"`) in one
-call — a pack actions module needs NO `provider:`. **The resolver is the SESSION's**
-**project-scoped tool manager**, not the server-level one: the endpoint derives the project
-from the session (`sessionManager.getSession(sid)?.projectId ?? getPersistedSession(sid)?.projectId`)
-and resolves `(projectId ? projectContextManager.getOrCreate(projectId)?.toolManager : undefined) ?? toolManager`
-(the shared `resolveActionToolManager` helper). The SAME session-project manager is used
-for BOTH the `getToolByName` metadata (allowlist / `hasActions` / `actionNames`) AND the
-location the `ActionDispatcher` consumes (passed as `dispatch(..., resolver)`), so the
-winning provider the dispatcher loads matches what the session's tool resolution sees — no
-split-brain, and a project-scope pack (or a project pack shadowing a global tool) dispatches
-its OWN handler. With no project (server/global scope) the `?? toolManager` fallback keeps
-the path byte-identical. Load via
+Resolution uses `resolveToolLocation(tool)` to obtain `baseDir`, `groupDir`, and the
+`actions.module` path (default `"actions.js"`) from the exact authoritative catalogue entry;
+a pack actions module needs no `provider:`. The resolver is the calling session's scoped
+`ToolManager`, selected from its persisted project identity. The same manager generation
+supplies `getToolByName` metadata (allowlist / `hasActions` / `actionNames`) and the location
+passed to `ActionDispatcher`, so a project pack cannot advertise one action and dispatch a
+global implementation. Headquarters normalizes to server scope, while an unknown project
+fails closed rather than selecting another scope. Load via
 `await import(pathToFileURL(abs).href)`. **Cache** is a
 `Map<absPath, { mtimeMs; epoch; module }>`; a stale mtime reloads (mirrors `scanToolsDirCached`),
 and an `epoch` counter (bumped by `invalidate()`) cache-busts the import URL so a

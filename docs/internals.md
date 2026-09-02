@@ -152,17 +152,19 @@ Session snapshots, archived-session traversal, persistence hot paths, eager rest
 
 #### Session tool runtime scope
 
-A session's project owns more than its persisted record: it also owns the tool catalogue and policy inputs used to construct the agent's callable surface. An explicit project session therefore uses that `ProjectContext.toolManager`; only a genuinely projectless session uses the server `ToolManager`. `projectId` selects the owner, while `cwd` remains execution and runtime-cache context and must not independently redirect project ownership.
+A session's project owns more than its persisted record: it selects the authoritative tool catalogue and policy inputs used to construct the agent's callable surface. An explicit project session therefore uses that `ProjectContext.toolManager`; only a genuinely projectless session uses the server `ToolManager`. `projectId` selects the owner, while `cwd` remains execution and dynamic-discovery context and must not redirect configuration ownership.
 
-Each setup or replacement operation carries one coherent tuple of project id, cwd, `ToolManager`, group-policy provider, and scoped `McpManager`. The group-policy provider resolves the live builtin → server → project cascade, with the project override winning. That same tuple must be used for:
+`ConfigCascade.resolveToolsEntries()` is the sole YAML winner selector. It sends one low-to-high pack list through `PackResolver`: monolithic builtins, built-in first-party packs, each of the server and global-user market/user bands, then the selected project's market/user band. `projectId=headquarters` normalizes to server scope. Same-name identity is case-insensitive, while the winning definition keeps its declared spelling. Merge is by tool name rather than group, so a partial higher-scope group override leaves lower-scope sibling tools available. Market roots that resolve to the same physical path are admitted once at their first, lower-scope position; a self-managed project therefore cannot conflict with itself.
 
-- tool and standalone Pi-extension discovery, effective policy computation, disabled-tool filtering, and group-grant expansion;
-- agent activation arguments and callable extensions, prompt tool documentation, MCP proxies, and generated tool guards;
-- ordinary and staff creation, delegation before the child allowlist is frozen, restore/restart, role changes, and force-abort replacement;
-- host interceptor argument/result mutation validation, including schema and known-tool checks; and
-- MCP and Pi discovery/guard registration that feeds the generated surface.
+Activation filtering and validation happen before the name merge. Disabling a market tool or whole pack removes that candidate and reveals the same lower-priority winner everywhere. Mutable user definitions whose extension preflight fails are likewise omitted before merge and reported as diagnostics instead of hiding a valid lower definition. Every resolved entry retains the winning scope, pack and exact source file plus the ordered `shadows` records, which makes a disagreement diagnosable rather than relying only on a flattened `origin` label.
 
-This is an authorization invariant, not only a discovery detail. If project discovery uses one manager while policy, activation, or validation uses another, a project-only tool can disappear from prompt docs or activation even though it is visible in the project catalogue. The inverse mismatch is more dangerous: a loaded Pi tool may be absent from the `ask`/`never` guard map, a host interceptor may validate against the wrong schema, or a group approval may include stale registrations. Resolving the tuple once per operation keeps discovery, visibility, and enforcement in agreement.
+`ToolManager` does not run another production precedence algorithm. Server startup binds each manager to the appropriate `resolveToolsEntries()` provider, and the manager hydrates those exact entries into an operation-local `ToolReadGeneration`. The generation is captured once for a bounded synchronous request or asynchronous session operation and inherited by nested reads; concurrent operations receive independent snapshots. The Tools list/detail responses, `getAvailableTools()`/`getToolByName()`, policy and allowlist computation, provider and extension paths, prompt/detail documentation, generated guards, and renderer/action/surface-token location all read that same generation. This prevents a live edit during setup from mixing an old policy with a new provider. The next operation reads current configuration; customization and marketplace mutations invalidate the underlying content/discovery caches immediately rather than waiting for a TTL.
+
+Dynamic external and discovered Pi tools are fallback definitions only: they may fill a name for which no YAML winner exists, but cannot replace a YAML tool through a separate precedence path. Pi provider provenance may augment the winning row without taking ownership of its YAML policy or implementation.
+
+Each setup or replacement operation carries one coherent tuple of project id, cwd, `ToolManager`, group-policy provider, and scoped `McpManager`. The same tuple and tool generation cover ordinary and staff setup, delegation before its allowlist is frozen, cold restore, role replacement, restart/respawn, and force-abort replacement. Required Bobbit lifecycle names use the same activation plan: assistants retain `propose_goal`; goal sessions retain `task_create`; and team leads also retain `team_spawn`. Their presence does not bypass the generated policy guard.
+
+This is an authorization invariant, not only a discovery detail. A mismatched manager could advertise one policy while loading another implementation, omit an `ask` tool from the guard, validate an interceptor against the wrong schema, or expand a group grant from stale registrations. Capturing one authoritative generation closes all of those gaps.
 
 Discovered Pi tools are registered under the exact project/cwd scope in the selected manager. A project's registration is visible to that project plus applicable default-scope contributions, but not to sibling projects or the server manager. Marketplace install, update, uninstall, order, and activation mutations invalidate discovery caches and clear scoped Pi registrations from the server manager and every live project manager. The next setup or replacement rediscovers into the correct owner; group grants therefore cannot reuse tools removed from a stale manager. See [Marketplace Pi extensions](marketplace.md#marketplace-pi-extensions) and [Marketplace MCP and scoped managers](mcp-meta-tools.md#marketplace-mcp-and-scoped-managers).
 
@@ -383,15 +385,15 @@ The full restart and cleanup contract is in [Exact process ownership for command
 
 Two resolution modes:
 
-**Entity resolution** (`resolveEntities`): For named entities (roles, tools, workflows), merge by name across tiers. A project-level entity with the same name fully overrides the server/global version - no field-level merge. Entities that only exist at a higher tier remain available in all projects.
+**Entity resolution** (`resolveEntities`): the generic resolver can merge named objects across tiers with whole-record replacement. Production tool YAML does not use this as a second winner path; its complete pack-aware resolution is owned by `ConfigCascade.resolveToolsEntries()` below.
 
 **Scalar resolution** (`resolveScalarConfig`): For `project.yaml` keys (build_command, test_command, default models, etc.), first defined value wins: project → server → global → built-in default. Returns both the resolved value and its source scope.
 
 ### Config cascade
 
-The config cascade handles resolution of named config entities (roles, tools, tool group policies) through a three-layer merge. This is separate from `ConfigResolver`'s scalar config resolution above - it resolves entire config objects by name, not individual settings keys.
+The config cascade resolves named configuration objects rather than the scalar settings handled by `ConfigResolver`. Roles and tools are name-merged through `PackResolver`; tool group policies retain their dedicated cascade.
 
-> **Roles, tools, and skills now resolve through the unified `PackResolver`.** As of the [pack-based marketplace](marketplace.md), the installable entity types are resolved by a single pipeline over one ordered list of *packs* (directories laid out like `defaults/`). `ConfigCascade.resolveRoles()`/`resolveTools()` and `slash-skills.ts::discoverSlashSkills()` are now thin **adapters** over that resolver — they build the ordered list via `pack-list.ts::buildPackList()` and resolve through `PackResolver`. With zero market packs installed, the list reproduces the legacy three-layer cascade and the legacy skill scan order exactly, so resolution is byte-for-byte identical. `resolveWorkflows()` and `resolveToolGroupPolicies()` are **not** routed through the resolver (no workflow/policy loaders) and keep their implementations below. **MCP** (`mcp-manager.ts`) and **AGENTS.md** (`system-prompt.ts`) keep their own loaders and are explicitly out of scope. See [docs/marketplace.md](marketplace.md) for the pack model, scopes/precedence, the legacy→unified mapping, and the install engine.
+> **Tool YAML has one authoritative winner path.** `ConfigCascade.resolveToolsEntries()` constructs the complete ordered pack list and is the only production precedence owner. `ToolManager` consumes its resolved entries rather than independently recreating the cascade. Roles and skills also use `PackResolver`, but their adapters and discovery details differ. `resolveWorkflows()` and `resolveToolGroupPolicies()` are not routed through the pack resolver. MCP and AGENTS.md prompt assembly retain their own loaders. See [Marketplace](marketplace.md#authoritative-tool-resolution) for tool bands, runtime hydration, activation adapters, and sandbox mapping.
 
 The global `system-prompt.md` template participates in the same builtin → user-override pattern but via a dedicated path resolver rather than the `ConfigCascade` class. `resolveSystemPromptPath()` in `src/server/agent/system-prompt.ts` returns `<bobbitConfigDir()>/system-prompt.md` when present and falls back to the shipped `dist/server/defaults/system-prompt.md`. The file is **not** copied to `.bobbit/config/` on startup; users opt into customisation explicitly via the Settings → General → "Customise system prompt" button (which calls `POST /api/system-prompt/customise` to copy the default into place). Existence of `.bobbit/config/system-prompt.md` is itself the customisation signal used by `isSetupComplete()` (in `src/server/setup-status.ts`).
 
@@ -403,29 +405,30 @@ Without it, every project got a full independent copy of all config YAML via sca
 
 #### Architecture
 
+For tools, the ordered bands are:
+
 ```
-builtin (dist/server/defaults/)  →  server / Headquarters (bobbitConfigDir())  →  normal project (<project>/.bobbit/config/)
-       lowest priority                                                                              highest priority
+monolithic builtin
+  → built-in first-party packs
+  → server market packs → server user tools
+  → global-user market packs → global-user user tools
+  → project market packs → project user tools
 ```
 
-`projectId=headquarters` is normalized to the server/Headquarters layer for non-workflow config, so it does not add a second project override layer.
+Later same-name entries win. Within each scope, market-pack order is persisted by `pack_order`, and the ordinary user pack stays above that market band so a customization wins locally. `projectId=headquarters` is normalized to the server/Headquarters layer, so the project bands are omitted rather than reading the same physical files twice.
 
-Two modules implement this:
+The main modules are:
 
-- **`BuiltinConfigProvider`** (`builtin-config.ts`): Reads factory defaults from `dist/server/defaults/` at runtime. These are the same files copied by `scripts/copy-defaults.mjs` at build time. Read-only, lazy-loaded with caching (`reload()` clears the cache). Mirrors the YAML parsing logic of each store (RoleStore, etc.).
+- **`BuiltinConfigProvider`** (`builtin-config.ts`): reads the monolithic factory defaults and attaches parsed runtime definitions to tool metadata.
+- **`ConfigCascade`** (`config-cascade.ts`): constructs the authoritative ordered entries, applies pre-merge activation and mutable-extension validation, deduplicates overlapping market roots, and calls `PackResolver`.
+- **`PackResolver`** (`pack-resolver.ts`): performs the single case-insensitive by-name merge and retains winner/shadow provenance. Loaders parse entity types but contain no precedence policy.
+- **`ToolManager`** (`tool-manager.ts`): hydrates and projects the already-resolved tool entries for runtime consumers. Its standalone root adapter exists for focused tests and embedders, not as a second production winner path.
 
-- **`ConfigCascade`** (`config-cascade.ts`): Merges the three layers. Constructor takes a `BuiltinConfigProvider`, explicit `ServerStores` accessors, and `ProjectContextManager`. Provides `resolveRoles()`, `resolveTools()`, and `resolveToolGroupPolicies()` - all accepting an optional `projectId`. `resolveWorkflows()` exists for shape compat but only reads the project layer (see callout above).
-
-Each returned item is a `ResolvedItem<T>` with:
-- `item: T` - the config object
-- `origin: "builtin" | "server" | "user" | "project"` - which layer provided this item
-- `overrides?: ConfigOrigin` - which lower layer this item shadows, if any
-
-The UI labels `origin: "server"` as **Headquarters**.
+Public `ResolvedItem<T>` projections carry the item, winning scope (`origin`), immediate overridden scope when present, and market-pack id/name. The raw `ResolvedEntity<T>` used by diagnostics and runtime additionally retains the exact source base/file and all lower `shadows` entries. The UI labels `origin: "server"` as **Headquarters**.
 
 #### Resolution rules
 
-For each cascaded config type (roles, tools, tool-group-policies), items are merged by a unique key (roles by `name`, tools by `name`). Later layers shadow earlier ones entirely - no field-level merge. Without `projectId`, returns server/Headquarters scope (builtins + server stores at `bobbitConfigDir()`). With a normal `projectId`, the project layer is added on top. With `projectId=headquarters`, the project id is normalized away and only the server/Headquarters layer is used.
+Roles and tools merge by case-insensitive `name`; a later winner replaces the whole named record, with no field-level merge. Tool groups do not participate in winner selection. Without a project id, tool resolution includes the builtin, first-party, server, and global-user bands. A normal project adds its market and user bands. `projectId=headquarters` normalizes away the project layer and reports server origins. Disabled or invalid higher-priority candidates are removed before the merge so every consumer sees the revealed lower winner.
 
 Workflows are not cascaded - `resolveWorkflows(projectId)` reads only the selected project's inline `workflows:` block. Hidden workflows (e.g. `test-fast`) are filtered out by the resolver. Without `projectId` it returns `[]`; with `projectId=headquarters`, it reads the Headquarters `project.yaml::workflows` block through the aliased server config store.
 
@@ -477,7 +480,7 @@ On server startup, standalone stores (`roleStore`) are seeded with builtins that
 
 #### Session setup integration
 
-The session setup pipeline (`session-setup.ts`) resolves roles and tools through `ConfigCascade` when a `plan.projectId` is available. A `lookupRole()` helper in the pipeline prefers cascade-resolved roles, falling back to the standalone store. Session and staff REST paths use the same cascade-first role lookup for creation, assignment, validation, and persisted-session rehydration, so any role shown by `GET /api/roles` can run in the matching project scope. Unknown roles still fail before dispatch.
+The session setup pipeline resolves roles through the cascade-aware role source. For tools it selects the project-owned `ToolManager`, whose provider is already bound to that project's authoritative `ConfigCascade.resolveToolsEntries()` result, and wraps tool discovery, prompt assembly, and activation in one `ToolReadGeneration`. Session and staff creation, assignment, validation, restoration, and replacement reuse the same scoped owner. Unknown roles still fail before dispatch.
 
 #### REST API
 
@@ -1613,6 +1616,16 @@ Earlier versions used a fragile multi-layered approach: stub extensions raced ag
 
 **Key files:** `tool-guard-extension.ts` (generates the guard), `tool-activation.ts` (`writeToolGuardExtension`, `computeToolPolicies`), `tool-group-policy-store.ts`, role YAML `toolPolicies`, tool YAML `grantPolicy`.
 
+### Winner-filtered extension activation
+
+A winning YAML definition chooses the provider, but a shared Bobbit extension module may register several tools. Passing that raw module to Pi would let a shadowed sibling implementation leak back into the session. Manager-backed activation therefore groups the permitted winning names by canonical physical extension target and materializes a content-addressed adapter under the Headquarters state `tool-extension-activation/` directory. Pi receives the adapter path, never the raw shared module path.
+
+Each adapter imports one captured target and proxies Pi's `registerTool`: only case-insensitive canonical names in that target's captured winner set are admitted. Its `manifest.json` records the adapter id, canonical target identity and aliases, allowed names, and generated-source hash. The target URL is supplied separately in `BOBBIT_TOOL_EXTENSION_TARGETS`, keyed by adapter id, so immutable adapter source contains neither session credentials nor host-specific runtime authority.
+
+Target capture is intentionally one-shot. Resolution records the canonical physical file while building the activation plan; publication does not follow the lexical path again if a symlink changes. Adapter files and manifests are written to a temporary sibling and atomically renamed, and an existing content address is reused only after exact byte validation. There is no process-memory adapter cache or TTL: every materialization validates the published artifact, and corruption fails closed. Unknown targets, failed capture/publication, or missing environment mappings omit the unfiltered extension rather than falling back to it.
+
+The same plan includes lifecycle-required `task_create`, `team_spawn`, and `propose_goal` names during initial setup, cold restore, role replacement, and respawn. They remain subject to the generated guard; lifecycle retention is not a policy bypass. Sandboxed sessions mount generated adapter state read-only and remap only targets under declared builtin, pack, or ordinary user-tool roots. See [Marketplace — Docker and sandbox behavior](marketplace.md#docker-and-sandbox-behavior).
+
 ### Returned tool-result errors
 
 Many Bobbit tools return MCP-style payloads: `{ content, isError: true }` or `{ content, is_error: true }`. Returning instead of throwing preserves a useful result body for validation failures, but pi treats any normally-returned handler as successful. Bobbit prepends a generated `tool-result-error-bridge` pi extension during session setup so registered tool handlers are wrapped before execution. If a handler returns a flagged payload, the bridge throws a `BobbitToolResultError` whose message is derived from the payload content; pi then persists and broadcasts the paired `toolResult` as errored while keeping the human-readable body.
@@ -1660,9 +1673,11 @@ Resolution order is unchanged (first non-null wins):
 
 1. `role.toolPolicies["<tool-name>"]` - per-tool override on role
 2. `role.toolPolicies["<group>"]` - per-group override on role
-3. `tool.grantPolicy` - tool YAML default
+3. `tool.grantPolicy` - the authoritative winning tool YAML default
 4. Group default - `defaults/tool-group-policies.yaml` (builtin), overridden by `.bobbit/config/tool-group-policies.yaml` (server/project)
 5. System fallback - `allow`
+
+Role policy therefore remains authoritative over a higher-scope YAML customization. Existing persisted MCP operation/package/server rules retain their earlier position ahead of YAML where applicable; the shared catalogue changes which YAML record supplies a default, not the established MCP policy hierarchy.
 
 ### MCP groups default to `allow`
 
@@ -3633,6 +3648,7 @@ Only truly global state lives in the server's central state directory.
 | `mcp-extensions/` | `tool-activation.ts` | MCP proxy extensions |
 | `google-code-assist/` | `google-code-assist-provider-extension.ts` | Content-addressed generated provider extensions mounted read-only into Docker sandboxes when needed. |
 | `tool-result-error-bridge/` | `tool-result-error-bridge-extension.ts` | Content-addressed generated bridge extension that preserves returned MCP-style tool error flags. Mounted read-only into Docker sandboxes. |
+| `tool-extension-activation/` | `tool-extension-activation.ts` | Atomically published, content-addressed winner-filter adapters and manifests. Mounted read-only into Docker sandboxes. |
 | `preview/<sid>/` | `src/server/preview/mount.ts` | Per-session preview mount (entry HTML + sibling assets). See [`docs/preview-architecture.md`](preview-architecture.md). |
 | `preview-artifacts/<sid>/<artifactId>/` | `src/server/preview/artifacts.ts` | Immutable copies of the mounted bytes captured on every successful `POST /api/preview/mount`. Each artifact directory holds `artifact.json` metadata plus the exact mount tree. Deduplicated by `contentHash` per session. Survives session archival; removed on session purge (`removeArtifacts(sid)`) or via the `sweepOrphanArtifacts(knownIds)` maintenance helper. Full lifecycle and restore semantics in [`docs/design/side-panel-tab-contract.md`](design/side-panel-tab-contract.md) and [`docs/preview-architecture.md`](preview-architecture.md). |
 `auth-cookies.json` is not global state any more. If a legacy copy exists here,
