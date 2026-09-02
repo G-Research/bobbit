@@ -3610,6 +3610,13 @@ export class SessionManager {
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private readonly worktreePoolRecords: PoolRecordSink;
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
+	/**
+	 * Pool deletion admission is irreversible for a manager lifetime, even when
+	 * later project cleanup fails. Retrying drain/forget remains safe, but a stale
+	 * boot callback must not silently reopen the pool. Normal project IDs are
+	 * generated UUIDs and never reused, so a later registration gets a new ID.
+	 */
+	private removedWorktreePoolProjectIds?: Set<string>;
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	lifecycleHub?: LifecycleHub;
@@ -7130,6 +7137,7 @@ export class SessionManager {
 	 * waiting for `git worktree add` + `npm ci` (~10-30s).
 	 */
 	initWorktreePoolForProject(projectId: string, repoPath: string, componentsResolver?: () => import("./project-config-store.js").Component[], targetSize = 2, worktreeRoot?: string, baseRefResolver?: () => string | undefined, setupTimeoutResolver?: () => number | string | undefined, projectRoot?: string): Promise<void> {
+		if (this.removedWorktreePoolProjectIds?.has(projectId)) return Promise.resolve();
 		let hiddenProject = false;
 		if (this.projectContextManager) {
 			for (const ctx of this.projectContextManager.all()) {
@@ -7216,6 +7224,9 @@ export class SessionManager {
 
 	/** Drain and remove a project's worktree pool (for project deletion). */
 	async removeWorktreePool(projectId: string): Promise<void> {
+		// Fence synchronously before drain yields: a stale boot callback must never
+		// construct a replacement pool or restore its durable ownership record.
+		(this.removedWorktreePoolProjectIds ??= new Set()).add(projectId);
 		if (projectId === HEADQUARTERS_PROJECT_ID) {
 			this.worktreePools.delete(projectId);
 			return;
