@@ -599,7 +599,8 @@ export class RpcBridge {
 		// tools) so the agent has its baseline toolset.
 		if (!args.includes("--no-extensions")) {
 			const bashExtPath = this.options.toolManager
-				? this.options.toolManager.resolveToolExtensionPath("bash", "extension.ts")
+				? (this.options.toolManager.resolveToolExtensionPath?.("bash", "extension.ts")
+					?? this.options.toolManager.getExtensionPath("shell", "extension.ts"))
 				: path.join(TOOLS_DIR, "shell", "extension.ts");
 			if (!args.includes(bashExtPath)) {
 				args.push("--extension", bashExtPath);

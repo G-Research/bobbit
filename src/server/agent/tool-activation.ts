@@ -1389,7 +1389,8 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 				if (provider.tool === "bash") {
 					// bash comes from the extension beside the winning bash definition,
 					// not from the file-builtins set.
-					extensionPaths.add(toolManager.resolveToolExtensionPath("bash", "extension.ts"));
+					extensionPaths.add(toolManager.resolveToolExtensionPath?.("bash", "extension.ts")
+						?? toolManager.getExtensionPath("shell", "extension.ts"));
 					continue;
 				}
 				if (FILE_TOOL_BUILTIN_NAMES.has(provider.tool)) {
