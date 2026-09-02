@@ -61,7 +61,7 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, requiredLifecycleToolNames, type EffectiveTool, type GroupPolicyProvider } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -224,27 +224,16 @@ export function resolveMarketplacePiExtensionActivation(
 
 // ── Extension path helpers ─────────────────────────────────────────────────
 
-/** Resolve named extensions only when their winning provider requires one. */
-function resolveGoalToolsExtPath(ctx: PipelineContext): string | undefined {
-	if (ctx.toolManager) return typeof ctx.toolManager.resolveToolExtensionPath === "function"
-		? ctx.toolManager.resolveToolExtensionPath("task_create", "extension.ts")
-		: undefined;
-	// Fixed compatibility path only when no manager exists.
+/** Fixed compatibility paths used only when no ToolManager is available. */
+function resolveGoalToolsExtPath(): string {
 	return path.join(TOOLS_DIR, "tasks", "extension.ts");
 }
 
-function resolveTeamToolsExtPath(ctx: PipelineContext): string | undefined {
-	if (ctx.toolManager) return typeof ctx.toolManager.resolveToolExtensionPath === "function"
-		? ctx.toolManager.resolveToolExtensionPath("team_spawn", "extension.ts")
-		: undefined;
+function resolveTeamToolsExtPath(): string {
 	return path.join(TOOLS_DIR, "team", "extension.ts");
 }
 
-/** Resolve proposal tools extension path from the winning propose_goal definition. */
-function resolveProposalToolsExtPath(ctx: PipelineContext): string | undefined {
-	if (ctx.toolManager) return typeof ctx.toolManager.resolveToolExtensionPath === "function"
-		? ctx.toolManager.resolveToolExtensionPath("propose_goal", "extension.ts")
-		: undefined;
+function resolveProposalToolsExtPath(): string {
 	return path.join(TOOLS_DIR, "proposals", "extension.ts");
 }
 
@@ -758,33 +747,36 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	}
 }
 
-/** Step 2: Add goal/team extension paths to bridge args. */
+/** Step 2: add goal metadata and no-manager compatibility extensions. */
 export function resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	return profile("resolveGoalExtensions", () => _resolveGoalExtensions(plan, ctx));
 }
 function _resolveGoalExtensions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	if (plan.goalId && !plan.assistantType) {
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
-		// Add goal tools extension (task + gate management) if not already present.
-		const goalExtPath = resolveGoalToolsExtPath(ctx);
-		if (goalExtPath && !plan.bridgeOptions.args.includes(goalExtPath)) {
-			plan.bridgeOptions.args.push("--extension", goalExtPath);
-		}
-		if (plan.roleName === "team-lead") {
-			const teamExtPath = resolveTeamToolsExtPath(ctx);
-			if (teamExtPath && !plan.bridgeOptions.args.includes(teamExtPath)) {
-				plan.bridgeOptions.args.push("--extension", teamExtPath);
+		if (!ctx.toolManager) {
+			const goalExtPath = resolveGoalToolsExtPath();
+			if (!plan.bridgeOptions.args.includes(goalExtPath)) {
+				plan.bridgeOptions.args.push("--extension", goalExtPath);
+			}
+			if (plan.roleName === "team-lead") {
+				const teamExtPath = resolveTeamToolsExtPath();
+				if (!plan.bridgeOptions.args.includes(teamExtPath)) {
+					plan.bridgeOptions.args.push("--extension", teamExtPath);
+				}
 			}
 		}
 		plan.bridgeOptions.env = { ...plan.bridgeOptions.env, BOBBIT_GOAL_ID: plan.goalId };
 	}
 
-	// Add proposal tools extension for assistant sessions (goal assistant, role assistant, etc.)
+	// A manager routes this capability through the filtered activation plan.
 	if (plan.assistantType) {
 		plan.bridgeOptions.args = plan.bridgeOptions.args || [];
-		const proposalExtPath = resolveProposalToolsExtPath(ctx);
-		if (proposalExtPath && !plan.bridgeOptions.args.includes(proposalExtPath)) {
-			plan.bridgeOptions.args.push("--extension", proposalExtPath);
+		if (!ctx.toolManager) {
+			const proposalExtPath = resolveProposalToolsExtPath();
+			if (!plan.bridgeOptions.args.includes(proposalExtPath)) {
+				plan.bridgeOptions.args.push("--extension", proposalExtPath);
+			}
 		}
 	}
 }
@@ -1156,7 +1148,20 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
 
-	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
+	const requiredToolNames = requiredLifecycleToolNames({
+		goalId: plan.goalId,
+		assistantType: plan.assistantType,
+		roleName: plan.roleName,
+	});
+	const activation = computeToolActivationArgs(
+		plan.effectiveAllowedTools,
+		ctx.toolManager ?? undefined,
+		plan.cwd,
+		mcpExtPaths,
+		disabledTools,
+		toolScope,
+		requiredToolNames,
+	);
 	const packLocalDataEnv = resolvePackLocalDataEnvironment(
 		ctx.packLocalDataBindingsResolver,
 		plan.projectId,

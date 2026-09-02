@@ -2,10 +2,12 @@
 // Source: tests/session-manager-pi-extension-args.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 import { EventBuffer } from "../../../src/server/agent/event-buffer.ts";
@@ -20,7 +22,12 @@ import {
 	type ResolvedPiExtensionContribution,
 } from "../../../src/server/agent/session-setup.ts";
 import { BOBBIT_PACK_LOCAL_DATA_ENV } from "../../../src/server/agent/pack-local-data-runtime.ts";
-import { writeToolGuardExtension } from "../../../src/server/agent/tool-activation.ts";
+import { computeToolActivationArgs, requiredLifecycleToolNames } from "../../../src/server/agent/tool-activation.ts";
+import {
+	TOOL_EXTENSION_ADAPTER_MANIFEST,
+	TOOL_EXTENSION_TARGETS_ENV,
+	type ToolExtensionAdapterManifest,
+} from "../../../src/server/agent/tool-extension-activation.ts";
 import { packLocalDataDockerExecArgs, registerRpcBridgeFactory } from "../../../src/server/agent/rpc-bridge.ts";
 import { ToolManager, __resetToolScanCache, type ScopedToolContext } from "../../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../helpers/agent-dir.js";
@@ -29,14 +36,45 @@ import type { MemFs } from "../../../tests/support/harnesses/shared/mem-fs.js";
 
 let memoryFs: MemFs;
 let restoreFs: () => void;
+let restoreAdapterFs: () => void;
 let fixtureSequence = 0;
 
 beforeEach(() => {
 	({ fs: memoryFs, restore: restoreFs } = installMemoryFs());
+	const originalRealpathNative = fs.realpathSync.native;
+	fs.realpathSync.native = ((target: fs.PathLike) => path.resolve(String(target))) as typeof fs.realpathSync.native;
+	const mkdtempSpy = vi.spyOn(fs, "mkdtempSync").mockImplementation((prefix) => {
+		const directory = `${String(prefix)}fixture-${fixtureSequence++}`;
+		memoryFs.mkdirSync(directory, { recursive: true });
+		return directory;
+	});
+	vi.mocked(fs.renameSync).mockImplementation((from, to) => {
+		const source = path.resolve(String(from));
+		const destination = path.resolve(String(to));
+		if (!memoryFs.dirs.has(source)) return memoryFs.renameSync(from, to);
+		const prefix = `${source}${path.sep}`;
+		for (const [file, content] of [...memoryFs.files]) {
+			if (!file.startsWith(prefix)) continue;
+			memoryFs.files.delete(file);
+			memoryFs.files.set(path.join(destination, file.slice(prefix.length)), content);
+		}
+		for (const directory of [...memoryFs.dirs].sort((a, b) => a.length - b.length)) {
+			if (directory !== source && !directory.startsWith(prefix)) continue;
+			memoryFs.dirs.delete(directory);
+			memoryFs.dirs.add(directory === source
+				? destination
+				: path.join(destination, directory.slice(prefix.length)));
+		}
+	});
+	restoreAdapterFs = () => {
+		mkdtempSpy.mockRestore();
+		fs.realpathSync.native = originalRealpathNative;
+	};
 });
 
 afterEach(() => {
 	registerRpcBridgeFactory(null);
+	restoreAdapterFs();
 	restoreFs();
 });
 
@@ -64,6 +102,31 @@ function extensionPaths(args: string[]): string[] {
 		if (args[i] === "--extension" && args[i + 1]) out.push(args[i + 1]);
 	}
 	return out;
+}
+
+function assertFilteredAdapter(
+	activation: { args: string[]; env: Record<string, string> },
+	targetPath: string,
+	allowedToolNames: readonly string[],
+): string {
+	const targets = JSON.parse(activation.env[TOOL_EXTENSION_TARGETS_ENV] ?? "{}") as Record<string, string>;
+	const targetUrl = pathToFileURL(path.resolve(targetPath)).href;
+	const target = Object.entries(targets).find(([, url]) => url === targetUrl);
+	assert.ok(target, `expected adapter target mapping for ${targetPath}`);
+	const [adapterId] = target;
+	const matches = extensionPaths(activation.args).filter((candidate) => {
+		try {
+			const manifest = JSON.parse(memoryFs.readFileSync(path.join(path.dirname(candidate), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf-8")) as ToolExtensionAdapterManifest;
+			return manifest.adapterId === adapterId;
+		} catch {
+			return false;
+		}
+	});
+	assert.equal(matches.length, 1, `expected exactly one adapter for ${targetPath}`);
+	assert.equal(extensionPaths(activation.args).includes(targetPath), false, "raw named extension must not reach argv");
+	const manifest = JSON.parse(memoryFs.readFileSync(path.join(path.dirname(matches[0]), TOOL_EXTENSION_ADAPTER_MANIFEST), "utf-8")) as ToolExtensionAdapterManifest;
+	assert.deepEqual(manifest.allowedToolNames, allowedToolNames);
+	return matches[0];
 }
 
 const require = createRequire(import.meta.url);
@@ -331,6 +394,59 @@ describe("marketplace pi extension activation args", () => {
 		}
 	});
 
+	it("derives exact lifecycle names while retaining raw compatibility paths only without a manager", () => {
+		assert.deepEqual(requiredLifecycleToolNames({ goalId: "goal" }), ["task_create"]);
+		assert.deepEqual(requiredLifecycleToolNames({ goalId: "goal", roleName: "team-lead" }), ["team_spawn", "task_create"]);
+		assert.deepEqual(requiredLifecycleToolNames({ assistantType: "goal" }), ["propose_goal"]);
+		assert.deepEqual(requiredLifecycleToolNames({}), []);
+
+		const worker = { goalId: "goal", bridgeOptions: {} } as any;
+		resolveGoalExtensions(worker, {} as any);
+		assert.equal(extensionPaths(worker.bridgeOptions.args).some((entry) => entry.endsWith(path.join("tools", "tasks", "extension.ts"))), true);
+
+		const lead = { goalId: "goal", roleName: "team-lead", bridgeOptions: {} } as any;
+		resolveGoalExtensions(lead, {} as any);
+		const leadPaths = extensionPaths(lead.bridgeOptions.args);
+		assert.equal(leadPaths.some((entry) => entry.endsWith(path.join("tools", "tasks", "extension.ts"))), true);
+		assert.equal(leadPaths.some((entry) => entry.endsWith(path.join("tools", "team", "extension.ts"))), true);
+
+		const assistant = { assistantType: "goal", bridgeOptions: {} } as any;
+		resolveGoalExtensions(assistant, {} as any);
+		assert.equal(extensionPaths(assistant.bridgeOptions.args).some((entry) => entry.endsWith(path.join("tools", "proposals", "extension.ts"))), true);
+	});
+
+	it("materializes lifecycle-required names through the winning filtered adapters", () => {
+		const manager = realToolManager("required-lifecycle-adapters");
+		for (const [group, name] of [
+			["tasks", "task_create"],
+			["team", "team_spawn"],
+			["proposals", "propose_goal"],
+		] as const) {
+			writeNamedTool(manager, group, name, `provider:\n  type: bobbit-extension\n  extension: ${name}.ts`);
+			memoryFs.writeFileSync(path.join(manager.getToolsDir(), group, `${name}.ts`), "export default function extension() {}\n");
+		}
+		__resetToolScanCache();
+		const scope = scopedToolContext("project-security", fixtureRoot("required-lifecycle-scope"));
+
+		for (const lifecycle of [
+			{ session: { goalId: "goal" }, expected: [["tasks", "task_create"]] },
+			{ session: { goalId: "goal", roleName: "team-lead" }, expected: [["team", "team_spawn"], ["tasks", "task_create"]] },
+			{ session: { assistantType: "goal" }, expected: [["proposals", "propose_goal"]] },
+		] as const) {
+			const required = requiredLifecycleToolNames(lifecycle.session);
+			const activation = computeToolActivationArgs([], manager, scope.cwd, undefined, new Set(required), scope, required);
+			for (const [group, name] of lifecycle.expected) {
+				assertFilteredAdapter(
+					activation,
+					path.join(manager.getToolsDir(), group, `${name}.ts`),
+					[name],
+				);
+			}
+			const paths = extensionPaths(activation.args);
+			assert.equal(new Set(paths.map((entry) => path.resolve(entry))).size, paths.length, "required adapters must not be duplicated");
+		}
+	});
+
 	it("freezes one post-dynamic-context generation through sandbox prompt reassembly", async () => {
 		const cwd = fixtureRoot("setup-generation");
 		const manager = realToolManager("setup-generation-manager");
@@ -393,9 +509,15 @@ describe("marketplace pi extension activation args", () => {
 		await executePlan(plan, context);
 
 		const extensionArgs = extensionPaths(bridgeOptions.args);
-		assert.ok(extensionArgs.includes(path.join(manager.getToolsDir(), "tasks", "task-b.ts")));
+		assertFilteredAdapter(
+			{ args: bridgeOptions.args, env: bridgeOptions.env },
+			path.join(manager.getToolsDir(), "tasks", "task-b.ts"),
+			["task_create"],
+		);
 		assert.equal(extensionArgs.includes(path.join(manager.getToolsDir(), "tasks", "task-a.ts")), false);
+		assert.equal(extensionArgs.includes(path.join(manager.getToolsDir(), "tasks", "task-b.ts")), false);
 		assert.equal(extensionArgs.includes(path.join(manager.getToolsDir(), "tasks", "task-c.ts")), false);
+		assert.equal(new Set(extensionArgs.map((entry) => path.resolve(entry))).size, extensionArgs.length, "fresh setup must not duplicate extensions");
 		assert.equal(promptDocs.length, 2, "sandbox cwd remap must reassemble the prompt exactly once");
 		for (const docs of promptDocs) {
 			assert.match(docs, /GENERATION_B_TASK_DOCS/);
@@ -778,16 +900,11 @@ describe("marketplace pi extension activation args", () => {
 		const extensionA = writeTaskGeneration(fixture.projectManager, "A");
 		fixture.persisted.goalId = "goal-generation";
 		let activationAllowed: Array<{ name: string }> | undefined;
+		let activationResult: { args: string[]; env: Record<string, string>; runtimeExtensions: unknown[] } | undefined;
+		let requiredNames: readonly string[] | undefined;
 		let guardSource: string | undefined;
 		let providerExtension: string | undefined;
 		let promptDocs: string | undefined;
-		const namedPaths: Array<string | undefined> = [];
-		const originalResolvePath = fixture.projectManager.resolveToolExtensionPath.bind(fixture.projectManager);
-		fixture.projectManager.resolveToolExtensionPath = ((name: string, fallback?: string) => {
-			const resolved = originalResolvePath(name, fallback);
-			if (name === "task_create") namedPaths.push(resolved);
-			return resolved;
-		}) as typeof fixture.projectManager.resolveToolExtensionPath;
 		fixture.manager.preparePersistedIntentRestore = (ps: any) => ({
 			ps,
 			store: fixture.store,
@@ -798,21 +915,15 @@ describe("marketplace pi extension activation args", () => {
 			writeTaskGeneration(fixture.projectManager, "B");
 			return null;
 		};
-		fixture.manager.buildToolActivationArgs = (_id: string, allowed: Array<{ name: string }> | undefined) => {
-			activationAllowed = allowed;
+		const originalBuildToolActivationArgs = fixture.manager.buildToolActivationArgs.bind(fixture.manager);
+		fixture.manager.buildToolActivationArgs = (...args: any[]) => {
+			activationAllowed = args[1];
+			requiredNames = args[9];
 			providerExtension = fixture.projectManager.getToolProvider("task_create")?.extension;
-			const guard = writeToolGuardExtension(
-				"cold-restore-generation",
-				fixture.projectManager,
-				undefined,
-				fixture.role,
-				undefined,
-				[],
-				undefined,
-				scopedToolContext("project-security", fixture.cwd),
-			);
-			guardSource = guard ? memoryFs.readFileSync(guard, "utf-8") : undefined;
-			return { args: [], env: {}, runtimeExtensions: [] };
+			activationResult = originalBuildToolActivationArgs(...args);
+			const guard = guardPath(activationResult!.args);
+			guardSource = memoryFs.readFileSync(guard, "utf-8");
+			return activationResult;
 		};
 		fixture.manager.assemblePrompt = () => {
 			promptDocs = fixture.projectManager.getToolDocsForPrompt(["task_create"]);
@@ -826,7 +937,10 @@ describe("marketplace pi extension activation args", () => {
 
 		assert.equal(fixture.discoveryCount(), 1, "cold restore must discover before capturing its YAML generation");
 		assert.deepEqual(activationAllowed?.map((tool) => tool.name), ["task_create", "pi_dangerous_tool"]);
-		assert.deepEqual(namedPaths, [extensionA]);
+		assert.deepEqual(requiredNames, ["task_create"]);
+		assert.ok(activationResult);
+		assertFilteredAdapter(activationResult, extensionA, ["task_create"]);
+		assert.equal(new Set(extensionPaths(activationResult.args).map((entry) => path.resolve(entry))).size, extensionPaths(activationResult.args).length);
 		assert.equal(providerExtension, "task-a.ts");
 		assert.match(promptDocs ?? "", /GENERATION_A_TASK_DOCS/);
 		assert.doesNotMatch(promptDocs ?? "", /GENERATION_B_TASK_DOCS/);
@@ -849,13 +963,8 @@ describe("marketplace pi extension activation args", () => {
 		let promptDocs: string | undefined;
 		let providerExtension: string | undefined;
 		let guardSource: string | undefined;
-		const namedPaths: Array<string | undefined> = [];
-		const originalResolvePath = fixture.projectManager.resolveToolExtensionPath.bind(fixture.projectManager);
-		fixture.projectManager.resolveToolExtensionPath = ((name: string, fallback?: string) => {
-			const resolved = originalResolvePath(name, fallback);
-			if (name === "task_create") namedPaths.push(resolved);
-			return resolved;
-		}) as typeof fixture.projectManager.resolveToolExtensionPath;
+		let activationResult: { args: string[]; env: Record<string, string>; runtimeExtensions: unknown[] } | undefined;
+		let requiredNames: readonly string[] | undefined;
 		fixture.manager.assemblePrompt = (_id: string, parts: { allowedTools?: string[] }) => {
 			promptAllowed = parts.allowedTools;
 			promptDocs = fixture.projectManager.getToolDocsForPrompt(["task_create"]);
@@ -863,19 +972,12 @@ describe("marketplace pi extension activation args", () => {
 			return undefined;
 		};
 		fixture.manager.ensureMcpManagerForContext = async () => null;
-		fixture.manager.buildToolActivationArgs = () => {
+		const originalBuildToolActivationArgs = fixture.manager.buildToolActivationArgs.bind(fixture.manager);
+		fixture.manager.buildToolActivationArgs = (...args: any[]) => {
+			requiredNames = args[9];
 			providerExtension = fixture.projectManager.getToolProvider("task_create")?.extension;
-			const guard = writeToolGuardExtension(
-				"role-replacement-generation",
-				fixture.projectManager,
-				undefined,
-				fixture.role,
-				undefined,
-				[],
-				undefined,
-				scopedToolContext("project-security", fixture.cwd),
-			);
-			guardSource = guard ? memoryFs.readFileSync(guard, "utf-8") : undefined;
+			activationResult = originalBuildToolActivationArgs(...args);
+			guardSource = memoryFs.readFileSync(guardPath(activationResult!.args), "utf-8");
 			throw new Error("stop-after-coherent-role-replacement");
 		};
 		const oldBridge = {
@@ -908,7 +1010,10 @@ describe("marketplace pi extension activation args", () => {
 		assert.equal(fixture.discoveryCount(), 1, "role replacement must discover before effective tools and prompt docs");
 		assert.deepEqual(promptAllowed, ["task_create", "pi_dangerous_tool"]);
 		assert.match(promptDocs ?? "", /GENERATION_A_TASK_DOCS/);
-		assert.deepEqual(namedPaths, [extensionA]);
+		assert.deepEqual(requiredNames, ["task_create"]);
+		assert.ok(activationResult);
+		assertFilteredAdapter(activationResult, extensionA, ["task_create"]);
+		assert.equal(new Set(extensionPaths(activationResult.args).map((entry) => path.resolve(entry))).size, extensionPaths(activationResult.args).length);
 		assert.equal(providerExtension, "task-a.ts");
 		assert.ok(guardSource, "the Pi ask-policy control must produce a guard");
 		assert.equal(await evaluateGuard(guardSource)({ toolName: "task_create" }), undefined);
@@ -918,33 +1023,21 @@ describe("marketplace pi extension activation args", () => {
 		const fixture = coldProjectReplacementFixture("cold-force-order");
 		const extensionA = writeTaskGeneration(fixture.projectManager, "A");
 		let activationAllowed: Array<{ name: string }> | undefined;
+		let activationResult: { args: string[]; env: Record<string, string>; runtimeExtensions: unknown[] } | undefined;
+		let requiredNames: readonly string[] | undefined;
 		let providerExtension: string | undefined;
 		let guardSource: string | undefined;
-		const namedPaths: Array<string | undefined> = [];
-		const originalResolvePath = fixture.projectManager.resolveToolExtensionPath.bind(fixture.projectManager);
-		fixture.projectManager.resolveToolExtensionPath = ((name: string, fallback?: string) => {
-			const resolved = originalResolvePath(name, fallback);
-			if (name === "task_create") namedPaths.push(resolved);
-			return resolved;
-		}) as typeof fixture.projectManager.resolveToolExtensionPath;
 		fixture.manager.ensureMcpManagerForContext = async () => {
 			writeTaskGeneration(fixture.projectManager, "B");
 			return null;
 		};
-		fixture.manager.buildToolActivationArgs = (_id: string, allowed: Array<{ name: string }> | undefined) => {
-			activationAllowed = allowed;
+		const originalBuildToolActivationArgs = fixture.manager.buildToolActivationArgs.bind(fixture.manager);
+		fixture.manager.buildToolActivationArgs = (...args: any[]) => {
+			activationAllowed = args[1];
+			requiredNames = args[9];
 			providerExtension = fixture.projectManager.getToolProvider("task_create")?.extension;
-			const guard = writeToolGuardExtension(
-				"force-abort-generation",
-				fixture.projectManager,
-				undefined,
-				fixture.role,
-				undefined,
-				[],
-				undefined,
-				scopedToolContext("project-security", fixture.cwd),
-			);
-			guardSource = guard ? memoryFs.readFileSync(guard, "utf-8") : undefined;
+			activationResult = originalBuildToolActivationArgs(...args);
+			guardSource = memoryFs.readFileSync(guardPath(activationResult!.args), "utf-8");
 			throw new Error("stop-after-coherent-force-abort");
 		};
 		fixture.manager.handleAgentLifecycle = () => {};
@@ -992,7 +1085,10 @@ describe("marketplace pi extension activation args", () => {
 
 		assert.equal(fixture.discoveryCount(), 1, "force-abort must discover before effective tools are frozen");
 		assert.deepEqual(activationAllowed?.map((tool) => tool.name), ["task_create", "pi_dangerous_tool"]);
-		assert.deepEqual(namedPaths, [extensionA]);
+		assert.deepEqual(requiredNames, ["task_create"]);
+		assert.ok(activationResult);
+		assertFilteredAdapter(activationResult, extensionA, ["task_create"]);
+		assert.equal(new Set(extensionPaths(activationResult.args).map((entry) => path.resolve(entry))).size, extensionPaths(activationResult.args).length);
 		assert.equal(providerExtension, "task-a.ts");
 		assert.ok(guardSource, "the Pi ask-policy control must produce a guard");
 		assert.equal(await evaluateGuard(guardSource)({ toolName: "task_create" }), undefined);
