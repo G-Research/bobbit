@@ -480,11 +480,14 @@ describe("shared worktree guard reproductions", () => {
 			store.put(owner);
 			let removalAttempts = 0;
 			const runner: CommandRunner = {
-				execFile: async (_command, args) => {
-					if (args[0] === "worktree" && args[1] === "remove") removalAttempts++;
-					throw Object.assign(new Error("git worktree remove failed"), {
-						stderr: "error: failed to delete worktree: Permission denied",
-					});
+				execFile: async (command, args, options) => {
+					if (args[0] === "worktree" && args[1] === "remove") {
+						removalAttempts++;
+						throw Object.assign(new Error("git worktree remove failed"), {
+							stderr: "error: failed to delete worktree: Permission denied",
+						});
+					}
+					return fakeGitRunner.execFile(command, args, options);
 				},
 			};
 			const manager = makeManager(store, runner);
@@ -523,7 +526,7 @@ describe("shared worktree guard reproductions", () => {
 			let removalAttempts = 0;
 			let branchDeleteCalls = 0;
 			const runner: CommandRunner = {
-				execFile: async (_command, args) => {
+				execFile: async (command, args, options) => {
 					if (args[0] === "worktree" && args[1] === "remove") {
 						removalAttempts++;
 						fs.renameSync(worktree, original);
@@ -536,7 +539,7 @@ describe("shared worktree guard reproductions", () => {
 						});
 					}
 					if (args[0] === "branch" && args[1] === "-D") branchDeleteCalls++;
-					return { stdout: "", stderr: "" };
+					return fakeGitRunner.execFile(command, args, options);
 				},
 			};
 

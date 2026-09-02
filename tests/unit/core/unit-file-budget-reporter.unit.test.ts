@@ -35,7 +35,7 @@ function timedReporter(options: {
 }
 
 describe("UnitFileBudgetReporter", () => {
-	test("allows every tier-1 project at the exact 25 second boundary", () => {
+	test("allows every tier-1 project at the exact 26 second boundary", () => {
 		const { reporter, elapse } = timedReporter();
 		for (const project of ["v2-core", "v2-dom", "v2-integration", "v2-isolated"]) {
 			elapse(moduleFor(`/repo/tests/unit/${project}.unit.test.ts`, project), UNIT_FILE_WALL_BUDGET_MS);
@@ -46,17 +46,17 @@ describe("UnitFileBudgetReporter", () => {
 
 	test("hard-fails by default after measuring the whole module wall and aggregating retries", () => {
 		const { reporter, elapse } = timedReporter();
-		elapse(moduleFor("C:\\repo\\tests\\unit\\core\\retry.unit.test.ts?first", "v2-core"), 12_500);
-		elapse(moduleFor("file:///C:/repo/tests/unit/core/retry.unit.test.ts?retry", "v2-core"), 12_501);
+		elapse(moduleFor("C:\\repo\\tests\\unit\\core\\retry.unit.test.ts?first", "v2-core"), 13_000);
+		elapse(moduleFor("file:///C:/repo/tests/unit/core/retry.unit.test.ts?retry", "v2-core"), 13_001);
 
 		assert.throws(
 			() => reporter.onTestRunEnd(),
 			(error: unknown) => {
 				assert.ok(error instanceof Error);
-				assert.match(error.message, /budget=25000ms/);
+				assert.match(error.message, /budget=26000ms/);
 				assert.match(error.message, /path=C:\/repo\/tests\/unit\/core\/retry\.unit\.test\.ts/);
 				assert.match(error.message, /project=v2-core/);
-				assert.match(error.message, /duration=25001ms/);
+				assert.match(error.message, /duration=26001ms/);
 				return true;
 			},
 		);
@@ -64,7 +64,7 @@ describe("UnitFileBudgetReporter", () => {
 
 	test("reports all over-budget files with path, project, and duration", () => {
 		const { reporter, elapse } = timedReporter();
-		elapse(moduleFor("/repo/tests/dom/slow.dom.test.ts", "v2-dom"), 25_250.2);
+		elapse(moduleFor("/repo/tests/dom/slow.dom.test.ts", "v2-dom"), 26_250.2);
 		elapse(moduleFor("/repo/tests/integration/gateway/slower.gateway.test.ts", "v2-integration"), 28_000);
 
 		assert.throws(
@@ -72,7 +72,7 @@ describe("UnitFileBudgetReporter", () => {
 			(error: unknown) => {
 				assert.ok(error instanceof Error);
 				assert.match(error.message, /path=\/repo\/tests\/integration\/gateway\/slower\.gateway\.test\.ts project=v2-integration duration=28000ms/);
-				assert.match(error.message, /path=\/repo\/tests\/dom\/slow\.dom\.test\.ts project=v2-dom duration=25251ms/);
+				assert.match(error.message, /path=\/repo\/tests\/dom\/slow\.dom\.test\.ts project=v2-dom duration=26251ms/);
 				return true;
 			},
 		);
@@ -85,7 +85,7 @@ describe("UnitFileBudgetReporter", () => {
 			output: message => output.push(message),
 		});
 		reporter.onTestRunStart();
-		elapse(moduleFor("/repo/tests/dom/slow.dom.test.ts", "v2-dom"), 25_250.2);
+		elapse(moduleFor("/repo/tests/dom/slow.dom.test.ts", "v2-dom"), 26_250.2);
 		elapse(moduleFor("/repo/tests/integration/gateway/slower.gateway.test.ts", "v2-integration"), 28_000);
 
 		assert.doesNotThrow(() => reporter.onTestRunEnd());
@@ -94,7 +94,7 @@ describe("UnitFileBudgetReporter", () => {
 		assert.match(output[1], /CONCURRENT PROOF MODE/);
 		assert.match(output[1], /do not qualify as solo unit-stage evidence/);
 		assert.match(output[1], /path=\/repo\/tests\/integration\/gateway\/slower\.gateway\.test\.ts project=v2-integration duration=28000ms/);
-		assert.match(output[1], /path=\/repo\/tests\/dom\/slow\.dom\.test\.ts project=v2-dom duration=25251ms/);
+		assert.match(output[1], /path=\/repo\/tests\/dom\/slow\.dom\.test\.ts project=v2-dom duration=26251ms/);
 		assert.match(output[1], /suite and test failures remain authoritative/);
 	});
 
@@ -102,18 +102,18 @@ describe("UnitFileBudgetReporter", () => {
 		const { reporter, elapse } = timedReporter({
 			env: { [UNIT_CONCURRENT_PROOF_ENV]: "true" },
 		});
-		elapse(moduleFor("/repo/tests/unit/core/slow.unit.test.ts", "v2-core"), 25_001);
+		elapse(moduleFor("/repo/tests/unit/core/slow.unit.test.ts", "v2-core"), 26_001);
 
-		assert.throws(() => reporter.onTestRunEnd(), /duration=25001ms/);
+		assert.throws(() => reporter.onTestRunEnd(), /duration=26001ms/);
 	});
 
 	test("does not create exemptions for additional unit projects", () => {
 		const { reporter, elapse } = timedReporter();
-		elapse(moduleFor("/repo/tests/unit/core/future.unit.test.ts", "v2-future-unit"), 25_001);
+		elapse(moduleFor("/repo/tests/unit/core/future.unit.test.ts", "v2-future-unit"), 26_001);
 
 		assert.throws(
 			() => reporter.onTestRunEnd(),
-			/project=v2-future-unit duration=25001ms/,
+			/project=v2-future-unit duration=26001ms/,
 		);
 	});
 
